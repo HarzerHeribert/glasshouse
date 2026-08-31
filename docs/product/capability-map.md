@@ -1422,8 +1422,8 @@ Fixed architectural requirements
 ☑ Prefer a routing model that reliably returns the required structured classification schema.
 ☑ Allow multiple routing-model candidates to form a fallback chain.
 ☑ Allow deterministic heuristics to remain the final fallback when every routing model is unavailable.
-☐ Keep routing-model prompts short and exclude unnecessary repository history.
-☐ Do not send secrets, unrelated project memory, or full conversation histories to the routing model.
+☑ Keep routing-model prompts short and exclude unnecessary repository history.
+☑ Do not send secrets, unrelated project memory, or full conversation histories to the routing model.
 ☑ Allow a user to route classifications through a privacy-preserving local model even when remote models are available.
 
 Phase 34C — Automatic routing-model selection
@@ -1444,19 +1444,19 @@ Phase 34C — Automatic routing-model selection
 
 Phase 34D — Router request schema
 
-☐ Define a small structured input for routing classification containing the user request, minimal current-session metadata, and relevant resource summaries.
-☐ Include whether a relevant warm session already exists in the router input.
-☐ Include current capacity bands rather than raw provider secrets or unnecessary billing details.
-☐ Include required user-specified constraints such as pinned harness or forbidden providers.
-☐ Include whether the task is expected to modify code.
+☑ Define a small structured input for routing classification containing the user request, minimal current-session metadata, and relevant resource summaries.
+☑ Include whether a relevant warm session already exists in the router input.
+☑ Include current capacity bands rather than raw provider secrets or unnecessary billing details.
+☑ Include required user-specified constraints such as pinned harness or forbidden providers.
+☑ Include whether the task is expected to modify code.
 ☑ Include whether the task needs repository exploration.
 ☑ Include whether browser or external-tool capability is required.
-☐ Include whether the user appears to expect a long-running multi-turn task.
-☐ Avoid sending full repository contents to the router.
-☐ Avoid sending full session transcripts to the router.
-☐ Define structured routing output containing task class, required workload tier, required capabilities, expected duration class, and confidence.
-☐ Allow the router output to recommend reuse-session, new-session, or disposable-job as an execution shape.
-☐ Treat low-confidence routing classifications as a reason to use conservative deterministic fallback rules.
+☑ Include whether the user appears to expect a long-running multi-turn task.
+☑ Avoid sending full repository contents to the router.
+☑ Avoid sending full session transcripts to the router.
+☑ Define structured routing output containing task class, required workload tier, required capabilities, expected duration class, and confidence.
+☑ Allow the router output to recommend reuse-session, new-session, or disposable-job as an execution shape.
+☑ Treat low-confidence routing classifications as a reason to use conservative deterministic fallback rules.
 
 Phase 34E — Router economics
 
@@ -1464,11 +1464,11 @@ Phase 34E — Router economics
 ☑ Measure routing-model token and request consumption separately from coding-agent consumption.
 ☑ Track routing-model spend separately from productive task spend.
 ☑ Warn when routing overhead becomes a non-trivial fraction of the resources it is intended to save.
-☐ Allow repeated low-risk turns in the same sticky session to bypass the routing model.
-☐ Re-run classification only when the user starts a new task, requests migration, the current session becomes unsuitable, or resource conditions materially change.
+☑ Allow repeated low-risk turns in the same sticky session to bypass the routing model.
+☑ Re-run classification only when the user starts a new task, requests migration, the current session becomes unsuitable, or resource conditions materially change.
 ☐ Cache recent classification results for semantically identical task starts when safe.
-☐ Prefer deterministic routing for obvious commands such as explicitly selecting a named existing session.
-☐ Ensure the scheduler can be useful even if every LLM-based routing call is disabled.
+☑ Prefer deterministic routing for obvious commands such as explicitly selecting a named existing session.
+☑ Ensure the scheduler can be useful even if every LLM-based routing call is disabled.
 
 Phase 34F — Model capability and tier calibration
 
@@ -1846,7 +1846,7 @@ Phase 51 — Evaluation hooks
 ☐ Measure how quickly local pairing evidence becomes more predictive than the initial same-vendor prior.
 ☐ Measure output-token reduction, time to actionable information, profile overrides, missing caveats, and additional steering for each response profile.
 ☐ Measure response-profile effects separately by harness-model pairing and application mechanism.
-☐ Measure routing latency added before interactive task execution.
+☑ Measure routing latency added before interactive task execution.
 ☐ Measure whether effective TTFC predicts usable agent turns better than raw TTFC, TTFT, or decode throughput.
 ☐ Measure how often failure-domain evidence prevents a failover onto the same unhealthy upstream.
 ☐ Measure how often nominally different routes provide separate quota capacity but not independent failure resilience.

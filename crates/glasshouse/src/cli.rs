@@ -410,6 +410,19 @@ pub enum Command {
         #[arg(long)]
         headless: bool,
 
+        /// Describe the work, so the destination is chosen for what it
+        /// actually needs.
+        ///
+        /// With a routing model configured, Glasshouse classifies the task
+        /// through it before deciding where the work goes — never sending
+        /// repository files, transcripts or secrets, only the task and a few
+        /// facts about the session — and falls back to deterministic
+        /// heuristics when none is configured or it does not answer. `--to`
+        /// and `--fresh` decide on their own and ask no model. Omitting
+        /// `--task` leaves the launch exactly as it has always been.
+        #[arg(long, value_name = "TEXT")]
+        task: Option<String>,
+
         /// Arguments passed straight through to the harness, after `--`.
         ///
         /// Glasshouse does not interpret these; `glasshouse launch
@@ -509,6 +522,19 @@ pub enum Command {
         /// would lose the pseudo-terminal it is reading from.
         #[arg(long)]
         headless: bool,
+
+        /// Describe the work, so the destination is chosen for what it
+        /// actually needs.
+        ///
+        /// With a routing model configured, Glasshouse classifies the task
+        /// through it before deciding where the work goes — never sending
+        /// repository files, transcripts or secrets, only the task and a few
+        /// facts about the session — and falls back to deterministic
+        /// heuristics when none is configured or it does not answer. `--to`
+        /// and `--fresh` decide on their own and ask no model. Omitting
+        /// `--task` leaves the launch exactly as it has always been.
+        #[arg(long, value_name = "TEXT")]
+        task: Option<String>,
 
         /// Arguments passed straight through to the harness, after `--`.
         ///
@@ -768,6 +794,7 @@ mod tests {
             to,
             fresh,
             headless,
+            task,
             harness_args,
         }) = cli.command
         else {
@@ -775,6 +802,9 @@ mod tests {
         };
         assert_eq!(harness.as_deref(), Some("claude-code"));
         assert_eq!(profile, None);
+        // Opt-in, like every routing flag: a launch that describes no task
+        // classifies nothing and routes exactly as it always has.
+        assert_eq!(task, None);
         // Opt-in like every other launch flag: a launch that names no
         // response profile and no role leaves the harness's own
         // communication behaviour untouched.

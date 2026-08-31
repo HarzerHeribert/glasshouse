@@ -254,3 +254,10 @@ does.
   as *"the candidate that would have won without the failure-domain term did
   not win with it"* — one comparison inside `best()`/`on_provider_failure` plus
   one producer call from `gateway/session.rs`.
+
+
+---
+
+## From `GH-LAUNCH-CLASSIFIER` (2026-08-31)
+
+The launch-path classifier package (router request schema, classification on the acting path) touched this phase's lines 1849 (closed — routing latency measured decision-start → decision-end). The full entry — production sites, regression names, the 23 killed mutations, the one honestly-survived one, and the missing producer for 1516/1517/1531 — is in `phase-34d.md`, *Phase 34D — router request schema* and *lines outside Phase 34D*, because the mechanism lives there.

@@ -843,6 +843,52 @@ fn a_classification_call_is_recorded_under_its_purpose_and_extraction_is_not() {
 /// whole request: the `authorization` header legitimately carries the
 /// fixture's credential, which is what makes "no credential in the body" a
 /// claim about the prompt rather than about the connection.
+/// Phase 34D. `glasshouse classify` sends the same structured router request
+/// a launch does — with every session fact honestly absent, because this
+/// command decides nothing — and the report prints the two recommendation
+/// fields the reply schema gained, marking them derived when the model
+/// stated none.
+#[test]
+fn the_classify_command_sends_the_structured_router_request() {
+    let model = FakeModel::answering(MODEL_ANSWER);
+    let fixture = Fixture::new();
+    fixture.add_provider("alpha-runner", "alpha-model", &model.base_url());
+    fixture.pin_routing_model("alpha-runner", "alpha-model");
+
+    let run = fixture.classify(QUESTION);
+    assert!(run.status.success(), "stderr: {}", run.stderr);
+
+    let requests = model.requests();
+    assert_eq!(requests.len(), 1);
+    let body = &requests[0].body;
+    assert!(body.contains("## The routing request"), "{body}");
+    assert!(body.contains(QUESTION), "{body}");
+    assert!(
+        body.contains("warm session      none"),
+        "a diagnostic with no session in hand must say so rather than invent one:\n{body}"
+    );
+    assert!(
+        body.contains("harness           not named; selected by the tool"),
+        "{body}"
+    );
+    assert!(body.contains("no candidate provider named"), "{body}");
+    assert!(body.contains("destination       none stated"), "{body}");
+
+    assert!(
+        run.stdout
+            .contains("expected duration       long-running (derived; the classifier stated none)"),
+        "{}",
+        run.stdout
+    );
+    assert!(
+        run.stdout.contains(
+            "execution shape         reuse session (derived; the classifier stated none)"
+        ),
+        "{}",
+        run.stdout
+    );
+}
+
 #[test]
 fn a_credential_in_the_request_never_reaches_the_model() {
     const PASTED_KEY: &str = "sk-abcd1234efgh5678ijkl";

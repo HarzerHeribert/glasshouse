@@ -260,6 +260,99 @@ impl fmt::Display for HardCapability {
     }
 }
 
+/// How long the work is expected to run — Phase 34D's "expected duration
+/// class" (map line 1457), on three coarse bands like [`Complexity`].
+///
+/// Ordered, so a conservative reading can move *up* the scale the way
+/// [`WorkloadTier::escalate`] does: planning for a longer session than the
+/// work needs costs a little warmth-preference; planning for a shorter one
+/// costs the person their context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DurationClass {
+    /// One exchange and done.
+    SingleTurn,
+    /// A handful of exchanges with a clear end.
+    FewTurns,
+    /// Open-ended, multi-turn work that will want to keep its context.
+    LongRunning,
+}
+
+impl DurationClass {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::SingleTurn => "single turn",
+            Self::FewTurns => "a few turns",
+            Self::LongRunning => "long-running",
+        }
+    }
+
+    /// The class the signal fields imply when nothing stated one: the same
+    /// fail-closed direction every other derived value in this module takes.
+    pub fn derived_from(classification: &TaskClassification) -> Self {
+        if !classification.likely_multi_turn() {
+            Self::SingleTurn
+        } else if classification.complexity() < Complexity::Complex {
+            Self::FewTurns
+        } else {
+            Self::LongRunning
+        }
+    }
+}
+
+impl fmt::Display for DurationClass {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// The execution shape a router answer may recommend — map line 1458's three
+/// words, and no others.
+///
+/// A *recommendation*, carried and rendered: the session router's own ranking
+/// (`super::session`) still decides between continuing and starting, because
+/// it weighs facts about the candidates — warmth, quota, health — that a
+/// classifier of the request text alone cannot see. What this adds is the
+/// classifier's view of the *work*: whether it is the kind that wants its
+/// context kept, the kind that wants a clean start, or the kind a throwaway
+/// model could absorb.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecutionShape {
+    ReuseSession,
+    NewSession,
+    DisposableJob,
+}
+
+impl ExecutionShape {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ReuseSession => "reuse session",
+            Self::NewSession => "new session",
+            Self::DisposableJob => "disposable job",
+        }
+    }
+
+    /// The shape the signal fields imply when nothing stated one. Reads the
+    /// **conservative** disposable-safety accessor, so a low-confidence
+    /// classification can never derive its way to a throwaway model.
+    pub fn derived_from(classification: &TaskClassification) -> Self {
+        if classification.conservative_safe_for_disposable_model() {
+            Self::DisposableJob
+        } else if classification.likely_multi_turn()
+            || classification.warm_context() == WarmContextValue::PreferWarm
+        {
+            Self::ReuseSession
+        } else {
+            Self::NewSession
+        }
+    }
+}
+
+impl fmt::Display for ExecutionShape {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 /// A structured, small classification of one request — Phase 35's "keep
 /// classification output structured and small".
 ///
@@ -280,6 +373,14 @@ pub struct TaskClassification {
     warm_context: WarmContextValue,
     confidence: Confidence,
     source: ClassificationSource,
+    /// Map line 1457's duration class, **when the producer stated one**.
+    /// `None` is not a default: it means the classifier said nothing, and
+    /// [`DurationClass::derived_from`] is what a reader falls back to — a
+    /// deterministic function of fields the producer *did* state, never an
+    /// invented value wearing the producer's source.
+    duration: Option<DurationClass>,
+    /// Map line 1458's execution shape, on the same terms as `duration`.
+    execution_shape: Option<ExecutionShape>,
 }
 
 impl TaskClassification {
@@ -309,7 +410,81 @@ impl TaskClassification {
             warm_context,
             confidence,
             source,
+            duration: None,
+            execution_shape: None,
         }
+    }
+
+    /// Attach the duration class a producer stated. Builder rather than a
+    /// twelfth constructor argument, so every existing caller of
+    /// [`Self::new`] — and every reply that predates the field — is
+    /// unchanged and reads as "not stated".
+    pub fn with_duration(mut self, duration: Option<DurationClass>) -> Self {
+        self.duration = duration;
+        self
+    }
+
+    /// Attach the execution shape a producer stated — see [`Self::with_duration`].
+    pub fn with_execution_shape(mut self, shape: Option<ExecutionShape>) -> Self {
+        self.execution_shape = shape;
+        self
+    }
+
+    /// The duration class the producer stated, if it stated one. Prefer
+    /// [`Self::expected_duration`] for a decision.
+    pub fn stated_duration(&self) -> Option<DurationClass> {
+        self.duration
+    }
+
+    /// The execution shape the producer stated, if it stated one. Prefer
+    /// [`Self::expected_execution_shape`] for a decision.
+    pub fn stated_execution_shape(&self) -> Option<ExecutionShape> {
+        self.execution_shape
+    }
+
+    /// Line 1457's duration class as a router should read it: what the
+    /// producer stated, or what its signal fields imply — and
+    /// [`DurationClass::LongRunning`] whenever confidence is
+    /// [`Confidence::Low`], for the reason [`Self::conservative_workload_tier`]
+    /// escalates: an uncertain answer is planned for as the more demanding
+    /// case, never the cheaper one.
+    pub fn expected_duration(&self) -> DurationClass {
+        let stated_or_derived = self
+            .duration
+            .unwrap_or_else(|| DurationClass::derived_from(self));
+        match self.confidence {
+            Confidence::Low => DurationClass::LongRunning,
+            Confidence::Medium | Confidence::High => stated_or_derived,
+        }
+    }
+
+    /// Line 1458's execution shape as a router should read it: what the
+    /// producer stated, or what its signal fields imply — except that a
+    /// stated [`ExecutionShape::DisposableJob`] is withdrawn whenever
+    /// [`Self::conservative_safe_for_disposable_model`] is false, which is
+    /// the same fail-closed rule that accessor states for the raw flag.
+    pub fn expected_execution_shape(&self) -> ExecutionShape {
+        match self.execution_shape {
+            Some(ExecutionShape::DisposableJob) | None => ExecutionShape::derived_from(self),
+            Some(stated) => stated,
+        }
+    }
+
+    /// Whether this is the kind of work a sticky session may keep absorbing
+    /// without asking the routing model again — map line 1467's *"repeated
+    /// low-risk turns"*, defined from the fields this type already carries
+    /// and not from a second reading of the request text.
+    ///
+    /// Low-risk means: nothing is modified, nothing is executed, no browser
+    /// is driven, the tier is at most [`WorkloadTier::Standard`], and the
+    /// producer was at least [`Confidence::Medium`] — a low-confidence
+    /// classification is exactly the one that should be asked about again.
+    pub fn is_low_risk(&self) -> bool {
+        !self.needs_code_modification
+            && !self.needs_shell_execution
+            && !self.needs_browser_interaction
+            && self.conservative_workload_tier() <= WorkloadTier::Standard
+            && self.confidence != Confidence::Low
     }
 
     pub fn needs_repo_context(&self) -> bool {
@@ -632,7 +807,9 @@ pub const CLASSIFICATION_RESPONSE_SCHEMA: &str = r#"
   "workload_tier": "deterministic" | "leaf" | "standard" | "heavy" | "frontier",
   "safe_for_disposable_model": true | false,
   "warm_context": "prefer_warm" | "prefer_stronger_cold",
-  "confidence": "low" | "medium" | "high"
+  "confidence": "low" | "medium" | "high",
+  "expected_duration": "single_turn" | "few_turns" | "long_running",
+  "execution_shape": "reuse_session" | "new_session" | "disposable_job"
 }
 
 ## What each field means
@@ -652,8 +829,17 @@ pub const CLASSIFICATION_RESPONSE_SCHEMA: &str = r#"
 - warm_context: whether the session's existing warm backend is worth more
   than a stronger cold one for this request.
 - confidence: how much the router should trust the fields above.
+- expected_duration: how long the work will run. single_turn = one exchange;
+  few_turns = a handful with a clear end; long_running = open-ended work that
+  wants to keep its context. Optional — omit it if unsure.
+- execution_shape: where the work should go. reuse_session = continue the
+  warm session if one exists; new_session = start clean; disposable_job = a
+  throwaway model could do this. Optional — omit it if unsure.
 
-## The request
+## The routing request
+
+Everything below was assembled by the tool from the request and a few facts
+about the session — never from repository files or conversation history.
 
 "#;
 
@@ -750,9 +936,17 @@ fn required_str<'a>(
         .ok_or(ClassificationParseError::MissingField { field })
 }
 
+/// A string field that may be absent — see `parse_classification`'s note on
+/// the two recommendation fields. A present non-string reads as absent for
+/// the same reason an unknown value does: the producer stated nothing this
+/// build can act on.
+fn optional_str<'a>(document: &'a serde_json::Value, field: &'static str) -> Option<&'a str> {
+    document.get(field).and_then(serde_json::Value::as_str)
+}
+
 /// Read one model reply as a [`TaskClassification`] attributed to `label`.
 ///
-/// # Every field is required, and nothing has a default
+/// # Every classifying field is required, and nothing has a default
 ///
 /// A model that omits `workload_tier` has not classified the request, and a
 /// classification assembled around a default would be a fabrication wearing
@@ -761,6 +955,19 @@ fn required_str<'a>(
 /// and the caller falls back to [`classify_heuristically`], which is honest
 /// about being a heuristic. That is the same direction
 /// [`crate::memory::extract::TokenUsage`]'s fields take for an unreported count.
+///
+/// # The two recommendation fields are the exception, and why that is not a default
+///
+/// `expected_duration` and `execution_shape` (map lines 1457 and 1458) are
+/// read when present and **`None` when absent or unrecognised** — never an
+/// error, and never a value stored as if the model had said it. `None` is
+/// its own fact ("the producer did not state one"), and every reader goes
+/// through [`TaskClassification::expected_duration`] and
+/// [`TaskClassification::expected_execution_shape`], which derive the answer
+/// from the ten fields the model *did* state. A reply from a model that
+/// predates the two keys therefore parses exactly as it always did, and a
+/// model that invents a fourth shape is read as having recommended nothing
+/// rather than as having failed to classify.
 ///
 /// `label` names the resource that answered, for
 /// [`ClassificationSource::Model`]. It is the caller's own description of a
@@ -816,6 +1023,19 @@ pub fn parse_classification(
         }
     };
 
+    let duration = match optional_str(&document, "expected_duration") {
+        Some("single_turn") => Some(DurationClass::SingleTurn),
+        Some("few_turns") => Some(DurationClass::FewTurns),
+        Some("long_running") => Some(DurationClass::LongRunning),
+        Some(_) | None => None,
+    };
+    let execution_shape = match optional_str(&document, "execution_shape") {
+        Some("reuse_session") => Some(ExecutionShape::ReuseSession),
+        Some("new_session") => Some(ExecutionShape::NewSession),
+        Some("disposable_job") => Some(ExecutionShape::DisposableJob),
+        Some(_) | None => None,
+    };
+
     Ok(TaskClassification::new(
         required_bool(&document, "needs_repo_context")?,
         required_bool(&document, "needs_code_modification")?,
@@ -830,7 +1050,9 @@ pub fn parse_classification(
         ClassificationSource::Model {
             label: label.into(),
         },
-    ))
+    )
+    .with_duration(duration)
+    .with_execution_shape(execution_shape))
 }
 
 fn yes_no(value: bool) -> &'static str {
@@ -926,8 +1148,30 @@ pub fn report(request_text: &str, model_output: Option<TaskClassification>) -> S
                 .join(", ")
         }
     );
+    let _ = writeln!(
+        out,
+        "  expected duration       {}{}",
+        result.expected_duration(),
+        stated_or_derived(result.stated_duration().is_some())
+    );
+    let _ = writeln!(
+        out,
+        "  execution shape         {}{}",
+        result.expected_execution_shape(),
+        stated_or_derived(result.stated_execution_shape().is_some())
+    );
 
     out
+}
+
+/// The suffix `report` prints beside a recommendation, so a reader can tell a
+/// value the producer stated from one derived from its other fields.
+fn stated_or_derived(stated: bool) -> &'static str {
+    if stated {
+        ""
+    } else {
+        " (derived; the classifier stated none)"
+    }
 }
 
 #[cfg(test)]
@@ -1100,6 +1344,76 @@ mod tests {
         );
         assert!(text.contains("shell execution         yes"), "{text}");
         assert!(text.contains("workload tier           heavy"), "{text}");
+    }
+
+    /// Line 1467's predicate, bracketed on each clause: a confident question
+    /// at a modest tier is low-risk; low confidence, modification, execution
+    /// and a heavy tier each disqualify on their own.
+    #[test]
+    fn low_risk_is_a_confident_question_at_a_modest_tier_and_nothing_else() {
+        assert!(classify_heuristically("what is a mutex?").is_low_risk());
+        assert!(
+            !classify_heuristically("thing").is_low_risk(),
+            "a low-confidence classification is exactly the one to ask about again"
+        );
+        assert!(!classify_heuristically("fix the bug in auth.rs").is_low_risk());
+        assert!(!classify_heuristically("run cargo test").is_low_risk());
+        assert!(!classify_heuristically("open the browser").is_low_risk());
+        let heavy_but_read_only = TaskClassification::new(
+            true,
+            false,
+            false,
+            false,
+            Complexity::Complex,
+            true,
+            WorkloadTier::Heavy,
+            false,
+            WarmContextValue::PreferWarm,
+            Confidence::High,
+            ClassificationSource::Heuristic,
+        );
+        assert!(
+            !heavy_but_read_only.is_low_risk(),
+            "a heavy tier is not low-risk even when nothing is modified"
+        );
+    }
+
+    /// Lines 1457/1458: the recommendations derive from the stated fields,
+    /// and a stated value wins over the derivation except where line 1459
+    /// withdraws it.
+    #[test]
+    fn recommendations_derive_from_the_stated_fields_and_a_stated_value_wins() {
+        let question = classify_heuristically("what is a mutex?");
+        assert_eq!(question.stated_duration(), None);
+        assert_eq!(question.expected_duration(), DurationClass::SingleTurn);
+        assert_eq!(
+            question.expected_execution_shape(),
+            ExecutionShape::DisposableJob,
+            "a confident, self-contained question may go to a throwaway model"
+        );
+        let stated = question
+            .clone()
+            .with_duration(Some(DurationClass::FewTurns))
+            .with_execution_shape(Some(ExecutionShape::NewSession));
+        assert_eq!(stated.expected_duration(), DurationClass::FewTurns);
+        assert_eq!(
+            stated.expected_execution_shape(),
+            ExecutionShape::NewSession
+        );
+
+        let shell = classify_heuristically("run cargo test and fix whatever fails");
+        assert_eq!(shell.expected_duration(), DurationClass::LongRunning);
+        assert_eq!(
+            shell.expected_execution_shape(),
+            ExecutionShape::ReuseSession
+        );
+        assert_ne!(
+            shell
+                .with_execution_shape(Some(ExecutionShape::DisposableJob))
+                .expected_execution_shape(),
+            ExecutionShape::DisposableJob,
+            "a stated disposable shape is withdrawn when the work is not safe for one"
+        );
     }
 
     #[test]

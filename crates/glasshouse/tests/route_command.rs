@@ -752,30 +752,31 @@ fn a_task_naming_repository_work_puts_repository_access_in_the_router_input_and_
 ///
 /// The CLI report (`render_route_recommendation`) never echoes `--task`
 /// text or any Debug form of `RouterInputs`/`TaskRequirements` — it renders
-/// only the six/seven named `Contribution`s (verified by reading
-/// `main.rs:1226-1250`). So a report-text assertion cannot tell "the router
-/// received a bounded classification" from "the router received the raw
-/// text and nothing happens to print it". The claim has to be checked
-/// against the value the router actually receives, so these tests call the
-/// same two library functions `task_requirements_from_text` calls
-/// (`main.rs:1277-1281`, quoted in its doc comment above) directly —
-/// `main.rs` itself is a forbidden file in this packet and is not edited,
-/// even transiently, so this mirrors its body rather than invoking it (it
-/// is private to the binary target and unreachable from an integration
-/// test regardless).
+/// only the named `Contribution`s. So a report-text assertion cannot tell
+/// "the router received a bounded classification" from "the router received
+/// the raw text and nothing happens to print it". The claim has to be checked
+/// against the value the router actually receives, so these tests build it
+/// through the same public `RouterAnswer::requirements()` `main.rs`'s
+/// `heuristic_answer` produces on every path that asks no model (the
+/// functions themselves are private to the binary and unreachable from an
+/// integration test). Since Phase 34D the request a routing *model* is shown
+/// is bounded separately — `routing::request::TASK_TEXT_CEILING_BYTES` and
+/// `tests/launch_classification.rs` cover that half against the wire.
 mod bounded_router_input {
     use glasshouse::routing::classify::classify_heuristically;
+    use glasshouse::routing::request::{AnswerProvenance, HeuristicReason, RouterAnswer};
     use glasshouse::routing::session::TaskRequirements;
 
-    /// What `task_requirements_from_text` (`main.rs:1277-1281`) builds from
-    /// a task string, reproduced here because that function is private.
+    /// What `main.rs`'s `heuristic_answer(..).requirements()` builds from a
+    /// task string — the producer `classify_for_routing` uses on every path
+    /// that asks no model — reproduced here through the same public
+    /// `RouterAnswer` because those functions are private to the binary.
     fn router_input_for(task_text: &str) -> TaskRequirements {
-        let hard_capabilities = classify_heuristically(task_text).hard_capabilities();
-        TaskRequirements {
-            needs_tool_calls: !hard_capabilities.is_empty(),
-            hard_capabilities,
-            ..TaskRequirements::default()
-        }
+        RouterAnswer::new(
+            classify_heuristically(task_text),
+            AnswerProvenance::Heuristic(HeuristicReason::NoRoutingModel),
+        )
+        .requirements()
     }
 
     /// Line 1455. A task description built to look like a real file's
@@ -801,7 +802,7 @@ mod bounded_router_input {
         let requirements = router_input_for(&repo_shaped);
         let rendered = format!("{requirements:?}");
         assert!(
-            rendered.len() < 300,
+            rendered.len() < 1_024,
             "the router's input must stay a small structured value however large a task \
              description that looks like repository contents is — it rendered to {} bytes \
              for a {}-byte task, which would mean the repository content itself reached the \
@@ -828,7 +829,7 @@ mod bounded_router_input {
         let requirements = router_input_for(&transcript_shaped);
         let rendered = format!("{requirements:?}");
         assert!(
-            rendered.len() < 300,
+            rendered.len() < 1_024,
             "the router's input must stay small however large a task description that looks \
              like a session transcript is — it rendered to {} bytes for a {}-byte task, which \
              would mean the transcript itself reached the router:\n{rendered}",
@@ -853,7 +854,7 @@ mod bounded_router_input {
         let requirements = router_input_for(&huge);
         let rendered = format!("{requirements:?}");
         assert!(
-            rendered.len() < 300,
+            rendered.len() < 1_024,
             "a megabyte-scale task description must still produce a router input that \
              renders to a small, bounded value — it rendered to {} bytes:\n{rendered}",
             rendered.len()

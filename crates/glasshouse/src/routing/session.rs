@@ -59,6 +59,7 @@ use super::free::{FreePool, FreeResource};
 use super::pressure::{
     self, Alternatives, CapacityFacts, PressureInputs, ReservePolicies, ReserveScope,
 };
+use super::request::RouterAnswer;
 use super::{
     Backend, CacheLocality, Contribution, HardConstraint, RoutingExplanation, ToolSemantics,
     apply_hard_constraints,
@@ -234,6 +235,14 @@ pub struct Destination {
     /// not looked a model's own facts up, matching every other unattached
     /// `Declared` value in this struct.
     resource_facts: ResourceFacts,
+    /// Map line 1516: the highest workload tier this destination is
+    /// **established** to serve, attached via [`Self::with_tier_ceiling`].
+    /// `None` — the default, and what every destination the shipped binary
+    /// builds carries today — means nobody has established one, and the
+    /// tier gate then does nothing to it: an unknown ceiling is not a low
+    /// one, the same rule `capability`'s `Unverified` and line 1434's
+    /// absent-headroom reading both follow.
+    tier_ceiling: Option<WorkloadTier>,
 }
 
 impl Destination {
@@ -291,6 +300,7 @@ impl Destination {
                 .into_iter()
                 .collect(),
             resource_facts: ResourceFacts::UNVERIFIED,
+            tier_ceiling: None,
         }
     }
 
@@ -340,6 +350,25 @@ impl Destination {
 
     pub fn resource_facts(&self) -> ResourceFacts {
         self.resource_facts
+    }
+
+    /// State the highest workload tier this destination is established to
+    /// serve — map line 1516's input. `None` withdraws the fact.
+    ///
+    /// **No production caller attaches one today.** Nothing in the
+    /// configuration, the provider registry, the harness adapters or
+    /// [`ResourceFacts`] states a resource's tier, so `main.rs` cannot
+    /// honestly fill this and does not; the gate in `hard_constraint` and
+    /// the term in [`workload_tier_fit`] are therefore inert on the shipped
+    /// binary's path and live on the library's. Both are proven with
+    /// destinations built here, and the evidence entry says so.
+    pub fn with_tier_ceiling(mut self, ceiling: Option<WorkloadTier>) -> Self {
+        self.tier_ceiling = ceiling;
+        self
+    }
+
+    pub fn tier_ceiling(&self) -> Option<WorkloadTier> {
+        self.tier_ceiling
     }
 
     /// The stable identifier a user names in an override, and the one a
@@ -403,6 +432,15 @@ impl Destination {
 /// lack), and that exception is not wired here: nothing in this package
 /// constructs a `HardConstraint::Capability`, so an established-absent axis
 /// still only costs a candidate a contribution, never a rejection.
+///
+/// `minimum_tier` is the second field that can reject (map line 1516), and
+/// it rejects only a destination whose ceiling is *established* below it —
+/// see [`Destination::with_tier_ceiling`]. `classification` is the answer
+/// the requirements were built from, carried so the explanation can say who
+/// classified the work and whether line 1459's conservative rules fired;
+/// `None` for a caller with no task in hand, which is every launch that
+/// states none and therefore reproduces the pre-classification explanation
+/// byte for byte.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TaskRequirements {
     /// Whether the work needs the harness's tool-call protocol to work.
@@ -412,6 +450,15 @@ pub struct TaskRequirements {
     pub hard_capabilities: Vec<HardCapability>,
     /// Line 1516: the lowest workload tier that may serve this work.
     pub minimum_tier: Option<WorkloadTier>,
+    /// The classification these requirements came from, for the explanation.
+    pub classification: Option<RouterAnswer>,
+}
+
+impl TaskRequirements {
+    /// The required tier, or `None` when none was established.
+    pub fn tier(&self) -> Option<WorkloadTier> {
+        self.minimum_tier
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -619,6 +666,24 @@ const CAPABILITY_ESTABLISHED_ABSENT: f64 = -0.4;
 /// what acceptance test 2 checks.
 const CAPABILITY_UNVERIFIED: f64 = 0.0;
 
+/// Map line 1531. A destination whose established ceiling is exactly the
+/// tier the work needs — the fit a router should prefer, on the same scale
+/// as [`CAPABILITY_ESTABLISHED_PRESENT`] because it is the same kind of
+/// established fact.
+const TIER_FIT_EXACT: f64 = 0.4;
+
+/// The same, for a destination established to serve *above* the required
+/// tier. Positive — it can do the work — and less than an exact fit, because
+/// sending routine work to the strongest resource spends what the map calls
+/// a scarce premium session on something a cheaper one could do.
+const TIER_FIT_HEADROOM: f64 = 0.2;
+
+/// Nothing established about the destination's tier scores `0.0` — the same
+/// tri-state as [`CAPABILITY_UNVERIFIED`], and for the same reason. A
+/// destination *below* the tier never reaches this term: line 1516's gate
+/// removed it first.
+const TIER_FIT_UNVERIFIED: f64 = 0.0;
+
 // ---------------------------------------------------------------------------
 // The seven contributions. One public function each, so a mutation can zero
 // exactly one of them.
@@ -765,6 +830,55 @@ pub fn capability_fit(destination: &Destination, requirements: &TaskRequirements
     }
 
     Contribution::new("capability fit", magnitude, notes.join("; "))
+}
+
+/// Map line 1531: how well this destination's established workload ceiling
+/// fits the tier the work needs.
+///
+/// Only called when a tier is stated (`score` skips it otherwise, so a
+/// launch that states no task renders exactly the explanation it always
+/// has). A destination below the required tier is never scored here — line
+/// 1516's gate in `hard_constraint` removed it — so the three cases are
+/// exact, headroom, and not established.
+pub fn workload_tier_fit(destination: &Destination, required: WorkloadTier) -> Contribution {
+    match destination.tier_ceiling() {
+        Some(ceiling) if ceiling == required => Contribution::new(
+            "workload tier fit",
+            TIER_FIT_EXACT,
+            format!(
+                "the task needs the `{required}` tier and `{}` is established to serve exactly \
+                 that",
+                destination.id()
+            ),
+        ),
+        Some(ceiling) => Contribution::new(
+            "workload tier fit",
+            TIER_FIT_HEADROOM,
+            format!(
+                "the task needs the `{required}` tier and `{}` is established to serve up to \
+                 `{ceiling}` — it can, with headroom a cheaper resource would not spend",
+                destination.id()
+            ),
+        ),
+        None => Contribution::new(
+            "workload tier fit",
+            TIER_FIT_UNVERIFIED,
+            format!(
+                "the task needs the `{required}` tier and nothing has established `{}`'s \
+                 ceiling — not a `no`",
+                destination.id()
+            ),
+        ),
+    }
+}
+
+/// The classification a decision acted on, as a zero-weight line in every
+/// candidate's explanation — so a reader of `glasshouse route --task` or of
+/// a launch sees who classified the work, what it was classed as, and
+/// whether line 1459's conservative rules changed the answer, beside the
+/// terms that answer then drove.
+fn classification_note(answer: &RouterAnswer) -> Contribution {
+    Contribution::new("task classification", 0.0, answer.explain())
 }
 
 /// Line 1596: what an existing session's affinity contributes.
@@ -1245,8 +1359,12 @@ impl Routed {
             for (destination, constraint) in &self.rejected {
                 let _ = writeln!(
                     out,
-                    "  {} — hard {constraint} constraint",
-                    destination.label()
+                    "  {} — hard {constraint} constraint{}",
+                    destination.label(),
+                    constraint
+                        .reason()
+                        .map(|reason| format!(" — {reason}"))
+                        .unwrap_or_default()
                 );
             }
         }
@@ -1347,9 +1465,11 @@ impl SessionRouter {
     /// 2. **Hard constraints**, through
     ///    [`super::apply_hard_constraints`] and therefore structurally: a
     ///    task that needs tool calls cannot go where they are established not
-    ///    to work, and a harness that cannot speak the route's protocol at
-    ///    all cannot serve it.
-    /// 3. **The six soft contributions** (lines 1595–1600), summed by
+    ///    to work, a harness that cannot speak the route's protocol at all
+    ///    cannot serve it, and a destination established to serve below the
+    ///    classified minimum tier cannot serve the work (line 1516).
+    /// 3. **The soft contributions** (lines 1595–1600, the capability fit,
+    ///    and — when a tier is stated — line 1531's tier fit), summed by
     ///    [`RoutingExplanation::total`]. None of them can exclude a
     ///    destination; only step 2 can.
     /// 4. **The user's override** (line 1602), applied over the ranking and
@@ -1553,8 +1673,14 @@ fn score(
     pressure: &PressureInputs<'_>,
 ) -> RoutingExplanation {
     let mut explanation = RoutingExplanation::new();
+    if let Some(answer) = &inputs.requirements.classification {
+        explanation.push(classification_note(answer));
+    }
     explanation.push(harness_capability_fit(destination, inputs.overrides));
     explanation.push(capability_fit(destination, &inputs.requirements));
+    if let Some(required) = inputs.requirements.minimum_tier {
+        explanation.push(workload_tier_fit(destination, required));
+    }
     explanation.push(session_affinity(destination));
     explanation.push(prompt_cache_state(destination, current));
     explanation.push(quota_pressure(destination));
@@ -1646,10 +1772,16 @@ fn provider_available(destination: &Destination, pool: &FreePool, now: Instant) 
     !health.credential_was_rejected() && health.is_available(now)
 }
 
-/// The gate step 2 runs. Two constraints and no others, for the same reason
-/// [`crate::routing::interactive`]'s `compatible` has two: each is a fact
-/// about whether the destination *can* serve, not a preference about whether
-/// it *should*.
+/// The gate step 2 runs. Three constraints and no others, for the same
+/// reason [`crate::routing::interactive`]'s `compatible` has two: each is a
+/// fact about whether the destination *can* serve, not a preference about
+/// whether it *should*.
+///
+/// The third — map line 1516 — fires only on an **established** ceiling
+/// strictly below the required tier. A destination with no ceiling stated
+/// passes, because "nobody has said" is not "cannot"; the same rule the two
+/// constraints above already follow for `Unverified` tool semantics and an
+/// unknown protocol.
 fn hard_constraint(
     destination: &Destination,
     inputs: &RouterInputs<'_>,
@@ -1663,6 +1795,12 @@ fn hard_constraint(
         == ProtocolFit::Incompatible
     {
         return Err(HardConstraint::Protocol);
+    }
+    if let (Some(required), Some(offered)) =
+        (inputs.requirements.minimum_tier, destination.tier_ceiling())
+        && offered < required
+    {
+        return Err(HardConstraint::WorkloadTier { required, offered });
     }
     Ok(())
 }

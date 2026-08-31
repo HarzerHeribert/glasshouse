@@ -66,6 +66,7 @@ pub mod evidence;
 pub mod free;
 pub mod interactive;
 pub mod pressure;
+pub mod request;
 pub mod session;
 
 use crate::secret::SecretRef;
@@ -520,9 +521,14 @@ impl RoutingExplanation {
 /// say *which* one rather than only that the candidate was refused.
 ///
 /// Phase 9J line 568 — "apply hard protocol, tool, capability, privacy, and
-/// user constraints before applying the pairing prior" — names exactly these
-/// five, and no others, on purpose: it is the map's own list, not this
-/// module's guess at what a hard constraint could be.
+/// user constraints before applying the pairing prior" — names the first
+/// five, and map line 1516 — *"exclude candidates below the classified
+/// minimum workload tier"* — names the sixth. Each is a line of the map, not
+/// this module's guess at what a hard constraint could be.
+///
+/// [`Self::WorkloadTier`] carries the two tiers it compared, because "below
+/// the minimum tier" is only readable next to which tier was required and
+/// which was offered — see [`Self::reason`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HardConstraint {
     Protocol,
@@ -530,6 +536,13 @@ pub enum HardConstraint {
     Capability,
     Privacy,
     UserConstraint,
+    /// Line 1516. `offered` is the destination's established ceiling, which
+    /// is strictly below `required`; a destination whose ceiling nobody has
+    /// established is never given this constraint (`session::hard_constraint`).
+    WorkloadTier {
+        required: classify::WorkloadTier,
+        offered: classify::WorkloadTier,
+    },
 }
 
 impl HardConstraint {
@@ -540,6 +553,24 @@ impl HardConstraint {
             Self::Capability => "capability",
             Self::Privacy => "privacy",
             Self::UserConstraint => "user constraint",
+            Self::WorkloadTier { .. } => "workload tier",
+        }
+    }
+
+    /// The sentence a person reads beside a rejection, for the constraints
+    /// that carry enough to write one. `None` for the five that name only
+    /// their kind — their explanations live at the site that raised them.
+    pub fn reason(self) -> Option<String> {
+        match self {
+            Self::WorkloadTier { required, offered } => Some(format!(
+                "the task needs at least the `{required}` tier and this destination is \
+                 established to offer at most `{offered}`"
+            )),
+            Self::Protocol
+            | Self::ToolSemantics
+            | Self::Capability
+            | Self::Privacy
+            | Self::UserConstraint => None,
         }
     }
 }

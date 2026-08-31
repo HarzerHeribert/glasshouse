@@ -150,7 +150,10 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
             // is unchanged — this command has never had a failure mode, and a
             // routing model the user configured being unreachable is not one
             // it should acquire.
-            let model_output = match classify_with_routing_model(&runtime, &request) {
+            let model_output = match classify_with_routing_model(
+                &runtime,
+                &glasshouse::routing::request::RouterRequest::for_text(&request),
+            ) {
                 ClassificationAttempt::NotConfigured => None,
                 ClassificationAttempt::Answered(classification) => Some(classification),
                 ClassificationAttempt::Failed(why) => {
@@ -248,6 +251,7 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
             to,
             fresh,
             headless,
+            task,
             harness_args,
         })
         | Some(Command::Run {
@@ -259,6 +263,7 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
             to,
             fresh,
             headless,
+            task,
             harness_args,
         }) => {
             let response =
@@ -277,6 +282,7 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
                     from_checkpoint: from_checkpoint.as_deref(),
                     to: to.as_deref(),
                     fresh: *fresh,
+                    task: task.as_deref(),
                 },
                 &response,
                 *headless,
@@ -537,6 +543,10 @@ struct LaunchDestination<'a> {
     to: Option<&'a str>,
     /// `--fresh`: a new session, whatever the ranking says.
     fresh: bool,
+    /// `--task`: what the work is, which decides what the destination must
+    /// be able to do (Phase 34D). `None` classifies nothing and reproduces
+    /// the launch exactly as it was before classification existed.
+    task: Option<&'a str>,
 }
 
 /// The identifier `--to` takes for "a new session under this profile".
@@ -1726,6 +1736,15 @@ fn session_router(
 /// executing it"*, and is asserted over the shipped binary in
 /// `tests/routing_api.rs`.
 ///
+/// One qualification since Phase 34D: with a routing model **configured** and
+/// a `--task` stated, this asks that model exactly as a launch would — so the
+/// two cannot disagree about the classification — and the *cost* of that one
+/// call is recorded under `purpose = "classification"`, as every routing-model
+/// call is. That is a fact about what the diagnostic spent, not about the
+/// work, which is still not executed. It never writes the sticky
+/// classification record a launch leaves behind (`remember_classification`),
+/// because a preview is not a decision.
+///
 /// Two differences from the launch path, both stated in the rendered output
 /// rather than hidden:
 ///
@@ -1781,12 +1800,35 @@ fn route_recommendation(
     // a routing explanation cannot have. `routing_caveats` below says which
     // of the two happened rather than asserting the empty case.
     let health = observed_provider_health(runtime, &destinations);
-    let requirements = task_requirements_from_text(task);
+    // Phase 34D on the path that reports: the same classifier the launch
+    // path calls, over the same destinations, so the explanation printed
+    // here is the one a launch would act on. No sticky record is consulted
+    // — this path ranks across every harness and decides nothing, so the
+    // one difference from a launch is that it always asks rather than
+    // reusing, and `classify_for_routing`'s doc says so.
+    let classified = classify_for_routing(
+        runtime,
+        effective,
+        RoutingClassificationSite {
+            task,
+            moment,
+            harness: None,
+            harness_named: false,
+            to,
+            fresh,
+            destinations: &destinations,
+            health: &health,
+            sticky: None,
+        },
+    );
     let inputs = RouterInputs {
         overrides: &overrides,
         health: &health,
         now: std::time::Instant::now(),
-        requirements,
+        requirements: classified
+            .as_ref()
+            .map(|classified| classified.answer.requirements())
+            .unwrap_or_default(),
     };
 
     let mut user_override = routing_override(to, fresh);
@@ -1869,36 +1911,346 @@ fn render_route_recommendation(recommendation: &RouteRecommendation) -> String {
     }
 }
 
-/// Classify `task`'s free-form description of the work into the
-/// `TaskRequirements` `RouterInputs` carries — the wire that makes the
-/// capability registry (`routing::capability`) reachable from a production
-/// caller (map lines 1382–1391). Absent or blank text reproduces today's
-/// `TaskRequirements::default()` behaviour byte for byte (ruling 1).
-///
-/// Classification happens here, once, at the entry point — never inside
-/// `SessionRouter` itself (ruling 2), so the router stays something a
-/// classification is handed to and tested against, rather than something
-/// that computes its own input.
-///
-/// `needs_tool_calls` is derived from the same signal fields
-/// `TaskClassification::hard_capabilities` already reads, rather than left
-/// hardcoded `false` (ruling 3): a task this heuristic marks as needing
-/// repository access, shell execution, or browser interaction needs the
-/// harness to act through its tool-call protocol, not only answer in words.
-fn task_requirements_from_text(
-    task: Option<&str>,
-) -> glasshouse::routing::session::TaskRequirements {
-    use glasshouse::routing::classify::classify_heuristically;
-    use glasshouse::routing::session::TaskRequirements;
+/// What one routing decision classified the work as, and the facts that
+/// answer was conditioned on — Phase 34D's answer beside Phase 34E's
+/// fingerprint. `None` from [`classify_for_routing`] when no task was
+/// stated, which is every launch and every `route` that reproduces the
+/// pre-classification behaviour byte for byte.
+struct ClassifiedRouting {
+    answer: glasshouse::routing::request::RouterAnswer,
+    fingerprint: glasshouse::routing::request::RoutingFingerprint,
+}
 
-    let Some(text) = task.map(str::trim).filter(|text| !text.is_empty()) else {
-        return TaskRequirements::default();
+/// Everything [`classify_for_routing`] needs to build the router request
+/// from what its caller already holds — never a file, a transcript, an
+/// environment variable or a credential, which is map lines 1425, 1426,
+/// 1455 and 1456 made structural (see `routing::request`'s header).
+struct RoutingClassificationSite<'a> {
+    /// `--task`. Absent or blank means "classify nothing".
+    task: Option<&'a str>,
+    moment: glasshouse::routing::session::RoutingMoment,
+    /// The harness this decision is for. `None` for `glasshouse route`,
+    /// which ranks across every enabled harness.
+    harness: Option<glasshouse::integrations::IntegrationId>,
+    /// Whether the person named the harness on the command line (line
+    /// 1450's "pinned harness") rather than letting the one enabled harness
+    /// be selected.
+    harness_named: bool,
+    to: Option<&'a str>,
+    fresh: bool,
+    destinations: &'a [glasshouse::routing::session::Destination],
+    health: &'a glasshouse::routing::free::FreePool,
+    /// The sticky record to consult for line 1467. `Some` on the path that
+    /// acts; `None` on the path that reports, which never reuses.
+    sticky: Option<&'a ClassificationStickyCache>,
+}
+
+/// Deterministic heuristics' answer for `text`, with the reason they answered.
+///
+/// The one producer of a heuristic [`RouterAnswer`] in this binary, called
+/// on every path that ends up not asking a model — no routing model
+/// configured (line 1471), an explicit destination (line 1470), or a model
+/// that did not answer — so those three paths cannot classify differently.
+fn heuristic_answer(
+    text: &str,
+    reason: glasshouse::routing::request::HeuristicReason,
+) -> glasshouse::routing::request::RouterAnswer {
+    use glasshouse::routing::request::{AnswerProvenance, RouterAnswer};
+
+    RouterAnswer::new(
+        glasshouse::routing::classify::classify_heuristically(text),
+        AnswerProvenance::Heuristic(reason),
+    )
+}
+
+/// Classify the work a routing decision is about — Phase 34D's producer,
+/// and the one place the four Phase 34E economy rules this package closes
+/// are decided.
+///
+/// Returns `None` when no task was stated: no request is built, no model is
+/// asked, no ledger is opened, and the caller hands the router
+/// `TaskRequirements::default()` exactly as it did before this existed.
+///
+/// With a task, in this order:
+///
+/// 1. **An explicit destination is deterministic** (line 1470). `--to` or
+///    `--fresh` decides; heuristics classify for the explanation only and
+///    no routing model is asked.
+/// 2. **No routing model configured → heuristics** (line 1471). Everything
+///    downstream — the tier gate, the capability terms, the explanation —
+///    works on that answer exactly as it would on a model's.
+/// 3. **A low-risk answer for the same sticky session is reused** (line
+///    1467), and only when nothing it was conditioned on has changed (line
+///    1468): the sticky record's own `reuse_for` is the whole rule.
+/// 4. **Otherwise the routing model is asked**, through the same
+///    `classify_with_routing_model` `glasshouse classify` uses, with the
+///    rendered [`RouterRequest`] as the request text. A model that does not
+///    answer usably falls back to heuristics and says so on stderr, exactly
+///    as `glasshouse classify` does.
+///
+/// Line 1459 is applied by every reader of the answer rather than here:
+/// [`RouterAnswer::requirements`] carries the *conservative* tier, and
+/// [`RouterAnswer::explain`] says when confidence was low and what it did.
+fn classify_for_routing(
+    runtime: &Runtime,
+    effective: &EffectiveConfig<'_>,
+    site: RoutingClassificationSite<'_>,
+) -> Option<ClassifiedRouting> {
+    use glasshouse::config::RoutingModelResolution;
+    use glasshouse::routing::request::{
+        AnswerProvenance, HeuristicReason, RouterAnswer, RouterRequest, RoutingFingerprint,
+        UserConstraints, WarmSessionFact,
     };
-    let hard_capabilities = classify_heuristically(text).hard_capabilities();
-    TaskRequirements {
-        needs_tool_calls: !hard_capabilities.is_empty(),
-        hard_capabilities,
-        ..TaskRequirements::default()
+
+    let text = site.task.map(str::trim).filter(|text| !text.is_empty())?;
+    let bands = destination_bands(effective, site.destinations);
+    let fingerprint = RoutingFingerprint::new(
+        site.harness,
+        &bands,
+        site.health
+            .observed()
+            .into_iter()
+            .map(|(resource, _)| resource.label()),
+    );
+    let constraints = UserConstraints::none()
+        .with_pinned_harness(site.harness.filter(|_| site.harness_named))
+        .with_destination(site.to)
+        .with_fresh(site.fresh)
+        .with_forbidden_providers(forbidden_providers(runtime, effective));
+    let request = RouterRequest::new(text, site.moment)
+        .with_warm_session(WarmSessionFact::among(site.destinations))
+        .with_capacity(bands)
+        .with_constraints(constraints);
+
+    let answer = if request.constraints().is_deterministic() {
+        heuristic_answer(text, HeuristicReason::DeterministicOverride)
+    } else {
+        match effective.routing_model_resolution().value {
+            RoutingModelResolution::Heuristics(_) => {
+                heuristic_answer(text, HeuristicReason::NoRoutingModel)
+            }
+            RoutingModelResolution::Pinned { .. } | RoutingModelResolution::Automatic => {
+                let reused = site.sticky.and_then(|cache| {
+                    let record = cache.load()?;
+                    match record.reuse_for(&fingerprint, site.destinations) {
+                        Ok(classification) => {
+                            let previously = classification.source().to_string();
+                            Some(RouterAnswer::new(
+                                classification,
+                                AnswerProvenance::Reused {
+                                    session: record.session().to_owned(),
+                                    previously,
+                                },
+                            ))
+                        }
+                        Err(refusal) => {
+                            tracing::debug!(
+                                %refusal,
+                                "the previous classification does not stand; asking the routing \
+                                 model"
+                            );
+                            None
+                        }
+                    }
+                });
+                match reused {
+                    Some(answer) => answer,
+                    None => match classify_with_routing_model(runtime, &request) {
+                        ClassificationAttempt::NotConfigured => {
+                            heuristic_answer(text, HeuristicReason::NoRoutingModel)
+                        }
+                        ClassificationAttempt::Answered(classification) => {
+                            let provenance = AnswerProvenance::of_source(classification.source());
+                            RouterAnswer::new(classification, provenance)
+                        }
+                        ClassificationAttempt::Failed(why) => {
+                            eprintln!(
+                                "glasshouse: {why}; deterministic heuristics answered instead"
+                            );
+                            heuristic_answer(text, HeuristicReason::ModelFailed(why))
+                        }
+                    },
+                }
+            }
+        }
+    };
+    Some(ClassifiedRouting {
+        answer,
+        fingerprint,
+    })
+}
+
+/// Line 1449's producer: one capacity **band** per candidate provider, read
+/// off the quota reading `routing_destinations` already attached to each
+/// destination and banded with the same thresholds `glasshouse resources`
+/// and the disposable router use — never the reading itself.
+fn destination_bands(
+    effective: &EffectiveConfig<'_>,
+    destinations: &[glasshouse::routing::session::Destination],
+) -> Vec<glasshouse::routing::request::ProviderBand> {
+    use glasshouse::routing::request::ProviderBand;
+
+    let mut seen = std::collections::BTreeSet::new();
+    let mut bands = Vec::new();
+    for destination in destinations {
+        let provider = destination.backend().provider();
+        if !seen.insert(provider.to_owned()) {
+            continue;
+        }
+        let band = destination.capacity().map(|score| {
+            let thresholds = effective
+                .capacity_band_thresholds()
+                .value
+                .with_resource_reserve(effective.reserve_percent(provider).value.get());
+            score.band(&thresholds)
+        });
+        bands.push(ProviderBand::new(provider, band));
+    }
+    bands
+}
+
+/// Line 1450's "forbidden providers": every configured provider the person
+/// has disabled. The one way this configuration can forbid a provider today;
+/// a provider that is merely absent is not forbidden, it is unknown.
+///
+/// Best-effort on a configuration that will not load — an empty list and a
+/// log line — because the request is being built for a decision the caller
+/// has already loaded that configuration for once.
+fn forbidden_providers(runtime: &Runtime, effective: &EffectiveConfig<'_>) -> Vec<String> {
+    let (Ok(user), Ok(project)) = (
+        UserConfig::load(runtime.paths()),
+        config::load_project_config(runtime.project()),
+    ) else {
+        tracing::debug!("could not re-read configuration for forbidden providers");
+        return Vec::new();
+    };
+    effective
+        .provider_names()
+        .into_iter()
+        .filter(|name| {
+            project
+                .as_ref()
+                .and_then(|p| p.providers().get(name))
+                .or_else(|| user.providers().get(name))
+                .is_some_and(|provider| !provider.enabled())
+        })
+        .collect()
+}
+
+/// Where the previous decision's classification is kept between launches —
+/// map line 1467's memory, project-scoped for the same reason
+/// [`glasshouse::provider::telemetry::RoutingStickyCache`] is, and in its
+/// shape: one JSON file, written to a temporary name and renamed, and every
+/// read failure answering `None` rather than an error.
+struct ClassificationStickyCache {
+    path: std::path::PathBuf,
+}
+
+impl ClassificationStickyCache {
+    fn new(paths: &glasshouse::paths::RuntimePaths, project_id: &str) -> Self {
+        Self {
+            path: paths
+                .project_state_dir(project_id)
+                .join("routing-classification.json"),
+        }
+    }
+
+    fn load(&self) -> Option<glasshouse::routing::request::StickyClassification> {
+        let bytes = std::fs::read(&self.path).ok()?;
+        glasshouse::routing::request::StickyClassification::from_json(&bytes)
+    }
+
+    fn store(&self, record: &glasshouse::routing::request::StickyClassification) {
+        let attempt = (|| -> std::io::Result<()> {
+            if let Some(parent) = self.path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let encoded = record
+                .to_json()
+                .map_err(|err| std::io::Error::other(err.to_string()))?;
+            let temporary = self.path.with_extension("json.writing");
+            std::fs::write(&temporary, encoded)?;
+            std::fs::rename(&temporary, &self.path)
+        })();
+        if let Err(err) = attempt {
+            tracing::debug!(error = %err, "could not persist the routing classification");
+        }
+    }
+}
+
+/// Leave this decision's classification behind for the next one — line
+/// 1467's write side, called once the session the work landed on has an
+/// identifier. Only an answer a model actually gave is worth remembering:
+/// heuristics are free to re-run, and a reused answer is already on disk.
+fn remember_classification(
+    cache: &ClassificationStickyCache,
+    classified: Option<&ClassifiedRouting>,
+    session: &str,
+) {
+    let Some(classified) = classified else {
+        return;
+    };
+    if !classified.answer.provenance().asked_a_model() {
+        return;
+    }
+    cache.store(&glasshouse::routing::request::StickyClassification::new(
+        session,
+        classified.fingerprint.clone(),
+        classified.answer.classification(),
+        glasshouse::provider::cache::now_unix_seconds(),
+    ));
+}
+
+/// What `routing_observations.purpose` records for map line 1849's
+/// measurement. Spelled once, like [`CLASSIFICATION_PURPOSE`].
+const ROUTING_LATENCY_PURPOSE: &str = "routing-latency";
+
+/// Map line 1849: record what routing added to this launch, from the start
+/// of the decision (`started`) to its end — the point after which profile
+/// resolution, the gateway and the process spawn happen identically whether
+/// or not a task was stated, and are therefore the launch's own cost rather
+/// than routing's.
+///
+/// Called only when a classification ran, so a launch that states no task
+/// opens no ledger (practice §65) and leaves no row: the row's absence is
+/// the honest reading of "nothing was added". Opened, written and dropped
+/// here, before any gateway holds its own handle.
+///
+/// The ledger's timing columns are unix **seconds** (migration 11), so a
+/// sub-second decision reads back as `0` through `duration_ms()`; the
+/// millisecond figure goes to the log beside it. A finer column is a schema
+/// decision this package does not take.
+fn record_routing_latency(
+    runtime: &Runtime,
+    started: std::time::Instant,
+    started_at_unix: i64,
+    harness: glasshouse::integrations::IntegrationId,
+    answer: &glasshouse::routing::request::RouterAnswer,
+) {
+    let elapsed = started.elapsed();
+    let completed_at_unix = glasshouse::provider::cache::now_unix_seconds();
+    tracing::info!(
+        elapsed_ms = elapsed.as_millis() as u64,
+        asked_a_model = answer.provenance().asked_a_model(),
+        "routing decision latency before the harness starts"
+    );
+    let ledger = match glasshouse::routing::evidence::EvidenceLedger::open(runtime) {
+        Ok(ledger) => ledger,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "routing evidence ledger unavailable; routing latency is not recorded"
+            );
+            return;
+        }
+    };
+    let observation =
+        glasshouse::routing::evidence::NewObservation::new("glasshouse", "session-router")
+            .with_harness(Some(harness.slug()))
+            .with_purpose(Some(ROUTING_LATENCY_PURPOSE))
+            .with_timing(Some(started_at_unix), Some(completed_at_unix));
+    if let Err(err) = ledger.record(observation, completed_at_unix) {
+        tracing::warn!(error = %err, "could not record routing latency");
     }
 }
 
@@ -1982,7 +2334,12 @@ fn launch_session(
         from_checkpoint,
         to,
         fresh,
+        task,
     } = destination;
+    // Map line 1849: the routing decision is timed from here. Whether the
+    // figure is ever recorded is decided by whether a task was stated.
+    let routing_started = std::time::Instant::now();
+    let routing_started_at_unix = glasshouse::provider::cache::now_unix_seconds();
     let user = UserConfig::load(runtime.paths())?;
     let project = config::load_project_config(runtime.project())?;
     let effective = EffectiveConfig::new(&user, project.as_ref());
@@ -2061,11 +2418,35 @@ fn launch_session(
     // the health of a provider is not a fact this launch can observe about a
     // session it has not started yet.
     let health = observed_provider_health(runtime, &destinations);
+    // Phase 34D, on the path that acts: what the work *is* decides what the
+    // destination must be able to do. `None` — no `--task` — hands the
+    // router `TaskRequirements::default()` and asks nothing, which is this
+    // launch exactly as it was before classification existed.
+    let sticky_cache =
+        ClassificationStickyCache::new(runtime.paths(), runtime.project().id().as_str());
+    let classified = classify_for_routing(
+        runtime,
+        &effective,
+        RoutingClassificationSite {
+            task,
+            moment: glasshouse::routing::session::RoutingMoment::SessionStart,
+            harness: Some(selection.id()),
+            harness_named: harness.is_some(),
+            to,
+            fresh,
+            destinations: &destinations,
+            health: &health,
+            sticky: Some(&sticky_cache),
+        },
+    );
     let inputs = glasshouse::routing::session::RouterInputs {
         overrides: &overrides,
         health: &health,
         now: std::time::Instant::now(),
-        requirements: glasshouse::routing::session::TaskRequirements::default(),
+        requirements: classified
+            .as_ref()
+            .map(|classified| classified.answer.requirements())
+            .unwrap_or_default(),
     };
     // Line 1602 on the path that acts, not only on the one that reports.
     //
@@ -2093,6 +2474,21 @@ fn launch_session(
         &destinations,
         &inputs,
     );
+    if let Some(classified) = &classified {
+        // The classification the decision just acted on, in the same words
+        // `glasshouse route --task` prints — including whether line 1459's
+        // conservative rules fired. And the end of what routing added to
+        // this launch (line 1849), recorded before anything below opens a
+        // ledger handle of its own.
+        eprintln!("glasshouse: {}", classified.answer.explain());
+        record_routing_latency(
+            runtime,
+            routing_started,
+            routing_started_at_unix,
+            selection.id(),
+            &classified.answer,
+        );
+    }
 
     // A destination the router chose is announced before anything happens,
     // never after: a person who did not want their previous session continued
@@ -2136,6 +2532,8 @@ fn launch_session(
                 routing_evidence_for(&health, routed.chosen()),
                 glasshouse::evaluation::now_unix(),
             );
+            // Line 1467: the session this work landed on is the sticky one.
+            remember_classification(&sticky_cache, classified.as_ref(), routed.chosen().id());
             return resume_session(
                 runtime,
                 routed.chosen().id(),
@@ -2418,6 +2816,9 @@ fn launch_session(
             // must never record an invented source.
             .with_source_session(bootstrap.as_ref().map(|(_, source)| source.clone())),
     )?;
+    // Line 1467, the fresh half: the session just recorded is the one the
+    // next low-risk turn will be in.
+    remember_classification(&sticky_cache, classified.as_ref(), record.id.as_str());
 
     // Read before the harness runs, for a harness that keeps its identifiers
     // in one shared index: such an index carries no per-entry timestamp, so
@@ -3797,7 +4198,20 @@ fn automatic_classification_choice(
 /// database, and prints exactly what it printed before this function existed.
 /// `tests/classification_call.rs` holds that byte-for-byte against the
 /// heuristic's own output.
-fn classify_with_routing_model(runtime: &Runtime, request_text: &str) -> ClassificationAttempt {
+///
+/// # What reaches the model is the rendered request, and nothing else
+///
+/// Phase 34D: `request` is the structured [`RouterRequest`] — the task,
+/// bounded, and the few session facts its caller held — and its rendering
+/// is the whole of the request text `Prompt::for_request` scrubs and sends.
+/// The heuristic tier the `Automatic` arm needs for the classification job
+/// itself is read off the same request's task text.
+///
+/// [`RouterRequest`]: glasshouse::routing::request::RouterRequest
+fn classify_with_routing_model(
+    runtime: &Runtime,
+    request: &glasshouse::routing::request::RouterRequest,
+) -> ClassificationAttempt {
     use glasshouse::config::RoutingModelResolution;
 
     let user = match UserConfig::load(runtime.paths()) {
@@ -3829,7 +4243,7 @@ fn classify_with_routing_model(runtime: &Runtime, request_text: &str) -> Classif
             &user,
             project.as_ref(),
             &effective,
-            request_text,
+            request.task_text(),
         ),
     };
     let first = match first {
@@ -3840,7 +4254,7 @@ fn classify_with_routing_model(runtime: &Runtime, request_text: &str) -> Classif
     let prompt = glasshouse::memory::extract::Prompt::for_request(
         glasshouse::routing::classify::CLASSIFICATION_PROMPT_CONTRACT,
         glasshouse::routing::classify::CLASSIFICATION_RESPONSE_SCHEMA,
-        request_text,
+        &request.render(),
     );
 
     // The call, the row it leaves and the fallback chain are all
@@ -5459,6 +5873,10 @@ fn report_task_boundary_routing(runtime: &Runtime, session: &str) {
     // is read beside the launch path's own decision, so it weighs the same
     // persisted readings that path does.
     let health = observed_provider_health(runtime, &destinations);
+    // Phase 34D does not reach this report: `glasshouse resume` carries no
+    // task text, so there is nothing to classify and nothing is invented.
+    // The moment a `resume` learns what the next task is, this is the site
+    // that hands `classify_for_routing` a `TaskBoundary` moment.
     let inputs = RouterInputs {
         overrides: &overrides,
         health: &health,
@@ -9652,11 +10070,13 @@ mod tests {
     //
     // This proves the same claim the way `tests/session_router.rs` proves
     // every other hard-constraint gate: by calling `SessionRouter::choose`
-    // directly, through `task_requirements_from_text`, the actual function
-    // `route_report` calls at its `RouterInputs` construction site. Mutation
-    // (b) — hardcoding `needs_tool_calls: false` back into that function —
-    // fails this test, because the `KnownAbsent` destination would stop being
-    // rejected for a task that plainly asks for shell execution.
+    // directly, through `heuristic_answer(..).requirements()` — the producer
+    // `classify_for_routing` uses on every path that asks no model, which is
+    // what `route_report` reaches at its `RouterInputs` construction site
+    // with no routing model configured. A mutation that hardcodes
+    // `needs_tool_calls: false` into `RouterAnswer::requirements` fails this
+    // test, because the `KnownAbsent` destination would stop being rejected
+    // for a task that plainly asks for shell execution.
     #[test]
     fn a_task_implying_tool_use_reaches_the_hard_constraint_gate_through_the_real_call_site() {
         use glasshouse::integrations::IntegrationId;
@@ -9709,8 +10129,11 @@ mod tests {
 
         // A task this heuristic reads as needing shell execution: the same
         // call `route_report` makes on real `--task` text.
-        let tool_use_requirements =
-            task_requirements_from_text(Some("run cargo test and fix whatever fails"));
+        let tool_use_requirements = heuristic_answer(
+            "run cargo test and fix whatever fails",
+            glasshouse::routing::request::HeuristicReason::NoRoutingModel,
+        )
+        .requirements();
         assert!(
             tool_use_requirements.needs_tool_calls,
             "a task naming shell execution must derive `needs_tool_calls: true`"
@@ -9740,9 +10163,11 @@ mod tests {
             glasshouse::routing::HardConstraint::ToolSemantics
         );
 
-        // The absent-`--task` behaviour: `needs_tool_calls` stays `false`,
-        // and the same `known-absent` destination is no longer rejected.
-        let no_task_requirements = task_requirements_from_text(None);
+        // The absent-`--task` behaviour: `classify_for_routing` answers
+        // `None` and the caller falls back to the default, so
+        // `needs_tool_calls` stays `false` and the same `known-absent`
+        // destination is no longer rejected.
+        let no_task_requirements = glasshouse::routing::session::TaskRequirements::default();
         assert!(!no_task_requirements.needs_tool_calls);
         let inputs = RouterInputs {
             overrides: &overrides,

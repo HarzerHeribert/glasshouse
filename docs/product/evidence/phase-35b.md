@@ -375,3 +375,10 @@ schema**, not a Phase 35B question, and no phase currently asks for it.
 **This is deliberately not a re-tick or an un-tick.** Un-ticking would retire a
 mechanism that works for the case the ledger can actually distinguish; leaving
 the question open a fourth time is what this ruling exists to stop.
+
+
+---
+
+## From `GH-LAUNCH-CLASSIFIER` (2026-08-31)
+
+The launch-path classifier package (router request schema, classification on the acting path) touched this phase's lines 1531 (open — same missing producer as 1516). The full entry — production sites, regression names, the 23 killed mutations, the one honestly-survived one, and the missing producer for 1516/1517/1531 — is in `phase-34d.md`, *Phase 34D — router request schema* and *lines outside Phase 34D*, because the mechanism lives there.
