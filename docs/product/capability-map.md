@@ -1417,25 +1417,25 @@ Fixed architectural requirements
 ☑ Allow GPT-5.6 Luna or another inexpensive fast model to be configured for the routing-model role when available to the user.
 ☑ Never hard-code GPT-5.6 Luna or any other specific model as a mandatory routing dependency.
 ☐ Prefer a routing model whose marginal decision cost is materially lower than the premium capacity it protects.
-☐ Prefer a routing model with sufficient requests per minute to avoid becoming the scheduler bottleneck.
-☐ Prefer a routing model with low enough latency that routing does not make interactive use feel slower than direct harness use.
-☐ Prefer a routing model that reliably returns the required structured classification schema.
-☐ Allow multiple routing-model candidates to form a fallback chain.
+☑ Prefer a routing model with sufficient requests per minute to avoid becoming the scheduler bottleneck.
+☑ Prefer a routing model with low enough latency that routing does not make interactive use feel slower than direct harness use.
+☑ Prefer a routing model that reliably returns the required structured classification schema.
+☑ Allow multiple routing-model candidates to form a fallback chain.
 ☑ Allow deterministic heuristics to remain the final fallback when every routing model is unavailable.
 ☐ Keep routing-model prompts short and exclude unnecessary repository history.
 ☐ Do not send secrets, unrelated project memory, or full conversation histories to the routing model.
-☐ Allow a user to route classifications through a privacy-preserving local model even when remote models are available.
+☑ Allow a user to route classifications through a privacy-preserving local model even when remote models are available.
 
 Phase 34C — Automatic routing-model selection
 
 ☑ Let routing_model = auto choose among configured resources dynamically.
-☐ Filter automatic candidates by required structured-output reliability.
+☑ Filter automatic candidates by required structured-output reliability.
 ☑ Filter automatic candidates by current provider health.
 ☑ Filter automatic candidates by minimum requests-per-minute headroom when known.
-☐ Filter automatic candidates by maximum acceptable routing latency.
+☑ Filter automatic candidates by maximum acceptable routing latency.
 ☐ Filter automatic candidates by maximum marginal routing cost.
-☐ Prefer currently free candidates after capability and latency requirements are satisfied.
-☐ Prefer local candidates when they satisfy the configured latency and quality requirements.
+☑ Prefer currently free candidates after capability and latency requirements are satisfied.
+☑ Prefer local candidates when they satisfy the configured latency and quality requirements.
 ☐ Prefer a cheap metered model over an unreliable free model when failed routing attempts would cost more time than the price difference.
 ☐ Avoid using a scarce premium subscription session as the classifier when a cheaper adequate routing resource exists.
 ☑ Re-evaluate the automatic routing-model choice when its provider becomes degraded or rate-limited.
@@ -1460,10 +1460,10 @@ Phase 34D — Router request schema
 
 Phase 34E — Router economics
 
-☐ Measure the number of routing decisions made per interactive hour.
+☑ Measure the number of routing decisions made per interactive hour.
 ☑ Measure routing-model token and request consumption separately from coding-agent consumption.
-☐ Track routing-model spend separately from productive task spend.
-☐ Warn when routing overhead becomes a non-trivial fraction of the resources it is intended to save.
+☑ Track routing-model spend separately from productive task spend.
+☑ Warn when routing overhead becomes a non-trivial fraction of the resources it is intended to save.
 ☐ Allow repeated low-risk turns in the same sticky session to bypass the routing model.
 ☐ Re-run classification only when the user starts a new task, requests migration, the current session becomes unsuitable, or resource conditions materially change.
 ☐ Cache recent classification results for semantically identical task starts when safe.
@@ -1792,7 +1792,7 @@ Phase 49 — Configuration
 ☑ Allow the user to configure provider-specific quota overrides when automatic telemetry is unavailable.
 ☑ Allow the user to configure a monthly or rolling monetary budget for metered providers.
 ☑ Allow the user to configure protected reserve percentages for premium subscriptions.
-☐ Allow the user to configure the routing-model fallback chain.
+☑ Allow the user to configure the routing-model fallback chain.
 ☐ Allow the user to configure workload-tier ceilings for individual models.
 ☑ Allow the user to configure native-pairing preference strength without hard-coding vendor-specific routing rules.
 ☑ Allow named response profiles and separate role defaults for orchestrator, worker, reviewer, explainer, and ordinary sessions.

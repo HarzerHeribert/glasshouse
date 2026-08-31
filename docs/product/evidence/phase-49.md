@@ -435,3 +435,10 @@ Platform/external evidence: `session_hook.rs` is not platform-gated and runs on
 Windows. No `#[cfg]` was added.
 
 Missing evidence: CI run on all three platforms.
+
+
+---
+
+## From `GH-ROUTING-ECONOMICS` (2026-08-31)
+
+The routing-model selector package closed this phase's lines 1795 (routing.model_fallback); the full entry — production sites, regression names, the 22 killed mutations and the four refusals with their producers — is in `phase-34c.md` under *Package GH-ROUTING-ECONOMICS*, because the mechanism (`DisposableRouting::choose_for_automatic_classification`) lives in that phase.

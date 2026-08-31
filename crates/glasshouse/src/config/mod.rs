@@ -1985,6 +1985,30 @@ pub struct RoutingConfig {
     /// here is inert — it can only ever match a session with that identifier.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reserve_override_sessions: Option<Vec<String>>,
+    /// The routing-model fallback chain — capability map lines 1423 and
+    /// 1795: the resources `glasshouse classify` tries next, in this order,
+    /// when the model it chose (automatic or pinned) cannot be reached or
+    /// does not answer in the schema. Each is tried at most once per
+    /// classification, and an entry naming the model that already failed is
+    /// skipped rather than retried.
+    ///
+    /// Two names per entry — exactly [`FreeResourceRef`]'s on-disk shape —
+    /// because a chain entry is a reference to a provider and model
+    /// configured elsewhere, never a base URL or a credential. An entry may
+    /// name a metered model: like a pin, it is the user's own explicit
+    /// instruction. Same `None`-means-undecided reasoning as
+    /// [`RoutingConfig::free_resource_order`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    model_fallback: Option<Vec<FreeResourceRef>>,
+    /// Capability map line 1427: confine classification to local inference.
+    /// When `true`, automatic selection admits only candidates the provider
+    /// registry knows to be local, the fallback chain skips remote entries,
+    /// and a pinned remote model is not called — nothing about a request
+    /// leaves the machine for classification, and deterministic heuristics
+    /// answer when no local model can. `None` defers to the next layer;
+    /// the default is `false`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    classification_local_only: Option<bool>,
 }
 
 impl RoutingConfig {
@@ -2043,6 +2067,28 @@ impl RoutingConfig {
 
     pub fn set_reserve_override_sessions(&mut self, value: Option<Vec<String>>) -> &mut Self {
         self.reserve_override_sessions = value;
+        self
+    }
+
+    /// This layer's recorded fallback chain, or `None` for "never decided"
+    /// — capability map lines 1423 and 1795.
+    pub fn model_fallback(&self) -> Option<&[FreeResourceRef]> {
+        self.model_fallback.as_deref()
+    }
+
+    pub fn set_model_fallback(&mut self, value: Option<Vec<FreeResourceRef>>) -> &mut Self {
+        self.model_fallback = value;
+        self
+    }
+
+    /// This layer's recorded local-only confinement, or `None` for "never
+    /// decided" — capability map line 1427.
+    pub fn classification_local_only(&self) -> Option<bool> {
+        self.classification_local_only
+    }
+
+    pub fn set_classification_local_only(&mut self, value: Option<bool>) -> &mut Self {
+        self.classification_local_only = value;
         self
     }
 
@@ -2126,6 +2172,8 @@ impl RoutingConfig {
             && self.free_resource_pin.is_none()
             && self.capacity_band_thresholds.is_none()
             && self.reserve_override_sessions.is_none()
+            && self.model_fallback.is_none()
+            && self.classification_local_only.is_none()
     }
 }
 
@@ -3020,6 +3068,39 @@ impl<'a> EffectiveConfig<'a> {
             return Layered::new(value.to_vec(), Layer::User);
         }
         Layered::new(Vec::new(), Layer::Default)
+    }
+
+    /// The routing-model fallback chain — capability map lines 1423 and
+    /// 1795 — resolved per field, project over user over the empty default,
+    /// exactly like [`Self::free_resource_order`]. First layer wins outright
+    /// rather than the two being concatenated, for
+    /// [`Self::reserve_override_sessions`]'s reason: a chain is a list of
+    /// models Glasshouse may *call on the user's behalf*, and a project must
+    /// not be able to append one the user's own configuration never named.
+    pub fn routing_model_fallback(&self) -> Layered<Vec<FreeResourceRef>> {
+        if let Some(value) = self.project.and_then(|p| p.routing().model_fallback()) {
+            return Layered::new(value.to_vec(), Layer::Project);
+        }
+        if let Some(value) = self.user.routing().model_fallback() {
+            return Layered::new(value.to_vec(), Layer::User);
+        }
+        Layered::new(Vec::new(), Layer::Default)
+    }
+
+    /// Whether classification is confined to local inference — capability
+    /// map line 1427 — resolved per field; `false` when neither layer
+    /// decided.
+    pub fn classification_local_only(&self) -> Layered<bool> {
+        if let Some(value) = self
+            .project
+            .and_then(|p| p.routing().classification_local_only())
+        {
+            return Layered::new(value, Layer::Project);
+        }
+        if let Some(value) = self.user.routing().classification_local_only() {
+            return Layered::new(value, Layer::User);
+        }
+        Layered::new(false, Layer::Default)
     }
 
     /// Premium remaining-capacity threshold below which reserve protection

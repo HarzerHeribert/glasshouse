@@ -150,6 +150,32 @@ use crate::provider::quota::{Confidence, Freshness, Reading, ReadingSource};
 /// exists to forbid on the quota side.
 pub const MIN_SAMPLE_FOR_SUMMARY: usize = 5;
 
+/// What `routing_observations.purpose` records for a routing-model
+/// classification call — `main.rs`'s `glasshouse classify` producer writes
+/// it, and [`EvidenceLedger::classification_record`] reads it back.
+///
+/// Spelled once, here, because two spellings of one word would silently
+/// split the only producer from the only reader: `purpose` is a `TEXT`
+/// column with no `CHECK` (migration 11), so nothing in the schema would
+/// notice.
+pub const CLASSIFICATION_PURPOSE: &str = "classification";
+
+/// How far back [`EvidenceLedger::classification_record`] and the routing
+/// economics readers look — seven days, the same window the shell's
+/// route-evidence view already uses, so a routing model's record and the
+/// route table beside it agree on what "recent" means.
+pub const CLASSIFICATION_EVIDENCE_WINDOW_SECONDS: i64 = 7 * 24 * 60 * 60;
+
+/// The fraction of task spend above which [`RoutingOverhead::exceeds`] says
+/// so — capability map line 1466's *"non-trivial fraction of the resources
+/// it is intended to save"*.
+///
+/// One in ten. A classifier exists to keep premium capacity for the work
+/// that needs it; once it is spending a tenth as many tokens as that work
+/// itself, the most it could possibly save is of the same order as what it
+/// costs, and a person should be told to look at it.
+pub const ROUTING_OVERHEAD_WARNING_FRACTION: f64 = 0.10;
+
 /// Whether the response the harness ultimately saw succeeded, from this
 /// producer's point of view — capability map line 1334's "final user-visible
 /// outcome," with the honest caveat this module's own doc comment gives:
@@ -742,6 +768,131 @@ pub struct PurposeConsumption {
     pub mean_time_to_first_byte_ms: Option<f64>,
 }
 
+/// What this project's ledger holds about one `(provider, model)` **as a
+/// routing-model classifier** — capability map lines 1422/1432 (does it
+/// come back in the schema?) and 1421/1435 (how long does it take?) — read
+/// from the [`CLASSIFICATION_PURPOSE`] rows alone.
+///
+/// Two counts and one median, each carrying its own denominator:
+///
+/// - `outcomes_recorded` is the number of rows that carry a parse outcome
+///   at all — [`Outcome::Succeeded`] or [`Outcome::Failed`] — and `parsed`
+///   is how many of those succeeded. A row with no outcome (written by a
+///   build before the producer recorded one) counts in neither: it is not
+///   evidence of reliability in either direction.
+/// - `timed` is how many rows carry a duration, and `median_duration_ms`
+///   is their median **only** once there are at least
+///   [`MIN_SAMPLE_FOR_SUMMARY`] of them — the same floor every other figure
+///   on this ledger sits behind. Below it the field is `None`, which a
+///   consumer must read as *unmeasured*, never as fast.
+///
+/// **Resolution is one second.** `dispatched_at` and `completed_at` are
+/// whole Unix seconds (this module's header, on line 1332's gap), so every
+/// duration here is a multiple of 1000ms, and a ceiling compared against
+/// this median is honest only to the second.
+///
+/// Not split by [`ContextState`]: a classification call is a fresh prompt
+/// every time with nothing warm to keep, and its producer records
+/// [`ContextState::Unknown`] on every row.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClassificationRecord {
+    pub provider: String,
+    pub model: String,
+    /// Rows carrying [`Outcome::Succeeded`] or [`Outcome::Failed`].
+    pub outcomes_recorded: usize,
+    /// Of those, the rows whose reply parsed as a classification.
+    pub parsed: usize,
+    /// Rows carrying a duration at all.
+    pub timed: usize,
+    /// The median of those durations, once there are enough to trust.
+    pub median_duration_ms: Option<i64>,
+}
+
+impl ClassificationRecord {
+    /// The share of outcome-carrying rows that parsed, or `None` when no
+    /// row carries an outcome — a ratio over a zero denominator is not a
+    /// reliability of `0`.
+    pub fn parsed_fraction(&self) -> Option<f64> {
+        (self.outcomes_recorded > 0).then(|| self.parsed as f64 / self.outcomes_recorded as f64)
+    }
+}
+
+/// Routing-model spend set against everything else — capability map line
+/// 1465 — as one pure reading over
+/// [`EvidenceLedger::consumption_by_purpose`]'s groups, so the arithmetic is
+/// testable without a database and is rendered with its denominators rather
+/// than as a bare ratio.
+///
+/// "Spend" is **tokens**, input plus output as the provider reported them,
+/// because that is the only currency this ledger holds: `cost_micro_usd`
+/// has no producer in this build (see [`NewObservation::with_tokens`]).
+/// Cached input tokens are left out of the sum — providers disagree on
+/// whether they are already inside `input_tokens`, and a sum that might
+/// double-count is worse than one that names what it omits.
+///
+/// A `None` token figure means *no row in that side carried a count*, the
+/// same convention [`PurposeConsumption`] keeps; a side that mixes counted
+/// and uncounted rows sums only what was counted. [`Self::fraction`] is
+/// `None` whenever either side is uncounted or the task side is zero, and
+/// [`Self::exceeds`] never fires on an unmeasured comparison.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutingOverhead {
+    /// Rows whose `purpose` is [`CLASSIFICATION_PURPOSE`].
+    pub classification_requests: usize,
+    pub classification_tokens: Option<i64>,
+    /// Every other row the ledger holds in the window — gateway exchanges,
+    /// memory extraction, anything a later producer stamps with another
+    /// purpose.
+    pub task_requests: usize,
+    pub task_tokens: Option<i64>,
+}
+
+impl RoutingOverhead {
+    pub fn from_consumption(groups: &[PurposeConsumption]) -> Self {
+        let mut overhead = Self {
+            classification_requests: 0,
+            classification_tokens: None,
+            task_requests: 0,
+            task_tokens: None,
+        };
+        for group in groups {
+            let tokens = match (group.input_tokens, group.output_tokens) {
+                (None, None) => None,
+                (input, output) => Some(input.unwrap_or(0) + output.unwrap_or(0)),
+            };
+            let (requests, total) = if group.purpose.as_deref() == Some(CLASSIFICATION_PURPOSE) {
+                (
+                    &mut overhead.classification_requests,
+                    &mut overhead.classification_tokens,
+                )
+            } else {
+                (&mut overhead.task_requests, &mut overhead.task_tokens)
+            };
+            *requests += group.sample_count;
+            if let Some(tokens) = tokens {
+                *total = Some(total.unwrap_or(0) + tokens);
+            }
+        }
+        overhead
+    }
+
+    /// Classification tokens as a fraction of task tokens, when both sides
+    /// were counted and the task side is not zero.
+    pub fn fraction(&self) -> Option<f64> {
+        let classification = self.classification_tokens?;
+        let task = self.task_tokens?;
+        (task > 0).then(|| classification as f64 / task as f64)
+    }
+
+    /// Capability map line 1466: whether routing's own spend has crossed
+    /// `threshold` of the task spend it exists to protect. `false` whenever
+    /// [`Self::fraction`] is `None` — an unmeasured comparison is not a
+    /// warning.
+    pub fn exceeds(&self, threshold: f64) -> bool {
+        self.fraction().is_some_and(|fraction| fraction > threshold)
+    }
+}
+
 /// An open project database plus the routing observations inside it.
 ///
 /// Owns its connection behind a [`Mutex`] rather than borrowing one, unlike
@@ -1177,6 +1328,82 @@ impl EvidenceLedger {
             out.push(row.map_err(sql_err("read one purpose's routing consumption"))?);
         }
         Ok(out)
+    }
+
+    /// [`ClassificationRecord`] for one `(provider, model)` over the last
+    /// `window_seconds` — the reader for capability map lines 1422/1432 and
+    /// 1421/1435, and the one that makes those quantities *measured* for
+    /// `crate::routing::disposable`'s classification filters.
+    ///
+    /// Reads only rows whose `purpose` is [`CLASSIFICATION_PURPOSE`]: a
+    /// model's gateway exchanges or extraction calls say nothing about how
+    /// it behaves as a classifier, and folding them in would let a model
+    /// that relays fine but never returns the schema look reliable.
+    ///
+    /// Scoped to this ledger's own `project_id`, like every read here that
+    /// is not already keyed by a full identity.
+    pub fn classification_record(
+        &self,
+        provider: &str,
+        model: &str,
+        now_unix: i64,
+        window_seconds: i64,
+    ) -> Result<ClassificationRecord, EvidenceLedgerError> {
+        let earliest = now_unix.saturating_sub(window_seconds);
+        let observations = {
+            let conn = self.lock();
+            let mut statement = conn
+                .prepare(
+                    "SELECT * FROM routing_observations
+                     WHERE project_id = ?1 AND provider = ?2 AND model = ?3
+                       AND purpose = ?4
+                       AND observed_at >= ?5 AND observed_at <= ?6
+                     ORDER BY observed_at ASC",
+                )
+                .map_err(sql_err("read classification observations"))?;
+            let rows = statement
+                .query_map(
+                    params![
+                        self.project_id,
+                        provider,
+                        model,
+                        CLASSIFICATION_PURPOSE,
+                        earliest,
+                        now_unix
+                    ],
+                    row_to_observation,
+                )
+                .map_err(sql_err("read classification observations"))?;
+            let mut observations = Vec::new();
+            for row in rows {
+                observations.push(row.map_err(sql_err("read a classification observation"))??);
+            }
+            observations
+        };
+
+        let outcomes_recorded = observations
+            .iter()
+            .filter(|o| matches!(o.outcome, Some(Outcome::Succeeded) | Some(Outcome::Failed)))
+            .count();
+        let parsed = observations
+            .iter()
+            .filter(|o| o.outcome == Some(Outcome::Succeeded))
+            .count();
+        let durations: Vec<i64> = observations
+            .iter()
+            .filter_map(RoutingObservation::duration_ms)
+            .collect();
+        let timed = durations.len();
+        let median_duration_ms = (timed >= MIN_SAMPLE_FOR_SUMMARY).then(|| median(durations));
+
+        Ok(ClassificationRecord {
+            provider: provider.to_owned(),
+            model: model.to_owned(),
+            outcomes_recorded,
+            parsed,
+            timed,
+            median_duration_ms,
+        })
     }
 }
 

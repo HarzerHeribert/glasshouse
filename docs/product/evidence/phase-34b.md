@@ -208,3 +208,10 @@ carries a classification. That is the same wall five of six recons named — and
 `routing_model_config.rs` is configuration and rendering: no OS-specific claim in
 any of these seven contracts. Run on macOS, Linux and Windows in
 `scripts/ci-local.sh --windows-vm`.
+
+
+---
+
+## From `GH-ROUTING-ECONOMICS` (2026-08-31)
+
+The routing-model selector package closed this phase's lines 1420, 1421, 1422, 1423, 1427 (1419 refused: no per-model price); the full entry — production sites, regression names, the 22 killed mutations and the four refusals with their producers — is in `phase-34c.md` under *Package GH-ROUTING-ECONOMICS*, because the mechanism (`DisposableRouting::choose_for_automatic_classification`) lives in that phase.

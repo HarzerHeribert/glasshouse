@@ -173,3 +173,10 @@ The ledger can count rows and knows `observed_at`, so decisions per *elapsed*
 hour is available. **"Interactive hour" is the blocker**: nothing in this build
 measures interactive time, and a proxy would be a fabricated denominator. Left
 open rather than closed against a substituted quantity.
+
+
+---
+
+## From `GH-ROUTING-ECONOMICS` (2026-08-31)
+
+The routing-model selector package closed this phase's lines 1463, 1465, 1466; the full entry — production sites, regression names, the 22 killed mutations and the four refusals with their producers — is in `phase-34c.md` under *Package GH-ROUTING-ECONOMICS*, because the mechanism (`DisposableRouting::choose_for_automatic_classification`) lives in that phase.

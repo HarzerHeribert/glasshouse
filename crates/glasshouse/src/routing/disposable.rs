@@ -45,8 +45,10 @@ use crate::provider::quota::{
     CapacityBand, RemainingCapacityScore, ReserveDecision, ReserveDecisionInputs,
     evaluate_reserve_spend,
 };
+use crate::provider::registry::Locality;
 use crate::provider::telemetry::RetainedPick;
 use crate::routing::classify::{TaskClassification, WorkloadTier};
+use crate::routing::evidence::{ClassificationRecord, MIN_SAMPLE_FOR_SUMMARY};
 
 /// The kind of bounded internal work a choice is being made for.
 ///
@@ -205,6 +207,17 @@ pub struct DisposableCandidate {
     /// [`DisposableRouting::score`] renders as an honest `0.0` contribution
     /// naming the missing source, per this packet's design decision 3.
     capacity: CandidateCapacity,
+    /// Where this candidate's compute runs, when the caller said —
+    /// capability map lines 1427 and 1438. `None` is a caller that did not
+    /// say, which [`ClassificationPolicy::local_only`] treats as *not known
+    /// to be local* (see [`classification_verdict`]) and the locality
+    /// preference treats as inert.
+    locality: Option<Locality>,
+    /// What the evidence ledger recorded about this candidate as a
+    /// classifier, when the caller read it — capability map lines
+    /// 1422/1432 and 1421/1435. `None` is "nothing was read", and every
+    /// filter and preference built on it is inert for that candidate.
+    classification: Option<ClassificationRecord>,
 }
 
 impl DisposableCandidate {
@@ -220,6 +233,8 @@ impl DisposableCandidate {
             credential,
             cost,
             capacity: CandidateCapacity::default(),
+            locality: None,
+            classification: None,
         }
     }
 
@@ -228,6 +243,35 @@ impl DisposableCandidate {
     pub fn with_capacity(mut self, capacity: CandidateCapacity) -> Self {
         self.capacity = capacity;
         self
+    }
+
+    /// State where this candidate's compute runs — capability map lines
+    /// 1427 and 1438. `main.rs` reads it from
+    /// [`crate::provider::registry::ResourceKind::from_direct_provider`],
+    /// the one place this build already says which provider names are
+    /// local-inference servers.
+    #[must_use]
+    pub fn with_locality(mut self, locality: Locality) -> Self {
+        self.locality = Some(locality);
+        self
+    }
+
+    /// Attach what the evidence ledger recorded about this candidate as a
+    /// classifier — `crate::routing::evidence::EvidenceLedger::classification_record`'s
+    /// answer. `None` leaves every classification filter and preference
+    /// inert for it, explained as unmeasured.
+    #[must_use]
+    pub fn with_classification_record(mut self, record: Option<ClassificationRecord>) -> Self {
+        self.classification = record;
+        self
+    }
+
+    pub fn locality(&self) -> Option<Locality> {
+        self.locality
+    }
+
+    pub fn classification_record(&self) -> Option<&ClassificationRecord> {
+        self.classification.as_ref()
     }
 
     pub fn provider(&self) -> &str {
@@ -288,6 +332,257 @@ fn has_no_known_headroom(candidate: &DisposableCandidate) -> bool {
         .remaining_capacity
         .as_ref()
         .is_some_and(|score| score.fraction() <= 0.0)
+}
+
+/// Capability map lines 1422 and 1432: the share of classification calls
+/// that must have come back in the schema for a candidate to stay eligible,
+/// once it has enough history to be judged at all.
+///
+/// Four in five. Every reply that fails to parse costs a full model call
+/// *and* falls back to the heuristic answer anyway, so a classifier below
+/// this line is paying for a call on more than one request in five to
+/// produce exactly what the heuristic would have produced for nothing.
+pub const CLASSIFICATION_RELIABILITY_FLOOR: f64 = 0.8;
+
+/// How many outcome-carrying classification calls a candidate needs before
+/// [`CLASSIFICATION_RELIABILITY_FLOOR`] applies to it — the evidence
+/// ledger's own [`MIN_SAMPLE_FOR_SUMMARY`], so "enough to judge" means one
+/// number across this crate. Below it a candidate is *unproven*, which is a
+/// different fact from *unreliable* and is never grounds for exclusion.
+pub const CLASSIFICATION_RELIABILITY_MIN_OBSERVATIONS: usize = MIN_SAMPLE_FOR_SUMMARY;
+
+/// The dimension name `crate::provider::quota::CapacityState::remaining_capacity_score`
+/// stamps on a score bound by the per-minute request ceiling. Matched by
+/// string because that function names its dimension as prose for a
+/// diagnostic, and `tests/routing_economics.rs` pins the spelling by
+/// building an RPM-bound score and asserting the preference fires.
+const REQUESTS_PER_MINUTE_DIMENSION: &str = "requests per minute";
+
+/// How much each classification preference can add to a candidate's score
+/// at its best — capability map lines 1420, 1421, 1422 and 1438. The same
+/// for all four, so no measured preference outranks another by
+/// construction: a candidate that wins on one and loses on another is
+/// decided by the size of the margins, which is the only thing this module
+/// can say about them honestly. The weight never competes with the cost
+/// term — free and metered candidates are ranked in separate loops — nor
+/// with the user's own order, which `FreePreferences::arrange` applies
+/// after these have been summed.
+const CLASSIFICATION_PREFERENCE_WEIGHT: f64 = 0.25;
+
+/// The classification-side requirements a candidate must meet before it may
+/// be asked to classify — capability map lines 1427 (local only) and 1435
+/// (latency ceiling) — carried on the policy, like [`ReserveOverride`],
+/// because they are this instance's standing rules rather than one call's
+/// argument.
+///
+/// Both default to *not applied*: no ceiling, and no confinement. `main.rs`
+/// fills them from the layered `[routing]` configuration for the automatic
+/// classification path and nowhere else, so memory extraction and every
+/// other [`JobKind`] keep exactly the behaviour they had.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ClassificationPolicy {
+    max_latency_ms: Option<u32>,
+    local_only: bool,
+}
+
+impl ClassificationPolicy {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Capability map line 1435: exclude a candidate whose *measured*
+    /// median classification latency exceeds this many milliseconds. A
+    /// candidate with no median is not measured and is never excluded by
+    /// it.
+    #[must_use]
+    pub fn with_max_latency_ms(mut self, max_latency_ms: Option<u32>) -> Self {
+        self.max_latency_ms = max_latency_ms;
+        self
+    }
+
+    /// Capability map line 1427: admit only candidates known to run
+    /// locally.
+    #[must_use]
+    pub fn with_local_only(mut self, local_only: bool) -> Self {
+        self.local_only = local_only;
+        self
+    }
+
+    pub fn max_latency_ms(&self) -> Option<u32> {
+        self.max_latency_ms
+    }
+
+    pub fn local_only(&self) -> bool {
+        self.local_only
+    }
+}
+
+/// One candidate's standing against [`ClassificationPolicy`] and the
+/// reliability floor, decided by [`classification_verdict`].
+enum ClassificationVerdict {
+    /// Admitted, with one [`Contribution`] per requirement saying whether
+    /// it applied or was inert — rendered on the winner's explanation so a
+    /// reader can see which requirements were actually *measured*.
+    Admitted {
+        notes: Vec<Contribution>,
+    },
+    Excluded {
+        reason: String,
+    },
+}
+
+/// Decide whether `candidate` may be asked to classify — the three filters
+/// capability map lines 1427, 1432 and 1435 name, in that order.
+///
+/// # The honesty rule, and the one place it is deliberately inverted
+///
+/// Reliability and latency are **measurements**, and a measurement that has
+/// not been taken never excludes: a candidate with no record, or with fewer
+/// than [`CLASSIFICATION_RELIABILITY_MIN_OBSERVATIONS`] outcomes, or with no
+/// median yet, is admitted with a note saying the requirement was inert —
+/// the same rule [`has_no_known_headroom`] applies to capacity, because
+/// turning "nothing measured" into "fails the bar" is a fabrication.
+///
+/// Locality is **not a measurement**: it is a fact the provider registry
+/// states for every provider name, and a caller that attaches none has
+/// declined to say rather than failed to measure. Under
+/// [`ClassificationPolicy::local_only`] that fails **closed** — a candidate
+/// nobody could say is local is not sent anything — because this is a
+/// privacy constraint, and a privacy constraint that admits on silence
+/// would send a request off the machine on the strength of nobody having
+/// said where the model runs.
+fn classification_verdict(
+    policy: &ClassificationPolicy,
+    candidate: &DisposableCandidate,
+) -> ClassificationVerdict {
+    let mut notes = Vec::with_capacity(3);
+
+    // Map line 1427, first: a candidate this policy may never send to is
+    // excluded before anything about its quality is even considered.
+    if policy.local_only {
+        match candidate.locality {
+            Some(Locality::Local) => notes.push(Contribution::new(
+                "local only",
+                0.0,
+                "local inference — admitted under classification_local_only (map line 1427)"
+                    .to_owned(),
+            )),
+            Some(Locality::Remote) => {
+                return ClassificationVerdict::Excluded {
+                    reason: "remote, and classification is confined to local models — nothing \
+                             is sent to it (map line 1427)"
+                        .to_owned(),
+                };
+            }
+            None => {
+                return ClassificationVerdict::Excluded {
+                    reason: "its locality was not stated, and classification is confined to \
+                             local models — a candidate not known to be local is not sent \
+                             anything (map line 1427)"
+                        .to_owned(),
+                };
+            }
+        }
+    }
+
+    // Map line 1432.
+    match candidate.classification.as_ref() {
+        None => notes.push(Contribution::new(
+            "reliability floor",
+            0.0,
+            format!(
+                "no classification history was read for this candidate — the {:.0}% floor is \
+                 inert; unproven, not unreliable (map line 1432)",
+                CLASSIFICATION_RELIABILITY_FLOOR * 100.0
+            ),
+        )),
+        Some(record) if record.outcomes_recorded < CLASSIFICATION_RELIABILITY_MIN_OBSERVATIONS => {
+            notes.push(Contribution::new(
+                "reliability floor",
+                0.0,
+                format!(
+                    "unproven, not unreliable: {} of {} classification calls parsed, fewer than \
+                     the {} needed before the {:.0}% floor applies (map line 1432)",
+                    record.parsed,
+                    record.outcomes_recorded,
+                    CLASSIFICATION_RELIABILITY_MIN_OBSERVATIONS,
+                    CLASSIFICATION_RELIABILITY_FLOOR * 100.0
+                ),
+            ));
+        }
+        Some(record) => {
+            let fraction = record
+                .parsed_fraction()
+                .expect("outcomes_recorded is at least the minimum, so above zero");
+            if fraction < CLASSIFICATION_RELIABILITY_FLOOR {
+                return ClassificationVerdict::Excluded {
+                    reason: format!(
+                        "only {} of {} classification calls came back in the schema ({:.0}%), \
+                         below the {:.0}% reliability floor (map line 1432)",
+                        record.parsed,
+                        record.outcomes_recorded,
+                        fraction * 100.0,
+                        CLASSIFICATION_RELIABILITY_FLOOR * 100.0
+                    ),
+                };
+            }
+            notes.push(Contribution::new(
+                "reliability floor",
+                0.0,
+                format!(
+                    "{} of {} classification calls came back in the schema ({:.0}%), at or above \
+                     the {:.0}% floor (map line 1432)",
+                    record.parsed,
+                    record.outcomes_recorded,
+                    fraction * 100.0,
+                    CLASSIFICATION_RELIABILITY_FLOOR * 100.0
+                ),
+            ));
+        }
+    }
+
+    // Map line 1435.
+    let median = candidate
+        .classification
+        .as_ref()
+        .and_then(|record| record.median_duration_ms);
+    let timed = candidate
+        .classification
+        .as_ref()
+        .map_or(0, |record| record.timed);
+    match (policy.max_latency_ms, median) {
+        (None, _) => notes.push(Contribution::new(
+            "latency ceiling",
+            0.0,
+            "no maximum routing latency is configured for this decision (map line 1435)".to_owned(),
+        )),
+        (Some(ceiling), None) => notes.push(Contribution::new(
+            "latency ceiling",
+            0.0,
+            format!(
+                "no latency figure yet ({timed} of {MIN_SAMPLE_FOR_SUMMARY} timed classification \
+                 calls) — the {ceiling}ms ceiling is inert (map line 1435)"
+            ),
+        )),
+        (Some(ceiling), Some(median)) if median > i64::from(ceiling) => {
+            return ClassificationVerdict::Excluded {
+                reason: format!(
+                    "median classification latency {median}ms over {timed} timed calls exceeds \
+                     the {ceiling}ms ceiling (map line 1435)"
+                ),
+            };
+        }
+        (Some(ceiling), Some(median)) => notes.push(Contribution::new(
+            "latency ceiling",
+            0.0,
+            format!(
+                "median classification latency {median}ms over {timed} timed calls is within the \
+                 {ceiling}ms ceiling (map line 1435)"
+            ),
+        )),
+    }
+
+    ClassificationVerdict::Admitted { notes }
 }
 
 /// The resource one disposable job was routed to, and why.
@@ -381,6 +676,12 @@ pub enum NoResource {
     /// denied every metered candidate that could otherwise have served —
     /// map line 1550. `reasons` names each denial, one per candidate.
     ProtectedReserveDenied { reasons: Vec<String> },
+    /// Every configured candidate was excluded by a classification
+    /// requirement before ranking ran — capability map lines 1427, 1432
+    /// and 1435. `reasons` names each exclusion, one per candidate, so a
+    /// caller that falls back to deterministic heuristics can say why no
+    /// model was asked.
+    ClassificationRequirementsExcludedAll { reasons: Vec<String> },
 }
 
 impl std::fmt::Display for NoResource {
@@ -405,6 +706,12 @@ impl std::fmt::Display for NoResource {
                 f,
                 "every free resource failed or was absent, and the protected-reserve policy \
                  denied every metered candidate: {}",
+                reasons.join("; ")
+            ),
+            Self::ClassificationRequirementsExcludedAll { reasons } => write!(
+                f,
+                "every configured candidate was excluded by a classification requirement before \
+                 ranking, so no model was asked: {}",
                 reasons.join("; ")
             ),
         }
@@ -552,6 +859,12 @@ pub struct DisposableRouting {
     /// said otherwise, so every construction that predates the line keeps
     /// exactly the behaviour it had.
     reserve_override: ReserveOverride,
+    /// The classification-side requirements — capability map lines 1427
+    /// and 1435 — consulted by [`Self::choose_for_automatic_classification`]
+    /// alone. [`ClassificationPolicy::default`] applies nothing, so every
+    /// construction that predates those lines keeps exactly the behaviour
+    /// it had.
+    classification_policy: ClassificationPolicy,
 }
 
 impl DisposableRouting {
@@ -563,6 +876,7 @@ impl DisposableRouting {
             prefer_free_setting,
             preferences,
             reserve_override: ReserveOverride::none(),
+            classification_policy: ClassificationPolicy::default(),
         }
     }
 
@@ -585,6 +899,7 @@ impl DisposableRouting {
             prefer_free_setting: true,
             preferences,
             reserve_override: ReserveOverride::none(),
+            classification_policy: ClassificationPolicy::default(),
         }
     }
 
@@ -613,6 +928,21 @@ impl DisposableRouting {
     /// report it.
     pub fn reserve_override(&self) -> &ReserveOverride {
         &self.reserve_override
+    }
+
+    /// Carry the user's classification requirements — capability map lines
+    /// 1427 and 1435. A builder for [`Self::with_reserve_override`]'s
+    /// reason: both constructors describe what kind of work this policy is
+    /// for, and a latency ceiling or a privacy confinement is a statement
+    /// about one job class that most callers never make.
+    #[must_use]
+    pub fn with_classification_policy(mut self, policy: ClassificationPolicy) -> Self {
+        self.classification_policy = policy;
+        self
+    }
+
+    pub fn classification_policy(&self) -> &ClassificationPolicy {
+        &self.classification_policy
     }
 
     /// Choose a resource for one bounded job.
@@ -902,6 +1232,76 @@ impl DisposableRouting {
         classification: Option<&TaskClassification>,
         retained: Option<RetainedPick>,
     ) -> Result<AutomaticClassificationDecision, NoResource> {
+        // Capability map lines 1427, 1432 and 1435, before anything else:
+        // the requirements a candidate must meet are applied here, once, to
+        // the whole list — so a retained pick that no longer meets them is
+        // simply not "still present" below and gets a fresh decision, the
+        // same way a pick whose health turned is handled. `choose` itself
+        // is untouched: these requirements are about *classification*, and
+        // `choose` serves every `JobKind`.
+        let mut admitted: Vec<(DisposableCandidate, Vec<Contribution>)> = Vec::new();
+        let mut exclusions: Vec<Contribution> = Vec::new();
+        for candidate in candidates {
+            match classification_verdict(&self.classification_policy, candidate) {
+                ClassificationVerdict::Admitted { notes } => {
+                    admitted.push((candidate.clone(), notes));
+                }
+                ClassificationVerdict::Excluded { reason } => exclusions.push(Contribution::new(
+                    "excluded candidate",
+                    0.0,
+                    format!(
+                        "{} on {}: {reason}",
+                        candidate.model(),
+                        candidate.provider()
+                    ),
+                )),
+            }
+        }
+        if admitted.is_empty() && !candidates.is_empty() {
+            return Err(NoResource::ClassificationRequirementsExcludedAll {
+                reasons: exclusions
+                    .iter()
+                    .map(|exclusion| exclusion.evidence().to_owned())
+                    .collect(),
+            });
+        }
+
+        // Capability map lines 1420, 1421 and 1438: among the candidates the
+        // user has *not* placed in an explicit free-resource order, the
+        // classification preferences decide the order `choose`'s free loop
+        // walks. A stable sort on the preference total, so two candidates
+        // nothing is known about keep the caller's order exactly as before —
+        // and `FreePreferences::arrange` re-sorts by the user's own order
+        // afterwards, so a ranked candidate is never moved by this. The
+        // scoring invariant `choose` documents therefore still holds: it
+        // consults no score to pick a free winner; the order it is handed
+        // is what changed.
+        admitted.sort_by(|(left, _), (right, _)| {
+            let of = |candidate: &DisposableCandidate| {
+                self.classification_preferences(candidate)
+                    .iter()
+                    .map(Contribution::magnitude)
+                    .sum::<f64>()
+            };
+            of(right)
+                .partial_cmp(&of(left))
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        let candidates: Vec<DisposableCandidate> = admitted
+            .iter()
+            .map(|(candidate, _)| candidate.clone())
+            .collect();
+        let candidates = candidates.as_slice();
+        let notes_for = |choice: &DisposableChoice| -> Vec<Contribution> {
+            admitted
+                .iter()
+                .find(|(candidate, _)| {
+                    candidate.provider() == choice.provider() && candidate.model() == choice.model()
+                })
+                .map(|(_, notes)| notes.clone())
+                .unwrap_or_default()
+        };
+
         if let Some(pick) = &retained {
             let age = now_unix.saturating_sub(pick.chosen_at_unix);
             let within_window = (0..AUTOMATIC_CLASSIFICATION_STICKY_WINDOW_SECONDS).contains(&age);
@@ -929,18 +1329,25 @@ impl DisposableRouting {
                          line 1442); DisposableRouting::score did not run for this decision"
                     ),
                 ));
-                let choice = self.choice(JobKind::Classification, candidate, reason, explanation);
+                let mut choice =
+                    self.choice(JobKind::Classification, candidate, reason, explanation);
+                for contribution in notes_for(&choice).into_iter().chain(exclusions) {
+                    choice.explanation.push(contribution);
+                }
                 return Ok(AutomaticClassificationDecision::Retained(choice));
             }
         }
 
-        let choice = self.choose(
+        let mut choice = self.choose(
             JobKind::Classification,
             candidates,
             pool,
             now,
             classification,
         )?;
+        for contribution in notes_for(&choice).into_iter().chain(exclusions) {
+            choice.explanation.push(contribution);
+        }
         let pick = RetainedPick {
             provider: choice.provider().to_owned(),
             model: choice.model().to_owned(),
@@ -1037,6 +1444,10 @@ impl DisposableRouting {
             ),
         });
 
+        for contribution in self.classification_preferences(value) {
+            explanation.push(contribution);
+        }
+
         if let (Some(session), true) = (self.reserve_override.granted_session(), reserve.is_some())
         {
             explanation.push(Contribution::new(
@@ -1066,6 +1477,132 @@ impl DisposableRouting {
         }
 
         explanation
+    }
+
+    /// The four classification preferences — capability map lines 1421
+    /// (latency), 1422 (structured-output reliability), 1420
+    /// (requests-per-minute headroom) and 1438 (locality) — as named
+    /// contributions, each inert and saying so when its quantity is not
+    /// measured.
+    ///
+    /// One definition, two consumers: [`Self::score`] renders them on every
+    /// explanation (and their magnitudes rank the metered-fallback path),
+    /// and [`Self::choose_for_automatic_classification`] sums them to order
+    /// the free candidates the user has not ranked. Splitting the two would
+    /// let the explanation say one thing and the order do another.
+    fn classification_preferences(&self, candidate: &DisposableCandidate) -> Vec<Contribution> {
+        let mut out = Vec::with_capacity(4);
+
+        let timed = candidate
+            .classification
+            .as_ref()
+            .map_or(0, |record| record.timed);
+        out.push(
+            match candidate
+                .classification
+                .as_ref()
+                .and_then(|record| record.median_duration_ms)
+            {
+                Some(median) => Contribution::new(
+                    "classification latency",
+                    CLASSIFICATION_PREFERENCE_WEIGHT / (1.0 + median as f64 / 1000.0),
+                    format!(
+                        "median {median}ms over {timed} timed classification calls — lower is \
+                         preferred so routing does not make a person's turn feel slower than \
+                         the harness alone (map line 1421)"
+                    ),
+                ),
+                None => Contribution::new(
+                    "classification latency",
+                    0.0,
+                    format!(
+                        "no latency figure yet ({timed} of {MIN_SAMPLE_FOR_SUMMARY} timed \
+                         classification calls) — this preference is inert (map line 1421)"
+                    ),
+                ),
+            },
+        );
+
+        out.push(match candidate.classification.as_ref() {
+            Some(record)
+                if record.outcomes_recorded >= CLASSIFICATION_RELIABILITY_MIN_OBSERVATIONS =>
+            {
+                let fraction = record
+                    .parsed_fraction()
+                    .expect("outcomes_recorded is at least the minimum, so above zero");
+                Contribution::new(
+                    "structured-output reliability",
+                    fraction * CLASSIFICATION_PREFERENCE_WEIGHT,
+                    format!(
+                        "{} of {} classification calls came back in the schema ({:.0}%) — more \
+                         reliable is preferred (map line 1422)",
+                        record.parsed,
+                        record.outcomes_recorded,
+                        fraction * 100.0
+                    ),
+                )
+            }
+            other => Contribution::new(
+                "structured-output reliability",
+                0.0,
+                format!(
+                    "no reliability figure yet ({} of {} outcome-carrying classification calls) \
+                     — this preference is inert (map line 1422)",
+                    other.map_or(0, |record| record.outcomes_recorded),
+                    CLASSIFICATION_RELIABILITY_MIN_OBSERVATIONS
+                ),
+            ),
+        });
+
+        out.push(match &candidate.capacity.remaining_capacity {
+            Some(score) if score.dimension() == REQUESTS_PER_MINUTE_DIMENSION => Contribution::new(
+                "requests-per-minute headroom",
+                score.routing_fraction() * CLASSIFICATION_PREFERENCE_WEIGHT,
+                format!(
+                    "{} of the per-minute request ceiling remains — more headroom is \
+                         preferred so routing does not become the scheduler's bottleneck (map \
+                         line 1420)",
+                    score.percent().render()
+                ),
+            ),
+            Some(score) => Contribution::new(
+                "requests-per-minute headroom",
+                0.0,
+                format!(
+                    "this candidate is bound by {} rather than by requests per minute — this \
+                     preference is inert (map line 1420)",
+                    score.dimension()
+                ),
+            ),
+            None => Contribution::new(
+                "requests-per-minute headroom",
+                0.0,
+                "no requests-per-minute reading for this provider — this preference is inert \
+                 (map line 1420)"
+                    .to_owned(),
+            ),
+        });
+
+        out.push(match candidate.locality {
+            Some(Locality::Local) => Contribution::new(
+                "locality",
+                CLASSIFICATION_PREFERENCE_WEIGHT,
+                "local inference — preferred among candidates that met every requirement \
+                 applied before ranking (map line 1438)"
+                    .to_owned(),
+            ),
+            Some(Locality::Remote) => {
+                Contribution::new("locality", 0.0, "remote (map line 1438)".to_owned())
+            }
+            None => Contribution::new(
+                "locality",
+                0.0,
+                "locality not stated by the caller — this preference is inert (map line 1438)"
+                    .to_owned(),
+            ),
+        });
+
+        out
     }
 
     /// The pinned candidate's explanation: everything [`DisposableRouting::score`]

@@ -269,3 +269,175 @@ until the call site lands.** The follow-up is one call site in
 **The invariant the wiring must preserve**, already enforced by the built code
 and its tests: *a retained pick is never returned without re-checking its
 health.* Stickiness must not outlive the healthiness it was predicated on.
+
+
+---
+
+# Package `GH-ROUTING-ECONOMICS` — 2026-08-31, Fable specialist at xhigh
+
+**Seventeen lines against one selector**: `DisposableRouting::choose_for_automatic_classification`
+(`routing/disposable.rs`) — the function `main.rs::automatic_classification_choice`
+calls on `RoutingModelResolution::Automatic`, itself reached from
+`classify_with_routing_model` by `glasshouse classify` and, once the launch path
+classifies, by `glasshouse launch`. **Thirteen closed, four refused with one
+producer each.** This is the "build the named producer" follow-up practice §83
+asks for: `GH-AUTO-ROUTING-MODEL` refused six 34C filters because reliability,
+latency and cost were unmeasured; this package measures two of the three.
+
+Contract (the package's): Given automatic routing-model selection, when Glasshouse
+picks which model classifies a task, it prefers candidates the evidence ledger
+shows to be fast, high-headroom and reliable at returning the schema, excludes
+those below a reliability floor or above the configured latency ceiling, walks a
+user-configured fallback chain once when the chosen model fails, may be confined
+to a local model, and can say what fraction of resources routing itself consumes
+— while preserving that a candidate is filtered only on a quantity actually
+measured, and that an unmeasured quantity leaves an inert, labelled term.
+
+**The producer that made it possible**: `main.rs::record_classification_observation`
+now records the **parse outcome** (`Outcome::Succeeded`/`Failed` — a reply that
+could not be read as a classification failed at its purpose; migration 11's
+`CHECK` fixes the vocabulary and a `Malformed` variant would have been a
+migration) and the **clock either side of the call** (`with_timing`, whole Unix
+seconds — every duration is a multiple of 1000 ms, stated as a limit). It is
+called **after** `parse_classification`, from the new `classify_through_chain`.
+Readers: `EvidenceLedger::classification_record` (`routing/evidence.rs`; median
+withheld below `MIN_SAMPLE_FOR_SUMMARY`), attached per candidate by
+`main.rs::attach_classification_records`.
+
+**Preferences act; they do not only explain** (ruling accepted). `choose`'s free
+loop walks `FreePreferences::arrange` and never consults `score`, and
+`scoring_never_reorders_the_existing_free_selection` still holds. So the four
+preferences are applied as a **stable pre-order** of the *unranked* admitted
+candidates before `arrange` re-sorts by the user's own order; a user-ranked
+candidate is never displaced. One definition, two consumers:
+`classification_preferences` feeds both `score()` and the pre-order.
+
+Gates (final tree): fmt clean; clippy `-D warnings` clean; `routing_economics`
+**22 passed**; `routing_disposable_tier` 7; `classification_call` 9;
+`provider_discovery` 45; lib filter `routing::disposable routing::evidence
+evaluation:: config::` 120 passed; `blast-radius.sh` exit 0 — **54 targets, 2363
+passed, 0 failed**; `mutate.sh --script` — **22 KILLED, 0 SURVIVED**, every
+restore byte-identical.
+
+**One red result, attributed and fixed**: the first blast-radius run failed
+`routing::tests::the_two_policy_classes_do_not_name_each_other`, which scans
+`disposable.rs` production code for the word *interactive* — the new latency
+evidence string had quoted line 1421's own wording. Reworded; the guard was
+doing its job on a string literal. Worth knowing for the next packet that quotes
+1421 into that file.
+
+## Phase 34B — routing-model role
+
+- **1420** ☑ COMPLETE — *requests-per-minute headroom* preference
+  (`classification_preferences`, `REQUESTS_PER_MINUTE_DIMENSION`; the reading's
+  producer is the unchanged `disposable_candidate_capacity`). Killed:
+  `more_request_headroom_scores_higher_and_says_so` (zeroed term → *"the roomier
+  candidate was listed second and must still win"*). Limit: the RPM figure is
+  visible only when RPM is the *tightest* dimension `remaining_capacity_score`
+  found; otherwise the term says it is unstated.
+- **1421** ☑ COMPLETE — *classification latency* preference. Killed:
+  `a_faster_candidate_is_preferred_among_unranked_free_candidates`. Limit:
+  one-second resolution; the line's "than direct harness use" is not measured —
+  this prefers lower classification latency, not a classification-vs-harness
+  delta.
+- **1422** ☑ COMPLETE — *structured-output reliability* preference, on the parse
+  outcome now recorded. Killed twice: zeroed term →
+  `a_more_reliable_candidate_is_preferred_among_unranked_free_candidates`;
+  producer lying (`if parsed.is_ok()` → `if true`) →
+  `a_fallback_chain_is_walked_once_and_every_attempt_is_recorded` (*alpha's row
+  recorded Succeeded, Failed expected*). Limit: per `(provider, model)` over 7
+  days; fewer than five outcome-carrying calls → inert and labelled.
+- **1423** ☑ COMPLETE — `classify_through_chain` walks `routing.model_fallback`
+  once after the chosen model fails, never re-tries a candidate (`tried`
+  set — mutation *retry the same candidate* killed: *"3 requests seen"*), records
+  every attempt, names the walk in the classification's `source` label. Without
+  a chain, today's stderr text is unchanged
+  (`without_a_chain_a_parse_failure_degrades_to_the_heuristic_as_before`).
+  Limit: consulted only after a *chosen* model failed, not when automatic
+  selection admits nothing.
+- **1427** ☑ COMPLETE — `routing.classification_local_only` confines candidates to
+  the registry's local providers (`ResourceKind::locality()`: the `ollama` /
+  `llama-cpp` slugs); **unstated locality fails closed** — the one deliberate
+  inversion of "absence never eliminates", because a privacy constraint that
+  admits on silence would send a request off the machine. Guarded twice (the
+  policy and `classify_through_chain`'s guard before any model is built); both
+  mutations killed by `local_only_never_sends_a_remote_request` /
+  `local_only_admits_no_remote_or_unstated_candidate_and_says_why`. Limit: a
+  local runner configured under another name is treated as remote and refused.
+- **1419** ☐ **REFUSED — producer: a per-model price.** `cost_micro_usd` has no
+  writer in `src/`; `RouterCostMicroUsd` is a config ceiling with no consumer;
+  `metered_models` carries names only; the registry carries no price.
+
+## Phase 34C — automatic routing-model selection
+
+- **1432** ☑ COMPLETE — reliability floor (`CLASSIFICATION_RELIABILITY_FLOOR`
+  0.8 after `CLASSIFICATION_RELIABILITY_MIN_OBSERVATIONS` 5) in
+  `classification_verdict`, applied by `choose_for_automatic_classification`
+  before ranking, reason names the ratio; fewer observations → admitted and
+  explained as *unproven, not unreliable*. Three mutations killed, including the
+  §35 one — `attach_classification_records` skipped →
+  `a_candidate_the_ledger_shows_unreliable_is_not_asked_by_the_shipped_binary`
+  (*the wire request named alpha-model*). Limit: a pinned model is never filtered;
+  rows written before this package carry no outcome and count toward neither side.
+- **1435** ☑ COMPLETE — the ceiling is the **existing** `routing.max_router_latency_ms`
+  (`RouterLatencyMs`, layered, validated, default 2000 ms, previously without a
+  routing consumer) — not the packet's proposed new key; the register's own 1435
+  row named it. Median above the ceiling excludes with both figures; no median
+  → inert and explained. Killed: admit-everything →
+  `a_slow_candidate_is_excluded_by_the_configured_latency_ceiling`; timing
+  dropped → the chain test (*the row must carry the clock either side of the
+  call*); sample floor lowered →
+  `the_ledger_withholds_a_classification_median_below_the_sample_floor`.
+- **1437** ☑ COMPLETE — free candidates pass `classification_verdict` (latency
+  ceiling, reliability floor) before `choose`'s free-before-metered order applies.
+  Killed: free candidates bypassing the verdict →
+  `a_free_candidate_is_preferred_only_after_the_latency_ceiling_is_satisfied`
+  (*the 3000 ms free candidate chosen over the metered one*). Limit: "capability
+  requirements" are `apply_hard_constraints`' existing gate; no per-candidate
+  capability model exists for classification.
+- **1438** ☑ COMPLETE — *locality* preference from `DisposableCandidate::with_locality`,
+  set by `disposable_candidates` from the registry. Killed:
+  `a_local_candidate_is_preferred_over_an_equally_adequate_remote_one`. Limit:
+  "quality requirements" are the reliability floor; no other quality signal is
+  on the path.
+- **1436** ☐ **REFUSED** — same producer as 1419; `EffectiveConfig::max_router_cost`
+  already resolves the ceiling, the missing half is the reading.
+- **1439** ☐ **REFUSED** — same producer; once a price exists the comparison is
+  *(1 − parsed_fraction) × median latency* against the price difference.
+- **1440** ☐ **REFUSED — producer: a subscription-backed classification candidate.**
+  `disposable_candidates` builds only `DirectProvider` candidates with a resolving
+  credential; a `NativeSubscription` resource is never a classifier in this
+  build, so there is nothing to avoid, and closing by absence would be the
+  vacuous-qualifier shape this register has refused before.
+
+## Phase 34E — router economics
+
+- **1463** ☑ COMPLETE — `EvaluationObservations::routing_decision_rate`
+  (`evaluation/mod.rs`, own `impl` block): `routing_continuation_decided` rows
+  over the window divided by **interactive hours** — epoch-aligned hours that at
+  least one session's `(created_at, last_activity_at)` span touches, clipped to
+  the window; wall-clock hours would report a project that ran once on Monday as
+  deciding at a vanishing rate all week. Rendered in `glasshouse resources`'
+  `ROUTING ECONOMICS` block with the derivation. Killed: count zeroed and
+  hour-range made exclusive (`interactive_hours_count_the_hours_a_session_touched`).
+  Limit: `glasshouse classify` diagnostics are not decisions and are not counted.
+- **1465** ☑ COMPLETE — `RoutingOverhead::from_consumption` (`routing/evidence.rs`)
+  separates `purpose = classification` rows from everything else via
+  `consumption_by_purpose`; **spend is tokens** (input + output; cached excluded,
+  providers disagree on where it sits) because cost has no producer; an
+  uncounted side prints *not comparable — <why>*, never `0%`. Killed: purpose
+  check disabled → spend lines missing.
+- **1466** ☑ COMPLETE — `RoutingOverhead::exceeds` at `ROUTING_OVERHEAD_WARNING_FRACTION`
+  (one tenth, a constant with a stated rationale) → a `warning` line in the same
+  block. Killed: threshold raised → warning line missing.
+
+## Phase 49 — configuration
+
+- **1795** ☑ COMPLETE — `routing.model_fallback`: a list of `{ provider = ..,
+  model = .. }` tables (`FreeResourceRef`'s on-disk shape, not the packet's
+  `"provider/model"` strings), layered project-over-user
+  (`the_fallback_chain_and_local_only_layer_project_over_user`); read by
+  `classify_through_chain`. Killed: configured chain ignored → the chain test.
+  Limit: not validated against configured providers at load — an entry naming an
+  unconfigured provider is skipped at walk time with a named reason, like a
+  stale pin.

@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**835 / 1280 mandatory capabilities (65%)** — 445 open across 60 phases.
+**848 / 1280 mandatory capabilities (66%)** — 432 open across 60 phases.
 
 ## Where the work is
 
@@ -33,31 +33,31 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 32F | Protected quota reserve | **1** | 7 | `1285` |
 | Phase 37 | Basic session-aware router | **1** | 10 | `1590` |
 | Phase 46 | Security and contamination tests | **1** | 7 | `1739` |
+| Phase 49 | Configuration | **1** | 15 | `1784` |
 | Phase 9 | Antigravity adapter | **2** | 5 | `330` |
 | Phase 9E | Secret storage | **2** | 11 | `432` |
 | Phase 9J | Harness-model pairing model | **2** | 18 | `545` |
 | Phase 20 | Minimal durable project memory | **2** | 16 | `805` |
 | Phase 21F | Memory retrieval quality | **2** | 9 | `927` |
 | Phase 32D | Normalized remaining-capacity score | **2** | 10 | `1257` |
-| Phase 49 | Configuration | **2** | 14 | `1784` |
 | Phase 34A | Workload tiers | **3** | 7 | `1393` |
+| Phase 34B | Routing-model role | **3** | 12 | `1406` |
+| Phase 34C | Automatic routing-model selection | **3** | 10 | `1429` |
 | Phase 21E | Decision ladder and conflict handling | **4** | 8 | `907` |
 | Phase 54 | Criteria before deeper cmux coupling | **4** | 0 | `1885` |
 | Phase 24 | Memory reranking | **5** | 1 | `1082` |
 | Phase 28 | File-aware memory lookup | **5** | 0 | `1137` |
 | Phase 33 | Resource health | **5** | 10 | `1309` |
 | Phase 33A | Routing evidence ledger | **5** | 10 | `1327` |
+| Phase 34E | Router economics | **5** | 4 | `1461` |
 | Phase 53 | Criteria before adding graph storage | **5** | 0 | `1872` |
 | Phase 21G | Memory revalidation | **6** | 3 | `941` |
 | Phase 31 | Compaction-aware behavior | **6** | 1 | `1167` |
 | Phase 52 | Criteria before adding semantic/vector retrieval | **6** | 0 | `1858` |
-| Phase 34C | Automatic routing-model selection | **7** | 6 | `1429` |
 | Phase 38 | Quota-preserving routing | **7** | 0 | `1604` |
 | Phase 47 | Observability without spectacle | **7** | 8 | `1750` |
 | Phase 50 | Tracked project knowledge as an optional feature | **7** | 0 | `1803` |
 | Phase 29 | Memory commits | **8** | 0 | `1145` |
-| Phase 34B | Routing-model role | **8** | 7 | `1406` |
-| Phase 34E | Router economics | **8** | 1 | `1461` |
 | Phase 35D | Routing under subscription pressure | **8** | 0 | `1568` |
 | Phase 36 | Session affinity | **8** | 0 | `1579` |
 | Phase 21J | Implementation review checklist | **9** | 0 | `980` |
@@ -89,7 +89,7 @@ closures are usually at the top. Open the map at the line number given.
 
 Every phase with **three or fewer** open lines, quoted verbatim. These are
 where a single package finishes a phase, so they are listed here and the
-other ~417 open lines are not.
+other ~399 open lines are not.
 
 For any other phase: `scripts/discover.py --phase <id>` prints its open
 lines and evidence together. **Do not open the 178 KB map to read them.**
@@ -142,6 +142,10 @@ these unwrapped.
 
 - **1745** ☐ Add automated tests proving cmux session metadata cannot bypass project-scope validation.
 
+### Phase 49 — Configuration  (1 open, 15 closed)
+
+- **1796** ☐ Allow the user to configure workload-tier ceilings for individual models.
+
 ### Phase 9 — Antigravity adapter  (2 open, 5 closed)
 
 - **340** ☐ Integrate structured Antigravity lifecycle events where the CLI exposes them.
@@ -172,16 +176,23 @@ these unwrapped.
 - **1263** ☐ Lower the score when user-defined spending budget is close to exhaustion.
 - **1267** ☐ Treat unlimited local inference as high-capacity but still account for measured latency and concurrency.
 
-### Phase 49 — Configuration  (2 open, 14 closed)
-
-- **1795** ☐ Allow the user to configure the routing-model fallback chain.
-- **1796** ☐ Allow the user to configure workload-tier ceilings for individual models.
-
 ### Phase 34A — Workload tiers  (3 open, 7 closed)
 
 - **1401** ☐ Allow workload tiers to express required capabilities independently from raw model intelligence.
 - **1402** ☐ Allow a task to require a lower reasoning tier but a specific capability such as browser use or a very large context window.
 - **1403** ☐ Allow a task to require a minimum harness capability even when a cheap raw model would otherwise score highly.
+
+### Phase 34B — Routing-model role  (3 open, 12 closed)
+
+- **1419** ☐ Prefer a routing model whose marginal decision cost is materially lower than the premium capacity it protects.
+- **1425** ☐ Keep routing-model prompts short and exclude unnecessary repository history.
+- **1426** ☐ Do not send secrets, unrelated project memory, or full conversation histories to the routing model.
+
+### Phase 34C — Automatic routing-model selection  (3 open, 10 closed)
+
+- **1436** ☐ Filter automatic candidates by maximum marginal routing cost.
+- **1439** ☐ Prefer a cheap metered model over an unreliable free model when failed routing attempts would cost more time than the price difference.
+- **1440** ☐ Avoid using a scarce premium subscription session as the classifier when a cheaper adequate routing resource exists.
 
 ## Practice sections, by number
 

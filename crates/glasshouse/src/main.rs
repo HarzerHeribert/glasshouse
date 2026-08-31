@@ -3120,6 +3120,13 @@ fn disposable_candidates(
             continue;
         }
         let capacity = disposable_candidate_capacity(&name, effective, telemetry, now_unix);
+        // Map lines 1427 and 1438: where this provider's compute runs, from
+        // the one place this build already says so — the registry's
+        // local-inference slugs — never from a base URL that happens to
+        // point at loopback.
+        let locality =
+            glasshouse::provider::registry::ResourceKind::from_direct_provider(name.as_str())
+                .locality();
         for var in provider_config.credential_env() {
             let reference = SecretRef::Environment { var: var.clone() };
             if secrets.resolve(&reference).is_none() {
@@ -3137,7 +3144,8 @@ fn disposable_candidates(
                         credential_id.clone(),
                         provider_config.cost_of(model),
                     )
-                    .with_capacity(capacity.clone()),
+                    .with_capacity(capacity.clone())
+                    .with_locality(locality),
                 );
             }
         }
@@ -3148,10 +3156,35 @@ fn disposable_candidates(
 /// What `routing_observations.purpose` records for a call `glasshouse
 /// classify` made.
 ///
-/// Spelled once. `purpose` is a `TEXT` column with no `CHECK`
-/// (`database.rs`'s migration 11), so the only thing keeping two producers
-/// from writing two spellings of one word is that each has exactly one.
-const CLASSIFICATION_PURPOSE: &str = "classification";
+/// Spelled once — in `routing::evidence`, beside the reader that keys on it
+/// (`EvidenceLedger::classification_record`), and only re-named here.
+/// `purpose` is a `TEXT` column with no `CHECK` (`database.rs`'s migration
+/// 11), so the only thing keeping the producer and the reader on one
+/// spelling is that there is exactly one.
+const CLASSIFICATION_PURPOSE: &str = glasshouse::routing::evidence::CLASSIFICATION_PURPOSE;
+
+/// One resource `glasshouse classify` may ask, by name: the provider and
+/// model a configuration or a routing choice named, plus the exact
+/// credential reference the choice resolved — `None` for a pinned model or
+/// a fallback-chain entry, where [`classification_model`] resolves the first
+/// variable that answers. Built into a `ConfiguredModel` only at the moment
+/// it is about to be called, inside [`classify_through_chain`], so a chain
+/// entry that is never reached is never built and never resolves anything.
+struct ClassifierRef {
+    provider: String,
+    model: String,
+    credential: Option<glasshouse::secret::SecretRef>,
+}
+
+impl ClassifierRef {
+    fn named(provider: impl Into<String>, model: impl Into<String>) -> Self {
+        Self {
+            provider: provider.into(),
+            model: model.into(),
+            credential: None,
+        }
+    }
+}
 
 /// What happened when `glasshouse classify` tried to have a model classify a
 /// request.
@@ -3262,7 +3295,8 @@ fn classification_model(
 
 /// The `Automatic` half of `RoutingModelChoice`: ask
 /// `DisposableRouting::choose` which resource should classify this request,
-/// and build the model it named.
+/// and name the model it chose — built into a `ConfiguredModel` only when
+/// [`classify_through_chain`] is about to call it.
 ///
 /// # Why this goes through `choose` rather than building a model directly
 ///
@@ -3286,7 +3320,7 @@ fn automatic_classification_model(
     project: Option<&ProjectConfig>,
     effective: &EffectiveConfig<'_>,
     request_text: &str,
-) -> Result<glasshouse::memory::ConfiguredModel, String> {
+) -> Result<ClassifierRef, String> {
     // The tier this job's own demand implies, from the request itself. This
     // is `RoutedNoModel::new_for_request`'s fifth link, made by the one
     // `JobKind` its doc comment says the constructor was waiting for — a
@@ -3298,13 +3332,11 @@ fn automatic_classification_model(
                 format!("no resource is available to classify this request: {reason}")
             })?;
 
-    classification_model(
-        user,
-        project,
-        choice.provider(),
-        choice.model(),
-        Some(choice.credential().reference()),
-    )
+    Ok(ClassifierRef {
+        provider: choice.provider().to_owned(),
+        model: choice.model().to_owned(),
+        credential: Some(choice.credential().reference().clone()),
+    })
 }
 
 /// Which configured resource automatic routing-model selection picks right
@@ -3360,6 +3392,7 @@ fn automatic_classification_choice(
     );
     let candidates =
         disposable_candidates(user, project, effective, &secrets, &telemetry, now_unix);
+    let candidates = attach_classification_records(runtime, candidates, now_unix);
     let health = observed_health_of(
         runtime,
         candidates.iter().map(|candidate| {
@@ -3393,9 +3426,19 @@ fn automatic_classification_choice(
                 .as_ref()
                 .map(|pin| pin.to_key()),
         );
+    // Map lines 1427 and 1435: the user's classification requirements,
+    // layered like every other `[routing]` value. `max_router_latency_ms`
+    // has a default (2000ms), so the ceiling is always stated; whether it
+    // *applies* to a candidate is decided by whether that candidate has a
+    // measured median — see `routing::disposable::classification_verdict`.
     let routing = DisposableRouting::for_support_work(
         effective.prefer_free_routing().value,
         free_preferences,
+    )
+    .with_classification_policy(
+        glasshouse::routing::disposable::ClassificationPolicy::new()
+            .with_max_latency_ms(Some(effective.max_router_latency().value.get()))
+            .with_local_only(effective.classification_local_only().value),
     );
 
     // Map lines 1441/1442: reuse a recent healthy pick rather than
@@ -3438,7 +3481,6 @@ fn automatic_classification_choice(
 /// heuristic's own output.
 fn classify_with_routing_model(runtime: &Runtime, request_text: &str) -> ClassificationAttempt {
     use glasshouse::config::RoutingModelResolution;
-    use glasshouse::memory::ExtractionModel as _;
 
     let user = match UserConfig::load(runtime.paths()) {
         Ok(user) => user,
@@ -3459,10 +3501,10 @@ fn classify_with_routing_model(runtime: &Runtime, request_text: &str) -> Classif
     };
     let effective = EffectiveConfig::new(&user, project.as_ref());
 
-    let built = match effective.routing_model_resolution().value {
+    let first = match effective.routing_model_resolution().value {
         RoutingModelResolution::Heuristics(_) => return ClassificationAttempt::NotConfigured,
         RoutingModelResolution::Pinned { provider, model } => {
-            classification_model(&user, project.as_ref(), &provider, &model, None)
+            Ok(ClassifierRef::named(provider, model))
         }
         RoutingModelResolution::Automatic => automatic_classification_model(
             runtime,
@@ -3472,42 +3514,211 @@ fn classify_with_routing_model(runtime: &Runtime, request_text: &str) -> Classif
             request_text,
         ),
     };
-    let model = match built {
-        Ok(model) => model,
+    let first = match first {
+        Ok(first) => first,
         Err(why) => return ClassificationAttempt::Failed(why),
     };
 
-    // `describe()` names the provider, the model and the route, and neither
-    // the base URL nor the credential — see `memory::extract::model`'s header
-    // for why the base URL is excluded even though it looks harmless. This is
-    // the label the classification is attributed to, and it comes from the
-    // model this process built, never from anything the reply said.
-    let label = model.describe();
     let prompt = glasshouse::memory::extract::Prompt::for_request(
         glasshouse::routing::classify::CLASSIFICATION_PROMPT_CONTRACT,
         glasshouse::routing::classify::CLASSIFICATION_RESPONSE_SCHEMA,
         request_text,
     );
 
-    let reply = match model.complete_observed(&prompt) {
-        Ok(reply) => reply,
-        Err(err) => return ClassificationAttempt::Failed(routing_model_failure(&err)),
-    };
-    // Recorded before the reply is read, and whether or not it parses: this
-    // row is what the call *cost*, and a call that came back in the wrong
-    // shape cost exactly as much as one that came back in the right one.
-    if let Some(call) = &reply.call {
-        record_classification_observation(runtime, call);
-    }
-
-    match glasshouse::routing::classify::parse_classification(&reply.reply, label) {
-        Ok(classification) => ClassificationAttempt::Answered(classification),
-        Err(err) => ClassificationAttempt::Failed(err.to_string()),
-    }
+    // The call, the row it leaves and the fallback chain are all
+    // `classify_through_chain`'s — see its header for what one attempt
+    // records and when the next model is tried.
+    classify_through_chain(runtime, &user, project.as_ref(), &effective, first, &prompt)
 }
 
-/// Append what one classification call cost to the routing evidence ledger,
-/// under `purpose = "classification"`.
+/// Ask `first` to classify, and when it cannot — unreachable, or answering
+/// outside the schema — walk `routing.model_fallback` once (capability map
+/// lines 1423 and 1795), never sending anything to a remote model while
+/// `routing.classification_local_only` is set (line 1427).
+///
+/// # What one attempt leaves behind
+///
+/// Every attempt that reached a provider leaves one `routing_observations`
+/// row through [`record_classification_observation`], carrying the parse
+/// outcome and the clock at dispatch and completion — the producers
+/// capability map lines 1422/1432 and 1421/1435 were missing. An attempt
+/// that never reached a provider (a build failure, a transport error, or a
+/// remote model declined under local-only) leaves no row, which is the
+/// honest shape: there is no call whose cost could be recorded.
+///
+/// # The chain is walked once, and never back onto itself
+///
+/// Each `(provider, model)` is tried at most once per classification: a
+/// chain entry naming the model that just failed is skipped, not retried, so
+/// a chain of `[a, b]` after `a` was chosen automatically makes exactly two
+/// calls. `tests/routing_economics.rs` holds this.
+///
+/// # The walk is named in the classification's own label
+///
+/// A classification that arrived through the chain is attributed to the
+/// model that answered, and its label — the `source` line `glasshouse
+/// classify` prints — says which models were tried first and why they
+/// failed. Names only: every phrase in it is a provider name, a model name,
+/// a route, or one of this file's own fixed sentences — never a base URL, a
+/// credential, or a provider's response body, which
+/// [`routing_model_failure`] already keeps out of the sentence.
+///
+/// # Without a chain, this is exactly the behaviour it replaced
+///
+/// One attempt, one row, and the same failure sentence on standard error —
+/// a single failure is reported bare, without the model's name in front of
+/// it, so nothing a person or a test read before this function existed
+/// changed shape.
+fn classify_through_chain(
+    runtime: &Runtime,
+    user: &UserConfig,
+    project: Option<&ProjectConfig>,
+    effective: &EffectiveConfig<'_>,
+    first: ClassifierRef,
+    prompt: &glasshouse::memory::extract::Prompt,
+) -> ClassificationAttempt {
+    use glasshouse::memory::ExtractionModel as _;
+    use glasshouse::provider::registry::{Locality, ResourceKind};
+    use glasshouse::routing::evidence::Outcome;
+
+    let local_only = effective.classification_local_only().value;
+    let chain = effective.routing_model_fallback().value;
+    let mut tried: Vec<(String, String)> = Vec::new();
+    // `(name, why)` per failed attempt — rendered bare when there was only
+    // one, and as `name: why` once the chain was walked.
+    let mut failures: Vec<(String, String)> = Vec::new();
+
+    let attempts = std::iter::once(first).chain(
+        chain
+            .iter()
+            .map(|entry| ClassifierRef::named(entry.provider(), entry.model())),
+    );
+    for attempt in attempts {
+        let key = (attempt.provider.clone(), attempt.model.clone());
+        if tried.contains(&key) {
+            continue;
+        }
+        tried.push(key);
+        let name = format!("{} on {}", attempt.model, attempt.provider);
+
+        // Map line 1427: decided from the provider's *name*, the one fact
+        // the registry states for every provider, before anything is built
+        // — a model that would be refused must not even resolve a
+        // credential.
+        if local_only
+            && ResourceKind::from_direct_provider(attempt.provider.as_str()).locality()
+                != Locality::Local
+        {
+            failures.push((
+                name,
+                "remote, and classification is confined to local models — no request was sent"
+                    .to_owned(),
+            ));
+            continue;
+        }
+
+        let model = match classification_model(
+            user,
+            project,
+            &attempt.provider,
+            &attempt.model,
+            attempt.credential.as_ref(),
+        ) {
+            Ok(model) => model,
+            Err(why) => {
+                failures.push((name, why));
+                continue;
+            }
+        };
+
+        // `describe()` names the provider, the model and the route, and
+        // neither the base URL nor the credential — see
+        // `memory::extract::model`'s header for why the base URL is excluded
+        // even though it looks harmless. This is the label the
+        // classification is attributed to, and it comes from the model this
+        // process built, never from anything the reply said.
+        let label = if failures.is_empty() {
+            model.describe()
+        } else {
+            format!(
+                "{}, after {}",
+                model.describe(),
+                render_chain_failures(&failures)
+            )
+        };
+
+        let dispatched_at_unix = glasshouse::provider::cache::now_unix_seconds();
+        let reply = match model.complete_observed(prompt) {
+            Ok(reply) => reply,
+            Err(err) => {
+                failures.push((name, routing_model_failure(&err)));
+                continue;
+            }
+        };
+        let completed_at_unix = glasshouse::provider::cache::now_unix_seconds();
+
+        let parsed = glasshouse::routing::classify::parse_classification(&reply.reply, label);
+        if let Some(call) = &reply.call {
+            let outcome = if parsed.is_ok() {
+                Outcome::Succeeded
+            } else {
+                Outcome::Failed
+            };
+            record_classification_observation(
+                runtime,
+                call,
+                outcome,
+                dispatched_at_unix,
+                completed_at_unix,
+            );
+        }
+        match parsed {
+            Ok(classification) => return ClassificationAttempt::Answered(classification),
+            Err(err) => failures.push((name, err.to_string())),
+        }
+    }
+
+    ClassificationAttempt::Failed(match failures.as_slice() {
+        [(_, only)] => only.clone(),
+        _ => format!(
+            "every routing model in the chain failed — {}",
+            render_chain_failures(&failures)
+        ),
+    })
+}
+
+/// `name: why; name: why` — the walk, as one phrase for a label or a
+/// failure sentence.
+fn render_chain_failures(failures: &[(String, String)]) -> String {
+    failures
+        .iter()
+        .map(|(name, why)| format!("{name}: {why}"))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// Append what one classification call cost — and whether its reply parsed
+/// — to the routing evidence ledger, under `purpose = "classification"`.
+///
+/// # This is the producer capability map lines 1422/1432 and 1421/1435 lacked
+///
+/// Recorded **after** the reply is parsed, so the row carries its outcome:
+/// [`glasshouse::routing::evidence::Outcome::Succeeded`] for a reply in the
+/// schema and `Failed` for one outside it. Migration 11's `CHECK` fixes the
+/// vocabulary to `succeeded`, `failed`, `cancelled` and `unknown`; a new
+/// value would be a migration, and *failed at its purpose* is exactly what
+/// a reply that could not be read as a classification did, so no new value
+/// is invented. A transport failure never reaches this function — there is
+/// no `ModelCall` — so a classification row's outcome is always a statement
+/// about a reply that arrived.
+///
+/// `dispatched_at_unix` and `completed_at_unix` are the clock either side
+/// of the call, in whole seconds because that is what the columns hold;
+/// `RoutingObservation::duration_ms` is therefore honest to the second, and
+/// [`glasshouse::routing::evidence::ClassificationRecord`] says so. This is
+/// deliberately not `ModelCall::observation`'s job: that producer's own doc
+/// records that it leaves timing unwritten, and this caller is the one
+/// that actually held the clock.
 ///
 /// # Why the handle is opened here and dropped here (practice §65)
 ///
@@ -3525,6 +3736,9 @@ fn classify_with_routing_model(runtime: &Runtime, request_text: &str) -> Classif
 fn record_classification_observation(
     runtime: &Runtime,
     call: &glasshouse::memory::extract::ModelCall,
+    outcome: glasshouse::routing::evidence::Outcome,
+    dispatched_at_unix: i64,
+    completed_at_unix: i64,
 ) {
     let ledger = match glasshouse::routing::evidence::EvidenceLedger::open(runtime) {
         Ok(ledger) => ledger,
@@ -3538,10 +3752,71 @@ fn record_classification_observation(
     };
     let observation = call
         .observation()
-        .with_purpose(Some(CLASSIFICATION_PURPOSE));
+        .with_purpose(Some(CLASSIFICATION_PURPOSE))
+        .with_timing(Some(dispatched_at_unix), Some(completed_at_unix))
+        .with_outcome(outcome);
     if let Err(err) = ledger.record(observation, glasshouse::provider::cache::now_unix_seconds()) {
         tracing::warn!(error = %err, "could not record what classification cost");
     }
+}
+
+/// Read what the evidence ledger holds about each candidate as a classifier
+/// — the reader half of capability map lines 1422/1432 and 1421/1435 — and
+/// attach it, so `DisposableRouting::choose_for_automatic_classification`'s
+/// filters and preferences act on measured quantities.
+///
+/// # Opened here, after the candidate list exists (practice §65)
+///
+/// Nothing is opened when there is no candidate to read about, and the
+/// handle is dropped before the routing decision runs. A ledger that cannot
+/// be opened, or a record that cannot be read, leaves that candidate
+/// unmeasured — every filter built on it is then inert and says so in the
+/// explanation — rather than failing the classification: Glasshouse's books
+/// are never more important than the answer they are about.
+fn attach_classification_records(
+    runtime: &Runtime,
+    candidates: Vec<glasshouse::routing::disposable::DisposableCandidate>,
+    now_unix: i64,
+) -> Vec<glasshouse::routing::disposable::DisposableCandidate> {
+    use glasshouse::routing::evidence::{CLASSIFICATION_EVIDENCE_WINDOW_SECONDS, EvidenceLedger};
+
+    if candidates.is_empty() {
+        return candidates;
+    }
+    let ledger = match EvidenceLedger::open(runtime) {
+        Ok(ledger) => ledger,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "routing evidence ledger unavailable; automatic classification ranks every \
+                 candidate as unmeasured"
+            );
+            return candidates;
+        }
+    };
+    candidates
+        .into_iter()
+        .map(|candidate| {
+            let record = match ledger.classification_record(
+                candidate.provider(),
+                candidate.model(),
+                now_unix,
+                CLASSIFICATION_EVIDENCE_WINDOW_SECONDS,
+            ) {
+                Ok(record) => Some(record),
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        provider = candidate.provider(),
+                        model = candidate.model(),
+                        "could not read a candidate's classification record; it ranks as unmeasured"
+                    );
+                    None
+                }
+            };
+            candidate.with_classification_record(record)
+        })
+        .collect()
 }
 
 /// What real telemetry says about `provider`'s remaining capacity right now
@@ -5225,7 +5500,154 @@ fn resources_report(
         &effective,
         verbose,
     );
+    render_routing_economics(&mut out, runtime, now_unix);
     Ok(out)
+}
+
+/// Capability map lines 1463, 1465 and 1466 — what routing itself costs, as
+/// the block after `ROUTING MODEL` in `glasshouse resources`.
+///
+/// Three lines and a conditional fourth, every one carrying its
+/// denominators: decisions *over* interactive hours, tokens *over* calls on
+/// each side, and the overhead fraction beside the line it is judged
+/// against. A figure nobody counted prints as *not counted*
+/// ([`render_token_count`]'s rule), and a comparison that cannot be made
+/// prints as *not comparable* with the reason — never `0%`, which would read
+/// as "routing is free".
+///
+/// # Both ledgers are opened here and dropped here (practice §65)
+///
+/// Each store is opened inside the helper that reads it and closed before
+/// the next one opens, so no handle is held across a read it is not part
+/// of. A store that cannot be opened renders as *unavailable* with the
+/// reason, and the command succeeds: [`resources_report`]'s own header says
+/// no telemetry read may fail it, and this block is telemetry.
+fn render_routing_economics(out: &mut String, runtime: &Runtime, now_unix: i64) {
+    use glasshouse::routing::evidence::{
+        CLASSIFICATION_EVIDENCE_WINDOW_SECONDS, ROUTING_OVERHEAD_WARNING_FRACTION,
+    };
+    use std::fmt::Write as _;
+
+    let window_seconds = CLASSIFICATION_EVIDENCE_WINDOW_SECONDS;
+    let from = now_unix.saturating_sub(window_seconds);
+    let _ = writeln!(
+        out,
+        "\nROUTING ECONOMICS (last {} days)",
+        window_seconds / (24 * 60 * 60)
+    );
+
+    match routing_decision_rate(runtime, from, now_unix) {
+        Ok(rate) => {
+            let per_hour = match rate.per_hour() {
+                Some(per_hour) => format!("{per_hour:.1} per interactive hour"),
+                None => "no interactive hour in the window, so no rate".to_owned(),
+            };
+            let _ = writeln!(
+                out,
+                "  {:<16}{} routing decisions over {} interactive hours — {per_hour}",
+                "decisions", rate.decisions, rate.interactive_hours
+            );
+            let _ = writeln!(
+                out,
+                "  {:<16}an interactive hour is a wall-clock hour in which a session record \
+                 shows activity (map line 1463)",
+                ""
+            );
+        }
+        Err(reason) => {
+            let _ = writeln!(out, "  {:<16}unavailable — {reason:#}", "decisions");
+        }
+    }
+
+    let tokens = |count: Option<i64>| match count {
+        Some(count) => format!("{count} tokens"),
+        None => "tokens not counted".to_owned(),
+    };
+    match routing_overhead(runtime, now_unix, window_seconds) {
+        Ok(overhead) => {
+            let _ = writeln!(
+                out,
+                "  {:<16}{} over {} classification calls",
+                "routing spend",
+                tokens(overhead.classification_tokens),
+                overhead.classification_requests
+            );
+            let _ = writeln!(
+                out,
+                "  {:<16}{} over {} other calls — everything this project's ledger holds that \
+                 is not classification (map line 1465)",
+                "task spend",
+                tokens(overhead.task_tokens),
+                overhead.task_requests
+            );
+            match overhead.fraction() {
+                Some(fraction) => {
+                    let _ = writeln!(
+                        out,
+                        "  {:<16}{:.1}% of task spend — warns above {:.0}% (map line 1466)",
+                        "overhead",
+                        fraction * 100.0,
+                        ROUTING_OVERHEAD_WARNING_FRACTION * 100.0
+                    );
+                    if overhead.exceeds(ROUTING_OVERHEAD_WARNING_FRACTION) {
+                        let _ = writeln!(
+                            out,
+                            "  {:<16}routing is consuming {:.1}% of the task spend it exists to \
+                             protect, above the {:.0}% line — the routing model is no longer \
+                             cheap relative to what it saves",
+                            "warning",
+                            fraction * 100.0,
+                            ROUTING_OVERHEAD_WARNING_FRACTION * 100.0
+                        );
+                    }
+                }
+                None => {
+                    let why = if overhead.classification_tokens.is_none() {
+                        "no classification call in the window carried a token count"
+                    } else if overhead.task_tokens.is_none() {
+                        "no other call in the window carried a token count"
+                    } else {
+                        "no task spend was counted in the window to compare against"
+                    };
+                    let _ = writeln!(out, "  {:<16}not comparable — {why}", "overhead");
+                }
+            }
+        }
+        Err(reason) => {
+            let _ = writeln!(out, "  {:<16}unavailable — {reason:#}", "routing spend");
+        }
+    }
+}
+
+/// Capability map line 1463's two stores, each opened for exactly its own
+/// read: the session store for activity spans, then the evaluation ledger
+/// for the count.
+fn routing_decision_rate(
+    runtime: &Runtime,
+    from: i64,
+    to: i64,
+) -> anyhow::Result<glasshouse::evaluation::RoutingDecisionRate> {
+    let spans: Vec<(i64, i64)> = {
+        let sessions = glasshouse::session::ProjectSessions::open(runtime)?;
+        let records = sessions.store().list()?;
+        records
+            .into_iter()
+            .map(|record| (record.created_at, record.last_activity_at))
+            .collect()
+    };
+    let ledger = glasshouse::evaluation::EvaluationObservations::open(runtime)?;
+    Ok(ledger.routing_decision_rate(spans, from, to)?)
+}
+
+/// Capability map line 1465's reading, from the evidence ledger alone.
+fn routing_overhead(
+    runtime: &Runtime,
+    now_unix: i64,
+    window_seconds: i64,
+) -> anyhow::Result<glasshouse::routing::evidence::RoutingOverhead> {
+    let ledger = glasshouse::routing::evidence::EvidenceLedger::open(runtime)?;
+    let groups = ledger.consumption_by_purpose(now_unix, window_seconds)?;
+    Ok(glasshouse::routing::evidence::RoutingOverhead::from_consumption(&groups))
 }
 
 /// Capability map line 1443 — *"show the currently selected routing model in

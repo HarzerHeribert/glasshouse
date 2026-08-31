@@ -1091,6 +1091,81 @@ pub fn record_routing_decision(
     }
 }
 
+/// Capability map line 1463 — how many routing decisions were made per
+/// interactive hour, with both numbers beside the ratio so the ratio can
+/// never be read without its denominators.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RoutingDecisionRate {
+    /// [`EvaluationKind::RoutingContinuationDecided`] rows in the window —
+    /// one per launch that reached a routing decision
+    /// ([`record_routing_decision`] writes exactly one per launch).
+    pub decisions: i64,
+    /// Distinct wall-clock hours in the window during which at least one
+    /// session record shows activity — see [`interactive_hours`] for the
+    /// derivation.
+    pub interactive_hours: usize,
+    /// `(from, to)`, in Unix seconds.
+    pub window: (i64, i64),
+}
+
+impl RoutingDecisionRate {
+    /// Decisions per interactive hour, or `None` when the window holds no
+    /// interactive hour at all — a rate over zero hours is not a rate.
+    pub fn per_hour(&self) -> Option<f64> {
+        (self.interactive_hours > 0).then(|| self.decisions as f64 / self.interactive_hours as f64)
+    }
+}
+
+/// How many distinct wall-clock hours inside `[from, to]` at least one of
+/// `spans` touches — the "interactive hour" capability map line 1463 divides
+/// by, derived from session records rather than from the clock alone.
+///
+/// A span is one session's `(created_at, last_activity_at)`, both in Unix
+/// seconds; an hour is an epoch-aligned bucket of 3600 seconds, and a span
+/// that touches a bucket at all counts it — a session that was active for
+/// one minute of an hour makes that an interactive hour, which is the
+/// reading a person would give it. A span outside the window contributes
+/// nothing; a span partly inside is clipped to it. Counting wall-clock
+/// hours instead would say a project that ran one session on Monday and
+/// none since is making decisions at a vanishing rate all week, which is
+/// the fabrication this derivation exists to avoid.
+pub fn interactive_hours(spans: impl IntoIterator<Item = (i64, i64)>, from: i64, to: i64) -> usize {
+    let mut hours = std::collections::BTreeSet::new();
+    for (start, end) in spans {
+        let start = start.max(from);
+        let end = end.min(to);
+        if end < start {
+            continue;
+        }
+        hours.extend(start.div_euclid(3600)..=end.div_euclid(3600));
+    }
+    hours.len()
+}
+
+/// The decisions-per-interactive-hour reader — capability map line 1463 —
+/// kept in its own `impl` block beside the writers rather than among the
+/// other counts, because it joins two stores: this ledger's count and the
+/// session store's activity spans, which the caller supplies so this module
+/// opens nothing it does not own.
+impl EvaluationObservations {
+    /// [`RoutingDecisionRate`] over `[from, to]`, dividing this ledger's
+    /// [`EvaluationKind::RoutingContinuationDecided`] count by the
+    /// [`interactive_hours`] `spans` cover in the same window.
+    pub fn routing_decision_rate(
+        &self,
+        spans: impl IntoIterator<Item = (i64, i64)>,
+        from: i64,
+        to: i64,
+    ) -> Result<RoutingDecisionRate, EvaluationError> {
+        let decisions = self.count(EvaluationKind::RoutingContinuationDecided, from, to)?;
+        Ok(RoutingDecisionRate {
+            decisions,
+            interactive_hours: interactive_hours(spans, from, to),
+            window: (from, to),
+        })
+    }
+}
+
 /// Seconds since the Unix epoch, the way every other store in this crate reads
 /// the clock.
 pub fn now_unix() -> i64 {
