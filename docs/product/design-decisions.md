@@ -2910,3 +2910,42 @@ Glasshouse to perform an analysis it cannot (an unindexed-scan detector, say)
 is refused on that reading and the policy still carries the instruction.
 
 Package: `GH-IMPLEMENTATION-POLICY`.
+
+## Phase 17: cmux is driven through its documented CLI, and a pane is metadata
+
+### Decided by the orchestrator, 2026-08-31
+
+Phase 54 asks that cmux stay optional, that nothing depend on its undocumented
+internals, and that embedded sessions work if cmux changes or disappears. The
+design that satisfies all three: **`integrations/cmux.rs` wraps a small
+allow-list of `cmux` subcommands behind a trait** (tests inject a fake), and
+never the socket. Detection is what already exists — `IntegrationId::Cmux`'s
+environment presence — corroborated by `cmux ping`. External presentation
+**runs Glasshouse in the pane**: the outer process creates a workspace whose
+command is an ordinary `glasshouse launch … --presentation-ref <ref>`, so the
+session inside is a normal embedded one whose record says `External` and where.
+That *where* is one nullable column, `sessions.presentation_ref` (migration
+20). Focus goes through the integration; sending text prefers Glasshouse's own
+door and falls back to cmux only when the session is unreachable, and says so.
+`session/**` and `shell/**` never name cmux — a source-scan tripwire, which is
+also how Phase 54's criteria are held rather than merely written down.
+
+Package: `GH-CMUX-PRESENTATION`.
+
+## Phase 29: a memory commit is the existing extraction, named and triggered from four places
+
+### Decided by the orchestrator, 2026-08-31
+
+Glasshouse has one extraction pipeline (`run_extraction`), one production
+trigger (`TurnEnded { Completed }`), and an `ExtractionTrigger` vocabulary with
+a `BeforeCompaction` variant whose production caller is unverified. A *memory
+commit* is that pipeline with its trigger named on every memory it produces: a
+person (`glasshouse memory commit`), a completed task (already), a Git commit
+landing, and the harness's pre-compaction event. **Git-commit detection needs no
+git hook** — the hook path runs on every harness event and the checkpoint
+module already reads HEAD; a changed HEAD since the last one this session saw
+is the code-change boundary, and the hash is recorded on the memories as
+provenance (migration 21, `sessions.last_seen_commit`). Idempotency is the
+store's existing dedupe, proven by running the same commit twice; no lock.
+
+Package: `GH-MEMORY-COMMITS`.
