@@ -3998,3 +3998,15 @@ One `integrate.sh` call, one blast radius (89 targets over 19 changed files), on
 | extract-model-error-wording (Sonnet, Green) | (1174 wording; no box) | 0 | 1/1 | dispatched from the Red report's §8 within the hour |
 
 Recurring defect, now in memory (`detached-gates-die-without-exit-lines`): three detached worker gates died mid-run without exit lines today; both affected workers idled on a `tail -f` that could never fire and looked like "done, no report". The recovery each time: `ps` for the real process (excluding the watchers that match the name), then a `cmux send` + `send-key Enter` nudge.
+
+## Batches 64–66 outcomes — 2026-08-31 evening, the 56A critical path and the translation matrix
+
+| package | lines | boxes | mutations | notable |
+|---|---|---|---|---|
+| entitlement-pool (Fable, Red) | 56A 1962–1964 (+1973 held) + 1947's consumer | 3 | 6/6 | four packet errors, all the orchestrator's; the worker's own limit held 1973 open |
+| prove-it-54a (Sonnet, Green) | 54A 1899–1907 | 9 | 9/9 | 1908 open — its words name CI runners |
+| gateway-translate-t2 (Fable, Red) | 56 pairs 2–3 (lines stay open by quantification) | 0 | 4/4 | found protocol_fit asking the table BACKWARDS; prescribed both integrator fixes verbatim |
+| protocol-fit-direction (Sonnet, Amber) | (fix; no box) | 0 | 2/2 | T1's shipped pairing finally classifies Translated |
+| entitlement-env-scrub (Sonnet, Amber) | 56A 1973 | 1 | 2/2 | the held clause discharged; every launch path scrubs |
+
+**13 boxes this span; 1067 → 1080/1305 (82%).** The dead-gate defect fired twice more (t2's blast, the scrub's) — the ps-then-nudge recovery is now routine at under two minutes each. The stale-workspaces watch caught its first forgotten pane fifteen minutes after being written.
