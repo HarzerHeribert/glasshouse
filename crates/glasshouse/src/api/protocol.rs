@@ -441,12 +441,28 @@ pub enum Request {
     /// `limit` is capped at `unix::MAX_MEMORY_LIMIT` regardless of what is
     /// asked for — line 1115. A caller may lower the ceiling; it cannot raise
     /// it.
+    ///
+    /// # `path`, line 1143
+    ///
+    /// With `path` present, the answer comes from
+    /// `memory::search::MemoryStore::for_path` instead of a text search:
+    /// every memory this project learned while `path` was being worked on,
+    /// each one's `association` naming why it is in the answer.
+    /// `for_path` writes only `FileAssociation::Observed` today, so
+    /// `association` reads `"observed"` on every row — a correlation the
+    /// producer recorded because the file changed during the session that
+    /// produced the memory, never a claim that the memory refers to it.
+    /// `query` plays no role in this mode: a path lookup runs no `MATCH`, so
+    /// there is no text for it to search. `path` absent leaves this verb
+    /// byte-for-byte what it was.
     QueryMemory {
         query: String,
         #[serde(default)]
         history: bool,
         #[serde(default = "default_memory_limit")]
         limit: usize,
+        #[serde(default)]
+        path: Option<String>,
     },
     /// One selected memory in full — capability map line 1112's
     /// project-scoped `memory.get`.

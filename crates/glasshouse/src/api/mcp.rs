@@ -643,6 +643,12 @@ const TOOLS: &[Tool] = &[
                 query,
                 history,
                 limit,
+                // Line 1143's `path` mode is not exposed as an MCP tool
+                // argument by this package — `GH-WIRE-FILE-MEMORY`'s
+                // objective scopes it to the door request, and the schema
+                // this tool advertises is unchanged. `None` here is exactly
+                // what a bare `Request::QueryMemory` has always answered.
+                path: None,
             })
         },
     },

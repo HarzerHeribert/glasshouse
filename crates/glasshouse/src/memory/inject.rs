@@ -66,7 +66,8 @@ use std::collections::HashSet;
 
 use super::search::SearchScope;
 use super::store::{
-    MemoryAuthority, MemoryId, MemoryKind, MemoryRecord, MemoryStore, MemoryStoreError,
+    FileAssociation, MemoryAuthority, MemoryId, MemoryKind, MemoryRecord, MemoryStore,
+    MemoryStoreError,
 };
 
 /// Opens every injected block. Chosen to be unmistakable in a transcript and
@@ -143,6 +144,12 @@ pub const MAX_QUERY_CHARS: usize = 512;
 /// relevance is still a constraint, and line 1131 wants it ahead of five
 /// ordinary findings that matched better.
 const CANDIDATE_LIMIT: usize = 40;
+
+/// The most memories line 1140's file-observed section carries — deliberately
+/// the same size as [`MAX_INJECTED_MEMORIES`] for the same reason: a session
+/// starts with the few things beside its named files it must not rediscover,
+/// not with every row `memory_files` happens to hold.
+const MAX_FILE_OBSERVED_MEMORIES: usize = 3;
 
 /// A labelled block of this project's memory, ready to deliver.
 ///
@@ -267,13 +274,83 @@ pub fn briefing(
         .take(MAX_INJECTED_MEMORIES)
         .collect();
 
-    Ok(render(&selected))
+    let file_observed = file_observed_memories(store, task, already_injected, &selected)?;
+
+    Ok(render(&selected, &file_observed))
 }
 
-/// Turn the selected records into the one labelled line, or `None` if there
-/// are none.
-fn render(selected: &[MemoryRecord]) -> Option<Injection> {
-    if selected.is_empty() {
+/// Line 1140: memories this project learned while a task's own named files
+/// were being worked on — [`MemoryStore::for_path`] over every path
+/// [`crate::routing::session::paths_named_in`] finds in `task`, reusing
+/// Phase 36's 1583 extraction rather than writing a second one.
+///
+/// `task` naming no path, or naming one nothing was ever observed against,
+/// both answer `Ok(Vec::new())` — the same "nothing to say" the search half
+/// of [`briefing`] already returns for an unmatched query, and [`render`]
+/// treats the two identically.
+///
+/// Every row [`MemoryStore::for_path`] can return today carries
+/// [`FileAssociation::Observed`] — that method's own doc comment says why it
+/// does not narrow by association, and [`FileAssociation`] has exactly one
+/// variant — so this section always labels its rows `observed`, never
+/// `referenced`: the file changed during the session that produced the
+/// memory, which is a correlation and not a claim the memory refers to it.
+///
+/// A memory already selected by the search half, or already sent to this
+/// session, is excluded rather than shown twice.
+fn file_observed_memories(
+    store: &MemoryStore<'_>,
+    task: &str,
+    already_injected: &HashSet<MemoryId>,
+    already_selected: &[MemoryRecord],
+) -> Result<Vec<MemoryRecord>, MemoryStoreError> {
+    let paths = crate::routing::session::paths_named_in(task);
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let mut excluded: HashSet<MemoryId> = already_injected.clone();
+    excluded.extend(already_selected.iter().map(|record| record.id.clone()));
+
+    let mut observed: Vec<MemoryRecord> = Vec::new();
+    for path in &paths {
+        let grouped = store.for_path(path, SearchScope::Current, CANDIDATE_LIMIT)?;
+        for record in grouped
+            .invariants_and_constraints
+            .into_iter()
+            .chain(grouped.other)
+        {
+            if excluded.contains(&record.id) {
+                continue;
+            }
+            excluded.insert(record.id.clone());
+            observed.push(record);
+        }
+    }
+
+    observed.retain(|record| record.is_current() && !is_unreaffirmed_idea(record));
+    observed.truncate(MAX_FILE_OBSERVED_MEMORIES);
+    Ok(observed)
+}
+
+/// Turn the selected records — and, for line 1140, the records observed
+/// beside the task's own named files — into the one labelled line, or `None`
+/// if there is nothing to say about either.
+///
+/// # The file-observed section is appended whole, or not at all
+///
+/// `selected`'s own entries are dropped one at a time from the end once the
+/// byte ceiling is reached — the ordering `briefing` already chose. The
+/// file-observed section is a different kind of content (line 1140 rather
+/// than the routed query) rather than more of the same list, so it is judged
+/// as a unit *after* every `selected` entry that fits has been placed: it is
+/// included only if its heading and every one of its entries fit in what
+/// remains, and dropped in full otherwise. A section truncated to fewer files
+/// than were actually observed would misstate what this project remembers
+/// about them, which cutting whole entries elsewhere in this module already
+/// takes care not to do.
+fn render(selected: &[MemoryRecord], file_observed: &[MemoryRecord]) -> Option<Injection> {
+    if selected.is_empty() && file_observed.is_empty() {
         return None;
     }
 
@@ -286,7 +363,7 @@ fn render(selected: &[MemoryRecord]) -> Option<Injection> {
     let mut used = MEMORY_MARKER.len() + MEMORY_MARKER_END.len() + 2 + header_reservation();
 
     for (index, record) in selected.iter().enumerate() {
-        let entry = render_entry(index + 1, selected.len(), record);
+        let entry = render_entry(index + 1, selected.len(), record, None);
         let cost = entry.len() + 1;
         if used + cost > MAX_INJECTED_BYTES {
             break;
@@ -294,6 +371,30 @@ fn render(selected: &[MemoryRecord]) -> Option<Injection> {
         used += cost;
         entries.push(entry);
         memories.push(record.id.clone());
+    }
+    let primary_count = memories.len();
+
+    if !file_observed.is_empty() {
+        let heading = file_observed_heading(file_observed.len());
+        let mut section_entries: Vec<String> = Vec::with_capacity(file_observed.len());
+        let mut section_bytes = heading.len() + 1;
+        for (index, record) in file_observed.iter().enumerate() {
+            let entry = render_entry(
+                index + 1,
+                file_observed.len(),
+                record,
+                Some(FileAssociation::Observed),
+            );
+            section_bytes += entry.len() + 1;
+            section_entries.push(entry);
+        }
+        if used + section_bytes <= MAX_INJECTED_BYTES {
+            entries.push(heading);
+            for (entry, record) in section_entries.into_iter().zip(file_observed) {
+                entries.push(entry);
+                memories.push(record.id.clone());
+            }
+        }
     }
 
     if entries.is_empty() {
@@ -303,7 +404,7 @@ fn render(selected: &[MemoryRecord]) -> Option<Injection> {
     let mut text = String::with_capacity(MAX_INJECTED_BYTES);
     text.push_str(MEMORY_MARKER);
     text.push(' ');
-    text.push_str(&header(memories.len()));
+    text.push_str(&header(primary_count));
     for entry in &entries {
         text.push(' ');
         text.push_str(entry);
@@ -346,13 +447,49 @@ fn header_reservation() -> usize {
     header(MAX_INJECTED_MEMORIES).len()
 }
 
+/// Line 1140's section heading, computed from the actual count rather than
+/// reserved for a worst case: unlike [`header`], this is only ever measured
+/// after `file_observed_memories` has already returned, so [`render`] has the
+/// real length to test the byte ceiling against and no reservation is needed.
+///
+/// States the same caveat [`FileAssociation::Observed`] documents — an
+/// observed correlation, not a claim the memory refers to the file — because
+/// a reader seeing "beside the files you named" without it would reasonably
+/// take the stronger reading.
+fn file_observed_heading(count: usize) -> String {
+    format!(
+        "{count} more, observed beside the files you named: the file changed during the \
+         session that produced the memory — a correlation, not a claim the memory refers to \
+         this file."
+    )
+}
+
 /// One memory, as its bracketed head plus its quoted fields.
 ///
 /// The head is the only place structure lives, and every token in it comes
 /// from a fixed enum or an integer. Everything after it is [`quote`]d.
-fn render_entry(position: usize, total: usize, record: &MemoryRecord) -> String {
+///
+/// `association` is `Some(FileAssociation::Observed)` for an entry line 1140
+/// added from [`MemoryStore::for_path`] rather than from the routed query —
+/// see [`file_observed_memories`] for why that is the only value this build
+/// can pass — and `None` for every entry the search half of [`briefing`]
+/// selected, which carries no association at all. Both cases share this
+/// function so the two kinds of entry are indistinguishable in every field
+/// except the one that differs.
+fn render_entry(
+    position: usize,
+    total: usize,
+    record: &MemoryRecord,
+    association: Option<FileAssociation>,
+) -> String {
+    // Line 1140: an entry `for_path` produced says so in its own head rather
+    // than only in the section heading above it, so the association survives
+    // a reader who quotes one entry out of the block.
+    let assoc = association
+        .map(|association| format!(" assoc={}", association.as_str()))
+        .unwrap_or_default();
     let mut entry = format!(
-        "[{position}/{total} {standing} kind={kind} authority={authority} id={id}]",
+        "[{position}/{total} {standing} kind={kind} authority={authority} id={id}{assoc}]",
         standing = standing(record),
         kind = record.kind.as_str(),
         authority = record

@@ -46,7 +46,7 @@ use glasshouse::events::{
 use glasshouse::integrations::cmux;
 use glasshouse::launch::HarnessLaunch;
 use glasshouse::memory::inject::{self, Injection};
-use glasshouse::memory::{MemoryId, ProjectMemory};
+use glasshouse::memory::{FileAssociation, MemoryId, ProjectMemory};
 use glasshouse::policy;
 use glasshouse::session::api::{ApiError, SessionApi};
 use glasshouse::session::{
@@ -980,7 +980,8 @@ fn dispatch(
             query,
             history,
             limit,
-        } => query_memory(runtime, &query, history, limit),
+            path,
+        } => query_memory(runtime, &query, history, limit, path.as_deref()),
         Request::GetMemory { memory } => get_memory(runtime, &memory),
         Request::CurrentMemory { limit, body_chars } => current_memory(runtime, limit, body_chars),
         Request::TakeCheckpoint {
@@ -3104,12 +3105,30 @@ fn gateway_failure_str(reason: GatewayFailure) -> &'static str {
 /// disagree about what a query finds. One search, not two: the CLI's report
 /// text is rendered from the already-fetched grouping rather than searched
 /// for a second time.
-fn query_memory(runtime: &Runtime, query: &str, history: bool, limit: usize) -> Response {
+///
+/// # `path`, capability map line 1143
+///
+/// `path` present switches this to [`query_memory_for_path`] and `query` is
+/// not consulted — see [`Request::QueryMemory`]'s own doc comment for why a
+/// path lookup has no text to search. `path` absent is byte-for-byte what
+/// this door has always answered.
+fn query_memory(
+    runtime: &Runtime,
+    query: &str,
+    history: bool,
+    limit: usize,
+    path: Option<&str>,
+) -> Response {
     // Line 1115. The cap is applied here rather than left to the caller's
     // `limit`, and it is a `min` rather than a rejection: a caller asking for
     // more than the door will give gets the door's answer, not an error, the
     // same shape [`project_events`] uses for `MAX_EVENTS_LIMIT`.
     let limit = limit.min(MAX_MEMORY_LIMIT);
+
+    if let Some(path) = path {
+        return query_memory_for_path(runtime, path, history, limit);
+    }
+
     let grouped = match crate::memory_search_grouped(runtime, query, history, limit) {
         Ok(grouped) => grouped,
         // Through [`memory_error_message`], not `Response::err(err)` directly:
@@ -3132,6 +3151,82 @@ fn query_memory(runtime: &Runtime, query: &str, history: bool, limit: usize) -> 
         "other": grouped.other.iter().map(memory_result_json).collect::<Vec<_>>(),
         "report": report,
     }))
+}
+
+/// [`query_memory`]'s `path` mode — capability map line 1143, *"the
+/// rationale behind a file-related constraint"* — through
+/// [`glasshouse::memory::MemoryStore::for_path`], migration 17's read door
+/// rather than a text search.
+///
+/// # `association`, and why it is always `"observed"`
+///
+/// Every row carries an `association` field alongside the body and rationale
+/// [`memory_result_json`] already puts there — line 1143 asks for the
+/// rationale *behind a constraint*, and which relationship produced the row
+/// is part of reading that rationale honestly. `for_path`'s own doc comment
+/// says it does not narrow by [`FileAssociation`], and this build's only
+/// writer, `MemoryStore::record_observed_files`, only ever stores
+/// [`FileAssociation::Observed`] — so `association` is that constant on
+/// every row today, not a per-row lookup this door invents. It reads
+/// `"observed"` rather than `"referenced"` for the same reason
+/// `memory::inject`'s line 1140 section does: the file changed during the
+/// session that produced the memory, which this build can prove; that the
+/// memory refers to the file is map line 1139's own claim, and 1139 is not
+/// satisfied by anything shipped here.
+///
+/// No `report`: `render_memory_report`'s prose is written for a text search
+/// and would misdescribe a path lookup as one, so this answers with `path`
+/// naming what was looked up instead. `query` is not accepted here — see
+/// [`query_memory`].
+///
+/// Opens the project's memory directly, the same shape [`get_memory`] and
+/// [`current_memory`] use, rather than through `crate::memory_search_grouped`:
+/// that helper is `main.rs`'s text-search core and records every retrieval
+/// through it as a *search* (`evaluation::record_memory_retrieval`); a path
+/// lookup runs no query and recording it as one would misreport what was
+/// asked. `main.rs`/`cli.rs` are held by a live worker on this round in any
+/// case (this door's own CLI flag is a later Green, not this package).
+fn query_memory_for_path(runtime: &Runtime, path: &str, history: bool, limit: usize) -> Response {
+    use glasshouse::memory::search::SearchScope;
+
+    let project = match ProjectMemory::open(runtime) {
+        Ok(project) => project,
+        Err(err) => return Response::err(memory_error_message(&err)),
+    };
+    let scope = if history {
+        SearchScope::Historical
+    } else {
+        SearchScope::Current
+    };
+    let grouped = match project.store().for_path(path, scope, limit) {
+        Ok(grouped) => grouped,
+        Err(err) => return Response::err(err),
+    };
+
+    Response::ok(serde_json::json!({
+        "invariants_and_constraints": grouped
+            .invariants_and_constraints
+            .iter()
+            .map(file_observed_memory_json)
+            .collect::<Vec<_>>(),
+        "other": grouped.other.iter().map(file_observed_memory_json).collect::<Vec<_>>(),
+        "path": path,
+    }))
+}
+
+/// [`memory_result_json`] plus the one field [`query_memory_for_path`] adds
+/// — see that function for why `association` is always `"observed"`.
+fn file_observed_memory_json(record: &glasshouse::memory::MemoryRecord) -> serde_json::Value {
+    let serde_json::Value::Object(mut fields) = memory_result_json(record) else {
+        // Unreachable: `memory_result_json` is a `json!({...})` object
+        // literal, the same guarantee `memory_full_json` relies on above.
+        return memory_result_json(record);
+    };
+    fields.insert(
+        "association".to_owned(),
+        serde_json::json!(FileAssociation::Observed.as_str()),
+    );
+    serde_json::Value::Object(fields)
 }
 
 /// One memory, as JSON for the machine door — Phase 21F lines 935/936.
