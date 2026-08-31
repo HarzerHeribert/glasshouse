@@ -65,6 +65,7 @@ pub mod domain;
 pub mod evidence;
 pub mod free;
 pub mod interactive;
+pub mod pressure;
 pub mod session;
 
 use crate::secret::SecretRef;

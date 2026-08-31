@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**853 / 1280 mandatory capabilities (67%)** — 427 open across 60 phases.
+**862 / 1280 mandatory capabilities (67%)** — 418 open across 60 phases.
 
 ## Where the work is
 
@@ -31,6 +31,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 30 | Session context metadata | **1** | 7 | `1156` |
 | Phase 32B | Quota telemetry sources | **1** | 13 | `1220` |
 | Phase 32F | Protected quota reserve | **1** | 7 | `1285` |
+| Phase 35D | Routing under subscription pressure | **1** | 7 | `1568` |
 | Phase 37 | Basic session-aware router | **1** | 10 | `1590` |
 | Phase 46 | Security and contamination tests | **1** | 7 | `1739` |
 | Phase 49 | Configuration | **1** | 15 | `1784` |
@@ -50,16 +51,15 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 28 | File-aware memory lookup | **5** | 0 | `1137` |
 | Phase 33A | Routing evidence ledger | **5** | 10 | `1327` |
 | Phase 34E | Router economics | **5** | 4 | `1461` |
+| Phase 38 | Quota-preserving routing | **5** | 2 | `1604` |
 | Phase 53 | Criteria before adding graph storage | **5** | 0 | `1872` |
 | Phase 21G | Memory revalidation | **6** | 3 | `941` |
 | Phase 31 | Compaction-aware behavior | **6** | 1 | `1167` |
 | Phase 52 | Criteria before adding semantic/vector retrieval | **6** | 0 | `1858` |
-| Phase 38 | Quota-preserving routing | **7** | 0 | `1604` |
 | Phase 47 | Observability without spectacle | **7** | 8 | `1750` |
 | Phase 50 | Tracked project knowledge as an optional feature | **7** | 0 | `1803` |
 | Phase 29 | Memory commits | **8** | 0 | `1145` |
 | Phase 33C | Failure, quota, and route correlation | **8** | 7 | `1362` |
-| Phase 35D | Routing under subscription pressure | **8** | 0 | `1568` |
 | Phase 36 | Session affinity | **8** | 0 | `1579` |
 | Phase 21J | Implementation review checklist | **9** | 0 | `980` |
 | Phase 32A | Unified quota and capacity model | **9** | 12 | `1196` |
@@ -89,7 +89,7 @@ closures are usually at the top. Open the map at the line number given.
 
 Every phase with **three or fewer** open lines, quoted verbatim. These are
 where a single package finishes a phase, so they are listed here and the
-other ~391 open lines are not.
+other ~381 open lines are not.
 
 For any other phase: `scripts/discover.py --phase <id>` prints its open
 lines and evidence together. **Do not open the 178 KB map to read them.**
@@ -133,6 +133,10 @@ these unwrapped.
 ### Phase 32F — Protected quota reserve  (1 open, 7 closed)
 
 - **1294** ☐ Avoid moving an almost-complete high-value task to another session solely because a reserve threshold was crossed.
+
+### Phase 35D — Routing under subscription pressure  (1 open, 7 closed)
+
+- **1577** ☐ Allow users to define different reserve policies for interactive work and background support jobs.
 
 ### Phase 37 — Basic session-aware router  (1 open, 10 closed)
 
@@ -287,7 +291,7 @@ the rest are context you probably do not need.
 `docs/product/evidence/` — open the one for the phase you are working,
 never the directory.
 
-    phase-0.md  phase-1.md  phase-10.md  phase-10a.md  phase-11.md  phase-12-13-and-45.md  phase-12-18-and-19.md  phase-14.md  phase-15.md  phase-16.md  phase-2.md  phase-20-22-and-23.md  phase-21-credential-acceptance-condition.md  phase-21-extraction-contract.md  phase-21-manual-extraction.md  phase-21.md  phase-21a-authority-classes.md  phase-21b.md  phase-21c.md  phase-21d.md  phase-21e.md  phase-21f.md  phase-21g.md  phase-24.md  phase-25.md  phase-26.md  phase-27.md  phase-2a.md  phase-2b.md  phase-2c.md  phase-2d.md  phase-3.md  phase-30.md  phase-31.md  phase-32.md  phase-32a.md  phase-32b.md  phase-32d.md  phase-32f.md  phase-33.md  phase-33a.md  phase-33c.md  phase-34.md  phase-34a.md  phase-34b.md  phase-34c.md  phase-34d.md  phase-34e.md  phase-35.md  phase-35b.md  phase-37.md  phase-4-unfocused-control.md  phase-4.md  phase-40.md  phase-41.md  phase-42.md  phase-43.md  phase-45.md  phase-46.md  phase-47.md  phase-48.md  phase-49.md  phase-5-7.md  phase-5.md  phase-51.md  phase-6.md  phase-7.md  phase-8.md  phase-9.md  phase-9a.md  phase-9b.md  phase-9c-9d.md  phase-9c.md  phase-9d-9a.md  phase-9d.md  phase-9e.md  phase-9f-preflight.md  phase-9f.md  phase-9g-refined.md  phase-9g.md  phase-9h.md  phase-9i.md  phase-9j.md  phase-9k.md  unfiled.md
+    phase-0.md  phase-1.md  phase-10.md  phase-10a.md  phase-11.md  phase-12-13-and-45.md  phase-12-18-and-19.md  phase-14.md  phase-15.md  phase-16.md  phase-2.md  phase-20-22-and-23.md  phase-21-credential-acceptance-condition.md  phase-21-extraction-contract.md  phase-21-manual-extraction.md  phase-21.md  phase-21a-authority-classes.md  phase-21b.md  phase-21c.md  phase-21d.md  phase-21e.md  phase-21f.md  phase-21g.md  phase-24.md  phase-25.md  phase-26.md  phase-27.md  phase-2a.md  phase-2b.md  phase-2c.md  phase-2d.md  phase-3.md  phase-30.md  phase-31.md  phase-32.md  phase-32a.md  phase-32b.md  phase-32d.md  phase-32f.md  phase-33.md  phase-33a.md  phase-33c.md  phase-34.md  phase-34a.md  phase-34b.md  phase-34c.md  phase-34d.md  phase-34e.md  phase-35.md  phase-35b.md  phase-35d.md  phase-37.md  phase-38.md  phase-4-unfocused-control.md  phase-4.md  phase-40.md  phase-41.md  phase-42.md  phase-43.md  phase-45.md  phase-46.md  phase-47.md  phase-48.md  phase-49.md  phase-5-7.md  phase-5.md  phase-51.md  phase-6.md  phase-7.md  phase-8.md  phase-9.md  phase-9a.md  phase-9b.md  phase-9c-9d.md  phase-9c.md  phase-9d-9a.md  phase-9d.md  phase-9e.md  phase-9f-preflight.md  phase-9f.md  phase-9g-refined.md  phase-9g.md  phase-9h.md  phase-9i.md  phase-9j.md  phase-9k.md  unfiled.md
 
 ## The three things that are always true here
 

@@ -639,7 +639,7 @@ fn routing_destinations(
             .map(|layered| layered.value)
             .unwrap_or_else(|| glasshouse::profile::LaunchProfile::native(harness));
         let (backend, protocols) = destination_backend(effective, &profile, record.model.clone());
-        destinations.push(
+        destinations.push(with_capacity(
             with_provider_protocols(
                 Destination::existing(
                     record.id.as_str(),
@@ -649,11 +649,9 @@ fn routing_destinations(
                     warm,
                 ),
                 protocols,
-            )
-            .with_capacity(destination_capacity(
-                &profile, effective, &telemetry, now_unix,
-            )),
-        );
+            ),
+            destination_capacity(&profile, effective, &telemetry, now_unix),
+        ));
     }
 
     // 2. One fresh destination per *enabled* configured launch profile, each
@@ -694,7 +692,7 @@ fn routing_destinations(
         };
         let profile = profile.value;
         let (backend, protocols) = destination_backend(effective, &profile, None);
-        destinations.push(
+        destinations.push(with_capacity(
             with_provider_protocols(
                 Destination::fresh(
                     fresh_destination_id(harness, &name),
@@ -704,11 +702,9 @@ fn routing_destinations(
                     checkpoint,
                 ),
                 protocols,
-            )
-            .with_capacity(destination_capacity(
-                &profile, effective, &telemetry, now_unix,
-            )),
-        );
+            ),
+            destination_capacity(&profile, effective, &telemetry, now_unix),
+        ));
     }
 
     Ok(destinations)
@@ -805,10 +801,16 @@ fn warm_session(
 /// `recorded_model` is a recorded session's own assigned model, which is a
 /// fact about that session and outranks re-deriving one from the profile.
 ///
-/// `Cost` is `Metered` for everything here, and that is not a shortcut: the
-/// session router reads a backend's provider, credential, model and tool
-/// semantics and never its cost, and `Cost::Metered` is the fail-closed value
-/// the rest of this project uses when nobody has marked a model free.
+/// `Cost` is the one fact that decides "premium" for the subscription-pressure
+/// terms (`routing::pressure`, lines 1570–1575): a direct-provider profile
+/// whose named model the user marked in that provider's `free_models` is
+/// `Cost::Free`, through `ProviderConfig::cost_of` — the same rule
+/// `disposable_candidates` and `gateway_upstream` already apply — and
+/// everything else is `Cost::Metered`, the fail-closed value the rest of this
+/// project uses when nobody has marked a model free. A native subscription
+/// and the gateway are always metered here: a subscription is the premium
+/// resource those lines are about, and the gateway's cost is whichever
+/// upstream it is bound to, which this launch does not know yet.
 fn destination_backend(
     effective: &EffectiveConfig<'_>,
     profile: &glasshouse::profile::LaunchProfile,
@@ -829,11 +831,18 @@ fn destination_backend(
         .map(|protocol| protocol.slug().to_owned())
         .unwrap_or_default();
 
-    let (provider, credential, protocols) = match &profile.backend {
+    let (provider, credential, protocols, cost) = match &profile.backend {
         BackendResource::DirectProvider { provider } => {
             match effective.configured_provider(provider) {
                 Ok(resolved) => {
                     let resolved = resolved.value;
+                    // Line 1575's "zero-cost resource", from the one place
+                    // the lookup lives. A model the harness picks itself is
+                    // not a model anyone marked free.
+                    let cost = model
+                        .name()
+                        .map(|name| effective.model_cost(provider, name).value)
+                        .unwrap_or(Cost::Metered);
                     // Line 1595's input: every protocol the provider declares
                     // a usable base URL for, which is the same filter
                     // `EffectiveConfig::pairing_queries` applies for
@@ -859,6 +868,7 @@ fn destination_backend(
                         provider.clone(),
                         CredentialId::new(provider.clone(), reference),
                         protocols,
+                        cost,
                     )
                 }
                 // A profile naming a provider this configuration no longer
@@ -874,6 +884,7 @@ fn destination_backend(
                         },
                     ),
                     Vec::new(),
+                    Cost::Metered,
                 ),
             }
         }
@@ -892,6 +903,7 @@ fn destination_backend(
                 },
             ),
             Vec::new(),
+            Cost::Metered,
         ),
         // A gateway-backed profile is assigned its provider when the session
         // starts, so the serving provider genuinely is not known here — the
@@ -906,6 +918,7 @@ fn destination_backend(
                 },
             ),
             Vec::new(),
+            Cost::Metered,
         ),
     };
 
@@ -915,7 +928,7 @@ fn destination_backend(
             protocol,
             model,
             credential,
-            Cost::Metered,
+            cost,
             pairing.tool_semantics(),
         ),
         protocols,
@@ -1014,15 +1027,32 @@ fn with_provider_protocols(
 }
 
 /// Line 1598's input, read from the same on-disk quota cache
-/// `glasshouse resources` reads and with no request of its own.
+/// `glasshouse resources` reads and with no request of its own — and, from
+/// the same reading, lines 1570–1574's: the band that score falls in and how
+/// far off the next reset is.
+///
+/// The band is resolved exactly as [`disposable_candidate_capacity`] resolves
+/// it for the disposable router: the user's thresholds (line 1270) with the
+/// provider's own protected reserve percentage applied (line 1288) — which is
+/// what makes the pressure policy tunable rather than fixed (line 1612). A
+/// native subscription and the gateway are not keys in the provider table, so
+/// they take the global thresholds, the same answer
+/// `provider::resources::capacity_band_thresholds_for` gives them.
+///
+/// Both halves are `None` for a provider with no cached reading, and every
+/// pressure term is inert on that and says so.
 fn destination_capacity(
     profile: &glasshouse::profile::LaunchProfile,
     effective: &EffectiveConfig<'_>,
     telemetry: &glasshouse::provider::resources::GatheredTelemetry,
     now_unix: i64,
-) -> Option<glasshouse::provider::quota::RemainingCapacityScore> {
+) -> (
+    Option<glasshouse::provider::quota::RemainingCapacityScore>,
+    glasshouse::routing::pressure::CapacityFacts,
+) {
     use glasshouse::profile::BackendResource;
     use glasshouse::provider::registry::ResourceKind;
+    use glasshouse::routing::pressure::CapacityFacts;
 
     let kind = match &profile.backend {
         BackendResource::Native => ResourceKind::NativeSubscription {
@@ -1033,8 +1063,30 @@ fn destination_capacity(
         }
         BackendResource::GlasshouseGateway => ResourceKind::GlasshouseGateway,
     };
-    glasshouse::provider::resources::observed_capacity(&kind, effective, telemetry, now_unix)
-        .remaining_capacity_score()
+    let state =
+        glasshouse::provider::resources::observed_capacity(&kind, effective, telemetry, now_unix);
+    let score = state.remaining_capacity_score();
+    let thresholds = effective.capacity_band_thresholds().value;
+    let thresholds = match &kind {
+        ResourceKind::DirectProvider { provider, .. } => {
+            thresholds.with_resource_reserve(effective.reserve_percent(provider).value.get())
+        }
+        _ => thresholds,
+    };
+    let band = score.as_ref().map(|score| score.band(&thresholds));
+    let facts = CapacityFacts::new(band, state.seconds_until_reset(now_unix));
+    (score, facts)
+}
+
+/// Attach [`destination_capacity`]'s two halves to a destination.
+fn with_capacity(
+    destination: glasshouse::routing::session::Destination,
+    (score, facts): (
+        Option<glasshouse::provider::quota::RemainingCapacityScore>,
+        glasshouse::routing::pressure::CapacityFacts,
+    ),
+) -> glasshouse::routing::session::Destination {
+    destination.with_capacity(score).with_capacity_facts(facts)
 }
 
 /// **Line 1599's bridge**: what a gateway has actually observed about these
@@ -1644,6 +1696,19 @@ enum NoRoute {
     MomentDoesNotRoute(glasshouse::routing::session::RoutingMoment),
 }
 
+/// The session router with the user's reserve configuration attached —
+/// lines 1571 and 1577 (`routing.reserve.interactive`) and line 1290
+/// (`routing.reserve_override_sessions`) on every path that ranks, so the
+/// path that acts and the path that reports cannot disagree about either.
+fn session_router(
+    effective: &EffectiveConfig<'_>,
+    user_override: glasshouse::routing::session::RoutingOverride,
+) -> glasshouse::routing::session::SessionRouter {
+    glasshouse::routing::session::SessionRouter::with_override(user_override)
+        .with_reserve_policies(effective.reserve_policies())
+        .with_reserve_override_sessions(effective.reserve_override_sessions().value)
+}
+
 /// `glasshouse route`'s decision, and the control door's — map lines 1601,
 /// 1602 and 1681.
 ///
@@ -1679,7 +1744,7 @@ fn route_recommendation(
     task: Option<&str>,
 ) -> anyhow::Result<RouteRecommendation> {
     use glasshouse::integrations::{IntegrationId, IntegrationKind};
-    use glasshouse::routing::session::{RouterInputs, RoutingMoment, SessionRouter};
+    use glasshouse::routing::session::{RouterInputs, RoutingMoment};
 
     let mut destinations = Vec::new();
     // Which of them `glasshouse launch` would refuse, so the report can say so
@@ -1748,7 +1813,7 @@ fn route_recommendation(
             .cloned(),
     };
 
-    let Some(routed) = SessionRouter::with_override(user_override).choose(
+    let Some(routed) = session_router(effective, user_override).choose(
         moment,
         current.as_ref(),
         &destinations,
@@ -1833,6 +1898,7 @@ fn task_requirements_from_text(
     TaskRequirements {
         needs_tool_calls: !hard_capabilities.is_empty(),
         hard_capabilities,
+        ..TaskRequirements::default()
     }
 }
 
@@ -2021,7 +2087,7 @@ fn launch_session(
     } else {
         glasshouse::routing::session::RoutingOverride::none()
     };
-    let routed = glasshouse::routing::session::SessionRouter::with_override(user_override).choose(
+    let routed = session_router(&effective, user_override).choose(
         glasshouse::routing::session::RoutingMoment::SessionStart,
         None,
         &destinations,
@@ -5345,7 +5411,7 @@ fn one_line(text: &str) -> String {
 /// where the choice is genuinely open, and not here.
 fn report_task_boundary_routing(runtime: &Runtime, session: &str) {
     use glasshouse::routing::session::{
-        RouterInputs, RoutingMoment, RoutingOverride, SessionRouter, TaskRequirements,
+        RouterInputs, RoutingMoment, RoutingOverride, TaskRequirements,
     };
 
     // Its own scope, and everything it opened is closed before it returns —
@@ -5399,7 +5465,7 @@ fn report_task_boundary_routing(runtime: &Runtime, session: &str) {
         now: std::time::Instant::now(),
         requirements: TaskRequirements::default(),
     };
-    let Some(routed) = SessionRouter::with_override(RoutingOverride::to(id.as_str())).choose(
+    let Some(routed) = session_router(&effective, RoutingOverride::to(id.as_str())).choose(
         RoutingMoment::TaskBoundary,
         current.as_ref(),
         &destinations,

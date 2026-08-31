@@ -774,6 +774,7 @@ mod bounded_router_input {
         TaskRequirements {
             needs_tool_calls: !hard_capabilities.is_empty(),
             hard_capabilities,
+            ..TaskRequirements::default()
         }
     }
 

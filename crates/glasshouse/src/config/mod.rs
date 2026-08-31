@@ -1062,6 +1062,63 @@ impl CapacityBandThresholdsConfig {
     }
 }
 
+/// `[routing.reserve]` — capability map line 1577: the reserve policy for
+/// interactive work and the one for background support jobs, recorded
+/// separately.
+///
+/// Each field is `None` for "this layer never recorded one", matching
+/// [`RoutingConfig::model`]'s reasoning, and the two resolve **per field**
+/// through [`EffectiveConfig::reserve_policy`] — a project that sets only
+/// `background` leaves `interactive` to the user layer and then the default,
+/// exactly as [`CapacityBandThresholdsConfig`]'s siblings do. The values are
+/// [`crate::routing::pressure::ReservePolicy`]'s own, deserialized directly,
+/// so there is no second spelling of `protect`/`spend` to keep in step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ReservePoliciesConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    interactive: Option<crate::routing::pressure::ReservePolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    background: Option<crate::routing::pressure::ReservePolicy>,
+}
+
+impl ReservePoliciesConfig {
+    pub fn interactive(&self) -> Option<crate::routing::pressure::ReservePolicy> {
+        self.interactive
+    }
+
+    pub fn set_interactive(
+        &mut self,
+        value: Option<crate::routing::pressure::ReservePolicy>,
+    ) -> &mut Self {
+        self.interactive = value;
+        self
+    }
+
+    pub fn background(&self) -> Option<crate::routing::pressure::ReservePolicy> {
+        self.background
+    }
+
+    pub fn set_background(
+        &mut self,
+        value: Option<crate::routing::pressure::ReservePolicy>,
+    ) -> &mut Self {
+        self.background = value;
+        self
+    }
+
+    /// This layer's recorded policy for `scope`, or `None` for "never
+    /// decided" — the one place the scope selects a field.
+    pub fn for_scope(
+        &self,
+        scope: crate::routing::pressure::ReserveScope,
+    ) -> Option<crate::routing::pressure::ReservePolicy> {
+        match scope {
+            crate::routing::pressure::ReserveScope::Interactive => self.interactive,
+            crate::routing::pressure::ReserveScope::Background => self.background,
+        }
+    }
+}
+
 /// Why a stored [`ProviderConfig`] could not be turned into a
 /// [`crate::provider::Provider`].
 #[derive(Debug, thiserror::Error)]
@@ -2009,6 +2066,10 @@ pub struct RoutingConfig {
     /// the default is `false`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     classification_local_only: Option<bool>,
+    /// `[routing.reserve]` — capability map line 1577. `None` means this
+    /// layer recorded neither scope's policy; see [`ReservePoliciesConfig`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    reserve: Option<ReservePoliciesConfig>,
 }
 
 impl RoutingConfig {
@@ -2089,6 +2150,17 @@ impl RoutingConfig {
 
     pub fn set_classification_local_only(&mut self, value: Option<bool>) -> &mut Self {
         self.classification_local_only = value;
+        self
+    }
+
+    /// This layer's recorded reserve policies, or `None` for "never
+    /// decided" — capability map line 1577.
+    pub fn reserve(&self) -> Option<ReservePoliciesConfig> {
+        self.reserve
+    }
+
+    pub fn set_reserve(&mut self, value: Option<ReservePoliciesConfig>) -> &mut Self {
+        self.reserve = value;
         self
     }
 
@@ -2174,6 +2246,7 @@ impl RoutingConfig {
             && self.reserve_override_sessions.is_none()
             && self.model_fallback.is_none()
             && self.classification_local_only.is_none()
+            && self.reserve.is_none()
     }
 }
 
@@ -3147,6 +3220,64 @@ impl<'a> EffectiveConfig<'a> {
             Some(value) => Layered::new(value, configured.layer),
             None => self.premium_reserve(),
         }
+    }
+
+    /// The reserve policy for `scope` — capability map line 1577 — resolved
+    /// per field, project over user over
+    /// [`crate::routing::pressure::ReservePolicy::Protect`], the fail-closed
+    /// default for a spending protection. Per field, so a project that
+    /// records only the background policy inherits the user's interactive
+    /// one rather than resetting it.
+    pub fn reserve_policy(
+        &self,
+        scope: crate::routing::pressure::ReserveScope,
+    ) -> Layered<crate::routing::pressure::ReservePolicy> {
+        if let Some(value) = self
+            .project
+            .and_then(|p| p.routing().reserve())
+            .and_then(|reserve| reserve.for_scope(scope))
+        {
+            return Layered::new(value, Layer::Project);
+        }
+        if let Some(value) = self
+            .user
+            .routing()
+            .reserve()
+            .and_then(|reserve| reserve.for_scope(scope))
+        {
+            return Layered::new(value, Layer::User);
+        }
+        Layered::new(
+            crate::routing::pressure::ReservePolicy::default(),
+            Layer::Default,
+        )
+    }
+
+    /// Both scopes' policies at once, for a router that carries them whole.
+    pub fn reserve_policies(&self) -> crate::routing::pressure::ReservePolicies {
+        crate::routing::pressure::ReservePolicies {
+            interactive: self
+                .reserve_policy(crate::routing::pressure::ReserveScope::Interactive)
+                .value,
+            background: self
+                .reserve_policy(crate::routing::pressure::ReserveScope::Background)
+                .value,
+        }
+    }
+
+    /// Whether `model` on `provider` costs the user anything at the margin —
+    /// [`ProviderConfig::cost_of`], read from the layer that configures the
+    /// provider (project over user), and
+    /// [`crate::routing::Cost::Metered`] when neither does: a provider nobody
+    /// configured is not one anybody marked free.
+    pub fn model_cost(&self, provider: &str, model: &str) -> Layered<crate::routing::Cost> {
+        if let Some(config) = self.project.and_then(|p| p.providers().get(provider)) {
+            return Layered::new(config.cost_of(model), Layer::Project);
+        }
+        if let Some(config) = self.user.providers().get(provider) {
+            return Layered::new(config.cost_of(model), Layer::User);
+        }
+        Layered::new(crate::routing::Cost::Metered, Layer::Default)
     }
 
     /// The user's preferred order over free resources, resolved per field —
@@ -5887,5 +6018,88 @@ mod tests {
             crate::provider::quota::CapacityBandThresholds::DEFAULT
         );
         assert_eq!(effective.capacity_band_thresholds().layer, Layer::Default);
+    }
+
+    /// Capability map line 1577: `[routing.reserve]` carries two policies,
+    /// they round-trip through the loader, they resolve **per field** with
+    /// the project layer first, and a layer that recorded neither leaves the
+    /// fail-closed `protect` default in place for both scopes.
+    #[test]
+    fn reserve_policies_round_trip_and_resolve_per_scope_with_protect_as_the_default() {
+        use crate::routing::pressure::{ReservePolicy, ReserveScope};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(tmp.path().join("data"), tmp.path().join("config"));
+
+        let mut user = UserConfig::default();
+        assert_eq!(user.routing().reserve(), None);
+        let mut reserve = ReservePoliciesConfig::default();
+        reserve
+            .set_interactive(Some(ReservePolicy::Spend))
+            .set_background(Some(ReservePolicy::Protect));
+        user.routing_mut().set_reserve(Some(reserve));
+        user.save(&paths).unwrap();
+        let loaded = UserConfig::load(&paths).unwrap();
+        assert_eq!(loaded.routing().reserve(), user.routing().reserve());
+
+        // The on-disk spelling is the enum's own, kebab-case.
+        let text = std::fs::read_to_string(paths.user_config_file()).unwrap();
+        assert!(text.contains("interactive = \"spend\""), "{text}");
+        assert!(text.contains("background = \"protect\""), "{text}");
+
+        let effective = EffectiveConfig::new(&loaded, None);
+        let interactive = effective.reserve_policy(ReserveScope::Interactive);
+        assert_eq!(
+            (interactive.value, interactive.layer),
+            (ReservePolicy::Spend, Layer::User)
+        );
+        let background = effective.reserve_policy(ReserveScope::Background);
+        assert_eq!(
+            (background.value, background.layer),
+            (ReservePolicy::Protect, Layer::User)
+        );
+
+        // A project that records only the background policy wins that field
+        // and leaves the interactive one to the user layer.
+        let project: ProjectConfig =
+            toml::from_str("version = 1\n\n[routing.reserve]\nbackground = \"spend\"\n").unwrap();
+        let effective = EffectiveConfig::new(&loaded, Some(&project));
+        let interactive = effective.reserve_policy(ReserveScope::Interactive);
+        assert_eq!(
+            (interactive.value, interactive.layer),
+            (ReservePolicy::Spend, Layer::User)
+        );
+        let background = effective.reserve_policy(ReserveScope::Background);
+        assert_eq!(
+            (background.value, background.layer),
+            (ReservePolicy::Spend, Layer::Project)
+        );
+        assert_eq!(
+            effective.reserve_policies(),
+            crate::routing::pressure::ReservePolicies {
+                interactive: ReservePolicy::Spend,
+                background: ReservePolicy::Spend,
+            }
+        );
+
+        // Nothing recorded anywhere: protect, for both, from the default layer.
+        let empty = UserConfig::default();
+        let effective = EffectiveConfig::new(&empty, None);
+        for scope in [ReserveScope::Interactive, ReserveScope::Background] {
+            let resolved = effective.reserve_policy(scope);
+            assert_eq!(
+                (resolved.value, resolved.layer),
+                (ReservePolicy::Protect, Layer::Default)
+            );
+        }
+
+        // An unknown spelling is refused by the loader rather than defaulted.
+        assert!(
+            toml::from_str::<UserConfig>(
+                "version = 1\n\n[routing.reserve]\ninteractive = \"exclude\"\n"
+            )
+            .is_err(),
+            "an unknown reserve policy must be refused, not read as a default"
+        );
     }
 }

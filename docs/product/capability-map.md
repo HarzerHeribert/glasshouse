@@ -1567,13 +1567,13 @@ Phase 35C — Capacity-aware tier escalation and downgrade
 
 Phase 35D — Routing under subscription pressure
 
-☐ Prefer alternative adequate resources when a premium subscription enters the tight capacity band.
-☐ Protect premium subscription reserve for high-tier tasks when the subscription enters the reserve band.
-☐ Prefer finishing an already warm high-value session over migrating solely because the same subscription entered tight.
-☐ Consider reset proximity before conserving subscription capacity aggressively.
-☐ Allow a nearly-resetting subscription to be used more freely when remaining capacity would otherwise expire unused.
-☐ Avoid intentionally exhausting a subscription if another adequate zero-cost resource is healthy and the task is low tier.
-☐ Make subscription-pressure decisions visible in routing explanations.
+☑ Prefer alternative adequate resources when a premium subscription enters the tight capacity band.
+☑ Protect premium subscription reserve for high-tier tasks when the subscription enters the reserve band.
+☑ Prefer finishing an already warm high-value session over migrating solely because the same subscription entered tight.
+☑ Consider reset proximity before conserving subscription capacity aggressively.
+☑ Allow a nearly-resetting subscription to be used more freely when remaining capacity would otherwise expire unused.
+☑ Avoid intentionally exhausting a subscription if another adequate zero-cost resource is healthy and the task is low tier.
+☑ Make subscription-pressure decisions visible in routing explanations.
 ☐ Allow users to define different reserve policies for interactive work and background support jobs.
 
 Phase 36 — Session affinity
@@ -1603,13 +1603,13 @@ Phase 37 — Basic session-aware router
 
 Phase 38 — Quota-preserving routing
 
-☐ Allow the router to reserve scarce premium-session capacity for difficult tasks.
+☑ Allow the router to reserve scarce premium-session capacity for difficult tasks.
 ☐ Prefer local or free resources for trivial classification and extraction work when suitable.
 ☐ Prefer cheap resources for simple repository summarization when no valuable warm session already exists.
 ☐ Prefer premium warm sessions for difficult tasks that benefit strongly from existing context.
 ☐ Avoid migrating a nearly completed task solely to preserve a small amount of quota.
 ☐ Avoid spending premium model capacity on internal Glasshouse bookkeeping when a cheap resource can perform it reliably.
-☐ Keep quota preservation as a tunable policy rather than a hard-coded model hierarchy.
+☑ Keep quota preservation as a tunable policy rather than a hard-coded model hierarchy.
 
 Phase 39 — Gateway-backed disposable jobs
 

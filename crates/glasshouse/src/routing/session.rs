@@ -44,17 +44,21 @@
 //! `crate::session` nor `crate::checkpoint`, for the reason
 //! [`crate::config::pairing::ContinuitySource`] gives.
 
+use std::collections::BTreeSet;
 use std::time::Instant;
 
 use crate::config::pairing::{ContinuitySource, WarmSession};
 use crate::harness::pairing::{self, ModelBehaviourFit, ProtocolFit};
 use crate::harness::{Capabilities as HarnessCapabilities, Declared, WireProtocol};
 use crate::integrations::IntegrationId;
-use crate::provider::quota::RemainingCapacityScore;
+use crate::provider::quota::{CapacityBand, RemainingCapacityScore};
 
 use super::capability::{self, ResourceFacts};
-use super::classify::HardCapability;
+use super::classify::{HardCapability, WorkloadTier};
 use super::free::{FreePool, FreeResource};
+use super::pressure::{
+    self, Alternatives, CapacityFacts, PressureInputs, ReservePolicies, ReserveScope,
+};
 use super::{
     Backend, CacheLocality, Contribution, HardConstraint, RoutingExplanation, ToolSemantics,
     apply_hard_constraints,
@@ -203,6 +207,14 @@ pub struct Destination {
     /// never a zero and never a full, for the reason `glasshouse resources`
     /// prints `unknown` rather than either.
     capacity: Option<RemainingCapacityScore>,
+    /// Lines 1570–1574: the band that score falls in against the user's
+    /// thresholds and the provider's own reserve percentage, and how far off
+    /// the next reset is — both read by the caller, exactly as `capacity` is,
+    /// and both `None` when nothing has been read. Carried beside `capacity`
+    /// rather than derived from it here because the thresholds that turn a
+    /// score into a band are configuration this module does not read, and
+    /// the reset is not in the score at all.
+    capacity_facts: CapacityFacts,
     /// Every wire protocol the serving provider offers, not only the one
     /// [`Backend::protocol`] names.
     ///
@@ -274,6 +286,7 @@ impl Destination {
             backend,
             continuation,
             capacity: None,
+            capacity_facts: CapacityFacts::UNREAD,
             provider_protocols: pairing::wire_protocol_from_slug(&protocol)
                 .into_iter()
                 .collect(),
@@ -287,6 +300,20 @@ impl Destination {
     pub fn with_capacity(mut self, capacity: Option<RemainingCapacityScore>) -> Self {
         self.capacity = capacity;
         self
+    }
+
+    /// Attach what was read about this destination's capacity band and reset
+    /// — lines 1570–1574. The caller resolves both from the same
+    /// `crate::provider::quota::CapacityState` it took `capacity` from; the
+    /// default is [`CapacityFacts::UNREAD`], on which every pressure term is
+    /// inert and says so.
+    pub fn with_capacity_facts(mut self, facts: CapacityFacts) -> Self {
+        self.capacity_facts = facts;
+        self
+    }
+
+    pub fn capacity_facts(&self) -> CapacityFacts {
+        self.capacity_facts
     }
 
     /// Declare every protocol the serving provider offers — line 1595. The
@@ -383,6 +410,8 @@ pub struct TaskRequirements {
     /// The hard capability requirements this task implies — see
     /// `super::classify::TaskClassification::hard_capabilities`.
     pub hard_capabilities: Vec<HardCapability>,
+    /// Line 1516: the lowest workload tier that may serve this work.
+    pub minimum_tier: Option<WorkloadTier>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1235,6 +1264,20 @@ impl Routed {
 #[derive(Debug, Clone, Default)]
 pub struct SessionRouter {
     user_override: RoutingOverride,
+    /// Line 1577: both scopes' reserve policies, as configuration resolved
+    /// them. This router applies the **interactive** one — see
+    /// [`ReserveScope`] for why that is a fact about its callers and not a
+    /// guess — and carries both so the explanation can name which applied.
+    reserve_policies: ReservePolicies,
+    /// Line 1290: the sessions the user named as allowed to spend protected
+    /// reserve, as `crate::config::EffectiveConfig::reserve_override_sessions`
+    /// resolved them. Read at exactly one place,
+    /// [`SessionRouter::reserve_overridden`], which is true only of an
+    /// existing session the user named — the same scope rule the throwaway-job
+    /// router's own override type enforces, restated here in one line rather
+    /// than imported, because this module may not reach that module
+    /// (`super::tests::the_session_router_cannot_reach_the_disposable_policy_class`).
+    reserve_override_sessions: BTreeSet<String>,
 }
 
 impl SessionRouter {
@@ -1244,11 +1287,45 @@ impl SessionRouter {
 
     /// Line 1602.
     pub fn with_override(user_override: RoutingOverride) -> Self {
-        Self { user_override }
+        Self {
+            user_override,
+            ..Self::default()
+        }
+    }
+
+    /// Line 1577. Without this the default applies — `protect` for both
+    /// scopes, the fail-closed direction for a spending protection.
+    #[must_use]
+    pub fn with_reserve_policies(mut self, policies: ReservePolicies) -> Self {
+        self.reserve_policies = policies;
+        self
+    }
+
+    /// Line 1290. Naming none is the same as not calling this.
+    #[must_use]
+    pub fn with_reserve_override_sessions<S: Into<String>>(
+        mut self,
+        sessions: impl IntoIterator<Item = S>,
+    ) -> Self {
+        self.reserve_override_sessions = sessions.into_iter().map(Into::into).collect();
+        self
     }
 
     pub fn user_override(&self) -> &RoutingOverride {
         &self.user_override
+    }
+
+    pub fn reserve_policies(&self) -> ReservePolicies {
+        self.reserve_policies
+    }
+
+    /// Whether the user overrode reserve protection for `destination` — true
+    /// only for an existing session the user named. A fresh destination has
+    /// no session for the user to have named, and there is deliberately no
+    /// spelling of this set that means "every session" (line 1290 says *for
+    /// a specific task or session*).
+    fn reserve_overridden(&self, destination: &Destination) -> bool {
+        !destination.is_fresh() && self.reserve_override_sessions.contains(destination.id())
     }
 
     /// Choose where this work goes — the router's one production entry point.
@@ -1347,12 +1424,34 @@ impl SessionRouter {
             });
         }
 
-        let mut scored: Vec<(Destination, RoutingExplanation)> = eligible
+        // The set-level facts the pressure terms need (`super::pressure`)
+        // are computed against the *eligible* set, after step 2: a candidate
+        // a hard constraint removed is not an alternative anything can be
+        // routed to instead.
+        let candidates: Vec<Destination> = eligible
             .into_iter()
             .map(super::EligibleCandidate::into_inner)
-            .map(|destination| {
-                let explanation = score(&destination, current, inputs);
-                (destination, explanation)
+            .collect();
+        let mut scored: Vec<(Destination, RoutingExplanation)> = candidates
+            .iter()
+            .enumerate()
+            .map(|(index, destination)| {
+                let alternatives = alternatives_for(index, &candidates, inputs);
+                let pressure = PressureInputs {
+                    premium: !destination.backend().cost().is_free(),
+                    facts: destination.capacity_facts(),
+                    // `None` is "not established": `super::pressure` takes it
+                    // conservatively at the reserve gate (line 1459) and is
+                    // inert on it for the low-tier term.
+                    tier: inputs.requirements.minimum_tier,
+                    existing: !destination.is_fresh(),
+                    alternatives: &alternatives,
+                    policies: self.reserve_policies,
+                    scope: ReserveScope::Interactive,
+                    user_override: self.reserve_overridden(destination),
+                };
+                let explanation = score(destination, current, inputs, &pressure);
+                (destination.clone(), explanation)
             })
             .collect();
 
@@ -1451,6 +1550,7 @@ fn score(
     destination: &Destination,
     current: Option<&Destination>,
     inputs: &RouterInputs<'_>,
+    pressure: &PressureInputs<'_>,
 ) -> RoutingExplanation {
     let mut explanation = RoutingExplanation::new();
     explanation.push(harness_capability_fit(destination, inputs.overrides));
@@ -1458,9 +1558,92 @@ fn score(
     explanation.push(session_affinity(destination));
     explanation.push(prompt_cache_state(destination, current));
     explanation.push(quota_pressure(destination));
+    // Phase 35D, lines 1570–1577: the band the quota reading falls in, and
+    // what the scope's reserve policy makes of it — placed right after the
+    // reading it qualifies, so a reader sees the percentage and the band
+    // together.
+    explanation.push(pressure::capacity_band_pressure(pressure));
+    explanation.push(pressure::low_tier_spend(pressure));
     explanation.push(provider_health(destination, inputs.health, inputs.now));
     explanation.push(switching_and_bootstrap_cost(destination, current));
     explanation
+}
+
+/// What the other eligible candidates offer `candidates[index]` as an
+/// alternative — the two set-level facts `super::pressure` reads, computed
+/// here because only the router holds the set.
+///
+/// "Adequate" is [`is_adequate`]: no required hard capability established
+/// absent, the same fact [`capability_fit`] prices. "Available" is the
+/// provider's observed health, the same fact [`provider_health`] prices.
+/// Neither is re-decided here; both are read off the destination the way the
+/// pricing terms read them, so the alternative an explanation names is one
+/// those terms would also have scored well.
+fn alternatives_for(
+    index: usize,
+    candidates: &[Destination],
+    inputs: &RouterInputs<'_>,
+) -> Alternatives {
+    let mut alternatives = Alternatives::none();
+    for (other_index, other) in candidates.iter().enumerate() {
+        // A candidate that cannot serve right now — refused by its provider,
+        // or cooling down — is not an alternative anything can be routed to
+        // instead, whatever its band. Without this, a reserve-band
+        // destination would be denied in favour of a provider that
+        // `provider_health` is about to score as unavailable, and the work
+        // would go to the one place it cannot run.
+        if other_index == index
+            || !is_adequate(other, &inputs.requirements)
+            || !provider_available(other, inputs.health, inputs.now)
+        {
+            continue;
+        }
+        let free = other.backend().cost().is_free();
+        let band = other.capacity_facts().band();
+        if alternatives.healthy_free_adequate().is_none()
+            && free
+            && band.is_none_or(|band| band >= CapacityBand::Healthy)
+        {
+            alternatives = alternatives.with_healthy_free_adequate(other.id());
+        }
+        if alternatives.cheaper_adequate().is_none()
+            && (free || band.is_some_and(|band| band > CapacityBand::Reserve))
+        {
+            alternatives = alternatives.with_cheaper_adequate(other.id());
+        }
+    }
+    alternatives
+}
+
+/// Whether `destination` is established to lack none of the task's required
+/// hard capabilities — the negative half of [`capability_fit`]'s reading,
+/// as a fact rather than a price. Unverified is not a `no`, here as there.
+fn is_adequate(destination: &Destination, requirements: &TaskRequirements) -> bool {
+    if requirements.hard_capabilities.is_empty() {
+        return true;
+    }
+    let harness_caps = crate::harness::adapter_for(destination.harness())
+        .map(|adapter| adapter.describe().capabilities)
+        .unwrap_or(HarnessCapabilities::UNVERIFIED);
+    let resource =
+        capability::ResourceCapabilities::describe(&harness_caps, destination.resource_facts());
+    requirements.hard_capabilities.iter().all(|requirement| {
+        !matches!(
+            resource.axis(capability::axis_for(*requirement)),
+            Declared::Verified { value: false, .. }
+        )
+    })
+}
+
+/// Whether the provider behind `destination` is currently usable by its
+/// observed health — not refused, not cooling down. The same two facts
+/// [`provider_health`] prices at [`HEALTH_UNAVAILABLE_PENALTY`].
+fn provider_available(destination: &Destination, pool: &FreePool, now: Instant) -> bool {
+    let health = pool.health(&FreeResource::new(
+        destination.backend().credential().clone(),
+        destination.backend().model().label(),
+    ));
+    !health.credential_was_rejected() && health.is_available(now)
 }
 
 /// The gate step 2 runs. Two constraints and no others, for the same reason
