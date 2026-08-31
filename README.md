@@ -19,10 +19,10 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`█████████████████████████░░░░░░░░░░░░░░░` 824 / 1280 mandatory capabilities (64%)
+`███████████████████████████████░░░░░░░░░` 1027 / 1292 mandatory capabilities (79%)
 
 <details>
-<summary>Per-phase breakdown (43 of 104 phases complete)</summary>
+<summary>Per-phase breakdown (58 of 105 phases complete)</summary>
 
 | Phase | Done |
 |---|---|
@@ -59,7 +59,7 @@ the authoritative specification and tracks what is done.
 | Phase 14 — Orchestrator role | 11/11 ✅ |
 | Phase 15 — Orchestrator wake-up flow | 7/8 |
 | Phase 16 — Worker transparency | 7/7 ✅ |
-| Phase 17 — cmux optional integration | 0/10 |
+| Phase 17 — cmux optional integration | 10/10 ✅ |
 | Phase 18 — Raw event recording | 10/10 ✅ |
 | Phase 19 — Portable session checkpoints | 14/14 ✅ |
 | Phase 20 — Minimal durable project memory | 16/18 |
@@ -71,10 +71,10 @@ the authoritative specification and tracks what is done.
 | Phase 21E — Decision ladder and conflict handling | 8/12 |
 | Phase 21F — Memory retrieval quality | 9/11 |
 | Phase 21G — Memory revalidation | 3/9 |
-| Phase 21H — Simplicity-first implementation policy | 0/10 |
-| Phase 21I — Production-aware implementation checks | 0/11 |
-| Phase 21J — Implementation review checklist | 0/9 |
-| Phase 21K — Assumption-aware implementation guardrails | 0/43 |
+| Phase 21H — Simplicity-first implementation policy | 10/10 ✅ |
+| Phase 21I — Production-aware implementation checks | 11/11 ✅ |
+| Phase 21J — Implementation review checklist | 9/9 ✅ |
+| Phase 21K — Assumption-aware implementation guardrails | 42/43 |
 | Phase 22 — Memory lifecycle and supersession | 9/9 ✅ |
 | Phase 23 — Memory full-text search | 7/7 ✅ |
 | Phase 24 — Memory reranking | 1/6 |
@@ -82,7 +82,7 @@ the authoritative specification and tracks what is done.
 | Phase 26 — Memory query for agents | 6/6 ✅ |
 | Phase 27 — Context injection | 10/11 |
 | Phase 28 — File-aware memory lookup | 0/5 |
-| Phase 29 — Memory commits | 0/8 |
+| Phase 29 — Memory commits | 7/8 |
 | Phase 30 — Session context metadata | 7/8 |
 | Phase 31 — Compaction-aware behavior | 1/7 |
 | Phase 32 — Resource registry | 12/12 ✅ |
@@ -93,43 +93,44 @@ the authoritative specification and tracks what is done.
 | Phase 32E — Burn rate and exhaustion forecasting | 0/10 |
 | Phase 32F — Protected quota reserve | 7/8 |
 | Phase 32G — Provider-aware request-cost estimation | 0/10 |
-| Phase 33 — Resource health | 10/15 |
+| Phase 33 — Resource health | 13/15 |
 | Phase 33A — Routing evidence ledger | 10/15 |
 | Phase 33B — Reliability-adjusted agent performance | 0/14 |
-| Phase 33C — Failure, quota, and route correlation | 5/15 |
+| Phase 33C — Failure, quota, and route correlation | 11/15 |
 | Phase 34 — Capability registry | 10/10 ✅ |
-| Phase 34A — Workload tiers | 7/10 |
-| Phase 34B — Routing-model role | 7/15 |
-| Phase 34C — Automatic routing-model selection | 6/13 |
-| Phase 34D — Router request schema | 2/13 |
-| Phase 34E — Router economics | 1/9 |
+| Phase 34A — Workload tiers | 10/10 ✅ |
+| Phase 34B — Routing-model role | 14/15 |
+| Phase 34C — Automatic routing-model selection | 10/13 |
+| Phase 34D — Router request schema | 13/13 ✅ |
+| Phase 34E — Router economics | 8/9 |
 | Phase 34F — Model capability and tier calibration | 0/11 |
 | Phase 35 — Lightweight task classification | 14/14 ✅ |
-| Phase 35A — Candidate generation | 0/11 |
-| Phase 35B — Candidate scoring | 11/25 |
-| Phase 35C — Capacity-aware tier escalation and downgrade | 0/9 |
-| Phase 35D — Routing under subscription pressure | 0/8 |
-| Phase 36 — Session affinity | 0/8 |
+| Phase 35A — Candidate generation | 1/11 |
+| Phase 35B — Candidate scoring | 12/25 |
+| Phase 35C — Capacity-aware tier escalation and downgrade | 9/9 ✅ |
+| Phase 35D — Routing under subscription pressure | 8/8 ✅ |
+| Phase 36 — Session affinity | 8/8 ✅ |
 | Phase 37 — Basic session-aware router | 10/11 |
-| Phase 38 — Quota-preserving routing | 0/7 |
+| Phase 38 — Quota-preserving routing | 5/7 |
 | Phase 39 — Gateway-backed disposable jobs | 0/9 |
 | Phase 40 — Fresh-session handoff | 9/9 ✅ |
 | Phase 41 — Project overview | 15/15 ✅ |
 | Phase 42 — External control API | 13/13 ✅ |
-| Phase 43 — MCP surface for orchestrators | 0/10 |
-| Phase 44 — User control and override | 0/9 |
+| Phase 43 — MCP surface for orchestrators | 10/10 ✅ |
+| Phase 44 — User control and override | 9/9 ✅ |
 | Phase 45 — Failure handling | 9/9 ✅ |
-| Phase 46 — Security and contamination tests | 6/8 |
+| Phase 46 — Security and contamination tests | 8/8 ✅ |
 | Phase 47 — Observability without spectacle | 8/15 |
 | Phase 48 — CLI ergonomics | 8/8 ✅ |
-| Phase 49 — Configuration | 14/16 |
-| Phase 50 — Tracked project knowledge as an optional feature | 0/7 |
-| Phase 51 — Evaluation hooks | 5/37 |
+| Phase 49 — Configuration | 16/16 ✅ |
+| Phase 50 — Tracked project knowledge as an optional feature | 7/7 ✅ |
+| Phase 51 — Evaluation hooks | 12/37 |
 | Phase 52 — Criteria before adding semantic/vector retrieval | 0/6 |
 | Phase 53 — Criteria before adding graph storage | 0/5 |
-| Phase 54 — Criteria before deeper cmux coupling | 0/4 |
+| Phase 54 — Criteria before deeper cmux coupling | 4/4 ✅ |
 | Phase 54A — Setup and portability completion criteria | 0/10 |
 | Phase 55 — V1 completion definition | 0/23 |
+| Phase 56 — Harness–subscription decoupling: choose the harness, route the subscription and model | 0/12 |
 
 </details>
 <!-- progress:end -->

@@ -2038,7 +2038,7 @@ costs a material share of it is not, however small its absolute price.
   "explicit opt-in" indistinguishable from a default, which is the exact wording
   `MeteredUse`'s own doc warns against.
 - **Nothing here authorises spending premium interactive capacity on bookkeeping.**
-  Map line 1611 and the Product Rule at line 2201 still stand.
+  Map line 1611 and the Product Rule at line 2218 still stand.
 
 ### The sub-question this leaves genuinely open, and it must not be faked
 
@@ -2969,4 +2969,41 @@ building one on purpose is worse than leaving the gap named.
 
 Package: `GH-TIER-CEILING`; lines 1401–1403 closed on the tier producer plus the
 declarations `capability_fit` already reads.
+
+## Phase 56: the harness is the user's choice; the subscription is Glasshouse's to route
+
+**Instruction of record, 2026-08-31, from the user:** *"decoupling subscription /
+harness — Claude Code and model, or Codex and model, or Gemini and model —
+everything where possible, so Glasshouse gets a real bundled API gateway plus
+subscription rules. Conceptually I want to be able to choose the harness, not
+the provider, because some harnesses are more efficient in different tasks."*
+Recorded as Phase 56 (map lines 1945–1956, twelve mandatory lines).
+
+**What it changes.** Line 497 — *no broad cross-protocol request translation
+until concrete harness/provider pairs require it* — was a standing rule with no
+trigger. Phase 56 is the trigger, and it keeps 497's shape: translation lands
+one **named** pair at a time, each behind an end-to-end test through the shipped
+binary against a fixture upstream (line 1956), and each refused pair is
+refused by name (line 1949). The refusal register's **P10** — *a model axis on
+the candidate set*, the missing producer behind 566/569 and Phase 35A/35B — is
+now a requirement rather than an observation (line 1953).
+
+**What it does not change.** Phase 55's fixed requirements stand: no replacement
+harness, no cloud service. A harness's native tooling is kept or the pairing is
+refused (line 1950); nothing is silently degraded to make a pairing look
+supported. The decoupling is opt-in per launch profile (line 1955); every
+existing profile keeps its native pairing until the user changes it.
+
+**Order of work, from the tree as it stands.** (1) A subscription as a routing
+resource with rules — configuration first, no routing change (lines 1946,
+1947, 1954). (2) The subscription/model axis on the candidate set (P10;
+line 1953). (3) Gateway translation for the first named pair — the pair the
+user actually wants first, with its end-to-end test (lines 1948, 1949,
+1950, 1956). (4) Per-harness efficiency evidence and the preference
+that reads it (lines 1951, 1952), which reuses Phase 51's evaluation
+channel and today's `RoutingTierObserved` rows. (5) The announcement and the
+never-charge rule (line 1954), which is what makes the whole thing
+inspectable.
+
+Not yet packaged; every package owes its Phase −1 from production code.
 

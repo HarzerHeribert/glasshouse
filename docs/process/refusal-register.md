@@ -575,7 +575,7 @@ path. **Do not conflate them again.**
 | **P7** | a retrieval-quality signal (score computed and dropped, `memory/search.rs:443`) | 1129, 1094, 939 | no |
 | **P8** | provider health reaching the router | 1599, 1433, 531 in part | no |
 | **P9** | a compaction event record | **row corrected — see “Phase 31 and P9 scoped” below** | **no** |
-| **P10** | a model axis on the candidate set | 566, 569, 35A/35B unchecked | no |
+| **P10** | a model axis on the candidate set | 566, 569, 35A/35B unchecked | no — **now REQUIRED by Phase 56 line 1953 (2026-08-31)** |
 | **P11** | per-model capability ratings | 1475–1485 | likely |
 
 **Not work, so nobody re-derives them:** Cluster E, Cluster F, 442 (a `keyring`

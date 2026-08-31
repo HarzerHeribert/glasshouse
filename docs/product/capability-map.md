@@ -1938,6 +1938,23 @@ Fixed architectural requirements
 ☐ Consider V1 usable when cmux integration can expose or spawn a session externally without being required for normal operation.
 ☐ Consider V1 complete only after project-isolation and cross-contamination tests pass.
 
+Phase 56 — Harness–subscription decoupling: choose the harness, route the subscription and model
+
+Recorded 2026-08-31 from the user's instruction of record: *"I want to be able to choose the harness, not the provider, because some harnesses are more efficient in different tasks."* A coding harness (Claude Code, Codex, Gemini's CLI, and the others Phase 9 adapts) is today bound in practice to its vendor's subscription and model. Phase 9J already stores harness vendor, model developer, serving provider and wire protocol as independent facts; this phase makes that independence usable: a subscription is a routing resource with its own rules, Glasshouse's bundled gateway serves any supported harness from any subscription or model it can translate to the harness's native protocol, and the choice of harness is made on evidence of which harness is efficient at which kind of task. Line 497's standing rule — no broad cross-protocol translation until concrete pairs require it — is not repealed; this phase is the concrete requirement it was waiting for, one named pair at a time, each behind an end-to-end test. Phase 55's fixed requirements hold: no replacement harness, no cloud service.
+
+☐ Allow a user to choose the coding harness for a task independently of which provider, subscription, or model serves it.
+☐ Treat a subscription — a Claude, ChatGPT/Codex, or Gemini plan, or an API key — as a routing resource with its own rules, separate from any harness that consumes it.
+☐ Allow a subscription rule to state which harnesses, workload tiers, and job kinds the subscription may serve, and which it must never serve.
+☐ Serve any supported harness through Glasshouse's bundled API gateway from any subscription or model whose wire protocol the gateway can translate to the harness's native protocol.
+☐ Translate between wire protocols at the gateway for concrete harness/provider pairs as each is required, recording every supported pairing and every refused one by name.
+☐ Keep a harness's native tooling — editing, shell, repository, and tool-call behaviour — intact when it is served by a non-native provider, and refuse the pairing by name when it cannot be kept.
+☐ Record per-harness task efficiency — tokens, wall-clock, request count, and outcome by task class — so that harness choice can rest on evidence rather than on which vendor bills for it.
+☐ Prefer, for a stated task the user has not assigned a harness to, the harness with the better observed efficiency for that task class, and say why.
+☐ Give the routing candidate set a subscription and model axis, so the same harness is ranked across every subscription allowed to serve it.
+☐ Never charge a task to a subscription the user's rules did not allow for that harness or tier, and announce which subscription served each session.
+☐ Keep the decoupling opt-in per launch profile, so an existing profile keeps its native pairing until the user changes it.
+☐ Cover each supported harness/provider/protocol pairing with an end-to-end test through the shipped binary against a fixture upstream before offering it.
+
 ────────
 
 Maybe / Experimental Capabilities

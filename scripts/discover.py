@@ -290,7 +290,10 @@ def parse_box_lines(lines: list[str]) -> list[tuple[int, str, str]]:
 
 def phase_span(lines: list[str], phase_id: str) -> tuple[int, int, str] | None:
     heading_re = re.compile(r"^Phase\s+" + re.escape(phase_id) + r"\b")
-    next_re = re.compile(r"^Phase\s+\S+")
+    # A phase ends at the next phase heading OR at the experimental block:
+    # the last mandatory phase otherwise runs to EOF and counts every Maybe
+    # line and Product Rule as its own (Phase 56 reported 241 boxes for 12).
+    next_re = re.compile(r"^(Phase\s+\S+|Maybe\s+[A-Z]\b|Maybe / Experimental Capabilities)")
     start = None
     heading = None
     for i, line in enumerate(lines):

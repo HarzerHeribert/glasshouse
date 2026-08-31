@@ -13,7 +13,7 @@ historical handoff, and the `--lines` flag of `new-packet.sh`. Nothing crashes.
 The numbers still resolve. They just resolve to the wrong capability.
 
 Checked before writing this: only two commits have ever inserted map lines
-without deleting any, and **both landed below line 1943**, inside the
+without deleting any, and **both landed below line 1960 (1943 before Phase 56 was inserted on 2026-08-31)**, inside the
 "Maybe / Experimental" section. So the mandatory range has never actually
 shifted. That is luck, not design — the insertions happened to be at the bottom.
 

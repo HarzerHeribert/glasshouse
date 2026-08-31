@@ -1,3 +1,5 @@
+**2026-08-31 (new requirement):** Phase 56 — harness–subscription decoupling — recorded from the user's instruction (map 1945–1956, twelve lines; design-decisions has the ruling and the order of work). The mandatory denominator is now 1292.
+
 **2026-08-31 (Opus 5 orchestrator, later):** 1027/1280 committed (`afd9ebb`) — batches 57 and 58 landed, 130 boxes today; one worker live (1317); next: the map side-effect recon and its prove-it successors.
 
 **2026-08-31 (Opus 5 orchestrator):** 953/1280 committed; batch 57's five
