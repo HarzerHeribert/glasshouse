@@ -571,3 +571,7 @@ Recorded scope limits — stated by the worker, not discovered later:
 - 'Through the shipped binary' is satisfied to exactly T1's depth: the binary's own gateway door, real sockets, production upstream builder — not `glasshouse launch` (blocked at profile::apply_gateway, witness still green); same reason T1's ruling left these PARTIALLY VERIFIED
 
 ---
+
+#### T2 finding 1 resolved same day: the classifier asks the table in the harness's direction
+
+Package `GH-PROTOCOL-FIT-DIRECTION`, 2026-08-31, Sonnet at high (Amber). One arm in `harness::pairing::protocol_fit`: the translation lookup now asks `translation_available(spoken_protocol, route)` — the harness's own direction — so T1's shipped pairing (a harness speaking anthropic-messages on a chat-only route) classifies `Translated` instead of `Incompatible`, and the asymmetric witness (openai-chat spoken on an anthropic-only route) stays `Incompatible`. Both direction-mutations KILLED with distinguishing panics; the four affected suites and the full blast radius green.

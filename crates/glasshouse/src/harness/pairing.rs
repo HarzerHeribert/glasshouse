@@ -826,10 +826,15 @@ fn protocol_fit(
         return ProtocolFit::Compatible;
     }
     // The one caller of the translation seam — answered from the gateway's
-    // pair table, which supports three pairs as of T2 (2026-08-31).
+    // pair table, which supports three pairs as of T2 (2026-08-31). The
+    // table's `from` is the protocol the harness speaks and `to` is what the
+    // route serves, so the lookup must go `spoken -> route`, not the reverse:
+    // asking `route -> spoken` finds T1's own pairing (Claude Code served by
+    // an OpenAI-Chat-only entitlement) at the refused reverse row and
+    // answers `Incompatible` for a pair the gateway translates daily.
     if spoken
         .iter()
-        .any(|to| crate::provider::translation_available(route, *to))
+        .any(|spoken_protocol| crate::provider::translation_available(*spoken_protocol, route))
     {
         return ProtocolFit::Translated;
     }
@@ -1355,6 +1360,45 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// T1's own shipped pairing: Claude Code (which speaks
+    /// `anthropic-messages`) served by a route that serves only
+    /// `openai-chat` — OpenRouter and every OpenAI-compatible key. The
+    /// translation arm used to ask the table backwards
+    /// (`translation_available(route, spoken)`), which looked up the
+    /// refused reverse row (`openai-chat -> anthropic-messages`) and
+    /// answered `Incompatible` for the pairing the gateway translates every
+    /// day. This is the witness for the direction fix: the arm must ask
+    /// `translation_available(spoken, route)`.
+    #[test]
+    fn a_harness_speaking_anthropic_messages_on_a_chat_only_route_is_translated() {
+        // A model attributed to a different vendor than Claude Code's own,
+        // so the pairing falls through to the protocol rungs instead of
+        // being decided by `VendorNative` first (line 560).
+        let mut q = query(IntegrationId::ClaudeCode, "gpt-5.5");
+        q.route.protocol = Some(WireProtocol::OpenAiChat);
+        q.provider_protocols = vec![WireProtocol::OpenAiChat];
+        let pairing = classify(&q, &none());
+        assert_eq!(pairing.protocol_fit(), ProtocolFit::Translated);
+        assert_eq!(pairing.class(), PairingClass::ProtocolTranslated);
+    }
+
+    /// The asymmetric witness that the fix is not a blanket "either
+    /// direction supported" flip. OpenCode speaks `openai-chat`; a route
+    /// serving only `anthropic-messages` looks up `openai-chat ->
+    /// anthropic-messages`, which the table refuses (`NOT_YET_REVERSE`)
+    /// even though the opposite direction (`anthropic-messages ->
+    /// openai-chat`, T1's pairing above) is supported. A classifier that
+    /// answered `Translated` whenever *either* direction is supported would
+    /// wrongly translate this pairing too.
+    #[test]
+    fn a_harness_speaking_openai_chat_on_an_anthropic_only_route_stays_incompatible() {
+        let mut q = query(IntegrationId::OpenCode, "claude-fable-5");
+        q.route.protocol = Some(WireProtocol::AnthropicMessages);
+        q.provider_protocols = vec![WireProtocol::AnthropicMessages];
+        let pairing = classify(&q, &none());
+        assert_eq!(pairing.protocol_fit(), ProtocolFit::Incompatible);
     }
 
     /// The translation seam is *asked*, not assumed absent. A classifier that
