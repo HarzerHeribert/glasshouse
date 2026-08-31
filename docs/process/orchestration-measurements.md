@@ -3816,7 +3816,7 @@ have taken.
    sizing argument rests on the target count alone, which is enough for the
    ordering but not for a budget.
 
-## Batch 56 — six workers at once, 74 lines, sized by mechanism at Fable tier
+## Batch 56 — seven workers at once, 79 lines, sized by mechanism at Fable tier
 
 Dispatched 2026-08-31 ~02:30–02:45 by the first Fable 5 orchestrator session,
 under the user's instruction to use Fable for larger packages, go more parallel,
@@ -3830,6 +3830,7 @@ and not surface decisions solely because they are complicated.
 | routing-economics | Fable xhigh | 17 | producers for the six 34C refusals (reliability, latency, RPM), fallback chain, local-only, overhead report |
 | routing-outcome | Opus high | 5 | Cluster B join: `task_outcome` → evaluation rows; RC-B ruled |
 | user-control | Opus high | 9 | flags + evidence + two seams (mute, input precedence) |
+| failure-taxonomy | Fable xhigh | 5 | ruling + migration 16: failure classes from framing, joined the round late as a declared co-editor of database.rs and evidence.rs |
 
 **What this batch tests.** (1) Whether a 10–20-line package at Fable tier holds
 together — batch 55 averaged 0.77 boxes per package; the mechanism-sized outlier
