@@ -20,6 +20,41 @@ validated and waiting on the commit. Next action: `.agent-runtime/CONTINUATION.m
 
 Last updated: 2026-08-31 (Europe/Berlin)
 
+## Checkpoint — 2026-08-31, batches 59–61 and the Opus → Fable hand-off: 1040 / 1305 (79%)
+
+**The hand-off landed hot and the board never emptied.** The Opus 5 orchestrator
+committed 1317, ten prove-it lines and 1480 (`eb44707`), then handed off with two
+workers live and one patch staged; the Fable 5 successor (session `a78f9a53`,
+workspace:368) integrated the staged patch — Phase 28's 1140/1143, `1ba3f80`, the
+phase's first evidence entry — and refilled the board to six. The predecessor pane
+stayed up as the user's requirements scribe and committed **Phase 56A** (`2ea40d6`,
+map 1962–1974: the entitlement pool and subscription broker) by pathspec while the
+successor's patch sat staged; `orchestration-measurements.md` prices the hand-off.
+
+**The user's requirement of record is Phase 56 with 56A as its core**, and the
+parked question on translation pairs came back *"as much of this as possible — full
+intercompatibility and translation"*. Ruled in `design-decisions.md` §Phase 56
+(`950def9`): the full matrix as scope; one codec per wire protocol around one
+canonical form instead of N² translators; `ingress`'s byte-for-byte relay kept for
+served protocols with only today's 404 branch entering a codec; order T1 → T2 → T3.
+The register's P1b opens for translated exchanges (`d424091`).
+
+**Live at this checkpoint**: subscription-rules (Fable; 56 1946/1947/1954; 12/12
+mutations killed, report pending its blast radius), hook-extraction-detach (Opus,
+Red; 31 1174), gateway-translate (Fable; T1 — 56 1948/1949/1950/1956),
+harness-efficiency (Sonnet; 56 1951 + 39 1629), prove-it-v1-sessions and
+prove-it-v1-routing (Sonnet, tests-only; 15 of Phase 55's criteria). **Queued,
+validated**: `entitlement-pool` (56A step 1 — 1962/1963/1964/1973; dispatch after
+subscription-rules integrates, it renames that package's types) and
+`prove-it-v1-orch-memory` (55 1925–1929, 1938). `.agent-runtime/CONTINUATION.md`
+§2 is the exact board with surfaces.
+
+**Two mechanical traps, now in memory**: `cmux send "...\r"` does not submit in a
+Claude Code pane — a worker sat idle 40 minutes with the notice in its prompt; use
+`send-key Enter` and confirm the token counter moved. And a pathspec commit sweeps
+any uncommitted edit to the same file, so with a scribe session live every map
+tick, `progress.py`, `orient.py` and commit happen in one command.
+
 ## Checkpoint — 2026-08-31, batches 56–57: 896 / 1280 (70%)
 
 **Batch 56 landed whole**: seven workers, 79 lines, 65 boxes, 824 → 889 in one
