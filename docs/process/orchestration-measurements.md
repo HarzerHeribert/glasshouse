@@ -4010,3 +4010,29 @@ Recurring defect, now in memory (`detached-gates-die-without-exit-lines`): three
 | entitlement-env-scrub (Sonnet, Amber) | 56A 1973 | 1 | 2/2 | the held clause discharged; every launch path scrubs |
 
 **13 boxes this span; 1067 → 1080/1305 (82%).** The dead-gate defect fired twice more (t2's blast, the scrub's) — the ps-then-nudge recovery is now routine at under two minutes each. The stale-workspaces watch caught its first forgotten pane fifteen minutes after being written.
+
+## Batch 67 + the investigation swarm — 2026-08-31 evening
+
+Broker (56A-3) landed `0587f4a` (1953/1966/1967/1968/1969) — but only after the
+user, at 14% weekly quota, asked for an investigation swarm to burn it before
+midnight. **12 read-only agents** (6 Opus adversarial, 6 Sonnet quality), each
+writing findings + a proposed-fix diff to its OWN gitignored file (no
+cross-contamination; a worktree can never collide with `.agent-runtime/swarm-*`).
+**57 findings.** Ruled in `.agent-runtime/swarm-2026-08-31/ACCEPTANCE.md`.
+
+The swarm paid for itself immediately: the adversarial routing agent found
+`burn_urgency` rewarding a reset already in the past (+1.0), which inverts line
+1967 — caught and fixed *in the same commit as the box it would have falsified*.
+Six more high-severity defects accepted and queued (cmux `send --text` injection
+past a documented guarantee; `deny_harness` typo silently voiding a deny rule
+for want of `deny_unknown_fields`; a credential reaching `Debug` and
+`glasshouse.log` unredacted; a dead memory dedup check; a restart-vs-resume
+identity bug; translation streaming the wrong tool-call id). 26 quality findings
+(atomic-write dup across 4 caches; a 1018-line `launch_session`; a `require(id)`
+helper for 15 sites) batched into behaviour-preserving cleanup packets.
+
+Two process notes: the swarm's concurrent load flaked one real-binary
+subprocess test (`v1_1907`) during the broker blast — it passes isolated, the
+classic §34 load flake; and an untracked helper (`swarm-collate.sh`) dirtied the
+tree and made `integrate.sh` refuse until committed — the swarm findings dir
+itself is gitignored, which is what keeps it collision-free.
