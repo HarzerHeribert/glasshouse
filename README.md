@@ -19,7 +19,7 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`███████████████████████████████░░░░░░░░░` 1040 / 1305 mandatory capabilities (79%)
+`███████████████████████████████░░░░░░░░░` 1041 / 1305 mandatory capabilities (79%)
 
 <details>
 <summary>Per-phase breakdown (58 of 106 phases complete)</summary>
@@ -84,7 +84,7 @@ the authoritative specification and tracks what is done.
 | Phase 28 — File-aware memory lookup | 2/5 |
 | Phase 29 — Memory commits | 7/8 |
 | Phase 30 — Session context metadata | 7/8 |
-| Phase 31 — Compaction-aware behavior | 1/7 |
+| Phase 31 — Compaction-aware behavior | 2/7 |
 | Phase 32 — Resource registry | 12/12 ✅ |
 | Phase 32A — Unified quota and capacity model | 13/21 |
 | Phase 32B — Quota telemetry sources | 13/14 |

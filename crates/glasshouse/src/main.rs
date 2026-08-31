@@ -6134,7 +6134,11 @@ fn report_hook_with(
                     );
                 }
                 if memory_extraction_enabled(runtime) {
-                    run_extraction(
+                    // `hook_extraction`, not `run_extraction`: this is the
+                    // trigger line 1174 is about, and a compaction that
+                    // recorded nothing must say so where the person can read
+                    // it rather than into a log that is off.
+                    hook_extraction(
                         runtime,
                         &id,
                         model(&id),
@@ -6259,7 +6263,7 @@ fn report_hook_with(
             if memory_extraction_enabled(runtime) {
                 match (landed, completed) {
                     (Some(commit), _) => {
-                        run_extraction(
+                        hook_extraction(
                             runtime,
                             &id,
                             model(&id),
@@ -6267,7 +6271,7 @@ fn report_hook_with(
                         );
                     }
                     (None, true) => {
-                        run_extraction(
+                        hook_extraction(
                             runtime,
                             &id,
                             model(&id),
@@ -6575,6 +6579,127 @@ fn run_extraction(
             None
         }
     }
+}
+
+/// [`run_extraction`] on a hook's path, where a lost memory has to be said
+/// out loud.
+///
+/// # Why this exists at all, when `run_extraction` already logs every failure
+///
+/// Because on this path nothing reads the log. `logging::LogConfig::resolve`
+/// answers [`glasshouse::logging::LogSink::Disabled`] unless `GLASSHOUSE_LOG`
+/// is set or a `--log-*` flag is given, and a harness spawning
+/// `glasshouse hook` gives neither — so `run_extraction`'s
+/// `"memory extraction produced nothing"` and its bound-expiry `warn!` are
+/// both written to a subscriber that was never installed. Measured
+/// 2026-08-31: a `PreCompact` hook whose model call failed exited **0**, with
+/// **empty stderr**, having recorded nothing.
+///
+/// That is the precise thing capability map line 1174 is about. *"Record
+/// enough pre-compaction durable memory that important project decisions do
+/// not depend solely on a lossy native compact summary"* is not satisfied by
+/// a trigger that fires, fails, and says nothing: the person then believes
+/// their decisions were captured and goes on to compact, which is worse than
+/// knowing they were not.
+///
+/// # Why stderr, and why one line
+///
+/// `main.rs`'s own [`run`] already draws this distinction for the overridden
+/// safety refusal, three lines into the program and for exactly this reason:
+/// *"logging is off by default, so a `tracing::warn!` there can go completely
+/// unseen … it always gets a line on stderr, log or no log."* A memory the
+/// compaction trigger was supposed to record and did not is user-facing in
+/// the same sense.
+///
+/// Stderr and not stdout, and never a non-zero exit: Claude Code reads a
+/// hook's exit code as a gate on the turn, and Phase 21's *"keep
+/// memory-extraction failure non-fatal to the coding session"* is unchanged
+/// by this. The hook still exits zero whatever extraction did.
+///
+/// Not used by `glasshouse memory commit`: that trigger is
+/// [`glasshouse::memory::ExtractionTrigger::Manual`], it runs in front of a
+/// person who is watching, and it prints its own report. This is the wrapper
+/// for the triggers that run inside somebody's session with nobody watching.
+fn hook_extraction(
+    runtime: &Runtime,
+    id: &SessionId,
+    model: Box<dyn glasshouse::memory::ExtractionModel>,
+    trigger: glasshouse::memory::ExtractionTrigger,
+) {
+    // Read before the call, because `run_extraction` takes the trigger.
+    let named = trigger.as_str();
+    let outcome = run_extraction(runtime, id, model, trigger);
+    if let Some(notice) = lost_extraction_notice(named, outcome.as_ref()) {
+        eprintln!("glasshouse: warning: {notice}");
+        eprintln!(
+            "glasshouse: the coding session is unaffected; this project's durable memory is not \
+             updated for this boundary"
+        );
+    }
+}
+
+/// What to tell the person about an extraction that recorded nothing, or
+/// [`None`] when nothing was lost.
+///
+/// Separated from [`hook_extraction`] so the decision can be tested without a
+/// process: what this returns is the whole of the difference between a silent
+/// loss and an observable one.
+///
+/// # The four cases, and why two of them are silent
+///
+/// - **no outcome at all.** [`run_extraction`] answers `None` for its two
+///   preparation failures and for [`EXTRACTION_BOUND`] expiring. All three
+///   are losses — a boundary went by and nothing was written — and the reason
+///   is in a log that, on this path, does not exist.
+/// - **a failure.** The model was unavailable, refused, timed out, panicked,
+///   answered something the contract could not read, or the store could not
+///   be read for duplicate detection. Each is a memory that should exist and
+///   does not, and [`glasshouse::memory::extract::ExtractionFailure`]'s `Display` is a
+///   fixed phrase by construction — no provider body reaches this line.
+/// - **[`glasshouse::memory::extract::ExtractionFailure::NothingToExtract`] is
+///   deliberately silent.** There was no session activity to extract from, so
+///   there is no memory to have lost. A warning here would fire on every
+///   compaction of a session that had not done anything yet, and a warning
+///   that cries wolf is how the real one gets ignored.
+/// - **rejections without a failure.** The model answered and some of what it
+///   proposed did not survive the contract. Said out loud when *nothing*
+///   survived, and silent when something did: a run that stored two memories
+///   and rejected a third lost nothing a person needs to act on, and
+///   duplicates and speculative drops are the mechanism working rather than
+///   failing.
+fn lost_extraction_notice(
+    trigger: &str,
+    outcome: Option<&glasshouse::memory::ExtractionOutcome>,
+) -> Option<String> {
+    use glasshouse::memory::extract::ExtractionFailure;
+
+    let Some(outcome) = outcome else {
+        return Some(format!(
+            "memory extraction for `{trigger}` did not finish and recorded nothing (it was cut \
+             off at its {}s bound, or this session's history could not be read)",
+            EXTRACTION_BOUND.as_secs()
+        ));
+    };
+
+    if let Some(failure) = &outcome.failure {
+        // The one failure that is not a loss.
+        if matches!(failure, ExtractionFailure::NothingToExtract) {
+            return None;
+        }
+        return Some(format!(
+            "memory extraction for `{trigger}` recorded nothing: {failure}"
+        ));
+    }
+
+    if outcome.stored() == 0 && !outcome.rejected.is_empty() {
+        return Some(format!(
+            "memory extraction for `{trigger}` recorded nothing: the model answered, and all {} \
+             of the memories it proposed were rejected",
+            outcome.rejected.len()
+        ));
+    }
+
+    None
 }
 
 /// What the extraction model reported the call cost, into this project's
@@ -10611,6 +10736,141 @@ mod tests {
         let reading_a_field = "fn report_hook(runtime: &Runtime, session: &str, event: &str) {\n    \
                                 tracing::debug!(prompt = \"x\");\n}\n";
         assert!(strip_comments(reading_a_field).contains("prompt"));
+    }
+
+    /// An outcome that recorded nothing, which every case below varies one
+    /// field of.
+    ///
+    /// A struct literal rather than a constructor because
+    /// `ExtractionOutcome::empty` is private to its own module and needs a
+    /// `SessionChunk` this decision has nothing to do with. One literal, so a
+    /// field added to the outcome breaks one place.
+    fn recorded_nothing() -> glasshouse::memory::ExtractionOutcome {
+        glasshouse::memory::ExtractionOutcome {
+            trigger: glasshouse::memory::ExtractionTrigger::BeforeCompaction,
+            model: "a test model".to_owned(),
+            session_id: "s".to_owned(),
+            commit: None,
+            recorded: Vec::new(),
+            lowered: Vec::new(),
+            speculative: 0,
+            duplicates: 0,
+            rejected: Vec::new(),
+            activity_dropped: 0,
+            activity_truncated: 0,
+            redactions: 0,
+            failure: None,
+            call: None,
+        }
+    }
+
+    /// A model that could not be asked is a memory that should exist and does
+    /// not, and [`lost_extraction_notice`] says so naming both the trigger and
+    /// the reason.
+    ///
+    /// The reason is [`glasshouse::memory::ModelError`]'s own `Display`, which
+    /// is a fixed phrase by construction — this line reaches a person's
+    /// terminal, and a provider error body can echo the prompt that was sent.
+    #[test]
+    fn a_failed_extraction_is_reported_with_its_trigger_and_its_reason() {
+        let mut outcome = recorded_nothing();
+        outcome.failure = Some(glasshouse::memory::extract::ExtractionFailure::Model(
+            glasshouse::memory::ModelError::Refused,
+        ));
+
+        let notice = lost_extraction_notice("before_compaction", Some(&outcome))
+            .expect("a failed extraction is a lost memory");
+        assert!(
+            notice.contains("before_compaction"),
+            "the notice must name which boundary lost its memory: {notice}"
+        );
+        assert!(
+            notice.contains("the extraction model declined the request"),
+            "the notice must say why: {notice}"
+        );
+    }
+
+    /// A session with no activity has no memory to have lost, and a warning
+    /// here would fire on every compaction of a session that had not done
+    /// anything yet.
+    ///
+    /// This is the assertion that keeps the notice worth reading: a warning
+    /// that cries wolf is indistinguishable from one that matters, and the way
+    /// this one stops being read is by appearing when nothing is wrong.
+    #[test]
+    fn a_compaction_with_no_session_activity_is_not_reported_as_a_loss() {
+        let mut outcome = recorded_nothing();
+        outcome.failure = Some(glasshouse::memory::extract::ExtractionFailure::NothingToExtract);
+
+        assert_eq!(
+            lost_extraction_notice("before_compaction", Some(&outcome)),
+            None,
+            "nothing was extracted because there was nothing to extract; that is not a loss"
+        );
+    }
+
+    /// [`run_extraction`] answers [`None`] for its preparation failures and
+    /// for [`EXTRACTION_BOUND`] expiring, and all of those are losses — a
+    /// boundary went by and nothing was written.
+    #[test]
+    fn an_extraction_that_never_produced_an_outcome_is_reported_as_a_loss() {
+        let notice = lost_extraction_notice("before_compaction", None)
+            .expect("no outcome at all is a lost memory");
+        assert!(
+            notice.contains("before_compaction") && notice.contains("recorded nothing"),
+            "{notice}"
+        );
+        assert!(
+            notice.contains(&EXTRACTION_BOUND.as_secs().to_string()),
+            "the notice must name the bound it may have been cut off at: {notice}"
+        );
+    }
+
+    /// A run that stored something and rejected something else lost nothing a
+    /// person needs to act on, and neither did one that found only
+    /// duplicates.
+    ///
+    /// The discriminating half of the case below it: rejections are reported
+    /// only when *nothing* survived them.
+    #[test]
+    fn a_run_that_stored_a_memory_is_silent_even_when_it_also_rejected_one() {
+        let mut outcome = recorded_nothing();
+        outcome
+            .recorded
+            .push(glasshouse::memory::MemoryId::new("m1"));
+        outcome
+            .rejected
+            .push(glasshouse::memory::extract::Rejection::Store(
+                "a rejected one".to_owned(),
+            ));
+        assert_eq!(
+            lost_extraction_notice("task_completed", Some(&outcome)),
+            None
+        );
+
+        let mut duplicates_only = recorded_nothing();
+        duplicates_only.duplicates = 2;
+        assert_eq!(
+            lost_extraction_notice("task_completed", Some(&duplicates_only)),
+            None,
+            "a duplicate is the duplicate check working, not a memory lost"
+        );
+    }
+
+    /// And the case that is a loss: the model answered, and nothing it
+    /// proposed survived the contract.
+    #[test]
+    fn a_run_whose_every_memory_was_rejected_is_reported_as_a_loss() {
+        let mut outcome = recorded_nothing();
+        outcome
+            .rejected
+            .push(glasshouse::memory::extract::Rejection::Store(
+                "the store refused it".to_owned(),
+            ));
+
+        let notice = lost_extraction_notice("before_compaction", Some(&outcome))
+            .expect("a run that stored none of what it proposed lost every one of them");
+        assert!(notice.contains("rejected"), "{notice}");
     }
 
     /// The mechanism that stops the payload drain being an open-ended wait —

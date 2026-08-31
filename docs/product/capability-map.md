@@ -1171,7 +1171,7 @@ Phase 31 — Compaction-aware behavior
 ☑ Prefer creating or refreshing a portable checkpoint before intentional compaction when practical.
 ☐ Prefer compaction at semantic task boundaries over arbitrary elapsed-time boundaries.
 ☐ Allow the native harness to perform its own compaction mechanism rather than replacing it with a Glasshouse-specific history format.
-☐ Record enough pre-compaction durable memory that important project decisions do not depend solely on a lossy native compact summary.
+☑ Record enough pre-compaction durable memory that important project decisions do not depend solely on a lossy native compact summary.
 ☐ Allow a fresh session to bootstrap from a checkpoint when a huge cold native session is no longer economically or semantically attractive.
 
 Phase 32 — Resource registry
