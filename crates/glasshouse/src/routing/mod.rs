@@ -530,10 +530,10 @@ impl RoutingExplanation {
 /// the minimum tier" is only readable next to which tier was required and
 /// which was offered — see [`Self::reason`].
 ///
-/// [`Self::Subscription`] — Phase 56 line 1954 — carries the subscription's
+/// [`Self::Entitlement`] — Phase 56 line 1954 — carries the entitlement's
 /// **name** and what it refused, because *"never charge a task to a
 /// subscription the user's rules did not allow"* is only inspectable when the
-/// explanation says which subscription and which rule. A name is a `String`,
+/// explanation says which entitlement and which rule. A name is a `String`,
 /// which is why this type is no longer `Copy`: the one caller that copied a
 /// constraint (`session::SessionRouter::apply_override`) clones it instead.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -550,17 +550,17 @@ pub enum HardConstraint {
         required: classify::WorkloadTier,
         offered: classify::WorkloadTier,
     },
-    /// Line 1954. The subscription that would be charged for this destination
-    /// has a rule — [`SubscriptionRules`] — that does not admit the harness
+    /// Line 1954. The entitlement that would be charged for this destination
+    /// has a rule — [`EntitlementRules`] — that does not admit the harness
     /// or the tier this work would run as. Raised by
-    /// `session::hard_constraint` from the [`Subscription`] the caller
-    /// attached to the destination; a destination with no subscription
+    /// `session::hard_constraint` from the [`Entitlement`] the caller
+    /// attached to the destination; a destination with no entitlement
     /// attached is never given this constraint, for the same reason an
     /// unknown ceiling is never given [`Self::WorkloadTier`].
-    Subscription {
-        /// The `[subscriptions.<name>]` key, as the user wrote it.
-        subscription: String,
-        refused: SubscriptionRefusal,
+    Entitlement {
+        /// The `[entitlements.<name>]` key, as the user wrote it.
+        entitlement: String,
+        refused: EntitlementRefusal,
     },
 }
 
@@ -573,7 +573,7 @@ impl HardConstraint {
             Self::Privacy => "privacy",
             Self::UserConstraint => "user constraint",
             Self::WorkloadTier { .. } => "workload tier",
-            Self::Subscription { .. } => "subscription",
+            Self::Entitlement { .. } => "entitlement",
         }
     }
 
@@ -586,11 +586,11 @@ impl HardConstraint {
                 "the task needs at least the `{required}` tier and this destination is \
                  established to offer at most `{offered}`"
             )),
-            Self::Subscription {
-                subscription,
+            Self::Entitlement {
+                entitlement,
                 refused,
             } => Some(format!(
-                "subscription `{subscription}` does not serve {refused}"
+                "entitlement `{entitlement}` does not serve {refused}"
             )),
             Self::Protocol
             | Self::ToolSemantics
@@ -608,57 +608,65 @@ impl std::fmt::Display for HardConstraint {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 56, lines 1946, 1947 and 1954 — a subscription as a routing resource
-// with rules of its own.
+// Phase 56/56A, lines 1946, 1947, 1954 and 1962 — an entitlement as a routing
+// resource with rules of its own.
 // ---------------------------------------------------------------------------
 
-/// Which half of a subscription's rules refused a destination — the thing a
-/// [`HardConstraint::Subscription`] names after the subscription itself.
+/// Which part of an entitlement's rules refused a destination or a candidate —
+/// the thing a [`HardConstraint::Entitlement`] names after the entitlement
+/// itself.
 ///
-/// Two halves and not three: the job-kind half of [`SubscriptionRules`] is
-/// consulted by no session router, because a session has no job kind — a
-/// [`disposable::JobKind`] is Glasshouse's own bounded support work, which
-/// `disposable::DisposableRouting` routes and which does not construct this
-/// type. See [`SubscriptionRules::serves_job_kind`].
+/// Three parts, one per rule axis, and two distinct askers: the session
+/// router raises [`Self::Harness`] and [`Self::Tier`] through
+/// `session::hard_constraint`, because a session has a harness and may have a
+/// classified tier but never a job kind; `disposable::DisposableRouting`
+/// raises [`Self::JobKind`] through [`Entitlement::job_constraint`], because
+/// a disposable job has a [`disposable::JobKind`] and neither a harness nor
+/// a tier of its own. No caller can raise the wrong part: each asks only the
+/// question its work actually poses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SubscriptionRefusal {
+pub enum EntitlementRefusal {
     /// The rules do not admit this harness.
     Harness(crate::integrations::IntegrationId),
     /// The rules do not admit the tier this work would run as.
     Tier(classify::WorkloadTier),
+    /// The rules do not admit this kind of bounded support job — the third
+    /// clause of map line 1947, consumed by `disposable::DisposableRouting`.
+    JobKind(disposable::JobKind),
 }
 
-impl std::fmt::Display for SubscriptionRefusal {
+impl std::fmt::Display for EntitlementRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Harness(harness) => write!(f, "harness `{}`", harness.slug()),
             Self::Tier(tier) => write!(f, "the `{tier}` tier"),
+            Self::JobKind(kind) => write!(f, "the `{kind}` job kind"),
         }
     }
 }
 
-/// What a subscription may and may never be charged for — map line 1947.
+/// What an entitlement may and may never be charged for — map line 1947.
 ///
 /// Six lists in three pairs, each pair an allow-list and a deny-list over one
 /// axis: harnesses, workload tiers, job kinds. The resolution rule is the same
 /// for every axis and lives in exactly one private function, `admits`:
 ///
 /// - **deny wins over allow** — a value on both lists is refused;
-/// - **an empty allow-list means everything not denied** — a subscription
+/// - **an empty allow-list means everything not denied** — an entitlement
 ///   nobody restricted serves whatever asks, which is what makes the default
 ///   entry for a harness's own sign-in ([`Self::UNRESTRICTED`]) change
 ///   nothing for a user who configured nothing;
 /// - **a non-empty allow-list admits only what it names.**
 ///
-/// A rules value carries no name and no knowledge of what a subscription *is*
+/// A rules value carries no name and no knowledge of what an entitlement *is*
 /// — a Claude plan, an API key — because the router never decides on those:
-/// [`Subscription`] carries the name, and the kind stays in configuration,
+/// [`Entitlement`] carries the name, and the kind stays in configuration,
 /// where the announcement that reads it lives. This module never reads
-/// configuration; `crate::config::EffectiveConfig::subscription_for` resolves
-/// one of these from the user's `[subscriptions.<name>]` tables and the caller
+/// configuration; `crate::config::EffectiveConfig::entitlement_for` resolves
+/// one of these from the user's `[entitlements.<name>]` tables and the caller
 /// attaches it to a `session::Destination`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct SubscriptionRules {
+pub struct EntitlementRules {
     allow_harnesses: Vec<crate::integrations::IntegrationId>,
     deny_harnesses: Vec<crate::integrations::IntegrationId>,
     allow_tiers: Vec<classify::WorkloadTier>,
@@ -667,10 +675,10 @@ pub struct SubscriptionRules {
     deny_job_kinds: Vec<disposable::JobKind>,
 }
 
-impl SubscriptionRules {
+impl EntitlementRules {
     /// No rule on any axis: serves every harness, every tier, every job kind.
     /// The rules a harness's own sign-in carries when the user configured no
-    /// `[subscriptions]` entry for it.
+    /// `[entitlements]` entry for it.
     pub const UNRESTRICTED: Self = Self {
         allow_harnesses: Vec::new(),
         deny_harnesses: Vec::new(),
@@ -744,13 +752,13 @@ impl SubscriptionRules {
         Self::admits(&self.allow_tiers, &self.deny_tiers, &tier)
     }
 
-    /// The job-kind half of line 1947, resolved by the same rule as the other
-    /// two. **No router in this build consults it yet**: a session has no job
-    /// kind, and the router for Glasshouse's own support jobs
-    /// (`disposable::DisposableRouting`) ranks candidates that carry no
-    /// subscription. It is resolved here rather than dropped so that the
-    /// day that router gains one, the rule it applies is this one and not a
-    /// second spelling of it.
+    /// The job-kind axis of line 1947, resolved by the same rule as the other
+    /// two. A session has no job kind, so no *session* router asks this; the
+    /// router for Glasshouse's own bounded support jobs,
+    /// `disposable::DisposableRouting`, asks it through
+    /// [`Entitlement::job_constraint`] for every candidate that carries an
+    /// entitlement, and a candidate whose entitlement does not serve the job's
+    /// kind is never a candidate at all.
     pub fn serves_job_kind(&self, kind: disposable::JobKind) -> bool {
         Self::admits(&self.allow_job_kinds, &self.deny_job_kinds, &kind)
     }
@@ -768,35 +776,36 @@ impl SubscriptionRules {
         &self,
         harness: crate::integrations::IntegrationId,
         tier: Option<classify::WorkloadTier>,
-    ) -> Option<SubscriptionRefusal> {
+    ) -> Option<EntitlementRefusal> {
         if !self.serves_harness(harness) {
-            return Some(SubscriptionRefusal::Harness(harness));
+            return Some(EntitlementRefusal::Harness(harness));
         }
         if let Some(tier) = tier
             && !self.serves_tier(tier)
         {
-            return Some(SubscriptionRefusal::Tier(tier));
+            return Some(EntitlementRefusal::Tier(tier));
         }
         None
     }
 }
 
-/// A subscription as the router sees it — map line 1946: a named resource
-/// with rules, separate from the harness that consumes it.
+/// An entitlement as the router sees it — map lines 1946 and 1962: a named
+/// resource with rules, separate from the harness that consumes it.
 ///
 /// Exactly two facts, because they are the two the router acts on: the name,
-/// so a refusal and an announcement can say which subscription; and the
-/// rules. Which plan it is, which credential backs it and which harness's
-/// sign-in it stands for are configuration facts the router never decides on,
-/// and they stay in `crate::config`.
+/// so a refusal and an announcement can say which entitlement; and the
+/// rules. Which plan it is, which vendor bills it, which credential
+/// authenticates it and which harness's sign-in it stands for are
+/// configuration facts the router never decides on, and they stay in
+/// `crate::config` (`ResolvedEntitlement`).
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Subscription {
+pub struct Entitlement {
     name: String,
-    rules: SubscriptionRules,
+    rules: EntitlementRules,
 }
 
-impl Subscription {
-    pub fn new(name: impl Into<String>, rules: SubscriptionRules) -> Self {
+impl Entitlement {
+    pub fn new(name: impl Into<String>, rules: EntitlementRules) -> Self {
         Self {
             name: name.into(),
             rules,
@@ -807,23 +816,40 @@ impl Subscription {
         &self.name
     }
 
-    pub fn rules(&self) -> &SubscriptionRules {
+    pub fn rules(&self) -> &EntitlementRules {
         &self.rules
     }
 
-    /// [`SubscriptionRules::refusal`], as the hard constraint the router
-    /// raises — the one place a rule becomes a [`HardConstraint`].
+    /// [`EntitlementRules::refusal`], as the hard constraint the router
+    /// raises — the one place a session-side rule becomes a
+    /// [`HardConstraint`].
     pub fn constraint(
         &self,
         harness: crate::integrations::IntegrationId,
         tier: Option<classify::WorkloadTier>,
     ) -> Result<(), HardConstraint> {
         match self.rules.refusal(harness, tier) {
-            Some(refused) => Err(HardConstraint::Subscription {
-                subscription: self.name.clone(),
+            Some(refused) => Err(HardConstraint::Entitlement {
+                entitlement: self.name.clone(),
                 refused,
             }),
             None => Ok(()),
+        }
+    }
+
+    /// The job-kind axis as the hard constraint the disposable router raises
+    /// — map line 1947's third clause, mirrored on [`Self::constraint`] so
+    /// the refusal a support job reports names the entitlement and the job
+    /// kind exactly as the session router's names the entitlement and the
+    /// harness or tier.
+    pub fn job_constraint(&self, kind: disposable::JobKind) -> Result<(), HardConstraint> {
+        if self.rules.serves_job_kind(kind) {
+            Ok(())
+        } else {
+            Err(HardConstraint::Entitlement {
+                entitlement: self.name.clone(),
+                refused: EntitlementRefusal::JobKind(kind),
+            })
         }
     }
 }

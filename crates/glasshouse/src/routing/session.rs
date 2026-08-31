@@ -337,17 +337,17 @@ pub struct Destination {
     /// via [`Self::with_session_context`]. [`SessionContextFacts::UNREAD`] for
     /// a fresh destination and for any caller that did not look.
     context: SessionContextFacts,
-    /// Phase 56 line 1946: the subscription that would be charged for work
-    /// on this destination, attached via [`Self::with_subscription`] by the
+    /// Phase 56 line 1946: the entitlement that would be charged for work
+    /// on this destination, attached via [`Self::with_entitlement`] by the
     /// caller that resolved it from configuration. `None` — the default —
-    /// means no subscription describes this destination's resource (a
+    /// means no entitlement describes this destination's resource (a
     /// gateway-backed profile, whose upstream is assigned when the session
-    /// starts; a direct provider no `[subscriptions]` entry names), and the
-    /// subscription constraint then does nothing to it: nobody's rule can
+    /// starts; a direct provider no `[entitlements]` entry names), and the
+    /// entitlement constraint then does nothing to it: nobody's rule can
     /// refuse a resource nobody's rule describes. A harness's own sign-in
     /// always arrives with one, because configuration supplies a default
     /// entry for it.
-    subscription: Option<super::Subscription>,
+    entitlement: Option<super::Entitlement>,
 }
 
 impl Destination {
@@ -407,7 +407,7 @@ impl Destination {
             resource_facts: ResourceFacts::UNVERIFIED,
             tier_ceiling: None,
             context: SessionContextFacts::UNREAD,
-            subscription: None,
+            entitlement: None,
         }
     }
 
@@ -429,19 +429,19 @@ impl Destination {
         self
     }
 
-    /// Attach the subscription this destination would charge — Phase 56
+    /// Attach the entitlement this destination would charge — Phase 56
     /// lines 1946 and 1954. The caller resolves it from
-    /// `crate::config::EffectiveConfig::subscription_for`; this module reads
-    /// no configuration of its own. `None` is "no subscription describes this
-    /// resource", on which the subscription constraint is inert.
+    /// `crate::config::EffectiveConfig::entitlement_for`; this module reads
+    /// no configuration of its own. `None` is "no entitlement describes this
+    /// resource", on which the entitlement constraint is inert.
     #[must_use]
-    pub fn with_subscription(mut self, subscription: Option<super::Subscription>) -> Self {
-        self.subscription = subscription;
+    pub fn with_entitlement(mut self, entitlement: Option<super::Entitlement>) -> Self {
+        self.entitlement = entitlement;
         self
     }
 
-    pub fn subscription(&self) -> Option<&super::Subscription> {
-        self.subscription.as_ref()
+    pub fn entitlement(&self) -> Option<&super::Entitlement> {
+        self.entitlement.as_ref()
     }
 
     pub fn capacity_facts(&self) -> CapacityFacts {
@@ -3277,15 +3277,15 @@ fn hard_constraint(
     minimum_tier: Option<WorkloadTier>,
 ) -> Result<(), HardConstraint> {
     // Phase 56 line 1954, asked first: the user's own rule about what a
-    // subscription may be charged for is the strongest statement in this
+    // entitlement may be charged for is the strongest statement in this
     // gate, and when a destination fails it *and* a capability fact, the
     // constraint a person reads should be the one they wrote. The harness
     // half is asked on both passes; the tier half reads `minimum_tier`, so it
     // — like line 1516's ceiling gate below — fires only on the pass that
     // knows the tier the movement settled, and never against an unknown one
-    // (`super::SubscriptionRules::refusal`).
-    if let Some(subscription) = destination.subscription() {
-        subscription.constraint(destination.harness(), minimum_tier)?;
+    // (`super::EntitlementRules::refusal`).
+    if let Some(entitlement) = destination.entitlement() {
+        entitlement.constraint(destination.harness(), minimum_tier)?;
     }
     if inputs.requirements.needs_tool_calls
         && destination.backend().tools() == ToolSemantics::KnownAbsent

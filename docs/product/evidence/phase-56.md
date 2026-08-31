@@ -298,3 +298,174 @@ Recorded scope limits — stated by the worker, not discovered later:
 - wall-clock sum/median is not gated by MIN_SAMPLE_FOR_SUMMARY, per the packet's own wording
 
 ---
+
+
+---
+
+### Lines 1962, 1963, 1964, 1973 — the entitlement is the unit of capacity (56A step 1), and 1947's job-kind clause gains its consumer
+
+Package `GH-ENTITLEMENT-POOL`, 2026-08-31, Fable 5 at xhigh (Red). The rename subscription→entitlement, complete and alias-free (the table was under a day old; an old `[subscriptions]` table is silently ignored — unknown keys are ignored by the loader, recorded); `[entitlements.<name>]` with `kind`, descriptive `vendor`, its OWN credential as a reference in exactly two shapes (env var name / OS service+account — a value is refused by name and never echoed by this crate's own message), optional `native_harness`; several entries of one vendor and kind coexist as distinct registry resources (`ResourceKind::Entitlement { name }`) with capacity slots pinned `unknown` until 56A-2; the five layers (harness / protocol adapter / authentication / entitlement / model) each varied alone in tests; and the disposable router now consults the entitlement's job-kind rules by name — 1947's third clause's consumer, landing as `phase-56.md`'s 1947 entry promised. Notable degradation ruling (the worker's, accepted): a contradictory `[entitlements]` table refuses a LAUNCH outright but degrades SUPPORT-WORK candidates to no-entitlement with a warning — failing memory extraction over a config contradiction would punish the wrong action.
+
+### Model an entitlement — a specific subscription or API-credit account such as Claude Max A, Claude Max B, ChatGPT Pro, OpenRouter credits, or an API key — as the unit of capacity, distinct from the vendor, the provider adapter, the wire protocol, and the harness. (line 1962)
+
+Contract: Given the user's `[entitlements.<name>]` tables, when Glasshouse resolves the resource a session or a support job would be charged to, it treats each entry as an entitlement — a specific subscription or API-credit account with an optional kind, an optional billing vendor, its own credential REFERENCE and an optional native_harness, distinct from the vendor, the provider adapter, the wire protocol and the harness — while preserving that a user who configured nothing sees the same defaults, the same launches and the same refusals under the new name.
+
+State: COMPLETE — ruled 2026-08-31 by the orchestrator from the report's artifacts (6/6 mutations KILLED with failure text quoted; every renamed test green with counts; blast radius 83/84 targets, 2735 passed, the 84th being the deleted subscription_rules.rs; the residual-`subscription` grep catalogued line by line) and the decision diffs read at review.
+
+Production evidence:
+- `src/config/mod.rs` — `EntitlementConfig (kind, vendor, credential, native_harness, provider, six rule lists), EntitlementKind, EntitlementVendor, EntitlementCredential, EntitlementTable, EntitlementBacking, ResolvedEntitlement, EntitlementLookupError`
+- `src/config/mod.rs` — `EffectiveConfig::entitlements/entitlement_for (renamed, same resolution; NativeSignInWithOwnCredential and SharedCredential added)`
+- `src/routing/mod.rs` — `Entitlement, EntitlementRules, EntitlementRefusal, HardConstraint::Entitlement { entitlement, refused }`
+- `src/routing/session.rs` — `Destination::with_entitlement/entitlement; hard_constraint unchanged in behaviour`
+- `src/main.rs` — `destination_entitlement, announce_entitlement ("entitlement `X` (…) will serve this session."), both launch guards' texts naming [entitlements.<name>]`
+
+Regression evidence:
+- `entitlements (15 tests — every renamed subscription-rules test green under the new names, binary halves included)`
+- `config::tests::entitlements_round_trip_and_resolve_project_over_user_with_a_native_default`
+- `config::tests::contradictory_entitlement_tables_are_refused_by_name`
+- `entitlement_pool::only_the_two_reference_shapes_deserialise_and_a_value_is_refused_by_name`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| crates/glasshouse/src/config/mod.rs: user-layer lookup `.get(name)` -> `.iter().map(|(_, config)| config).next()` (every name resolves to the first entry's config) | `wrong-source` | **killed** | `resolving_two_entitlements_yields_each_its_own_value_and_never_the_others` |
+
+> wrong-source observed: panicked at crates/glasshouse/tests/entitlement_pool.rs:283:10 — resolution crossed accounts (SharedCredential fired); 9 tests FAILED including both launch-isolation binary tests
+
+Recorded scope limits — stated by the worker, not discovered later:
+- an old `[subscriptions.<name>]` table is silently ignored after the rename (unknown keys are deliberately ignored on load); the packet ruled no alias — the table is under a day old
+- `vendor` is descriptive: read by describe()/the announcement only, keyed on by nothing — deliberately, per line 1962's 'distinct from the vendor'
+
+---
+
+### Allow several entitlements of the same vendor and plan to coexist in one pool, each with its own authentication, remaining capacity, and reset time. (line 1963)
+
+Contract: Given two `[entitlements]` entries of one vendor and one kind, each with its own credential reference, when Glasshouse resolves and enumerates its resources, both coexist — EffectiveConfig::entitlements returns both, ResourceKind::Entitlement { name } lists each configured account as its own resource, glasshouse status prints both by name, and each carries its own remaining-capacity and reset-time slots — while preserving that the slots read unknown (None), never full or empty, until 56A package 2 populates them, and that nothing anywhere dedupes by vendor.
+
+State: COMPLETE — ruled 2026-08-31 by the orchestrator from the report's artifacts (6/6 mutations KILLED with failure text quoted; every renamed test green with counts; blast radius 83/84 targets, 2735 passed, the 84th being the deleted subscription_rules.rs; the residual-`subscription` grep catalogued line by line) and the decision diffs read at review.
+
+Production evidence:
+- `src/provider/registry.rs` — `ResourceKind::Entitlement { name } (+ locality/label arms)`
+- `src/provider/quota.rs` — `CapacityState::for_resource's Entitlement arm (opaque; no launch path reaches it)`
+- `src/config/mod.rs` — `EffectiveConfig::configured_entitlements, ::entitlement_resources (one resource per entry, keyed by name)`
+- `src/config/mod.rs` — `ResolvedEntitlement::{credential, vendor, remaining_capacity, seconds_until_reset}`
+- `src/main.rs` — `status_report's Entitlements line (the enumeration's production caller)`
+
+Regression evidence:
+- `entitlement_pool::two_entitlements_of_one_vendor_and_kind_coexist_as_distinct_resources`
+- `entitlement_pool::status_lists_both_accounts_of_one_vendor_by_name (binary)`
+- `entitlement_pool::shared_credentials_and_native_sign_ins_with_credentials_are_refused_by_name`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| crates/glasshouse/src/config/mod.rs: .filter(|entry| entry.layer() != Layer::Default) -> same + .scan(BTreeSet::new(), dedupe by entry.vendor()).flatten() | `skip-state-update` | **killed** | `two_entitlements_of_one_vendor_and_kind_coexist_as_distinct_resources` |
+
+> skip-state-update observed: panicked at crates/glasshouse/tests/entitlement_pool.rs:76:5 — assert_eq!(configured.len(), 2); status_lists_both_accounts_of_one_vendor_by_name FAILED on the binary too (claude-b vanished)
+
+Recorded scope limits — stated by the worker, not discovered later:
+- the slots have no producer by design (56A package 2); the test pins None — unknown, never full or empty
+- own-credential accounts with no backing are listed and never charged: no launch profile resolves to one until the broker packages place work on them
+
+---
+
+### Keep the layering explicit and separately replaceable: harness, protocol adapter, authentication, entitlement, inference model. (line 1964)
+
+Contract: Given the five layers — harness (IntegrationId), protocol adapter (WireProtocol from the provider template), authentication (the credential reference), entitlement (the entry), inference model (LaunchProfile.model) — when any one is varied, the other four stand: the same entitlement serves two harnesses, the same harness runs under two entitlements, the same entitlement serves two models, and one vendor and protocol stand behind two credentials — while preserving that the layering is stated on the entitlement type itself as documentation the next phase can hold to.
+
+State: COMPLETE — ruled 2026-08-31 by the orchestrator from the report's artifacts (6/6 mutations KILLED with failure text quoted; every renamed test green with counts; blast radius 83/84 targets, 2735 passed, the 84th being the deleted subscription_rules.rs; the residual-`subscription` grep catalogued line by line) and the decision diffs read at review.
+
+Production evidence:
+- `src/config/mod.rs` — `EntitlementConfig's five-layer doc (names each layer and which field is which)`
+- `src/config/mod.rs` — `EffectiveConfig::entitlement_for (keys on backing, blind to model; harness read only for the Native arm)`
+
+Regression evidence:
+- `entitlement_pool::the_same_entitlement_serves_two_harnesses`
+- `entitlement_pool::the_same_harness_runs_under_two_entitlements`
+- `entitlement_pool::the_same_entitlement_serves_two_models`
+- `entitlement_pool::one_vendor_and_protocol_stand_behind_two_credentials`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| crates/glasshouse/src/config/mod.rs: user-layer lookup `.get(name)` -> first entry's config for every name (the same mutation as 1962's, which collapses the entitlement layer) | `wrong-source` | **killed** | `the_same_harness_runs_under_two_entitlements` |
+
+> wrong-source observed: panicked at crates/glasshouse/tests/entitlement_pool.rs:417:10 — the two backings no longer resolved to two accounts
+
+Recorded scope limits — stated by the worker, not discovered later:
+- every layer varied alone today — no coupling found, so no line is left open on this ground
+- the protocol-adapter layer is varied structurally (two providers of one template), not by a wire-protocol assertion: entitlement entries never name a protocol, which is the separation itself
+
+---
+
+### Keep every entitlement's credential isolated: tokens and keys never mixed across accounts, never logged, never written into a project file. (line 1973)
+
+Contract: Given entitlements with their own credentials, when Glasshouse loads, prints, resolves, launches or writes configuration, no credential value can be expressed in the config schema (only SecretRef's two reference shapes deserialise, everything else refused by name), no Debug/Display of an entitlement type contains a resolved value, each account resolves its own value and never another's, a launch's child environment carries only the serving account's variable (every other entitlement's env-shaped credential is scrubbed before the overlay applies, on the fresh and the resume path), and the project-config writer serialises references only — while preserving that a launch no entitlement serves carries no account's variable at all.
+
+State: PARTIALLY VERIFIED — ruled 2026-08-31 by the orchestrator, **box NOT ticked**, over the worker's `closed`: the worker's own first limit is a reachable mixing path — shell-started sessions (`src/shell/mod.rs:1162`, `:1296`, outside the packet's files) build their own `HarnessLaunch` and do NOT scrub foreign entitlement credential variables, so a session started from the TUI can carry both accounts' variables in its child environment. Everything else about the line is proven (reference-only serde with refusal by name and no echo; redacting Debug; per-account resolution; the scrub at both `main.rs` launch sites, binary-tested against the child's own environment dump; the reference-only project-config writer). Successor dispatched the same hour: `entitlement-env-scrub` — apply `foreign_entitlement_credential_vars` at the two shell sites with a test; tick on its landing.
+
+Production evidence:
+- `src/config/mod.rs` — `EntitlementCredential (manual serde: two shapes, refusal by name, no echo; manual Debug: names only)`
+- `src/config/mod.rs` — `EntitlementLookupError::{SharedCredential, NativeSignInWithOwnCredential}`
+- `src/main.rs` — `foreign_entitlement_credential_vars + env_remove loops at both HarnessLaunch sites (launch_session, resume_session), before overlay.apply`
+- `src/config/mod.rs` — `write_project_config_with_consent (pre-existing writer; the credential field serialises as its reference)`
+
+Regression evidence:
+- `entitlement_pool::only_the_two_reference_shapes_deserialise_and_a_value_is_refused_by_name`
+- `entitlement_pool::the_refusal_message_this_crate_writes_never_contains_the_value`
+- `entitlement_pool::debug_of_every_entitlement_type_never_contains_a_resolved_value`
+- `entitlement_pool::resolving_two_entitlements_yields_each_its_own_value_and_never_the_others`
+- `entitlement_pool::a_launch_under_one_entitlement_never_carries_the_other_accounts_variable (binary; the child's own environment dump)`
+- `entitlement_pool::a_launch_no_entitlement_serves_carries_no_accounts_variable (binary)`
+- `entitlement_pool::the_project_config_writer_serialises_references_and_never_values`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| crates/glasshouse/src/main.rs: launch_session scrub body `launch = launch.env_remove(var);` -> `let _ = var;` | `remove-guard` | **killed** | `a_launch_under_one_entitlement_never_carries_the_other_accounts_variable` |
+| crates/glasshouse/src/config/mod.rs: credential Debug `write!(f, "environment variable `{var}`")` -> `write!(f, …, std::env::var(var).unwrap_or_default())` | `wrong-source` | **killed** | `debug_of_every_entitlement_type_never_contains_a_resolved_value` |
+| crates/glasshouse/src/config/mod.rs: user-layer lookup `.get(name)` -> first entry's config for every name | `wrong-source` | **killed** | `resolving_two_entitlements_yields_each_its_own_value_and_never_the_others` |
+
+> remove-guard observed: panicked at crates/glasshouse/tests/entitlement_pool.rs:871:5 — the child's environment dump contained claude-b's variable; a_launch_no_entitlement_serves_carries_no_accounts_variable FAILED too
+
+> wrong-source observed: panicked at crates/glasshouse/tests/entitlement_pool.rs:257:5 — the planted value appeared in the rendering
+
+> wrong-source observed: panicked at crates/glasshouse/tests/entitlement_pool.rs:283:10 — claude-b no longer resolved its own value
+
+Recorded scope limits — stated by the worker, not discovered later:
+- shell-started sessions (src/shell/mod.rs:1162, :1296 — outside this packet's files) build their own HarnessLaunch and do not scrub; successor: apply foreign_entitlement_credential_vars at those two sites
+- the TOML library's error rendering quotes the offending config line, so a value a user pastes into `credential = ` is echoed once, by the parser's snippet, in the load error — the refusal sentence itself never repeats it (pinned by the_refusal_message test); fixing the snippet means reformatting every config parse error
+- only env-shaped references are scrubbed; an OsCredential reference has no variable to leak, and provider credential_env pools not named by any entitlement are untouched (out of this line's scope)
+- macOS only; the #[cfg(windows)] fake-harness arm mirrors tests/entitlements.rs's and is untested here
+
+---
+
+### Allow a subscription rule to state which harnesses, workload tiers, and job kinds the subscription may serve, and which it must never serve. (line 1947)
+
+Contract: Given an entitlement whose rules state allow_job_kinds or deny_job_kinds, when Glasshouse's disposable router picks a resource for a JobKind, a candidate whose entitlement does not serve that kind is never a candidate, and the refusal names the entitlement and the job kind exactly as the session router's refusals name an entitlement and a harness or tier — while preserving that a candidate with no entitlement is never refused by one, that no scoring changed, and that when every candidate is refused the error names each rule rather than misreporting the pool as exhausted.
+
+State: COMPLETE — ruled 2026-08-31 by the orchestrator from the report's artifacts (6/6 mutations KILLED with failure text quoted; every renamed test green with counts; blast radius 83/84 targets, 2735 passed, the 84th being the deleted subscription_rules.rs; the residual-`subscription` grep catalogued line by line) and the decision diffs read at review.
+
+Production evidence:
+- `src/routing/mod.rs` — `EntitlementRefusal::JobKind, Entitlement::job_constraint`
+- `src/routing/disposable.rs` — `DisposableCandidate::with_entitlement/entitlement; the job_constraint check in choose's apply_hard_constraints; refusal notes on the winner's explanation; NoResource::EntitlementDeniesEveryCandidate`
+- `src/config/mod.rs` — `EffectiveConfig::entitlement_for_provider (a disposable job has no harness)`
+- `src/main.rs` — `disposable_candidates attaches the entitlement per provider (never a silent pre-filter)`
+
+Regression evidence:
+- `entitlement_pool::an_entitlement_that_denies_the_job_kind_is_not_a_candidate_and_is_named`
+- `entitlement_pool::an_allow_list_omitting_the_job_kind_refuses_it_and_no_entitlement_never_does`
+- `entitlement_pool::every_candidate_refused_names_every_entitlement_and_the_job_kind`
+- `entitlement_pool::the_shipped_binary_attaches_entitlements_to_support_work_candidates (binary, via glasshouse resources' routing-model block)`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| crates/glasshouse/src/routing/disposable.rs: entitlement.job_constraint(job)?; -> let _ = entitlement.job_constraint(job); | `remove-guard` | **killed** | `an_entitlement_that_denies_the_job_kind_is_not_a_candidate_and_is_named` |
+| crates/glasshouse/src/main.rs: .with_entitlement(entitlement.clone()), -> .with_entitlement(None), | `remove-guard` | **killed** | `the_shipped_binary_attaches_entitlements_to_support_work_candidates` |
+
+> remove-guard observed: panicked at crates/glasshouse/tests/entitlement_pool.rs:572:9 — the denied candidate was chosen; the all-refused and allow-list tests FAILED too
+
+> remove-guard observed: panicked at crates/glasshouse/tests/entitlement_pool.rs:925:5 — glasshouse resources stopped naming the refusal from the binary's own candidate list
+
+Recorded scope limits — stated by the worker, not discovered later:
+- line 1947 is already ☑ (subscription-rules); this entry records the third clause's consumer landing, per the packet's objective 5 — the orchestrator rules whether the ledger entry is amended or left
+- choose_for_automatic_classification's retained arm re-validates health and presence, not entitlement rules; a pick retained before a rule changed could serve one more classification (the fresh path that creates picks applies the rule)
+- a contradiction in the [entitlements] tables degrades support-work candidates to no-entitlement with a tracing::warn (a launch is refused outright on the same tables; failing memory extraction over it would punish the wrong actor)
+
+---

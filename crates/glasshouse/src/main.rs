@@ -689,23 +689,23 @@ fn fresh_destination_id(harness: glasshouse::integrations::IntegrationId, profil
     format!("fresh:{}:{profile}", harness.slug())
 }
 
-/// Phase 56 line 1946's producer on the routing path: the subscription a
+/// Phase 56 line 1946's producer on the routing path: the entitlement a
 /// destination running `profile` would charge, as the router carries it.
 ///
-/// One lookup — `EffectiveConfig::subscription_for` — shared with the launch
-/// announcement (`announce_subscription`), so the subscription the router
+/// One lookup — `EffectiveConfig::entitlement_for` — shared with the launch
+/// announcement (`announce_entitlement`), so the entitlement the router
 /// refused or admitted is the one the person is told about. `glasshouse::
 /// routing` may not import `glasshouse::config`, which is why the resolution
 /// happens here and the router receives a value. `None` is a real answer (no
 /// entry describes this resource) and leaves the destination without a
-/// subscription constraint; a contradiction in the tables is an error that
+/// entitlement constraint; a contradiction in the tables is an error that
 /// stops the routing decision rather than a guess about which entry meant it.
-fn destination_subscription(
+fn destination_entitlement(
     effective: &EffectiveConfig<'_>,
     profile: &glasshouse::profile::LaunchProfile,
-) -> anyhow::Result<Option<glasshouse::routing::Subscription>> {
+) -> anyhow::Result<Option<glasshouse::routing::Entitlement>> {
     Ok(effective
-        .subscription_for(profile.harness, &profile.backend)?
+        .entitlement_for(profile.harness, &profile.backend)?
         .map(|resolved| resolved.to_routing()))
 }
 
@@ -713,36 +713,70 @@ fn destination_subscription(
 /// said on stderr beside the routing announcements, before the session
 /// exists. `None` is announced as what it is — no entry names this resource,
 /// or the gateway has not assigned an upstream yet — rather than as a
-/// subscription nobody configured.
-fn announce_subscription(
-    subscription: Option<&glasshouse::config::ResolvedSubscription>,
+/// entitlement nobody configured.
+fn announce_entitlement(
+    entitlement: Option<&glasshouse::config::ResolvedEntitlement>,
     profile: &glasshouse::profile::LaunchProfile,
 ) {
     use glasshouse::profile::BackendResource;
 
-    match subscription {
-        Some(subscription) => {
-            let served_by = subscription.name();
+    match entitlement {
+        Some(entitlement) => {
+            let served_by = entitlement.name();
             eprintln!(
-                "glasshouse: subscription `{served_by}` ({}) will serve this session.",
-                subscription.describe()
+                "glasshouse: entitlement `{served_by}` ({}) will serve this session.",
+                entitlement.describe()
             );
         }
         None => match &profile.backend {
             BackendResource::DirectProvider { provider } => eprintln!(
-                "glasshouse: no `[subscriptions]` entry names provider `{provider}`, so no \
-                 subscription rule applies to this session."
+                "glasshouse: no `[entitlements]` entry names provider `{provider}`, so no \
+                 entitlement rule applies to this session."
             ),
             BackendResource::GlasshouseGateway => eprintln!(
                 "glasshouse: the Glasshouse gateway assigns this session's upstream when it \
-                 starts, so no subscription is named at launch."
+                 starts, so no entitlement is named at launch."
             ),
             BackendResource::Native => eprintln!(
-                "glasshouse: no subscription describes {}'s own sign-in.",
+                "glasshouse: no entitlement describes {}'s own sign-in.",
                 profile.harness.display_name()
             ),
         },
     }
+}
+
+/// Map line 1973's isolation, on the path that actually leaks: the child
+/// process inherits this whole process's environment, so every *other*
+/// entitlement's environment-variable credential would ride along into a
+/// session charged to one account — two accounts' keys mixed in one child,
+/// which is exactly what the line forbids. This names the variables to
+/// remove from a launch: the environment-shaped credential reference of
+/// every entitlement that is not the one serving this session. The serving
+/// entitlement's own variable stays; an OS-credential reference has no
+/// variable to leak; and a user with no `[entitlements]` entries gets an
+/// empty list, so nothing about an unconfigured launch changes.
+///
+/// Called with the launch's resolved entitlement name, or `None` for a
+/// session no entitlement describes — which scrubs every entitlement's
+/// variable, because a session charged to no account has no business
+/// carrying any account's key. Tables that do not resolve scrub nothing:
+/// the launch path has already refused or reported that error before any
+/// process exists.
+fn foreign_entitlement_credential_vars(
+    effective: &EffectiveConfig<'_>,
+    serving: Option<&str>,
+) -> Vec<String> {
+    let Ok(entitlements) = effective.entitlements() else {
+        return Vec::new();
+    };
+    entitlements
+        .iter()
+        .filter(|entry| serving != Some(entry.name()))
+        .filter_map(|entry| match entry.credential() {
+            Some(glasshouse::secret::SecretRef::Environment { var }) => Some(var.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 /// Which destinations a caller can actually *use*, which is not the same
@@ -867,10 +901,10 @@ fn routing_destinations(
         // destination — see `destination_tier_ceiling` for why it is read off
         // the backend's resolved model rather than off the profile.
         let ceiling = destination_tier_ceiling(effective, &backend);
-        // Phase 56 line 1954's producer: the subscription this session's
+        // Phase 56 line 1954's producer: the entitlement this session's
         // profile charges, so a rule the user has since written applies to
         // continuing it exactly as it applies to starting a fresh one.
-        let subscription = destination_subscription(effective, &profile)?;
+        let entitlement = destination_entitlement(effective, &profile)?;
         destinations.push(
             with_capacity(
                 with_provider_protocols(
@@ -887,7 +921,7 @@ fn routing_destinations(
             )
             .with_tier_ceiling(ceiling)
             .with_session_context(context)
-            .with_subscription(subscription),
+            .with_entitlement(entitlement),
         );
     }
     drop(checkpoints);
@@ -931,7 +965,7 @@ fn routing_destinations(
         let profile = profile.value;
         let (backend, protocols) = destination_backend(effective, &profile, None);
         let ceiling = destination_tier_ceiling(effective, &backend);
-        let fresh_subscription = destination_subscription(effective, &profile)?;
+        let fresh_entitlement = destination_entitlement(effective, &profile)?;
         destinations.push(
             with_capacity(
                 with_provider_protocols(
@@ -947,7 +981,7 @@ fn routing_destinations(
                 destination_capacity(&profile, effective, &telemetry, now_unix),
             )
             .with_tier_ceiling(ceiling)
-            .with_subscription(fresh_subscription),
+            .with_entitlement(fresh_entitlement),
         );
     }
 
@@ -3769,9 +3803,9 @@ fn launch_session(
         // there is no current session to hold — and until now this launch read
         // that as "nowhere to go" and started `fresh_profile` anyway, the
         // silence Phase 35D's decision 3 recorded. A destination the user's
-        // own subscription rule refused must not be started by that fallback,
+        // own entitlement rule refused must not be started by that fallback,
         // so the same gate is asked what it refused, and the launch stops by
-        // name. Only the subscription constraint is read here: a protocol or
+        // name. Only the entitlement constraint is read here: a protocol or
         // tool-semantics refusal of the sole destination keeps the behaviour it
         // had, which `profile::resolve` already refuses on its own terms.
         let nowhere_to_go = routed.is_none();
@@ -3782,22 +3816,22 @@ fn launch_session(
                         && destination.launch_profile() == fresh_profile
                         && matches!(
                             constraint,
-                            glasshouse::routing::HardConstraint::Subscription { .. }
+                            glasshouse::routing::HardConstraint::Entitlement { .. }
                         )
                 },
             )
         {
             let (_, constraint) = refused;
             let name = match &constraint {
-                glasshouse::routing::HardConstraint::Subscription { subscription, .. } => {
-                    subscription.clone()
+                glasshouse::routing::HardConstraint::Entitlement { entitlement, .. } => {
+                    entitlement.clone()
                 }
-                _ => unreachable!("filtered to the subscription constraint above"),
+                _ => unreachable!("filtered to the entitlement constraint above"),
             };
             eprintln!(
                 "glasshouse: not starting this session — {}, and launch profile `{fresh_profile}` \
-                 would charge it. Change the rule under `[subscriptions.{name}]`, or launch \
-                 under a profile whose subscription serves this work.",
+                 would charge it. Change the rule under `[entitlements.{name}]`, or launch \
+                 under a profile whose entitlement serves this work.",
                 constraint.reason().unwrap_or_default()
             );
             return Ok(ExitCode::FAILURE);
@@ -3995,37 +4029,37 @@ fn launch_session(
     };
 
     // Phase 56 line 1954, on the path that starts a session: which
-    // subscription it will be charged to, said before anything is recorded or
-    // started — and the harness half of that subscription's rule applied once
-    // more here, through the same `SubscriptionRules::refusal` the router
+    // entitlement it will be charged to, said before anything is recorded or
+    // started — and the harness half of that entitlement's rule applied once
+    // more here, through the same `EntitlementRules::refusal` the router
     // asked, for the one launch the router never saw: line 1712's routing-off
     // launch, where `routing_destinations` and `choose` do not run at all. A
     // rule about *this harness* needs no classification to apply; the tier
     // half does, and it is the router's (above). A contradiction in the
-    // `[subscriptions]` tables is refused here for the same reason a bad
+    // `[entitlements]` tables is refused here for the same reason a bad
     // profile is: it must cost nothing.
-    let subscription =
-        match effective.subscription_for(launch_profile.harness, &launch_profile.backend) {
-            Ok(subscription) => subscription,
+    let entitlement =
+        match effective.entitlement_for(launch_profile.harness, &launch_profile.backend) {
+            Ok(entitlement) => entitlement,
             Err(err) => {
                 eprintln!("glasshouse: {err}");
                 return Ok(ExitCode::FAILURE);
             }
         };
-    if let Some(subscription) = &subscription
-        && let Some(refused) = subscription.rules().refusal(launch_profile.harness, None)
+    if let Some(entitlement) = &entitlement
+        && let Some(refused) = entitlement.rules().refusal(launch_profile.harness, None)
     {
         eprintln!(
-            "glasshouse: not starting this session — subscription `{}` does not serve {refused}, \
-             and launch profile `{}` would charge it. Change the rule under `[subscriptions.{}]`, \
-             or launch under a profile whose subscription serves this work.",
-            subscription.name(),
+            "glasshouse: not starting this session — entitlement `{}` does not serve {refused}, \
+             and launch profile `{}` would charge it. Change the rule under `[entitlements.{}]`, \
+             or launch under a profile whose entitlement serves this work.",
+            entitlement.name(),
             launch_profile.name,
-            subscription.name()
+            entitlement.name()
         );
         return Ok(ExitCode::FAILURE);
     }
-    announce_subscription(subscription.as_ref(), &launch_profile);
+    announce_entitlement(entitlement.as_ref(), &launch_profile);
 
     // Phase 9K: the response profile is resolved *here*, on the production
     // launch path, through the same `EffectiveConfig::response_profile`
@@ -4390,7 +4424,17 @@ fn launch_session(
             &response_application,
         ),
     );
-    let launch = HarnessLaunch::new(selection.into_executable(), runtime.project()).args(args);
+    let mut launch = HarnessLaunch::new(selection.into_executable(), runtime.project()).args(args);
+    // Map line 1973: the child inherits this process's environment, so
+    // another entitlement's credential variable would reach a session that
+    // account is not serving. Removed before the overlay applies, so the
+    // overlay's own `env` entries — the serving credential among them —
+    // always win per key.
+    for var in
+        foreign_entitlement_credential_vars(&effective, entitlement.as_ref().map(|e| e.name()))
+    {
+        launch = launch.env_remove(var);
+    }
     // The overlay is the only thing that may put its own arguments or
     // environment onto the launch — see `LaunchOverlay::apply`'s doc.
     let launch = overlay.apply(launch);
@@ -5564,6 +5608,27 @@ fn disposable_candidates(
         let locality =
             glasshouse::provider::registry::ResourceKind::from_direct_provider(name.as_str())
                 .locality();
+        // Map line 1947's job-kind clause: the entitlement charged for work
+        // sent to this provider, so `DisposableRouting::choose` can refuse a
+        // job kind its rules do not serve — by the entitlement's name, in
+        // the choice's own explanation, never as a silent pre-filter here.
+        // A contradiction in the `[entitlements]` tables refuses a *launch*
+        // outright; a bounded support job degrades to "no rule" with a
+        // warning instead, because failing memory extraction over a config
+        // contradiction the next launch will already report would punish the
+        // wrong actor.
+        let entitlement = match effective.entitlement_for_provider(&name) {
+            Ok(entitlement) => entitlement.map(|entitlement| entitlement.to_routing()),
+            Err(err) => {
+                tracing::warn!(
+                    provider = %name,
+                    error = %err,
+                    "the [entitlements] tables could not be resolved; support work \
+                     proceeds with no entitlement rule for this provider"
+                );
+                None
+            }
+        };
         for var in provider_config.credential_env() {
             let reference = SecretRef::Environment { var: var.clone() };
             if secrets.resolve(&reference).is_none() {
@@ -5582,7 +5647,8 @@ fn disposable_candidates(
                         provider_config.cost_of(model),
                     )
                     .with_capacity(capacity.clone())
-                    .with_locality(locality),
+                    .with_locality(locality)
+                    .with_entitlement(entitlement.clone()),
                 );
             }
         }
@@ -8152,23 +8218,29 @@ fn resume_session(
     // `glasshouse resume` and by a launch the router steered into an existing
     // session. The profile is re-read the way `routing_destinations` reads it
     // for a recorded session, with the same fallback to the implied Native
-    // profile, so the announcement names the subscription the router weighed.
+    // profile, so the announcement names the entitlement the router weighed.
     // Announced and not gated: a session that already exists on this resource
     // is one the person asked to continue, and a resume is not the moment to
     // refuse — the comment above `overlay_resolution` says the same of an
     // overlay that no longer resolves.
-    {
+    let resume_entitlement = {
         let profile = record
             .launch_profile
             .as_deref()
             .and_then(|name| effective.launch_profile(name, selection.id()).ok())
             .map(|layered| layered.value)
             .unwrap_or_else(|| glasshouse::profile::LaunchProfile::native(selection.id()));
-        match effective.subscription_for(profile.harness, &profile.backend) {
-            Ok(subscription) => announce_subscription(subscription.as_ref(), &profile),
-            Err(err) => eprintln!("glasshouse: {err}"),
+        match effective.entitlement_for(profile.harness, &profile.backend) {
+            Ok(entitlement) => {
+                announce_entitlement(entitlement.as_ref(), &profile);
+                entitlement
+            }
+            Err(err) => {
+                eprintln!("glasshouse: {err}");
+                None
+            }
         }
-    }
+    };
 
     // The response profile a fresh session opened under this record's role
     // would get today. Not the five axes stored on the record — those are a
@@ -8199,7 +8271,18 @@ fn resume_session(
         ),
     );
 
-    let launch = HarnessLaunch::new(selection.into_executable(), runtime.project()).args(args);
+    let mut launch = HarnessLaunch::new(selection.into_executable(), runtime.project()).args(args);
+    // Map line 1973, on the path that continues a session — the same scrub
+    // `launch_session` applies, for the same reason: the child inherits this
+    // process's environment, and another account's credential variable has
+    // no business in it.
+    for var in foreign_entitlement_credential_vars(
+        &effective,
+        resume_entitlement.as_ref().map(|e| e.name()),
+    ) {
+        launch = launch.env_remove(var);
+    }
+    let launch = launch;
     // Both guards must outlive `session::attach` below — dropping either
     // early would delete the generated configuration file, or close the
     // gateway's loopback listener, out from under the harness that is about
@@ -9788,6 +9871,37 @@ fn status_report(runtime: &Runtime) -> anyhow::Result<String> {
         "Resources    {} tracked — see `glasshouse resources` for quota detail",
         resources.len()
     );
+
+    // Map line 1963: every configured entitlement is its own resource, named
+    // here one entry per account — never merged by vendor, kind or backing,
+    // because two accounts of one vendor being two resources is what makes
+    // the pool a pool. A user with no `[entitlements]` entries sees no line.
+    let user = UserConfig::load(runtime.paths())?;
+    let project_config = config::load_project_config(runtime.project())?;
+    let effective = EffectiveConfig::new(&user, project_config.as_ref());
+    match effective.entitlement_resources() {
+        Ok(entitlements) if entitlements.is_empty() => {}
+        Ok(entitlements) => {
+            let names: Vec<String> = entitlements
+                .iter()
+                .map(|kind| match kind {
+                    glasshouse::provider::registry::ResourceKind::Entitlement { name } => {
+                        format!("`{name}`")
+                    }
+                    other => other.label(),
+                })
+                .collect();
+            let _ = writeln!(
+                out,
+                "Entitlements {} configured — {}",
+                entitlements.len(),
+                names.join(", ")
+            );
+        }
+        Err(err) => {
+            let _ = writeln!(out, "Entitlements not resolvable — {err}");
+        }
+    }
 
     Ok(out)
 }

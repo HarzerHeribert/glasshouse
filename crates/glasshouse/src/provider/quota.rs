@@ -1486,6 +1486,15 @@ impl CapacityState {
                 ..
             } => Self::metered_balance(),
             ResourceKind::GlasshouseGateway => Self::delegated_to_upstream(),
+            // A configured entitlement (Phase 56A line 1963) is an account
+            // whose telemetry is 56A package 2's to read, keyed per
+            // entitlement; until that exists, nothing has read one, and its
+            // pools answer as a first-party account's do: opaque, with the
+            // plan statable and the allowance published nowhere this build
+            // looks. No launch path reaches this arm — no profile resolves
+            // to an entitlement resource yet — so nothing user-visible
+            // reports a shape for one.
+            ResourceKind::Entitlement { .. } => Self::opaque_subscription(),
         }
     }
 

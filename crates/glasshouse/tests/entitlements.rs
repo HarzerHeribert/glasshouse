@@ -1,15 +1,16 @@
-//! Phase 56 lines 1946, 1947 and 1954 — a subscription as a routing resource
-//! with rules of its own, entered the way production enters it.
+//! Phase 56 lines 1946, 1947 and 1954, renamed by Phase 56A line 1962 — an
+//! entitlement as a routing resource with rules of its own, entered the way
+//! production enters it.
 //!
 //! Two halves, for the reason `tests/subscription_pressure.rs` gives for its
 //! own. The first goes through [`SessionRouter::choose`] with hand-built
-//! destinations that differ **in the subscription alone**, and shows the
-//! subscription constraint removing a candidate, naming itself, and refusing
+//! destinations that differ **in the entitlement alone**, and shows the
+//! entitlement constraint removing a candidate, naming itself, and refusing
 //! to be outranked by a score. The second runs the shipped binary against a
-//! `[subscriptions.<name>]` table it wrote itself: nothing in half one can
+//! `[entitlements.<name>]` table it wrote itself: nothing in half one can
 //! fail on a build where `main.rs::routing_destinations` stops attaching the
-//! subscription, where the launch proceeds past a refused sole destination,
-//! or where the announcement names the harness instead of the subscription —
+//! entitlement, where the launch proceeds past a refused sole destination,
+//! or where the announcement names the harness instead of the entitlement —
 //! and those three are the whole of what this package wires. Practice §35.
 
 use std::path::{Path, PathBuf};
@@ -27,8 +28,8 @@ use glasshouse::routing::session::{
     SessionRouter, TaskRequirements,
 };
 use glasshouse::routing::{
-    AssignedModel, Backend, Cost, CredentialId, HardConstraint, Subscription, SubscriptionRefusal,
-    SubscriptionRules, ToolSemantics,
+    AssignedModel, Backend, Cost, CredentialId, Entitlement, EntitlementRefusal, EntitlementRules,
+    HardConstraint, ToolSemantics,
 };
 use glasshouse::secret::SecretRef;
 
@@ -55,16 +56,16 @@ fn backend(provider: &str) -> Backend {
     )
 }
 
-/// A fresh destination that differs from its siblings in the subscription
+/// A fresh destination that differs from its siblings in the entitlement
 /// it carries and in nothing the router scores.
-fn fresh(id: &str, subscription: Option<Subscription>) -> Destination {
+fn fresh(id: &str, entitlement: Option<Entitlement>) -> Destination {
     Destination::fresh(id, HARNESS, "profile", backend("the-same-provider"), None)
-        .with_subscription(subscription)
+        .with_entitlement(entitlement)
 }
 
 /// A live, zero-idle existing session — the warmest destination this router
-/// can be handed — carrying `subscription`.
-fn warm(id: &str, subscription: Option<Subscription>) -> Destination {
+/// can be handed — carrying `entitlement`.
+fn warm(id: &str, entitlement: Option<Entitlement>) -> Destination {
     Destination::existing(
         id,
         HARNESS,
@@ -75,20 +76,20 @@ fn warm(id: &str, subscription: Option<Subscription>) -> Destination {
             idle_seconds: 0,
         },
     )
-    .with_subscription(subscription)
+    .with_entitlement(entitlement)
 }
 
 /// The unrestricted entry configuration supplies for a harness's own
 /// sign-in when the user configured none.
-fn own_sign_in() -> Subscription {
-    Subscription::new(HARNESS.slug(), SubscriptionRules::UNRESTRICTED)
+fn own_sign_in() -> Entitlement {
+    Entitlement::new(HARNESS.slug(), EntitlementRules::UNRESTRICTED)
 }
 
 /// A team's API key that must never serve Claude Code.
-fn team_key() -> Subscription {
-    Subscription::new(
+fn team_key() -> Entitlement {
+    Entitlement::new(
         "team-key",
-        SubscriptionRules::UNRESTRICTED.deny_harnesses([HARNESS]),
+        EntitlementRules::UNRESTRICTED.deny_harnesses([HARNESS]),
     )
 }
 
@@ -143,17 +144,17 @@ fn rejection<'a>(routed: &'a Routed, id: &str) -> Option<&'a HardConstraint> {
         .map(|(_, constraint)| constraint)
 }
 
-fn refused_harness(subscription: &str, harness: IntegrationId) -> HardConstraint {
-    HardConstraint::Subscription {
-        subscription: subscription.to_owned(),
-        refused: SubscriptionRefusal::Harness(harness),
+fn refused_harness(entitlement: &str, harness: IntegrationId) -> HardConstraint {
+    HardConstraint::Entitlement {
+        entitlement: entitlement.to_owned(),
+        refused: EntitlementRefusal::Harness(harness),
     }
 }
 
-fn refused_tier(subscription: &str, tier: WorkloadTier) -> HardConstraint {
-    HardConstraint::Subscription {
-        subscription: subscription.to_owned(),
-        refused: SubscriptionRefusal::Tier(tier),
+fn refused_tier(entitlement: &str, tier: WorkloadTier) -> HardConstraint {
+    HardConstraint::Entitlement {
+        entitlement: entitlement.to_owned(),
+        refused: EntitlementRefusal::Tier(tier),
     }
 }
 
@@ -164,7 +165,7 @@ fn refused_tier(subscription: &str, tier: WorkloadTier) -> HardConstraint {
 /// function, and this holds each of them to it.
 #[test]
 fn deny_wins_over_allow_on_every_axis() {
-    let rules = SubscriptionRules::UNRESTRICTED
+    let rules = EntitlementRules::UNRESTRICTED
         .allow_harnesses([IntegrationId::ClaudeCode, IntegrationId::Codex])
         .deny_harnesses([IntegrationId::ClaudeCode])
         .allow_tiers([WorkloadTier::Leaf, WorkloadTier::Heavy])
@@ -190,12 +191,12 @@ fn deny_wins_over_allow_on_every_axis() {
 
     assert_eq!(
         rules.refusal(IntegrationId::ClaudeCode, Some(WorkloadTier::Leaf)),
-        Some(SubscriptionRefusal::Harness(IntegrationId::ClaudeCode)),
+        Some(EntitlementRefusal::Harness(IntegrationId::ClaudeCode)),
         "the harness half is asked first"
     );
     assert_eq!(
         rules.refusal(IntegrationId::Codex, Some(WorkloadTier::Heavy)),
-        Some(SubscriptionRefusal::Tier(WorkloadTier::Heavy))
+        Some(EntitlementRefusal::Tier(WorkloadTier::Heavy))
     );
     assert_eq!(
         rules.refusal(IntegrationId::Codex, Some(WorkloadTier::Leaf)),
@@ -209,9 +210,9 @@ fn deny_wins_over_allow_on_every_axis() {
 /// only what it names.
 #[test]
 fn an_empty_allow_list_admits_everything_not_denied_and_a_stated_one_only_its_members() {
-    assert!(SubscriptionRules::UNRESTRICTED.is_unrestricted());
+    assert!(EntitlementRules::UNRESTRICTED.is_unrestricted());
     for harness in IntegrationId::ALL {
-        assert!(SubscriptionRules::UNRESTRICTED.serves_harness(*harness));
+        assert!(EntitlementRules::UNRESTRICTED.serves_harness(*harness));
     }
     for tier in [
         WorkloadTier::Deterministic,
@@ -220,14 +221,14 @@ fn an_empty_allow_list_admits_everything_not_denied_and_a_stated_one_only_its_me
         WorkloadTier::Heavy,
         WorkloadTier::Frontier,
     ] {
-        assert!(SubscriptionRules::UNRESTRICTED.serves_tier(tier));
+        assert!(EntitlementRules::UNRESTRICTED.serves_tier(tier));
         assert_eq!(
-            SubscriptionRules::UNRESTRICTED.refusal(HARNESS, Some(tier)),
+            EntitlementRules::UNRESTRICTED.refusal(HARNESS, Some(tier)),
             None
         );
     }
 
-    let deny_only = SubscriptionRules::UNRESTRICTED.deny_tiers([WorkloadTier::Frontier]);
+    let deny_only = EntitlementRules::UNRESTRICTED.deny_tiers([WorkloadTier::Frontier]);
     assert!(!deny_only.is_unrestricted());
     assert!(
         deny_only.serves_tier(WorkloadTier::Heavy),
@@ -235,7 +236,7 @@ fn an_empty_allow_list_admits_everything_not_denied_and_a_stated_one_only_its_me
     );
     assert!(!deny_only.serves_tier(WorkloadTier::Frontier));
 
-    let allow_only = SubscriptionRules::UNRESTRICTED.allow_harnesses([IntegrationId::Codex]);
+    let allow_only = EntitlementRules::UNRESTRICTED.allow_harnesses([IntegrationId::Codex]);
     assert!(allow_only.serves_harness(IntegrationId::Codex));
     assert!(
         !allow_only.serves_harness(IntegrationId::Cursor),
@@ -246,13 +247,13 @@ fn an_empty_allow_list_admits_everything_not_denied_and_a_stated_one_only_its_me
 // --- line 1954: the constraint ----------------------------------------------
 
 /// **Line 1954 at the router.** Two fresh destinations identical in every
-/// scored axis; one carries a subscription whose rule denies this harness.
+/// scored axis; one carries an entitlement whose rule denies this harness.
 /// It is never a candidate — it is in `rejected`, not `considered` — the
-/// constraint names the subscription, and the rendered explanation carries
+/// constraint names the entitlement, and the rendered explanation carries
 /// the sentence a person reads. Both orders, so the caller's tiebreaker
 /// cannot be what decided it.
 #[test]
-fn a_subscription_that_denies_the_harness_removes_the_destination_and_names_itself() {
+fn an_entitlement_that_denies_the_harness_removes_the_destination_and_names_itself() {
     let fixture = Fixture::new();
     let router = SessionRouter::new();
     let team = fresh("team", Some(team_key()));
@@ -278,19 +279,19 @@ fn a_subscription_that_denies_the_harness_removes_the_destination_and_names_itse
         let rendered = routed.render_overview();
         assert!(
             rendered.contains(
-                "hard subscription constraint — subscription `team-key` does not serve harness \
+                "hard entitlement constraint — entitlement `team-key` does not serve harness \
                  `claude-code`"
             ),
-            "the explanation must name the subscription and the harness:\n{rendered}"
+            "the explanation must name the entitlement and the harness:\n{rendered}"
         );
     }
 }
 
 /// **A hard constraint, not a price.** The warmest destination this router
 /// knows — a live, zero-idle session — loses to a cold fresh one when its
-/// subscription's rule denies the harness. No score outranks the user's rule.
+/// entitlement's rule denies the harness. No score outranks the user's rule.
 #[test]
-fn the_subscription_constraint_outranks_a_warm_session() {
+fn the_entitlement_constraint_outranks_a_warm_session() {
     let fixture = Fixture::new();
     let router = SessionRouter::new();
     let warm_but_denied = warm("warm", Some(team_key()));
@@ -318,13 +319,13 @@ fn the_subscription_constraint_outranks_a_warm_session() {
 fn a_tier_rule_fires_only_against_an_established_tier() {
     let fixture = Fixture::new();
     let router = SessionRouter::new();
-    let no_heavy = Subscription::new(
+    let no_heavy = Entitlement::new(
         "no-heavy",
-        SubscriptionRules::UNRESTRICTED.deny_tiers([WorkloadTier::Heavy]),
+        EntitlementRules::UNRESTRICTED.deny_tiers([WorkloadTier::Heavy]),
     );
-    let leaf_only = Subscription::new(
+    let leaf_only = Entitlement::new(
         "leaf-only",
-        SubscriptionRules::UNRESTRICTED.allow_tiers([WorkloadTier::Leaf]),
+        EntitlementRules::UNRESTRICTED.allow_tiers([WorkloadTier::Leaf]),
     );
     let set = vec![
         fresh("no-heavy", Some(no_heavy)),
@@ -352,7 +353,7 @@ fn a_tier_rule_fires_only_against_an_established_tier() {
     assert!(
         heavy
             .render_overview()
-            .contains("subscription `no-heavy` does not serve the `heavy` tier"),
+            .contains("entitlement `no-heavy` does not serve the `heavy` tier"),
         "{}",
         heavy.render_overview()
     );
@@ -365,12 +366,12 @@ fn a_tier_rule_fires_only_against_an_established_tier() {
     );
 }
 
-/// **A destination with no subscription is never refused by one.** `None`
+/// **A destination with no entitlement is never refused by one.** `None`
 /// is "no entry describes this resource" — a gateway-backed profile, a
 /// provider nobody named — and nobody's rule can refuse what nobody's rule
 /// describes.
 #[test]
-fn a_destination_with_no_subscription_is_never_refused_by_one() {
+fn a_destination_with_no_entitlement_is_never_refused_by_one() {
     let fixture = Fixture::new();
     let router = SessionRouter::new();
     let routed = fixture.choose(
@@ -415,9 +416,9 @@ fn refused_reports_the_gate_when_choose_has_nowhere_to_go() {
 
 /// **An override overrules a ranking, never a fact about what can serve.**
 /// The user names the refused destination; the router keeps the eligible one
-/// and says the override hit a subscription constraint.
+/// and says the override hit an entitlement constraint.
 #[test]
-fn an_override_naming_a_refused_destination_is_refused_by_the_subscription() {
+fn an_override_naming_a_refused_destination_is_refused_by_the_entitlement() {
     let fixture = Fixture::new();
     let router = SessionRouter::with_override(RoutingOverride::to("team"));
     let routed = fixture.choose(
@@ -439,28 +440,28 @@ fn an_override_naming_a_refused_destination_is_refused_by_the_subscription() {
     assert!(
         routed
             .render_overview()
-            .contains("which a hard subscription constraint rejected"),
+            .contains("which a hard entitlement constraint rejected"),
         "{}",
         routed.render_overview()
     );
 }
 
 // ===========================================================================
-// Half two — the shipped binary, reading `[subscriptions.<name>]`.
+// Half two — the shipped binary, reading `[entitlements.<name>]`.
 //
 // The fixture is `tests/subscription_pressure.rs`'s, reproduced rather than
 // shared because integration tests are separate crates; the fake harness and
 // the argv log are the same mechanism for the same reasons that file gives.
 // ===========================================================================
 
-const CREDENTIAL_VAR: &str = "GLASSHOUSE_SUBSCRIPTION_TEST_KEY";
+const CREDENTIAL_VAR: &str = "GLASSHOUSE_ENTITLEMENT_TEST_KEY";
 
 /// Two direct-provider launch profiles for Claude Code, on two providers.
 const PROFILES: &str = "\n\
      [providers.alpha-probe]\ntemplate = \"openrouter\"\n\
-     credential_env = [\"GLASSHOUSE_SUBSCRIPTION_TEST_KEY\"]\n\n\
+     credential_env = [\"GLASSHOUSE_ENTITLEMENT_TEST_KEY\"]\n\n\
      [providers.beta-probe]\ntemplate = \"openrouter\"\n\
-     credential_env = [\"GLASSHOUSE_SUBSCRIPTION_TEST_KEY\"]\n\n\
+     credential_env = [\"GLASSHOUSE_ENTITLEMENT_TEST_KEY\"]\n\n\
      [profiles.alpha]\nharness = \"claude-code\"\n\
      expected_protocol = \"anthropic-messages\"\n\n\
      [profiles.alpha.backend]\nkind = \"direct-provider\"\n\
@@ -472,12 +473,12 @@ const PROFILES: &str = "\n\
 
 /// The team's API key behind `alpha-probe`, which must never serve Claude Code.
 const TEAM_KEY_DENIES_CLAUDE_CODE: &str = "\n\
-     [subscriptions.team-key]\nkind = \"api-key\"\nprovider = \"alpha-probe\"\n\
+     [entitlements.team-key]\nkind = \"api-key\"\nprovider = \"alpha-probe\"\n\
      deny_harnesses = [\"claude-code\"]\n";
 
 /// A configured entry for Claude Code's own sign-in, replacing the default.
 const MAX_PLAN: &str = "\n\
-     [subscriptions.max]\nkind = \"claude\"\nnative_harness = \"claude-code\"\n";
+     [entitlements.max]\nkind = \"claude\"\nnative_harness = \"claude-code\"\n";
 
 struct Binary {
     _tmp: tempfile::TempDir,
@@ -529,7 +530,7 @@ impl Binary {
             .arg("--config-dir")
             .arg(self.base.join("config"))
             .args(args)
-            .env(CREDENTIAL_VAR, "planted-opaque-subscription-value-56")
+            .env(CREDENTIAL_VAR, "planted-opaque-entitlement-value-56")
             .env("PATH", self.base.join("empty-path"))
             .output()
             .expect("the glasshouse binary must be runnable")
@@ -611,28 +612,28 @@ fn rejected_section(report: &str) -> &str {
 }
 
 /// **Line 1954's *never charge*, through the acting path.** A launch under a
-/// profile whose subscription's rule denies this harness is refused **by
+/// profile whose entitlement's rule denies this harness is refused **by
 /// name**, before anything exists: no process, no session. The sibling
 /// profile on a provider no entry names launches, and is told no rule
 /// applies. A build where `routing_destinations` stops attaching the
-/// subscription, or where the launch keeps falling back past a refused sole
+/// entitlement, or where the launch keeps falling back past a refused sole
 /// destination, fails here; nothing in half one can keep it passing.
 #[test]
-fn a_launch_whose_subscription_denies_the_harness_is_refused_by_name_and_starts_nothing() {
+fn a_launch_whose_entitlement_denies_the_harness_is_refused_by_name_and_starts_nothing() {
     let binary = Binary::with_config(&format!("{PROFILES}{TEAM_KEY_DENIES_CLAUDE_CODE}"));
 
     let refused = binary.glasshouse(&["launch", "claude-code", "--headless", "--profile", "alpha"]);
     let said = Binary::both_streams(&refused);
     assert!(
         !refused.status.success(),
-        "a launch charged to a subscription whose rule denies the harness must be refused:\n{said}"
+        "a launch charged to an entitlement whose rule denies the harness must be refused:\n{said}"
     );
     assert!(
-        said.contains("subscription `team-key` does not serve harness `claude-code`"),
-        "the refusal names the subscription and the harness:\n{said}"
+        said.contains("entitlement `team-key` does not serve harness `claude-code`"),
+        "the refusal names the entitlement and the harness:\n{said}"
     );
     assert!(
-        said.contains("[subscriptions.team-key]"),
+        said.contains("[entitlements.team-key]"),
         "the refusal says where the rule lives:\n{said}"
     );
     assert!(
@@ -642,21 +643,21 @@ fn a_launch_whose_subscription_denies_the_harness_is_refused_by_name_and_starts_
     );
 
     // The same harness on a provider no entry describes: no rule, and the
-    // launch says so rather than naming a subscription nobody configured.
+    // launch says so rather than naming an entitlement nobody configured.
     let said = binary.launch_ok(Some("beta"));
     assert!(
-        said.contains("no `[subscriptions]` entry names provider `beta-probe`"),
+        said.contains("no `[entitlements]` entry names provider `beta-probe`"),
         "{said}"
     );
     assert_eq!(binary.harness_invocations().len(), 1);
 }
 
 /// **Line 1954 on the reporting path.** `glasshouse route` ranks every
-/// destination this project could use; the one whose subscription denies the
-/// harness is under `rejected`, with the subscription named — and it decides
+/// destination this project could use; the one whose entitlement denies the
+/// harness is under `rejected`, with the entitlement named — and it decides
 /// nothing.
 #[test]
-fn route_names_the_subscription_that_refused_a_destination() {
+fn route_names_the_entitlement_that_refused_a_destination() {
     let binary = Binary::with_config(&format!("{PROFILES}{TEAM_KEY_DENIES_CLAUDE_CODE}"));
     let report = binary.stdout(&["route"]);
     let rejected = rejected_section(&report);
@@ -666,7 +667,7 @@ fn route_names_the_subscription_that_refused_a_destination() {
     );
     assert!(
         rejected.contains(
-            "hard subscription constraint — subscription `team-key` does not serve harness \
+            "hard entitlement constraint — entitlement `team-key` does not serve harness \
              `claude-code`"
         ),
         "{report}"
@@ -682,19 +683,19 @@ fn route_names_the_subscription_that_refused_a_destination() {
     );
 }
 
-/// **Line 1954's *announce which subscription served*, and line 1946's
+/// **Line 1954's *announce which entitlement served*, and line 1946's
 /// default.** A user who configured nothing is told the harness's own sign-in
 /// serves the session, under the default entry named for the harness; a user
 /// who configured an entry for that sign-in is told its name and its plan,
 /// and the default is gone. A build whose announcement names the harness
-/// instead of the subscription fails the second half.
+/// instead of the entitlement fails the second half.
 #[test]
-fn the_native_default_and_a_configured_native_subscription_are_announced_by_name() {
+fn the_native_default_and_a_configured_native_entitlement_are_announced_by_name() {
     let unconfigured = Binary::with_config(PROFILES);
     let said = unconfigured.launch_ok(None);
     assert!(
         said.contains(
-            "subscription `claude-code` (Claude Code's own sign-in) will serve this session."
+            "entitlement `claude-code` (Claude Code's own sign-in) will serve this session."
         ),
         "{said}"
     );
@@ -703,29 +704,29 @@ fn the_native_default_and_a_configured_native_subscription_are_announced_by_name
     let said = configured.launch_ok(None);
     assert!(
         said.contains(
-            "subscription `max` (Claude plan, Claude Code's own sign-in) will serve this session."
+            "entitlement `max` (Claude plan, Claude Code's own sign-in) will serve this session."
         ),
         "{said}"
     );
     assert!(
-        !said.contains("subscription `claude-code`"),
+        !said.contains("entitlement `claude-code`"),
         "the configured entry replaces the default rather than joining it:\n{said}"
     );
 }
 
 /// **The announcement on the path that continues.** The second launch is
 /// steered by the router into the session the first one started, and says
-/// which subscription that session is charged to — the same entry, resolved
+/// which entitlement that session is charged to — the same entry, resolved
 /// by the same function.
 #[test]
-fn a_continued_session_announces_its_subscription() {
+fn a_continued_session_announces_its_entitlement() {
     let binary = Binary::with_config(&format!("{PROFILES}{MAX_PLAN}"));
     binary.launch_ok(None);
     let said = binary.launch_ok(None);
     assert!(said.contains("continuing session"), "{said}");
     assert!(
         said.contains(
-            "subscription `max` (Claude plan, Claude Code's own sign-in) will serve this session."
+            "entitlement `max` (Claude plan, Claude Code's own sign-in) will serve this session."
         ),
         "{said}"
     );
@@ -736,7 +737,7 @@ fn a_continued_session_announces_its_subscription() {
 /// or `automatic = false` under `[routing]`) `routing_destinations` and
 /// `choose` do not run, so the router's gate cannot refuse anything — and
 /// line 1954 says *never*. The launch path asks the same
-/// `SubscriptionRules::refusal` once more, for the harness half a rule can
+/// `EntitlementRules::refusal` once more, for the harness half a rule can
 /// answer without a classification, and refuses by name.
 #[test]
 fn a_routing_off_launch_still_applies_the_harness_rule() {
@@ -752,7 +753,7 @@ fn a_routing_off_launch_still_applies_the_harness_rule() {
     let said = Binary::both_streams(&refused);
     assert!(!refused.status.success(), "{said}");
     assert!(
-        said.contains("subscription `team-key` does not serve harness `claude-code`"),
+        said.contains("entitlement `team-key` does not serve harness `claude-code`"),
         "{said}"
     );
     assert!(binary.harness_invocations().is_empty());
@@ -763,7 +764,7 @@ fn a_routing_off_launch_still_applies_the_harness_rule() {
     assert!(out.status.success(), "{said}");
     assert!(
         said.contains(
-            "subscription `claude-code` (Claude Code's own sign-in) will serve this session."
+            "entitlement `claude-code` (Claude Code's own sign-in) will serve this session."
         ),
         "{said}"
     );
@@ -772,7 +773,7 @@ fn a_routing_off_launch_still_applies_the_harness_rule() {
 
 /// **The router-side guard's own work: a tier refusal of a launch's sole
 /// destination.** A launch that states heavy work under a profile whose
-/// subscription denies heavy work is refused by name before anything starts —
+/// entitlement denies heavy work is refused by name before anything starts —
 /// and only the router can refuse it, because the tier exists only once the
 /// task is classified; the harness-half gate after the profile resolves has
 /// no tier to read. The mutation this test exists to kill
@@ -781,7 +782,7 @@ fn a_routing_off_launch_still_applies_the_harness_rule() {
 #[test]
 fn a_launch_stating_heavy_work_is_refused_by_a_tier_rule_before_anything_starts() {
     const NO_HEAVY_WORK: &str = "\n\
-         [subscriptions.team-key]\nprovider = \"alpha-probe\"\n\
+         [entitlements.team-key]\nprovider = \"alpha-probe\"\n\
          deny_tiers = [\"heavy\", \"frontier\"]\n";
     let binary = Binary::with_config(&format!("{PROFILES}{NO_HEAVY_WORK}"));
 
@@ -797,10 +798,10 @@ fn a_launch_stating_heavy_work_is_refused_by_a_tier_rule_before_anything_starts(
     let said = Binary::both_streams(&refused);
     assert!(
         !refused.status.success(),
-        "heavy work charged to a subscription that denies heavy work must be refused:\n{said}"
+        "heavy work charged to an entitlement that denies heavy work must be refused:\n{said}"
     );
     assert!(
-        said.contains("subscription `team-key` does not serve the `heavy` tier"),
+        said.contains("entitlement `team-key` does not serve the `heavy` tier"),
         "{said}"
     );
     assert!(
@@ -824,7 +825,7 @@ fn a_launch_stating_heavy_work_is_refused_by_a_tier_rule_before_anything_starts(
     assert!(out.status.success(), "{said}");
     assert!(
         said.contains(
-            "subscription `team-key` (behind provider `alpha-probe`) will serve this session."
+            "entitlement `team-key` (behind provider `alpha-probe`) will serve this session."
         ),
         "{said}"
     );
@@ -837,7 +838,7 @@ fn a_launch_stating_heavy_work_is_refused_by_a_tier_rule_before_anything_starts(
 #[test]
 fn a_tier_rule_reaches_the_route_report_through_the_task_classification() {
     const NO_HEAVY_WORK: &str = "\n\
-         [subscriptions.team-key]\nprovider = \"alpha-probe\"\n\
+         [entitlements.team-key]\nprovider = \"alpha-probe\"\n\
          deny_tiers = [\"heavy\", \"frontier\"]\n";
     let binary = Binary::with_config(&format!("{PROFILES}{NO_HEAVY_WORK}"));
 
@@ -849,7 +850,7 @@ fn a_tier_rule_reaches_the_route_report_through_the_task_classification() {
     let rejected = rejected_section(&heavy);
     assert!(
         rejected.contains("fresh:claude-code:alpha")
-            && rejected.contains("subscription `team-key` does not serve the `heavy` tier"),
+            && rejected.contains("entitlement `team-key` does not serve the `heavy` tier"),
         "{heavy}"
     );
 
@@ -870,7 +871,7 @@ fn a_tier_rule_reaches_the_route_report_through_the_task_classification() {
     ]);
     let rejected = rejected_section(&heavy_again);
     assert!(
-        rejected.contains("via alpha-probe (existing) — hard subscription constraint — subscription `team-key` does not serve the `heavy` tier"),
+        rejected.contains("via alpha-probe (existing) — hard entitlement constraint — entitlement `team-key` does not serve the `heavy` tier"),
         "{heavy_again}"
     );
 }

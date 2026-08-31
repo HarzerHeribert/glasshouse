@@ -219,6 +219,13 @@ pub struct DisposableCandidate {
     /// 1422/1432 and 1421/1435. `None` is "nothing was read", and every
     /// filter and preference built on it is inert for that candidate.
     classification: Option<ClassificationRecord>,
+    /// The entitlement charged for work sent to this candidate's provider,
+    /// when a `[entitlements.<name>]` entry names it — map line 1947's
+    /// job-kind clause. `main.rs::disposable_candidates` attaches it from
+    /// `EffectiveConfig::entitlement_for_provider`; this module reads no
+    /// configuration of its own. `None` is "no entry describes this
+    /// resource", and no rule can refuse what no rule describes.
+    entitlement: Option<super::Entitlement>,
 }
 
 impl DisposableCandidate {
@@ -236,7 +243,22 @@ impl DisposableCandidate {
             capacity: CandidateCapacity::default(),
             locality: None,
             classification: None,
+            entitlement: None,
         }
+    }
+
+    /// Attach the entitlement whose rules govern this candidate — map line
+    /// 1947's job-kind clause. [`DisposableRouting::choose`] refuses the
+    /// candidate, by the entitlement's name, for any [`JobKind`] the rules
+    /// do not serve.
+    #[must_use]
+    pub fn with_entitlement(mut self, entitlement: Option<super::Entitlement>) -> Self {
+        self.entitlement = entitlement;
+        self
+    }
+
+    pub fn entitlement(&self) -> Option<&super::Entitlement> {
+        self.entitlement.as_ref()
     }
 
     /// Attach real capacity data a caller has read for this candidate — map
@@ -683,6 +705,16 @@ pub enum NoResource {
     /// caller that falls back to deterministic heuristics can say why no
     /// model was asked.
     ClassificationRequirementsExcludedAll { reasons: Vec<String> },
+    /// Every configured candidate's entitlement has a rule that does not
+    /// serve this job's kind — map line 1947's job-kind clause. `reasons`
+    /// names each refusal: the candidate, the entitlement and the job kind,
+    /// exactly as the session router's rejection names an entitlement and a
+    /// harness. Distinct from
+    /// [`Self::NoFreeResourceAndMeteredWithheld`] because "your rule forbids
+    /// this" and "the pool is exhausted" call for different fixes, and
+    /// reporting the first as the second would hide the user's own rule from
+    /// them.
+    EntitlementDeniesEveryCandidate { reasons: Vec<String> },
 }
 
 impl std::fmt::Display for NoResource {
@@ -713,6 +745,11 @@ impl std::fmt::Display for NoResource {
                 f,
                 "every configured candidate was excluded by a classification requirement before \
                  ranking, so no model was asked: {}",
+                reasons.join("; ")
+            ),
+            Self::EntitlementDeniesEveryCandidate { reasons } => write!(
+                f,
+                "every configured candidate's entitlement refuses this job kind: {}",
                 reasons.join("; ")
             ),
         }
@@ -998,7 +1035,11 @@ impl DisposableRouting {
     ///
     /// 1. **Hard constraints first, structurally** (map line 1553):
     ///    [`apply_hard_constraints`] removes any candidate this policy could
-    ///    never use — today that is exactly the metered candidates
+    ///    never use — a candidate whose entitlement's rules do not serve this
+    ///    job's kind (map line 1947's third clause, refused as
+    ///    [`HardConstraint::Entitlement`] by the entitlement's name; the
+    ///    refusal rides the winner's explanation, and when nothing survives
+    ///    the error names every one), and the metered candidates
     ///    [`MeteredUse`] withholds, named [`HardConstraint::UserConstraint`]
     ///    because line 568 calls a user's own opt-in rule exactly that. A
     ///    candidate that fails this is unrepresentable to the scorer below,
@@ -1064,13 +1105,55 @@ impl DisposableRouting {
             return Err(NoResource::NothingConfigured);
         }
 
-        let (eligible, _rejected) = apply_hard_constraints(candidates.to_vec(), |candidate| {
+        // Map line 1947's job-kind clause, asked first and named: a
+        // candidate whose entitlement's rules do not serve this job's kind
+        // is never a candidate — not scored, not walked by either loop below
+        // — exactly as the session router removes a destination whose
+        // entitlement does not serve the harness. The refusal carries the
+        // entitlement's name and the job kind, and it is *kept*: each one
+        // travels on the winner's explanation, and when nothing survives at
+        // all the error names every one rather than misreporting the pool as
+        // merely exhausted.
+        let (eligible, rejected) = apply_hard_constraints(candidates.to_vec(), |candidate| {
+            if let Some(entitlement) = candidate.entitlement() {
+                entitlement.job_constraint(job)?;
+            }
             if candidate.cost().is_free() || self.metered.permits_metered() {
                 Ok(())
             } else {
                 Err(HardConstraint::UserConstraint)
             }
         });
+        let entitlement_refusals: Vec<(String, String)> = rejected
+            .iter()
+            .filter_map(|(candidate, constraint)| match constraint {
+                HardConstraint::Entitlement { .. } => Some((
+                    format!("{} on {}", candidate.model(), candidate.provider()),
+                    constraint
+                        .reason()
+                        .expect("an entitlement constraint always carries a reason"),
+                )),
+                _ => None,
+            })
+            .collect();
+        if eligible.is_empty() && !entitlement_refusals.is_empty() {
+            return Err(NoResource::EntitlementDeniesEveryCandidate {
+                reasons: entitlement_refusals
+                    .into_iter()
+                    .map(|(candidate, reason)| format!("{candidate}: {reason}"))
+                    .collect(),
+            });
+        }
+        let refusal_notes: Vec<Contribution> = entitlement_refusals
+            .iter()
+            .map(|(candidate, reason)| {
+                Contribution::new(
+                    "entitlement rule",
+                    0.0,
+                    format!("{candidate} is not a candidate — {reason} (map line 1947)"),
+                )
+            })
+            .collect();
 
         // Map line 1434, step 2 of the order documented above: a candidate
         // whose remaining capacity is *known* and reads zero headroom is
@@ -1094,7 +1177,10 @@ impl DisposableRouting {
                 .filter(|candidate| pool.is_available(&candidate.value().as_free_resource(), now));
             return match pinned {
                 Some(candidate) => {
-                    let explanation = self.score_pinned(candidate);
+                    let mut explanation = self.score_pinned(candidate);
+                    for note in refusal_notes.iter().cloned() {
+                        explanation.push(note);
+                    }
                     Ok(self.choice(
                         job,
                         candidate.value(),
@@ -1139,7 +1225,10 @@ impl DisposableRouting {
                     // metered resource happens to be configured beside it.
                     UseReason::QuotaPreservation
                 };
-                let explanation = self.score(candidate, Some(position), arranged.len(), None);
+                let mut explanation = self.score(candidate, Some(position), arranged.len(), None);
+                for note in refusal_notes.iter().cloned() {
+                    explanation.push(note);
+                }
                 return Ok(self.choice(job, candidate.value(), reason, explanation));
             }
         }
@@ -1222,7 +1311,10 @@ impl DisposableRouting {
         }
 
         match best {
-            Some((candidate, explanation, _)) => {
+            Some((candidate, mut explanation, _)) => {
+                for note in refusal_notes.iter().cloned() {
+                    explanation.push(note);
+                }
                 Ok(self.choice(job, candidate.value(), UseReason::Fallback, explanation))
             }
             None if denied_reasons.is_empty() => {

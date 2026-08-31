@@ -109,6 +109,26 @@ pub enum ResourceKind {
     /// there is exactly one gateway process, whatever it is currently
     /// forwarding to.
     GlasshouseGateway,
+    /// A configured entitlement — one `[entitlements.<name>]` entry, a
+    /// specific subscription or API-credit account with its own
+    /// authentication (map lines 1962 and 1963). Keyed by the **user's name
+    /// for the account and by nothing else**, because several entitlements
+    /// of one vendor and plan coexist as several resources.
+    ///
+    /// A new shape rather than a name on [`Self::NativeSubscription`],
+    /// deliberately: the native variant is keyed by *harness* and stands for
+    /// "whatever account that harness is currently signed into" — a
+    /// per-harness singleton that exists whether or not anything is
+    /// configured — while a configured entitlement is an *account the user
+    /// declared*, of which one harness's vendor may have several and which
+    /// need not be any harness's current sign-in at all. Folding the two
+    /// together would leave `claude-a` and `claude-b` unrepresentable, which
+    /// is the exact inefficiency Phase 56A names.
+    ///
+    /// Enumerated by `crate::config::EffectiveConfig::entitlement_resources`
+    /// — configuration this static catalog cannot see — and printed by
+    /// `glasshouse status`.
+    Entitlement { name: String },
 }
 
 impl ResourceKind {
@@ -125,6 +145,9 @@ impl ResourceKind {
             ResourceKind::NativeSubscription { .. } => Locality::Remote,
             ResourceKind::DirectProvider { locality, .. } => *locality,
             ResourceKind::GlasshouseGateway => Locality::Local,
+            // An entitlement is an account with a vendor; whatever serves
+            // it, its compute is not this machine's.
+            ResourceKind::Entitlement { .. } => Locality::Remote,
         }
     }
 
@@ -173,6 +196,7 @@ impl ResourceKind {
                 format!("{provider} ({})", locality.as_str())
             }
             ResourceKind::GlasshouseGateway => "glasshouse gateway".to_owned(),
+            ResourceKind::Entitlement { name } => format!("entitlement `{name}`"),
         }
     }
 }
