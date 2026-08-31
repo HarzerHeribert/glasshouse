@@ -843,6 +843,8 @@ mod tests {
                 WireProtocol::OpenAiResponses,
                 WireProtocol::AnthropicMessages,
             ),
+            (WireProtocol::OpenAiChat, WireProtocol::OpenAiResponses),
+            (WireProtocol::OpenAiResponses, WireProtocol::OpenAiChat),
         ];
         for &from in &ALL {
             for &to in &ALL {

@@ -1303,10 +1303,12 @@ mod tests {
         assert_eq!(compatible.protocol_fit(), ProtocolFit::Compatible);
         assert_eq!(compatible.class(), PairingClass::ProtocolCompatible);
 
-        // T2 made Codex on an Anthropic-only route a *translated* pairing
-        // (openai-responses <-> anthropic-messages is in the gateway's
-        // table), so the incompatible case moved to a chat-only route:
-        // openai-chat <-> openai-responses stays refused ("not yet: T2b").
+        // T2 made Codex on an Anthropic-only route a *translated* pairing,
+        // and T2b made openai-chat <-> openai-responses one too — Codex's
+        // whole repertoire now classifies Native/Compatible/Translated, so
+        // the incompatible witness moves to OpenCode (openai-chat) on an
+        // Anthropic-only route: openai-chat -> anthropic-messages is the one
+        // refused row left.
         let mut translated = query(IntegrationId::Codex, "claude-fable-5");
         translated.route.protocol = Some(WireProtocol::AnthropicMessages);
         translated.provider_protocols = vec![WireProtocol::AnthropicMessages];
@@ -1314,22 +1316,25 @@ mod tests {
         assert_eq!(translated.protocol_fit(), ProtocolFit::Translated);
         assert_eq!(translated.class(), PairingClass::ProtocolTranslated);
 
-        let mut incompatible = query(IntegrationId::Codex, "claude-fable-5");
-        incompatible.route.protocol = Some(WireProtocol::OpenAiChat);
-        incompatible.provider_protocols = vec![WireProtocol::OpenAiChat];
+        let mut incompatible = query(IntegrationId::OpenCode, "claude-fable-5");
+        incompatible.route.protocol = Some(WireProtocol::AnthropicMessages);
+        incompatible.provider_protocols = vec![WireProtocol::AnthropicMessages];
         let incompatible = classify(&incompatible, &none());
         assert_eq!(incompatible.protocol_fit(), ProtocolFit::Incompatible);
         assert_eq!(incompatible.class(), PairingClass::Unknown);
     }
 
     /// Exactly the pairs the gateway's translation table supports are
-    /// translated — three today: an Anthropic Messages harness served from
-    /// an OpenAI Chat upstream (T1, 2026-08-31), and both directions of
+    /// translated — five today: an Anthropic Messages harness served from
+    /// an OpenAI Chat upstream (T1, 2026-08-31), both directions of
     /// Anthropic Messages <-> OpenAI Responses (T2, 2026-08-31, each behind
-    /// its own end-to-end test in `tests/gateway_translate_responses.rs`).
-    /// If this fails, a codec pair was added or removed; the pair table in
-    /// `gateway::translate` and `docs/product/evidence/phase-56.md` are what
-    /// should be re-read, and this pin updated with them.
+    /// its own end-to-end test in `tests/gateway_translate_responses.rs`),
+    /// and both directions of OpenAI Chat <-> OpenAI Responses (T2b,
+    /// 2026-08-31, each behind its own end-to-end test in
+    /// `tests/gateway_translate_t2b.rs`). If this fails, a codec pair was
+    /// added or removed; the pair table in `gateway::translate` and
+    /// `docs/product/evidence/phase-56.md` are what should be re-read, and
+    /// this pin updated with them.
     #[test]
     fn exactly_the_supported_pairs_are_translated() {
         let supported = [
@@ -1342,6 +1347,8 @@ mod tests {
                 WireProtocol::OpenAiResponses,
                 WireProtocol::AnthropicMessages,
             ),
+            (WireProtocol::OpenAiChat, WireProtocol::OpenAiResponses),
+            (WireProtocol::OpenAiResponses, WireProtocol::OpenAiChat),
         ];
         for from in [
             WireProtocol::AnthropicMessages,

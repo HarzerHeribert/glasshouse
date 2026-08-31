@@ -121,10 +121,15 @@ impl Pair {
 
 const NOT_YET_REVERSE: &str = "not yet: both codecs exist, but the pair has no end-to-end test through the shipped \
      binary against a fixture upstream, and no pair is offered before its test (1956)";
-const NOT_YET_T2B: &str = "not yet: T2b — both codecs exist, but the pair has no end-to-end test through the \
-     shipped binary against a fixture upstream, and no pair is offered before its test (1956)";
 const SAME_PROTOCOL: &str =
     "same protocol: the relay carries it byte for byte and no codec is entered";
+
+/// The API version header `api.anthropic.com` requires on every request —
+/// the same value real clients send and the relay path already forwards
+/// verbatim (`gateway/mod.rs`'s fixture tests pin it). A translated request
+/// has no client header to relay this from, so [`serve`] states it itself,
+/// and only toward an Anthropic-serving outbound protocol (T2 finding 2).
+const ANTHROPIC_VERSION: &str = "2023-06-01";
 
 /// The pair table. Every ordered pair of [`PROTOCOLS`], including each
 /// protocol with itself, exactly once — `every_ordered_pair_appears_exactly_once`
@@ -163,10 +168,15 @@ const TABLE: [Pair; 9] = [
         to: "openai-chat",
         status: PairStatus::Refused(SAME_PROTOCOL),
     },
+    // T2b: an OpenCode-shaped (openai-chat) client served by an
+    // OpenAI-Responses entitlement — a ChatGPT/Codex-plan-shaped upstream.
+    // Supported only because its own end-to-end test exists:
+    // `tests/gateway_translate_t2b.rs`,
+    // `an_opencode_request_is_translated_to_openai_responses_and_back_with_tool_call_ids_preserved`.
     Pair {
         from: "openai-chat",
         to: "openai-responses",
-        status: PairStatus::Refused(NOT_YET_T2B),
+        status: PairStatus::Supported,
     },
     // T2's mirror: a Codex-shaped client served by an Anthropic Messages
     // entitlement. Supported only because its own end-to-end test exists:
@@ -177,10 +187,14 @@ const TABLE: [Pair; 9] = [
         to: "anthropic-messages",
         status: PairStatus::Supported,
     },
+    // T2b's mirror: a Codex-shaped (openai-responses) client served by an
+    // OpenAI-Chat entitlement. Supported only because its own end-to-end
+    // test exists: `tests/gateway_translate_t2b.rs`,
+    // `a_codex_shaped_request_is_translated_to_openai_chat_and_back_with_tool_call_ids_preserved`.
     Pair {
         from: "openai-responses",
         to: "openai-chat",
-        status: PairStatus::Refused(NOT_YET_T2B),
+        status: PairStatus::Supported,
     },
     Pair {
         from: "openai-responses",
@@ -551,6 +565,12 @@ pub(super) fn serve(
     }
     // The one credential, attached exactly where the relay attaches it.
     outbound = outbound.header(header::AUTHORIZATION, serving.authorization());
+    // api.anthropic.com requires this header; no client header exists to
+    // relay it from on a translated request, so it is stated here, and only
+    // toward an Anthropic-serving outbound protocol (T2 finding 2).
+    if to.protocol() == anthropic::PROTOCOL {
+        outbound = outbound.header("anthropic-version", ANTHROPIC_VERSION);
+    }
     let Ok(outbound) = outbound.body(SendBody::from_owned_reader(std::io::Cursor::new(
         translated,
     ))) else {
@@ -1198,7 +1218,9 @@ mod tests {
             vec![
                 "anthropic-messages->openai-chat".to_owned(),
                 "anthropic-messages->openai-responses".to_owned(),
+                "openai-chat->openai-responses".to_owned(),
                 "openai-responses->anthropic-messages".to_owned(),
+                "openai-responses->openai-chat".to_owned(),
             ]
         );
         for pair in TABLE.iter().filter(|pair| !pair.is_supported()) {
@@ -1214,9 +1236,9 @@ mod tests {
         assert!(is_supported("anthropic-messages", "openai-chat"));
         assert!(is_supported("anthropic-messages", "openai-responses"));
         assert!(is_supported("openai-responses", "anthropic-messages"));
+        assert!(is_supported("openai-responses", "openai-chat"));
+        assert!(is_supported("openai-chat", "openai-responses"));
         assert!(!is_supported("openai-chat", "anthropic-messages"));
-        assert!(!is_supported("openai-responses", "openai-chat"));
-        assert!(!is_supported("openai-chat", "openai-responses"));
         assert!(!is_supported("anthropic-messages", "anthropic-messages"));
         assert!(!is_supported("anthropic-messages", "gemini"));
     }
@@ -1276,18 +1298,17 @@ mod tests {
             place("/v1/responses", &["openai-responses", "anthropic-messages"]),
             Placement::Unplaceable
         ));
-        // A refused pair is answered with the pair and the reason.
-        match place("/v1/chat/completions", &["openai-responses"]) {
-            Placement::PairRefused { from, refused } => {
-                assert_eq!(from, "openai-chat");
-                assert_eq!(refused.len(), 1);
-                assert_eq!(refused[0].slug(), "openai-chat->openai-responses");
-                let message = pair_refusal_message(from, &refused);
-                assert!(message.contains("openai-chat->openai-responses"));
-                assert!(message.contains("not yet: T2b"));
-            }
-            other => panic!("expected a refused pair, got {other:?}"),
-        }
+        // The two T2b pairs place too: an OpenCode-shaped client at a
+        // Responses-only provider, and a Codex-shaped client at a Chat-only
+        // one.
+        assert!(matches!(
+            place("/v1/chat/completions", &["openai-responses"]),
+            Placement::Translate(pair) if pair.slug() == "openai-chat->openai-responses"
+        ));
+        assert!(matches!(
+            place("/responses", &["openai-chat"]),
+            Placement::Translate(pair) if pair.slug() == "openai-responses->openai-chat"
+        ));
         // OpenAI Chat at an Anthropic-only provider: the reverse pair, refused
         // by name until its own end-to-end test exists.
         match place("/v1/chat/completions", &["anthropic-messages"]) {
