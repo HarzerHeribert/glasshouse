@@ -1896,15 +1896,15 @@ Fixed architectural requirements
 
 Phase 54A — Setup and portability completion criteria
 
-☐ Consider onboarding usable when a new user can launch Glasshouse and see installed supported harnesses without manually editing a config file.
-☐ Consider onboarding usable when the user can skip all provider configuration and still use native detected harnesses.
-☐ Consider settings usable when the user can return later and configure a provider without rerunning the entire setup.
-☐ Consider launch profiles usable when the same installed Claude Code binary can be started natively or with an alternate compatible provider without modifying the user’s normal Claude configuration.
-☐ Consider interactive gateway use valid only when the session is operated by an installed compatible harness and Glasshouse does not create a replacement agent loop.
-☐ Consider response profiles minimally usable when at least one supported harness can apply a selected profile through a native mechanism or the bounded additive fallback while preserving coding instructions.
-☐ Consider gateway mode usable when two concurrent Glasshouse instances can run isolated local gateways without port or credential collisions.
-☐ Consider provider setup usable when OpenRouter, one generic OpenAI-compatible endpoint, and one generic Anthropic-compatible endpoint can be configured and tested.
-☐ Consider free-pool support usable when at least one configured zero-cost or free-tier model can perform a disposable Glasshouse support job.
+☑ Consider onboarding usable when a new user can launch Glasshouse and see installed supported harnesses without manually editing a config file.
+☑ Consider onboarding usable when the user can skip all provider configuration and still use native detected harnesses.
+☑ Consider settings usable when the user can return later and configure a provider without rerunning the entire setup.
+☑ Consider launch profiles usable when the same installed Claude Code binary can be started natively or with an alternate compatible provider without modifying the user’s normal Claude configuration.
+☑ Consider interactive gateway use valid only when the session is operated by an installed compatible harness and Glasshouse does not create a replacement agent loop.
+☑ Consider response profiles minimally usable when at least one supported harness can apply a selected profile through a native mechanism or the bounded additive fallback while preserving coding instructions.
+☑ Consider gateway mode usable when two concurrent Glasshouse instances can run isolated local gateways without port or credential collisions.
+☑ Consider provider setup usable when OpenRouter, one generic OpenAI-compatible endpoint, and one generic Anthropic-compatible endpoint can be configured and tested.
+☑ Consider free-pool support usable when at least one configured zero-cost or free-tier model can perform a disposable Glasshouse support job.
 ☐ Consider cross-platform support stable only after PTY/session smoke tests pass on macOS, Linux, and native Windows CI runners.
 
 Phase 55 — V1 completion definition
