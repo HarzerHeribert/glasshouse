@@ -3007,6 +3007,48 @@ inspectable.
 
 Not yet packaged; every package owes its Phase −1 from production code.
 
+### 2026-08-31, later — the user's answer on pairs: all of them
+
+Asked which harness/subscription pair the gateway should translate first, the
+user answered: *"please as much of this as possible i want full
+intercompatibility and translation."* Ruled from that:
+
+- **Scope.** Every harness Glasshouse adapts is to be servable from every
+  entitlement whose wire protocol the gateway can translate to the harness's
+  own — the full matrix, not one pair. Line 497 (*no broad translation until
+  concrete pairs require it*) stays ☑ and stays true: the pairs are now
+  required, and each is still offered only behind its own end-to-end test
+  through the shipped binary against a fixture upstream (1956), recorded by
+  name in the pairing table (1949), and refused by name where the harness's
+  native tooling cannot be kept (1950).
+- **Architecture: codecs, not translators.** Translation is one canonical
+  form — a request (system, messages of typed content blocks including tool
+  use and tool results, tool definitions, generation parameters) and a
+  response (content blocks, tool calls, stop reason, usage), with one
+  streaming event vocabulary for the same — plus one codec per wire protocol
+  that decodes that protocol's requests into the form and encodes responses
+  and stream events out of it. A pair is a decoder and an encoder meeting in
+  the middle: three protocols cost three codecs rather than six translators,
+  and a fourth protocol (Gemini's) costs one codec and a harness adapter.
+  Fidelity is a property of a codec and is tested per codec; per pair only the
+  end-to-end test is owed.
+- **The relay rule is narrowed, not repealed.** `gateway::ingress` forwards a
+  request whose target belongs to a protocol the provider serves *byte for
+  byte*, exactly as today. Only a target the provider does not serve — which
+  today is answered `404` with nothing opened upstream — may enter a codec,
+  and only when a supported pair exists for it; parsing is bounded by the
+  existing body limits, streaming stays streaming, and nothing is guessed from
+  a body's shape. Consequence for the refusal register's P1b: a translated
+  exchange has a parsed response, so its usage is recorded as *exact* where the
+  provider states it; relayed exchanges are unchanged.
+- **Order, by leverage.** (T1) the canonical form, the Anthropic Messages and
+  OpenAI Chat codecs both ways, the seam, and the first pair — Claude Code
+  served by an OpenAI-Chat entitlement (OpenRouter and every OpenAI-compatible
+  key) — end to end; (T2) the OpenAI Responses codec — Codex served by a
+  Claude entitlement, Claude Code by a ChatGPT/Codex plan; (T3) a Gemini codec
+  and the Gemini CLI adapter, which the tree does not have. One package each;
+  none is offered before its test.
+
 ## Phase 56A: the entitlement is the unit of capacity, and a broker stands between every harness and the pool
 
 **Instruction of record, 2026-08-31, from the user, refining Phase 56.** The
