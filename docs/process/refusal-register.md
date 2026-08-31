@@ -687,6 +687,8 @@ when it was alone. That relay was sent.
 
 ## Phase 28 scoped: the producer is OBSERVATION, and 1139's qualifier is unsatisfiable
 
+> **2026-08-31:** Cluster H's row 417 ("no file-path association exists at all", 1139/1140) is stale for **1140** — migration 17 landed `memory_files` and `MemoryStore::for_path` reads it; what 1140 lacks is a production caller, packaged as `GH-WIRE-FILE-MEMORY` (with 1143). 1139 stays refused exactly as below.
+
 `GH-FILE-MEMORY-RECON`, 2026-08-30. It corrected **four** claims it was handed
 (§81), including that the `memories` column list in circulation is **migration
 4's**: migrations 6, 10 and 13 have since added eighteen more, for **30 columns**

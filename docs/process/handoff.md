@@ -1,4 +1,4 @@
-**2026-08-31 (Opus 5 orchestrator, later):** 1026/1280 committed (`1362f51`) — batches 57 and 58 landed, 130 boxes today; one worker live (1317); next: the map side-effect recon and its prove-it successors.
+**2026-08-31 (Opus 5 orchestrator, later):** 1027/1280 committed (`afd9ebb`) — batches 57 and 58 landed, 130 boxes today; one worker live (1317); next: the map side-effect recon and its prove-it successors.
 
 **2026-08-31 (Opus 5 orchestrator):** 953/1280 committed; batch 57's five
 remaining packages merged and staged behind one gate (+52 → 1005 when green);
