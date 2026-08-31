@@ -1,3 +1,5 @@
+**2026-08-31 (hand-off):** the Opus 5 orchestrator handed off HOT to a Fable 5 orchestrator at the user's request — 1037/1292 committed (`d584ad3`), 1480 in flight behind a gate, subscription-rules (Phase 56 #1) live, wire-file-memory reported with its patch staged. Everything is in `.agent-runtime/CONTINUATION.md` and `.agent-runtime/handoff-batch59-60/`.
+
 **2026-08-31 (new requirement):** Phase 56 — harness–subscription decoupling — recorded from the user's instruction (map 1945–1956, twelve lines; design-decisions has the ruling and the order of work). The mandatory denominator is now 1292.
 
 **2026-08-31 (Opus 5 orchestrator, later):** 1027/1280 committed (`afd9ebb`) — batches 57 and 58 landed, 130 boxes today; one worker live (1317); next: the map side-effect recon and its prove-it successors.

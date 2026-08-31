@@ -1829,6 +1829,7 @@ fn route_report(
     let mut report = render_route_recommendation(&recommendation);
     report.push('\n');
     report.push_str(&route_outcomes_section(runtime));
+    report.push_str(&tier_outcome_section(runtime));
     report.push_str(&route_correlations_section(runtime));
     report.push_str(&throttle_scope_section(runtime));
     Ok(report)
@@ -2144,6 +2145,93 @@ fn route_outcomes_section(runtime: &Runtime) -> String {
         "\nA session whose harness never reported a turn end is counted as neither a success \
          nor a failure; a quiet or exited process is never read as either.\n",
     );
+    out
+}
+
+/// Map line 1480, printed for a person: whether each workload tier has
+/// enough evidence to say how its routed sessions turned out, and what that
+/// evidence says when it does.
+///
+/// A section of its own, beside [`route_correlations_section`] and
+/// [`throttle_scope_section`] — not a change to [`route_outcomes_section`]'s
+/// own "by workload tier" table, which map line 1834 already closed and
+/// whose regression asserts raw, un-gated counts. Line 1834 asks what was
+/// recorded; line 1480 asks whether enough of it exists to summarize, which
+/// is [`glasshouse::evaluation::EvaluationObservations::outcomes_by_tier`]'s
+/// own [`glasshouse::evaluation::TierOutcomeVerdict`] gate.
+///
+/// Same window as [`route_outcomes_section`] and the same practice §65
+/// reasoning: the ledger is opened here, in the one function that reads it
+/// for this section, and dropped when this returns.
+fn tier_outcome_section(runtime: &Runtime) -> String {
+    use glasshouse::evaluation::{EvaluationObservations, TierOutcomeVerdict};
+
+    let header =
+        "\nWorkload-tier outcomes in this project, last 30 days (map line 1480)\n".to_owned();
+    let ledger = match EvaluationObservations::open(runtime) {
+        Ok(ledger) => ledger,
+        Err(err) => {
+            tracing::debug!(
+                error = %format!("{err:#}"),
+                "could not open the evaluation ledger for the tier-outcome section"
+            );
+            return format!("{header}\n  the evaluation ledger could not be opened\n");
+        }
+    };
+    let to = glasshouse::evaluation::now_unix();
+    let from = to - ROUTE_OUTCOME_WINDOW_DAYS * 24 * 60 * 60;
+    let outcomes = match ledger.outcomes_by_tier(from, to) {
+        Ok(outcomes) => outcomes,
+        Err(err) => return format!("{header}\n  {err}\n"),
+    };
+
+    let mut out = header;
+    out.push('\n');
+    if outcomes.is_empty() {
+        out.push_str("  no routed sessions recorded in this window\n");
+        return out;
+    }
+    for outcome in outcomes.iter() {
+        match outcome.verdict {
+            TierOutcomeVerdict::InsufficientEvidence {
+                sample_size,
+                required,
+            } => {
+                let _ = writeln_str(
+                    &mut out,
+                    format!(
+                        "  {}: insufficient evidence — {sample_size} of the {required} reported \
+                         turns a tier summary needs; treated as no summary",
+                        outcome.bucket
+                    ),
+                );
+            }
+            TierOutcomeVerdict::Measured {
+                successful,
+                failed,
+                sample_size,
+            } => {
+                let _ = writeln_str(
+                    &mut out,
+                    format!(
+                        "  {}: {successful} of {sample_size} reported turns succeeded, {failed} \
+                         failed",
+                        outcome.bucket
+                    ),
+                );
+            }
+        }
+        if outcome.undecided > 0 {
+            let _ = writeln_str(
+                &mut out,
+                format!(
+                    "    {} session(s) with no turn end reported yet — undecided, never a \
+                     failure",
+                    outcome.undecided
+                ),
+            );
+        }
+    }
     out
 }
 

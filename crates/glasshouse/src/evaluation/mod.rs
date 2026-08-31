@@ -76,6 +76,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 
 use crate::Runtime;
 use crate::database::{EVALUATION_KINDS, PROJECT_ID_KEY};
+use crate::routing::evidence::MIN_SAMPLE_FOR_SUMMARY;
 
 /// What was decided — the `evaluation_observations.kind` vocabulary, in Rust
 /// because migration 15 deliberately gives that column no SQL `CHECK`.
@@ -1329,6 +1330,92 @@ impl EvaluationObservations {
             .map_err(sql_err("read routed sessions by pairing class"))?;
         collect_outcome_counts(rows)
     }
+}
+
+/// Map line 1480's own reader — kept in its own block, practice §77, so it
+/// cannot land on the same lines as another worker's.
+impl EvaluationObservations {
+    /// [`Self::route_outcomes_by`]'s existing join
+    /// ([`EvaluationKind::RoutingTierObserved`]), with a verdict per tier
+    /// instead of a raw count — **map line 1480**, distinct from map line
+    /// 1834's raw table: 1834 asks what was recorded, 1480 asks whether
+    /// enough of it exists to say how a tier is doing.
+    ///
+    /// **No new number.** This reuses the join `route_outcomes_by` already
+    /// performs rather than duplicating its SQL, and applies
+    /// [`crate::routing::evidence::MIN_SAMPLE_FOR_SUMMARY`] — the ledger's
+    /// one existing answer to "when enough evidence exists" — to
+    /// [`RouteOutcomeCounts::reported_turns`], the count a success-or-failure
+    /// summary is actually made from. A session with a tier row and no
+    /// outcome row is [`TierOutcome::undecided`] and is never part of that
+    /// count and never read as a failure.
+    pub fn outcomes_by_tier(
+        &self,
+        from: i64,
+        to: i64,
+    ) -> Result<Vec<TierOutcome>, EvaluationError> {
+        let counts = self.route_outcomes_by(EvaluationKind::RoutingTierObserved, from, to)?;
+        Ok(counts.into_iter().map(TierOutcome::from_counts).collect())
+    }
+}
+
+/// One [`EvaluationObservations::outcomes_by_tier`] row — map line 1480.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TierOutcome {
+    /// The tier-and-escalation bucket — [`RoutingTier::as_str`]'s closed
+    /// vocabulary, or `unclassified`, read back as the stored string and
+    /// never decoded into [`RoutingTier`] itself (the same rule
+    /// [`RoutingEvidence`]'s own doc comment gives for a stored vocabulary
+    /// word). Escalated and non-escalated tiers are distinct words in this
+    /// vocabulary, so they are distinct buckets here too.
+    pub bucket: String,
+    /// Sessions whose harness never reported a turn end for this tier —
+    /// counted on its own, never folded into a failure.
+    pub undecided: i64,
+    /// Whether this tier has enough reported turns to summarize, and what
+    /// the summary says when it does.
+    pub verdict: TierOutcomeVerdict,
+}
+
+impl TierOutcome {
+    fn from_counts(counts: RouteOutcomeCounts) -> Self {
+        let sample_size = counts.reported_turns();
+        let verdict = if sample_size < MIN_SAMPLE_FOR_SUMMARY as i64 {
+            TierOutcomeVerdict::InsufficientEvidence {
+                sample_size,
+                required: MIN_SAMPLE_FOR_SUMMARY,
+            }
+        } else {
+            TierOutcomeVerdict::Measured {
+                successful: counts.completed,
+                failed: counts.failed,
+                sample_size,
+            }
+        };
+        Self {
+            bucket: counts.bucket,
+            undecided: counts.sessions_without_outcome,
+            verdict,
+        }
+    }
+}
+
+/// What [`EvaluationObservations::outcomes_by_tier`] answers for one tier —
+/// gated the way
+/// [`crate::routing::evidence::RouteCorrelation::verdict`] gates a route
+/// pair (map line 1376's rule, reused rather than re-invented).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TierOutcomeVerdict {
+    /// Fewer than [`crate::routing::evidence::MIN_SAMPLE_FOR_SUMMARY`]
+    /// reported turns for this tier. Carries the count so a reader prints
+    /// *2 of 5* rather than *unknown*.
+    InsufficientEvidence { sample_size: i64, required: usize },
+    /// Enough reported turns to summarize successful and failed outcomes.
+    Measured {
+        successful: i64,
+        failed: i64,
+        sample_size: i64,
+    },
 }
 
 /// The one reader whose kind carries no `session_id` — map line 1851's
