@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1026 / 1280 mandatory capabilities (80%)** — 254 open across 46 phases.
+**1027 / 1280 mandatory capabilities (80%)** — 253 open across 46 phases.
 
 ## Where the work is
 
@@ -42,8 +42,8 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 20 | Minimal durable project memory | **2** | 16 | `805` |
 | Phase 21F | Memory retrieval quality | **2** | 9 | `927` |
 | Phase 32D | Normalized remaining-capacity score | **2** | 10 | `1257` |
+| Phase 33 | Resource health | **2** | 13 | `1309` |
 | Phase 38 | Quota-preserving routing | **2** | 5 | `1604` |
-| Phase 33 | Resource health | **3** | 12 | `1309` |
 | Phase 34C | Automatic routing-model selection | **3** | 10 | `1429` |
 | Phase 21E | Decision ladder and conflict handling | **4** | 8 | `907` |
 | Phase 33C | Failure, quota, and route correlation | **4** | 11 | `1362` |
@@ -170,16 +170,15 @@ these unwrapped.
 - **1263** ☐ Lower the score when user-defined spending budget is close to exhaustion.
 - **1267** ☐ Treat unlimited local inference as high-capacity but still account for measured latency and concurrency.
 
+### Phase 33 — Resource health  (2 open, 13 closed)
+
+- **1323** ☐ Avoid background probing at an aggressive rate that wastes free-request pools.
+- **1325** ☐ Record whether a health observation came from a real task, a retry, a repair attempt, or an explicit probe.
+
 ### Phase 38 — Quota-preserving routing  (2 open, 5 closed)
 
 - **1608** ☐ Prefer cheap resources for simple repository summarization when no valuable warm session already exists.
 - **1610** ☐ Avoid migrating a nearly completed task solely to preserve a small amount of quota.
-
-### Phase 33 — Resource health  (3 open, 12 closed)
-
-- **1317** ☐ Track whether a rate-limit failure appears to be provider-wide, model-specific, account-specific, or request-pool-specific when evidence permits.
-- **1323** ☐ Avoid background probing at an aggressive rate that wastes free-request pools.
-- **1325** ☐ Record whether a health observation came from a real task, a retry, a repair attempt, or an explicit probe.
 
 ### Phase 34C — Automatic routing-model selection  (3 open, 10 closed)
 

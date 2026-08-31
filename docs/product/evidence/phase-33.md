@@ -620,3 +620,53 @@ Gates the worker ran (re-run the decisive ones yourself):
 ## From `GH-FAILURE-TAXONOMY` (2026-08-31)
 
 **1316 and 1318 are CLOSED** and **1325/1317 stay as ruled above**. The relay now records a nine-way `failure_class` per exchange from status, headers and framing (never body content — the ruling *"framing is not content"* in `design-decisions.md`), so rate-limit responses are counted apart from transport and model failures (1316), and a relayed 429's own headers are proven to move the capacity estimator's band (1318). Full entry, mutations and limits: `phase-33c.md`, *GH-FAILURE-TAXONOMY*.
+
+### Line 1317 — the scope of a rate-limit failure: provider-wide or model-specific
+
+Package `GH-RATE-LIMIT-SCOPE`, 2026-08-31, Sonnet at high (Amber). One derived classification over the correlation reader GH-ROUTE-CORRELATION landed the same afternoon: `throttle_scopes` reads the same `throttle` rows, uses the reader's own `CORRELATION_OVERLAP_TOLERANCE_SECONDS` and `MIN_CORRELATION_SAMPLE` — the packet refused a second tolerance or minimum and the worker added none — and answers provider-wide when throttles on two or more models of one provider overlap, model-specific when a sibling model succeeded inside the same window, `Unknown` below the sample. Computed on read, never persisted; surfaced in `glasshouse route`'s explanation; not yet acted on by the failover ranking (the line says *track*). Three mutations, three killed. Gates quoted: fmt, clippy, `routing::evidence` 44 passed, `rate_limit_scope` 2 passed, blast radius exit 0.
+
+### Track whether a rate-limit failure appears to be provider-wide, model-specific, account-specific, or request-pool-specific when evidence permits. (line 1317)
+
+Contract: Given routing observations recording FailureClass::Throttle on one or more models of a provider, when Glasshouse is asked whether a throttle on a route is provider-wide, model-specific, or unknown, it reports ProviderWide when a throttle on that route overlapped (within CORRELATION_OVERLAP_TOLERANCE_SECONDS) a throttle on another model of the same provider, ModelSpecific when every informative throttle on that route overlapped a sibling model recording a non-throttle outcome, and Unknown with the sample size and the required minimum below MIN_CORRELATION_SAMPLE informative events — while preserving that account-specific and request-pool-specific scopes are never fabricated, matching the refusal register's ruling that neither has a producer in this build.
+
+State: COMPLETE — ruled 2026-08-31 by the orchestrator from the report's five artifacts and the diff of the decision. **Two of the line's four scopes are not produced, by ruling, not omission:** *account-specific* — this build routes one account per provider and no observation row carries an account identity, so the scope has no discriminating input; *request-pool-specific* — `is_request_pool` has no production caller and production never distinguishes pooled from token-priced allowance (refusal register, 531). `ThrottleScope` therefore reads `ProviderWide | ModelSpecific | Unknown`, and `Unknown` says so with its count below `MIN_CORRELATION_SAMPLE`. The line says *track*, and the two scopes that can be tracked are; the two that cannot are named here rather than fabricated.
+
+Production evidence:
+- `src/routing/evidence.rs` — `ThrottleScope`
+- `src/routing/evidence.rs` — `classify_throttle_scope`
+- `src/routing/evidence.rs` — `classify_throttle_scopes`
+- `src/routing/evidence.rs` — `ThrottleScopes`
+- `src/routing/evidence.rs` — `EvidenceLedger::throttle_scopes`
+- `src/main.rs` — `throttle_scope_section`
+- `src/main.rs` — `route_report (wires the new section into `glasshouse route`)`
+
+Regression evidence:
+- `routing::evidence::throttle_scope_tests::overlapping_throttles_on_sibling_models_read_as_provider_wide`
+- `routing::evidence::throttle_scope_tests::a_throttle_overlapped_by_a_sibling_models_success_reads_as_model_specific`
+- `routing::evidence::throttle_scope_tests::one_overlapping_throttle_among_many_lone_ones_still_reads_as_provider_wide`
+- `routing::evidence::throttle_scope_tests::below_the_minimum_sample_the_scope_is_unknown_and_says_the_count`
+- `routing::evidence::throttle_scope_tests::a_throttle_with_no_sibling_observed_is_uninformative`
+- `routing::evidence::throttle_scope_tests::an_upstream_5xx_is_not_a_throttle_and_contributes_nothing`
+- `routing::evidence::throttle_scope_tests::a_different_providers_model_is_not_a_sibling`
+- `routing::evidence::throttle_scope_tests::classify_throttle_scopes_covers_every_throttled_route_and_no_others`
+- `rate_limit_scope::throttle_scopes_are_read_from_a_real_ledger_with_their_sample_size_and_window`
+- `rate_limit_scope::the_route_command_prints_every_routes_throttle_scope`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| if sample_size < MIN_CORRELATION_SAMPLE { -> if sample_size < 1 { | `drop-min-sample` | **killed** | `routing::evidence::throttle_scope_tests::below_the_minimum_sample_the_scope_is_unknown_and_says_the_count` |
+| if overlaps > 0 { -> if false { | `collapse-provider-wide` | **killed** | `routing::evidence::throttle_scope_tests::overlapping_throttles_on_sibling_models_read_as_provider_wide` |
+| (true, false) => lone += 1, -> (true, false) => {} | `ignore-sibling-success` | **killed** | `routing::evidence::throttle_scope_tests::a_throttle_overlapped_by_a_sibling_models_success_reads_as_model_specific` |
+
+> drop-min-sample observed: assertion `left == right` failed at evidence.rs:4409 — four informative events read back as a verdict instead of Unknown
+
+> collapse-provider-wide observed: assertion `left == right` failed: every throttle on x overlapped a throttle on y of the same provider
+
+> ignore-sibling-success observed: assertion `left == right` failed: every throttle on x was observed against a sibling that kept serving
+
+Recorded scope limits — stated by the worker, not discovered later:
+- not wired into the live failover's ranking or scoring — recorded and readable, not acted on, per the objective's own instruction
+- computed on read, never persisted
+- the shipped-binary CLI test drives macOS only, no Windows leg
+- only looks within one provider's own recorded models; cross-provider correlation remains correlate_routes/RouteCorrelations' job
+

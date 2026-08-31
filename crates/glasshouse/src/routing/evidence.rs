@@ -1382,6 +1382,182 @@ pub fn correlate_routes(observations: &[RoutingObservation]) -> RouteCorrelation
     RouteCorrelations { pairs }
 }
 
+/// Capability map line 1317: whether a throttle on one route reads as this
+/// provider's own cadence limiter firing everywhere, or as one model's own
+/// limit — computed, never stored, from the same rows and the same overlap
+/// [`correlate_routes`] measures, restricted to [`FailureClass::Throttle`]
+/// and to one provider's own models rather than every route in the ledger.
+///
+/// # Two of the map line's four scopes are not here
+///
+/// Line 1317 names four: provider-wide, model-specific, account-specific,
+/// request-pool-specific. Only the first two have a producer in this build.
+/// **Account-specific** has none: this build routes one credential per
+/// provider, and no [`RoutingObservation`] row carries an account identity —
+/// there is nothing to key a second account by. **Request-pool-specific**
+/// has neither a producer nor a consumer: `routing::free::is_request_pool`
+/// has no production caller, and the one production allowance read asks only
+/// `is_exhausted`, which a pooled and a token-priced credential both answer
+/// the same way (refusal register, row 531). Fabricating either would be
+/// exactly the invention line 1317's own "when evidence permits" refuses.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum ThrottleScope {
+    /// A throttle on this route overlapped, within
+    /// [`CORRELATION_OVERLAP_TOLERANCE_SECONDS`], a throttle on another model
+    /// of the same provider — direct evidence the limiter reached more than
+    /// one model, and outweighs any number of windows where it did not.
+    ProviderWide,
+    /// Every informative throttle on this route overlapped a sibling model
+    /// of the same provider recording a **non-throttle** outcome — evidence
+    /// the limiter is scoped to this model alone.
+    ModelSpecific,
+    /// Fewer than [`MIN_CORRELATION_SAMPLE`] informative throttle events for
+    /// this route — line 1376's own refusal shape, reused rather than given
+    /// a second minimum: this ledger keeps one answer to *how many
+    /// observations before a figure is trusted*.
+    Unknown { sample_size: usize, required: usize },
+}
+
+/// [`classify_throttle_scope`]'s per-event judgement: whether a throttle on
+/// `route` was, within [`CORRELATION_OVERLAP_TOLERANCE_SECONDS`], observed
+/// against a sibling model of the same provider, and whether that sibling
+/// was throttled too — the same three-way outcome
+/// [`count_failures_against`] folds into a [`RouteCorrelation`], specialised
+/// to one provider's own models and to [`FailureClass::Throttle`] alone.
+fn count_throttles_against_siblings(
+    failing: &[&RoutingObservation],
+    siblings: &[&RoutingObservation],
+) -> (usize, usize) {
+    let mut overlaps = 0usize;
+    let mut lone = 0usize;
+    for failure in failing {
+        if failure.failure_class != Some(FailureClass::Throttle) {
+            continue;
+        }
+        let window = failure.window();
+        let mut observed = false;
+        let mut matched = false;
+        for row in siblings {
+            if !overlaps_within(window, row.window(), CORRELATION_OVERLAP_TOLERANCE_SECONDS) {
+                continue;
+            }
+            observed = true;
+            if row.failure_class == Some(FailureClass::Throttle) {
+                matched = true;
+                break;
+            }
+        }
+        match (observed, matched) {
+            (false, _) => {}
+            (true, true) => overlaps += 1,
+            (true, false) => lone += 1,
+        }
+    }
+    (overlaps, lone)
+}
+
+/// Line 1317, as a pure function over raw rows — the same shape
+/// [`correlate_routes`] takes, restricted to `route`'s own provider's other
+/// models rather than every other route in the ledger: line 1317 asks
+/// whether a throttle is provider-wide **within one provider**, not whether
+/// it correlates with an unrelated one.
+///
+/// An informative event is a throttle on `route` during which a sibling
+/// model of the same provider was observed at all, within
+/// [`CORRELATION_OVERLAP_TOLERANCE_SECONDS`] — rows with no recorded outcome
+/// and this reader's own [`CORRELATION_PURPOSE`] rows are excluded on both
+/// sides, the same rule [`correlate_routes`] applies. Below
+/// [`MIN_CORRELATION_SAMPLE`] informative events, [`ThrottleScope::Unknown`]
+/// with the count, exactly line 1376's shape. At or above it,
+/// [`ThrottleScope::ProviderWide`] if any sibling model was throttled at the
+/// same moment, else [`ThrottleScope::ModelSpecific`].
+pub fn classify_throttle_scope(
+    observations: &[RoutingObservation],
+    route: &RouteIdentity,
+) -> ThrottleScope {
+    let informative = |row: &&RoutingObservation| {
+        row.outcome.is_some() && row.purpose.as_deref() != Some(CORRELATION_PURPOSE)
+    };
+    let failing: Vec<&RoutingObservation> = observations
+        .iter()
+        .filter(|row| row.provider == route.provider && row.model == route.model)
+        .filter(informative)
+        .collect();
+    let siblings: Vec<&RoutingObservation> = observations
+        .iter()
+        .filter(|row| row.provider == route.provider && row.model != route.model)
+        .filter(informative)
+        .collect();
+
+    let (overlaps, lone) = count_throttles_against_siblings(&failing, &siblings);
+    let sample_size = overlaps + lone;
+    if sample_size < MIN_CORRELATION_SAMPLE {
+        return ThrottleScope::Unknown {
+            sample_size,
+            required: MIN_CORRELATION_SAMPLE,
+        };
+    }
+    if overlaps > 0 {
+        ThrottleScope::ProviderWide
+    } else {
+        ThrottleScope::ModelSpecific
+    }
+}
+
+/// Every route [`classify_throttle_scope`] has anything to say about — at
+/// least one throttle, in the window queried — looked up by route. The same
+/// relationship [`RouteCorrelations`] has to a single pair: one query builds
+/// every entry at once, and a caller with one route in mind still asks this
+/// type rather than the database again.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ThrottleScopes {
+    routes: std::collections::BTreeMap<RouteIdentity, ThrottleScope>,
+}
+
+impl ThrottleScopes {
+    /// What this reader knows about `route`'s own throttles — never a bare
+    /// absence: a route with no recorded throttle is
+    /// [`ThrottleScope::Unknown`] with a count of zero, the same "nothing
+    /// observed and too little observed read as one verdict" rule
+    /// [`RouteCorrelations::between`] keeps.
+    pub fn for_route(&self, route: &RouteIdentity) -> ThrottleScope {
+        self.routes
+            .get(route)
+            .copied()
+            .unwrap_or(ThrottleScope::Unknown {
+                sample_size: 0,
+                required: MIN_CORRELATION_SAMPLE,
+            })
+    }
+
+    /// Every route with at least one recorded throttle, in route order.
+    pub fn iter(&self) -> impl Iterator<Item = (&RouteIdentity, &ThrottleScope)> {
+        self.routes.iter()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.routes.is_empty()
+    }
+}
+
+/// [`classify_throttle_scope`] for every route that recorded a throttle in
+/// `observations`, rather than one asked about by name.
+pub fn classify_throttle_scopes(observations: &[RoutingObservation]) -> ThrottleScopes {
+    let routes: std::collections::BTreeSet<RouteIdentity> = observations
+        .iter()
+        .filter(|row| row.failure_class == Some(FailureClass::Throttle))
+        .map(|row| RouteIdentity::new(&row.provider, &row.model))
+        .collect();
+    let routes = routes
+        .into_iter()
+        .map(|route| {
+            let scope = classify_throttle_scope(observations, &route);
+            (route, scope)
+        })
+        .collect();
+    ThrottleScopes { routes }
+}
+
 /// Request and token consumption for one `(purpose, harness_recorded)`
 /// group, within a queried window — capability map line 1464's "measure
 /// routing-model token and request consumption separately from coding-agent
@@ -2008,6 +2184,43 @@ impl EvidenceLedger {
             observations
         };
         Ok(correlate_routes(&observations))
+    }
+
+    /// Capability map line 1317's reader: [`classify_throttle_scopes`], fed
+    /// every outcome-carrying row in the window ending at `now_unix` — the
+    /// same query shape [`Self::route_correlations`] runs, for the same
+    /// reason: the tolerance, the class match and the minimum are decisions,
+    /// and a decision belongs where a test reaches it without a database.
+    pub fn throttle_scopes(
+        &self,
+        now_unix: i64,
+        window_seconds: i64,
+    ) -> Result<ThrottleScopes, EvidenceLedgerError> {
+        let earliest = now_unix.saturating_sub(window_seconds);
+        let observations = {
+            let conn = self.lock();
+            let mut statement = conn
+                .prepare(
+                    "SELECT * FROM routing_observations
+                     WHERE project_id = ?1
+                       AND observed_at >= ?2 AND observed_at <= ?3
+                       AND outcome IS NOT NULL
+                     ORDER BY observed_at ASC",
+                )
+                .map_err(sql_err("read routing observations for throttle scope"))?;
+            let rows = statement
+                .query_map(
+                    params![self.project_id, earliest, now_unix],
+                    row_to_observation,
+                )
+                .map_err(sql_err("read routing observations for throttle scope"))?;
+            let mut observations = Vec::new();
+            for row in rows {
+                observations.push(row.map_err(sql_err("read a routing observation"))??);
+            }
+            observations
+        };
+        Ok(classify_throttle_scopes(&observations))
     }
 
     /// [`Self::summarize`] for whichever `(route, harness, context_state)`
@@ -4061,5 +4274,246 @@ mod correlation_tests {
         let mut backwards = served("a", 100);
         backwards.completed_at_unix = Some(50);
         assert_eq!(backwards.window(), (100, 100));
+    }
+}
+
+#[cfg(test)]
+mod throttle_scope_tests {
+    use super::*;
+
+    fn row(
+        provider: &str,
+        model: &str,
+        start: i64,
+        end: i64,
+        class: Option<FailureClass>,
+    ) -> RoutingObservation {
+        RoutingObservation {
+            seq: 0,
+            project_id: "project".to_owned(),
+            observed_at_unix: end,
+            provider: provider.to_owned(),
+            model: model.to_owned(),
+            route: Some("anthropic-messages".to_owned()),
+            quota_context: None,
+            harness: Some("claude-code".to_owned()),
+            purpose: None,
+            dispatched_at_unix: Some(start),
+            first_byte_at_unix: None,
+            first_token_at_unix: None,
+            first_tool_call_at_unix: None,
+            completed_at_unix: Some(end),
+            input_tokens: None,
+            output_tokens: None,
+            cached_input_tokens: None,
+            cost: None,
+            tool_rounds: None,
+            retries: None,
+            repairs: None,
+            failovers: None,
+            outcome: Some(if class.is_some() {
+                Outcome::Failed
+            } else {
+                Outcome::Succeeded
+            }),
+            failure_class: class,
+            context_state: ContextState::Unknown,
+        }
+    }
+
+    fn throttle(provider: &str, model: &str, start: i64) -> RoutingObservation {
+        row(
+            provider,
+            model,
+            start,
+            start + 5,
+            Some(FailureClass::Throttle),
+        )
+    }
+
+    fn served(provider: &str, model: &str, start: i64) -> RoutingObservation {
+        row(provider, model, start, start + 5, None)
+    }
+
+    fn route(provider: &str, model: &str) -> RouteIdentity {
+        RouteIdentity::new(provider, model)
+    }
+
+    /// Line 1317, its provider-wide half — kills *collapse provider-wide
+    /// into model-specific*: five throttles on `x` each overlapped by a
+    /// throttle on sibling model `y` of the same provider is direct evidence
+    /// the limiter reached both.
+    #[test]
+    fn overlapping_throttles_on_sibling_models_read_as_provider_wide() {
+        let rows: Vec<RoutingObservation> = (0..5)
+            .flat_map(|i| {
+                let at = i * 1_000;
+                [throttle("a", "x", at), throttle("a", "y", at + 10)]
+            })
+            .collect();
+        assert_eq!(
+            classify_throttle_scope(&rows, &route("a", "x")),
+            ThrottleScope::ProviderWide,
+            "every throttle on x overlapped a throttle on y of the same provider"
+        );
+    }
+
+    /// Line 1317, its model-specific half — kills *ignore the sibling
+    /// model's success*: five throttles on `x`, each overlapped by `y`
+    /// serving normally, is evidence the limiter never reached `y`.
+    #[test]
+    fn a_throttle_overlapped_by_a_sibling_models_success_reads_as_model_specific() {
+        let rows: Vec<RoutingObservation> = (0..5)
+            .flat_map(|i| {
+                let at = i * 1_000;
+                [throttle("a", "x", at), served("a", "y", at + 10)]
+            })
+            .collect();
+        assert_eq!(
+            classify_throttle_scope(&rows, &route("a", "x")),
+            ThrottleScope::ModelSpecific,
+            "every throttle on x was observed against a sibling that kept serving"
+        );
+    }
+
+    /// A single provider-wide instance outweighs any number of
+    /// model-specific ones — the scope answers "did the limiter ever reach
+    /// another model", not a majority vote.
+    #[test]
+    fn one_overlapping_throttle_among_many_lone_ones_still_reads_as_provider_wide() {
+        let mut rows: Vec<RoutingObservation> = (0..4)
+            .flat_map(|i| {
+                let at = i * 1_000;
+                [throttle("a", "x", at), served("a", "y", at + 10)]
+            })
+            .collect();
+        rows.push(throttle("a", "x", 100_000));
+        rows.push(throttle("a", "y", 100_010));
+        assert_eq!(
+            classify_throttle_scope(&rows, &route("a", "x")),
+            ThrottleScope::ProviderWide
+        );
+    }
+
+    /// Line 1317 — kills *drop the minimum sample*: four informative
+    /// throttle events is insufficient and says so with both numbers; the
+    /// fifth makes it a verdict.
+    #[test]
+    fn below_the_minimum_sample_the_scope_is_unknown_and_says_the_count() {
+        let mut rows: Vec<RoutingObservation> = (0..4)
+            .flat_map(|i| {
+                let at = i * 1_000;
+                [throttle("a", "x", at), served("a", "y", at + 10)]
+            })
+            .collect();
+        assert_eq!(
+            classify_throttle_scope(&rows, &route("a", "x")),
+            ThrottleScope::Unknown {
+                sample_size: 4,
+                required: MIN_CORRELATION_SAMPLE,
+            }
+        );
+
+        rows.push(throttle("a", "x", 5_000));
+        rows.push(served("a", "y", 5_010));
+        assert_eq!(
+            classify_throttle_scope(&rows, &route("a", "x")),
+            ThrottleScope::ModelSpecific
+        );
+    }
+
+    /// A throttle observed against no sibling at all is uninformative, same
+    /// as [`correlate_routes`]'s own rule — it does not count toward the
+    /// sample and does not make the scope provider-wide by default.
+    #[test]
+    fn a_throttle_with_no_sibling_observed_is_uninformative() {
+        let rows = vec![throttle("a", "x", 0)];
+        assert_eq!(
+            classify_throttle_scope(&rows, &route("a", "x")),
+            ThrottleScope::Unknown {
+                sample_size: 0,
+                required: MIN_CORRELATION_SAMPLE,
+            }
+        );
+    }
+
+    /// Only [`FailureClass::Throttle`] counts, not every correlatable class:
+    /// an `Upstream5xx` on `x` says nothing about line 1317's question even
+    /// when a sibling model failed the same way at the same moment.
+    #[test]
+    fn an_upstream_5xx_is_not_a_throttle_and_contributes_nothing() {
+        let rows: Vec<RoutingObservation> = (0..5)
+            .flat_map(|i| {
+                let at = i * 1_000;
+                [
+                    row("a", "x", at, at + 5, Some(FailureClass::Upstream5xx)),
+                    row("a", "y", at + 10, at + 15, Some(FailureClass::Upstream5xx)),
+                ]
+            })
+            .collect();
+        assert_eq!(
+            classify_throttle_scope(&rows, &route("a", "x")),
+            ThrottleScope::Unknown {
+                sample_size: 0,
+                required: MIN_CORRELATION_SAMPLE,
+            },
+            "5xx rows are not throttles and do not inform this scope"
+        );
+    }
+
+    /// A different provider's model is not a sibling: `b/x` throttling
+    /// beside `a/x` says nothing about `a`'s own other models.
+    #[test]
+    fn a_different_providers_model_is_not_a_sibling() {
+        let rows: Vec<RoutingObservation> = (0..5)
+            .flat_map(|i| {
+                let at = i * 1_000;
+                [throttle("a", "x", at), throttle("b", "x", at + 10)]
+            })
+            .collect();
+        assert_eq!(
+            classify_throttle_scope(&rows, &route("a", "x")),
+            ThrottleScope::Unknown {
+                sample_size: 0,
+                required: MIN_CORRELATION_SAMPLE,
+            }
+        );
+    }
+
+    /// [`classify_throttle_scopes`] finds every throttled route and nothing
+    /// else, and [`ThrottleScopes::for_route`] answers a route it never saw
+    /// with an honest zero rather than a panic or a default guess.
+    #[test]
+    fn classify_throttle_scopes_covers_every_throttled_route_and_no_others() {
+        let mut rows: Vec<RoutingObservation> = (0..5)
+            .flat_map(|i| {
+                let at = i * 1_000;
+                [throttle("a", "x", at), throttle("a", "y", at + 10)]
+            })
+            .collect();
+        rows.push(served("c", "z", 999_999));
+        let scopes = classify_throttle_scopes(&rows);
+
+        assert_eq!(
+            scopes.for_route(&route("a", "x")),
+            ThrottleScope::ProviderWide
+        );
+        assert_eq!(
+            scopes.for_route(&route("a", "y")),
+            ThrottleScope::ProviderWide
+        );
+        assert_eq!(
+            scopes.for_route(&route("c", "z")),
+            ThrottleScope::Unknown {
+                sample_size: 0,
+                required: MIN_CORRELATION_SAMPLE,
+            },
+            "c/z never throttled, so it is unmeasured rather than absent"
+        );
+        assert_eq!(
+            scopes.iter().count(),
+            2,
+            "only the two throttled routes are stored"
+        );
     }
 }

@@ -1830,6 +1830,7 @@ fn route_report(
     report.push('\n');
     report.push_str(&route_outcomes_section(runtime));
     report.push_str(&route_correlations_section(runtime));
+    report.push_str(&throttle_scope_section(runtime));
     Ok(report)
 }
 
@@ -1936,6 +1937,87 @@ fn route_correlations_section(runtime: &Runtime) -> String {
                  failure resilience (map line 1852)"
             ),
         );
+    }
+    out
+}
+
+/// Capability map line 1317, printed for a person: every route this
+/// project's ledger has seen throttled, and whether that throttle reads as
+/// this provider's own cadence limiter firing everywhere or as one model's
+/// own limit — line 1317's "track", not "act": nothing here changes a
+/// failover, only what a person reading `glasshouse route` is told about a
+/// throttle that already happened.
+///
+/// Two of the map line's four scopes are never printed here, on purpose:
+/// **account-specific** and **request-pool-specific** have no producer in
+/// this build — see [`glasshouse::routing::evidence::ThrottleScope`]'s own
+/// doc comment and refusal register row 531.
+///
+/// Reads the same
+/// [`glasshouse::routing::evidence::CLASSIFICATION_EVIDENCE_WINDOW_SECONDS`]
+/// window as [`route_correlations_section`], for the same reason: what this
+/// prints should be what a real failover, reading the ledger at the same
+/// moment, would see.
+fn throttle_scope_section(runtime: &Runtime) -> String {
+    use glasshouse::routing::evidence::{
+        CLASSIFICATION_EVIDENCE_WINDOW_SECONDS, EvidenceLedger, ThrottleScope,
+    };
+
+    let header = "\nThrottle scope in this project, last 7 days (map line 1317)\n".to_owned();
+    let ledger = match EvidenceLedger::open(runtime) {
+        Ok(ledger) => ledger,
+        Err(err) => {
+            tracing::debug!(
+                error = %err,
+                "could not open the routing evidence ledger for the throttle-scope section"
+            );
+            return format!("{header}\n  the routing evidence ledger could not be opened\n");
+        }
+    };
+    let now_unix = glasshouse::provider::cache::now_unix_seconds();
+    let scopes = match ledger.throttle_scopes(now_unix, CLASSIFICATION_EVIDENCE_WINDOW_SECONDS) {
+        Ok(scopes) => scopes,
+        Err(err) => return format!("{header}\n  {err}\n"),
+    };
+
+    let mut out = header;
+    out.push('\n');
+    if scopes.is_empty() {
+        out.push_str("  no throttle has been observed on any route in this window\n");
+    }
+    for (route, scope) in scopes.iter() {
+        match scope {
+            ThrottleScope::ProviderWide => {
+                let _ = writeln_str(
+                    &mut out,
+                    format!(
+                        "  {route}: provider-wide — a throttle on this route overlapped a \
+                         throttle on another model of the same provider"
+                    ),
+                );
+            }
+            ThrottleScope::ModelSpecific => {
+                let _ = writeln_str(
+                    &mut out,
+                    format!(
+                        "  {route}: model-specific — every observed throttle on this route \
+                         overlapped a sibling model that was not throttled"
+                    ),
+                );
+            }
+            ThrottleScope::Unknown {
+                sample_size,
+                required,
+            } => {
+                let _ = writeln_str(
+                    &mut out,
+                    format!(
+                        "  {route}: insufficient evidence — {sample_size} of the {required} \
+                         informative throttle events a scope needs; treated as unknown"
+                    ),
+                );
+            }
+        }
     }
     out
 }

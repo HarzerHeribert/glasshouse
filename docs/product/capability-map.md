@@ -1314,7 +1314,7 @@ Phase 33 — Resource health
 ☑ Track known quota or usage state when a provider or harness exposes it.
 ☑ Track known quota reset time when it is exposed.
 ☑ Track recent rate-limit responses separately from transport or model failures.
-☐ Track whether a rate-limit failure appears to be provider-wide, model-specific, account-specific, or request-pool-specific when evidence permits.
+☑ Track whether a rate-limit failure appears to be provider-wide, model-specific, account-specific, or request-pool-specific when evidence permits.
 ☑ Feed rate-limit events back into the unified capacity estimator.
 ☑ Treat provider-declared Retry-After or equivalent cooldown information as authoritative for temporary scheduling blocks.
 ☑ Treat unavailable quota telemetry as unknown rather than inventing a percentage.

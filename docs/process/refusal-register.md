@@ -128,7 +128,9 @@ whose consuming phases are still at zero. **It belongs in Cluster D.**
 | 1216 | reader built and wired; no host has ever sent a window > 60s |
 | 1317 | nothing states whether a 429 is provider-, model-, account- or pool-scoped |
 
-### Cluster L — Glasshouse refuses to parse the thing that carries the signal *(in-repo: the boundary is ours and deliberate — do not package without changing it first)*
+### Cluster L — Glasshouse refuses to parse the thing that carries the signal
+
+> **2026-08-31, from GH-MAP-SIDE-EFFECT-AUDIT:** this cluster's note that *purpose is the one field nothing holds* is stale — `NewObservation::with_purpose` has five production call sites (routing-latency, classification, extraction, tier-escalation/downgrade, route-correlation). The ingress boundary below is unchanged. *(in-repo: the boundary is ours and deliberate — do not package without changing it first)*
 
 **Added batch 53, after a Phase −1 check killed a package before dispatch.**
 Phase 33A ranks as "5 open, 10 closed" in `ORIENT.md`, which reads cheap. It is
@@ -343,7 +345,9 @@ has now cost two separate investigations.
 | ~~1599~~ | **CLOSED 2026-08-30** by `GH-GATEWAY-HEALTH-BRIDGE`. The row was correct — no pool reached the router — and it expired the moment a bridge was built. **The lossy reverse map did not defeat it**: `provider_health` builds its own key from the destination, so the bridge renders each destination's label with the *same function the write side used* and compares forward only. No inverse is ever computed. Three ambiguities are **declined rather than resolved**, including two readings that disagree on one (label, model) — which is exactly what a genuine label collision looks like in the data. See `phase-37.md`. |
 | 566, 569 | **Do not package. `docs/product/evidence/phase-9j.md` records the full reasoning and a self-maintaining tripwire.** `harness::pairing::classify` derives `PairingClass` from harness, model and user corrections — **never from the route** — while every candidate set the binary can construct varies *only* by route (`UpstreamBackend` has no model field; the one model arrives at `SessionRouting::bind` from `profile.model` and applies to every backend). So the native-pairing prior is constant across every set Glasshouse ranks. 569 is unreachable for the same reason: a warm session cannot outweigh a prior that never tipped anything. Separately, a fresh session does not reach the scorer at all — `best` has exactly two call sites, both in `on_provider_failure`. **The tripwire is `routing::interactive::tests::the_native_pairing_prior_is_constant_across_a_real_session_start_candidate_set`**: if anyone makes `classify` read the route, that test fails, and its failure means 566 has become reachable. |
 
-### Cluster O — Phase 34F has no producer for any of its eleven lines *(in-repo: yes; it is a build, not a wiring join)*
+### Cluster O — Phase 34F has no producer for any of its eleven lines
+
+> **2026-08-31: 1480's producer now exists** — `RoutingTierObserved` (1834, `record_routed_session`'s third row, both routed exits) beside the harness-verdict outcome row (1835). What 1480 still lacks is the join reader; packaged as `GH-TIER-OUTCOMES`. The other ten lines stay blocked exactly as below. *(in-repo: yes; it is a build, not a wiring join)*
 
 | lines | missing link |
 |---|---|
@@ -822,6 +826,8 @@ never holds a session's conversation at all.
 shape 1455 and 1456 were un-ticked for. **Do not package.**
 
 ### What IS reachable: 1171, and only 1171
+
+> **STALE as of 2026-08-31: 1171 is ☑ on the map.** The analysis below stood when written; the line has since closed. `cluster-b.py` still lists `NewObservation::with_context_state` (`evidence.rs`) with no production caller — that is Phase 33A's 1334 `context_state`, blocked with 1331–1334 on the `ingress` ruling, not 1171.
 
 *"Prefer creating or refreshing a portable checkpoint before intentional
 compaction when practical."* All four Phase −1 links stand in current
