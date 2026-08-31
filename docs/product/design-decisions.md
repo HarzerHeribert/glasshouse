@@ -2949,3 +2949,24 @@ provenance (migration 21, `sessions.last_seen_commit`). Idempotency is the
 store's existing dedupe, proven by running the same commit twice; no lock.
 
 Package: `GH-MEMORY-COMMITS`.
+
+## Phase 34A/35B: a declared capability that the scorer already reads is not wired twice
+
+Ruled 2026-08-31 on GH-TIER-CEILING's refusal, verified by the orchestrator.
+`ResourceCapabilities::describe(&harness_caps, facts)` — which `capability_fit`
+(`routing/session.rs:786`) already calls — reads the harness adapter's own
+declarations for `code_edit`, `shell_tool_use`, `browser_use` and `mcp`, and
+prefers `facts` only when a fact is `Declared::Verified`. Copying the adapter's
+declarations into `ResourceFacts` and attaching them to every destination would
+therefore change no score anywhere: `prefer()` falls through to the same
+values. It would also assert *verification* nobody performed, or, left
+`Unverified`, be inert. **`Destination::with_resource_facts` keeps no
+production caller, deliberately**, until something produces a fact the adapter
+cannot declare — `large_context`, `fast_cheap_analysis`, `repository_review`
+have no producer today and `axis_for` maps no hard capability to them. A wiring
+that would survive its own mutation is the shape `cluster-b.py` exists to find;
+building one on purpose is worse than leaving the gap named.
+
+Package: `GH-TIER-CEILING`; lines 1401–1403 closed on the tier producer plus the
+declarations `capability_fit` already reads.
+

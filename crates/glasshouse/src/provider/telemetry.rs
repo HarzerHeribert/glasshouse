@@ -1686,6 +1686,57 @@ impl GatewayHealthCache {
         out
     }
 
+    /// [`Self::load_all`], with **the unix second each provider's file was
+    /// written** beside its entries — map line 1854's *stale* half, which
+    /// this cache has always held and never handed out.
+    ///
+    /// # Why the date is per file and not per reading
+    ///
+    /// [`Self::store`] replaces a provider's whole file in one write, and its
+    /// one production caller builds that vector in one pass
+    /// (`crate::gateway::session::SessionRouting::health_readings_for` maps
+    /// the free pool at a single instant). So every entry in one file was
+    /// observed at the file's own `observed_at_unix`, and a per-entry column
+    /// would be that number copied N times — a second source of truth for a
+    /// fact the file already carries, which is the duplication
+    /// `crate::evaluation`'s own module header refuses one seam over.
+    ///
+    /// # A file that cannot be dated is not returned at all
+    ///
+    /// `observed_at_unix` is a required field of the stored document, so a
+    /// file without one fails to deserialize and is skipped by exactly the
+    /// same guard that skips a truncated one — [`Self::load_all`]'s own
+    /// fail-soft contract. A caller therefore never sees an undated reading,
+    /// and cannot mistake one for a fresh reading.
+    ///
+    /// [`Self::load_all`] is deliberately left as it is rather than widened:
+    /// its two other callers
+    /// (`crate::provider::resources::GatheredTelemetry::gather_gateway_health`
+    /// and the shell's own reader) render health, not its age.
+    pub fn load_all_dated(&self) -> Vec<(String, i64, Vec<GatewayHealthReading>)> {
+        let Ok(entries) = std::fs::read_dir(&self.root) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for entry in entries.flatten() {
+            let Ok(bytes) = std::fs::read(entry.path()) else {
+                continue;
+            };
+            let Ok(stored) = serde_json::from_slice::<PersistedGatewayHealth>(&bytes) else {
+                continue;
+            };
+            if stored.version != GATEWAY_HEALTH_FORMAT_VERSION {
+                continue;
+            }
+            out.push((
+                stored.provider.clone(),
+                stored.observed_at_unix,
+                stored.entries,
+            ));
+        }
+        out
+    }
+
     /// Persist `entries` for `provider`, replacing whatever it had before —
     /// the gateway's own half of capability map lines 1311/1321/1322/1324.
     ///

@@ -177,6 +177,35 @@ pub const MIN_SAMPLE_FOR_SUMMARY: usize = 5;
 /// notice.
 pub const CLASSIFICATION_PURPOSE: &str = "classification";
 
+/// What `routing_observations.purpose` records for a memory-extraction call
+/// — `main.rs`'s `record_extraction_observation` producer writes it, and
+/// [`RoutingOverhead`] reads it back as its own bucket.
+///
+/// **Rows written before this constant existed carry `NULL` and stay that
+/// way.** [`NewObservation::with_purpose`]'s own doc comment records why:
+/// back-filling them would make *"this build recorded nothing here"*
+/// indistinguishable from *"this build recorded a purpose"*. So the stamp
+/// applies from now on, an unstamped row is counted as unstamped, and
+/// nothing is ever re-labelled — which is what makes capability map line
+/// 1832's separation honest rather than retroactive.
+pub const EXTRACTION_PURPOSE: &str = "memory-extraction";
+
+/// What `routing_observations.purpose` records for map line 1849's
+/// decision-latency row — `main.rs`'s `record_routing_latency` producer
+/// writes it.
+///
+/// Spelled here rather than only at that producer so [`RoutingOverhead`] can
+/// read the same word: a second spelling would silently split the only
+/// producer from the only reader, exactly as [`CLASSIFICATION_PURPOSE`]'s
+/// own doc says.
+///
+/// **A row under this purpose is not a model call.** It records the wall
+/// clock a routing decision took, and carries no tokens at all — which is
+/// why it is its own bucket rather than folded into
+/// [`CLASSIFICATION_PURPOSE`]'s, where it would inflate a count of model
+/// requests with rows no model ever served.
+pub const ROUTING_LATENCY_PURPOSE: &str = "routing-latency";
+
 /// How far back [`EvidenceLedger::classification_record`] and the routing
 /// economics readers look — seven days, the same window the shell's
 /// route-evidence view already uses, so a routing model's record and the
@@ -1115,7 +1144,7 @@ impl ClassificationRecord {
 /// and uncounted rows sums only what was counted. [`Self::fraction`] is
 /// `None` whenever either side is uncounted or the task side is zero, and
 /// [`Self::exceeds`] never fires on an unmeasured comparison.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RoutingOverhead {
     /// Rows whose `purpose` is [`CLASSIFICATION_PURPOSE`].
     pub classification_requests: usize,
@@ -1123,34 +1152,108 @@ pub struct RoutingOverhead {
     /// Every other row the ledger holds in the window — gateway exchanges,
     /// memory extraction, anything a later producer stamps with another
     /// purpose.
+    ///
+    /// **This stays the line-1466 denominator and keeps its meaning**, and
+    /// the four fields below are its breakdown rather than a partition that
+    /// replaces it: `extraction + routing_latency + coding_agent +
+    /// unstamped == task_requests` exactly, by construction.
     pub task_requests: usize,
     pub task_tokens: Option<i64>,
+    /// Rows whose `purpose` is [`EXTRACTION_PURPOSE`] — capability map line
+    /// 1832's *"memory-extraction cost, separately from interactive coding
+    /// cost"*. Stamped from the build this constant landed in; earlier
+    /// extraction rows are in [`Self::unstamped_requests`] and are never
+    /// moved here.
+    pub extraction_requests: usize,
+    pub extraction_tokens: Option<i64>,
+    /// Rows whose `purpose` is [`ROUTING_LATENCY_PURPOSE`] — line 1833's
+    /// *request consumption* half for the routing model's own decision
+    /// timing. These carry no tokens by construction, so a token figure here
+    /// is honestly absent rather than zero.
+    pub routing_latency_requests: usize,
+    pub routing_latency_tokens: Option<i64>,
+    /// Rows no producer stamped that **did** name a harness — the gateway
+    /// relay, and today nothing else. This is *"interactive coding cost"* as
+    /// lines 1832 and 1833 use the phrase, and it is the one side of the
+    /// separation this build cannot count in tokens:
+    /// `crate::gateway::ingress` relays a body it is designed never to
+    /// parse, so every one of these rows leaves all three token columns
+    /// `NULL`. The request count is real; the token figure is absent, and
+    /// must render as absent.
+    pub coding_agent_requests: usize,
+    pub coding_agent_tokens: Option<i64>,
+    /// Everything none of the four named buckets claims — today exactly the
+    /// rows written before this build stamped a purpose (no `purpose`, no
+    /// harness), which is every memory-extraction call the previous builds
+    /// recorded.
+    ///
+    /// **Its own bucket precisely so those rows are neither re-labelled nor
+    /// silently counted as somebody else's spend.** A `purpose` a later
+    /// build writes and this one does not know would also land here, which
+    /// is visible degradation rather than a wrong attribution.
+    pub unstamped_requests: usize,
+    pub unstamped_tokens: Option<i64>,
+}
+
+/// Fold one group's counts into one bucket, keeping an absent token count
+/// absent.
+///
+/// `Some(0)` and `None` are different facts here — the whole reason
+/// [`PurposeConsumption`]'s token fields are `Option` — so a bucket only
+/// becomes counted once a group that carried a count reaches it.
+fn add_consumption(bucket: (&mut usize, &mut Option<i64>), requests: usize, tokens: Option<i64>) {
+    let (count, total) = bucket;
+    *count += requests;
+    if let Some(tokens) = tokens {
+        *total = Some(total.unwrap_or(0) + tokens);
+    }
 }
 
 impl RoutingOverhead {
     pub fn from_consumption(groups: &[PurposeConsumption]) -> Self {
-        let mut overhead = Self {
-            classification_requests: 0,
-            classification_tokens: None,
-            task_requests: 0,
-            task_tokens: None,
-        };
+        let mut overhead = Self::default();
         for group in groups {
             let tokens = match (group.input_tokens, group.output_tokens) {
                 (None, None) => None,
                 (input, output) => Some(input.unwrap_or(0) + output.unwrap_or(0)),
             };
-            let (requests, total) = if group.purpose.as_deref() == Some(CLASSIFICATION_PURPOSE) {
-                (
+            // The named bucket this group belongs to. `harness_recorded` is
+            // what tells the two `NULL`-purpose producers apart — see
+            // [`PurposeConsumption`]'s own doc comment — so an unstamped row
+            // that named a harness is the coding agent's, and one that named
+            // none is a row written before this build stamped a purpose.
+            let named = match group.purpose.as_deref() {
+                Some(CLASSIFICATION_PURPOSE) => (
                     &mut overhead.classification_requests,
                     &mut overhead.classification_tokens,
-                )
-            } else {
-                (&mut overhead.task_requests, &mut overhead.task_tokens)
+                ),
+                Some(EXTRACTION_PURPOSE) => (
+                    &mut overhead.extraction_requests,
+                    &mut overhead.extraction_tokens,
+                ),
+                Some(ROUTING_LATENCY_PURPOSE) => (
+                    &mut overhead.routing_latency_requests,
+                    &mut overhead.routing_latency_tokens,
+                ),
+                None if group.harness_recorded => (
+                    &mut overhead.coding_agent_requests,
+                    &mut overhead.coding_agent_tokens,
+                ),
+                _ => (
+                    &mut overhead.unstamped_requests,
+                    &mut overhead.unstamped_tokens,
+                ),
             };
-            *requests += group.sample_count;
-            if let Some(tokens) = tokens {
-                *total = Some(total.unwrap_or(0) + tokens);
+            add_consumption(named, group.sample_count, tokens);
+            // Line 1466's denominator is *everything that is not the routing
+            // model*, and it keeps that meaning: the four buckets above,
+            // minus classification, sum to exactly this.
+            if group.purpose.as_deref() != Some(CLASSIFICATION_PURPOSE) {
+                add_consumption(
+                    (&mut overhead.task_requests, &mut overhead.task_tokens),
+                    group.sample_count,
+                    tokens,
+                );
             }
         }
         overhead

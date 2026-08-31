@@ -354,3 +354,36 @@ State: NOT ATTEMPTED — no test written, deliberately.
 There is no MCP surface anywhere in `crates/glasshouse`. Phase 43 is recorded
 at 0/10 in `docs/process/handoff.md`. Same reasoning as the cmux entry above.
 Left open.
+
+### Line 1745 — cmux session metadata cannot bypass project-scope validation
+
+State: COMPLETE — ruled 2026-08-31 by the orchestrator.
+
+Package `GH-CMUX-SCOPE-TESTS`, 2026-08-31, Sonnet at medium (Green: tests only,
+no production change). The line was refused until today as *"no cmux-metadata
+path reaches project-scope validation"*; migration 20 (`1c7d2c0`) put
+`sessions.presentation_ref` in a project-scoped table, so the path exists and
+the box became askable.
+
+Contract: Given a session recorded with a cmux `presentation_ref` in project A,
+when project B lists, reads, focuses or sends to it — or when an INSERT carrying
+a forged `project_id` and a valid-looking reference is issued straight at the
+database — Glasshouse refuses: the session is absent from B, the reference is
+not a second identity, cmux is asked nothing, and the row is rejected by
+`sessions_reject_foreign_project_insert`.
+
+Regression evidence: `crates/glasshouse/tests/cmux_project_scope.rs`, three
+tests — `a_session_recorded_with_a_pane_belongs_to_its_project_like_any_other_session`,
+`a_cmux_reference_is_not_a_second_identity_across_projects`,
+`a_forged_insert_carrying_a_valid_looking_presentation_ref_is_refused_by_the_database_trigger`
+(`test result: ok. 3 passed`).
+
+| mutation | result | killed by |
+|---|---|---|
+| `database.rs`: both `sessions` scope triggers' `RAISE(ABORT, …)` → `SELECT 1;` (insert and update neutered together) | **killed** | `a_forged_insert_carrying_a_valid_looking_presentation_ref_is_refused_by_the_database_trigger` — panicked at `cmux_project_scope.rs:306` |
+
+Run by the orchestrator in the worker's worktree (the worker, being Green,
+owed none); restore verified byte-identical. Limit, stated here: the first two
+tests survive that mutation because they prove store-level scoping
+(`ProjectSessions`), not the trigger — the third is the one the line is about,
+and the update-trigger half is exercised by no test in this file.

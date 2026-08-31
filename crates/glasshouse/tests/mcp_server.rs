@@ -25,11 +25,12 @@ use serde_json::{Value, json};
 
 const TIMEOUT: Duration = Duration::from_secs(30);
 
-/// The eight tools Phase 43's packet names plus Phase 21K's five guardrail
-/// tools, and the whole surface: a fourteenth would be a new decision, and a
+/// The eight tools Phase 43's packet names plus Phase 21K's five guardrail tools and Phase 21H–J's policy
+/// tools, and the whole surface: a fifteenth would be a new decision, and a
 /// missing one a regression.
-const EXPECTED_TOOLS: [&str; 13] = [
+const EXPECTED_TOOLS: [&str; 14] = [
     "glasshouse_get_checkpoint",
+    "glasshouse_implementation_policy",
     "glasshouse_interrupt_session",
     "glasshouse_list_assumptions",
     "glasshouse_list_sessions",
@@ -339,7 +340,7 @@ fn an_orchestrator_can_initialize_list_tools_and_list_sessions_over_stdio() {
     assert_eq!(
         names(&tools),
         EXPECTED_TOOLS,
-        "the catalogue is the thirteen tools, exactly"
+        "the catalogue is the fourteen tools, exactly"
     );
     for tool in &tools {
         assert_eq!(tool["inputSchema"]["type"], "object", "{tool}");
@@ -604,10 +605,18 @@ mod live {
         std::fs::set_permissions(&path, perms).unwrap();
 
         let escaped = path.display().to_string().replace('\\', "\\\\");
+        // `implementation_policy = false`: this file is about the MCP door's
+        // own tools, and Glasshouse's implementation policy (`src/policy`) is
+        // several machine-origin deliveries into every session it briefs,
+        // which would shift the delivery this test reads without saying
+        // anything about MCP. The policy's own delivery is proven in
+        // `tests/implementation_policy.rs`, and its own MCP tool is asserted
+        // in the catalogue above.
         std::fs::write(
             fixture.base.join("config").join("config.toml"),
             format!(
-                "version = 1\n\n[integrations.claude-code]\nenabled = true\nexecutable = \"{escaped}\"\n"
+                "version = 1\nimplementation_policy = false\n\n[integrations.claude-code]\nenabled = \
+                 true\nexecutable = \"{escaped}\"\n"
             ),
         )
         .expect("write user config");

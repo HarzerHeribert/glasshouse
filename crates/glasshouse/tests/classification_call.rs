@@ -762,15 +762,31 @@ fn no_routing_model_configured_prints_exactly_what_it_always_did() {
 /// **What it cost, and whose row is whose.** A classification call lands in
 /// `routing_observations` with `purpose = "classification"`, and the
 /// extraction call that ran against the same endpoint in the same project
-/// keeps its `purpose` `NULL`.
+/// lands under a **different** purpose of its own.
 ///
-/// Both halves matter. The first is the axis Phase 34E's own lines need to
-/// tell routing spend from task spend. The second is the refusal to
-/// back-fill: `ModelCall::observation` leaves `purpose` unwritten and
-/// documents why, and extraction's existing rows are already on disk without
-/// one — a builder added for a new producer must not silently relabel them.
+/// # This assertion was inverted deliberately, and by which line
+///
+/// It used to require `extraction[0].purpose == None`, on the reasoning that
+/// `ModelCall::observation` leaves `purpose` unwritten and a builder added for
+/// a new producer must not silently relabel extraction's rows. **The second
+/// half of that is still true and is still asserted — one file over.** What
+/// changed is the first half: capability map line 1832 (*"measure
+/// memory-extraction cost separately from interactive coding cost"*) needs
+/// extraction's rows to say what they were for, and
+/// `main.rs::record_extraction_observation` now stamps them at the producer.
+/// `ModelCall::observation` is untouched and still writes no purpose.
+///
+/// The no-back-fill rule lives where it can actually be tested — against a row
+/// written *before* the stamp existed, which this test cannot produce because
+/// both of its calls are made by the current build:
+/// `evaluation_producers::extraction_rows_are_stamped_and_old_rows_are_not_relabelled`
+/// plants such a row and asserts it keeps its `NULL`.
+///
+/// What survives here, and is the thing this test was really for: the two
+/// calls that ran against **the same endpoint in the same project** are told
+/// apart by their purpose, and neither is counted as the other.
 #[test]
-fn a_classification_call_is_recorded_under_its_purpose_and_extraction_is_not() {
+fn a_classification_call_and_an_extraction_call_are_recorded_under_their_own_purposes() {
     let model = FakeModel::start(|body| {
         if body.contains("routing-model") {
             Answer::Content(MODEL_ANSWER.to_owned())
@@ -815,9 +831,15 @@ fn a_classification_call_is_recorded_under_its_purpose_and_extraction_is_not() {
         "the extraction call must have left exactly one row"
     );
     assert_eq!(
-        extraction[0].purpose, None,
-        "extraction's producer writes no purpose, and adding one for classification must not \
-         change that"
+        extraction[0].purpose.as_deref(),
+        Some("memory-extraction"),
+        "map line 1832: an extraction call must say what it was for, so its cost can be \
+         counted apart from the coding agent's"
+    );
+    assert_ne!(
+        extraction[0].purpose, classification[0].purpose,
+        "two calls to the same endpoint in the same project must not be counted as each \
+         other — telling them apart is the whole of what `purpose` is for"
     );
 }
 

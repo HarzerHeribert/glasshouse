@@ -319,6 +319,14 @@ fn rank(hits: &mut [Scored], now: i64) {
 
 /// Every column of `memories`, qualified by table name.
 ///
+/// **This list is hand-kept and its drift is a runtime error, not a compile
+/// one.** [`row_to_record`] reads by name, so a column added to
+/// [`super::store::ALL_COLUMNS`] and forgotten here does not fail to build —
+/// it fails on the next search, as `InvalidColumnName`, which is the whole of
+/// `memory search`. Migration 19 was caught that way. If a third list ever
+/// appears, the right answer is a shared constant with a qualifier applied,
+/// not a fourth reader remembering.
+///
 /// [`super::store::ALL_COLUMNS`] cannot be reused here unqualified: this
 /// query joins `memories` against `memories_fts`, which has its own `subject`
 /// and `body` columns, and an unqualified `SELECT subject, body, ...` would
@@ -328,7 +336,8 @@ fn rank(hits: &mut [Scored], now: i64) {
 const QUALIFIED_COLUMNS: &str = "memories.id, memories.project_id, memories.kind, \
                                  memories.authority, memories.status, memories.subject, \
                                  memories.body, memories.source_session_id, \
-                                 memories.source_commit, memories.source_event_first, \
+                                 memories.source_commit, memories.extraction_trigger, \
+                                 memories.source_event_first, \
                                  memories.source_event_last, memories.superseded_by, \
                                  memories.created_at, memories.updated_at, \
                                  memories.rationale, memories.project_phase, \

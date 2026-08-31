@@ -1228,3 +1228,14 @@ refusing any row that is not exactly five tab-separated fields. **Every
 unreliable.** Batch 57's other packages were checked and are not affected —
 their deletion-shaped mutations all used compiling non-empty replacements
 (`-> let landed: Option<String> = None;`, `-> match (landed, false)`).
+
+### Cluster E, two more rows — Phase 9's Antigravity lifecycle lines, checked 2026-08-31
+
+| line | why it cannot be packaged |
+|---|---|
+| **340** *"Integrate structured Antigravity lifecycle events where the CLI exposes them."* | The qualifier is the whole answer: the CLI exposes none. `harness/antigravity.rs:194` and `:333` record, in the adapter's own words, that there is *no hook, event, or notification mechanism anywhere in it* — the adapter learns a session's conversation identifier by reading a shared index file after the fact (`phase-9.md`, lines 2 and 3), which is the opposite of an event. A signal that does not arrive cannot be integrated. |
+| **341** *"Translate supported Antigravity lifecycle state into Glasshouse lifecycle events."* | Downstream of 340: nothing to translate until 340 has a producer, and 340's producer is the vendor's, not ours. |
+
+Both stay open. A tripwire is not worth writing: the moment the CLI grows an
+event surface, the adapter's own `:194` comment is what a worker would have to
+delete first, and that deletion is the signal.

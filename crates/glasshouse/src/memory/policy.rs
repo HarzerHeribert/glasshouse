@@ -476,6 +476,7 @@ mod ladder_tests {
             body: "ladder test body".to_string(),
             source_session_id: None,
             source_commit: None,
+            extraction_trigger: None,
             source_events: None,
             provenance: Default::default(),
             superseded_by: None,

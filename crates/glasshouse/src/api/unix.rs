@@ -47,6 +47,7 @@ use glasshouse::integrations::cmux;
 use glasshouse::launch::HarnessLaunch;
 use glasshouse::memory::inject::{self, Injection};
 use glasshouse::memory::{MemoryId, ProjectMemory};
+use glasshouse::policy;
 use glasshouse::session::api::{ApiError, SessionApi};
 use glasshouse::session::{
     HarnessSelection, NewSession, ProjectSessions, SessionId, SessionLifecycle,
@@ -219,6 +220,20 @@ const MAX_MUTE_SECONDS: u64 = 12 * 60 * 60;
 /// process that is meant to run for days.
 const MAX_REMEMBERED_INJECTIONS: usize = 256;
 
+/// Which live sessions have already been given Glasshouse's implementation
+/// policy — `glasshouse::policy`, capability map lines 955-990.
+///
+/// In memory and keyed by session-id string for exactly the reasons
+/// [`Injected`] is: the claim "this session has read the policy" is about a
+/// pseudo-terminal this process holds, and it stops being true the moment
+/// that process or that session does.
+///
+/// A set rather than a map because the policy has no parts a session can have
+/// some of: it is delivered whole, once, and either has been or has not.
+/// Unbounded only in the number of sessions this process has ever briefed,
+/// which is the same bound [`Injected`]'s outer map already carries.
+type Policied = Arc<Mutex<HashSet<String>>>;
+
 /// How often the background tick answers terminal queries and reaps exited
 /// sessions between requests. Mirrors `run_headless`'s `POLL` in `main.rs`:
 /// short enough that `poll_exits` marks a dead session promptly, long enough
@@ -270,6 +285,7 @@ pub(crate) struct ServerContext {
     /// — a field here rather than a parameter threaded through the socket
     /// door, so the stdio door cannot forget it.
     muted: Muted,
+    policied: Policied,
 }
 
 impl ServerContext {
@@ -297,6 +313,10 @@ impl ServerContext {
         let injected: Injected = Arc::new(Mutex::new(HashMap::new()));
         // Line 1717's record, in the same place and for the same reason.
         let muted: Muted = Arc::new(Mutex::new(HashMap::new()));
+        // The other half of the same bookkeeping: what this session has
+        // already been told, for the text Glasshouse wrote rather than the
+        // text it quoted.
+        let policied: Policied = Arc::new(Mutex::new(HashSet::new()));
 
         let context = Self {
             runtime: runtime.clone(),
@@ -306,6 +326,7 @@ impl ServerContext {
             recorder,
             injected,
             muted,
+            policied,
         };
         context.start_tick();
         Ok(context)
@@ -326,6 +347,7 @@ impl ServerContext {
             &self.recorder,
             &self.injected,
             &self.muted,
+            &self.policied,
         )
     }
 
@@ -689,6 +711,7 @@ fn dispatch(
     recorder: &EventRecorder,
     injected: &Injected,
     muted: &Muted,
+    policied: &Policied,
 ) -> Response {
     let store = sessions.store();
 
@@ -737,6 +760,7 @@ fn dispatch(
             guardrail,
             presentation.as_deref(),
             injected,
+            policied,
         ),
         // Line 1125's *"routed task"* is not only a spawn's own. This verb
         // is the follow-up half of the same seam — `SessionApi::send_text` —
@@ -808,6 +832,7 @@ fn dispatch(
                 let mut guard = lock(live);
                 let mut api = SessionApi::new(&store, &mut guard);
                 deliver_memory(&mut api, &id, briefing, injected);
+                deliver_policy(&mut api, runtime, &id, policied);
                 api.send_text(&id, &text, origin.message_origin())
             };
             match attempt {
@@ -940,6 +965,13 @@ fn dispatch(
         Request::WatchWorker { session, notify } => {
             watch_worker(runtime, &store, live, watches, &session, &notify)
         }
+        // Constant text, and the only handler here that reads nothing at
+        // all: no store is opened, no session is resolved and no
+        // configuration is consulted. `implementation_policy = false`
+        // silences delivery, not an answer to a caller that asked.
+        Request::ImplementationPolicy { part } => {
+            Response::ok(serde_json::json!({ "policy": policy::render(part) }))
+        }
         Request::GetCheckpoint {
             checkpoint,
             document,
@@ -1063,6 +1095,7 @@ fn spawn_session(
     guardrail: Option<GuardrailOverride>,
     presentation: Option<&str>,
     injected: &Injected,
+    policied: &Policied,
 ) -> Response {
     let role = match parse_role(role) {
         Ok(role) => role,
@@ -1187,6 +1220,12 @@ fn spawn_session(
         // as a separately labelled one. See `deliver_memory` for why a
         // failure here is not a failed spawn.
         deliver_memory(&mut api, &record.id, briefing, injected);
+        // And after it, Glasshouse's own implementation policy — lines
+        // 955-990. After, deliberately: the memory block is what this project
+        // learned and the policy is what Glasshouse says about how to work,
+        // and a reader that meets the trusted instruction second meets it
+        // last, next to the task it applies to.
+        deliver_policy(&mut api, runtime, &record.id, policied);
         // `MessageOrigin::Machine`, unconditionally and with no request
         // field to override it: a task delivered at spawn is something the
         // caller asked Glasshouse to start a session *with*, not a line a
@@ -1572,6 +1611,97 @@ fn deliver_memory(
     if seen.len() < MAX_REMEMBERED_INJECTIONS {
         seen.extend(briefing.memories().iter().cloned());
     }
+}
+
+/// Deliver Glasshouse's own implementation policy to `session`, once —
+/// capability map lines 955-990.
+///
+/// # Why this is a separate function and not a second `Injection`
+///
+/// [`deliver_memory`] carries text Glasshouse *quoted*; this carries text
+/// Glasshouse *wrote*. `memory::inject`'s whole module exists to keep an
+/// untrusted body from forging a label, and there is no untrusted body here —
+/// every byte is a literal in `glasshouse::policy`. Routing this through
+/// `Injection` would mean either widening a type whose single constructor is
+/// the containment argument, or pretending a constant is a memory. So it gets
+/// its own marker pair, distinct from `MEMORY_MARKER`, and a reader can tell
+/// the two apart because they *are* two things.
+///
+/// # Once per session, several lines
+///
+/// The policy does not change and a session that has it does not need it
+/// again; `policied` is the record, and it is checked before the first line
+/// goes out so a session is never given half of a second copy. It is written
+/// only after every line has actually been sent, for the reason
+/// [`deliver_memory`] writes its own ledger late: a policy that did not
+/// arrive must not be recorded as one the session already has.
+///
+/// Several lines because thirty rules do not fit in one — a delivery longer
+/// than a terminal's canonical line limit is discarded *and* wedges that
+/// session's input permanently, which is why `policy::deliveries` bounds
+/// every element and this function sends them one at a time. See
+/// `glasshouse::policy`'s own header for the measurement.
+///
+/// # Failure is never a delivery failure
+///
+/// As [`deliver_memory`]: a send that fails is logged and swallowed, and the
+/// task still goes. A worker that starts without the policy is better than a
+/// worker that does not start.
+fn deliver_policy(
+    api: &mut SessionApi<'_>,
+    runtime: &Runtime,
+    session: &SessionId,
+    policied: &Policied,
+) {
+    if !policy_delivery_enabled(runtime) {
+        return;
+    }
+    if lock_policied(policied).contains(session.as_str()) {
+        return;
+    }
+
+    for line in policy::deliveries() {
+        if let Err(err) = api.send_text(session, &line, MessageOrigin::Machine) {
+            tracing::warn!(
+                session = %session,
+                error = %api_error(err),
+                "could not deliver Glasshouse's implementation policy to a session; its task is \
+                 being sent without it"
+            );
+            return;
+        }
+    }
+
+    lock_policied(policied).insert(session.as_str().to_owned());
+}
+
+/// Whether this project wants the policy delivered — `implementation_policy`
+/// in the project's own configuration, then the user's, then the default,
+/// which is `true`.
+///
+/// Read per delivery rather than cached, so a team that turns it off does not
+/// have to restart a long-running door for the change to take. Every failure
+/// path answers `true`: a configuration file that cannot be read is not a
+/// decision to stay silent, and the same read failing is already reported by
+/// every other command that loads it.
+fn policy_delivery_enabled(runtime: &Runtime) -> bool {
+    let Ok(user) = UserConfig::load(runtime.paths()) else {
+        return true;
+    };
+    let Ok(project) = config::load_project_config(runtime.project()) else {
+        return true;
+    };
+    EffectiveConfig::new(&user, project.as_ref())
+        .implementation_policy_enabled()
+        .value
+}
+
+/// Take the policy ledger's lock, ignoring poisoning, for the reason
+/// [`lock_injected`] gives.
+fn lock_policied(policied: &Policied) -> std::sync::MutexGuard<'_, HashSet<String>> {
+    policied
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 /// Write the harness's lifecycle-hook document for a session this door is

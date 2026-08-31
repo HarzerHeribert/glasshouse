@@ -534,7 +534,7 @@ fn no_tool_argument_can_name_a_project_a_path_or_a_socket() {
     let root = fixture.project_root("alpha");
     let mut server = McpServer::start(&fixture, &root);
     let tools = server.tools();
-    assert_eq!(tools.len(), 13, "{tools:?}");
+    assert_eq!(tools.len(), 14, "{tools:?}");
 
     fn property_names(schema: &Value, into: &mut Vec<String>) {
         if let Some(properties) = schema["properties"].as_object() {

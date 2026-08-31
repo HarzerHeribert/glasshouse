@@ -626,6 +626,24 @@ pub struct MemoryRecord {
     pub source_session_id: Option<String>,
     /// The Git commit the project was at when this was learned, when known.
     pub source_commit: Option<String>,
+    /// Which of Phase 29's four memory-commit triggers produced this memory —
+    /// `task_completed`, `before_compaction`, `manual`, or `git_commit` — as
+    /// [`crate::memory::ExtractionTrigger::as_str`] names them.
+    ///
+    /// `None` is *"nothing recorded a trigger"*, which is every memory stored
+    /// before this column existed and every memory a future producer other
+    /// than the extractor writes. It is not a fifth trigger and must never be
+    /// rendered as one.
+    ///
+    /// # Why this is not derivable from [`Self::source_commit`]
+    ///
+    /// A commit says **where the project stood** when a memory was learned;
+    /// this says **what made Glasshouse look**. `glasshouse memory extract`,
+    /// run by hand, reads `GitPosition::detect` and stores a commit — so a
+    /// reader inferring the trigger from the commit's presence would report
+    /// every hand-run extraction as a code-change boundary, which is
+    /// precisely the distinction line 1153 is about.
+    pub extraction_trigger: Option<String>,
     /// The slice of the project event log this was extracted from, when it
     /// was extracted from one. `None` for a memory whose activity came from
     /// somewhere the event log does not reach — a file of session activity
@@ -726,6 +744,10 @@ pub struct NewMemory {
     pub authority: Option<MemoryAuthority>,
     pub source_session_id: Option<String>,
     pub source_commit: Option<String>,
+    /// Which memory-commit trigger produced this — see
+    /// [`MemoryRecord::extraction_trigger`]. `None` from any producer that is
+    /// not one of Phase 29's triggers.
+    pub extraction_trigger: Option<String>,
     /// The event-log slice this was extracted from, when there was one.
     pub source_events: Option<SourceEvents>,
     /// Phase 21B's decision provenance. Defaults to all-absent, which is what
@@ -751,6 +773,7 @@ impl NewMemory {
             authority: None,
             source_session_id: None,
             source_commit: None,
+            extraction_trigger: None,
             source_events: None,
             provenance: DecisionProvenance::default(),
             validity_conditions: None,
@@ -788,6 +811,19 @@ impl NewMemory {
     /// Record the Git commit the project was at.
     pub fn with_source_commit(mut self, commit: Option<impl Into<String>>) -> Self {
         self.source_commit = commit
+            .map(Into::into)
+            .filter(|value| !value.trim().is_empty());
+        self
+    }
+
+    /// Record which memory-commit trigger produced this memory — Phase 29.
+    ///
+    /// Whitespace-only is stored as `None` for
+    /// [`NewMemory::with_subject`]'s reason: "nobody recorded a trigger" and
+    /// "the trigger is the empty string" are the same fact, and only one of
+    /// them should be representable.
+    pub fn with_extraction_trigger(mut self, trigger: Option<impl Into<String>>) -> Self {
+        self.extraction_trigger = trigger
             .map(Into::into)
             .filter(|value| !value.trim().is_empty());
         self
@@ -989,7 +1025,8 @@ fn system_clock() -> i64 {
 
 /// Every column of `memories`, in the order [`row_to_record`] reads them.
 pub(super) const ALL_COLUMNS: &str = "id, project_id, kind, authority, status, subject, body, \
-                                      source_session_id, source_commit, source_event_first, \
+                                      source_session_id, source_commit, extraction_trigger, \
+                                      source_event_first, \
                                       source_event_last, superseded_by, created_at, updated_at, \
                                       rationale, project_phase, problem, assumptions, \
                                       scale_assumptions, security_assumptions, \
@@ -1146,6 +1183,7 @@ impl<'a> MemoryStore<'a> {
             body: new.body,
             source_session_id: new.source_session_id,
             source_commit: new.source_commit,
+            extraction_trigger: new.extraction_trigger,
             source_events: new.source_events,
             provenance: new.provenance,
             superseded_by: None,
@@ -1165,14 +1203,15 @@ impl<'a> MemoryStore<'a> {
         self.conn
             .execute(
                 "INSERT INTO memories (id, project_id, kind, authority, status, subject, \
-                 body, source_session_id, source_commit, source_event_first, \
+                 body, source_session_id, source_commit, extraction_trigger, \
+                 source_event_first, \
                  source_event_last, superseded_by, created_at, updated_at, rationale, \
                  project_phase, problem, assumptions, scale_assumptions, \
                  security_assumptions, compatibility_assumptions, \
                  operational_assumptions, evidence, source_excerpt, validity_conditions, \
                  invalidation_conditions) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, \
-                 ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26)",
+                 ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27)",
                 rusqlite::params![
                     record.id.as_str(),
                     &record.project_id,
@@ -1183,6 +1222,7 @@ impl<'a> MemoryStore<'a> {
                     &record.body,
                     &record.source_session_id,
                     &record.source_commit,
+                    &record.extraction_trigger,
                     record.source_events.map(|events| events.first),
                     record.source_events.map(|events| events.last),
                     record.superseded_by.as_ref().map(MemoryId::as_str),
@@ -2051,6 +2091,7 @@ pub(super) fn row_to_record(
         body: row.get("body")?,
         source_session_id: row.get("source_session_id")?,
         source_commit: row.get("source_commit")?,
+        extraction_trigger: row.get("extraction_trigger")?,
         source_events,
         provenance: DecisionProvenance {
             rationale: row.get("rationale")?,

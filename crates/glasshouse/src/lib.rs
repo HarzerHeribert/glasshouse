@@ -21,6 +21,7 @@ pub mod memory;
 pub mod onboarding;
 pub mod paths;
 pub mod platform;
+pub mod policy;
 pub mod profile;
 pub mod project;
 pub mod provider;

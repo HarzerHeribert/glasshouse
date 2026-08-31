@@ -709,6 +709,11 @@ fn a_version_five_database_migrates_forward_keeping_its_memories() {
              -- already added.
              ALTER TABLE sessions DROP COLUMN observed_compactions;
 
+             -- Migration 21's two columns, for the same reason: `memories`
+             -- survives this rollback, so both would be met again on the
+             -- re-run.
+             ALTER TABLE sessions DROP COLUMN last_seen_commit;
+             ALTER TABLE memories DROP COLUMN extraction_trigger;
              -- Migration 20's column, for the same reason.
              ALTER TABLE sessions DROP COLUMN presentation_ref;
 
@@ -767,8 +772,8 @@ fn a_version_five_database_migrates_forward_keeping_its_memories() {
         })
         .unwrap();
     assert_eq!(
-        version, 20,
-        "the launch must have applied migrations 6 through 20"
+        version, 21,
+        "the launch must have applied migrations 6 through 21"
     );
     drop(conn);
 
@@ -990,6 +995,11 @@ fn a_memorys_provenance_survives_the_seq_rebuild() {
              -- already added.
              ALTER TABLE sessions DROP COLUMN observed_compactions;
 
+             -- Migration 21's two columns, for the same reason: `memories`
+             -- survives this rollback, so both would be met again on the
+             -- re-run.
+             ALTER TABLE sessions DROP COLUMN last_seen_commit;
+             ALTER TABLE memories DROP COLUMN extraction_trigger;
              -- Migration 20's column, for the same reason.
              ALTER TABLE sessions DROP COLUMN presentation_ref;
 
@@ -1047,8 +1057,8 @@ fn a_memorys_provenance_survives_the_seq_rebuild() {
         })
         .unwrap();
     assert_eq!(
-        version, 20,
-        "the launch must have applied migrations 7 through 20"
+        version, 21,
+        "the launch must have applied migrations 7 through 21"
     );
     drop(conn);
 

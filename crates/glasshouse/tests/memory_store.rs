@@ -336,6 +336,12 @@ fn a_version_three_database_gains_the_memory_table_with_its_sessions_intact() {
              ALTER TABLE sessions DROP COLUMN supervision_reason;
              ALTER TABLE sessions DROP COLUMN source_session_id;
              ALTER TABLE sessions DROP COLUMN observed_compactions;
+
+             -- Migration 21's column, for the same reason as every other
+             -- `sessions` column above: the re-run would meet a column it had
+             -- already added. `memories.extraction_trigger` needs no undo here
+             -- because this rollback drops `memories` outright.
+             ALTER TABLE sessions DROP COLUMN last_seen_commit;
              ALTER TABLE sessions DROP COLUMN presentation_ref;
              DROP TABLE IF EXISTS routing_observations;
              DROP TABLE IF EXISTS evaluation_observations;
@@ -372,8 +378,8 @@ fn a_version_three_database_gains_the_memory_table_with_its_sessions_intact() {
         })
         .unwrap();
     assert_eq!(
-        version, 20,
-        "the launch must have applied migrations 4 through 20"
+        version, 21,
+        "the launch must have applied migrations 4 through 21"
     );
 
     // The session recorded before the migration is untouched.

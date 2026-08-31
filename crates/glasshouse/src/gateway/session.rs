@@ -26,7 +26,7 @@
 //! top of its own exchange — so a failover can never split one request
 //! between two providers.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 // `PairingOverrides` comes from `crate::config::pairing`'s own `pub use`, not
@@ -55,6 +55,23 @@ use super::upstream::Upstream;
 pub struct SessionRouting {
     state: Mutex<State>,
 }
+
+/// Told what the failure-domain term did to one failover's ranking, once per
+/// failover the gateway takes — capability map line 1851's write side.
+///
+/// **A sink rather than a ledger handle**, exactly like
+/// [`super::DegradeSink`] one module up and for practice §65's reason: the
+/// gateway holds this for its whole life, and an open SQLite connection held
+/// for the life of a session is free on the developer's machine and billed
+/// on Windows. The sink's own body opens, writes and drops a handle at the
+/// one moment a failover has actually been decided, which is a small
+/// minority of exchanges and none of the ones that move nothing.
+///
+/// It also keeps this module incapable of reaching a database: nothing here
+/// knows a project, a path or a `crate::Runtime`, and the only thing it can
+/// do with a prevention is hand it to whoever asked for it.
+pub type FailoverPreventionSink =
+    Arc<dyn Fn(&crate::routing::interactive::FailureDomainEffect) + Send + Sync>;
 
 #[derive(Debug, Default)]
 struct State {
@@ -494,6 +511,7 @@ impl SessionRouting {
     /// line 1334's `failovers`. Every early return is
     /// [`ExchangeEffect::Unchanged`]: an exchange that said nothing moved
     /// nothing.
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn observe_exchange(
         &self,
         upstream: &Upstream,
@@ -502,6 +520,7 @@ impl SessionRouting {
         ledger: Option<&EvidenceLedger>,
         now_unix: i64,
         stated_retry_after: Option<Duration>,
+        prevention: Option<&FailoverPreventionSink>,
     ) -> ExchangeEffect {
         let Some(observation) = classify(exchange, stated_retry_after) else {
             // Nothing reached the provider — an unauthenticated caller, a
@@ -587,8 +606,24 @@ impl SessionRouting {
                 to,
                 cache,
                 explanation,
+                domain_effect,
             } => {
                 if upstream.switch_to(to.backend().credential()) {
+                    // Capability map line 1851, at the one moment a failover
+                    // is real: `domain_effect` is the comparison
+                    // `on_provider_failure` made between its own ranking and
+                    // the same ranking without the failure-domain term. It
+                    // is reported here rather than at the `OfferMigration`
+                    // arm below, because that arm offers a move nobody takes
+                    // and counting it would put it in the denominator of how
+                    // often a *failover* was steered.
+                    //
+                    // Inside the `switch_to` guard on purpose: an upstream
+                    // that refused the switch produced no failover, and a row
+                    // for it would count a move that did not happen.
+                    if let Some(sink) = prevention {
+                        sink(&domain_effect);
+                    }
                     tracing::debug!(
                         harness = %current.harness(),
                         from = %current.label(),
@@ -613,6 +648,7 @@ impl SessionRouting {
                 to,
                 cache,
                 explanation,
+                domain_effect: _,
             } => {
                 // Phase 9H line 514: a material model change is not taken.
                 // Said out loud, because an offer nobody hears is a decision
@@ -1351,6 +1387,7 @@ mod tests {
             None,
             0,
             None,
+            None,
         );
         assert_eq!(effect, ExchangeEffect::FailedOver);
         assert_eq!(effect.failovers(), 1);
@@ -1370,6 +1407,7 @@ mod tests {
             Instant::now(),
             None,
             0,
+            None,
             None,
         );
         assert_eq!(effect, ExchangeEffect::Unchanged);
@@ -1393,6 +1431,7 @@ mod tests {
             Instant::now(),
             None,
             0,
+            None,
             None,
         );
         assert_eq!(effect, ExchangeEffect::RotatedCredential);
@@ -1465,6 +1504,7 @@ mod tests {
             Some(&ledger),
             now_unix,
             None,
+            None,
         );
 
         assert_eq!(
@@ -1500,6 +1540,7 @@ mod tests {
             Instant::now(),
             None,
             0,
+            None,
             None,
         );
 
@@ -1572,6 +1613,7 @@ mod tests {
                 None,
                 0,
                 None,
+                None,
             );
         });
 
@@ -1635,6 +1677,7 @@ mod tests {
             Instant::now(),
             None,
             0,
+            None,
             None,
         );
 
@@ -1708,6 +1751,7 @@ mod tests {
             None,
             0,
             None,
+            None,
         );
         routing.observe_exchange(
             &upstream,
@@ -1715,6 +1759,7 @@ mod tests {
             now,
             None,
             0,
+            None,
             None,
         );
 
@@ -1764,6 +1809,7 @@ mod tests {
             None,
             0,
             None,
+            None,
         );
         routing.observe_exchange(
             &upstream,
@@ -1772,6 +1818,7 @@ mod tests {
             None,
             0,
             None,
+            None,
         );
         routing.observe_exchange(
             &upstream,
@@ -1779,6 +1826,7 @@ mod tests {
             now,
             None,
             0,
+            None,
             None,
         );
 

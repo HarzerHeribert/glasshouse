@@ -1,3 +1,9 @@
+**2026-08-31 (Opus 5 orchestrator):** 953/1280 committed; batch 57's five
+remaining packages merged and staged behind one gate (+52 → 1005 when green);
+migration ladder now 18 → 19 → 20 → **21**; Phase 21H/I/J and Phase 17/54
+complete; three Fable packets (escalation, affinity, route-correlation)
+validated and waiting on the commit. Next action: `.agent-runtime/CONTINUATION.md` §1–2.
+
 # Glasshouse implementation handoff
 
 > This describes how Glasshouse is built, not what Glasshouse does. Nothing

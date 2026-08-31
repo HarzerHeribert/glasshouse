@@ -324,7 +324,7 @@ fn a_ledger_that_cannot_be_written_does_not_fail_the_retrieval() {
             })
             .unwrap();
         assert_eq!(
-            version, 20,
+            version, 21,
             "the database must still claim the current schema version, so nothing \
              rebuilds the table"
         );
@@ -774,7 +774,9 @@ fn a_version_fourteen_database_migrates_forward_keeping_every_row() {
         conn.execute_batch(
             // Every migration above 14, newest first: 20's column, 19's
             // two tables, 18's column, 17's table, 16's column, 15's table.
-            "ALTER TABLE sessions DROP COLUMN presentation_ref;
+            "ALTER TABLE memories DROP COLUMN extraction_trigger;
+             ALTER TABLE sessions DROP COLUMN last_seen_commit;
+            ALTER TABLE sessions DROP COLUMN presentation_ref;
              DROP TABLE assumption_transitions;
              DROP TABLE task_assumptions;
              ALTER TABLE routing_observations DROP COLUMN failure_class;
@@ -801,8 +803,8 @@ fn a_version_fourteen_database_migrates_forward_keeping_every_row() {
         })
         .unwrap();
     assert_eq!(
-        version, 20,
-        "the launch must have applied migrations 15 through 20"
+        version, 21,
+        "the launch must have applied migrations 15 through 21"
     );
 
     let memory = migrated.memory();
@@ -1082,7 +1084,7 @@ fn an_evaluation_rows_provenance_survives_a_routing_observations_rebuild() {
 ///
 /// Migration 15 gives `kind` no `CHECK`, deliberately, so nothing in SQL
 /// would have caught a new kind spelled two ways — and nothing in SQL knows
-/// these three exist, so nothing would have proved the project triggers still
+/// these five exist, so nothing would have proved the project triggers still
 /// apply to them either. Both are checked here rather than assumed from the
 /// kinds that came before.
 #[test]
@@ -1095,6 +1097,12 @@ fn the_new_kinds_are_in_the_vocabulary_and_foreign_project_rows_are_refused() {
         EvaluationKind::RoutingCostClassObserved,
         EvaluationKind::RoutingEvidenceObserved,
         EvaluationKind::RoutingOutcomeObserved,
+        // Lines 1834 and 1851's kinds, added under exactly the same two
+        // claims: `kind` still has no SQL `CHECK`, so a new spelling is
+        // caught only here, and migration 15's project triggers know nothing
+        // about a kind that did not exist when they were written.
+        EvaluationKind::RoutingTierObserved,
+        EvaluationKind::FailoverPrevented,
     ] {
         assert_eq!(
             EvaluationKind::from_stored(kind.as_str()),

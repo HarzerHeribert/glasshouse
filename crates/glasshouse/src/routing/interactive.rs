@@ -323,6 +323,9 @@ pub enum FailureResponse {
         /// [`crate::routing::disposable::DisposableChoice::explanation`]
         /// already surfaces for the other policy class.
         explanation: RoutingExplanation,
+        /// Map line 1851: what the failure-domain term did to the ranking
+        /// that produced `to` — see [`FailureDomainEffect`].
+        domain_effect: FailureDomainEffect,
     },
     /// A compatible backend exists, but it serves a **different model**, so
     /// taking it would be a migration rather than a transparent failover.
@@ -332,6 +335,12 @@ pub enum FailureResponse {
         cache: CacheLocality,
         /// The same explanation [`Self::FailOver`]'s own field carries.
         explanation: RoutingExplanation,
+        /// The same effect [`Self::FailOver`]'s own field carries, over the
+        /// migration candidates. Computed identically and **not recorded**:
+        /// line 1851 counts failovers, and a migration is offered rather
+        /// than taken, so a row here would put a move nobody made into the
+        /// denominator of how often a move was steered.
+        domain_effect: FailureDomainEffect,
     },
 }
 
@@ -650,7 +659,11 @@ impl InteractiveRouting {
             scored.push((Assignment::new(harness, candidate), explanation));
         }
 
-        let (assignment, explanation) = best(scored);
+        // No candidate here carries a failure-domain term — nothing has
+        // failed — so the second ranking `best` computes is the first one,
+        // and the effect it returns is always *not prevented*. Discarded
+        // rather than plumbed: line 1851 counts failovers.
+        let (assignment, explanation, _) = best(scored);
         Some(SessionStart {
             assignment,
             explanation,
@@ -773,22 +786,24 @@ impl InteractiveRouting {
         }
 
         if !same_model.is_empty() {
-            let (to, explanation) = best(same_model);
+            let (to, explanation, domain_effect) = best(same_model);
             let cache = CacheLocality::between(current.backend(), to.backend());
             return FailureResponse::FailOver {
                 to,
                 cache,
                 explanation,
+                domain_effect,
             };
         }
 
         if !migration.is_empty() {
-            let (to, explanation) = best(migration);
+            let (to, explanation, domain_effect) = best(migration);
             let cache = CacheLocality::between(current.backend(), to.backend());
             return FailureResponse::OfferMigration {
                 to,
                 cache,
                 explanation,
+                domain_effect,
             };
         }
 
@@ -987,7 +1002,7 @@ const SHARED_FAILURE_DOMAIN_PENALTY: f64 = -1.0;
 fn failure_domain_contribution(current: &Backend, candidate: &Backend) -> Contribution {
     match FailureDomain::between(current, candidate) {
         FailureDomain::Shared => Contribution::new(
-            "failure-domain diversity",
+            FAILURE_DOMAIN_TERM,
             SHARED_FAILURE_DOMAIN_PENALTY,
             format!(
                 "`{}` shares its provider with the backend that just failed, which is the only \
@@ -997,7 +1012,7 @@ fn failure_domain_contribution(current: &Backend, candidate: &Backend) -> Contri
             ),
         ),
         FailureDomain::Unknown | FailureDomain::Independent => Contribution::new(
-            "failure-domain diversity",
+            FAILURE_DOMAIN_TERM,
             0.0,
             format!(
                 "`{}` is on a different provider than the backend that failed, but independence \
@@ -1009,25 +1024,131 @@ fn failure_domain_contribution(current: &Backend, candidate: &Backend) -> Contri
     }
 }
 
+/// The name [`failure_domain_contribution`] gives its [`Contribution`], and
+/// the key [`best`] removes to rank a second time.
+///
+/// Spelled once because two spellings would silently make the comparison
+/// below a comparison of a ranking against itself, which always answers
+/// *not prevented* and would look exactly like a correct measurement.
+const FAILURE_DOMAIN_TERM: &str = "failure-domain diversity";
+
+/// What the failure-domain term did to one ranking — **capability map line
+/// 1851**, derived rather than decided.
+///
+/// # Why this is a derivation and not a rejection
+///
+/// Design decision 1 makes failure-domain diversity *additive, never a
+/// filter*: `failure_domain_contribution` is a `-1.0` term inside an
+/// explanation, and nothing anywhere refuses a candidate for sharing the
+/// failed backend's provider. So no production code path *decides* that a
+/// failover was prevented, and inventing one would change the policy in
+/// order to measure it.
+///
+/// What can be established honestly is a comparison: rank the survivors
+/// once as production does, and once with that one term's magnitude removed.
+/// If the winners differ, the term is what moved the decision.
+///
+/// # The displaced candidate always shares the failed provider
+///
+/// This is a property of the arithmetic rather than a claim. Every
+/// candidate's score differs between the two rankings by its own
+/// failure-domain magnitude, which is `0.0` for every candidate except one
+/// on the failed backend's own provider, where it is
+/// `SHARED_FAILURE_DOMAIN_PENALTY`. A candidate scoring `0.0` for that
+/// term therefore has the same total in both rankings, while every other
+/// candidate's total can only be lower in the production ranking — so a
+/// `0.0` winner of the term-free ranking still wins the production one, with
+/// `best`'s first-seen tie-break unchanged because both rankings walk the
+/// same order. A winner that *changes* is therefore always a candidate that
+/// shared the upstream, which is exactly the map line's *"failover onto the
+/// same unhealthy upstream"*.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FailureDomainEffect {
+    displaced: Option<String>,
+}
+
+impl FailureDomainEffect {
+    /// The term changed which candidate won, and this is the label of the one
+    /// it displaced.
+    pub fn prevented(&self) -> bool {
+        self.displaced.is_some()
+    }
+
+    /// The candidate that would have won without the term — [`None`] when
+    /// the term changed nothing.
+    ///
+    /// **`provider/model`, and deliberately not [`Assignment::label`].** That
+    /// label names the credential *reference* too, which every log line here
+    /// already carries and which this value must not: it travels into
+    /// `crate::evaluation`'s durable ledger, where the rule is ids and
+    /// vocabulary only. The provider and the model are the whole of what
+    /// *"the same unhealthy upstream"* means, so the measurement loses
+    /// nothing by leaving the rest out.
+    pub fn displaced(&self) -> Option<&str> {
+        self.displaced.as_deref()
+    }
+}
+
 /// The best-scoring `(Assignment, RoutingExplanation)` in `candidates`,
 /// preferring the first one seen on a tie — the caller's own order. A build
 /// with no evidence source reproduces the pre-batch-46 "first compatible
 /// candidate" behaviour exactly this way: every contribution is `0.0` with
 /// nothing to weigh, so every candidate ties and the first stands.
 ///
+/// Returns the winner and, beside it, what the failure-domain term did to
+/// this ranking — map line 1851. The second ranking is over the same vector
+/// in the same order with only that term's magnitude subtracted, so the two
+/// differ in exactly one input and nothing else.
+///
 /// Panics on an empty `candidates` — both call sites only reach this after
 /// checking `!candidates.is_empty()`.
-fn best(mut candidates: Vec<(Assignment, RoutingExplanation)>) -> (Assignment, RoutingExplanation) {
+fn best(
+    mut candidates: Vec<(Assignment, RoutingExplanation)>,
+) -> (Assignment, RoutingExplanation, FailureDomainEffect) {
+    let best_index = argmax(&candidates, |explanation| explanation.total());
+    // The same ranking with the one term's magnitude taken back out. Not a
+    // re-score: `score_candidate` is not called again, so nothing else about
+    // the comparison can differ.
+    let without_index = argmax(&candidates, |explanation| {
+        explanation.total() - failure_domain_magnitude(explanation)
+    });
+    let displaced = (without_index != best_index).then(|| {
+        let backend = candidates[without_index].0.backend();
+        format!("{}/{}", backend.provider(), backend.model().label())
+    });
+    let (assignment, explanation) = candidates.swap_remove(best_index);
+    (assignment, explanation, FailureDomainEffect { displaced })
+}
+
+/// The index of the highest `score`, preferring the first on a tie — the
+/// caller's own order, which is what makes two rankings over one vector
+/// comparable.
+fn argmax(
+    candidates: &[(Assignment, RoutingExplanation)],
+    score: impl Fn(&RoutingExplanation) -> f64,
+) -> usize {
     let mut best_index = 0;
-    let mut best_total = candidates[0].1.total();
+    let mut best_total = score(&candidates[0].1);
     for (index, (_, explanation)) in candidates.iter().enumerate().skip(1) {
-        let total = explanation.total();
+        let total = score(explanation);
         if total > best_total {
             best_total = total;
             best_index = index;
         }
     }
-    candidates.swap_remove(best_index)
+    best_index
+}
+
+/// What [`failure_domain_contribution`] put into this explanation, summed —
+/// `0.0` for an explanation that carries no such term at all, which is every
+/// explanation built anywhere but [`InteractiveRouting::on_provider_failure`].
+fn failure_domain_magnitude(explanation: &RoutingExplanation) -> f64 {
+    explanation
+        .contributions()
+        .iter()
+        .filter(|contribution| contribution.name() == FAILURE_DOMAIN_TERM)
+        .map(Contribution::magnitude)
+        .sum()
 }
 
 /// Line 517, in one function: may `candidate` take over from `current`?

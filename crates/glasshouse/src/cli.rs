@@ -737,6 +737,29 @@ pub enum Command {
         #[arg(long, value_name = "N", default_value_t = 50)]
         limit: usize,
     },
+
+    /// Print Glasshouse's own project implementation policy — Phase 21H-21J.
+    ///
+    /// The simplicity-first rules, the production-aware checks, and the
+    /// pre-completion review checklist an agent Glasshouse briefs is given
+    /// alongside the project's memory. This is Glasshouse's own text, not a
+    /// memory it extracted, and it says so in the block it prints.
+    ///
+    /// **What it prints is byte for byte what an agent receives**, markers
+    /// and all, so the policy is inspectable before it is ever delivered
+    /// rather than only afterwards in somebody's transcript. It reads
+    /// nothing — no project, no session, no memory, no configuration — and
+    /// prints the same text in any directory.
+    ///
+    /// Turn delivery off with `implementation_policy = false` in
+    /// `.glasshouse/config.toml` or the user configuration file. That
+    /// silences delivery and not this command: a person who asked to read the
+    /// policy is not being spoken to unbidden.
+    Policy {
+        /// One part of the policy rather than all three.
+        #[arg(long, value_name = "PART")]
+        part: Option<crate::policy::Part>,
+    },
     /// Run the local, project-scoped control API — Phase 42.
     ///
     /// Everything else in this file is a one-shot invocation: open the
@@ -1624,6 +1647,32 @@ pub enum MemoryCommand {
         /// `active` or `superseded`.
         #[arg(value_name = "OUTCOME")]
         outcome: String,
+    },
+
+    /// Commit what a session has learned to this project's durable memory.
+    ///
+    /// The same extraction a completed turn, a landed commit, and an imminent
+    /// compaction each start automatically — Phase 29's *memory commit* —
+    /// asked for by hand at a moment you choose. It reads this session's
+    /// recorded activity, asks the extraction model your configuration names,
+    /// and records what survives the contract; the memories it produces are
+    /// stamped `manual`, so a run you asked for stays distinguishable from
+    /// one a harness event started.
+    ///
+    /// Re-running it over the same work is safe and deliberately dull: a
+    /// memory this project already holds is counted as a duplicate and not
+    /// stored again.
+    ///
+    /// Unlike `glasshouse memory extract`, this calls a real model rather
+    /// than reading a reply from a file, and it takes no activity file —
+    /// "recently completed work" is what this project's own event log
+    /// recorded.
+    Commit {
+        /// The session to commit, or the leading part of its identifier.
+        ///
+        /// Defaults to the most recently active session in this project.
+        #[arg(long)]
+        session: Option<String>,
     },
 
     /// Run memory extraction over a session's recorded activity.

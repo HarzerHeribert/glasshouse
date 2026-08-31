@@ -442,3 +442,37 @@ Missing evidence: CI run on all three platforms.
 ## From `GH-ROUTING-ECONOMICS` (2026-08-31)
 
 The routing-model selector package closed this phase's lines 1795 (routing.model_fallback); the full entry — production sites, regression names, the 22 killed mutations and the four refusals with their producers — is in `phase-34c.md` under *Package GH-ROUTING-ECONOMICS*, because the mechanism (`DisposableRouting::choose_for_automatic_classification`) lives in that phase.
+
+### Line 1796 — per-model workload-tier ceilings
+
+Package `GH-TIER-CEILING`, 2026-08-31, Opus at high. Nine mutations, nine killed. The worker **refused OBJECTIVE 3** — attaching adapter-declared `ResourceFacts` to destinations — and the orchestrator verified the refusal: `capability_fit` (`routing/session.rs:786`) already reads `adapter_for(destination.harness())` and `prefer()` falls through to those declarations whenever the facts are `Unverified`, so the wiring would have changed no score and survived its own mutation; `Destination::with_resource_facts` keeps no production caller, deliberately.
+
+### Allow the user to configure workload-tier ceilings for individual models. (line 1796)
+
+Contract: Given a user who has written providers.<p>.model_ceilings = { "<model>" = "<tier>" }, when Glasshouse loads that configuration, it resolves the named model's ceiling as a WorkloadTier through EffectiveConfig::model_ceiling, layered project over user -- while preserving that an unknown spelling is a load error rather than an absent ceiling, and that a model, provider or layer nobody stated a ceiling for resolves to None rather than to a low one.
+
+State: COMPLETE — ruled 2026-08-31 by the orchestrator from the report's five artifacts.
+
+Production evidence:
+- `src/config/mod.rs` — `ProviderConfig::model_ceilings`
+- `src/config/mod.rs` — `ProviderConfig::ceiling_of`
+- `src/config/mod.rs` — `ConfiguredWorkloadTier (Serialize/Deserialize)`
+- `src/config/mod.rs` — `EffectiveConfig::model_ceiling`
+
+Regression evidence:
+- `config::tests::every_workload_tier_spelling_round_trips`
+- `config::tests::an_unknown_model_ceiling_spelling_is_refused_at_load_rather_than_read_as_absent`
+- `config::tests::model_ceiling_is_layered_and_absent_where_nobody_stated_one`
+- `config::tests::serialized_form_has_no_secret_capable_field`
+- `tier_ceiling::a_configured_ceiling_excludes_a_destination_below_the_required_tier_on_the_shipped_binary`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| config/mod.rs: `return Layered::new(config.ceiling_of(model), Layer::User);` -> `return Layered::new(None, Layer::User);` | `skip-state-update` | **killed** | `tier_ceiling::tier_fit_orders_two_otherwise_equal_destinations` |
+
+> skip-state-update observed: assertion `left == right` failed: a ceiling equal to the required tier is the fit the router should prefer; left: 0.0 right: 0.4 -- and three further tests failed with it
+
+Recorded scope limits — stated by the worker, not discovered later:
+- Only a `[providers.*]` key can carry a ceiling; a native subscription and the gateway never can, so a harness's own sign-in cannot be capped.
+- The project layer replaces the user layer's whole map for that provider rather than merging into it -- the same replace-not-merge rule credential_env follows, asserted, not accidental.
+

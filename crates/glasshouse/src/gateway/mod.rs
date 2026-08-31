@@ -356,7 +356,14 @@ impl Gateway {
         evidence_ledger: Option<Arc<crate::routing::evidence::EvidenceLedger>>,
         health_cache: Option<crate::provider::telemetry::GatewayHealthCache>,
     ) -> Result<Self> {
-        Self::start_with_degrade_sink(upstream, quota_cache, evidence_ledger, health_cache, None)
+        Self::start_with_degrade_sink(
+            upstream,
+            quota_cache,
+            evidence_ledger,
+            health_cache,
+            None,
+            None,
+        )
     }
 
     /// [`Self::start_with_telemetry`], with a [`DegradeSink`] told about every
@@ -382,6 +389,7 @@ impl Gateway {
         evidence_ledger: Option<Arc<crate::routing::evidence::EvidenceLedger>>,
         health_cache: Option<crate::provider::telemetry::GatewayHealthCache>,
         degrade_sink: Option<DegradeSink>,
+        prevention_sink: Option<session::FailoverPreventionSink>,
     ) -> Result<Self> {
         let listener = TcpListener::bind((GATEWAY_INTERFACE, EPHEMERAL_PORT))
             .context("could not bind the local Glasshouse gateway to loopback")?;
@@ -412,6 +420,7 @@ impl Gateway {
                 let evidence_ledger = evidence_ledger.clone();
                 let health_cache = health_cache.clone();
                 let degrade_sink = degrade_sink.clone();
+                let prevention_sink = prevention_sink.clone();
                 move || {
                     accept_loop(
                         listener,
@@ -423,6 +432,7 @@ impl Gateway {
                         evidence_ledger,
                         health_cache,
                         degrade_sink,
+                        prevention_sink,
                     )
                 }
             })
@@ -549,6 +559,7 @@ fn accept_loop(
     evidence_ledger: Option<Arc<crate::routing::evidence::EvidenceLedger>>,
     health_cache: Option<Arc<crate::provider::telemetry::GatewayHealthCache>>,
     degrade_sink: Option<DegradeSink>,
+    prevention_sink: Option<session::FailoverPreventionSink>,
 ) {
     // One agent for the life of the gateway: it owns the connection pool to
     // the provider, so a warm TLS connection survives from one request to
@@ -567,6 +578,7 @@ fn accept_loop(
                 let evidence_ledger = evidence_ledger.clone();
                 let health_cache = health_cache.clone();
                 let degrade_sink = degrade_sink.clone();
+                let prevention_sink = prevention_sink.clone();
                 let spawned = std::thread::Builder::new()
                     .name("glasshouse-gateway-exchange".to_owned())
                     .spawn(move || {
@@ -622,6 +634,11 @@ fn accept_loop(
                             evidence_ledger.as_deref(),
                             completed_at,
                             session::stated_retry_after(&quota),
+                            // Capability map line 1851's write side. `None`
+                            // reproduces this loop's behaviour exactly as it
+                            // was before this package, the same additive
+                            // shape every other sink here follows.
+                            prevention_sink.as_ref(),
                         );
                         // Map line 1735: detect a gateway failure separately
                         // from a harness process failure. `session::classify`
@@ -827,6 +844,11 @@ pub fn start_if_required_with_degrade_sink(
     evidence_ledger: Option<Arc<crate::routing::evidence::EvidenceLedger>>,
     health_cache: Option<crate::provider::telemetry::GatewayHealthCache>,
     degrade_sink: Option<DegradeSink>,
+    // Told what the failure-domain term did to each failover this gateway
+    // takes — capability map line 1851. `None` reproduces the behaviour this
+    // door had before that line's producer landed, exactly as `degrade_sink`
+    // above does for line 1735.
+    prevention_sink: Option<session::FailoverPreventionSink>,
 ) -> Result<Option<Gateway>> {
     if !gateway_is_required(profiles) {
         return Ok(None);
@@ -837,6 +859,7 @@ pub fn start_if_required_with_degrade_sink(
         evidence_ledger,
         health_cache,
         degrade_sink,
+        prevention_sink,
     )
     .map(Some)
 }

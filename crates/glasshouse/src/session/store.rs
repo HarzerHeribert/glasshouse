@@ -537,6 +537,22 @@ pub struct SessionRecord {
     /// Written only by [`SessionStore::record_observed_compaction`], from the
     /// one production site that can tell a compaction is coming.
     pub observed_compactions: Option<i64>,
+    /// Where HEAD stood the last time Glasshouse looked at this session —
+    /// map line 1149's half of *"after a successful Git commit"*.
+    ///
+    /// The full object name, as `crate::checkpoint::git::GitPosition` read
+    /// it. `None` means **nobody has looked yet**, which is a different fact
+    /// from "HEAD has not moved" and is why the first look records a position
+    /// without treating it as a code-change boundary: a boundary is a
+    /// *change*, and there is nothing to have changed from.
+    ///
+    /// Per session on purpose. Two sessions working in one project each have
+    /// their own idea of what they have already seen, and a project-wide
+    /// column would let whichever session's turn ended first consume the
+    /// boundary for both.
+    ///
+    /// Written only by [`SessionStore::record_seen_commit`].
+    pub last_seen_commit: Option<String>,
 }
 
 impl SessionRecord {
@@ -1217,7 +1233,7 @@ const ALL_COLUMNS: &str = "id, project_id, harness, native_session_id, role, \
                            launch_profile, backend_resource, model, pairing_class, \
                            protocol, response_profile, response_mechanism, \
                            display_name, purpose, source_session_id, \
-                           observed_compactions, presentation_ref";
+                           observed_compactions, presentation_ref, last_seen_commit";
 
 /// An open project database plus the sessions inside it.
 ///
@@ -1490,6 +1506,15 @@ impl<'a> SessionStore<'a> {
             // be carrying no information at all.
             observed_compactions: Some(0),
             presentation_ref: new.presentation_ref,
+            // `None`, and this is the opposite call to the one above it for
+            // the same reason. `observed_compactions` is `Some(0)` because
+            // `create` can *measure* it — this build is counting from here.
+            // Nothing here can measure a repository position: `create` has
+            // the session's harness and role and no project root, and a
+            // position guessed from the process's working directory would be
+            // a claim about a repository nobody read. So the first hook that
+            // does read one records it, and does not call it a boundary.
+            last_seen_commit: None,
         };
 
         self.conn
@@ -1499,9 +1524,9 @@ impl<'a> SessionStore<'a> {
                  launch_profile, backend_resource, model, pairing_class, protocol, \
                  response_profile, response_mechanism, process_id, \
                  process_started_at, process_host, supervision, source_session_id, \
-                 observed_compactions, presentation_ref) \
+                 observed_compactions, presentation_ref, last_seen_commit) \
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, \
-                 ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23)",
+                 ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22, ?23, ?24)",
                 rusqlite::params![
                     record.id.as_str(),
                     &record.project_id,
@@ -1538,6 +1563,7 @@ impl<'a> SessionStore<'a> {
                     record.source_session_id.as_ref().map(SessionId::as_str),
                     record.observed_compactions,
                     &record.presentation_ref,
+                    &record.last_seen_commit,
                 ],
             )
             .map_err(|source| SessionStoreError::Sql {
@@ -2076,6 +2102,39 @@ impl<'a> SessionStore<'a> {
              WHERE id = ?1",
             rusqlite::params![id.as_str()],
             "count an observed compaction",
+        )
+    }
+
+    /// Record where HEAD stands for this session — map line 1149.
+    ///
+    /// # It stores, and says nothing about whether a boundary happened
+    ///
+    /// Deliberately not `record_code_change_boundary`. This writes one
+    /// column; whether the new position *is* a boundary is a comparison
+    /// against [`SessionRecord::last_seen_commit`] that the caller has
+    /// already made, and folding the comparison in here would put the
+    /// decision behind a write and make "the position was learned" and "a
+    /// commit landed" the same event. They are not: the first look at a
+    /// session records a position and is not a boundary, because there is
+    /// nothing to have changed from.
+    ///
+    /// # It is not activity
+    ///
+    /// `last_activity_at` is untouched, exactly as
+    /// [`SessionStore::record_observed_compaction`] leaves it: a commit is
+    /// something the *repository* did, and stamping it here would move a
+    /// session up a list ordered by when it last ran on the strength of a
+    /// `git commit` typed in another terminal.
+    pub fn record_seen_commit(
+        &self,
+        id: &SessionId,
+        commit: &str,
+    ) -> Result<SessionRecord, SessionStoreError> {
+        self.update(
+            id,
+            "UPDATE sessions SET last_seen_commit = ?2 WHERE id = ?1",
+            rusqlite::params![id.as_str(), commit],
+            "record where HEAD stood for a session",
         )
     }
 
@@ -2686,6 +2745,12 @@ fn read_record(row: &Row<'_>) -> Result<SessionRecord, SessionStoreError> {
     // would teach this module what a backend's references look like, which
     // is the one thing line 762 says it must not learn.
     let presentation_ref: Option<String> = row.get_unwrap(20);
+    // Never decoded either: an object name is forty hex characters or it is
+    // not one, and this column is only ever written from
+    // `GitPosition::detect`, which already refuses anything else. Read as an
+    // `Option` for `observed_compactions`' reason — NULL is the fact
+    // "nobody has looked yet" and no fallback may erase it.
+    let last_seen_commit: Option<String> = row.get_unwrap(21);
 
     Ok(SessionRecord {
         id,
@@ -2709,6 +2774,7 @@ fn read_record(row: &Row<'_>) -> Result<SessionRecord, SessionStoreError> {
         source_session_id,
         observed_compactions,
         presentation_ref,
+        last_seen_commit,
     })
 }
 
@@ -2800,6 +2866,9 @@ mod tests {
     /// triggers with it — and they go first, newest migration undone first.
     /// Migration 20's column is the newest of all, so it leads.
     const UNDO_MIGRATIONS_ABOVE_THIRTEEN: &str = "
+        ALTER TABLE memories DROP COLUMN extraction_trigger;
+        ALTER TABLE sessions DROP COLUMN last_seen_commit;
+
         ALTER TABLE sessions DROP COLUMN presentation_ref;
         DROP TABLE assumption_transitions;
         DROP TABLE task_assumptions;
@@ -3891,6 +3960,12 @@ mod tests {
                 "memories.review_marked_at",
                 "memories.last_validated_at",
                 "memories.superseded_reason",
+                // Migration 19. One of four fixed words from
+                // `memory::ExtractionTrigger::as_str`, which returns
+                // `&'static str` — every value this column can hold is a
+                // literal compiled into the binary, so there is nothing a
+                // user or a provider could type into it.
+                "memories.extraction_trigger",
                 "memories_fts.subject",
                 "memories_fts.body",
                 "memories_fts.rationale",
@@ -4013,6 +4088,13 @@ mod tests {
                 // back. A pane number is not a place a credential could be
                 // put.
                 "sessions.presentation_ref",
+                // Migration 21. A Git object name: forty hex characters read
+                // out of `.git/HEAD` and the ref it points at, by
+                // `checkpoint::git::GitPosition::detect`, which spawns no
+                // process and parses nothing a provider or a user supplied.
+                // The only strings that can reach it come from files Git
+                // itself wrote.
+                "sessions.last_seen_commit",
                 // Migration 19: the six fields an agent states about a
                 // premise and their bookkeeping. Free text, sanitized by the
                 // writer and bounded; no column is named for, or shaped
@@ -4151,7 +4233,8 @@ mod tests {
         fixture
             .conn
             .execute_batch(
-                "ALTER TABLE sessions DROP COLUMN presentation_ref;
+                "ALTER TABLE sessions DROP COLUMN last_seen_commit;
+                ALTER TABLE sessions DROP COLUMN presentation_ref;
                  ALTER TABLE sessions DROP COLUMN observed_compactions;
                  ALTER TABLE sessions DROP COLUMN launch_profile;
                  ALTER TABLE sessions DROP COLUMN backend_resource;
@@ -4188,8 +4271,8 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            version, 20,
-            "the launch must have applied migrations 3 through 20"
+            version, 21,
+            "the launch must have applied migrations 3 through 21"
         );
 
         let migrated_store = SessionStore::new(&reopened).unwrap();
@@ -4380,8 +4463,8 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            version, 20,
-            "the launch must have applied migrations 2 through 20"
+            version, 21,
+            "the launch must have applied migrations 2 through 21"
         );
 
         let store = SessionStore::new(&reopened).unwrap();
@@ -5334,8 +5417,8 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(
-                version, 20,
-                "the launch must have applied migrations 8 through 20"
+                version, 21,
+                "the launch must have applied migrations 8 through 21"
             );
 
             let after = SessionStore::new(&reopened)
@@ -5463,8 +5546,8 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(
-                version, 20,
-                "the reopen must have applied migrations 12 through 20"
+                version, 21,
+                "the reopen must have applied migrations 12 through 21"
             );
 
             let after = SessionStore::new(&reopened)

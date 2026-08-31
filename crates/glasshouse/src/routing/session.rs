@@ -237,9 +237,9 @@ pub struct Destination {
     resource_facts: ResourceFacts,
     /// Map line 1516: the highest workload tier this destination is
     /// **established** to serve, attached via [`Self::with_tier_ceiling`].
-    /// `None` — the default, and what every destination the shipped binary
-    /// builds carries today — means nobody has established one, and the
-    /// tier gate then does nothing to it: an unknown ceiling is not a low
+    /// `None` — the default, and what a destination whose model the user
+    /// named no ceiling for carries — means nobody has established one, and
+    /// the tier gate then does nothing to it: an unknown ceiling is not a low
     /// one, the same rule `capability`'s `Unverified` and line 1434's
     /// absent-headroom reading both follow.
     tier_ceiling: Option<WorkloadTier>,
@@ -355,13 +355,19 @@ impl Destination {
     /// State the highest workload tier this destination is established to
     /// serve — map line 1516's input. `None` withdraws the fact.
     ///
-    /// **No production caller attaches one today.** Nothing in the
-    /// configuration, the provider registry, the harness adapters or
-    /// [`ResourceFacts`] states a resource's tier, so `main.rs` cannot
-    /// honestly fill this and does not; the gate in `hard_constraint` and
-    /// the term in [`workload_tier_fit`] are therefore inert on the shipped
-    /// binary's path and live on the library's. Both are proven with
-    /// destinations built here, and the evidence entry says so.
+    /// **The production caller is `main.rs::routing_destinations`**, which
+    /// attaches every destination the shipped binary builds with
+    /// `destination_tier_ceiling`'s reading of the user's own
+    /// `providers.<p>.model_ceilings` (map line 1796) — so the gate in
+    /// `hard_constraint` and the term in [`workload_tier_fit`] act on the
+    /// binary's path, not only on the library's.
+    ///
+    /// It is still `None` for most destinations, and that is the design
+    /// rather than a gap: a ceiling exists only where the user stated one for
+    /// that specific model on that specific provider. Every destination in a
+    /// project that has configured none carries `None` and is treated exactly
+    /// as it was before the producer existed — "nobody has said" is not
+    /// "cannot".
     pub fn with_tier_ceiling(mut self, ceiling: Option<WorkloadTier>) -> Self {
         self.tier_ceiling = ceiling;
         self
@@ -684,8 +690,21 @@ const TIER_FIT_HEADROOM: f64 = 0.2;
 /// removed it first.
 const TIER_FIT_UNVERIFIED: f64 = 0.0;
 
+/// Map line 1558: what a destination that costs the user money contributes,
+/// against one that costs nothing, when both are otherwise adequate.
+///
+/// **Deliberately the smallest magnitude in this module** — smaller than
+/// every other differentiating constant here, [`TIER_FIT_HEADROOM`] and
+/// [`CACHE_LIKELY_LOST`]'s `0.2` included — because 1558 asks for the
+/// cheapest candidate *that satisfies* the tier and the hard capabilities,
+/// not for the cheapest candidate. Adequacy, health and warmth are priced by
+/// their own terms and must keep outranking price; this one decides only
+/// between candidates those terms could not separate, which is exactly what
+/// "prefer the cheapest **among** them" means.
+const METERED_COST_PREFERENCE: f64 = -0.1;
+
 // ---------------------------------------------------------------------------
-// The seven contributions. One public function each, so a mutation can zero
+// The contributions. One public function each, so a mutation can zero
 // exactly one of them.
 // ---------------------------------------------------------------------------
 
@@ -870,6 +889,67 @@ pub fn workload_tier_fit(destination: &Destination, required: WorkloadTier) -> C
             ),
         ),
     }
+}
+
+/// Map line 1558: *"prefer the cheapest healthy candidate that satisfies the
+/// required workload tier and hard capabilities."*
+///
+/// # What this term is, and what the three words before it already decide
+///
+/// The line names four properties, and three of them are already decided
+/// before this function is reached, which is why it prices only the fourth:
+///
+/// - *satisfies the required workload tier* — `hard_constraint` has already
+///   **removed** a destination whose established ceiling is below the
+///   requirement, and [`workload_tier_fit`] prices the fit of what is left;
+/// - *satisfies the hard capabilities* — [`capability_fit`] prices an
+///   established-absent axis at `CAPABILITY_ESTABLISHED_ABSENT`, four times
+///   this term's magnitude, so a cheap resource established to lack what the
+///   task needs can never win on price;
+/// - *healthy* — [`provider_health`] prices a refused credential and a
+///   cooling-down provider, and its penalties are larger again.
+///
+/// So what is left for this term is the comparison the line is actually
+/// about: two candidates the terms above could not separate, one of which
+/// spends the user's money. It is `METERED_COST_PREFERENCE` for a metered
+/// destination and `0.0` for a free one — a preference for the free
+/// resource expressed as a cost on the paid one, so that a project with no
+/// free resource configured is not scored as though every destination it has
+/// were somehow deficient.
+///
+/// # Why it is only pushed when a tier was established
+///
+/// `score` pushes this term exactly where it pushes [`workload_tier_fit`]:
+/// under `if let Some(required)`. The line's own subject is *"a candidate
+/// that satisfies the required workload tier"*, and there is no required tier
+/// until a task has been classified — so a launch or a `glasshouse route`
+/// that states no task renders precisely the explanation it rendered before
+/// this term existed, byte for byte. The same rule, and the same reason, as
+/// the tier term beside it.
+///
+/// `Cost` is [`super::Backend::cost`], which `main.rs::destination_backend`
+/// resolves through `ProviderConfig::cost_of` — the user's own `free_models`
+/// list. Nothing here infers a price from a model's name.
+pub fn cost_preference(destination: &Destination) -> Contribution {
+    if destination.backend().cost().is_free() {
+        return Contribution::new(
+            "cost preference",
+            0.0,
+            format!(
+                "`{}` is a zero-cost resource for this work — nothing is spent by preferring it",
+                destination.id()
+            ),
+        );
+    }
+    Contribution::new(
+        "cost preference",
+        METERED_COST_PREFERENCE,
+        format!(
+            "`{}` is metered, so it is preferred only over candidates this decision's other \
+             terms could not already separate it from (line 1558)",
+            destination.id()
+        ),
+    )
 }
 
 /// The classification a decision acted on, as a zero-weight line in every
@@ -1680,6 +1760,10 @@ fn score(
     explanation.push(capability_fit(destination, &inputs.requirements));
     if let Some(required) = inputs.requirements.minimum_tier {
         explanation.push(workload_tier_fit(destination, required));
+        // Line 1558, pushed under the same condition and for the same
+        // reason: "the cheapest candidate that satisfies the required
+        // workload tier" has no subject until a tier has been required.
+        explanation.push(cost_preference(destination));
     }
     explanation.push(session_affinity(destination));
     explanation.push(prompt_cache_state(destination, current));

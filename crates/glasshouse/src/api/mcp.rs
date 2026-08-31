@@ -339,7 +339,7 @@ fn dispatch_method(
     match method {
         "initialize" => Ok(initialize_result(&params)),
         "ping" => Ok(json!({})),
-        // No cursor: eight tools fit in one page, and a cursor a client
+        // No cursor: nine tools fit in one page, and a cursor a client
         // passes back is ignored rather than refused, as the specification
         // allows a server without pagination to do.
         "tools/list" => Ok(json!({ "tools": TOOLS.iter().map(tool_json).collect::<Vec<_>>() })),
@@ -425,12 +425,12 @@ const READ_ONLY: Annotations = Annotations {
     idempotent: true,
 };
 
-/// The thirteen tools, and the whole of what this door can do.
+/// The fourteen tools, and the whole of what this door can do.
 ///
 /// Every entry maps onto exactly one [`Request`] variant, and the request's
 /// own handler decides everything after that — bounds, scope, and errors —
 /// which is why the descriptions below say what the operation *is* and not
-/// how it is checked. A fourteenth tool would be a fourteenth entry here and
+/// how it is checked. A fifteenth tool would be a fifteenth entry here and
 /// nothing else; a tool that reached past `ServerContext::handle` cannot be
 /// written in this file without the source-scanning test noticing.
 ///
@@ -924,6 +924,31 @@ const TOOLS: &[Tool] = &[
             })
         },
     },
+    Tool {
+        name: "glasshouse_implementation_policy",
+        title: "Implementation policy",
+        description: "Glasshouse's own project implementation policy: the simplicity-first rules, \
+                      the production-aware checks, and the pre-completion review checklist. This \
+                      is an instruction Glasshouse wrote, not a memory it extracted. Constant \
+                      text; reads nothing. Read-only.",
+        annotations: READ_ONLY,
+        input_schema: || {
+            object_schema(
+                json!({
+                    "part": {
+                        "type": "string",
+                        "enum": ["simplicity", "production", "review"],
+                        "description": "One part of the policy. Absent means all three.",
+                    },
+                }),
+                &[],
+            )
+        },
+        build: |arguments| {
+            let PolicyArguments { part } = serde_json::from_value(arguments)?;
+            Ok(Request::ImplementationPolicy { part })
+        },
+    },
 ];
 
 /// The schema of `glasshouse_preflight`'s `change` argument — one property
@@ -1171,6 +1196,16 @@ struct PromoteAssumptionArguments {
     kind: PromotionKind,
     #[serde(default)]
     note: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PolicyArguments {
+    /// Deserialized as `policy::Part` itself rather than as a `String` this
+    /// file would then parse, so the tool's schema, the door's request and
+    /// the CLI's `--part` cannot come to disagree about the three names.
+    #[serde(default)]
+    part: Option<glasshouse::policy::Part>,
 }
 
 #[cfg(test)]

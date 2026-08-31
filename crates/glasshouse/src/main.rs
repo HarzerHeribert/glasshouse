@@ -430,6 +430,9 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
             MemoryCommand::Resolve { id, outcome } => {
                 print!("{}", memory_resolve_conflict(&runtime, id, outcome)?);
             }
+            MemoryCommand::Commit { session } => {
+                print!("{}", memory_commit(&runtime, session.as_deref())?);
+            }
             MemoryCommand::Extract {
                 session,
                 activity,
@@ -484,6 +487,13 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
                     return Ok(ExitCode::FAILURE);
                 }
             }
+        }
+        // Constant text: no runtime, no store, no configuration. See
+        // `glasshouse::policy` for why the policy is text Glasshouse carries
+        // rather than a check Glasshouse runs, and `cli::Command::Policy` for
+        // why this prints the delivered form rather than a prettier one.
+        Some(Command::Policy { part }) => {
+            println!("{}", glasshouse::policy::render(*part));
         }
         Some(Command::Api { command }) => match command {
             ApiCommand::Serve { socket } => {
@@ -766,19 +776,26 @@ fn routing_destinations(
             .map(|layered| layered.value)
             .unwrap_or_else(|| glasshouse::profile::LaunchProfile::native(harness));
         let (backend, protocols) = destination_backend(effective, &profile, record.model.clone());
-        destinations.push(with_capacity(
-            with_provider_protocols(
-                Destination::existing(
-                    record.id.as_str(),
-                    harness,
-                    profile.name.clone(),
-                    backend,
-                    warm,
+        // Line 1516's producer, read before the backend is moved into the
+        // destination — see `destination_tier_ceiling` for why it is read off
+        // the backend's resolved model rather than off the profile.
+        let ceiling = destination_tier_ceiling(effective, &backend);
+        destinations.push(
+            with_capacity(
+                with_provider_protocols(
+                    Destination::existing(
+                        record.id.as_str(),
+                        harness,
+                        profile.name.clone(),
+                        backend,
+                        warm,
+                    ),
+                    protocols,
                 ),
-                protocols,
-            ),
-            destination_capacity(&profile, effective, &telemetry, now_unix),
-        ));
+                destination_capacity(&profile, effective, &telemetry, now_unix),
+            )
+            .with_tier_ceiling(ceiling),
+        );
     }
 
     // 2. One fresh destination per *enabled* configured launch profile, each
@@ -819,19 +836,23 @@ fn routing_destinations(
         };
         let profile = profile.value;
         let (backend, protocols) = destination_backend(effective, &profile, None);
-        destinations.push(with_capacity(
-            with_provider_protocols(
-                Destination::fresh(
-                    fresh_destination_id(harness, &name),
-                    harness,
-                    profile.name.clone(),
-                    backend,
-                    checkpoint,
+        let ceiling = destination_tier_ceiling(effective, &backend);
+        destinations.push(
+            with_capacity(
+                with_provider_protocols(
+                    Destination::fresh(
+                        fresh_destination_id(harness, &name),
+                        harness,
+                        profile.name.clone(),
+                        backend,
+                        checkpoint,
+                    ),
+                    protocols,
                 ),
-                protocols,
-            ),
-            destination_capacity(&profile, effective, &telemetry, now_unix),
-        ));
+                destination_capacity(&profile, effective, &telemetry, now_unix),
+            )
+            .with_tier_ceiling(ceiling),
+        );
     }
 
     Ok(destinations)
@@ -1111,16 +1132,24 @@ fn routed_cost_class(
 /// the destination's own credential and model label, so a hit here means the
 /// same resource and not a resource that merely renders the same.
 ///
-/// This is the whole of what the launch path can say about its evidence.
-/// `routing::evidence`'s `Confidence` belongs to the gateway's aggregate
-/// ledger, which `SessionRouter` never reads, and a
-/// [`glasshouse::routing::free::FreePool`] health entry carries neither a
-/// confidence nor an observation time — so *stale* and *incorrectly
-/// segmented*, line 1854's other two, have no producer here and are not
-/// invented.
+/// **Two of line 1854's three words now, not one.** `routing::evidence`'s
+/// `Confidence` belongs to the gateway's aggregate ledger, which
+/// `SessionRouter` never reads, and a
+/// [`glasshouse::routing::free::FreePool`] health entry carries no
+/// observation time — but the cache the pool was filled from does, per
+/// provider file, and [`ObservedHealth`] carries it here. So *sparse* is
+/// answered by whether the pool held this destination and *stale* by how old
+/// the file that supplied it was, against
+/// [`glasshouse::evaluation::HEALTH_EVIDENCE_HORIZON_SECONDS`].
+///
+/// *Incorrectly segmented*, line 1854's third, still has no producer
+/// anywhere on this path and is not invented: nothing in this build compares
+/// a health reading's segmentation against the resource it was attributed
+/// to, and the line stays open on that word alone.
 fn routing_evidence_for(
-    health: &glasshouse::routing::free::FreePool,
+    health: &ObservedHealth,
     destination: &glasshouse::routing::session::Destination,
+    now_unix: i64,
 ) -> glasshouse::evaluation::RoutingEvidence {
     use glasshouse::routing::free::FreeResource;
 
@@ -1128,11 +1157,81 @@ fn routing_evidence_for(
         destination.backend().credential().clone(),
         destination.backend().model().label(),
     );
-    glasshouse::evaluation::RoutingEvidence::from_pool_hit(
-        health
-            .observed()
-            .iter()
-            .any(|(resource, _)| *resource == chosen),
+    let held = health
+        .pool()
+        .observed()
+        .iter()
+        .any(|(resource, _)| *resource == chosen);
+    // A pool hit whose date is somehow missing answers `absent`, not fresh —
+    // `and_then` rather than `unwrap_or(now_unix)`, which is the one
+    // substitution that would turn an unknown into a favourable fact.
+    let observed_at = held.then(|| health.observed_at(&chosen)).flatten();
+    glasshouse::evaluation::RoutingEvidence::from_observation(observed_at, now_unix)
+}
+
+/// The workload tier a launch's routing decision used, and whether line
+/// 1459's conservative rule moved it — **capability map line 1834**'s
+/// producer input, from the classification that decision actually acted on.
+///
+/// `None` — no `--task`, so nothing classified — is
+/// [`glasshouse::evaluation::RoutingTier::Unclassified`], **its own bucket
+/// and never nothing**: a launch that states no task still made a routing
+/// decision, and omitting its row would make *"this project never states its
+/// tasks"* read as *"this project never launches"*.
+///
+/// *Escalated* is whether the tier the decision used differs from the tier
+/// the classifier stated, which is not the same as whether the conservative
+/// rule fired — see [`glasshouse::evaluation::RoutingTier::Classified`]'s own
+/// doc comment for the case at the top of the scale where the two part.
+fn routed_tier(classified: Option<&ClassifiedRouting>) -> glasshouse::evaluation::RoutingTier {
+    use glasshouse::evaluation::RoutingTier;
+
+    let Some(classified) = classified else {
+        return RoutingTier::Unclassified;
+    };
+    let answer = &classified.answer;
+    RoutingTier::Classified {
+        tier: answer.required_tier(),
+        escalated: answer.required_tier() != answer.stated_tier(),
+    }
+}
+
+/// The sink `launch_session` and the resume path hand their gateway —
+/// **capability map line 1851**'s one production caller.
+///
+/// # Why a closure over a `Runtime` and not a ledger
+///
+/// `crate::gateway` has never had a database in scope and must not gain one:
+/// `gateway::session::FailoverPreventionSink`'s own doc comment records that
+/// this is what keeps that module incapable of reaching a project's files.
+/// The closure carries a [`Runtime`] — cheap, `Clone`, three paths — and
+/// opens the evaluation ledger inside
+/// [`glasshouse::evaluation::record_failover_prevention`] at the one moment a
+/// failover has actually been taken, which is practice §65's rule that a
+/// resource is acquired where its consumer starts and not a connection held
+/// for the life of a session that may never fail over at all.
+///
+/// The row is written from the gateway's own exchange thread, so nothing on
+/// the person's path waits for it, and a ledger that cannot be opened costs
+/// the observation rather than the exchange.
+fn failover_prevention_sink(
+    runtime: &Runtime,
+) -> glasshouse::gateway::session::FailoverPreventionSink {
+    let runtime = runtime.clone();
+    std::sync::Arc::new(
+        move |effect: &glasshouse::routing::interactive::FailureDomainEffect| {
+            let prevention = if effect.prevented() {
+                glasshouse::evaluation::FailoverPrevention::Prevented
+            } else {
+                glasshouse::evaluation::FailoverPrevention::NotPrevented
+            };
+            glasshouse::evaluation::record_failover_prevention(
+                &runtime,
+                prevention,
+                effect.displaced(),
+                glasshouse::evaluation::now_unix(),
+            );
+        },
     )
 }
 
@@ -1203,6 +1302,39 @@ fn destination_capacity(
     let band = score.as_ref().map(|score| score.band(&thresholds));
     let facts = CapacityFacts::new(band, state.seconds_until_reset(now_unix));
     (score, facts)
+}
+
+/// **Map line 1516's missing producer**, and the reason the tier gate stops
+/// being inert on the shipped binary: the highest workload tier this
+/// destination's model is established to serve, as the user configured it
+/// (`providers.<p>.model_ceilings`, map line 1796).
+///
+/// Read off the [`glasshouse::routing::Backend`] rather than from the
+/// profile, because the backend is where the *resolved* model lives — a
+/// recorded session's own assigned model outranks re-deriving one, and
+/// `destination_backend` has already applied that rule. Reading the profile
+/// again here would give a warm session the ceiling of the model it *would*
+/// be started with rather than the one it is actually running.
+///
+/// `None` — no ceiling established, which the router never reads as a
+/// refusal — in three honest cases, none of them a guess:
+///
+/// - the harness picked its own model ([`AssignedModel::HarnessDefault`]),
+///   so there is no model identifier to look a ceiling up by;
+/// - the destination's provider is not a `[providers.*]` key at all, which
+///   is every native subscription and the gateway — a ceiling is a statement
+///   about a named model on a named provider, and inventing one for a
+///   resource the user never configured is exactly what
+///   `ProviderConfig::cost_of` refuses to do for cost;
+/// - the provider is configured and this model is simply not in its map.
+fn destination_tier_ceiling(
+    effective: &EffectiveConfig<'_>,
+    backend: &glasshouse::routing::Backend,
+) -> Option<glasshouse::routing::classify::WorkloadTier> {
+    backend
+        .model()
+        .name()
+        .and_then(|model| effective.model_ceiling(backend.provider(), model).value)
 }
 
 /// Attach [`destination_capacity`]'s two halves to a destination.
@@ -1285,7 +1417,7 @@ fn with_capacity(
 fn observed_provider_health(
     runtime: &Runtime,
     destinations: &[glasshouse::routing::session::Destination],
-) -> glasshouse::routing::free::FreePool {
+) -> ObservedHealth {
     use glasshouse::routing::free::FreeResource;
 
     observed_health_of(
@@ -1297,6 +1429,53 @@ fn observed_provider_health(
             )
         }),
     )
+}
+
+/// The pool the router is handed, and **when each adopted reading was
+/// written** — capability map line 1854's *stale* half.
+///
+/// # Why the age travels beside the pool rather than inside it
+///
+/// [`glasshouse::routing::free::FreePool`] is the router's own input type and
+/// its health entries carry no observation time — see
+/// [`routing_evidence_for`]'s own header, and
+/// [`glasshouse::evaluation::EvaluationKind::RoutingEvidenceObserved`]'s. The
+/// age is not a routing input: nothing in the ranking reads it, and adding it
+/// to `FreePool` would put a field in the policy's input that the policy must
+/// not use. It is a fact about the *evidence a decision was made with*, which
+/// is what this ledger records and nothing else.
+///
+/// The age is per **provider file**, which is per reading:
+/// [`glasshouse::provider::telemetry::GatewayHealthCache::load_all_dated`]'s
+/// own doc comment has why those are the same number here.
+struct ObservedHealth {
+    pool: glasshouse::routing::free::FreePool,
+    /// Every resource adopted into `pool`, with the unix second its file was
+    /// written. A `Vec` rather than a map because it is walked once per
+    /// routed destination and holds one entry per configured destination.
+    observed_at: Vec<(glasshouse::routing::free::FreeResource, i64)>,
+}
+
+impl ObservedHealth {
+    fn pool(&self) -> &glasshouse::routing::free::FreePool {
+        &self.pool
+    }
+
+    /// When the reading this pool holds for `resource` was written, or
+    /// [`None`] when it holds none.
+    ///
+    /// There is no third answer: a file that could not be dated was never
+    /// loaded at all (`load_all_dated` skips it, as it skips a truncated
+    /// one), so a resource in `pool` always has a date and a resource with
+    /// no date is not in `pool`. That is what makes *"a reading whose age is
+    /// unknown is `absent`, never fresh"* structural rather than a rule
+    /// somebody has to remember.
+    fn observed_at(&self, resource: &glasshouse::routing::free::FreeResource) -> Option<i64> {
+        self.observed_at
+            .iter()
+            .find(|(candidate, _)| candidate == resource)
+            .map(|(_, at)| *at)
+    }
 }
 
 /// The persisted gateway-health readings that name any of `resources`, as a
@@ -1318,14 +1497,19 @@ fn observed_provider_health(
 fn observed_health_of(
     runtime: &Runtime,
     resources: impl IntoIterator<Item = glasshouse::routing::free::FreeResource>,
-) -> glasshouse::routing::free::FreePool {
+) -> ObservedHealth {
     use glasshouse::provider::telemetry::{GatewayHealthCache, GatewayHealthReading};
     use glasshouse::routing::free::FreePool;
 
     let mut pool = FreePool::new();
-    let stored = GatewayHealthCache::new(runtime.paths()).load_all();
+    let mut observed_at = Vec::new();
+    // `load_all_dated` rather than `load_all`: the same three refusals below,
+    // plus the unix second each provider's file was written, which line
+    // 1854's *stale* half is read from. A file with no date fails to
+    // deserialize and never reaches this loop.
+    let stored = GatewayHealthCache::new(runtime.paths()).load_all_dated();
     if stored.is_empty() {
-        return pool;
+        return ObservedHealth { pool, observed_at };
     }
 
     // Hazard 2: one pair, read together, for every reading below.
@@ -1337,26 +1521,32 @@ fn observed_health_of(
         let label = credential.label();
         let model = resource.model().to_owned();
 
-        let mut named: Option<&GatewayHealthReading> = None;
+        let mut named: Option<(&GatewayHealthReading, i64)> = None;
         let mut contradicted = false;
-        for reading in stored
+        for (reading, written_at) in stored
             .iter()
-            .filter(|(provider, _)| provider == credential.provider())
-            .flat_map(|(_, readings)| readings.iter())
-            .filter(|reading| reading.credential_label == label && reading.model == model)
+            .filter(|(provider, _, _)| provider == credential.provider())
+            .flat_map(|(_, written_at, readings)| {
+                readings.iter().map(move |reading| (reading, *written_at))
+            })
+            .filter(|(reading, _)| reading.credential_label == label && reading.model == model)
         {
             match named {
-                None => named = Some(reading),
+                None => named = Some((reading, written_at)),
                 // Two entries saying the same thing are one reading written
-                // twice, not a disagreement.
-                Some(first) if first == reading => {}
+                // twice, not a disagreement. The file dates may still differ
+                // — the same reading persisted twice — and the comparison is
+                // deliberately of the reading alone, so a duplicate does not
+                // become a contradiction because two files were written a
+                // second apart.
+                Some((first, _)) if first == reading => {}
                 Some(_) => {
                     contradicted = true;
                     break;
                 }
             }
         }
-        let Some(reading) = named.filter(|_| !contradicted) else {
+        let Some((reading, written_at)) = named.filter(|_| !contradicted) else {
             continue;
         };
 
@@ -1366,9 +1556,10 @@ fn observed_health_of(
             reading.cooling_down_until(now, now_unix),
             reading.credential_rejected,
         );
+        observed_at.push((resource, written_at));
     }
 
-    pool
+    ObservedHealth { pool, observed_at }
 }
 
 /// What the most recent checkpoint would give a fresh session to boot from —
@@ -1498,19 +1689,43 @@ fn route_outcomes_section(runtime: &Runtime) -> String {
     let by_class = ledger.route_outcomes_by(EvaluationKind::RoutingCostClassObserved, from, to);
     let by_pairing = ledger.route_outcomes_by_pairing_class(from, to);
     let by_evidence = ledger.route_outcomes_by(EvaluationKind::RoutingEvidenceObserved, from, to);
+    // Map line 1834. The bucket is the tier *with* its escalation, which is
+    // what makes "did this tier succeed without escalation" a comparison
+    // between two rows of one table rather than a join.
+    let by_tier = ledger.route_outcomes_by(EvaluationKind::RoutingTierObserved, from, to);
+    // Map line 1851. Counted rather than joined: these rows carry no
+    // session, because the gateway that ranks a failover holds no Glasshouse
+    // session id — see `EvaluationKind::FailoverPrevented`.
+    let preventions = ledger.counts_by_subject(EvaluationKind::FailoverPrevented, from, to);
 
-    let (by_class, by_pairing, by_evidence) = match (by_class, by_pairing, by_evidence) {
-        (Ok(class), Ok(pairing), Ok(evidence)) => (class, pairing, evidence),
-        (Err(err), _, _) | (_, Err(err), _) | (_, _, Err(err)) => {
-            // `WindowNotRetained` is the honest one: retention trimmed rows
-            // this window reaches back past, and a smaller number would be a
-            // fabrication. It is reported, not rounded away.
-            return format!("{header}\n  {err}\n");
-        }
-    };
+    let (by_class, by_pairing, by_evidence, by_tier, preventions) =
+        match (by_class, by_pairing, by_evidence, by_tier, preventions) {
+            (Ok(class), Ok(pairing), Ok(evidence), Ok(tier), Ok(preventions)) => {
+                (class, pairing, evidence, tier, preventions)
+            }
+            (Err(err), ..)
+            | (_, Err(err), ..)
+            | (_, _, Err(err), ..)
+            | (_, _, _, Err(err), _)
+            | (_, _, _, _, Err(err)) => {
+                // `WindowNotRetained` is the honest one: retention trimmed rows
+                // this window reaches back past, and a smaller number would be a
+                // fabrication. It is reported, not rounded away.
+                return format!("{header}\n  {err}\n");
+            }
+        };
 
     if by_class.is_empty() {
-        return format!("{header}\n  no routed sessions recorded in this window\n");
+        // Map line 1851 is still printed here. A prevention row carries no
+        // session — the gateway that ranks a failover holds no Glasshouse
+        // session id — so a project that has failed over without ever
+        // launching under a build that attributes routes has a real count and
+        // no routed sessions, and returning early would hide it behind an
+        // unrelated emptiness.
+        return format!(
+            "{header}\n  no routed sessions recorded in this window\n{}",
+            render_failover_preventions(&preventions)
+        );
     }
 
     let mut out = header;
@@ -1521,13 +1736,57 @@ fn route_outcomes_section(runtime: &Runtime) -> String {
                   quantities have no producer in this build)\n",
     );
     out.push_str(&render_route_outcome_rows(&by_pairing));
-    out.push_str("\n  by evidence held about the destination when it was chosen\n");
+    out.push_str(
+        "\n  by evidence held about the destination when it was chosen (`observed` is a row \
+         written before staleness was measured, never re-labelled)\n",
+    );
     out.push_str(&render_route_outcome_rows(&by_evidence));
+    out.push_str(
+        "\n  by workload tier the decision used, and whether the conservative rule escalated \
+         it (map line 1834)\n",
+    );
+    out.push_str(&render_route_outcome_rows(&by_tier));
+    out.push_str(&render_failover_preventions(&preventions));
     out.push_str(
         "\nA session whose harness never reported a turn end is counted as neither a success \
          nor a failure; a quiet or exited process is never read as either.\n",
     );
     out
+}
+
+/// Map line 1851, as one sentence with its denominator — *"3 of 7 failovers
+/// were steered off a shared upstream"*.
+///
+/// # Why this is a count and not a table
+///
+/// A prevention row carries no session and no turn outcome — the gateway
+/// that ranks a failover holds no Glasshouse session id — so there is
+/// nothing to bucket a success rate by. What line 1851 asks is *how often*,
+/// and the honest shape of that is a numerator over the total of every
+/// bucket the ledger holds, printed together.
+///
+/// A window with no failover prints so, and prints nothing that could be
+/// read as a rate: `0 of 0` is not `0%`, and an absent measurement is never
+/// rendered as a measured zero.
+fn render_failover_preventions(counts: &[(String, i64)]) -> String {
+    use glasshouse::evaluation::FailoverPrevention;
+
+    let total: i64 = counts.iter().map(|(_, count)| *count).sum();
+    let prevented = counts
+        .iter()
+        .find(|(subject, _)| subject == FailoverPrevention::Prevented.as_str())
+        .map(|(_, count)| *count)
+        .unwrap_or_default();
+    if total == 0 {
+        return "\n  no gateway failover was ranked in this window, so nothing is recorded \
+                about what failure-domain evidence did to one (map line 1851)\n"
+            .to_owned();
+    }
+    format!(
+        "\n  {prevented} of {total} gateway failovers went somewhere the failure-domain term \
+         changed the winner to — that many were steered off a candidate sharing the failed \
+         backend's provider (map line 1851)\n"
+    )
 }
 
 /// One table of [`RouteOutcomeCounts`], aligned on the bucket name.
@@ -1934,13 +2193,13 @@ fn route_recommendation(
             to,
             fresh,
             destinations: &destinations,
-            health: &health,
+            health: health.pool(),
             sticky: None,
         },
     );
     let inputs = RouterInputs {
         overrides: &overrides,
-        health: &health,
+        health: health.pool(),
         now: std::time::Instant::now(),
         requirements: classified
             .as_ref()
@@ -1992,6 +2251,7 @@ fn route_recommendation(
         destinations,
         refused_by_launch,
         health_observed: health
+            .pool()
             .observed()
             .into_iter()
             .map(|(resource, _)| resource.label())
@@ -2319,8 +2579,16 @@ fn remember_classification(
 }
 
 /// What `routing_observations.purpose` records for map line 1849's
-/// measurement. Spelled once, like [`CLASSIFICATION_PURPOSE`].
-const ROUTING_LATENCY_PURPOSE: &str = "routing-latency";
+/// measurement. Spelled once, like [`CLASSIFICATION_PURPOSE`], and now in
+/// `routing::evidence` beside it, because `RoutingOverhead` reads this word
+/// back and a second spelling would split the only producer from the only
+/// reader.
+const ROUTING_LATENCY_PURPOSE: &str = glasshouse::routing::evidence::ROUTING_LATENCY_PURPOSE;
+
+/// What `routing_observations.purpose` records for a memory-extraction call
+/// — capability map line 1832. Aliased from the ledger's own constant for
+/// [`CLASSIFICATION_PURPOSE`]'s reason.
+const EXTRACTION_PURPOSE: &str = glasshouse::routing::evidence::EXTRACTION_PURPOSE;
 
 /// Map line 1849: record what routing added to this launch, from the start
 /// of the decision (`started`) to its end — the point after which profile
@@ -2637,7 +2905,14 @@ fn launch_session(
     // handles as "there was no routing decision", and the fresh destination
     // is the profile this launch resolved on its own.
     let (routed, classified, health) = if routing_off {
-        (None, None, glasshouse::routing::free::FreePool::new())
+        (
+            None,
+            None,
+            ObservedHealth {
+                pool: glasshouse::routing::free::FreePool::new(),
+                observed_at: Vec::new(),
+            },
+        )
     } else {
         let destinations = routing_destinations(
             runtime,
@@ -2681,13 +2956,13 @@ fn launch_session(
                 to,
                 fresh,
                 destinations: &destinations,
-                health: &health,
+                health: health.pool(),
                 sticky: Some(&sticky_cache),
             },
         );
         let inputs = glasshouse::routing::session::RouterInputs {
             overrides: &overrides,
-            health: &health,
+            health: health.pool(),
             now: std::time::Instant::now(),
             requirements: classified
                 .as_ref()
@@ -2791,13 +3066,15 @@ fn launch_session(
             // destination *is* the session this work continues, so its id is
             // already the session id. The fresh branch records the same two
             // rows once `store.create` below has produced one.
+            let observed_at = glasshouse::evaluation::now_unix();
             glasshouse::evaluation::record_routed_session(
                 runtime,
                 routed.chosen().id(),
                 routed.chosen().id(),
                 routed_cost_class(&user, project.as_ref(), routed.chosen()),
-                routing_evidence_for(&health, routed.chosen()),
-                glasshouse::evaluation::now_unix(),
+                routing_evidence_for(&health, routed.chosen(), observed_at),
+                routed_tier(classified.as_ref()),
+                observed_at,
             );
             // Line 1467: the session this work landed on is the sticky one.
             remember_classification(&sticky_cache, classified.as_ref(), routed.chosen().id());
@@ -3019,6 +3296,13 @@ fn launch_session(
             runtime.paths(),
         )),
         Some(degrade_relay.sink()),
+        // Capability map line 1851: what the failure-domain term did to each
+        // failover this gateway takes. A sink rather than a ledger handle —
+        // `gateway::session::FailoverPreventionSink`'s own doc comment has
+        // practice §65's reason — so the evaluation ledger is opened, written
+        // and dropped inside the exchange thread that decided the failover,
+        // and never held open across the provider hop.
+        Some(failover_prevention_sink(runtime)),
     ) {
         Ok(gateway) => gateway,
         Err(err) => {
@@ -3197,13 +3481,15 @@ fn launch_session(
     // line. So the decision keeps its own moment and this row records what
     // that decision became — two rows, never an `UPDATE` of one.
     if let Some(routed) = &routed {
+        let observed_at = glasshouse::evaluation::now_unix();
         glasshouse::evaluation::record_routed_session(
             runtime,
             record.id.as_str(),
             routed.chosen().id(),
             routed_cost_class(&user, project.as_ref(), routed.chosen()),
-            routing_evidence_for(&health, routed.chosen()),
-            glasshouse::evaluation::now_unix(),
+            routing_evidence_for(&health, routed.chosen(), observed_at),
+            routed_tier(classified.as_ref()),
+            observed_at,
         );
     }
 
@@ -3874,6 +4160,10 @@ fn resolve_resume_overlay(
             runtime.paths(),
         )),
         Some(degrade_sink),
+        // Line 1851, on the resume path too: a resumed session's gateway
+        // fails over exactly as a launched one's does, and counting only the
+        // launched ones would make the denominator a subset nobody stated.
+        Some(failover_prevention_sink(runtime)),
     )?;
     let resolution = glasshouse::profile::Resolution {
         adapter: selection.adapter(),
@@ -4298,7 +4588,18 @@ fn disposable_extraction_model(
         effective.prefer_free_routing().value,
         free_preferences,
     )
-    .with_reserve_override(reserve_override);
+    .with_reserve_override(reserve_override)
+    // Capability map line 1577's background half, on the path that acts.
+    // Memory extraction is a support job Glasshouse runs on its own behalf,
+    // so the scope is `Background` and the selection is made here — by
+    // `ReservePolicies::for_scope`, the one function in the build that maps
+    // a scope to a field — rather than inside the router, which is held to
+    // never carrying the other scope's policy.
+    .with_reserve_policy(
+        effective
+            .reserve_policies()
+            .for_scope(glasshouse::routing::pressure::ReserveScope::Background),
+    );
     let job = glasshouse::routing::disposable::JobKind::MemoryExtraction;
     let routed = glasshouse::memory::RoutedNoModel::new(job, &candidates, &routing);
 
@@ -4721,6 +5022,16 @@ fn automatic_classification_choice(
         glasshouse::routing::disposable::ClassificationPolicy::new()
             .with_max_latency_ms(Some(effective.max_router_latency().value.get()))
             .with_local_only(effective.classification_local_only().value),
+    )
+    // Capability map line 1577's background half. Automatic classification
+    // is the other support job Glasshouse runs on its own behalf, and it
+    // takes the same scope as extraction for the same reason: nobody typed
+    // this request, so the reserve a person set aside for their own work is
+    // not the policy that should decide it.
+    .with_reserve_policy(
+        effective
+            .reserve_policies()
+            .for_scope(glasshouse::routing::pressure::ReserveScope::Background),
     );
 
     // Map lines 1441/1442: reuse a recent healthy pick rather than
@@ -4731,7 +5042,7 @@ fn automatic_classification_choice(
     let sticky_cache = RoutingStickyCache::new(runtime.paths(), runtime.project().id().as_str());
     let decision = routing.choose_for_automatic_classification(
         &candidates,
-        &health,
+        health.pool(),
         std::time::Instant::now(),
         now_unix,
         classification,
@@ -5403,23 +5714,63 @@ fn report_hook_with(
                 outcome,
                 glasshouse::evaluation::now_unix(),
             );
-        }
 
-        if matches!(
-            translated,
-            LifecycleEvent::TurnEnded {
-                outcome: TurnOutcome::Completed
-            }
-        ) {
+            // Map lines 1149 and 1153 — *"after a successful Git commit"* and
+            // *"record the relevant Git commit"*. Glasshouse installs no Git
+            // hook: `.git/hooks` belongs to the user, `core.hooksPath` can
+            // point anywhere, and nothing needs installing, because this
+            // process already runs at every turn boundary and
+            // `checkpoint::git` already reads HEAD out of `.git` without
+            // spawning anything. A commit landing is therefore *HEAD is not
+            // where this session last saw it*, and `note_head_commit` is that
+            // comparison.
+            //
+            // **Outside the `memory_extraction` gate, deliberately**, for the
+            // compaction counter's reason one arm up: that switch decides
+            // whether Glasshouse *does* something about a boundary, and the
+            // commit landed either way. A position recorded only while
+            // extraction is enabled would make the switch's first turn back
+            // on report a boundary spanning however long it was off.
+            let landed = note_head_commit(runtime, &store, &id, record.last_seen_commit.as_deref());
+            let completed = matches!(outcome, TurnOutcome::Completed);
+
+            // One extraction per turn, and the more specific trigger wins.
+            //
+            // A completed turn that also landed a commit is **one** boundary
+            // described two ways, not two boundaries: the same event window
+            // is read either way, so running both would ask a model the same
+            // question twice inside somebody's session and hand the second
+            // answer to the duplicate check. `GitCommit` is the description
+            // that carries more — it names the object, and line 1153 wants
+            // that object on the memories — so it is the one recorded.
+            //
+            // A turn that ended badly still gets the Git trigger, and gets
+            // nothing without one. `TurnOutcome` is the harness's verdict on
+            // its *own* turn; a commit that landed is a fact about the
+            // repository, and there is no reading of line 1149 in which a
+            // commit becomes un-landed because the turn after it failed.
             if memory_extraction_enabled(runtime) {
-                run_extraction(
-                    runtime,
-                    &id,
-                    model(&id),
-                    glasshouse::memory::ExtractionTrigger::TaskCompleted,
-                );
+                match (landed, completed) {
+                    (Some(commit), _) => {
+                        run_extraction(
+                            runtime,
+                            &id,
+                            model(&id),
+                            glasshouse::memory::ExtractionTrigger::GitCommit { commit },
+                        );
+                    }
+                    (None, true) => {
+                        run_extraction(
+                            runtime,
+                            &id,
+                            model(&id),
+                            glasshouse::memory::ExtractionTrigger::TaskCompleted,
+                        );
+                    }
+                    (None, false) => {}
+                }
             }
-            if automatic_checkpoint_enabled(runtime) {
+            if completed && automatic_checkpoint_enabled(runtime) {
                 checkpoint_after_turn(runtime, &id, &record.harness);
             }
         }
@@ -5447,6 +5798,58 @@ fn report_hook_with(
     if let Err(err) = outcome {
         tracing::warn!(error = %err, event, "could not record a harness event");
     }
+}
+
+/// Whether a commit landed since this session was last looked at, and record
+/// where HEAD stands now — map line 1149.
+///
+/// Returns the **new** commit when it is a code-change boundary, and `None`
+/// otherwise. Three different things produce `None` and they are not the
+/// same, which is why they are separated here rather than at the call site:
+///
+/// - **the project is not a Git repository**, or HEAD cannot be read.
+///   `GitPosition::detect` answers `None` for every such case by design, and
+///   nothing is stored: a project with no repository has no code-change
+///   boundaries to have.
+/// - **nobody has looked before.** `previous` is `None` on a session whose
+///   first turn this is, and on every session created before the column
+///   existed. The position is recorded, and it is **not** a boundary: a
+///   boundary is a *change*, and there is nothing here to have changed from.
+///   Reporting the first turn of every session as a landed commit would make
+///   the trigger fire hardest on sessions that have done nothing yet.
+/// - **HEAD has not moved.** The ordinary case, and the one the comparison
+///   exists for. Nothing is written, because nothing changed.
+///
+/// # A failed write is one debug line
+///
+/// Everything else on this path takes that stance and this is not more
+/// important than the compaction counter beside it. The cost of the failure
+/// is that the next turn re-reads the same position and calls it a boundary
+/// once — a duplicate extraction the duplicate check already absorbs, which
+/// is a far better failure than a hook that fell over inside somebody's
+/// coding session.
+fn note_head_commit(
+    runtime: &Runtime,
+    store: &glasshouse::session::SessionStore<'_>,
+    id: &SessionId,
+    previous: Option<&str>,
+) -> Option<String> {
+    let position = GitPosition::detect(runtime.project().root())?;
+    if previous == Some(position.commit.as_str()) {
+        return None;
+    }
+
+    if let Err(err) = store.record_seen_commit(id, &position.commit) {
+        tracing::debug!(
+            error = %err,
+            session = %id,
+            "could not record where HEAD stood for this session"
+        );
+    }
+
+    // Recorded either way above; a boundary only when there was a position to
+    // move *from*.
+    previous.is_some().then_some(position.commit)
 }
 
 /// The extraction model Glasshouse has in production, which is none.
@@ -5491,8 +5894,29 @@ impl glasshouse::memory::ExtractionModel for NoExtractionModel {
 /// job; a coding session waiting on one has the relationship backwards.
 const EXTRACTION_BOUND: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// Run memory extraction over what this session has done, after a completed
-/// turn.
+/// Run memory extraction over what this session has done — Phase 29's
+/// **memory commit**, whatever started it.
+///
+/// # One operation, four triggers, and no second pipeline
+///
+/// Map line 1147 asks for *"a lightweight memory commit operation that
+/// extracts durable project knowledge from recently completed work"* and
+/// lines 1148-1151 ask for four ways to start one. This function is that
+/// operation, and `trigger` is the whole of the difference between them:
+/// `Manual` from `glasshouse memory commit`, `TaskCompleted` and `GitCommit`
+/// from the `TurnEnded` arm of [`report_hook_with`], `BeforeCompaction` from
+/// its `PreCompact` arm. A second extraction path for any of them would be a
+/// second answer to what is worth remembering, a second credential screen and
+/// a second duplicate check.
+///
+/// # The outcome is returned, and the hook path still ignores it
+///
+/// `Option<ExtractionOutcome>` rather than `()` so `glasshouse memory commit`
+/// can print what its run actually did. It is not an error channel and does
+/// not become one: `None` means the *preparation* failed or the bound expired
+/// — both already logged here — and every failure of the extraction itself is
+/// a field on the outcome, never a `Result`. The hook path discards it, which
+/// is why nothing about its posture changes.
 ///
 /// # Nothing here can hurt the session, and that is the design
 ///
@@ -5527,7 +5951,7 @@ fn run_extraction(
     id: &SessionId,
     model: Box<dyn glasshouse::memory::ExtractionModel>,
     trigger: glasshouse::memory::ExtractionTrigger,
-) {
+) -> Option<glasshouse::memory::ExtractionOutcome> {
     use glasshouse::memory::extract::chunk::ChunkLimits;
     use glasshouse::memory::extract::lifecycle::{EVENT_WINDOW, chunk_for_session};
     use glasshouse::memory::{Extractor, ProjectMemory};
@@ -5547,17 +5971,28 @@ fn run_extraction(
                 error = %format!("{err:#}"),
                 "could not read this session's history for memory extraction"
             );
-            return;
+            return None;
         }
     };
 
-    // The commit is deliberately not read here. `checkpoint::git` knows how
-    // to find one and this process does not need to: a memory's commit is
-    // "where the project was when this was learned", and a hook process runs
-    // while the user's tree is mid-edit. `glasshouse memory extract` takes
-    // the session's activity from a person who knows; this path takes what
-    // the log holds and claims nothing more.
-    let chunk = chunk_for_session(id, &events, None, ChunkLimits::default());
+    // The commit is still deliberately not *read* here. `checkpoint::git`
+    // knows how to find one and this process does not need to: a memory's
+    // commit is "where the project was when this was learned", and a hook
+    // process runs while the user's tree is mid-edit. `glasshouse memory
+    // extract` takes the session's activity from a person who knows; this
+    // path takes what the log holds and claims nothing more.
+    //
+    // Map line 1153 — *"record the relevant Git commit with memories produced
+    // from a code-change boundary"* — is the one case where that objection
+    // does not apply, and it does not apply because nothing is read. A
+    // `GitCommit` trigger **is** a commit: the caller compared HEAD against
+    // what this session had already seen, found it moved, and the object that
+    // moved it is the trigger's own payload. So the commit recorded on these
+    // memories is the boundary that caused the run, not a reading taken at an
+    // arbitrary moment during it — which is exactly the distinction the
+    // paragraph above refuses to blur. Every other trigger still carries
+    // `None`.
+    let chunk = chunk_for_session(id, &events, trigger.commit(), ChunkLimits::default());
 
     // The **working tree**, though, is read here, and mid-edit is exactly why.
     //
@@ -5580,9 +6015,13 @@ fn run_extraction(
 
     let (tx, rx) = std::sync::mpsc::channel();
     let session = id.clone();
+    // Cloned rather than moved: `ExtractionTrigger` stopped being `Copy` when
+    // `GitCommit` gained its commit, and the log lines below name the trigger
+    // after the thread has taken its own.
+    let thread_trigger = trigger.clone();
     std::thread::spawn(move || {
         let store = memory.store();
-        let outcome = Extractor::new(&store, model.as_ref()).run(&chunk, trigger);
+        let outcome = Extractor::new(&store, model.as_ref()).run(&chunk, thread_trigger);
         // A closed receiver means the bound expired and nobody is listening.
         // That is a normal outcome here, not an error.
         let _ = tx.send(outcome);
@@ -5617,13 +6056,17 @@ fn run_extraction(
             // knowing about.
             record_extraction_observation(runtime, &outcome);
             record_observed_files(runtime, &outcome.recorded, &observed_files);
+            Some(outcome)
         }
-        Err(_) => tracing::warn!(
-            session = %id,
-            trigger = %trigger,
-            bound_ms = EXTRACTION_BOUND.as_millis(),
-            "memory extraction did not finish within its bound; the session is unaffected"
-        ),
+        Err(_) => {
+            tracing::warn!(
+                session = %id,
+                trigger = %trigger,
+                bound_ms = EXTRACTION_BOUND.as_millis(),
+                "memory extraction did not finish within its bound; the session is unaffected"
+            );
+            None
+        }
     }
 }
 
@@ -5668,6 +6111,19 @@ fn record_extraction_observation(
     let Some(observation) = outcome.observation() else {
         return;
     };
+    // Capability map line 1832. `ModelCall::observation` deliberately leaves
+    // `purpose` unwritten — its own doc comment records that it fills no
+    // column with a nearby value — so the stamp is applied here, by the
+    // producer that knows what this call was *for*, the same way
+    // `record_classification_observation` and `record_routing_latency` stamp
+    // theirs.
+    //
+    // **Only rows written from here on.** Every extraction row already on
+    // disk keeps its `NULL`, and the rendering counts those as *unstamped*
+    // rather than re-labelling them: `NewObservation::with_purpose`'s own doc
+    // comment is the rule, and back-filling would make "this build recorded
+    // nothing here" indistinguishable from "this build recorded a purpose".
+    let observation = observation.with_purpose(Some(EXTRACTION_PURPOSE));
     let ledger = match glasshouse::routing::evidence::EvidenceLedger::open(runtime) {
         Ok(ledger) => ledger,
         Err(err) => {
@@ -6558,7 +7014,7 @@ fn report_task_boundary_routing(runtime: &Runtime, session: &str) {
     // that hands `classify_for_routing` a `TaskBoundary` moment.
     let inputs = RouterInputs {
         overrides: &overrides,
-        health: &health,
+        health: health.pool(),
         now: std::time::Instant::now(),
         requirements: TaskRequirements::default(),
     };
@@ -7030,6 +7486,45 @@ fn render_routing_economics(out: &mut String, runtime: &Runtime, now_unix: i64) 
                 tokens(overhead.task_tokens),
                 overhead.task_requests
             );
+            // Capability map lines 1832 and 1833: what *"task spend"* above
+            // is actually made of, each side with both its denominators —
+            // tokens and calls. Every one of these is a subset of the line
+            // above rather than a competing total, and they sum to it
+            // exactly (`RoutingOverhead`'s own doc comment).
+            let _ = writeln!(
+                out,
+                "  {:<16}{} over {} extraction calls — Glasshouse's own memory extraction, \
+                 apart from the coding agent's work (map line 1832)",
+                "extraction",
+                tokens(overhead.extraction_tokens),
+                overhead.extraction_requests
+            );
+            let _ = writeln!(
+                out,
+                "  {:<16}{} over {} decision rows — the routing model's own request \
+                 consumption, which carries no tokens because a decision's latency is not a \
+                 model call (map line 1833)",
+                "routing model",
+                tokens(overhead.routing_latency_tokens),
+                overhead.routing_latency_requests
+            );
+            let _ = writeln!(
+                out,
+                "  {:<16}{} over {} relayed exchanges — interactive coding cost; the gateway \
+                 relays a body it never parses, so a token count here is absent rather than \
+                 zero",
+                "coding agent",
+                tokens(overhead.coding_agent_tokens),
+                overhead.coding_agent_requests
+            );
+            let _ = writeln!(
+                out,
+                "  {:<16}{} over {} calls — rows written before this build stamped a purpose, \
+                 counted as unstamped and never re-labelled",
+                "unstamped",
+                tokens(overhead.unstamped_tokens),
+                overhead.unstamped_requests
+            );
             match overhead.fraction() {
                 Some(fraction) => {
                     let _ = writeln!(
@@ -7416,6 +7911,21 @@ fn write_memory_record(
         .source_events
         .map_or_else(|| "no event range".to_owned(), |events| events.to_string());
     writeln!(out, "    from session {session}, commit {commit}, {events}")?;
+    // Phase 29: *every trigger names itself on the memory it produced.* On
+    // its own line rather than appended above, because it answers a different
+    // question from the three facts there — those say where this memory came
+    // from, this says what made Glasshouse go and look.
+    //
+    // A memory with no recorded trigger prints **nothing** rather than
+    // `unknown`, unlike its neighbours. Those three have been written for
+    // every memory this build stores since Phase 20, so an `unknown` there
+    // really does mean the producer did not know; a trigger is absent for
+    // every memory recorded before the column existed, and a line reading
+    // `trigger unknown` under all of them would be noise claiming to be a
+    // finding.
+    if let Some(trigger) = record.extraction_trigger.as_deref() {
+        writeln!(out, "    trigger {trigger}")?;
+    }
     Ok(())
 }
 
@@ -7788,6 +8298,97 @@ impl glasshouse::memory::ExtractionModel for ReplyFromFile {
 /// same contract validation, credential screen, conservative classification
 /// and duplicate check, and what survives is written to the project's real
 /// memory store.
+/// `glasshouse memory commit` — map line 1148, *"allow a memory commit to be
+/// triggered manually."*
+///
+/// # It is the same operation the harness triggers, not a hand-written twin
+///
+/// This calls [`run_extraction`] with
+/// [`glasshouse::memory::ExtractionTrigger::Manual`], which is the same
+/// function the `TurnEnded` and `PreCompact` arms of [`report_hook_with`]
+/// call. Everything a person could get wrong by hand — the event window, the
+/// credential screen, the duplicate check, the bound, the working-tree
+/// observation, the routing observation — is therefore identical by
+/// construction rather than by two implementations agreeing.
+///
+/// It is deliberately *not* [`memory_extract`]. That command exists to
+/// evaluate the contract without a provider, takes its reply from a file, and
+/// says so on every run; this one asks the model the user configured, which
+/// is what makes it a memory commit rather than a harness.
+///
+/// # Defaulting to the most recently active session
+///
+/// `SessionStore::list` is ordered `last_activity_at DESC`, which is the
+/// project's own answer to *"what was I just working on"* and the same order
+/// `glasshouse sessions` prints. A project with no sessions is an error
+/// naming the flag rather than a silent success: there is no honest
+/// "recently completed work" to commit, and reporting *stored 0* would be
+/// indistinguishable from a model that looked and found nothing.
+///
+/// # One database handle at a time
+///
+/// The session lookup is scoped so `ProjectSessions` is closed before
+/// [`run_extraction`] opens the event log and the memory store. That is
+/// practice §65's rule taken seriously on a path that has the choice: a
+/// handle held across work that does not need it is free on this developer's
+/// machine and billed under Windows' mandatory locks.
+fn memory_commit(runtime: &Runtime, session: Option<&str>) -> anyhow::Result<String> {
+    use std::fmt::Write as _;
+
+    use glasshouse::memory::ExtractionTrigger;
+
+    let id = {
+        let sessions = ProjectSessions::open(runtime)?;
+        let store = sessions.store();
+        match session {
+            Some(session) => store.resolve_id(session)?,
+            None => store
+                .list()?
+                .into_iter()
+                .next()
+                .map(|record| record.id)
+                .ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "this project has no sessions to commit; name one with --session"
+                    )
+                })?,
+        }
+    };
+
+    let model = disposable_extraction_model(runtime, &id);
+    let Some(outcome) = run_extraction(runtime, &id, model, ExtractionTrigger::Manual) else {
+        // `run_extraction` logged which of the two it was. Neither is a
+        // failure of the command: nothing was stored, nothing was corrupted,
+        // and the next commit will read the same activity.
+        return Ok(format!(
+            "memory commit for session {id} produced nothing;              see the log for why\n"
+        ));
+    };
+
+    let mut out = String::new();
+    writeln!(out, "trigger {}, model {}", outcome.trigger, outcome.model)?;
+    writeln!(out, "session: {id}")?;
+    if let Some(failure) = &outcome.failure {
+        writeln!(out, "memory commit produced nothing: {failure}")?;
+        return Ok(out);
+    }
+    writeln!(
+        out,
+        "stored {}, {} duplicate, {} speculative, {} rejected",
+        outcome.stored(),
+        outcome.duplicates,
+        outcome.speculative,
+        outcome.rejected.len()
+    )?;
+    for id in &outcome.recorded {
+        writeln!(out, "    stored    {id}")?;
+    }
+    for rejection in &outcome.rejected {
+        writeln!(out, "    rejected  {rejection}")?;
+    }
+    Ok(out)
+}
+
 fn memory_extract(
     runtime: &Runtime,
     session: &str,
@@ -9099,6 +9700,43 @@ mod tests {
             starts,
             "a relay is built and never installed: its sink would hold every \
              failure and write none of them"
+        );
+    }
+
+    /// Capability map line 1851's structural half: every gateway this binary
+    /// starts is also told where to report what the failure-domain term did
+    /// to a failover it takes.
+    ///
+    /// The same standing and the same limits as the two scans above — it
+    /// proves *presence*, not behaviour, and line 1851 does not close on it.
+    /// `evaluation_producers::a_failover_the_domain_term_prevented_is_\
+    /// counted_and_one_it_did_not_is_not` is what proves the behaviour, and it
+    /// enters at `start_if_required_with_degrade_sink`, the very door both
+    /// sites below call. What it cannot see is these two arguments: a launch
+    /// that fails over needs a gateway-backed profile, a provider that really
+    /// answers badly, and a harness process that really talks to it, and
+    /// nothing in this crate builds all three. So this is the §35 guard for
+    /// the one link that test cannot reach — an edit dropping either site
+    /// back to `None` would otherwise leave every suite green with line
+    /// 1851's producer unreachable from the shipped binary.
+    #[test]
+    fn every_gateway_the_binary_starts_is_told_where_to_report_a_prevented_failover() {
+        let code = production_code(include_str!("main.rs"));
+
+        let starts = code.matches("start_if_required_with_degrade_sink(").count();
+        let sinks = code
+            .matches("Some(failover_prevention_sink(runtime)),")
+            .count();
+        assert_eq!(
+            starts, 2,
+            "this binary should start a gateway at exactly two sites (launch and \
+             resume); if that changed, this test needs to change with it"
+        );
+        assert_eq!(
+            sinks, starts,
+            "a gateway is started somewhere without a failover-prevention sink, so what \
+             failure-domain evidence did to its failovers would be counted nowhere — which \
+             is the state map line 1851 was left in"
         );
     }
 

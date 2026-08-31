@@ -15,6 +15,7 @@ use glasshouse::guardrails::{
     PromotionKind, Uncertainty,
 };
 use glasshouse::memory::snapshot::SnapshotBudget;
+use glasshouse::policy::Part as PolicyPart;
 use serde::{Deserialize, Serialize};
 
 /// `pub(super)` so `super::mcp`'s search tool defaults exactly as a bare
@@ -488,6 +489,26 @@ pub enum Request {
         limit: usize,
         #[serde(default = "default_snapshot_body_chars")]
         body_chars: usize,
+    },
+    /// Glasshouse's own project implementation policy — capability map lines
+    /// 955-990.
+    ///
+    /// The read half of a text an agent normally receives without asking:
+    /// `unix::deliver_policy` puts it into a session Glasshouse briefs, and
+    /// this is how an agent, or a program acting for one, asks for it again —
+    /// after a compaction, or because it wants one part of it rather than all
+    /// three.
+    ///
+    /// Answered from `glasshouse::policy::render` directly, so this door and
+    /// `glasshouse policy` cannot disagree about what the policy says. It
+    /// reads nothing: no project, no session, no memory and no configuration
+    /// is consulted, because the policy is constant text Glasshouse wrote.
+    /// `policy.deliver = false` silences *delivery* and deliberately does not
+    /// silence this — a caller that asked is not being spoken to unbidden.
+    ImplementationPolicy {
+        /// One part of the policy, or absent for all three.
+        #[serde(default)]
+        part: Option<PolicyPart>,
     },
     /// Retrieve a checkpoint — capability map line 66, "retrieve a completed
     /// worker result or checkpoint." A worker has no other durable "result"

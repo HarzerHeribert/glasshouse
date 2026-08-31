@@ -109,9 +109,16 @@ pub(crate) const DATABASE_FILE_NAME: &str = "glasshouse.db";
 /// reason. See the migration's own doc comment for why it is a column beside
 /// `presentation` rather than a widening of it, and
 /// [`crate::integrations::cmux`] for the only code that ever reads it back.
+/// Version 21 adds `sessions.last_seen_commit` and
+/// `memories.extraction_trigger`, capability map lines 1149 and 1153: where
+/// HEAD stood the last time Glasshouse looked at a session, and which of
+/// Phase 29's four memory-commit triggers produced a memory. See the
+/// migration's own doc comment for why both live in one migration, why
+/// neither carries a `CHECK`, and why the trigger is a column beside
+/// `memories.source_commit` rather than something derived from it.
 /// Later migrations are appended to [`MIGRATIONS`], and this constant moves
 /// with them.
-const SUPPORTED_SCHEMA_VERSION: i64 = 20;
+const SUPPORTED_SCHEMA_VERSION: i64 = 21;
 
 /// The `lifecycle_events.kind` values migration 5's `CHECK` constraint allows.
 ///
@@ -150,7 +157,7 @@ pub(crate) const LIFECYCLE_EVENT_KINDS: [&str; 11] = [
 /// One entry per landed producer. Variants are added as producers land, never
 /// in advance: an enum written before its writers is the same mistake as a
 /// table written before its counts.
-pub(crate) const EVALUATION_KINDS: [&str; 7] = [
+pub(crate) const EVALUATION_KINDS: [&str; 9] = [
     "memory_retrieved",
     "disposable_route_decided",
     "routing_override_decided",
@@ -158,6 +165,8 @@ pub(crate) const EVALUATION_KINDS: [&str; 7] = [
     "routing_cost_class_observed",
     "routing_evidence_observed",
     "routing_outcome_observed",
+    "routing_tier_observed",
+    "failover_prevented",
 ];
 
 /// The `routing_observations.failure_class` values this build writes —
@@ -2163,6 +2172,74 @@ const MIGRATIONS: [&str; SUPPORTED_SCHEMA_VERSION as usize] = [
     "
     ALTER TABLE sessions ADD COLUMN presentation_ref TEXT;
     ",
+    // 21: the two facts a *memory commit* needs and this schema could not
+    // hold — capability map lines 1147-1154.
+    //
+    // # `sessions.last_seen_commit`: how a commit is noticed without a Git hook
+    //
+    // Line 1149 wants a memory commit *"after a successful Git commit"*.
+    // Glasshouse installs no Git hook and will not: a repository's hooks are
+    // the user's, `core.hooksPath` can point anywhere, and a tool that writes
+    // into `.git/hooks` to learn something it can read directly has taken
+    // over a file it does not own. It does not need one. The harness hook
+    // already runs at every `TurnEnded`, and `checkpoint::git::GitPosition`
+    // already reads HEAD without spawning `git` — so *"a commit landed"* is
+    // the comparison between HEAD now and HEAD the last time this session was
+    // looked at, and this column is the second half of that comparison.
+    //
+    // Per **session**, not per project: two sessions in one project each have
+    // their own idea of what they have seen, and a shared column would let
+    // one session's turn silently consume the other's boundary.
+    //
+    // `NULL` is *"Glasshouse has not looked at HEAD for this session yet"*,
+    // and the first look records it **without** treating it as a boundary —
+    // nothing changed, a position was simply learned. That is the same
+    // distinction migration 16 draws for `observed_compactions`, reached the
+    // other way round: that column starts at a measured `0` because `create`
+    // can measure it, and this one cannot, because `SessionStore::create` has
+    // no project root to read a repository from.
+    //
+    // # `memories.extraction_trigger`: what made Glasshouse look
+    //
+    // Lines 1147-1151 ask for four ways to start a memory commit and line
+    // 1153 asks that the commit be recorded *"with memories produced from a
+    // code-change boundary"*. `memories.source_commit` has existed since
+    // migration 6 and answers a different question — **where the project
+    // stood** when something was learned — and `glasshouse memory extract`,
+    // run by hand, fills it from `GitPosition::detect`. So a reader inferring
+    // "this came from a code-change boundary" from a commit being present
+    // would report every hand-run extraction as one. The trigger is the fact
+    // that was missing, and it is a column rather than a derivation.
+    //
+    // # Both in one migration
+    //
+    // They are one capability: the trigger vocabulary has a `git_commit` word
+    // only because `last_seen_commit` can produce it. Splitting them would
+    // create an intermediate schema version in which the word exists and
+    // nothing can ever write it.
+    //
+    // # `ADD COLUMN`, nullable, no `CHECK`, no index
+    //
+    // Migration 18's shape and its reasons, unchanged. `NULL` backfills every
+    // existing row, which is the honest reading for a row written before
+    // either fact was observable. No `CHECK` on `extraction_trigger` for
+    // `FAILURE_CLASSES`' reason — the vocabulary lives in Rust, on
+    // `ExtractionTrigger`, and is pinned there by a test; a `CHECK` would cost
+    // a table rebuild per new trigger, and `memories` is the table
+    // `memories_fts` shadows and `memory_files` references. No index: nothing
+    // queries by trigger, and migration 15's closing note applies.
+    //
+    // # What may write them
+    //
+    // `last_seen_commit`: `SessionStore::record_seen_commit`, from the hook
+    // path's `TurnEnded` arm, with a full object name `GitPosition::detect`
+    // read out of `.git`. `extraction_trigger`: `Extractor::store_one`, from
+    // `ExtractionTrigger::as_str`, which is `&'static str` precisely so that
+    // no runtime string — a commit hash least of all — can reach this column.
+    "
+    ALTER TABLE sessions ADD COLUMN last_seen_commit TEXT;
+    ALTER TABLE memories ADD COLUMN extraction_trigger TEXT;
+    ",
 ];
 
 pub(crate) const PROJECT_ID_KEY: &str = "project_id";
@@ -2658,6 +2735,8 @@ mod tests {
     /// nothing indexes `presentation_ref` and it carries no `CHECK`. Newest
     /// first, so 20 leads.
     const UNDO_MIGRATIONS_ABOVE_THIRTEEN: &str = "
+        ALTER TABLE memories DROP COLUMN extraction_trigger;
+        ALTER TABLE sessions DROP COLUMN last_seen_commit;
         ALTER TABLE sessions DROP COLUMN presentation_ref;
 
         DROP TABLE assumption_transitions;
@@ -2857,6 +2936,8 @@ mod tests {
         // `duplicate column name` — `UNDO_MIGRATIONS_ABOVE_THIRTEEN`'s own
         // lesson.
         const UNDO_18: &str = "
+            ALTER TABLE memories DROP COLUMN extraction_trigger;
+            ALTER TABLE sessions DROP COLUMN last_seen_commit;
             ALTER TABLE sessions DROP COLUMN presentation_ref;
             DROP TABLE assumption_transitions;
             DROP TABLE task_assumptions;
@@ -2994,6 +3075,8 @@ mod tests {
         // fails with `duplicate column name` instead of proving anything about
         // 19. A migration 21 owes this constant its own line.
         const UNDO_19: &str = "
+            ALTER TABLE memories DROP COLUMN extraction_trigger;
+            ALTER TABLE sessions DROP COLUMN last_seen_commit;
             ALTER TABLE sessions DROP COLUMN presentation_ref;
 
             DROP TABLE assumption_transitions;
@@ -3171,6 +3254,8 @@ mod tests {
         use crate::session::{NewSession, ProjectSessions, SessionId, SessionPresentation};
 
         const UNDO_20: &str = "
+            ALTER TABLE memories DROP COLUMN extraction_trigger;
+            ALTER TABLE sessions DROP COLUMN last_seen_commit;
             ALTER TABLE sessions DROP COLUMN presentation_ref;
             DELETE FROM schema_migrations WHERE version >= 20;
         ";
@@ -3215,7 +3300,14 @@ mod tests {
             let columns = columns_of(&conn, "sessions");
             let mut expected = columns_at_19.clone();
             expected.push("presentation_ref".to_owned());
-            assert_eq!(columns, expected, "exactly one column, appended");
+            // A prefix, not an equality: the bootstrap runs every migration
+            // above 19, and 21 appends `last_seen_commit` after this one. What
+            // this migration owns is that ITS column is the first appended.
+            assert_eq!(
+                &columns[..expected.len()],
+                &expected[..],
+                "exactly one column from this migration, appended"
+            );
         }
 
         // The pre-migration row reads as *no pane recorded*, and a row
@@ -3260,6 +3352,171 @@ mod tests {
         assert_eq!(schema_version(&db_path), 19);
     }
 
+    /// Migration proof for 21: a version-20 database holding a session and a
+    /// memory opens, migrates to 21 adding exactly one column to each of two
+    /// tables, reads both pre-migration rows as *nothing recorded* rather
+    /// than as a value, accepts a position and a trigger written through the
+    /// real writers, and the undo takes the whole schema back to exactly what
+    /// it was — every table, index and trigger.
+    ///
+    /// Named for what the migration does rather than for its number: the
+    /// number is whatever position this script ends up in once the migrations
+    /// being written beside it land, and a test name that had to be renumbered
+    /// to stay true is a name nobody would renumber.
+    ///
+    /// One connection at a time throughout (practice §65): every handle is
+    /// dropped before the next is opened and before the re-bootstrap.
+    #[test]
+    fn the_memory_commit_migration_adds_its_two_columns_and_undoes_cleanly() {
+        use crate::memory::{MemoryKind, NewMemory, ProjectMemory};
+        use crate::session::{NewSession, ProjectSessions};
+
+        const UNDO: &str = "
+            ALTER TABLE memories DROP COLUMN extraction_trigger;
+            ALTER TABLE sessions DROP COLUMN last_seen_commit;
+            DELETE FROM schema_migrations WHERE version >= 21;
+        ";
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let db_path = fixture.runtime.database_path();
+        let project_id = stored_project_id(&db_path);
+
+        // Back to 20, with a session row and a memory row written the way a
+        // version-18 build wrote them — neither has a column to name.
+        let (schema_at_18, session_columns_at_18, memory_columns_at_18) = {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(UNDO).unwrap();
+            conn.execute(
+                "INSERT INTO sessions (id, project_id, harness, role, lifecycle, \
+                 presentation, created_at, last_activity_at) \
+                 VALUES (\'pre-migration\', ?1, \'claude-code\', \'normal\', \'idle\', \
+                 \'embedded\', 1, 1)",
+                [&project_id],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO memories (id, project_id, kind, status, body, created_at, updated_at) \
+                 VALUES (\'premigration0000\', ?1, \'finding\', \'active\', \
+                 \'learned before the column existed\', 1, 1)",
+                [&project_id],
+            )
+            .unwrap();
+            (
+                whole_schema(&conn),
+                columns_of(&conn, "sessions"),
+                columns_of(&conn, "memories"),
+            )
+        };
+        assert_eq!(schema_version(&db_path), 20, "the rollback must land on 20");
+        assert!(
+            !session_columns_at_18
+                .iter()
+                .any(|column| column == "last_seen_commit"),
+            "{session_columns_at_18:?}"
+        );
+        assert!(
+            !memory_columns_at_18
+                .iter()
+                .any(|column| column == "extraction_trigger"),
+            "{memory_columns_at_18:?}"
+        );
+
+        // Forward: an ordinary bootstrap, exactly as a real upgrade happens.
+        let migrated = fixture.rebootstrap().unwrap();
+        assert_eq!(
+            schema_version(&migrated.database_path()),
+            SUPPORTED_SCHEMA_VERSION,
+            "the launch must have applied the memory-commit migration"
+        );
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            let mut expected = session_columns_at_18.clone();
+            expected.push("last_seen_commit".to_owned());
+            assert_eq!(
+                columns_of(&conn, "sessions"),
+                expected,
+                "exactly one column, appended"
+            );
+            let mut expected = memory_columns_at_18.clone();
+            expected.push("extraction_trigger".to_owned());
+            assert_eq!(
+                columns_of(&conn, "memories"),
+                expected,
+                "exactly one column, appended"
+            );
+        }
+
+        // Both pre-migration rows read as *nothing recorded*, never as a
+        // value, and rows written now carry what the real writers gave them.
+        {
+            let sessions = ProjectSessions::open(&migrated).unwrap();
+            let store = sessions.store();
+            let pre = store
+                .get(&crate::session::SessionId::new("pre-migration"))
+                .unwrap()
+                .expect("the pre-migration session survived");
+            assert_eq!(
+                pre.last_seen_commit, None,
+                "a row from before the column existed has seen no HEAD, \
+                 not an empty one"
+            );
+
+            let fresh = store.create(NewSession::embedded("claude-code")).unwrap();
+            assert_eq!(
+                fresh.last_seen_commit, None,
+                "a session Glasshouse just created has not looked at HEAD either"
+            );
+            let noted = store
+                .record_seen_commit(&fresh.id, "0123456789abcdef0123456789abcdef01234567")
+                .unwrap();
+            assert_eq!(
+                noted.last_seen_commit.as_deref(),
+                Some("0123456789abcdef0123456789abcdef01234567")
+            );
+        }
+        {
+            let memory = ProjectMemory::open(&migrated).unwrap();
+            let store = memory.store();
+            let pre = store
+                .get(&crate::memory::MemoryId::new("premigration0000"))
+                .unwrap()
+                .expect("the pre-migration memory survived");
+            assert_eq!(
+                pre.extraction_trigger, None,
+                "a row from before the column existed has no trigger, \
+                 not an `unknown` one"
+            );
+
+            let recorded = store
+                .record(
+                    NewMemory::new(MemoryKind::Finding, "learned at a code-change boundary")
+                        .with_extraction_trigger(Some("git_commit")),
+                )
+                .unwrap();
+            assert_eq!(recorded.extraction_trigger.as_deref(), Some("git_commit"));
+        }
+
+        // Back again: the whole schema is what it was at 20, and the rows are
+        // still there.
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(UNDO).unwrap();
+            assert_eq!(whole_schema(&conn), schema_at_18);
+            assert_eq!(columns_of(&conn, "sessions"), session_columns_at_18);
+            assert_eq!(columns_of(&conn, "memories"), memory_columns_at_18);
+            let sessions: i64 = conn
+                .query_row("SELECT COUNT(*) FROM sessions", [], |row| row.get(0))
+                .unwrap();
+            let memories: i64 = conn
+                .query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(sessions, 2, "dropping the column drops no rows");
+            assert_eq!(memories, 2, "dropping the column drops no rows");
+        }
+        assert_eq!(schema_version(&db_path), 20);
+    }
+
     /// Migration proof for migration 17: a version-16 database opens,
     /// migrates to 17, keeps every memory it had, and comes out with a table
     /// that accepts an association — plus the index and the two triggers, and
@@ -3294,7 +3551,9 @@ mod tests {
             // **every** migration above the version it claims, or the
             // re-run fails — `UNDO_MIGRATIONS_ABOVE_THIRTEEN`'s own lesson.
             conn.execute_batch(
-                "ALTER TABLE sessions DROP COLUMN presentation_ref;
+                "ALTER TABLE memories DROP COLUMN extraction_trigger;
+                 ALTER TABLE sessions DROP COLUMN last_seen_commit;
+                ALTER TABLE sessions DROP COLUMN presentation_ref;
                  DROP TABLE assumption_transitions;
                  DROP TABLE task_assumptions;
                  ALTER TABLE routing_observations DROP COLUMN failure_class;

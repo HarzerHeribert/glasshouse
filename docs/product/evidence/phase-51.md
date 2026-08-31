@@ -261,3 +261,185 @@ does.
 ## From `GH-LAUNCH-CLASSIFIER` (2026-08-31)
 
 The launch-path classifier package (router request schema, classification on the acting path) touched this phase's lines 1849 (closed — routing latency measured decision-start → decision-end). The full entry — production sites, regression names, the 23 killed mutations, the one honestly-survived one, and the missing producer for 1516/1517/1531 — is in `phase-34d.md`, *Phase 34D — router request schema* and *lines outside Phase 34D*, because the mechanism lives there.
+
+### Phase 51 — four measured quantities (lines 1832, 1833, 1834, 1851); 1854 open
+
+Package `GH-EVALUATION-PRODUCERS`, 2026-08-31, Opus at high. Six mutations, six killed. 1854 stays open by the worker's own reasoning: `PersistedGatewayHealth.observed_at_unix` has been written on every store since the format existed and `load`/`load_all` dropped it; copying it per entry would be a second source of truth, so `GatewayHealthCache::load_all_dated()` was added instead and `ObservedHealth` in `main.rs` now carries the dated readings the router's explanation reads. The routing-off branch yields an empty `ObservedHealth` rather than opening the three stores — the orchestrator's one edit at integration, where this package met the `--no-routing` restructure that landed after its base.
+
+
+## REVIEW — the orchestrator owes an answer to each of these
+
+This section is the point of the generator. Everything above is the
+worker's facts, transcribed. Nothing below is decided.
+
+- **1832** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
+- **1833** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
+- **1834** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
+- **1851** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
+- **1854** — verdict `open`. Confirm the worker's reason against current source before recording it.
+
+**Packet errors the worker reported — read these BEFORE its results.**
+Thirteen consecutive rounds a worker corrected its packet and was right:
+- 1854's producer already existed. `PersistedGatewayHealth.observed_at_unix` has been written on every store since the format was created; `load`/`load_all` drop it on the way out. Adding a per-entry `observed_at_unix` to `GatewayHealthReading` would have been the same number copied N times (a second source of truth for a fact the file holds), and would have broken ten struct literals in six files outside EXPECTED FILES. Added `GatewayHealthCache::load_all_dated()` instead, leaving `load_all` alone.
+- 1833's request figure was already rendered — `"{tokens} over {N} classification calls"` and `"... over {N} other calls"` were both in the block and `RoutingOverhead` already had both `*_requests` fields. What was actually missing was the separation, which is what this package adds.
+- 1851's row cannot be written from `gateway/session.rs` `the way record_routing_observation writes`: that method opens nothing, it takes `ledger: &EvidenceLedger` from `gateway/mod.rs`'s accept loop, and the evaluation ledger is a different store. `gateway/session.rs` has no `Runtime` and no paths, by design. See scope_overflow.
+- 1834's `subject = <tier>` / `detail = escalated|not-escalated` split would have needed a second reader duplicating `route_outcomes_by`'s SQL, because that reader groups on `subject` alone and line 1834's question is about the pair. `subject` carries the pair as one closed eleven-word vocabulary (`RoutingTier::as_str`, exhaustive match); `detail` carries the tier the classifier stated.
+- EXPECTED FILES listed `tests/routing_outcome.rs`; it needed no change and was not modified.
+- NOT A PACKET ERROR, A BASE ERROR, recorded here because the gate will hit it: `tests/memory_provenance.rs` is red on `58e4d2c` itself. Migration 18 landed in `46b96ef` and that file was last touched in `ac9f0f5`, which predates it, so `a_memorys_provenance_survives_the_seq_rebuild` (line 1031) and `a_version_five_database_migrates_forward_keeping_its_memories` (line 760) still pin `version, 17` against a `SUPPORTED_SCHEMA_VERSION` of 18. This package adds no migration and does not touch the constant. The fix is two literals and two message strings, `17` -> `18`; I did not apply it because the file is outside EXPECTED FILES and the regression belongs to another package.
+
+**Files touched outside EXPECTED FILES** — disclosed, not hidden:
+- `crates/glasshouse/src/gateway/mod.rs` — Line 1851's row must be written from the thread that ranked the failover, and the only way into that thread is this file's accept loop. Eight lines: one more optional argument (`prevention_sink: Option<session::FailoverPreventionSink>`) threaded through `start_if_required_with_degrade_sink` -> `Gateway::start_with_degrade_sink` -> `accept_loop` -> `observe_exchange`, mirroring the `degrade_sink` beside it including its `None` reproduces the previous behaviour exactly contract. The alternative needing no extra file — a setter on `SessionRouting` called after the gateway is already accepting connections — was rejected as an unreachable-today race.
+- `crates/glasshouse/tests/gateway_degrade.rs` — The one existing caller of the public door whose signature grew. One `None` argument with a comment saying why.
+- `crates/glasshouse/tests/classification_call.rs` — Found by `blast-radius.sh`, not by the packet. `a_classification_call_is_recorded_under_its_purpose_and_extraction_is_not` asserted that extraction rows carry no purpose — true when written, and exactly what map line 1832 changes. The assertion was inverted (now `Some("memory-extraction")` plus an `assert_ne!` against the classification row) and the test renamed `a_classification_call_and_an_extraction_call_are_recorded_under_their_own_purposes`; its real subject, that two calls to the same endpoint in the same project are told apart, is unchanged. The half of its old claim that is still true — no back-fill of rows written before the stamp — is asserted in `evaluation_producers::extraction_rows_are_stamped_and_old_rows_are_not_relabelled`, which can actually produce such a row, and both doc comments now point at each other.
+
+Gates the worker ran (re-run the decisive ones yourself):
+- cargo fmt --all -- --check: clean
+- cargo clippy --workspace --all-targets --all-features -- -D warnings: clean, exit 0
+- cargo test -p glasshouse --lib: test result: ok. 1619 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+- cargo test -p glasshouse --bin glasshouse: test result: ok. 48 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+- cargo test -p glasshouse --test evaluation_producers: test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+- cargo test -p glasshouse --test classification_call: test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+- cargo test -p glasshouse --test evaluation_observations: test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+- cargo test -p glasshouse --test routing_outcome: test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+- cargo test -p glasshouse --test gateway_retry_after: test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+- cargo test -p glasshouse --test routing_economics: test result: ok. 22 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+- cargo doc -p glasshouse --no-deps: clean after fixing three intra-doc links to private items that the first blast radius caught
+- scripts/mutate.sh --script <6 mutations> --allow-dirty: 6 KILLED, 0 SURVIVED; git diff byte-identical before and after. None of the six mutated lines changed after the batch — the later edits were the rendering early-return in `route_outcomes_section` and two test files — so the verdicts stand as run.
+- scripts/blast-radius.sh: NOT exit 0, and every red is attributed in the report body. Two were mine and are fixed (rustdoc intra-doc links to private items; `classification_call` asserting extraction is unstamped, which is what line 1832 changes). One is red on the base commit and not this package's (`memory_provenance`, migration 18's unbumped `version, 17` pins). Three are PTY/process-timing targets that fail only under load — `canonical_line_limit` and `worker_access` are ok alone (6 and 19 passed), and `session_supervision::a_harness_that_never_came_up_is_not_restarted` is 4/4 alone and 2/4 as a whole target, splitting on wall clock (fails at 39.7s and 33.3s, passes at 18.1s and 15.5s) on a box at load 9.37 with other workers running. This package touches no session, supervision or lifecycle code. Re-check those three on a quiet machine before the gate.
+
+---
+
+### Measure memory-extraction cost separately from interactive coding cost. (line 1832)
+
+Contract: Given a memory extraction that reached a provider, when Glasshouse records what that call cost, it stamps the row with the purpose the call was made for, so extraction spend can be counted apart from interactive coding spend — while preserving that no row already on disk is re-labelled and that an unstamped row is rendered as unstamped rather than folded into somebody else's bucket.
+
+State: COMPLETE — ruled 2026-08-31 by the orchestrator from the report's five artifacts.
+
+Production evidence:
+- `src/main.rs` — `record_extraction_observation`
+- `src/routing/evidence.rs` — `EXTRACTION_PURPOSE`
+- `src/routing/evidence.rs` — `RoutingOverhead::from_consumption`
+- `src/main.rs` — `render_routing_economics`
+
+Regression evidence:
+- `evaluation_producers::extraction_rows_are_stamped_and_old_rows_are_not_relabelled`
+- `evaluation_producers::resources_separates_extraction_and_routing_consumption_by_tokens_and_calls`
+- `classification_call::a_classification_call_and_an_extraction_call_are_recorded_under_their_own_purposes`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| src/main.rs: `.with_purpose(Some(EXTRACTION_PURPOSE))` -> `.with_purpose(None::<&str>)` | `skip-state-update` | **killed** | `evaluation_producers::extraction_rows_are_stamped_and_old_rows_are_not_relabelled` |
+
+> skip-state-update observed: assertion `left == right` failed: the row this extraction wrote must say what the call was for: [(None, "older-build", Some(11)), (None, "extractor", Some(120))]
+
+Recorded scope limits — stated by the worker, not discovered later:
+- It does not prove anything about extraction rows written by earlier builds beyond that they keep their NULL: their real purpose is unrecoverable and is not guessed at.
+- No Windows leg.
+
+
+---
+
+
+### Measure routing-model cost and request consumption separately from interactive coding cost. (line 1833)
+
+Contract: Given a window of this project's routing evidence, when a person asks `glasshouse resources` what routing cost, it prints the routing model's own consumption — tokens and calls — in its own bucket beside memory extraction, the coding agent's relayed exchanges, and rows no producer stamped, so routing spend is separable from interactive coding spend — while preserving that an uncounted token figure renders as `tokens not counted` and never as zero, and that map line 1466's own denominator keeps its previous meaning.
+
+State: COMPLETE — ruled 2026-08-31 by the orchestrator from the report's five artifacts.
+
+Production evidence:
+- `src/routing/evidence.rs` — `RoutingOverhead (extraction_*, routing_latency_*, coding_agent_*, unstamped_*)`
+- `src/routing/evidence.rs` — `ROUTING_LATENCY_PURPOSE`
+- `src/routing/evidence.rs` — `add_consumption`
+- `src/main.rs` — `render_routing_economics`
+
+Regression evidence:
+- `evaluation_producers::resources_separates_extraction_and_routing_consumption_by_tokens_and_calls`
+- `routing_economics::routing_overhead_is_read_with_its_denominators_and_never_from_an_uncounted_side`
+- `routing_economics::resources_reports_routing_overhead_with_denominators_and_warns_past_the_fraction`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| src/routing/evidence.rs: `add_consumption(named, group.sample_count, tokens)` -> `add_consumption(named, 0, tokens)` | `drop-denominator` | **killed** | `evaluation_producers::resources_separates_extraction_and_routing_consumption_by_tokens_and_calls` |
+
+> drop-denominator observed: panicked at crates/glasshouse/tests/evaluation_producers.rs:564 — every rendered `over N ... calls` denominator went to zero
+
+Recorded scope limits — stated by the worker, not discovered later:
+- The coding-agent bucket has a real request count and no token count, and will until something parses a relayed body — which `gateway::ingress` is designed never to do. The separation is real; one side of it is honestly uncounted.
+- `RoutingOverhead::fraction()` still divides classification tokens by `task_*`, which today is dominated by extraction. Unchanged deliberately.
+- A `purpose` a later build writes and this one does not know lands in `unstamped_*`. Visible degradation, not a wrong attribution.
+
+
+---
+
+
+### Measure how often workload-tier classification predicts successful execution without escalation. (line 1834)
+
+Contract: Given a launch Glasshouse routed, when it attributes that route to the session it produced, it also records the workload tier the decision used and whether the conservative rule escalated it — and records `unclassified` for a launch that stated no task — so `glasshouse route` can report completed and failed turns by tier-and-escalation bucket with both denominators, while preserving that nothing is inferred, that a task-less launch is its own bucket rather than an absence, and that no percentage is printed without the counts it came from.
+
+State: COMPLETE — ruled 2026-08-31 by the orchestrator from the report's five artifacts.
+
+Production evidence:
+- `src/evaluation/mod.rs` — `EvaluationKind::RoutingTierObserved`
+- `src/evaluation/mod.rs` — `RoutingTier, RoutingTier::as_str, RoutingTier::stated_tier, unescalate`
+- `src/evaluation/mod.rs` — `record_routed_session (third row)`
+- `src/main.rs` — `routed_tier`
+- `src/main.rs` — `launch_session, both routed exits`
+- `src/main.rs` — `route_outcomes_section (by-tier table)`
+- `src/database.rs` — `EVALUATION_KINDS`
+
+Regression evidence:
+- `evaluation_producers::a_classified_launch_records_its_tier_and_escalation_and_an_unclassified_one_says_so`
+- `evaluation_observations::the_new_kinds_are_in_the_vocabulary_and_foreign_project_rows_are_refused`
+- `glasshouse::evaluation::tests::every_kind_the_type_can_produce_is_one_the_schema_constant_declares`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| src/evaluation/mod.rs: `ledger.record_all(&[class, evidence, tier_row], observed_at_unix)` -> `ledger.record_all(&[class, evidence], observed_at_unix)` | `skip-state-update` | **killed** | `evaluation_producers::a_classified_launch_records_its_tier_and_escalation_and_an_unclassified_one_says_so` |
+| src/main.rs: `escalated: answer.required_tier() != answer.stated_tier()` -> `escalated: false` | `invert-decision` | **killed** | `evaluation_producers::a_classified_launch_records_its_tier_and_escalation_and_an_unclassified_one_says_so` |
+
+> skip-state-update observed: assertion `left == right` failed: exactly one `routing_tier_observed` row must name session `a622166ea7da812cad52ed557556336c`
+
+> invert-decision observed: assertion `left == right` failed: an uncertain classification is escalated, the row says so, and the `detail` keeps the tier the classifier itself stated — without which nobody could tell what was escalated from
+
+Recorded scope limits — stated by the worker, not discovered later:
+- The escalation measured is decision-time (`WorkloadTier::escalate`, fired at `Confidence::Low`), not a runtime one. Nothing in this build escalates a session that turned out to need more than its tier.
+- `glasshouse resume` attributes no route, so it records no tier either. Only `launch` does.
+- `escalated` means the tier actually moved, not that the conservative rule fired — the two differ at `Frontier`, where `escalate` is a fixed point. Stated in the type's own doc comment.
+
+
+---
+
+
+### Measure how often failure-domain evidence prevents a failover onto the same unhealthy upstream. (line 1851)
+
+Contract: Given a gateway failover whose candidates were ranked with a failure-domain diversity term, when that ranking's winner differs from the winner of the same ranking with the term removed, Glasshouse records that the term steered the failover off a candidate sharing the failed backend's provider, and records `not-prevented` when it did not — so a person can read how often failure-domain evidence prevented a failover onto the same unhealthy upstream, with its denominator — while preserving that the term stays additive and never a filter (design decision 1), that the row carries ids and vocabulary only, and that nothing on the exchange path holds a database handle it is not using.
+
+State: COMPLETE — ruled 2026-08-31 by the orchestrator from the report's five artifacts.
+
+Production evidence:
+- `src/routing/interactive.rs` — `FailureDomainEffect, best, argmax, failure_domain_magnitude, FAILURE_DOMAIN_TERM`
+- `src/routing/interactive.rs` — `FailureResponse::FailOver { domain_effect }`
+- `src/gateway/session.rs` — `FailoverPreventionSink, SessionRouting::observe_exchange`
+- `src/gateway/mod.rs` — `start_if_required_with_degrade_sink, Gateway::start_with_degrade_sink, accept_loop`
+- `src/main.rs` — `failover_prevention_sink, launch_session, resolve_resume_overlay`
+- `src/evaluation/mod.rs` — `EvaluationKind::FailoverPrevented, FailoverPrevention, record_failover_prevention, counts_by_subject`
+- `src/main.rs` — `render_failover_preventions`
+
+Regression evidence:
+- `evaluation_producers::a_failover_the_domain_term_prevented_is_counted_and_one_it_did_not_is_not`
+- `evaluation_producers::the_failover_prevention_ratio_is_printed_with_its_denominator_and_never_over_nothing`
+- `glasshouse::tests::every_gateway_the_binary_starts_is_told_where_to_report_a_prevented_failover`
+- `evaluation_observations::the_new_kinds_are_in_the_vocabulary_and_foreign_project_rows_are_refused`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| src/routing/interactive.rs: `explanation.total() - failure_domain_magnitude(explanation)` -> `explanation.total()` | `collapse-comparison` | **killed** | `evaluation_producers::a_failover_the_domain_term_prevented_is_counted_and_one_it_did_not_is_not` |
+
+> collapse-comparison observed: panicked at crates/glasshouse/tests/evaluation_producers.rs:1008 — with the two rankings made identical no failover is ever `prevented`, and the `prevented[0].0` assertion fails
+
+Recorded scope limits — stated by the worker, not discovered later:
+- The two `main.rs` call sites are proved structurally, not behaviourally: no test in this crate can drive a *launch* that fails over (it needs a gateway-backed profile, a provider that answers badly, and a harness process that talks to the gateway). The behaviour is proved through `start_if_required_with_degrade_sink`, the door both sites call.
+- `OfferMigration` computes the same effect and records nothing: a migration is offered, never taken, and counting it would put a move nobody made in the denominator.
+- The row carries no session id. The gateway holds none.
+- No Windows leg; the sink opens one SQLite handle on a gateway exchange thread, which is the thing a `--windows-vm` run should look at.
+

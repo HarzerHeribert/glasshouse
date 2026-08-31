@@ -594,6 +594,114 @@ fn wire_protocol_from_slug(slug: &str) -> Option<crate::harness::WireProtocol> {
     }
 }
 
+/// A [`crate::routing::classify::WorkloadTier`] as it is written in a
+/// configuration file, and the only place this crate turns a spelling back
+/// into that type.
+///
+/// # Why a newtype rather than `serde` on `WorkloadTier` itself
+///
+/// `WorkloadTier` is a routing type with no serialised form of its own —
+/// `routing::request` parses one out of a routing model's JSON answer, and
+/// giving the enum a `Deserialize` impl would make that answer and a user's
+/// config file the same surface. They are not: one is untrusted output from a
+/// model, the other is a file the user wrote. This newtype is the config
+/// file's side of that boundary and nothing else reads it.
+///
+/// # Why the spellings come from `as_str` rather than a second list
+///
+/// `WORKLOAD_TIER_SPELLINGS` holds every variant, and
+/// `workload_tier_ordinal`'s exhaustive `match` is what makes adding a
+/// sixth variant a **compile error** here rather than a spelling that
+/// silently fails to parse. The strings themselves are always
+/// `WorkloadTier::as_str`'s, so a renamed tier renames its config spelling
+/// with it and cannot drift.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConfiguredWorkloadTier(crate::routing::classify::WorkloadTier);
+
+/// Every [`crate::routing::classify::WorkloadTier`], in the type's own order.
+/// Kept complete by [`workload_tier_ordinal`].
+const WORKLOAD_TIER_SPELLINGS: [crate::routing::classify::WorkloadTier; 5] = {
+    use crate::routing::classify::WorkloadTier as T;
+    [
+        T::Deterministic,
+        T::Leaf,
+        T::Standard,
+        T::Heavy,
+        T::Frontier,
+    ]
+};
+
+/// Where a tier sits in [`WORKLOAD_TIER_SPELLINGS`]. The `match` is
+/// exhaustive on purpose: it is the compile-time guard that the array above
+/// still lists every variant, and `every_workload_tier_spelling_round_trips`
+/// is the run-time half that checks the two agree.
+///
+/// `#[cfg(test)]` because the guard is the `match` itself and nothing in the
+/// shipped binary needs an ordinal. It is still a real gate: the local gate
+/// and `cargo clippy --all-targets` both compile this module's tests, so a
+/// sixth [`crate::routing::classify::WorkloadTier`] variant fails the build
+/// there rather than becoming a spelling no configuration file can name.
+#[cfg(test)]
+fn workload_tier_ordinal(tier: crate::routing::classify::WorkloadTier) -> usize {
+    use crate::routing::classify::WorkloadTier as T;
+    match tier {
+        T::Deterministic => 0,
+        T::Leaf => 1,
+        T::Standard => 2,
+        T::Heavy => 3,
+        T::Frontier => 4,
+    }
+}
+
+impl ConfiguredWorkloadTier {
+    pub fn new(tier: crate::routing::classify::WorkloadTier) -> Self {
+        Self(tier)
+    }
+
+    pub fn tier(self) -> crate::routing::classify::WorkloadTier {
+        self.0
+    }
+
+    /// The spelling a user writes, which is the tier's own `as_str`.
+    pub fn as_str(self) -> &'static str {
+        self.0.as_str()
+    }
+
+    /// The tier a spelling names, or `None` for one no variant answers to.
+    /// Case-sensitive and untrimmed: a configuration value is compared
+    /// exactly as written, the same way `ProviderConfig::cost_of` compares a
+    /// model name, so a value that does not parse is reported rather than
+    /// guessed at.
+    pub fn parse(text: &str) -> Option<Self> {
+        WORKLOAD_TIER_SPELLINGS
+            .into_iter()
+            .find(|tier| tier.as_str() == text)
+            .map(Self)
+    }
+}
+
+impl Serialize for ConfiguredWorkloadTier {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ConfiguredWorkloadTier {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        Self::parse(&text).ok_or_else(|| {
+            let known = WORKLOAD_TIER_SPELLINGS
+                .into_iter()
+                .map(|tier| tier.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            serde::de::Error::custom(format!(
+                "unknown workload tier `{text}` — expected one of: {known}"
+            ))
+        })
+    }
+}
+
 /// One configured provider, as stored in a `[providers.<name>]` table.
 ///
 /// The provider's *name* is its key in [`ProviderTable`], not a field here —
@@ -697,6 +805,28 @@ pub struct ProviderConfig {
     /// it, because [`ProviderConfig::free_models`] is checked first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     metered_models: Vec<String>,
+    /// The highest workload tier the user is willing to trust an individual
+    /// model on this provider with — capability map line 1796, and the one
+    /// production producer of [`crate::routing::session::Destination::with_tier_ceiling`].
+    ///
+    /// Keyed by the same model identifier [`ProviderConfig::free_models`] and
+    /// [`ProviderConfig::metered_models`] name, and valued by
+    /// [`crate::routing::classify::WorkloadTier`]'s own spellings —
+    /// `deterministic`, `leaf`, `standard`, `heavy`, `frontier` — parsed
+    /// through [`ConfiguredWorkloadTier`], which refuses an unknown spelling
+    /// at load rather than silently reading it as no ceiling at all. A
+    /// misspelt ceiling that read as absent would be exactly the failure this
+    /// project keeps paying for: an empty result indistinguishable from
+    /// success (practice §68).
+    ///
+    /// **A model absent from this map has no ceiling, and that is not a low
+    /// one.** `super::routing::session::hard_constraint` rejects only a
+    /// destination whose ceiling is *established* below the task's required
+    /// tier; "nobody has said" is never "cannot". So the empty default — every
+    /// project that has not configured this — leaves every destination exactly
+    /// as eligible as it was before this field existed.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    model_ceilings: BTreeMap<String, ConfiguredWorkloadTier>,
     /// A prompt transformation this backend performs on the way through —
     /// Phase 9K line 609.
     ///
@@ -1226,6 +1356,7 @@ impl ProviderConfig {
             enabled: true,
             free_models: Vec::new(),
             metered_models: Vec::new(),
+            model_ceilings: BTreeMap::new(),
             prompt_transform: None,
             quota: None,
         }
@@ -1326,6 +1457,34 @@ impl ProviderConfig {
     pub fn set_metered_models(&mut self, models: Vec<String>) -> &mut Self {
         self.metered_models = models;
         self
+    }
+
+    /// The per-model workload-tier ceilings the user configured — map line
+    /// 1796. See the field's own doc for why an absent model is not a low
+    /// ceiling.
+    pub fn model_ceilings(&self) -> &BTreeMap<String, ConfiguredWorkloadTier> {
+        &self.model_ceilings
+    }
+
+    pub fn set_model_ceilings(
+        &mut self,
+        ceilings: BTreeMap<String, ConfiguredWorkloadTier>,
+    ) -> &mut Self {
+        self.model_ceilings = ceilings;
+        self
+    }
+
+    /// The highest workload tier `model` on this provider is established to
+    /// serve, or `None` when nobody has stated one.
+    ///
+    /// The one place this lookup lives, so no call site re-implements it —
+    /// [`ProviderConfig::cost_of`]'s own rule. There is no inference and no
+    /// default: a model nobody named here answers `None`, which the router
+    /// reads as *not established* rather than as a refusal.
+    pub fn ceiling_of(&self, model: &str) -> Option<crate::routing::classify::WorkloadTier> {
+        self.model_ceilings
+            .get(model)
+            .map(|configured| configured.tier())
     }
 
     /// What this backend does to a prompt on the way through, as the user
@@ -2396,6 +2555,24 @@ pub struct UserConfig {
     /// memory extraction never disables this and vice versa.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     automatic_checkpoint: Option<bool>,
+    /// Whether Glasshouse delivers its own project implementation policy
+    /// (`crate::policy`) to an agent it briefs. `None` means "never decided"
+    /// and resolves to enabled, for the same reason
+    /// [`Self::memory_extraction`] stays an `Option` rather than a plain
+    /// `bool`.
+    ///
+    /// **The default is on, and that is the decision rather than the safe
+    /// choice**: a policy nobody receives is not a policy, and an off default
+    /// silently wins every comparison nobody runs. A team that does not want
+    /// Glasshouse speaking into its agents' context turns it off here, and
+    /// what remains is coherent — the briefing and the task arrive exactly as
+    /// they did before the policy existed.
+    ///
+    /// Independent of [`Self::memory_extraction`] and every other automatic
+    /// behaviour by construction: its own field, read by
+    /// [`EffectiveConfig::implementation_policy_enabled`] alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    implementation_policy: Option<bool>,
     /// Which model performs memory extraction, or `None` for "the user has
     /// not chosen one" — Phase 21 line 834. See [`ExtractionModelRef`] for
     /// why this is a field of its own rather than a reading of the routing
@@ -2429,6 +2606,7 @@ impl Default for UserConfig {
             response: response::ResponseConfig::default(),
             memory_extraction: None,
             automatic_checkpoint: None,
+            implementation_policy: None,
             memory_extraction_model: None,
             guardrails: GuardrailsConfig::default(),
         }
@@ -2500,6 +2678,17 @@ impl UserConfig {
     /// trigger, or `None` for "never decided". See the field's own doc.
     pub fn memory_extraction(&self) -> Option<bool> {
         self.memory_extraction
+    }
+
+    /// The user's decision on delivering the implementation policy, or `None`
+    /// for "never decided". See [`Self::implementation_policy`].
+    pub fn implementation_policy(&self) -> Option<bool> {
+        self.implementation_policy
+    }
+
+    pub fn set_implementation_policy(&mut self, enabled: Option<bool>) -> &mut Self {
+        self.implementation_policy = enabled;
+        self
     }
 
     pub fn set_memory_extraction(&mut self, enabled: Option<bool>) -> &mut Self {
@@ -2613,6 +2802,13 @@ pub struct ProjectConfig {
     /// layer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     automatic_checkpoint: Option<bool>,
+    /// A project may override the user's decision on delivering the
+    /// implementation policy — see [`UserConfig::implementation_policy`] for
+    /// the field this mirrors and
+    /// [`EffectiveConfig::implementation_policy_enabled`] for how the two
+    /// layer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    implementation_policy: Option<bool>,
     /// A project may name its own extraction model — see
     /// [`UserConfig::memory_extraction_model`] for the field this mirrors and
     /// [`EffectiveConfig::memory_extraction_model`] for how the two layer.
@@ -2637,6 +2833,7 @@ impl Default for ProjectConfig {
             response: response::ResponseConfig::default(),
             memory_extraction: None,
             automatic_checkpoint: None,
+            implementation_policy: None,
             memory_extraction_model: None,
             guardrails: GuardrailsConfig::default(),
         }
@@ -2700,6 +2897,17 @@ impl ProjectConfig {
     /// trigger, or `None` for "never decided". See [`UserConfig::memory_extraction`].
     pub fn memory_extraction(&self) -> Option<bool> {
         self.memory_extraction
+    }
+
+    /// The project's decision on delivering the implementation policy, or
+    /// `None` for "never decided". See [`UserConfig::implementation_policy`].
+    pub fn implementation_policy(&self) -> Option<bool> {
+        self.implementation_policy
+    }
+
+    pub fn set_implementation_policy(&mut self, enabled: Option<bool>) -> &mut Self {
+        self.implementation_policy = enabled;
+        self
     }
 
     pub fn set_memory_extraction(&mut self, enabled: Option<bool>) -> &mut Self {
@@ -3130,6 +3338,33 @@ impl<'a> EffectiveConfig<'a> {
         Layered::new(true, Layer::Default)
     }
 
+    /// Whether Glasshouse delivers its own implementation policy
+    /// (`crate::policy`, capability map lines 955-990) to an agent it briefs,
+    /// reporting which layer decided it. Project first, then user, then
+    /// [`Layer::Default`], matching [`Self::memory_extraction_enabled`]'s own
+    /// layering.
+    ///
+    /// [`Layer::Default`] carries `true`: the policy is what Glasshouse has
+    /// to say about how work is implemented here, and a default of off would
+    /// ship the opposite of the decision that put it in the product.
+    ///
+    /// Deliberately independent of every other automatic behaviour: each
+    /// reads its own field, so turning memory extraction off never turns this
+    /// off and vice versa — the property
+    /// `config::response::tests::the_three_automatic_behaviours_disable_independently`
+    /// asserts for the three that came before it, and
+    /// `implementation_policy::the_policy_is_not_delivered_when_turned_off_and_never_repeated_to_the_same_session`
+    /// asserts end to end for this one.
+    pub fn implementation_policy_enabled(&self) -> Layered<bool> {
+        if let Some(value) = self.project.and_then(ProjectConfig::implementation_policy) {
+            return Layered::new(value, Layer::Project);
+        }
+        if let Some(value) = self.user.implementation_policy() {
+            return Layered::new(value, Layer::User);
+        }
+        Layered::new(true, Layer::Default)
+    }
+
     /// Which model may perform memory extraction, and which layer chose it —
     /// Phase 21 line 834. Project first, then user, then [`Layer::Default`],
     /// matching [`Self::memory_extraction_enabled`]'s own layering.
@@ -3463,6 +3698,32 @@ impl<'a> EffectiveConfig<'a> {
             return Layered::new(config.cost_of(model), Layer::User);
         }
         Layered::new(crate::routing::Cost::Metered, Layer::Default)
+    }
+
+    /// The highest workload tier `model` on `provider` is established to
+    /// serve — map line 1796, read from the layer that configures the
+    /// provider (project over user), exactly as
+    /// [`EffectiveConfig::model_cost`] reads the cost beside it.
+    ///
+    /// `None` when the configuring layer states no ceiling for that model,
+    /// and `None` when no layer configures the provider at all. Both are
+    /// *not established*, and the tier gate does nothing to a destination
+    /// carrying one — a provider nobody configured is not a provider anybody
+    /// capped. The layer is still reported, so a reader can tell "the project
+    /// layer states no ceiling for this model" from "nothing configures this
+    /// provider"; the value is the same either way.
+    pub fn model_ceiling(
+        &self,
+        provider: &str,
+        model: &str,
+    ) -> Layered<Option<crate::routing::classify::WorkloadTier>> {
+        if let Some(config) = self.project.and_then(|p| p.providers().get(provider)) {
+            return Layered::new(config.ceiling_of(model), Layer::Project);
+        }
+        if let Some(config) = self.user.providers().get(provider) {
+            return Layered::new(config.ceiling_of(model), Layer::User);
+        }
+        Layered::new(None, Layer::Default)
     }
 
     /// The user's preferred order over free resources, resolved per field —
@@ -5351,7 +5612,14 @@ mod tests {
             )))
             .set_headers(vec![("X-Test".to_owned(), "1".to_owned())])
             .set_enabled(false)
-            .set_free_models(vec!["nvidia/nemotron-nano-9b-v2:free".to_owned()]);
+            .set_free_models(vec!["nvidia/nemotron-nano-9b-v2:free".to_owned()])
+            // A model NAME and a workload-tier spelling. Line 1796's field is
+            // in this guard for the same reason `free_models` is: it is keyed
+            // by the same identifier, and neither half can hold a value.
+            .set_model_ceilings(BTreeMap::from([(
+                "nvidia/nemotron-nano-9b-v2:free".to_owned(),
+                ConfiguredWorkloadTier::new(crate::routing::classify::WorkloadTier::Leaf),
+            )]));
         let provider_value = toml::Value::try_from(&provider_cfg).unwrap();
         let provider_table = provider_value.as_table().unwrap();
         let mut provider_keys: Vec<&str> = provider_table.keys().map(String::as_str).collect();
@@ -5365,6 +5633,7 @@ mod tests {
                 "enabled",
                 "free_models",
                 "headers",
+                "model_ceilings",
                 "template"
             ],
             "ProviderConfig grew a field — confirm it cannot hold a credential before \
@@ -6286,5 +6555,163 @@ mod tests {
             .is_err(),
             "an unknown reserve policy must be refused, not read as a default"
         );
+    }
+
+    /// Map line 1796, the spelling half. Every
+    /// [`crate::routing::classify::WorkloadTier`] is listed in
+    /// [`WORKLOAD_TIER_SPELLINGS`] exactly once and round-trips through
+    /// [`ConfiguredWorkloadTier`]'s parse and its serialised form — so the
+    /// config file's vocabulary is the tier type's own `as_str` and cannot
+    /// drift from it.
+    ///
+    /// [`workload_tier_ordinal`]'s exhaustive `match` is the compile-time
+    /// half of the same guard; this is the run-time half that checks the
+    /// array and the match still agree.
+    #[test]
+    fn every_workload_tier_spelling_round_trips() {
+        use crate::routing::classify::WorkloadTier;
+
+        assert_eq!(
+            WORKLOAD_TIER_SPELLINGS.len(),
+            5,
+            "a `WorkloadTier` variant was added or removed without updating this array"
+        );
+        for tier in WORKLOAD_TIER_SPELLINGS {
+            assert_eq!(
+                WORKLOAD_TIER_SPELLINGS[workload_tier_ordinal(tier)],
+                tier,
+                "`{tier}` is not at its own ordinal in WORKLOAD_TIER_SPELLINGS"
+            );
+            let configured = ConfiguredWorkloadTier::new(tier);
+            assert_eq!(configured.as_str(), tier.as_str());
+            assert_eq!(
+                ConfiguredWorkloadTier::parse(tier.as_str()),
+                Some(configured),
+                "`{tier}` does not parse back from its own spelling"
+            );
+        }
+        // The spellings are the tier type's, not a second vocabulary.
+        assert_eq!(
+            ConfiguredWorkloadTier::parse("heavy").map(ConfiguredWorkloadTier::tier),
+            Some(WorkloadTier::Heavy)
+        );
+        // And nothing else parses — in particular nothing that would read as
+        // a *lower* ceiling than the user wrote.
+        for unknown in ["Heavy", "heavy ", "", "tier-3", "premium"] {
+            assert_eq!(
+                ConfiguredWorkloadTier::parse(unknown),
+                None,
+                "`{unknown}` must not parse as a workload tier"
+            );
+        }
+    }
+
+    /// Map line 1796, the fail-closed half — practice §68's family. A
+    /// misspelt ceiling must be a **load error**, never a silently absent
+    /// one: an absent ceiling is what the router reads as *not established*,
+    /// so a typo that read as absent would quietly widen the set of
+    /// destinations a task may go to and nothing anywhere would say so.
+    #[test]
+    fn an_unknown_model_ceiling_spelling_is_refused_at_load_rather_than_read_as_absent() {
+        let good = "version = 1\n\n[providers.alpha]\ntemplate = \"openrouter\"\n\n\
+                    [providers.alpha.model_ceilings]\nsmall = \"leaf\"\n";
+        let parsed: UserConfig = toml::from_str(good).expect("a known spelling must load");
+        assert_eq!(
+            parsed
+                .providers()
+                .get("alpha")
+                .expect("the provider was configured")
+                .ceiling_of("small"),
+            Some(crate::routing::classify::WorkloadTier::Leaf)
+        );
+
+        let typo = "version = 1\n\n[providers.alpha]\ntemplate = \"openrouter\"\n\n\
+                    [providers.alpha.model_ceilings]\nsmall = \"lite\"\n";
+        let err = toml::from_str::<UserConfig>(typo)
+            .expect_err("an unknown workload tier must be refused, not read as no ceiling");
+        let rendered = err.to_string();
+        assert!(
+            rendered.contains("lite") && rendered.contains("leaf"),
+            "the refusal must name what was written and what is accepted:\n{rendered}"
+        );
+    }
+
+    /// Map line 1796's lookup, and the three shapes of *not established*
+    /// that must never read as a low ceiling: an unnamed model, an
+    /// unconfigured provider, and a provider configured with no ceilings at
+    /// all. Layered project-over-user, exactly as
+    /// [`EffectiveConfig::model_cost`] is.
+    #[test]
+    fn model_ceiling_is_layered_and_absent_where_nobody_stated_one() {
+        use crate::routing::classify::WorkloadTier;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("workspace");
+        std::fs::create_dir_all(&root).unwrap();
+        let project_root = test_project(&root);
+
+        let mut user = UserConfig::default();
+        let mut user_alpha = ProviderConfig::new("openrouter");
+        user_alpha.set_model_ceilings(BTreeMap::from([
+            (
+                "small".to_owned(),
+                ConfiguredWorkloadTier::new(WorkloadTier::Leaf),
+            ),
+            (
+                "big".to_owned(),
+                ConfiguredWorkloadTier::new(WorkloadTier::Frontier),
+            ),
+        ]));
+        user.providers_mut().set("alpha", user_alpha);
+        // A configured provider that states no ceiling at all.
+        user.providers_mut()
+            .set("beta", ProviderConfig::new("openrouter"));
+
+        let effective = EffectiveConfig::new(&user, None);
+        assert_eq!(
+            effective.model_ceiling("alpha", "small"),
+            Layered::new(Some(WorkloadTier::Leaf), Layer::User)
+        );
+        assert_eq!(
+            effective.model_ceiling("alpha", "big"),
+            Layered::new(Some(WorkloadTier::Frontier), Layer::User)
+        );
+        assert_eq!(
+            effective.model_ceiling("alpha", "unnamed").value,
+            None,
+            "a model nobody named a ceiling for is not established, not capped"
+        );
+        assert_eq!(
+            effective.model_ceiling("beta", "small").value,
+            None,
+            "a provider with no ceilings states nothing about any of its models"
+        );
+        assert_eq!(
+            effective.model_ceiling("nowhere", "small"),
+            Layered::new(None, Layer::Default),
+            "a provider nobody configured is not a provider anybody capped"
+        );
+
+        // The project layer wins over the user layer, per provider, the same
+        // way `model_cost` resolves beside it.
+        let mut project = ProjectConfig::default();
+        let mut project_alpha = ProviderConfig::new("openrouter");
+        project_alpha.set_model_ceilings(BTreeMap::from([(
+            "small".to_owned(),
+            ConfiguredWorkloadTier::new(WorkloadTier::Standard),
+        )]));
+        project.providers_mut().set("alpha", project_alpha);
+        let effective = EffectiveConfig::new(&user, Some(&project));
+        assert_eq!(
+            effective.model_ceiling("alpha", "small"),
+            Layered::new(Some(WorkloadTier::Standard), Layer::Project)
+        );
+        assert_eq!(
+            effective.model_ceiling("alpha", "big").value,
+            None,
+            "the project layer replaces the user's map for that provider rather than \
+             merging into it — the same replace-not-merge rule `credential_env` follows"
+        );
+        drop(project_root);
     }
 }

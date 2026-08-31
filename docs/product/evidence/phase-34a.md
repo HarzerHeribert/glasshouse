@@ -76,3 +76,86 @@ Tier 4 is the partial exception and the reason the package is worth more than
 a vocabulary: it is *consumed* today. A `Frontier` task reaching the reserve
 policy is allowed to spend protected reserve, and that path is
 mutation-proven above. Tier 0 is consumed by nothing.
+
+### Lines 1401–1403 — required capabilities independent of raw intelligence
+
+Package `GH-TIER-CEILING`, 2026-08-31, Opus at high. Nine mutations, nine killed. The worker **refused OBJECTIVE 3** — attaching adapter-declared `ResourceFacts` to destinations — and the orchestrator verified the refusal: `capability_fit` (`routing/session.rs:786`) already reads `adapter_for(destination.harness())` and `prefer()` falls through to those declarations whenever the facts are `Unverified`, so the wiring would have changed no score and survived its own mutation; `Destination::with_resource_facts` keeps no production caller, deliberately. 1402's large-context half is recorded as a limit: nothing produces `large_context` today.
+
+
+### Allow workload tiers to express required capabilities independently from raw model intelligence. (line 1401)
+
+Contract: Given a classified task, when Glasshouse ranks destinations, the required workload tier and the required hard capabilities act as two independent inputs -- a destination can be admitted on tier and penalised on capability, or the reverse -- while preserving that neither is inferred from the other.
+
+State: COMPLETE — ruled 2026-08-31 by the orchestrator from the report's five artifacts.
+
+Production evidence:
+- `src/routing/session.rs` — `TaskRequirements { minimum_tier, hard_capabilities }`
+- `src/routing/session.rs` — `workload_tier_fit and capability_fit as separate contributions`
+- `src/main.rs` — `destination_tier_ceiling (the tier input's producer)`
+
+Regression evidence:
+- `tier_ceiling::a_hard_capability_outranks_raw_model_cheapness_at_a_lower_tier`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| main.rs: the with_tier_ceiling producer severed (mutation 1 above) | `skip-state-update` | **killed** | `tier_ceiling::a_hard_capability_outranks_raw_model_cheapness_at_a_lower_tier` |
+
+> skip-state-update observed: the tier term collapses to 0.000 for both candidates while the capability term keeps its +0.400/0.000 split -- which is the independence this line names, demonstrated by removing one axis and watching the other survive
+
+Recorded scope limits — stated by the worker, not discovered later:
+- Independence is shown for the pair (tier, hard capability). Nothing here shows the tier is independent of cost or health, which are separate terms with their own evidence.
+
+
+---
+
+
+### Allow a task to require a lower reasoning tier but a specific capability such as browser use or a very large context window. (line 1402)
+
+Contract: Given a task classified at a lower reasoning tier that nonetheless requires a specific harness capability, when Glasshouse ranks destinations it prefers the destination that declares the capability over one with a higher ceiling that does not -- while preserving that a resource declaring nothing about the axis is scored as not established rather than as absent.
+
+State: COMPLETE — ruled 2026-08-31 by the orchestrator from the report's five artifacts.
+
+Production evidence:
+- `src/routing/session.rs` — `capability_fit`
+- `src/routing/capability.rs` — `ResourceCapabilities::describe / axis_for (unchanged)`
+- `src/main.rs` — `destination_tier_ceiling`
+
+Regression evidence:
+- `tier_ceiling::a_hard_capability_outranks_raw_model_cheapness_at_a_lower_tier`
+- `routing_capability::an_unverified_axis_scores_strictly_better_than_an_established_absent_one`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| main.rs: the with_tier_ceiling producer severed (mutation 1 above) | `bypass-fallback` | **killed** | `tier_ceiling::a_hard_capability_outranks_raw_model_cheapness_at_a_lower_tier` |
+
+> bypass-fallback observed: the standard-tier run's tier terms both read `nothing has established ...'s ceiling`, and the two-condition experiment's required-run assertions fail at tier_ceiling.rs:405 and below
+
+Recorded scope limits — stated by the worker, not discovered later:
+- The line names browser use OR a very large context window. The capability half is closed on real harness declarations (codex code_editing verified present vs opencode Unverified). The LARGE-CONTEXT half has no producer: large_context, fast_cheap_analysis and repository_review are the three ResourceFacts axes no harness declares, axis_for maps no HardCapability to any of them, and Destination::with_resource_facts still has no production caller.
+
+
+---
+
+
+### Allow a task to require a minimum harness capability even when a cheap raw model would otherwise score highly. (line 1403)
+
+Contract: Given a required harness capability and a cheaper destination that does not declare it, when Glasshouse ranks them it chooses the capable destination even though the cheap one is free and has more raw headroom -- while preserving that the price preference still applies among candidates the capability term could not separate.
+
+State: COMPLETE — ruled 2026-08-31 by the orchestrator from the report's five artifacts.
+
+Production evidence:
+- `src/routing/session.rs` — `capability_fit (CAPABILITY_ESTABLISHED_PRESENT 0.4 against CAPABILITY_UNVERIFIED 0.0)`
+- `src/routing/session.rs` — `cost_preference (METERED_COST_PREFERENCE -0.1, four times smaller)`
+
+Regression evidence:
+- `tier_ceiling::a_hard_capability_outranks_raw_model_cheapness_at_a_lower_tier`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| routing/session.rs: `const METERED_COST_PREFERENCE: f64 = -0.1;` -> `= 0.0;` | `remove-guard` | **killed** | `tier_ceiling::a_hard_capability_outranks_raw_model_cheapness_at_a_lower_tier` |
+
+> remove-guard observed: assertion `left == right` failed: with nothing required beyond a leaf tier, the free destination is the one to take -- the control condition, which is what shows price is a live term this line has to outrank rather than a dead one
+
+Recorded scope limits — stated by the worker, not discovered later:
+- Cheapness here is Cost::Free vs Cost::Metered from the user's own free_models list. No marginal-price estimate exists (Phase 32G), so `cheap` is a two-state fact, not a magnitude.
+

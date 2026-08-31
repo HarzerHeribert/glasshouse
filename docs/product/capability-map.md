@@ -952,42 +952,42 @@ Phase 21G — Memory revalidation
 
 Phase 21H — Simplicity-first implementation policy
 
-☐ Add a project-level implementation policy that prefers the simplest correct, secure, maintainable, and scalable design satisfying current requirements.
-☐ Require agents to revisit a stale ordinary decision before introducing significant complexity solely to preserve it.
-☐ Discourage compatibility shims when removing or superseding an obsolete internal rule is cleaner and safe.
-☐ Discourage duplicate code paths created only to satisfy contradictory historical memories.
-☐ Discourage speculative abstraction that is not justified by current requirements or observed extension pressure.
-☐ Prefer existing language, framework, database, and platform primitives over custom mechanisms when they satisfy the requirement cleanly.
-☐ Prefer explicit straightforward implementations over clever indirection when both satisfy the same requirements.
-☐ Allow smart implementation choices that materially improve correctness, security, scalability, latency, or operational simplicity.
-☐ Require the agent to explain unusual complexity when a simpler implementation appears available.
-☐ Treat simplicity as a design constraint rather than as permission to ignore real scale or security requirements.
+☑ Add a project-level implementation policy that prefers the simplest correct, secure, maintainable, and scalable design satisfying current requirements.
+☑ Require agents to revisit a stale ordinary decision before introducing significant complexity solely to preserve it.
+☑ Discourage compatibility shims when removing or superseding an obsolete internal rule is cleaner and safe.
+☑ Discourage duplicate code paths created only to satisfy contradictory historical memories.
+☑ Discourage speculative abstraction that is not justified by current requirements or observed extension pressure.
+☑ Prefer existing language, framework, database, and platform primitives over custom mechanisms when they satisfy the requirement cleanly.
+☑ Prefer explicit straightforward implementations over clever indirection when both satisfy the same requirements.
+☑ Allow smart implementation choices that materially improve correctness, security, scalability, latency, or operational simplicity.
+☑ Require the agent to explain unusual complexity when a simpler implementation appears available.
+☑ Treat simplicity as a design constraint rather than as permission to ignore real scale or security requirements.
 
 Phase 21I — Production-aware implementation checks
 
-☐ Require implementation planning to consider whether a solution that works on development data remains acceptable at realistic production scale.
-☐ Prefer indexed lookup paths for high-cardinality database access when a stable indexed identifier is available.
-☐ Flag unindexed scans on large or expected-to-grow tables when they occur on latency-sensitive request paths.
-☐ Consider query complexity, index availability, cardinality, and expected access frequency before accepting a database lookup strategy.
-☐ Consider concurrency and race behavior before accepting code that is correct only under single-user development conditions.
-☐ Consider memory and response-size growth before accepting algorithms whose resource use scales linearly with large datasets.
-☐ Consider network round trips before accepting repeated remote calls in hot request paths.
-☐ Consider authentication and authorization lookup cost at realistic user counts.
-☐ Prefer stable indexed IDs over high-cost ad hoc lookups when the product already has an appropriate identifier.
-☐ Do not optimize prematurely where scale is demonstrably irrelevant, but record the assumption if the implementation depends on that fact.
-☐ Allow production incidents to promote previously hypothetical scale concerns into validated constraints.
+☑ Require implementation planning to consider whether a solution that works on development data remains acceptable at realistic production scale.
+☑ Prefer indexed lookup paths for high-cardinality database access when a stable indexed identifier is available.
+☑ Flag unindexed scans on large or expected-to-grow tables when they occur on latency-sensitive request paths.
+☑ Consider query complexity, index availability, cardinality, and expected access frequency before accepting a database lookup strategy.
+☑ Consider concurrency and race behavior before accepting code that is correct only under single-user development conditions.
+☑ Consider memory and response-size growth before accepting algorithms whose resource use scales linearly with large datasets.
+☑ Consider network round trips before accepting repeated remote calls in hot request paths.
+☑ Consider authentication and authorization lookup cost at realistic user counts.
+☑ Prefer stable indexed IDs over high-cost ad hoc lookups when the product already has an appropriate identifier.
+☑ Do not optimize prematurely where scale is demonstrably irrelevant, but record the assumption if the implementation depends on that fact.
+☑ Allow production incidents to promote previously hypothetical scale concerns into validated constraints.
 
 Phase 21J — Implementation review checklist
 
-☐ Before marking a substantial implementation complete, check whether any remembered rule forced avoidable complexity.
-☐ Before marking a substantial implementation complete, check whether the design still matches current project requirements rather than historical ones.
-☐ Before marking a substantial implementation complete, check correctness under realistic concurrency assumptions.
-☐ Before marking a substantial implementation complete, check security boundaries affected by the change.
-☐ Before marking a substantial implementation complete, check obvious database and algorithmic scaling characteristics.
-☐ Before marking a substantial implementation complete, check whether hot-path database queries use appropriate indexes.
-☐ Before marking a substantial implementation complete, check whether a simpler implementation would satisfy the same requirements with less code or fewer moving parts.
-☐ Before marking a substantial implementation complete, check whether a clever optimization introduces complexity disproportionate to its demonstrated benefit.
-☐ Record material architecture or performance decisions discovered during this review as current memories with rationale and scope.
+☑ Before marking a substantial implementation complete, check whether any remembered rule forced avoidable complexity.
+☑ Before marking a substantial implementation complete, check whether the design still matches current project requirements rather than historical ones.
+☑ Before marking a substantial implementation complete, check correctness under realistic concurrency assumptions.
+☑ Before marking a substantial implementation complete, check security boundaries affected by the change.
+☑ Before marking a substantial implementation complete, check obvious database and algorithmic scaling characteristics.
+☑ Before marking a substantial implementation complete, check whether hot-path database queries use appropriate indexes.
+☑ Before marking a substantial implementation complete, check whether a simpler implementation would satisfy the same requirements with less code or fewer moving parts.
+☑ Before marking a substantial implementation complete, check whether a clever optimization introduces complexity disproportionate to its demonstrated benefit.
+☑ Record material architecture or performance decisions discovered during this review as current memories with rationale and scope.
 
 Phase 21K — Assumption-aware implementation guardrails
 
@@ -1144,14 +1144,14 @@ Phase 28 — File-aware memory lookup
 
 Phase 29 — Memory commits
 
-☐ Define a lightweight memory commit operation that extracts durable project knowledge from recently completed work.
-☐ Allow a memory commit to be triggered manually.
-☐ Allow a memory commit to be triggered after a successful Git commit.
-☐ Allow a memory commit to be triggered after a task-completion event.
-☐ Allow a memory commit to be triggered before an intentional native prompt compaction.
+☑ Define a lightweight memory commit operation that extracts durable project knowledge from recently completed work.
+☑ Allow a memory commit to be triggered manually.
+☑ Allow a memory commit to be triggered after a successful Git commit.
+☑ Allow a memory commit to be triggered after a task-completion event.
+☑ Allow a memory commit to be triggered before an intentional native prompt compaction.
 ☐ Separate durable project memories from transient session checkpoints during a memory commit.
-☐ Record the relevant Git commit with memories produced from a code-change boundary.
-☐ Make memory commits idempotent enough that rerunning one does not create uncontrolled duplicate knowledge.
+☑ Record the relevant Git commit with memories produced from a code-change boundary.
+☑ Make memory commits idempotent enough that rerunning one does not create uncontrolled duplicate knowledge.
 
 Phase 30 — Session context metadata
 
@@ -1398,9 +1398,9 @@ Phase 34A — Workload tiers
 ☑ Define Tier 2 as routine coding, bounded debugging, focused review, and small multi-file changes.
 ☑ Define Tier 3 as difficult debugging, architecture-sensitive changes, broad refactors, and work requiring strong reasoning or long-lived repository context.
 ☑ Define Tier 4 as frontier work where failure cost or reasoning difficulty justifies the strongest available model or warm premium session.
-☐ Allow workload tiers to express required capabilities independently from raw model intelligence.
-☐ Allow a task to require a lower reasoning tier but a specific capability such as browser use or a very large context window.
-☐ Allow a task to require a minimum harness capability even when a cheap raw model would otherwise score highly.
+☑ Allow workload tiers to express required capabilities independently from raw model intelligence.
+☑ Allow a task to require a lower reasoning tier but a specific capability such as browser use or a very large context window.
+☑ Allow a task to require a minimum harness capability even when a cheap raw model would otherwise score highly.
 ☑ Keep tier definitions short, inspectable, and configurable rather than encoding opaque proprietary scores.
 
 Phase 34B — Routing-model role
@@ -1513,7 +1513,7 @@ Fixed architectural requirements
 ☐ Generate fresh gateway-backed session candidates only as installed-harness launch profiles whose protocol, model, tool semantics, and capability requirements match.
 ☐ Never generate a direct API or gateway endpoint as a first-class interactive session candidate without an owning installed harness.
 ☐ Generate disposable-job candidates for tasks that do not need a first-class interactive session.
-☐ Exclude candidates below the classified minimum workload tier.
+☑ Exclude candidates below the classified minimum workload tier.
 ☐ Exclude candidates missing a hard required capability.
 ☐ Exclude candidates whose provider is unavailable or in an authoritative cooldown.
 ☐ Exclude candidates whose user-defined spending budget has been exhausted.
@@ -1528,7 +1528,7 @@ Fixed architectural requirements
 - Observed task success, tool behavior, effective TTFC, reliability, and user pins may outweigh vendor alignment and nominal token abundance.
 
 ☑ Score every routing candidate using an inspectable weighted function.
-☐ Include workload-tier fit in candidate scoring.
+☑ Include workload-tier fit in candidate scoring.
 ☑ Include hard capability satisfaction as a prerequisite rather than a soft bonus.
 ☐ Include existing session affinity in candidate scoring.
 ☐ Include context quality in candidate scoring.
@@ -1555,7 +1555,7 @@ Fixed architectural requirements
 
 Phase 35C — Capacity-aware tier escalation and downgrade
 
-☐ Prefer the cheapest healthy candidate that satisfies the required workload tier and hard capabilities.
+☑ Prefer the cheapest healthy candidate that satisfies the required workload tier and hard capabilities.
 ☐ Escalate to a higher tier when lower-tier candidates are unhealthy, exhausted, or repeatedly fail the task.
 ☐ Escalate to a higher tier when the routing classifier reports low confidence and task failure would be expensive.
 ☐ Preserve a warm higher-tier session when its existing context makes it cheaper or safer than starting a nominally cheaper cold session.
@@ -1574,7 +1574,7 @@ Phase 35D — Routing under subscription pressure
 ☑ Allow a nearly-resetting subscription to be used more freely when remaining capacity would otherwise expire unused.
 ☑ Avoid intentionally exhausting a subscription if another adequate zero-cost resource is healthy and the task is low tier.
 ☑ Make subscription-pressure decisions visible in routing explanations.
-☐ Allow users to define different reserve policies for interactive work and background support jobs.
+☑ Allow users to define different reserve policies for interactive work and background support jobs.
 
 Phase 36 — Session affinity
 
@@ -1604,11 +1604,11 @@ Phase 37 — Basic session-aware router
 Phase 38 — Quota-preserving routing
 
 ☑ Allow the router to reserve scarce premium-session capacity for difficult tasks.
-☐ Prefer local or free resources for trivial classification and extraction work when suitable.
+☑ Prefer local or free resources for trivial classification and extraction work when suitable.
 ☐ Prefer cheap resources for simple repository summarization when no valuable warm session already exists.
-☐ Prefer premium warm sessions for difficult tasks that benefit strongly from existing context.
+☑ Prefer premium warm sessions for difficult tasks that benefit strongly from existing context.
 ☐ Avoid migrating a nearly completed task solely to preserve a small amount of quota.
-☐ Avoid spending premium model capacity on internal Glasshouse bookkeeping when a cheap resource can perform it reliably.
+☑ Avoid spending premium model capacity on internal Glasshouse bookkeeping when a cheap resource can perform it reliably.
 ☑ Keep quota preservation as a tunable policy rather than a hard-coded model hierarchy.
 
 Phase 39 — Gateway-backed disposable jobs
@@ -1742,7 +1742,7 @@ Phase 46 — Security and contamination tests
 ☑ Add automated tests proving a session from project A cannot be resumed from project B.
 ☑ Add automated tests proving canonicalized paths cannot escape the project root through ...
 ☑ Add automated tests proving symlink targets outside the project root are rejected by Glasshouse-controlled file operations.
-☐ Add automated tests proving cmux session metadata cannot bypass project-scope validation.
+☑ Add automated tests proving cmux session metadata cannot bypass project-scope validation.
 ☑ Add automated tests proving MCP operations remain bound to the active project.
 ☑ Add automated tests proving memory extraction cannot write into another project’s database.
 ☑ Add automated tests proving each project’s Glasshouse state is physically separated, so that deleting one project’s state directory removes only that project’s state.
@@ -1793,7 +1793,7 @@ Phase 49 — Configuration
 ☑ Allow the user to configure a monthly or rolling monetary budget for metered providers.
 ☑ Allow the user to configure protected reserve percentages for premium subscriptions.
 ☑ Allow the user to configure the routing-model fallback chain.
-☐ Allow the user to configure workload-tier ceilings for individual models.
+☑ Allow the user to configure workload-tier ceilings for individual models.
 ☑ Allow the user to configure native-pairing preference strength without hard-coding vendor-specific routing rules.
 ☑ Allow named response profiles and separate role defaults for orchestrator, worker, reviewer, explainer, and ordinary sessions.
 ☑ Allow response-profile injection to be disabled independently from automatic routing and memory extraction.
@@ -1829,9 +1829,9 @@ Phase 51 — Evaluation hooks
 ☑ Measure how often automatic routing is overridden by the user.
 ☑ Measure how often warm-session reuse is chosen over fresh-session creation.
 ☐ Measure how often memory prevents repetition of a recorded failed approach.
-☐ Measure memory-extraction cost separately from interactive coding cost.
-☐ Measure routing-model cost and request consumption separately from interactive coding cost.
-☐ Measure how often workload-tier classification predicts successful execution without escalation.
+☑ Measure memory-extraction cost separately from interactive coding cost.
+☑ Measure routing-model cost and request consumption separately from interactive coding cost.
+☑ Measure how often workload-tier classification predicts successful execution without escalation.
 ☑ Measure how often a low-cost or free route succeeds compared with the premium route it displaced.
 ☐ Measure the accuracy of estimated subscription headroom against observed throttling and resets.
 ☐ Measure how often protected quota remains available for high-tier tasks when needed.
@@ -1848,7 +1848,7 @@ Phase 51 — Evaluation hooks
 ☐ Measure response-profile effects separately by harness-model pairing and application mechanism.
 ☑ Measure routing latency added before interactive task execution.
 ☐ Measure whether effective TTFC predicts usable agent turns better than raw TTFC, TTFT, or decode throughput.
-☐ Measure how often failure-domain evidence prevents a failover onto the same unhealthy upstream.
+☑ Measure how often failure-domain evidence prevents a failover onto the same unhealthy upstream.
 ☐ Measure how often nominally different routes provide separate quota capacity but not independent failure resilience.
 ☐ Measure how much scarce capacity is consumed by probes and whether passive observations can replace them.
 ☐ Measure how often sparse, stale, or incorrectly segmented evidence causes a poor routing decision.

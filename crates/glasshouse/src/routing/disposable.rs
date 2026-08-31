@@ -49,6 +49,7 @@ use crate::provider::registry::Locality;
 use crate::provider::telemetry::RetainedPick;
 use crate::routing::classify::{TaskClassification, WorkloadTier};
 use crate::routing::evidence::{ClassificationRecord, MIN_SAMPLE_FOR_SUMMARY};
+use crate::routing::pressure::{ReservePolicy, ReserveScope};
 
 /// The kind of bounded internal work a choice is being made for.
 ///
@@ -859,6 +860,25 @@ pub struct DisposableRouting {
     /// said otherwise, so every construction that predates the line keeps
     /// exactly the behaviour it had.
     reserve_override: ReserveOverride,
+    /// What the user's `[routing.reserve]` policy for **background** work
+    /// makes of a reserve-band candidate — capability map line 1577's
+    /// second half.
+    ///
+    /// # Why one policy and not both scopes' policies
+    ///
+    /// [`crate::routing::pressure::ReservePolicies`] carries two fields, and
+    /// this router could have been handed the pair and selected from it.
+    /// It is deliberately handed the **already-selected** value instead:
+    /// `routing::tests::the_two_policy_classes_do_not_name_each_other` holds
+    /// this module to never naming the other policy class, and a router that
+    /// carried the other scope's policy would be holding a value it must
+    /// never read. Selecting at the caller — `ReservePolicies::for_scope`,
+    /// the one place the selection is made — makes the other scope's policy
+    /// *unrepresentable* here rather than merely unread.
+    ///
+    /// [`ReservePolicy::Protect`] by default, which is the behaviour every
+    /// caller predating line 1577 already had.
+    reserve_policy: ReservePolicy,
     /// The classification-side requirements — capability map lines 1427
     /// and 1435 — consulted by [`Self::choose_for_automatic_classification`]
     /// alone. [`ClassificationPolicy::default`] applies nothing, so every
@@ -876,6 +896,7 @@ impl DisposableRouting {
             prefer_free_setting,
             preferences,
             reserve_override: ReserveOverride::none(),
+            reserve_policy: ReservePolicy::default(),
             classification_policy: ClassificationPolicy::default(),
         }
     }
@@ -899,6 +920,7 @@ impl DisposableRouting {
             prefer_free_setting: true,
             preferences,
             reserve_override: ReserveOverride::none(),
+            reserve_policy: ReservePolicy::default(),
             classification_policy: ClassificationPolicy::default(),
         }
     }
@@ -928,6 +950,31 @@ impl DisposableRouting {
     /// report it.
     pub fn reserve_override(&self) -> &ReserveOverride {
         &self.reserve_override
+    }
+
+    /// Carry the user's reserve policy for background work — capability map
+    /// line 1577.
+    ///
+    /// The value is expected to come from
+    /// `EffectiveConfig::reserve_policies().for_scope(ReserveScope::Background)`,
+    /// which is the one place in the build that selects a scope's policy.
+    /// Omitting it is [`ReservePolicy::Protect`], the fail-closed default a
+    /// spending protection must have and exactly what every caller that
+    /// predates this line already got.
+    ///
+    /// A builder for [`Self::with_reserve_override`]'s reason: both
+    /// constructors say what kind of work this policy is for, and how a
+    /// person wants their reserve treated is a separate statement that most
+    /// callers of a routing policy never make.
+    #[must_use]
+    pub fn with_reserve_policy(mut self, policy: ReservePolicy) -> Self {
+        self.reserve_policy = policy;
+        self
+    }
+
+    /// The background reserve policy this router is carrying.
+    pub fn reserve_policy(&self) -> ReservePolicy {
+        self.reserve_policy
     }
 
     /// Carry the user's classification requirements — capability map lines
@@ -1141,7 +1188,21 @@ impl DisposableRouting {
                 // a proxy must not be invented for it.
                 task_nearly_complete: false,
             });
-            if !decision.is_allowed() {
+            // Capability map line 1577, second half. The reserve policy the
+            // user set for *background* work decides what happens to a
+            // denial here: `Protect` (the default) leaves it standing, and
+            // `Spend` removes it. It removes the **denial**, not the
+            // pressure — `super::pressure`'s own ruling for the other scope,
+            // kept identical here so one word does not mean two things — so
+            // `score` below still renders the band and the reason this
+            // candidate was denied on its own signals.
+            //
+            // Only a *denied* decision is affected. An allowed one is
+            // allowed under either policy, and a policy that could turn an
+            // allowance into a denial would be a second, unasked-for
+            // protection wearing this line's name.
+            let admitted = decision.is_allowed() || self.reserve_policy == ReservePolicy::Spend;
+            if !admitted {
                 denied_reasons.push(format!(
                     "{}: {}",
                     candidate.value().model(),
@@ -1474,9 +1535,65 @@ impl DisposableRouting {
                     decision.reason()
                 ),
             ));
+            explanation.push(self.background_reserve_policy_note(value, decision));
         }
 
         explanation
+    }
+
+    /// What the user's background reserve policy did to the decision above —
+    /// capability map line 1577, on the one path that can reach it.
+    ///
+    /// Always rendered beside a reserve decision rather than only when the
+    /// policy changed the answer, so a reader of a support job's rationale
+    /// can see *which* of the two configured policies was consulted. A line
+    /// that appeared only on the overriding case would leave the ordinary
+    /// case looking as though no scope had been chosen at all.
+    ///
+    /// The band is reported as it was read, and "unread" is said rather than
+    /// filled in: [`Self::choose`]'s gate substitutes
+    /// [`CapacityBand::Plenty`] for an absent reading because
+    /// `evaluate_reserve_spend` needs a band, and printing that substitution
+    /// here as though it were an observation is the fabrication this module
+    /// refuses everywhere else.
+    ///
+    /// The denied-and-`Protect` arm is unreachable from [`Self::choose`],
+    /// which drops such a candidate before scoring it. It is written out
+    /// rather than collapsed into an `unreachable!` because the pair is
+    /// total and a future caller that scores without gating should get a
+    /// true sentence rather than a panic.
+    fn background_reserve_policy_note(
+        &self,
+        value: &DisposableCandidate,
+        decision: &ReserveDecision,
+    ) -> Contribution {
+        let band = match value.capacity.band {
+            Some(band) => format!("in the {band} band"),
+            None => "with no band reading".to_owned(),
+        };
+        let effect = match (decision.is_allowed(), self.reserve_policy) {
+            (false, ReservePolicy::Spend) => format!(
+                "admitted this candidate {band} anyway — the policy removes the denial, not the \
+                 pressure, so the reason above still stands as the reading it was"
+            ),
+            (false, ReservePolicy::Protect) => {
+                format!("leaves the denial above standing for this candidate {band}")
+            }
+            (true, _) => format!(
+                "did not have to act: the reserve decision above allowed this candidate {band} \
+                 on its own signals"
+            ),
+        };
+        Contribution::new(
+            format!("{} reserve policy", ReserveScope::Background),
+            0.0,
+            format!(
+                "`{}` is the reserve policy configured for {} work, and it {effect} (map line \
+                 1577)",
+                self.reserve_policy,
+                ReserveScope::Background,
+            ),
+        )
     }
 
     /// The four classification preferences — capability map lines 1421

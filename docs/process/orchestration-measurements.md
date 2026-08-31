@@ -3893,3 +3893,38 @@ guardrails (43, reported: 42 closed), implementation-policy (30),
 tracked-knowledge (7, reported: 7 closed), cmux-presentation (14),
 memory-commits (8), evaluation-producers (5), tier-ceiling (8). Three of them
 carry migrations 19, 20, 21 in that integration order.
+
+
+## Batch 57 outcomes — 2026-08-31, seven packages, one orchestrator hand-off mid-batch
+
+Dispatched by the Fable orchestrator (six, Opus high / Fable xhigh) and by its
+Opus successor (one, Sonnet medium). Integrated by the successor in one
+session: 938 → 953 committed (`baf6be0` +42 assumption-guardrails, `1c7d2c0`
++14 cmux-presentation, `1745` scope tests), and **52 more staged behind one
+gate** — memory-commits 7, implementation-policy 30, evaluation-producers 4,
+tier-ceiling 7, support-work-economy 4 — for 1005/1280 if it holds.
+
+| package | model | lines | boxes | mutations | notable |
+|---|---|---|---|---|---|
+| assumption-guardrails | Fable xhigh | 43 | 42 | 59 killed, 1 survived → dead check deleted | 1044 refused (rolls nothing back) |
+| cmux-presentation | Fable xhigh | 14 | 14 | 20/20 | migration 20; merged its peer's undo lines itself |
+| memory-commits | Opus high | 8 | 7 | 9/9 | migration 21 (renumbered from 19 at integration); 1152 open, unmutated by design |
+| implementation-policy | Opus high | 30 | 30 | 30/30 | found `mutate.sh --script`'s false-KILLED defect; closed the real SURVIVED with a test |
+| evaluation-producers | Opus high | 5 | 4 | 6/6 | 1854 open (producer already existed; `load_all_dated` instead) |
+| tier-ceiling | Opus high | 8 | 7 | 9/9 | refused OBJECTIVE 3 as decorative wiring — verified and upheld |
+| support-work-economy | Opus high | 5 | 4 | 6/6 | 1608 refused, Cluster Q, with a tripwire |
+| cmux-scope-tests | Sonnet medium | 1 | 1 | 1/1 (orchestrator-run) | 1745 reachable only after migration 20 landed |
+
+**What integration cost, and where.** Every one of the seven co-edited
+`main.rs`, so merges were serial — 39 + 40 + 15 + 1 + 0 + 0 conflict blocks — and
+**every seam between two workers' additions in one file lost a closing
+delimiter to the shared tail** (nine hand repairs across `database.rs`,
+`main.rs`, `cli.rs`, `mcp.rs`, `unix.rs`). Three defects were found by the gate
+and not by any report: `UNDO_19` not reaching past migration 20, a credential
+pin carrying a stale draft column name, and the pin list's order. One gate for
+the batch of five instead of five gates — practice §87's trap 2 applied.
+
+**Tools fixed on the way:** the co-edit stop hook (invalid JSON on every
+multi-file firing, `710394d`) and `mutate.sh --script` (false KILLED on every
+deletion row, `efd6e65`). Register drift corrected: P2 closed, `with_purpose`
+exists, 1129 refused in-source, 514 wrongly offered by the handoff.

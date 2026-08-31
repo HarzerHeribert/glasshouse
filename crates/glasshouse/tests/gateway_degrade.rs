@@ -128,6 +128,7 @@ fn record(id: &str, backend_resource: Option<&str>) -> SessionRecord {
         source_session_id: None,
         observed_compactions: None,
         presentation_ref: None,
+        last_seen_commit: None,
     }
 }
 
@@ -226,6 +227,11 @@ fn a_real_gateway_failure_degrades_only_the_bound_session_and_moves_no_lifecycle
         None,
         None,
         Some(sink),
+        // Capability map line 1851's sink. This test is about the degrade
+        // sink beside it; a failover prevention has no bearing on what it
+        // asserts, and `None` is the same "behaves exactly as before" answer
+        // every optional sink on this door gives.
+        None,
     )
     .expect("loopback is bindable")
     .expect("a gateway-backed profile requires a gateway");

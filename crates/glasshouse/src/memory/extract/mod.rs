@@ -15,11 +15,21 @@
 //! half a provider call path here would be a second answer to a question
 //! another phase owns.
 //!
-//! Nothing **triggers** extraction either. Phase 21's three trigger lines
-//! (after task completion, around native compaction, manually for
-//! debugging) all need a caller in a file this batch does not own;
-//! [`ExtractionTrigger`] is the type they will pass, and the report carries
-//! the exact wiring each one needs.
+//! Four things **trigger** extraction, and Phase 29 is the name for what
+//! they start: a *memory commit*. `main.rs`'s hook path runs one after a
+//! completed turn, after a commit lands, and before a harness compacts its
+//! own context; `glasshouse memory commit` runs one a person asked for. All
+//! four go through [`Extractor::run`] with a different
+//! [`ExtractionTrigger`], which is recorded both on the
+//! [`ExtractionOutcome`] and on every memory the run stored — a second
+//! extraction path for any of them would be a second answer to what is worth
+//! remembering.
+//!
+//! (This paragraph used to say nothing triggered extraction at all. Batch 51
+//! wired the first two and Phase 29 wired the rest; it is kept in the past
+//! tense here because the module's structure — a trigger the caller passes
+//! in, rather than a trigger this module decides — is still the reason
+//! `ExtractionTrigger` exists.)
 //!
 //! # The acceptance condition, and where it lives
 //!
@@ -80,13 +90,32 @@ pub const EXISTING_MEMORIES_QUOTED: usize = 20;
 /// How much of an already-stored memory is quoted back.
 pub const EXISTING_MEMORY_CHARS: usize = 160;
 
-/// Why extraction ran.
+/// Why extraction ran — Phase 29's *memory commit*, in the only form it has.
 ///
-/// Recorded on every outcome so a memory produced by a debugging run is
-/// distinguishable from one produced automatically. The three variants are
-/// Phase 21's three trigger lines; **nothing constructs them in production
-/// yet**, and this batch's report says what each needs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// # A memory commit is this pipeline with a trigger, not a second pipeline
+///
+/// Phase 29 line 1147 asks for *"a lightweight memory commit operation that
+/// extracts durable project knowledge from recently completed work"*, and
+/// lines 1148–1151 ask for four ways to start one. That is exactly this
+/// module with four constructors of this type: a second extractor would be a
+/// second answer to *what is worth remembering*, a second credential screen,
+/// and a second duplicate check — three places for the same question to be
+/// answered differently.
+///
+/// So the variants below are the whole of the difference between a memory
+/// commit a person asked for and one a harness event started, and every one
+/// of them is recorded on the memories the run produced
+/// (`memories.extraction_trigger`, written by [`Extractor::run`]) as
+/// well as on its [`ExtractionOutcome`].
+///
+/// # Not `Copy`, because one variant carries a commit
+///
+/// [`Self::GitCommit`] names the object that made the boundary a boundary,
+/// which is a `String`. Carrying it here rather than passing it beside the
+/// trigger is what makes *"the commit is the reason this ran"* unrepresentable
+/// as anything else: there is no way to construct this variant without one,
+/// and no way for another trigger to acquire one.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExtractionTrigger {
     /// A turn ended with [`crate::events::TurnOutcome::Completed`].
     TaskCompleted,
@@ -94,23 +123,61 @@ pub enum ExtractionTrigger {
     /// context. Phase 21 wants durable memory written before a lossy native
     /// summary replaces the detail.
     BeforeCompaction,
-    /// A person asked, to debug or evaluate extraction itself.
+    /// A person asked, to debug or evaluate extraction itself, or through
+    /// `glasshouse memory commit` — line 1148.
     Manual,
+    /// HEAD moved since the last time this session was looked at: a commit
+    /// landed, which is line 1149's *"after a successful Git commit"* and
+    /// line 1153's *"code-change boundary"*.
+    ///
+    /// The full object name, as [`crate::checkpoint::git::GitPosition`] read
+    /// it. Never a short prefix in storage — a prefix is a rendering choice
+    /// and ambiguous in a repository large enough to matter.
+    GitCommit { commit: String },
 }
 
 impl ExtractionTrigger {
-    pub fn as_str(self) -> &'static str {
+    /// The stored word for this trigger, without its payload.
+    ///
+    /// `&'static str` deliberately: this is what goes into
+    /// `memories.extraction_trigger`, and a column value assembled from
+    /// runtime data would let a commit hash end up in the vocabulary column
+    /// as well as in `memories.source_commit`, where it belongs and where a
+    /// reader already looks for it.
+    pub fn as_str(&self) -> &'static str {
         match self {
             Self::TaskCompleted => "task_completed",
             Self::BeforeCompaction => "before_compaction",
             Self::Manual => "manual",
+            Self::GitCommit { .. } => "git_commit",
+        }
+    }
+
+    /// The commit this trigger *is about*, when it is about one.
+    ///
+    /// Only [`Self::GitCommit`] has one. A manual commit run while HEAD
+    /// happens to sit somewhere is not "about" that commit, and the caller
+    /// that reads the repository's position for its own reasons is a
+    /// different question from this one.
+    pub fn commit(&self) -> Option<&str> {
+        match self {
+            Self::GitCommit { commit } => Some(commit),
+            _ => None,
         }
     }
 }
 
 impl fmt::Display for ExtractionTrigger {
+    /// The word, and for a Git boundary the commit that made it one.
+    ///
+    /// `f.pad` on the payload-free variants keeps every existing formatting
+    /// call site — the log lines in `main.rs::run_extraction` and the report
+    /// `glasshouse memory extract` prints — rendering exactly as before.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.pad(self.as_str())
+        match self {
+            Self::GitCommit { commit } => write!(f, "git_commit {commit}"),
+            other => f.pad(other.as_str()),
+        }
     }
 }
 
@@ -705,6 +772,12 @@ impl<'a> Extractor<'a> {
             memory.disposition,
         );
 
+        // Phase 29: *every trigger names itself on the memory it produced.*
+        // Read before the builder below so nothing borrows `outcome` across
+        // the mutation at the end of this function — `as_str` returns a
+        // `&'static str`, so this holds no borrow of the outcome at all.
+        let trigger = outcome.trigger.as_str();
+
         let new = NewMemory::new(memory.kind, body)
             .with_subject(memory.subject.clone())
             .with_authority(Some(classification.stored))
@@ -717,6 +790,15 @@ impl<'a> Extractor<'a> {
             // chunk is the only thing that knows what was actually shown to
             // the model.
             .with_source_events(chunk.source_events())
+            // Phase 29 lines 1147–1151: which of the four ways of starting a
+            // memory commit started this one. Beside `source_commit` rather
+            // than folded into it, because they answer different questions: a
+            // commit says *where the project stood*, and this says *what made
+            // Glasshouse look*. `glasshouse memory extract` run by hand while
+            // HEAD happens to sit at a commit sets the first and not the
+            // second, and a reader must be able to tell that from a memory a
+            // landed commit actually produced.
+            .with_extraction_trigger(Some(trigger))
             // Phase 21B, in one move. The provenance is validated on the way
             // out of `schema::judge` and stored as it stands; nothing here
             // re-derives or defaults any of it, because an assumption

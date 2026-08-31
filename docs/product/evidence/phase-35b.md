@@ -382,3 +382,68 @@ the question open a fourth time is what this ruling exists to stop.
 ## From `GH-LAUNCH-CLASSIFIER` (2026-08-31)
 
 The launch-path classifier package (router request schema, classification on the acting path) touched this phase's lines 1531 (open — same missing producer as 1516). The full entry — production sites, regression names, the 23 killed mutations, the one honestly-survived one, and the missing producer for 1516/1517/1531 — is in `phase-34d.md`, *Phase 34D — router request schema* and *lines outside Phase 34D*, because the mechanism lives there.
+
+### Lines 1516 and 1531 — tier and hard-capability terms in the score; 1517 open
+
+Package `GH-TIER-CEILING`, 2026-08-31, Opus at high. Nine mutations, nine killed. The worker **refused OBJECTIVE 3** — attaching adapter-declared `ResourceFacts` to destinations — and the orchestrator verified the refusal: `capability_fit` (`routing/session.rs:786`) already reads `adapter_for(destination.harness())` and `prefer()` falls through to those declarations whenever the facts are `Unverified`, so the wiring would have changed no score and survived its own mutation; `Destination::with_resource_facts` keeps no production caller, deliberately.
+
+
+### Exclude candidates below the classified minimum workload tier. (line 1516)
+
+Contract: Given a classified task with a required workload tier and a destination whose model the user capped below it, when Glasshouse ranks destinations on the shipped binary, it refuses that destination with a readable workload-tier reason naming both tiers -- while preserving that a destination whose ceiling nobody established is never refused on it.
+
+State: COMPLETE — ruled 2026-08-31 by the orchestrator from the report's five artifacts.
+
+Production evidence:
+- `src/main.rs` — `destination_tier_ceiling`
+- `src/main.rs` — `routing_destinations (both Destination::with_tier_ceiling call sites)`
+- `src/routing/session.rs` — `hard_constraint (the WorkloadTier arm)`
+
+Regression evidence:
+- `tier_ceiling::a_configured_ceiling_excludes_a_destination_below_the_required_tier_on_the_shipped_binary`
+- `tier_ceiling::without_a_ceiling_nothing_is_excluded_and_the_fit_term_says_not_established`
+- `tier_ceiling::a_warm_sessions_ceiling_comes_from_the_model_it_is_running`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| main.rs: `destination_backend(effective, &profile, None);\n        let ceiling = destination_tier_ceiling(effective, &backend);` -> `... let ceiling = None;` | `bypass-fallback` | **killed** | `tier_ceiling::a_configured_ceiling_excludes_a_destination_below_the_required_tier_on_the_shipped_binary` |
+| main.rs, the OTHER call site: `destination_backend(effective, &profile, record.model.clone());` + the comment + `let ceiling = destination_tier_ceiling(effective, &backend);` -> `... let ceiling = None;` | `bypass-fallback` | **killed** | `tier_ceiling::a_warm_sessions_ceiling_comes_from_the_model_it_is_running` |
+| routing/session.rs hard_constraint: `&& offered < required` -> `&& offered > required` | `invert-condition` | **killed** | `tier_ceiling::a_hard_capability_outranks_raw_model_cheapness_at_a_lower_tier` |
+
+> bypass-fallback observed: panicked at tier_ceiling.rs:250:28: nothing was rejected at all: [full route report]; three further tests failed with it, while --test session_router and --test routing_capability stayed green
+
+> bypass-fallback observed: panicked at tier_ceiling.rs:395:5: nothing was rejected at all -- routing_destinations has two construction sites and §35's rule is about a call site, so both are mutated separately
+
+> invert-condition observed: assertion `left == right` failed: with nothing required beyond a leaf tier, the free destination is the one to take -- the inverted gate refuses the frontier-ceiling destination for a leaf task
+
+Recorded scope limits — stated by the worker, not discovered later:
+- The required tier comes from RouterAnswer::requirements(); with no routing model configured that is classify_heuristically's answer, so the classifier's own accuracy is not what this proves.
+
+
+---
+
+
+### Include workload-tier fit in candidate scoring. (line 1531)
+
+Contract: Given two eligible destinations alike in every other term, when one's established ceiling equals the required tier and the other's is above it, Glasshouse scores the exact fit strictly higher and chooses it -- while preserving that a destination with no established ceiling scores zero rather than a penalty and says so in words.
+
+State: COMPLETE — ruled 2026-08-31 by the orchestrator from the report's five artifacts.
+
+Production evidence:
+- `src/routing/session.rs` — `workload_tier_fit`
+- `src/routing/session.rs` — `score (pushed only when a tier is stated)`
+- `src/main.rs` — `destination_tier_ceiling`
+
+Regression evidence:
+- `tier_ceiling::tier_fit_orders_two_otherwise_equal_destinations`
+- `tier_ceiling::without_a_ceiling_nothing_is_excluded_and_the_fit_term_says_not_established`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| routing/session.rs: `const TIER_FIT_EXACT: f64 = 0.4;` -> `= 0.2;` | `alter-boundary` | **killed** | `tier_ceiling::tier_fit_orders_two_otherwise_equal_destinations` |
+
+> alter-boundary observed: assertion `left == right` failed: a ceiling equal to the required tier is the fit the router should prefer -- and, because the two then tie, the winner falls back to caller order and the chosen() assertion fails too
+
+Recorded scope limits — stated by the worker, not discovered later:
+- The winning profile is offered second so caller order cannot explain it; the three-way ordering exact > headroom > not-established is proven pairwise, not as a total order over all five tiers.
+

@@ -74,10 +74,17 @@ impl Fixture {
         let config_dir = base.join("config");
         std::fs::create_dir_all(&config_dir).expect("create config dir");
         let escaped = harness.display().to_string().replace('\\', "\\\\");
+        // `implementation_policy = false`: this file is about which event the door records for whom,
+        // and Glasshouse's implementation policy (`src/policy`) is several
+        // machine-origin deliveries into every session it briefs, which would
+        // shift every count and position asserted below without saying anything
+        // about origin attribution. The policy's own delivery, including its default of
+        // on, is proven in `tests/implementation_policy.rs`.
         std::fs::write(
             config_dir.join("config.toml"),
             format!(
-                "version = 1\n\n[integrations.claude-code]\nenabled = true\nexecutable = \"{escaped}\"\n"
+                "version = 1\nimplementation_policy = false\n\n[integrations.claude-code]\nenabled = \
+                 true\nexecutable = \"{escaped}\"\n"
             ),
         )
         .expect("write user config");

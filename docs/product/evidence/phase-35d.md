@@ -143,3 +143,42 @@ there:
 - `Cost::Free` reaches a destination only for a direct-provider profile whose
   named model is in `free_models`; a `HarnessDefault` profile stays metered,
   fail-closed.
+
+### Line 1577 — separate reserve policies for interactive and background work
+
+Package `GH-SUPPORT-WORK-ECONOMY`, 2026-08-31, Opus at high. Six mutations, six killed. **1608 refused** and stays open: Cluster Q — `JobKind` is Classification | MemoryExtraction | Reranking | Evaluation, no repository-summarization job exists, so there is nothing to prefer a cheap resource *for*. The worker left a tripwire (`no_repository_summarization_job_exists_to_route_cheaply_yet`) that stops compiling if a variant is added, and did not tick the box.
+
+### Allow users to define different reserve policies for interactive work and background support jobs. (line 1577)
+
+Contract: Given Glasshouse's own bounded support jobs, when the resource that would run one sits in the protected reserve band, Glasshouse applies the reserve policy the user configured for background work rather than the one they configured for their own sessions — admitting the spend under `spend` and refusing it under `protect` — while preserving that `spend` removes the denial and not the pressure, so the band and the reason the denial existed are still rendered in the rationale the person reads.
+
+State: COMPLETE — ruled 2026-08-31 by the orchestrator from the report's five artifacts.
+
+Production evidence:
+- `src/routing/disposable.rs` — `DisposableRouting::with_reserve_policy`
+- `src/routing/disposable.rs` — `DisposableRouting::choose (the `admitted` gate at the evaluate_reserve_spend call site)`
+- `src/routing/disposable.rs` — `DisposableRouting::background_reserve_policy_note`
+- `src/main.rs` — `disposable_extraction_model (for_scope(ReserveScope::Background))`
+- `src/main.rs` — `automatic_classification_choice (for_scope(ReserveScope::Background))`
+
+Regression evidence:
+- `support_work_economy::the_background_reserve_policy_decides_a_support_job_and_the_interactive_one_does_not`
+- `support_work_economy::an_unconfigured_project_protects_the_reserve_for_its_own_bookkeeping`
+- `support_work_economy::the_background_policy_removes_the_denial_at_the_disposable_gate`
+- `support_work_economy::the_background_scope_selects_the_background_field`
+- `support_work_economy::a_router_built_without_a_reserve_policy_protects`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| src/routing/disposable.rs: `let admitted = decision.is_allowed() || self.reserve_policy == ReservePolicy::Spend;` -> `let admitted = decision.is_allowed();` | `skip-state-update` | **killed** | `support_work_economy::the_background_policy_removes_the_denial_at_the_disposable_gate` |
+| src/main.rs: the extraction call site's `.for_scope(glasshouse::routing::pressure::ReserveScope::Background),` -> `...::Interactive),` (disambiguated by a multi-line find through `let job = ...JobKind::MemoryExtraction;`) | `wrong-source` | **killed** | `support_work_economy::the_background_reserve_policy_decides_a_support_job_and_the_interactive_one_does_not` |
+
+> skip-state-update observed: panicked at support_work_economy.rs:873: `spend` must remove the denial — choose returned Err with the reserve denial standing
+
+> wrong-source observed: panicked at support_work_economy.rs:326: `background = "spend"` must remove the denial — the stored rationale still read `protected-reserve policy denied every metered candidate`
+
+Recorded scope limits — stated by the worker, not discovered later:
+- The classification call site's `.with_reserve_policy` is wired but has no killing test: a metered classification candidate in a reserve band cannot be reached through the shipped binary from this fixture. Only the extraction call site is demonstrated.
+- `spend` is proven only on the metered-fallback path. A free candidate never reaches the reserve gate at all, which is `choose`'s existing order and not this line.
+- The band is planted through the gateway quota cache. A native subscription's band is still unread on this path (phase-35d's own recorded limit).
+

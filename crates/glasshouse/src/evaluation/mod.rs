@@ -186,6 +186,48 @@ pub enum EvaluationKind {
     /// reports a turn end is counted as *unknown* by every reader here —
     /// never as a failure and never as a success.
     RoutingOutcomeObserved,
+    /// The workload tier the launch-path classifier decided this session's
+    /// work needed, and whether line 1459's conservative rule moved it —
+    /// **map line 1834**. `subject` is [`RoutingTier::as_str`]'s closed
+    /// vocabulary (the tier, with `-escalated` when the tier the decision
+    /// used is not the tier the classifier stated, plus `unclassified`);
+    /// `detail` is the tier the classifier itself stated, absent for a
+    /// launch that stated no task; `session_id` is the session the launch
+    /// produced, which is what lets [`Self::RoutingOutcomeObserved`] be
+    /// counted against it.
+    ///
+    /// **A launch with no `--task` records `unclassified`, never nothing.**
+    /// The alternative — writing no row — would make *"this project never
+    /// states its tasks"* indistinguishable from *"this project never
+    /// launches"*, which is [`Self::RoutingOverrideDecided`]'s own argument
+    /// one line over. The bucket is its own; it is never folded into a tier.
+    ///
+    /// **The tier and the escalation are one bucket rather than two
+    /// columns**, because line 1834's question is about the pair: *does a
+    /// tier predict a successful turn **without** escalation?* A reader
+    /// grouping on `subject` alone therefore already has the comparison,
+    /// with no second key and no join.
+    RoutingTierObserved,
+    /// Whether the failure-domain term changed which candidate a gateway
+    /// failover chose — **map line 1851**. `subject` is
+    /// [`FailoverPrevention::as_str`]'s two words; `detail` is the label of
+    /// the candidate the term displaced, present only when one was.
+    ///
+    /// **Derived from one comparison, never from a rejection.** Design
+    /// decision 1 makes failure-domain diversity additive — a `-1.0`
+    /// contribution, never a filter — so nothing in production *decides* a
+    /// prevention. What can be established is whether the ranking's winner
+    /// differs from the winner of the same ranking with that one term
+    /// removed, and a difference is only ever possible when the displaced
+    /// candidate shared the failed backend's provider. That is exactly the
+    /// map line's *"failover onto the same unhealthy upstream"*, and it is
+    /// observed rather than caused.
+    ///
+    /// No `session_id`: the gateway that ranks a failover is serving one
+    /// session but holds no Glasshouse session id, and inventing an
+    /// attribution would be worse than a count that honestly has none. The
+    /// rendered figure is a ratio over failovers, which needs no session.
+    FailoverPrevented,
 }
 
 /// The `subject` this ledger writes for a destination whose cost class no
@@ -193,34 +235,196 @@ pub enum EvaluationKind {
 /// third value, beside [`crate::routing::Cost`]'s two.
 pub const UNKNOWN_COST_CLASS: &str = "unknown";
 
+/// How old a gateway-health reading may be before the launch path calls it
+/// stale — [`RoutingEvidence::from_observation`]'s horizon, and map line
+/// 1854's *stale* word made into a number that can be argued with.
+///
+/// **Fifteen minutes.** A persisted reading is written by
+/// `crate::gateway::session::SessionRouting::health_readings_for` on every
+/// exchange a gateway serves, so a project being worked in refreshes it
+/// continuously and nothing near this bound is reached. The bound is for the
+/// other case — the last gateway ran this morning and the router is about to
+/// weigh what it left behind — and it is set at the scale of
+/// `crate::routing::free`'s own cooldowns: past a quarter hour, a resource
+/// that was cooling down has long since come back and a resource that was
+/// healthy has had time to stop being, so the reading no longer describes
+/// the thing the router is about to choose.
+///
+/// It is a horizon, not a filter. A stale reading is still adopted into the
+/// pool and still ranked on — this constant only decides what the ledger
+/// *calls* the evidence a decision was made with, which is exactly what line
+/// 1854 asks to be measured.
+pub const HEALTH_EVIDENCE_HORIZON_SECONDS: i64 = 15 * 60;
+
 /// How much observed health evidence the router held about the destination it
 /// chose — the `subject` vocabulary for
 /// [`EvaluationKind::RoutingEvidenceObserved`].
+///
+/// **Three states now, where there were two.** The `observed` half of line
+/// 1854 has been split by [`HEALTH_EVIDENCE_HORIZON_SECONDS`] into fresh and
+/// stale, which is the line's second word. Rows written by earlier builds
+/// carry the old `observed` and are **not** re-labelled: nothing decodes this
+/// column back into this type, every reader groups on the stored string, so
+/// an old row appears in its own `observed` bucket and a reader can see that
+/// this project's history has both vocabularies in it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RoutingEvidence {
-    /// The pool the router was handed held a health reading for exactly this
-    /// destination's credential and model.
-    Observed,
-    /// It held none. The ranking still happened; it happened without any
-    /// observation of this destination's recent behaviour.
+    /// The pool held a reading for exactly this destination's credential and
+    /// model, and it was written within [`HEALTH_EVIDENCE_HORIZON_SECONDS`]
+    /// of this decision.
+    ObservedFresh,
+    /// The pool held such a reading and it is older than the horizon. The
+    /// ranking still used it; this records that what it used had aged.
+    ObservedStale,
+    /// It held none, or held one that could not be dated. The ranking still
+    /// happened; it happened without any usable observation of this
+    /// destination's recent behaviour.
+    ///
+    /// **A reading whose age is unknown is `absent`, never fresh.** A cache
+    /// file this build cannot date says nothing about when it was written,
+    /// and reading "no timestamp" as "just now" would be the one direction
+    /// that turns a missing fact into a favourable one.
     Absent,
 }
 
 impl RoutingEvidence {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Observed => "observed",
+            Self::ObservedFresh => "observed-fresh",
+            Self::ObservedStale => "observed-stale",
             Self::Absent => "absent",
         }
     }
 
-    /// From the one fact a caller on the launch path can establish: whether
-    /// the pool it handed the router carried this destination.
-    pub fn from_pool_hit(observed: bool) -> Self {
-        if observed {
-            Self::Observed
-        } else {
-            Self::Absent
+    /// From the two facts a caller on the launch path can establish: whether
+    /// the pool it handed the router carried this destination at all, and —
+    /// when it did — the unix second the reading it carried was written.
+    ///
+    /// `None` covers both *"no reading"* and *"a reading nothing could
+    /// date"*, and both answer [`Self::Absent`] for that variant's own
+    /// reason. A reading stamped in this launch's own future (two clocks, or
+    /// one that moved) is fresh rather than negative-aged: the horizon is a
+    /// bound on staleness, and nothing here invents a verdict from a skew it
+    /// cannot explain.
+    pub fn from_observation(observed_at_unix: Option<i64>, now_unix: i64) -> Self {
+        match observed_at_unix {
+            None => Self::Absent,
+            Some(observed_at)
+                if now_unix.saturating_sub(observed_at) > HEALTH_EVIDENCE_HORIZON_SECONDS =>
+            {
+                Self::ObservedStale
+            }
+            Some(_) => Self::ObservedFresh,
+        }
+    }
+}
+
+/// The workload tier a launch's routing decision used, together with whether
+/// line 1459's conservative rule moved it — the `subject` vocabulary for
+/// [`EvaluationKind::RoutingTierObserved`], and **map line 1834**'s bucket.
+///
+/// One closed list of eleven words rather than a composed label: the pair is
+/// the thing line 1834 asks about, and a `subject` built by concatenating two
+/// columns at the reader would be a derived label rather than a vocabulary
+/// word (see [`RouteOutcomeCounts::bucket`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoutingTier {
+    /// The launch stated a task, and this is the tier the decision used.
+    ///
+    /// `escalated` is **whether the tier actually moved** —
+    /// `RouterAnswer::required_tier() != RouterAnswer::stated_tier()` — and
+    /// not merely whether the conservative rule fired. The two differ at the
+    /// top of the scale, where `WorkloadTier::escalate` is a fixed point: a
+    /// low-confidence `frontier` classification runs the rule and comes back
+    /// with the tier the classifier already stated, and calling that row
+    /// *escalated* would put a tier nobody changed on the escalated side of
+    /// the very comparison line 1834 exists to make.
+    Classified {
+        tier: crate::routing::classify::WorkloadTier,
+        escalated: bool,
+    },
+    /// The launch stated no task, so nothing classified it. Its own bucket,
+    /// never a tier and never nothing.
+    Unclassified,
+}
+
+impl RoutingTier {
+    pub fn as_str(self) -> &'static str {
+        use crate::routing::classify::WorkloadTier;
+        match self {
+            Self::Unclassified => "unclassified",
+            Self::Classified { tier, escalated } => match (tier, escalated) {
+                (WorkloadTier::Deterministic, false) => "deterministic",
+                (WorkloadTier::Deterministic, true) => "deterministic-escalated",
+                (WorkloadTier::Leaf, false) => "leaf",
+                (WorkloadTier::Leaf, true) => "leaf-escalated",
+                (WorkloadTier::Standard, false) => "standard",
+                (WorkloadTier::Standard, true) => "standard-escalated",
+                (WorkloadTier::Heavy, false) => "heavy",
+                (WorkloadTier::Heavy, true) => "heavy-escalated",
+                (WorkloadTier::Frontier, false) => "frontier",
+                (WorkloadTier::Frontier, true) => "frontier-escalated",
+            },
+        }
+    }
+
+    /// The tier the classifier itself stated, for the row's `detail` — absent
+    /// for [`Self::Unclassified`], where no classifier ran and there is
+    /// nothing to state.
+    pub fn stated_tier(self) -> Option<crate::routing::classify::WorkloadTier> {
+        match self {
+            Self::Unclassified => None,
+            Self::Classified { tier, escalated } => Some(if escalated {
+                // The decision's tier is one step above what was stated, and
+                // `escalate` is the only step this build takes.
+                unescalate(tier)
+            } else {
+                tier
+            }),
+        }
+    }
+}
+
+/// The inverse of `WorkloadTier::escalate`, for the one place a stated tier
+/// has to be recovered from an escalated one.
+///
+/// Total because [`RoutingTier::Classified`] only ever carries `escalated`
+/// when the tier genuinely moved, and `escalate` moves each tier exactly one
+/// step: the bottom of the scale is never an escalation's *result*, so it
+/// answers itself rather than being made unrepresentable.
+fn unescalate(
+    tier: crate::routing::classify::WorkloadTier,
+) -> crate::routing::classify::WorkloadTier {
+    use crate::routing::classify::WorkloadTier;
+    match tier {
+        WorkloadTier::Deterministic => WorkloadTier::Deterministic,
+        WorkloadTier::Leaf => WorkloadTier::Deterministic,
+        WorkloadTier::Standard => WorkloadTier::Leaf,
+        WorkloadTier::Heavy => WorkloadTier::Standard,
+        WorkloadTier::Frontier => WorkloadTier::Heavy,
+    }
+}
+
+/// Whether the failure-domain term changed which candidate a failover chose
+/// — the `subject` vocabulary for [`EvaluationKind::FailoverPrevented`], and
+/// **map line 1851**'s two answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum FailoverPrevention {
+    /// The winner differs from the winner of the same ranking with the
+    /// failure-domain term removed — so the term steered this failover off a
+    /// candidate that shares the failed backend's provider.
+    Prevented,
+    /// The term changed nothing about which candidate won. Recorded, not
+    /// omitted: without it the denominator of *"how often"* would be the
+    /// number of preventions, which is not a rate.
+    NotPrevented,
+}
+
+impl FailoverPrevention {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Prevented => "prevented",
+            Self::NotPrevented => "not-prevented",
         }
     }
 }
@@ -235,6 +439,8 @@ impl EvaluationKind {
             Self::RoutingCostClassObserved => "routing_cost_class_observed",
             Self::RoutingEvidenceObserved => "routing_evidence_observed",
             Self::RoutingOutcomeObserved => "routing_outcome_observed",
+            Self::RoutingTierObserved => "routing_tier_observed",
+            Self::FailoverPrevented => "failover_prevented",
         }
     }
 
@@ -253,6 +459,8 @@ impl EvaluationKind {
             "routing_cost_class_observed" => Some(Self::RoutingCostClassObserved),
             "routing_evidence_observed" => Some(Self::RoutingEvidenceObserved),
             "routing_outcome_observed" => Some(Self::RoutingOutcomeObserved),
+            "routing_tier_observed" => Some(Self::RoutingTierObserved),
+            "failover_prevented" => Some(Self::FailoverPrevented),
             _ => None,
         }
     }
@@ -1123,6 +1331,50 @@ impl EvaluationObservations {
     }
 }
 
+/// The one reader whose kind carries no `session_id` — map line 1851's
+/// counts, kept in this block for practice §77's reason, the same as the
+/// three above it.
+impl EvaluationObservations {
+    /// How many rows of `kind` fall in `[from, to]`, by `subject`, in the
+    /// stored vocabulary and sorted by it.
+    ///
+    /// **A count and its own denominator, not a ratio.** The caller sums the
+    /// buckets to get the total it divides by, so a bucket that is missing
+    /// from this project's history is visibly missing rather than silently a
+    /// zero in a fraction nobody can check.
+    ///
+    /// A row with no `subject` groups under [`UNKNOWN_COST_CLASS`], the same
+    /// third bucket every other reader here uses, rather than being dropped.
+    pub fn counts_by_subject(
+        &self,
+        kind: EvaluationKind,
+        from: i64,
+        to: i64,
+    ) -> Result<Vec<(String, i64)>, EvaluationError> {
+        self.refuse_unretained_window(from)?;
+        let conn = self.lock();
+        let mut statement = conn
+            .prepare(
+                "SELECT COALESCE(subject, ?4), COUNT(*)
+                   FROM evaluation_observations
+                  WHERE kind = ?1
+                    AND observed_at >= ?2
+                    AND observed_at <= ?3
+                  GROUP BY COALESCE(subject, ?4)
+                  ORDER BY COALESCE(subject, ?4)",
+            )
+            .map_err(sql_err("count observations by subject"))?;
+        let rows = statement
+            .query_map(
+                params![kind.as_str(), from, to, UNKNOWN_COST_CLASS],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(sql_err("count observations by subject"))?;
+        rows.collect::<rusqlite::Result<Vec<_>>>()
+            .map_err(sql_err("decode a count by subject"))
+    }
+}
+
 /// One [`RouteOutcomeCounts`] row, in the column order both queries above
 /// select.
 fn read_outcome_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RouteOutcomeCounts> {
@@ -1573,6 +1825,7 @@ pub fn record_routed_session(
     destination_id: &str,
     cost: Option<crate::routing::Cost>,
     evidence: RoutingEvidence,
+    tier: RoutingTier,
     observed_at_unix: i64,
 ) {
     let class = NewObservation::new(EvaluationKind::RoutingCostClassObserved)
@@ -1583,6 +1836,16 @@ pub fn record_routed_session(
         .with_subject(evidence.as_str())
         .with_session_id(session_id)
         .with_detail(destination_id);
+    // Map line 1834's third row, written in the same call and therefore
+    // through the same one handle: a tier that reached the ledger a moment
+    // later would be a second open on a person's own launch path, which is
+    // the whole of practice §65's finding.
+    let mut tier_row = NewObservation::new(EvaluationKind::RoutingTierObserved)
+        .with_subject(tier.as_str())
+        .with_session_id(session_id);
+    if let Some(stated) = tier.stated_tier() {
+        tier_row = tier_row.with_detail(stated.as_str());
+    }
 
     let ledger = match EvaluationObservations::open(runtime) {
         Ok(ledger) => ledger,
@@ -1595,7 +1858,7 @@ pub fn record_routed_session(
             return;
         }
     };
-    if let Err(err) = ledger.record_all(&[class, evidence], observed_at_unix) {
+    if let Err(err) = ledger.record_all(&[class, evidence, tier_row], observed_at_unix) {
         tracing::warn!(
             error = %err,
             "could not attribute a route to its session; the session is routed, but its route \
@@ -1681,6 +1944,60 @@ pub fn record_routing_outcome(
     }
 }
 
+/// Record what the failure-domain term did to one gateway failover's ranking
+/// — the producer for [`EvaluationKind::FailoverPrevented`], **map line
+/// 1851**.
+///
+/// Its one caller is the sink `main.rs::launch_session` hands the gateway,
+/// invoked from the exchange thread that ranked the failover. Nothing else
+/// may call it: the comparison it records can only be made where both
+/// rankings exist, which is inside
+/// [`crate::routing::interactive::InteractiveRouting::on_provider_failure`],
+/// and a row written from anywhere else would be an assertion rather than an
+/// observation.
+///
+/// # One handle, opened here, dropped here (practice §65)
+///
+/// This runs on a gateway exchange thread inside somebody's coding session.
+/// The handle is opened only once a failover has actually been decided —
+/// which is a small minority of exchanges — and closed before this returns,
+/// so no connection is held across the provider hop and none is opened at all
+/// by the exchanges that fail over nowhere.
+///
+/// **This never fails an exchange.** Every error is one `warn` and a return,
+/// exactly as [`record_routed_session`] and [`record_routing_outcome`] do,
+/// and for the same reason: the session's own work outranks the books kept
+/// about it.
+pub fn record_failover_prevention(
+    runtime: &Runtime,
+    prevention: FailoverPrevention,
+    displaced: Option<&str>,
+    observed_at_unix: i64,
+) {
+    let mut observation =
+        NewObservation::new(EvaluationKind::FailoverPrevented).with_subject(prevention.as_str());
+    if let Some(displaced) = displaced {
+        observation = observation.with_detail(displaced);
+    }
+    let ledger = match EvaluationObservations::open(runtime) {
+        Ok(ledger) => ledger,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "could not open the evaluation ledger; the failover happened, but what the \
+                 failure-domain term did to it was not counted"
+            );
+            return;
+        }
+    };
+    if let Err(err) = ledger.record(observation, observed_at_unix) {
+        tracing::warn!(
+            error = %err,
+            "could not record what the failure-domain term did to a failover"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1702,6 +2019,8 @@ mod tests {
             EvaluationKind::RoutingCostClassObserved,
             EvaluationKind::RoutingEvidenceObserved,
             EvaluationKind::RoutingOutcomeObserved,
+            EvaluationKind::RoutingTierObserved,
+            EvaluationKind::FailoverPrevented,
         ];
         let names: Vec<&str> = declared.iter().map(|kind| kind.as_str()).collect();
         assert_eq!(
