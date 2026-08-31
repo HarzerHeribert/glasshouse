@@ -19,7 +19,7 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`███████████████████████████████░░░░░░░░░` 1041 / 1305 mandatory capabilities (79%)
+`████████████████████████████████░░░░░░░░` 1056 / 1305 mandatory capabilities (80%)
 
 <details>
 <summary>Per-phase breakdown (58 of 106 phases complete)</summary>
@@ -129,7 +129,7 @@ the authoritative specification and tracks what is done.
 | Phase 53 — Criteria before adding graph storage | 0/5 |
 | Phase 54 — Criteria before deeper cmux coupling | 4/4 ✅ |
 | Phase 54A — Setup and portability completion criteria | 0/10 |
-| Phase 55 — V1 completion definition | 0/23 |
+| Phase 55 — V1 completion definition | 15/23 |
 | Phase 56 — Harness–subscription decoupling: choose the harness, route the subscription and model | 0/12 |
 | Phase 56A — Entitlement pool and subscription broker: several accounts, one scheduler | 0/13 |
 

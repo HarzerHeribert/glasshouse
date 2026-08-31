@@ -1914,12 +1914,12 @@ Fixed architectural requirements
 - V1 remains a local terminal control plane built around installed native harnesses, project-local SQLite, adapter boundaries, PTY sessions, and basic evidence-aware routing.
 - V1 does not require a Glasshouse cloud service, replacement coding harness, browser frontend, microservice topology, vector database, graph database, or broad protocol-translation layer.
 
-☐ Consider V1 usable when Glasshouse can start in a Git project and isolate all state to that project.
-☐ Consider V1 usable when Claude Code can run as a fully interactive embedded native session.
-☐ Consider V1 usable when Codex can run as a fully interactive embedded native session.
-☐ Consider V1 usable when the user can switch between multiple live native sessions without restarting them.
-☐ Consider V1 usable when one session can be designated as orchestrator and spawn at least one visible worker session.
-☐ Consider V1 usable when every interactive native, direct-provider, or gateway-backed session records a real owning harness and launch profile.
+☑ Consider V1 usable when Glasshouse can start in a Git project and isolate all state to that project.
+☑ Consider V1 usable when Claude Code can run as a fully interactive embedded native session.
+☑ Consider V1 usable when Codex can run as a fully interactive embedded native session.
+☑ Consider V1 usable when the user can switch between multiple live native sessions without restarting them.
+☑ Consider V1 usable when one session can be designated as orchestrator and spawn at least one visible worker session.
+☑ Consider V1 usable when every interactive native, direct-provider, or gateway-backed session records a real owning harness and launch profile.
 ☐ Consider V1 usable when a compatible vendor-native pairing receives an inspectable initial prior without overriding stronger observed evidence or user choice.
 ☐ Consider V1 usable when a response profile can control user-facing communication without reducing verification or replacing native harness coding instructions.
 ☐ Consider V1 usable when a worker completion event can reliably wake or notify the orchestrator.
@@ -1927,16 +1927,16 @@ Fixed architectural requirements
 ☐ Consider V1 usable when project-specific durable memory can store the six initial memory kinds.
 ☐ Consider V1 usable when project memory can be searched with FTS5.
 ☐ Consider V1 usable when a small portable checkpoint can hand work from one harness to another.
-☐ Consider V1 usable when a simple router can choose between an existing relevant session and a fresh session using inspectable rules.
-☐ Consider V1 usable when at least one authoritative or observed provider quota can be displayed in native units.
-☐ Consider V1 usable when opaque subscription capacity can be represented as unknown or estimated without fabricating exact token counts.
-☐ Consider V1 usable when a configurable cheap/free/local routing model can assign workload tiers with deterministic fallback.
-☐ Consider V1 usable when protected premium reserve can influence a routing decision.
-☐ Consider V1 usable when a substantial high-risk task can record a small set of critical assumptions with evidence state and create a checkpoint before broad implementation.
-☐ Consider V1 usable when routing explanations show workload tier, session affinity, resource capacity, and the primary reason for selection.
-☐ Consider V1 usable when at least one gateway-backed route records classified success and failure outcomes plus TTFT or TTFC and can cite that evidence in a routing explanation.
+☑ Consider V1 usable when a simple router can choose between an existing relevant session and a fresh session using inspectable rules.
+☑ Consider V1 usable when at least one authoritative or observed provider quota can be displayed in native units.
+☑ Consider V1 usable when opaque subscription capacity can be represented as unknown or estimated without fabricating exact token counts.
+☑ Consider V1 usable when a configurable cheap/free/local routing model can assign workload tiers with deterministic fallback.
+☑ Consider V1 usable when protected premium reserve can influence a routing decision.
+☑ Consider V1 usable when a substantial high-risk task can record a small set of critical assumptions with evidence state and create a checkpoint before broad implementation.
+☑ Consider V1 usable when routing explanations show workload tier, session affinity, resource capacity, and the primary reason for selection.
+☑ Consider V1 usable when at least one gateway-backed route records classified success and failure outcomes plus TTFT or TTFC and can cite that evidence in a routing explanation.
 ☐ Consider V1 usable when cmux integration can expose or spawn a session externally without being required for normal operation.
-☐ Consider V1 complete only after project-isolation and cross-contamination tests pass.
+☑ Consider V1 complete only after project-isolation and cross-contamination tests pass.
 
 Phase 56 — Harness–subscription decoupling: choose the harness, route the subscription and model
 
