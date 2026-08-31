@@ -337,6 +337,17 @@ pub struct Destination {
     /// via [`Self::with_session_context`]. [`SessionContextFacts::UNREAD`] for
     /// a fresh destination and for any caller that did not look.
     context: SessionContextFacts,
+    /// Phase 56 line 1946: the subscription that would be charged for work
+    /// on this destination, attached via [`Self::with_subscription`] by the
+    /// caller that resolved it from configuration. `None` — the default —
+    /// means no subscription describes this destination's resource (a
+    /// gateway-backed profile, whose upstream is assigned when the session
+    /// starts; a direct provider no `[subscriptions]` entry names), and the
+    /// subscription constraint then does nothing to it: nobody's rule can
+    /// refuse a resource nobody's rule describes. A harness's own sign-in
+    /// always arrives with one, because configuration supplies a default
+    /// entry for it.
+    subscription: Option<super::Subscription>,
 }
 
 impl Destination {
@@ -396,6 +407,7 @@ impl Destination {
             resource_facts: ResourceFacts::UNVERIFIED,
             tier_ceiling: None,
             context: SessionContextFacts::UNREAD,
+            subscription: None,
         }
     }
 
@@ -415,6 +427,21 @@ impl Destination {
     pub fn with_capacity_facts(mut self, facts: CapacityFacts) -> Self {
         self.capacity_facts = facts;
         self
+    }
+
+    /// Attach the subscription this destination would charge — Phase 56
+    /// lines 1946 and 1954. The caller resolves it from
+    /// `crate::config::EffectiveConfig::subscription_for`; this module reads
+    /// no configuration of its own. `None` is "no subscription describes this
+    /// resource", on which the subscription constraint is inert.
+    #[must_use]
+    pub fn with_subscription(mut self, subscription: Option<super::Subscription>) -> Self {
+        self.subscription = subscription;
+        self
+    }
+
+    pub fn subscription(&self) -> Option<&super::Subscription> {
+        self.subscription.as_ref()
     }
 
     pub fn capacity_facts(&self) -> CapacityFacts {
@@ -2711,6 +2738,16 @@ impl Routed {
     }
 }
 
+/// What step 2 of [`SessionRouter::choose`] settled: who survived every hard
+/// constraint, who did not and why, and the tier movement decided between the
+/// two halves. Private — the only readers are `choose` and
+/// [`SessionRouter::refused`].
+struct Gate {
+    eligible: Vec<super::EligibleCandidate<Destination>>,
+    rejected: Vec<(Destination, HardConstraint)>,
+    movement: Option<TierMovement>,
+}
+
 /// The session-aware router — map lines 1592 to 1602.
 ///
 /// Holds the user's override and nothing else, exactly as
@@ -2811,6 +2848,61 @@ impl SessionRouter {
         !destination.is_fresh() && self.reserve_override_sessions.contains(destination.id())
     }
 
+    /// Step 2 of [`Self::choose`], in two halves — the one place the hard
+    /// constraints run, so the path that acts and the path that reports a
+    /// refusal cannot disagree about what was refused.
+    ///
+    /// The tier-movement decision (lines 1559–1565) has to see the candidate
+    /// set — "every candidate at the classified tier is struggling" is a fact
+    /// about the set — and it has to be settled *before* the tier gate,
+    /// because a downgrade admits a resource the classified tier would have
+    /// refused. So the capability constraints run first, the movement is
+    /// decided over what survived them, and the tier gate then reads the tier
+    /// the movement settled. An escalation never changes the gate: it moves a
+    /// preference, and a preference does not remove a candidate (design
+    /// decision 1, "additive, never a filter").
+    fn gate(&self, destinations: &[Destination], inputs: &RouterInputs<'_>) -> Gate {
+        let capability_survivors: Vec<&Destination> = destinations
+            .iter()
+            .filter(|destination| hard_constraint(destination, inputs, None).is_ok())
+            .collect();
+        let movement = decide_tier_movement(&capability_survivors, inputs, self.retry_after);
+        let gate_tier = match &movement {
+            Some(movement) => Some(movement.gate_tier()),
+            None => inputs.requirements.minimum_tier,
+        };
+        let (eligible, rejected) =
+            apply_hard_constraints(destinations.to_vec(), |destination: &Destination| {
+                hard_constraint(destination, inputs, gate_tier)
+            });
+        Gate {
+            eligible,
+            rejected,
+            movement,
+        }
+    }
+
+    /// Every destination a hard constraint would remove for this work, and
+    /// which constraint — the same gate [`Self::choose`] runs, exposed for the
+    /// one case `choose` cannot report: **every** destination refused and no
+    /// current destination to hold, where it answers `None` and the rejections
+    /// would otherwise be lost.
+    ///
+    /// Phase 56 line 1954 is why that case matters. Before this method, a
+    /// launch whose only destination was refused read `None` as "nowhere to
+    /// go" and proceeded on that destination anyway — the silence Phase 35D's
+    /// decision 3 recorded, and the one outcome *never charge a task to a
+    /// subscription the user's rules did not allow* cannot tolerate. The
+    /// launch path asks this when `choose` answers `None` for a non-empty set,
+    /// and refuses by name.
+    pub fn refused(
+        &self,
+        destinations: &[Destination],
+        inputs: &RouterInputs<'_>,
+    ) -> Vec<(Destination, HardConstraint)> {
+        self.gate(destinations, inputs).rejected
+    }
+
     /// Choose where this work goes — the router's one production entry point.
     ///
     /// `current` is where the work is now: `None` at a session start.
@@ -2887,19 +2979,11 @@ impl SessionRouter {
         // movement settled. An escalation never changes the gate: it moves
         // a preference, and a preference does not remove a candidate
         // (design decision 1, "additive, never a filter").
-        let capability_survivors: Vec<&Destination> = destinations
-            .iter()
-            .filter(|destination| hard_constraint(destination, inputs, None).is_ok())
-            .collect();
-        let movement = decide_tier_movement(&capability_survivors, inputs, self.retry_after);
-        let gate_tier = match &movement {
-            Some(movement) => Some(movement.gate_tier()),
-            None => inputs.requirements.minimum_tier,
-        };
-        let (eligible, rejected) =
-            apply_hard_constraints(destinations.to_vec(), |destination: &Destination| {
-                hard_constraint(destination, inputs, gate_tier)
-            });
+        let Gate {
+            eligible,
+            rejected,
+            movement,
+        } = self.gate(destinations, inputs);
 
         if eligible.is_empty() {
             // Every destination failed a hard constraint. Holding the work
@@ -3026,7 +3110,7 @@ impl SessionRouter {
                 None => match rejected.iter().find(|(d, _)| d.id() == id) {
                     Some((_, constraint)) => (
                         0,
-                        Some(OverrideRefusal::Ineligible(id.clone(), *constraint)),
+                        Some(OverrideRefusal::Ineligible(id.clone(), constraint.clone())),
                     ),
                     None => (0, Some(OverrideRefusal::NoSuchDestination(id.clone()))),
                 },
@@ -3192,6 +3276,17 @@ fn hard_constraint(
     inputs: &RouterInputs<'_>,
     minimum_tier: Option<WorkloadTier>,
 ) -> Result<(), HardConstraint> {
+    // Phase 56 line 1954, asked first: the user's own rule about what a
+    // subscription may be charged for is the strongest statement in this
+    // gate, and when a destination fails it *and* a capability fact, the
+    // constraint a person reads should be the one they wrote. The harness
+    // half is asked on both passes; the tier half reads `minimum_tier`, so it
+    // — like line 1516's ceiling gate below — fires only on the pass that
+    // knows the tier the movement settled, and never against an unknown one
+    // (`super::SubscriptionRules::refusal`).
+    if let Some(subscription) = destination.subscription() {
+        subscription.constraint(destination.harness(), minimum_tier)?;
+    }
     if inputs.requirements.needs_tool_calls
         && destination.backend().tools() == ToolSemantics::KnownAbsent
     {

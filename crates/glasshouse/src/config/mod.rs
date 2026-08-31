@@ -1250,6 +1250,506 @@ impl ReservePoliciesConfig {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Phase 56 — `[subscriptions.<name>]`: a subscription as a routing resource
+// with rules of its own (map lines 1946, 1947, 1954).
+// ---------------------------------------------------------------------------
+
+/// Which plan a subscription is — map line 1946's four: *"a Claude,
+/// ChatGPT/Codex, or Gemini plan, or an API key"*.
+///
+/// Descriptive, and read by exactly one consumer: the launch announcement
+/// that says which subscription will serve a session. No rule depends on it —
+/// [`SubscriptionConfig`]'s rules are about harnesses, tiers and job kinds,
+/// never about what kind of plan is paying — so a wrong `kind` misdescribes
+/// a subscription and never misroutes one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum SubscriptionKind {
+    Claude,
+    #[serde(rename = "chatgpt")]
+    ChatGpt,
+    Gemini,
+    ApiKey,
+}
+
+impl SubscriptionKind {
+    /// The spelling a configuration file uses.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::ChatGpt => "chatgpt",
+            Self::Gemini => "gemini",
+            Self::ApiKey => "api-key",
+        }
+    }
+
+    /// How the announcement names the plan.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::Claude => "Claude plan",
+            Self::ChatGpt => "ChatGPT plan",
+            Self::Gemini => "Gemini plan",
+            Self::ApiKey => "API key",
+        }
+    }
+}
+
+/// A harness as it is written in a `[subscriptions]` rule — the
+/// [`IntegrationId::slug`], parsed against the **harnesses** this build
+/// knows. A local inference runtime (`ollama`, `llama-cpp`) or the terminal
+/// multiplexer is refused by the loader: a subscription serves a harness,
+/// and a rule naming something that is not one would be a rule nothing can
+/// ever match — the silent kind of wrong this project keeps finding.
+///
+/// The same newtype-over-a-routing-type shape as [`ConfiguredWorkloadTier`],
+/// for the same reason: `IntegrationId` has no serialised form of its own,
+/// and this is the config file's side of that boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConfiguredHarness(IntegrationId);
+
+impl ConfiguredHarness {
+    pub fn new(id: IntegrationId) -> Self {
+        Self(id)
+    }
+
+    pub fn id(self) -> IntegrationId {
+        self.0
+    }
+
+    pub fn as_str(self) -> &'static str {
+        self.0.slug()
+    }
+
+    /// Every integration a subscription can serve, in presentation order.
+    fn harnesses() -> impl Iterator<Item = IntegrationId> {
+        IntegrationId::ALL
+            .iter()
+            .copied()
+            .filter(|id| id.kind() == crate::integrations::IntegrationKind::Harness)
+    }
+
+    /// The harness a slug names, or `None` for one that is not a harness.
+    /// Exact, like [`ConfiguredWorkloadTier::parse`].
+    pub fn parse(text: &str) -> Option<Self> {
+        Self::harnesses().find(|id| id.slug() == text).map(Self)
+    }
+}
+
+impl Serialize for ConfiguredHarness {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ConfiguredHarness {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        Self::parse(&text).ok_or_else(|| {
+            let known = Self::harnesses()
+                .map(IntegrationId::slug)
+                .collect::<Vec<_>>()
+                .join(", ");
+            serde::de::Error::custom(format!(
+                "unknown harness `{text}` — a subscription rule names one of: {known}"
+            ))
+        })
+    }
+}
+
+/// A [`crate::routing::disposable::JobKind`] as it is written in a
+/// `[subscriptions]` rule — the spelling is the kind's own `as_str`, and
+/// `JOB_KIND_SPELLINGS` is kept complete by `job_kind_ordinal`'s
+/// exhaustive `match`, exactly as [`ConfiguredWorkloadTier`] is kept honest
+/// by `workload_tier_ordinal`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConfiguredJobKind(crate::routing::disposable::JobKind);
+
+/// Every [`crate::routing::disposable::JobKind`], in the type's own order.
+/// Kept complete by `job_kind_ordinal`.
+const JOB_KIND_SPELLINGS: [crate::routing::disposable::JobKind; 4] = {
+    use crate::routing::disposable::JobKind as J;
+    [
+        J::Classification,
+        J::MemoryExtraction,
+        J::Reranking,
+        J::Evaluation,
+    ]
+};
+
+/// The compile-time guard that `JOB_KIND_SPELLINGS` still lists every
+/// variant — see `workload_tier_ordinal` for why this is `#[cfg(test)]`
+/// and still a real gate.
+#[cfg(test)]
+fn job_kind_ordinal(kind: crate::routing::disposable::JobKind) -> usize {
+    use crate::routing::disposable::JobKind as J;
+    match kind {
+        J::Classification => 0,
+        J::MemoryExtraction => 1,
+        J::Reranking => 2,
+        J::Evaluation => 3,
+    }
+}
+
+impl ConfiguredJobKind {
+    pub fn new(kind: crate::routing::disposable::JobKind) -> Self {
+        Self(kind)
+    }
+
+    pub fn kind(self) -> crate::routing::disposable::JobKind {
+        self.0
+    }
+
+    pub fn as_str(self) -> &'static str {
+        self.0.as_str()
+    }
+
+    /// Exact, like [`ConfiguredWorkloadTier::parse`].
+    pub fn parse(text: &str) -> Option<Self> {
+        JOB_KIND_SPELLINGS
+            .into_iter()
+            .find(|kind| kind.as_str() == text)
+            .map(Self)
+    }
+}
+
+impl Serialize for ConfiguredJobKind {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ConfiguredJobKind {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        Self::parse(&text).ok_or_else(|| {
+            let known = JOB_KIND_SPELLINGS
+                .into_iter()
+                .map(|kind| kind.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            serde::de::Error::custom(format!(
+                "unknown job kind `{text}` — expected one of: {known}"
+            ))
+        })
+    }
+}
+
+/// One configured subscription, as stored in a `[subscriptions.<name>]`
+/// table — map lines 1946 and 1947.
+///
+/// The subscription's *name* is its key in [`SubscriptionTable`], as a
+/// provider's is in [`ProviderTable`]. What it is (`kind`), what backs it
+/// (`native_harness` **or** `provider`, never both), and six rule lists in
+/// three allow/deny pairs. **No secret and no credential**: `provider` is the
+/// name of a `[providers.<name>]` entry, whose credential handling is that
+/// entry's own — the module-level "No secrets here" section applies here as
+/// it does to providers.
+///
+/// # Backing
+///
+/// `native_harness = "claude-code"` says *this entry is Claude Code's own
+/// sign-in* — the resource `crate::provider::registry::ResourceKind::
+/// NativeSubscription` describes — and replaces the default entry
+/// [`EffectiveConfig::subscriptions`] would otherwise supply for that
+/// harness. `provider = "<name>"` says *this entry is the account behind
+/// that configured provider*, which is how an API key becomes a subscription
+/// with rules. Naming both is refused when resolved
+/// ([`SubscriptionLookupError::TwoBackings`]); naming neither is allowed and
+/// inert — such an entry describes no resource, so nothing is ever charged
+/// to it and no rule of it ever fires.
+///
+/// # Rules
+///
+/// Resolved by [`crate::routing::SubscriptionRules`] and nowhere else: deny
+/// wins over allow, an empty allow-list admits everything not denied. The
+/// spellings are the routing types' own — [`IntegrationId::slug`],
+/// [`crate::routing::classify::WorkloadTier::as_str`],
+/// [`crate::routing::disposable::JobKind::as_str`] — through the three
+/// `Configured*` newtypes above, so an unknown spelling is refused by the
+/// loader rather than read as "no rule".
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SubscriptionConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    kind: Option<SubscriptionKind>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    native_harness: Option<ConfiguredHarness>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    allow_harnesses: Vec<ConfiguredHarness>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    deny_harnesses: Vec<ConfiguredHarness>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    allow_tiers: Vec<ConfiguredWorkloadTier>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    deny_tiers: Vec<ConfiguredWorkloadTier>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    allow_job_kinds: Vec<ConfiguredJobKind>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    deny_job_kinds: Vec<ConfiguredJobKind>,
+}
+
+impl SubscriptionConfig {
+    pub fn kind(&self) -> Option<SubscriptionKind> {
+        self.kind
+    }
+
+    pub fn set_kind(&mut self, value: Option<SubscriptionKind>) -> &mut Self {
+        self.kind = value;
+        self
+    }
+
+    pub fn native_harness(&self) -> Option<IntegrationId> {
+        self.native_harness.map(ConfiguredHarness::id)
+    }
+
+    pub fn set_native_harness(&mut self, value: Option<IntegrationId>) -> &mut Self {
+        self.native_harness = value.map(ConfiguredHarness::new);
+        self
+    }
+
+    pub fn provider(&self) -> Option<&str> {
+        self.provider.as_deref()
+    }
+
+    pub fn set_provider(&mut self, value: Option<String>) -> &mut Self {
+        self.provider = value;
+        self
+    }
+
+    pub fn set_allow_harnesses(
+        &mut self,
+        value: impl IntoIterator<Item = IntegrationId>,
+    ) -> &mut Self {
+        self.allow_harnesses = value.into_iter().map(ConfiguredHarness::new).collect();
+        self
+    }
+
+    pub fn set_deny_harnesses(
+        &mut self,
+        value: impl IntoIterator<Item = IntegrationId>,
+    ) -> &mut Self {
+        self.deny_harnesses = value.into_iter().map(ConfiguredHarness::new).collect();
+        self
+    }
+
+    pub fn set_allow_tiers(
+        &mut self,
+        value: impl IntoIterator<Item = crate::routing::classify::WorkloadTier>,
+    ) -> &mut Self {
+        self.allow_tiers = value.into_iter().map(ConfiguredWorkloadTier::new).collect();
+        self
+    }
+
+    pub fn set_deny_tiers(
+        &mut self,
+        value: impl IntoIterator<Item = crate::routing::classify::WorkloadTier>,
+    ) -> &mut Self {
+        self.deny_tiers = value.into_iter().map(ConfiguredWorkloadTier::new).collect();
+        self
+    }
+
+    pub fn set_allow_job_kinds(
+        &mut self,
+        value: impl IntoIterator<Item = crate::routing::disposable::JobKind>,
+    ) -> &mut Self {
+        self.allow_job_kinds = value.into_iter().map(ConfiguredJobKind::new).collect();
+        self
+    }
+
+    pub fn set_deny_job_kinds(
+        &mut self,
+        value: impl IntoIterator<Item = crate::routing::disposable::JobKind>,
+    ) -> &mut Self {
+        self.deny_job_kinds = value.into_iter().map(ConfiguredJobKind::new).collect();
+        self
+    }
+
+    /// This entry's six lists as the router's one rules value.
+    pub fn rules(&self) -> crate::routing::SubscriptionRules {
+        crate::routing::SubscriptionRules::UNRESTRICTED
+            .allow_harnesses(self.allow_harnesses.iter().map(|h| h.id()))
+            .deny_harnesses(self.deny_harnesses.iter().map(|h| h.id()))
+            .allow_tiers(self.allow_tiers.iter().map(|t| t.tier()))
+            .deny_tiers(self.deny_tiers.iter().map(|t| t.tier()))
+            .allow_job_kinds(self.allow_job_kinds.iter().map(|k| k.kind()))
+            .deny_job_kinds(self.deny_job_kinds.iter().map(|k| k.kind()))
+    }
+
+    /// The resolved value, named `name` — the key this entry was stored
+    /// under — and attributed to `layer`.
+    pub fn to_resolved(
+        &self,
+        name: &str,
+        layer: Layer,
+    ) -> Result<ResolvedSubscription, SubscriptionLookupError> {
+        let backing = match (self.native_harness, &self.provider) {
+            (Some(_), Some(_)) => {
+                return Err(SubscriptionLookupError::TwoBackings {
+                    name: name.to_owned(),
+                });
+            }
+            (Some(harness), None) => SubscriptionBacking::NativeHarness(harness.id()),
+            (None, Some(provider)) => SubscriptionBacking::Provider(provider.clone()),
+            (None, None) => SubscriptionBacking::Unstated,
+        };
+        Ok(ResolvedSubscription {
+            name: name.to_owned(),
+            kind: self.kind,
+            backing,
+            rules: self.rules(),
+            layer,
+        })
+    }
+}
+
+/// A map of configured subscriptions, keyed by name — `[subscriptions.<name>]`.
+///
+/// Configuration, never a credential store: see [`SubscriptionConfig`].
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SubscriptionTable(BTreeMap<String, SubscriptionConfig>);
+
+impl SubscriptionTable {
+    pub fn get(&self, name: &str) -> Option<&SubscriptionConfig> {
+        self.0.get(name)
+    }
+
+    pub fn set(&mut self, name: impl Into<String>, config: SubscriptionConfig) {
+        self.0.insert(name.into(), config);
+    }
+
+    pub fn remove(&mut self, name: &str) -> Option<SubscriptionConfig> {
+        self.0.remove(name)
+    }
+
+    pub fn names(&self) -> impl Iterator<Item = &str> {
+        self.0.keys().map(String::as_str)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&str, &SubscriptionConfig)> {
+        self.0.iter().map(|(name, cfg)| (name.as_str(), cfg))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+/// What a resolved subscription is backed by — the resource it stands for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SubscriptionBacking {
+    /// A harness's own first-party sign-in
+    /// ([`crate::profile::BackendResource::Native`] on that harness).
+    NativeHarness(IntegrationId),
+    /// The account behind a configured `[providers.<name>]` entry
+    /// ([`crate::profile::BackendResource::DirectProvider`] naming it).
+    Provider(String),
+    /// The entry names neither. Listed, never matched, never charged.
+    Unstated,
+}
+
+/// A subscription as configuration resolved it — [`SubscriptionConfig`] with
+/// its name, its layer, and its rules already turned into the router's
+/// [`crate::routing::SubscriptionRules`].
+///
+/// [`Self::to_routing`] is the bridge to the value a
+/// `crate::routing::session::Destination` carries, and it drops everything
+/// the router does not decide on: the kind, the backing and the layer stay
+/// here, where the announcement that reads them lives.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedSubscription {
+    name: String,
+    kind: Option<SubscriptionKind>,
+    backing: SubscriptionBacking,
+    rules: crate::routing::SubscriptionRules,
+    layer: Layer,
+}
+
+impl ResolvedSubscription {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn kind(&self) -> Option<SubscriptionKind> {
+        self.kind
+    }
+
+    pub fn backing(&self) -> &SubscriptionBacking {
+        &self.backing
+    }
+
+    pub fn rules(&self) -> &crate::routing::SubscriptionRules {
+        &self.rules
+    }
+
+    pub fn layer(&self) -> Layer {
+        self.layer
+    }
+
+    /// The router's view: name and rules, nothing else.
+    pub fn to_routing(&self) -> crate::routing::Subscription {
+        crate::routing::Subscription::new(self.name.clone(), self.rules.clone())
+    }
+
+    /// What the announcement says inside the parentheses after the name:
+    /// the plan when one was stated, and what backs it. Never a credential —
+    /// a harness's display name or a provider's *name*.
+    pub fn describe(&self) -> String {
+        let backing = match &self.backing {
+            SubscriptionBacking::NativeHarness(harness) => {
+                format!("{}'s own sign-in", harness.display_name())
+            }
+            SubscriptionBacking::Provider(provider) => format!("behind provider `{provider}`"),
+            SubscriptionBacking::Unstated => "no backing stated".to_owned(),
+        };
+        match self.kind {
+            Some(kind) => format!("{}, {backing}", kind.describe()),
+            None => backing,
+        }
+    }
+}
+
+/// Why the `[subscriptions]` tables could not be resolved. Each is a
+/// contradiction only the two layers together can show, so none is a
+/// deserialisation error; each is refused rather than resolved by guessing.
+#[derive(Debug, thiserror::Error)]
+pub enum SubscriptionLookupError {
+    #[error(
+        "subscription `{name}` names both `native_harness` and `provider`; a subscription is \
+         a harness's own sign-in or the account behind a provider, not both"
+    )]
+    TwoBackings { name: String },
+    #[error(
+        "subscription `{name}` takes the name reserved for {}'s own sign-in without being it; \
+         set `native_harness = \"{name}\"` on it or rename it",
+        .harness.display_name()
+    )]
+    NameReservedForHarness {
+        name: String,
+        harness: IntegrationId,
+    },
+    #[error(
+        "subscriptions {} all claim to be {}'s own sign-in; a harness signs in to one account, \
+         so keep one",
+        .names.join(", "), .harness.display_name()
+    )]
+    AmbiguousNativeHarness {
+        harness: IntegrationId,
+        names: Vec<String>,
+    },
+    #[error(
+        "subscriptions {} all claim provider `{provider}`; a configured provider is one account, \
+         so keep one",
+        .names.join(", ")
+    )]
+    AmbiguousProvider {
+        provider: String,
+        names: Vec<String>,
+    },
+}
+
 /// Why a stored [`ProviderConfig`] could not be turned into a
 /// [`crate::provider::Provider`].
 #[derive(Debug, thiserror::Error)]
@@ -2513,6 +3013,12 @@ pub struct UserConfig {
     profiles: ProfileTable,
     #[serde(default)]
     providers: ProviderTable,
+    /// `[subscriptions.<name>]` — Phase 56. Skipped when empty: a user who
+    /// configured none has no table, and every harness's own sign-in still
+    /// resolves to a default entry through
+    /// [`EffectiveConfig::subscriptions`].
+    #[serde(default, skip_serializing_if = "SubscriptionTable::is_empty")]
+    subscriptions: SubscriptionTable,
     /// Skipped when empty so a first run that declines the routing-model
     /// step writes no `[routing]` table at all — see [`RoutingConfig::model`].
     #[serde(default, skip_serializing_if = "RoutingConfig::is_unset")]
@@ -2601,6 +3107,7 @@ impl Default for UserConfig {
             integrations: IntegrationTable::default(),
             profiles: ProfileTable::default(),
             providers: ProviderTable::default(),
+            subscriptions: SubscriptionTable::default(),
             routing: RoutingConfig::default(),
             pairing: pairing::PairingConfig::default(),
             response: response::ResponseConfig::default(),
@@ -2648,6 +3155,14 @@ impl UserConfig {
 
     pub fn providers_mut(&mut self) -> &mut ProviderTable {
         &mut self.providers
+    }
+
+    pub fn subscriptions(&self) -> &SubscriptionTable {
+        &self.subscriptions
+    }
+
+    pub fn subscriptions_mut(&mut self) -> &mut SubscriptionTable {
+        &mut self.subscriptions
     }
 
     pub fn routing(&self) -> &RoutingConfig {
@@ -2774,6 +3289,11 @@ pub struct ProjectConfig {
     profiles: ProfileTable,
     #[serde(default)]
     providers: ProviderTable,
+    /// A project's `[subscriptions.<name>]` entries replace the user's
+    /// **by name**, whole — the rule [`ProviderTable`] follows — see
+    /// [`EffectiveConfig::subscriptions`].
+    #[serde(default, skip_serializing_if = "SubscriptionTable::is_empty")]
+    subscriptions: SubscriptionTable,
     /// A project may override the routing-model choice, unlike
     /// [`IntegrationConfig::bypass_acknowledged`] — see
     /// [`EffectiveConfig::routing_model`] for why this is a preference and
@@ -2828,6 +3348,7 @@ impl Default for ProjectConfig {
             integrations: IntegrationTable::default(),
             profiles: ProfileTable::default(),
             providers: ProviderTable::default(),
+            subscriptions: SubscriptionTable::default(),
             routing: RoutingConfig::default(),
             pairing: pairing::PairingConfig::default(),
             response: response::ResponseConfig::default(),
@@ -2867,6 +3388,14 @@ impl ProjectConfig {
 
     pub fn providers_mut(&mut self) -> &mut ProviderTable {
         &mut self.providers
+    }
+
+    pub fn subscriptions(&self) -> &SubscriptionTable {
+        &self.subscriptions
+    }
+
+    pub fn subscriptions_mut(&mut self) -> &mut SubscriptionTable {
+        &mut self.subscriptions
     }
 
     pub fn routing(&self) -> &RoutingConfig {
@@ -3682,6 +4211,125 @@ impl<'a> EffectiveConfig<'a> {
             background: self
                 .reserve_policy(crate::routing::pressure::ReserveScope::Background)
                 .value,
+        }
+    }
+
+    /// Every subscription this configuration describes — Phase 56 line 1946
+    /// — with the rules of each already resolved (line 1947).
+    ///
+    /// Two sources, in this order:
+    ///
+    /// 1. **The configured entries**, by name, project over user — a project's
+    ///    `[subscriptions.<name>]` replaces the user's entry of that name
+    ///    whole, exactly as [`EffectiveConfig::configured_provider`] reads a
+    ///    provider. Not per field: an allow-list that merged across layers
+    ///    would have no readable answer to "does the project's list replace or
+    ///    extend mine".
+    /// 2. **A default entry for every harness's own sign-in** that no
+    ///    configured entry claims through `native_harness` — named by the
+    ///    harness's slug, with no `kind` (Glasshouse does not know which plan a
+    ///    person signed a harness in with, and *unknown is an answer*) and
+    ///    [`crate::routing::SubscriptionRules::UNRESTRICTED`]. This is what
+    ///    keeps a user who configured nothing exactly where they were: every
+    ///    native launch has a subscription to announce, and none has a rule.
+    ///
+    /// Refused rather than resolved by guessing when the two layers together
+    /// contradict — see [`SubscriptionLookupError`].
+    pub fn subscriptions(&self) -> Result<Vec<ResolvedSubscription>, SubscriptionLookupError> {
+        let mut names: BTreeSet<&str> = self.user.subscriptions().names().collect();
+        if let Some(project) = self.project {
+            names.extend(project.subscriptions().names());
+        }
+        let mut resolved = Vec::with_capacity(names.len());
+        for name in names {
+            let (config, layer) = match self.project.and_then(|p| p.subscriptions().get(name)) {
+                Some(config) => (config, Layer::Project),
+                None => (
+                    self.user
+                        .subscriptions()
+                        .get(name)
+                        .expect("a name collected from the user table is in the user table"),
+                    Layer::User,
+                ),
+            };
+            resolved.push(config.to_resolved(name, layer)?);
+        }
+
+        for harness in IntegrationId::ALL
+            .iter()
+            .copied()
+            .filter(|id| id.kind() == crate::integrations::IntegrationKind::Harness)
+        {
+            let claimed = resolved
+                .iter()
+                .any(|entry| entry.backing == SubscriptionBacking::NativeHarness(harness));
+            if claimed {
+                continue;
+            }
+            if let Some(taken) = resolved.iter().find(|entry| entry.name == harness.slug()) {
+                return Err(SubscriptionLookupError::NameReservedForHarness {
+                    name: taken.name.clone(),
+                    harness,
+                });
+            }
+            resolved.push(ResolvedSubscription {
+                name: harness.slug().to_owned(),
+                kind: None,
+                backing: SubscriptionBacking::NativeHarness(harness),
+                rules: crate::routing::SubscriptionRules::UNRESTRICTED,
+                layer: Layer::Default,
+            });
+        }
+        Ok(resolved)
+    }
+
+    /// The subscription a session on `harness` over `backend` would be charged
+    /// to — line 1954's *which subscription*, resolved once here for the
+    /// router (`main.rs::routing_destinations` attaches it to every
+    /// destination) and for the announcement, so the two cannot disagree.
+    ///
+    /// `Ok(None)` is a real answer and means *no subscription describes this
+    /// resource*: a direct provider no entry names, or the Glasshouse gateway,
+    /// whose upstream is assigned when the session starts. No rule can refuse
+    /// a resource no rule describes, and the announcement says so rather than
+    /// naming one. A harness's own sign-in is never `None`, because
+    /// [`Self::subscriptions`] supplies its default.
+    pub fn subscription_for(
+        &self,
+        harness: IntegrationId,
+        backend: &crate::profile::BackendResource,
+    ) -> Result<Option<ResolvedSubscription>, SubscriptionLookupError> {
+        use crate::profile::BackendResource;
+
+        let wanted = match backend {
+            BackendResource::Native => SubscriptionBacking::NativeHarness(harness),
+            BackendResource::DirectProvider { provider } => {
+                SubscriptionBacking::Provider(provider.clone())
+            }
+            BackendResource::GlasshouseGateway => return Ok(None),
+        };
+        let mut matching: Vec<ResolvedSubscription> = self
+            .subscriptions()?
+            .into_iter()
+            .filter(|entry| entry.backing == wanted)
+            .collect();
+        match matching.len() {
+            0 => Ok(None),
+            1 => Ok(matching.pop()),
+            _ => {
+                let names = matching.into_iter().map(|entry| entry.name).collect();
+                Err(match wanted {
+                    SubscriptionBacking::NativeHarness(harness) => {
+                        SubscriptionLookupError::AmbiguousNativeHarness { harness, names }
+                    }
+                    SubscriptionBacking::Provider(provider) => {
+                        SubscriptionLookupError::AmbiguousProvider { provider, names }
+                    }
+                    SubscriptionBacking::Unstated => {
+                        unreachable!("`wanted` is built from a backend and is never Unstated")
+                    }
+                })
+            }
         }
     }
 
@@ -6554,6 +7202,290 @@ mod tests {
             )
             .is_err(),
             "an unknown reserve policy must be refused, not read as a default"
+        );
+    }
+
+    /// Phase 56 lines 1946 and 1947: `[subscriptions.<name>]` round-trips
+    /// through the loader with the routing types' own spellings, resolves
+    /// **by name** with the project layer replacing the user's entry whole,
+    /// supplies an unrestricted default for every harness's own sign-in that
+    /// nobody claimed, and refuses every unknown spelling rather than reading
+    /// it as "no rule".
+    #[test]
+    fn subscriptions_round_trip_and_resolve_project_over_user_with_a_native_default() {
+        use crate::profile::BackendResource;
+        use crate::routing::classify::WorkloadTier;
+        use crate::routing::disposable::JobKind;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(tmp.path().join("data"), tmp.path().join("config"));
+
+        let mut user = UserConfig::default();
+        assert!(user.subscriptions().is_empty());
+        let mut max = SubscriptionConfig::default();
+        max.set_kind(Some(SubscriptionKind::Claude))
+            .set_native_harness(Some(IntegrationId::ClaudeCode))
+            .set_deny_tiers([WorkloadTier::Leaf])
+            .set_allow_job_kinds([JobKind::MemoryExtraction]);
+        user.subscriptions_mut().set("max", max);
+        let mut team = SubscriptionConfig::default();
+        team.set_kind(Some(SubscriptionKind::ApiKey))
+            .set_provider(Some("openrouter".to_owned()))
+            .set_allow_harnesses([IntegrationId::Codex])
+            .set_deny_harnesses([IntegrationId::ClaudeCode]);
+        user.subscriptions_mut().set("team-key", team);
+        user.save(&paths).unwrap();
+        let loaded = UserConfig::load(&paths).unwrap();
+        assert_eq!(loaded.subscriptions(), user.subscriptions());
+
+        // The on-disk spellings are the routing types' own.
+        let text = std::fs::read_to_string(paths.user_config_file()).unwrap();
+        for expected in [
+            "[subscriptions.max]",
+            "kind = \"claude\"",
+            "native_harness = \"claude-code\"",
+            "deny_tiers = [\"leaf\"]",
+            "allow_job_kinds = [\"memory extraction\"]",
+            "[subscriptions.team-key]",
+            "kind = \"api-key\"",
+            "provider = \"openrouter\"",
+            "allow_harnesses = [\"codex\"]",
+            "deny_harnesses = [\"claude-code\"]",
+        ] {
+            assert!(text.contains(expected), "missing `{expected}` in:\n{text}");
+        }
+
+        // The user layer alone: `max` is Claude Code's sign-in, every other
+        // harness gets its unrestricted default, and the API key is found by
+        // the provider it backs.
+        let effective = EffectiveConfig::new(&loaded, None);
+        let claude = effective
+            .subscription_for(IntegrationId::ClaudeCode, &BackendResource::Native)
+            .unwrap()
+            .expect("a harness's own sign-in always resolves to a subscription");
+        assert_eq!((claude.name(), claude.layer()), ("max", Layer::User));
+        assert_eq!(claude.kind(), Some(SubscriptionKind::Claude));
+        assert!(!claude.rules().serves_tier(WorkloadTier::Leaf));
+        assert!(claude.rules().serves_tier(WorkloadTier::Heavy));
+        assert!(claude.rules().serves_job_kind(JobKind::MemoryExtraction));
+        assert!(!claude.rules().serves_job_kind(JobKind::Classification));
+        assert_eq!(claude.describe(), "Claude plan, Claude Code's own sign-in");
+
+        let codex = effective
+            .subscription_for(IntegrationId::Codex, &BackendResource::Native)
+            .unwrap()
+            .unwrap();
+        assert_eq!((codex.name(), codex.layer()), ("codex", Layer::Default));
+        assert_eq!(codex.kind(), None);
+        assert!(codex.rules().is_unrestricted());
+        assert_eq!(codex.describe(), "Codex's own sign-in");
+
+        let key = effective
+            .subscription_for(
+                IntegrationId::Codex,
+                &BackendResource::DirectProvider {
+                    provider: "openrouter".to_owned(),
+                },
+            )
+            .unwrap()
+            .unwrap();
+        assert_eq!(key.name(), "team-key");
+        assert!(key.rules().serves_harness(IntegrationId::Codex));
+        assert!(!key.rules().serves_harness(IntegrationId::ClaudeCode));
+        assert!(
+            !key.rules().serves_harness(IntegrationId::Cursor),
+            "a non-empty allow-list admits only what it names"
+        );
+        assert_eq!(key.describe(), "API key, behind provider `openrouter`");
+
+        // No entry names this provider, and the gateway assigns its upstream
+        // at session start: both are `None`, not a guess.
+        assert_eq!(
+            effective
+                .subscription_for(
+                    IntegrationId::ClaudeCode,
+                    &BackendResource::DirectProvider {
+                        provider: "nobody-configured".to_owned(),
+                    },
+                )
+                .unwrap(),
+            None
+        );
+        assert_eq!(
+            effective
+                .subscription_for(
+                    IntegrationId::ClaudeCode,
+                    &BackendResource::GlasshouseGateway
+                )
+                .unwrap(),
+            None
+        );
+
+        // A project entry of the same name replaces the user's whole: `max`
+        // becomes Codex's sign-in with different rules, so Claude Code falls
+        // back to its default and Codex is served by the project's `max`.
+        let project: ProjectConfig = toml::from_str(
+            "version = 1\n\n[subscriptions.max]\nnative_harness = \"codex\"\n\
+             allow_tiers = [\"heavy\", \"frontier\"]\n",
+        )
+        .unwrap();
+        let effective = EffectiveConfig::new(&loaded, Some(&project));
+        let claude = effective
+            .subscription_for(IntegrationId::ClaudeCode, &BackendResource::Native)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            (claude.name(), claude.layer()),
+            ("claude-code", Layer::Default)
+        );
+        let codex = effective
+            .subscription_for(IntegrationId::Codex, &BackendResource::Native)
+            .unwrap()
+            .unwrap();
+        assert_eq!((codex.name(), codex.layer()), ("max", Layer::Project));
+        assert_eq!(
+            codex.kind(),
+            None,
+            "the project's entry replaced the kind too"
+        );
+        assert!(codex.rules().serves_tier(WorkloadTier::Heavy));
+        assert!(!codex.rules().serves_tier(WorkloadTier::Leaf));
+
+        // Every harness — and only a harness — has an entry.
+        let all = effective.subscriptions().unwrap();
+        for id in IntegrationId::ALL {
+            let has_default = all
+                .iter()
+                .any(|s| s.backing() == &SubscriptionBacking::NativeHarness(*id));
+            assert_eq!(
+                has_default,
+                id.kind() == crate::integrations::IntegrationKind::Harness,
+                "{}",
+                id.slug()
+            );
+        }
+
+        // Unknown spellings are refused by the loader, never read as "no rule".
+        for bad in [
+            "[subscriptions.x]\ndeny_tiers = [\"huge\"]\n",
+            "[subscriptions.x]\nallow_harnesses = [\"ollama\"]\n",
+            "[subscriptions.x]\nallow_harnesses = [\"Claude Code\"]\n",
+            "[subscriptions.x]\nkind = \"netflix\"\n",
+            "[subscriptions.x]\nallow_job_kinds = [\"laundry\"]\n",
+        ] {
+            assert!(
+                toml::from_str::<UserConfig>(&format!("version = 1\n\n{bad}")).is_err(),
+                "must be refused: {bad}"
+            );
+        }
+    }
+
+    /// The contradictions only the resolved set can show, each refused by
+    /// name rather than settled by picking one.
+    #[test]
+    fn contradictory_subscription_tables_are_refused_by_name() {
+        use crate::profile::BackendResource;
+
+        let both: UserConfig = toml::from_str(
+            "version = 1\n\n[subscriptions.x]\nnative_harness = \"codex\"\nprovider = \"openrouter\"\n",
+        )
+        .unwrap();
+        let err = EffectiveConfig::new(&both, None)
+            .subscriptions()
+            .unwrap_err();
+        assert!(matches!(err, SubscriptionLookupError::TwoBackings { ref name } if name == "x"));
+
+        let two_claim: UserConfig = toml::from_str(
+            "version = 1\n\n[subscriptions.a]\nnative_harness = \"codex\"\n\n\
+             [subscriptions.b]\nnative_harness = \"codex\"\n",
+        )
+        .unwrap();
+        let err = EffectiveConfig::new(&two_claim, None)
+            .subscription_for(IntegrationId::Codex, &BackendResource::Native)
+            .unwrap_err();
+        assert!(
+            matches!(
+                &err,
+                SubscriptionLookupError::AmbiguousNativeHarness { harness: IntegrationId::Codex, names }
+                    if names == &["a".to_owned(), "b".to_owned()]
+            ),
+            "{err}"
+        );
+        // Claude Code is untouched by Codex's contradiction.
+        assert!(
+            EffectiveConfig::new(&two_claim, None)
+                .subscription_for(IntegrationId::ClaudeCode, &BackendResource::Native)
+                .is_ok()
+        );
+
+        let two_providers: UserConfig = toml::from_str(
+            "version = 1\n\n[subscriptions.a]\nprovider = \"openrouter\"\n\n\
+             [subscriptions.b]\nprovider = \"openrouter\"\n",
+        )
+        .unwrap();
+        let err = EffectiveConfig::new(&two_providers, None)
+            .subscription_for(
+                IntegrationId::Codex,
+                &BackendResource::DirectProvider {
+                    provider: "openrouter".to_owned(),
+                },
+            )
+            .unwrap_err();
+        assert!(
+            matches!(&err, SubscriptionLookupError::AmbiguousProvider { provider, .. } if provider == "openrouter"),
+            "{err}"
+        );
+
+        let reserved: UserConfig =
+            toml::from_str("version = 1\n\n[subscriptions.codex]\nprovider = \"openrouter\"\n")
+                .unwrap();
+        let err = EffectiveConfig::new(&reserved, None)
+            .subscriptions()
+            .unwrap_err();
+        assert!(
+            matches!(&err, SubscriptionLookupError::NameReservedForHarness { name, harness: IntegrationId::Codex } if name == "codex"),
+            "{err}"
+        );
+
+        // An entry that names neither backing is listed and matches nothing.
+        let unstated: UserConfig =
+            toml::from_str("version = 1\n\n[subscriptions.someday]\nkind = \"gemini\"\n").unwrap();
+        let all = EffectiveConfig::new(&unstated, None)
+            .subscriptions()
+            .unwrap();
+        let someday = all.iter().find(|s| s.name() == "someday").unwrap();
+        assert_eq!(someday.backing(), &SubscriptionBacking::Unstated);
+        assert_eq!(someday.describe(), "Gemini plan, no backing stated");
+    }
+
+    /// Every [`crate::routing::disposable::JobKind`] is listed in
+    /// [`JOB_KIND_SPELLINGS`] exactly once and round-trips through its
+    /// spelling — the run-time half of the guard `job_kind_ordinal`'s
+    /// exhaustive `match` provides at compile time.
+    #[test]
+    fn every_job_kind_spelling_round_trips() {
+        for (index, kind) in JOB_KIND_SPELLINGS.into_iter().enumerate() {
+            assert_eq!(job_kind_ordinal(kind), index, "{kind} is out of order");
+            let configured = ConfiguredJobKind::parse(kind.as_str())
+                .unwrap_or_else(|| panic!("`{}` must parse", kind.as_str()));
+            assert_eq!(configured.kind(), kind);
+            let json = serde_json::to_string(&configured).unwrap();
+            let back: ConfiguredJobKind = serde_json::from_str(&json).unwrap();
+            assert_eq!(back, configured);
+        }
+        assert_eq!(
+            ConfiguredJobKind::parse("Classification"),
+            None,
+            "exact, not case-folded"
+        );
+        assert_eq!(
+            ConfiguredHarness::parse("cmux"),
+            None,
+            "cmux is not a harness"
+        );
+        assert_eq!(
+            ConfiguredHarness::parse("claude-code").map(|h| h.id()),
+            Some(IntegrationId::ClaudeCode)
         );
     }
 

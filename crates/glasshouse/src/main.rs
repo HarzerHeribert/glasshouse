@@ -689,6 +689,62 @@ fn fresh_destination_id(harness: glasshouse::integrations::IntegrationId, profil
     format!("fresh:{}:{profile}", harness.slug())
 }
 
+/// Phase 56 line 1946's producer on the routing path: the subscription a
+/// destination running `profile` would charge, as the router carries it.
+///
+/// One lookup — `EffectiveConfig::subscription_for` — shared with the launch
+/// announcement (`announce_subscription`), so the subscription the router
+/// refused or admitted is the one the person is told about. `glasshouse::
+/// routing` may not import `glasshouse::config`, which is why the resolution
+/// happens here and the router receives a value. `None` is a real answer (no
+/// entry describes this resource) and leaves the destination without a
+/// subscription constraint; a contradiction in the tables is an error that
+/// stops the routing decision rather than a guess about which entry meant it.
+fn destination_subscription(
+    effective: &EffectiveConfig<'_>,
+    profile: &glasshouse::profile::LaunchProfile,
+) -> anyhow::Result<Option<glasshouse::routing::Subscription>> {
+    Ok(effective
+        .subscription_for(profile.harness, &profile.backend)?
+        .map(|resolved| resolved.to_routing()))
+}
+
+/// Phase 56 line 1954's *"announce which subscription served each session"*,
+/// said on stderr beside the routing announcements, before the session
+/// exists. `None` is announced as what it is — no entry names this resource,
+/// or the gateway has not assigned an upstream yet — rather than as a
+/// subscription nobody configured.
+fn announce_subscription(
+    subscription: Option<&glasshouse::config::ResolvedSubscription>,
+    profile: &glasshouse::profile::LaunchProfile,
+) {
+    use glasshouse::profile::BackendResource;
+
+    match subscription {
+        Some(subscription) => {
+            let served_by = subscription.name();
+            eprintln!(
+                "glasshouse: subscription `{served_by}` ({}) will serve this session.",
+                subscription.describe()
+            );
+        }
+        None => match &profile.backend {
+            BackendResource::DirectProvider { provider } => eprintln!(
+                "glasshouse: no `[subscriptions]` entry names provider `{provider}`, so no \
+                 subscription rule applies to this session."
+            ),
+            BackendResource::GlasshouseGateway => eprintln!(
+                "glasshouse: the Glasshouse gateway assigns this session's upstream when it \
+                 starts, so no subscription is named at launch."
+            ),
+            BackendResource::Native => eprintln!(
+                "glasshouse: no subscription describes {}'s own sign-in.",
+                profile.harness.display_name()
+            ),
+        },
+    }
+}
+
 /// Which destinations a caller can actually *use*, which is not the same
 /// question as which ones exist.
 ///
@@ -811,6 +867,10 @@ fn routing_destinations(
         // destination — see `destination_tier_ceiling` for why it is read off
         // the backend's resolved model rather than off the profile.
         let ceiling = destination_tier_ceiling(effective, &backend);
+        // Phase 56 line 1954's producer: the subscription this session's
+        // profile charges, so a rule the user has since written applies to
+        // continuing it exactly as it applies to starting a fresh one.
+        let subscription = destination_subscription(effective, &profile)?;
         destinations.push(
             with_capacity(
                 with_provider_protocols(
@@ -826,7 +886,8 @@ fn routing_destinations(
                 destination_capacity(&profile, effective, &telemetry, now_unix),
             )
             .with_tier_ceiling(ceiling)
-            .with_session_context(context),
+            .with_session_context(context)
+            .with_subscription(subscription),
         );
     }
     drop(checkpoints);
@@ -870,6 +931,7 @@ fn routing_destinations(
         let profile = profile.value;
         let (backend, protocols) = destination_backend(effective, &profile, None);
         let ceiling = destination_tier_ceiling(effective, &backend);
+        let fresh_subscription = destination_subscription(effective, &profile)?;
         destinations.push(
             with_capacity(
                 with_provider_protocols(
@@ -884,7 +946,8 @@ fn routing_destinations(
                 ),
                 destination_capacity(&profile, effective, &telemetry, now_unix),
             )
-            .with_tier_ceiling(ceiling),
+            .with_tier_ceiling(ceiling)
+            .with_subscription(fresh_subscription),
         );
     }
 
@@ -3482,12 +3545,51 @@ fn launch_session(
         } else {
             glasshouse::routing::session::RoutingOverride::none()
         };
-        let routed = session_router(&effective, user_override).choose(
+        let router = session_router(&effective, user_override);
+        let routed = router.choose(
             glasshouse::routing::session::RoutingMoment::SessionStart,
             None,
             &destinations,
             &inputs,
         );
+        // Phase 56 line 1954, the half a ranking cannot express. `choose`
+        // answers `None` when every destination failed a hard constraint and
+        // there is no current session to hold — and until now this launch read
+        // that as "nowhere to go" and started `fresh_profile` anyway, the
+        // silence Phase 35D's decision 3 recorded. A destination the user's
+        // own subscription rule refused must not be started by that fallback,
+        // so the same gate is asked what it refused, and the launch stops by
+        // name. Only the subscription constraint is read here: a protocol or
+        // tool-semantics refusal of the sole destination keeps the behaviour it
+        // had, which `profile::resolve` already refuses on its own terms.
+        let nowhere_to_go = routed.is_none();
+        if nowhere_to_go
+            && let Some(refused) = router.refused(&destinations, &inputs).into_iter().find(
+                |(destination, constraint)| {
+                    destination.is_fresh()
+                        && destination.launch_profile() == fresh_profile
+                        && matches!(
+                            constraint,
+                            glasshouse::routing::HardConstraint::Subscription { .. }
+                        )
+                },
+            )
+        {
+            let (_, constraint) = refused;
+            let name = match &constraint {
+                glasshouse::routing::HardConstraint::Subscription { subscription, .. } => {
+                    subscription.clone()
+                }
+                _ => unreachable!("filtered to the subscription constraint above"),
+            };
+            eprintln!(
+                "glasshouse: not starting this session — {}, and launch profile `{fresh_profile}` \
+                 would charge it. Change the rule under `[subscriptions.{name}]`, or launch \
+                 under a profile whose subscription serves this work.",
+                constraint.reason().unwrap_or_default()
+            );
+            return Ok(ExitCode::FAILURE);
+        }
         if let Some(classified) = &classified {
             // The classification the decision just acted on, in the same words
             // `glasshouse route --task` prints — including whether line 1459's
@@ -3679,6 +3781,39 @@ fn launch_session(
             return Ok(ExitCode::FAILURE);
         }
     };
+
+    // Phase 56 line 1954, on the path that starts a session: which
+    // subscription it will be charged to, said before anything is recorded or
+    // started — and the harness half of that subscription's rule applied once
+    // more here, through the same `SubscriptionRules::refusal` the router
+    // asked, for the one launch the router never saw: line 1712's routing-off
+    // launch, where `routing_destinations` and `choose` do not run at all. A
+    // rule about *this harness* needs no classification to apply; the tier
+    // half does, and it is the router's (above). A contradiction in the
+    // `[subscriptions]` tables is refused here for the same reason a bad
+    // profile is: it must cost nothing.
+    let subscription =
+        match effective.subscription_for(launch_profile.harness, &launch_profile.backend) {
+            Ok(subscription) => subscription,
+            Err(err) => {
+                eprintln!("glasshouse: {err}");
+                return Ok(ExitCode::FAILURE);
+            }
+        };
+    if let Some(subscription) = &subscription
+        && let Some(refused) = subscription.rules().refusal(launch_profile.harness, None)
+    {
+        eprintln!(
+            "glasshouse: not starting this session — subscription `{}` does not serve {refused}, \
+             and launch profile `{}` would charge it. Change the rule under `[subscriptions.{}]`, \
+             or launch under a profile whose subscription serves this work.",
+            subscription.name(),
+            launch_profile.name,
+            subscription.name()
+        );
+        return Ok(ExitCode::FAILURE);
+    }
+    announce_subscription(subscription.as_ref(), &launch_profile);
 
     // Phase 9K: the response profile is resolved *here*, on the production
     // launch path, through the same `EffectiveConfig::response_profile`
@@ -7800,6 +7935,28 @@ fn resume_session(
             }
         }
     });
+
+    // Phase 56 line 1954 on the path that continues a session — reached by
+    // `glasshouse resume` and by a launch the router steered into an existing
+    // session. The profile is re-read the way `routing_destinations` reads it
+    // for a recorded session, with the same fallback to the implied Native
+    // profile, so the announcement names the subscription the router weighed.
+    // Announced and not gated: a session that already exists on this resource
+    // is one the person asked to continue, and a resume is not the moment to
+    // refuse — the comment above `overlay_resolution` says the same of an
+    // overlay that no longer resolves.
+    {
+        let profile = record
+            .launch_profile
+            .as_deref()
+            .and_then(|name| effective.launch_profile(name, selection.id()).ok())
+            .map(|layered| layered.value)
+            .unwrap_or_else(|| glasshouse::profile::LaunchProfile::native(selection.id()));
+        match effective.subscription_for(profile.harness, &profile.backend) {
+            Ok(subscription) => announce_subscription(subscription.as_ref(), &profile),
+            Err(err) => eprintln!("glasshouse: {err}"),
+        }
+    }
 
     // The response profile a fresh session opened under this record's role
     // would get today. Not the five axes stored on the record — those are a

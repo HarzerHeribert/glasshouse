@@ -529,7 +529,14 @@ impl RoutingExplanation {
 /// [`Self::WorkloadTier`] carries the two tiers it compared, because "below
 /// the minimum tier" is only readable next to which tier was required and
 /// which was offered — see [`Self::reason`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+///
+/// [`Self::Subscription`] — Phase 56 line 1954 — carries the subscription's
+/// **name** and what it refused, because *"never charge a task to a
+/// subscription the user's rules did not allow"* is only inspectable when the
+/// explanation says which subscription and which rule. A name is a `String`,
+/// which is why this type is no longer `Copy`: the one caller that copied a
+/// constraint (`session::SessionRouter::apply_override`) clones it instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HardConstraint {
     Protocol,
     ToolSemantics,
@@ -543,10 +550,22 @@ pub enum HardConstraint {
         required: classify::WorkloadTier,
         offered: classify::WorkloadTier,
     },
+    /// Line 1954. The subscription that would be charged for this destination
+    /// has a rule — [`SubscriptionRules`] — that does not admit the harness
+    /// or the tier this work would run as. Raised by
+    /// `session::hard_constraint` from the [`Subscription`] the caller
+    /// attached to the destination; a destination with no subscription
+    /// attached is never given this constraint, for the same reason an
+    /// unknown ceiling is never given [`Self::WorkloadTier`].
+    Subscription {
+        /// The `[subscriptions.<name>]` key, as the user wrote it.
+        subscription: String,
+        refused: SubscriptionRefusal,
+    },
 }
 
 impl HardConstraint {
-    pub fn as_str(self) -> &'static str {
+    pub fn as_str(&self) -> &'static str {
         match self {
             Self::Protocol => "protocol",
             Self::ToolSemantics => "tool semantics",
@@ -554,17 +573,24 @@ impl HardConstraint {
             Self::Privacy => "privacy",
             Self::UserConstraint => "user constraint",
             Self::WorkloadTier { .. } => "workload tier",
+            Self::Subscription { .. } => "subscription",
         }
     }
 
     /// The sentence a person reads beside a rejection, for the constraints
     /// that carry enough to write one. `None` for the five that name only
     /// their kind — their explanations live at the site that raised them.
-    pub fn reason(self) -> Option<String> {
+    pub fn reason(&self) -> Option<String> {
         match self {
             Self::WorkloadTier { required, offered } => Some(format!(
                 "the task needs at least the `{required}` tier and this destination is \
                  established to offer at most `{offered}`"
+            )),
+            Self::Subscription {
+                subscription,
+                refused,
+            } => Some(format!(
+                "subscription `{subscription}` does not serve {refused}"
             )),
             Self::Protocol
             | Self::ToolSemantics
@@ -578,6 +604,227 @@ impl HardConstraint {
 impl std::fmt::Display for HardConstraint {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.pad(self.as_str())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 56, lines 1946, 1947 and 1954 — a subscription as a routing resource
+// with rules of its own.
+// ---------------------------------------------------------------------------
+
+/// Which half of a subscription's rules refused a destination — the thing a
+/// [`HardConstraint::Subscription`] names after the subscription itself.
+///
+/// Two halves and not three: the job-kind half of [`SubscriptionRules`] is
+/// consulted by no session router, because a session has no job kind — a
+/// [`disposable::JobKind`] is Glasshouse's own bounded support work, which
+/// `disposable::DisposableRouting` routes and which does not construct this
+/// type. See [`SubscriptionRules::serves_job_kind`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SubscriptionRefusal {
+    /// The rules do not admit this harness.
+    Harness(crate::integrations::IntegrationId),
+    /// The rules do not admit the tier this work would run as.
+    Tier(classify::WorkloadTier),
+}
+
+impl std::fmt::Display for SubscriptionRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Harness(harness) => write!(f, "harness `{}`", harness.slug()),
+            Self::Tier(tier) => write!(f, "the `{tier}` tier"),
+        }
+    }
+}
+
+/// What a subscription may and may never be charged for — map line 1947.
+///
+/// Six lists in three pairs, each pair an allow-list and a deny-list over one
+/// axis: harnesses, workload tiers, job kinds. The resolution rule is the same
+/// for every axis and lives in exactly one private function, `admits`:
+///
+/// - **deny wins over allow** — a value on both lists is refused;
+/// - **an empty allow-list means everything not denied** — a subscription
+///   nobody restricted serves whatever asks, which is what makes the default
+///   entry for a harness's own sign-in ([`Self::UNRESTRICTED`]) change
+///   nothing for a user who configured nothing;
+/// - **a non-empty allow-list admits only what it names.**
+///
+/// A rules value carries no name and no knowledge of what a subscription *is*
+/// — a Claude plan, an API key — because the router never decides on those:
+/// [`Subscription`] carries the name, and the kind stays in configuration,
+/// where the announcement that reads it lives. This module never reads
+/// configuration; `crate::config::EffectiveConfig::subscription_for` resolves
+/// one of these from the user's `[subscriptions.<name>]` tables and the caller
+/// attaches it to a `session::Destination`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SubscriptionRules {
+    allow_harnesses: Vec<crate::integrations::IntegrationId>,
+    deny_harnesses: Vec<crate::integrations::IntegrationId>,
+    allow_tiers: Vec<classify::WorkloadTier>,
+    deny_tiers: Vec<classify::WorkloadTier>,
+    allow_job_kinds: Vec<disposable::JobKind>,
+    deny_job_kinds: Vec<disposable::JobKind>,
+}
+
+impl SubscriptionRules {
+    /// No rule on any axis: serves every harness, every tier, every job kind.
+    /// The rules a harness's own sign-in carries when the user configured no
+    /// `[subscriptions]` entry for it.
+    pub const UNRESTRICTED: Self = Self {
+        allow_harnesses: Vec::new(),
+        deny_harnesses: Vec::new(),
+        allow_tiers: Vec::new(),
+        deny_tiers: Vec::new(),
+        allow_job_kinds: Vec::new(),
+        deny_job_kinds: Vec::new(),
+    };
+
+    #[must_use]
+    pub fn allow_harnesses(
+        mut self,
+        harnesses: impl IntoIterator<Item = crate::integrations::IntegrationId>,
+    ) -> Self {
+        self.allow_harnesses = harnesses.into_iter().collect();
+        self
+    }
+
+    #[must_use]
+    pub fn deny_harnesses(
+        mut self,
+        harnesses: impl IntoIterator<Item = crate::integrations::IntegrationId>,
+    ) -> Self {
+        self.deny_harnesses = harnesses.into_iter().collect();
+        self
+    }
+
+    #[must_use]
+    pub fn allow_tiers(mut self, tiers: impl IntoIterator<Item = classify::WorkloadTier>) -> Self {
+        self.allow_tiers = tiers.into_iter().collect();
+        self
+    }
+
+    #[must_use]
+    pub fn deny_tiers(mut self, tiers: impl IntoIterator<Item = classify::WorkloadTier>) -> Self {
+        self.deny_tiers = tiers.into_iter().collect();
+        self
+    }
+
+    #[must_use]
+    pub fn allow_job_kinds(mut self, kinds: impl IntoIterator<Item = disposable::JobKind>) -> Self {
+        self.allow_job_kinds = kinds.into_iter().collect();
+        self
+    }
+
+    #[must_use]
+    pub fn deny_job_kinds(mut self, kinds: impl IntoIterator<Item = disposable::JobKind>) -> Self {
+        self.deny_job_kinds = kinds.into_iter().collect();
+        self
+    }
+
+    /// Whether no axis carries a rule — the [`Self::UNRESTRICTED`] shape,
+    /// however it was built.
+    pub fn is_unrestricted(&self) -> bool {
+        *self == Self::UNRESTRICTED
+    }
+
+    /// The one resolution rule, over one axis: deny wins, an empty allow-list
+    /// admits everything not denied, a non-empty one admits only its members.
+    fn admits<T: PartialEq>(allow: &[T], deny: &[T], value: &T) -> bool {
+        let denied = deny.contains(value);
+        let allowed = allow.is_empty() || allow.contains(value);
+        allowed && !denied
+    }
+
+    pub fn serves_harness(&self, harness: crate::integrations::IntegrationId) -> bool {
+        Self::admits(&self.allow_harnesses, &self.deny_harnesses, &harness)
+    }
+
+    pub fn serves_tier(&self, tier: classify::WorkloadTier) -> bool {
+        Self::admits(&self.allow_tiers, &self.deny_tiers, &tier)
+    }
+
+    /// The job-kind half of line 1947, resolved by the same rule as the other
+    /// two. **No router in this build consults it yet**: a session has no job
+    /// kind, and the router for Glasshouse's own support jobs
+    /// (`disposable::DisposableRouting`) ranks candidates that carry no
+    /// subscription. It is resolved here rather than dropped so that the
+    /// day that router gains one, the rule it applies is this one and not a
+    /// second spelling of it.
+    pub fn serves_job_kind(&self, kind: disposable::JobKind) -> bool {
+        Self::admits(&self.allow_job_kinds, &self.deny_job_kinds, &kind)
+    }
+
+    /// Line 1954's question for one destination: why these rules refuse to
+    /// serve `harness` at `tier`, or `None` when they admit it.
+    ///
+    /// The harness half is always asked. The tier half is asked only when a
+    /// tier is *established* — `None` is "no task was stated", and a rule
+    /// about tiers has nothing to compare against then, exactly as
+    /// [`HardConstraint::WorkloadTier`] is never raised against an unknown
+    /// ceiling. An allow-list of tiers therefore does not refuse a launch
+    /// that stated no task; it refuses a task whose tier it does not name.
+    pub fn refusal(
+        &self,
+        harness: crate::integrations::IntegrationId,
+        tier: Option<classify::WorkloadTier>,
+    ) -> Option<SubscriptionRefusal> {
+        if !self.serves_harness(harness) {
+            return Some(SubscriptionRefusal::Harness(harness));
+        }
+        if let Some(tier) = tier
+            && !self.serves_tier(tier)
+        {
+            return Some(SubscriptionRefusal::Tier(tier));
+        }
+        None
+    }
+}
+
+/// A subscription as the router sees it — map line 1946: a named resource
+/// with rules, separate from the harness that consumes it.
+///
+/// Exactly two facts, because they are the two the router acts on: the name,
+/// so a refusal and an announcement can say which subscription; and the
+/// rules. Which plan it is, which credential backs it and which harness's
+/// sign-in it stands for are configuration facts the router never decides on,
+/// and they stay in `crate::config`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Subscription {
+    name: String,
+    rules: SubscriptionRules,
+}
+
+impl Subscription {
+    pub fn new(name: impl Into<String>, rules: SubscriptionRules) -> Self {
+        Self {
+            name: name.into(),
+            rules,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn rules(&self) -> &SubscriptionRules {
+        &self.rules
+    }
+
+    /// [`SubscriptionRules::refusal`], as the hard constraint the router
+    /// raises — the one place a rule becomes a [`HardConstraint`].
+    pub fn constraint(
+        &self,
+        harness: crate::integrations::IntegrationId,
+        tier: Option<classify::WorkloadTier>,
+    ) -> Result<(), HardConstraint> {
+        match self.rules.refusal(harness, tier) {
+            Some(refused) => Err(HardConstraint::Subscription {
+                subscription: self.name.clone(),
+                refused,
+            }),
+            None => Ok(()),
+        }
     }
 }
 
