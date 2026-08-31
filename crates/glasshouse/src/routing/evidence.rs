@@ -206,11 +206,77 @@ pub const EXTRACTION_PURPOSE: &str = "memory-extraction";
 /// requests with rows no model ever served.
 pub const ROUTING_LATENCY_PURPOSE: &str = "routing-latency";
 
+/// What `routing_observations.purpose` records when the session router
+/// **escalated** the tier a decision prefers — capability map line 1566,
+/// written by `main.rs`'s `record_tier_movement` on the launch path (the
+/// path that acts; `glasshouse route` reports and records nothing).
+///
+/// Spelled here beside [`CLASSIFICATION_PURPOSE`] for its reason, and read
+/// back by [`RoutingOverhead`] into its own bucket: a movement row is not a
+/// model call and carries no tokens, so it must be neither counted as one
+/// nor left to the unstamped bucket as though no producer had named it.
+///
+/// **The row records that a movement happened and its direction, and
+/// nothing else.** The tiers it moved between and the destination it landed
+/// on have no column, and adding one is a migration this producer's package
+/// may not make; it writes the same `glasshouse`/`session-router` identity
+/// [`ROUTING_LATENCY_PURPOSE`]'s producer writes, so it can never blend into
+/// a real model's latency summary.
+pub const TIER_ESCALATION_PURPOSE: &str = "tier-escalation";
+
+/// [`TIER_ESCALATION_PURPOSE`]'s other direction — line 1566 asks for both,
+/// and a reader counting one must not have to subtract the other.
+pub const TIER_DOWNGRADE_PURPOSE: &str = "tier-downgrade";
+
 /// How far back [`EvidenceLedger::classification_record`] and the routing
 /// economics readers look — seven days, the same window the shell's
 /// route-evidence view already uses, so a routing model's record and the
 /// route table beside it agree on what "recent" means.
 pub const CLASSIFICATION_EVIDENCE_WINDOW_SECONDS: i64 = 7 * 24 * 60 * 60;
+
+/// What a row written by `main.rs`'s failover-prevention sink says: a
+/// gateway failover was steered off a route whose failures **correlate**
+/// with the failed backend's — capability map line 1852's measurement, one
+/// row per steered failover, counted back by purpose and never as an
+/// exchange.
+///
+/// Spelled here beside [`CLASSIFICATION_PURPOSE`] for the reason
+/// [`ROUTING_LATENCY_PURPOSE`] gives: one producer, one reader, one word.
+///
+/// **A row under this purpose is not an exchange and not a model call.** It
+/// carries no outcome, no failure class and no tokens, so every reader keyed
+/// on `outcome` ([`FailureClassCounts::record`]) ignores it by construction,
+/// [`RoutingOverhead::from_consumption`] skips it by name, and
+/// [`correlate_routes`] — which would otherwise read its own consequence
+/// back as evidence — excludes it explicitly.
+pub const CORRELATION_PURPOSE: &str = "route-correlation";
+
+/// How far apart two exchanges' windows may sit and still be *the same
+/// moment* for [`correlate_routes`] — capability map line 1370's
+/// "temporally overlapping", with the tolerance named rather than assumed.
+///
+/// Sixty seconds. The overlap this reader most needs to see is the one a
+/// failover produces on its own: the failed backend's exchange ends, and the
+/// route it failed over to starts its first exchange seconds later. Those
+/// two windows never literally intersect — one ends before the other begins
+/// — and a tolerance of zero would make every failover's most informative
+/// pair of rows invisible. A minute covers that gap with room for a slow
+/// client; an hour would fold two separate incidents into one. The
+/// conservative error is to see *fewer* overlaps: a missed overlap leaves a
+/// pair at [`CorrelationVerdict::InsufficientEvidence`] — no correlation,
+/// line 1378's safe side — while an invented one penalises a route that did
+/// nothing wrong.
+pub const CORRELATION_OVERLAP_TOLERANCE_SECONDS: i64 = 60;
+
+/// How many informative failure events a pair of routes needs before
+/// [`RouteCorrelation::verdict`] reports a confidence at all — line 1376's
+/// "sufficient overlapping observations."
+///
+/// The same five as [`MIN_SAMPLE_FOR_SUMMARY`], on purpose: this ledger has
+/// one answer to "how many observations before a figure is trusted", and a
+/// second number here would make a correlation trustworthy at a count a
+/// failure rate computed from the same rows is not.
+pub const MIN_CORRELATION_SAMPLE: usize = MIN_SAMPLE_FOR_SUMMARY;
 
 /// The fraction of task spend above which [`RoutingOverhead::exceeds`] says
 /// so — capability map line 1466's *"non-trivial fraction of the resources
@@ -446,6 +512,22 @@ impl FailureClass {
             | Self::CredentialFailure
             | Self::RequestIncompatibility => false,
         }
+    }
+
+    /// Whether a failure of this class on one route says anything about
+    /// another route failing at the same moment — the classes
+    /// [`correlate_routes`] matches on, capability map line 1373.
+    ///
+    /// Two and only two. An `Upstream5xx` is the provider's own
+    /// infrastructure answering that it is broken, and two front doors
+    /// answering so together is the strongest signal this ledger holds that
+    /// they are one door. A `Throttle` is a limiter firing, and two limiters
+    /// firing together is the "matching serving behaviour" the line names.
+    /// Everything else is about the credential, the request, or a transport
+    /// this build cannot attribute to either side — a `CredentialFailure` on
+    /// two routes at once is two bad keys, not one shared upstream.
+    pub fn is_correlatable(self) -> bool {
+        matches!(self, Self::Upstream5xx | Self::Throttle)
     }
 
     fn index(self) -> usize {
@@ -801,6 +883,23 @@ impl RoutingObservation {
         }
         (completed - dispatched).checked_mul(1000)
     }
+
+    /// The wall-clock span this exchange occupied, as `(start_unix,
+    /// end_unix)` — the same shape [`AggregateReading::window`] and
+    /// [`ObservedIdentity::window`] return — and the interval
+    /// [`correlate_routes`] tests for overlap.
+    ///
+    /// `dispatched_at` and `completed_at` when the producer recorded them
+    /// (the gateway always does); `observed_at` stands in for either end a
+    /// producer left absent, so a row that recorded only when it was written
+    /// is a point in time rather than no interval at all. An end before its
+    /// start — the case [`Self::duration_ms`] answers `None` to — is clamped
+    /// to the start rather than producing a negative span.
+    pub fn window(&self) -> (i64, i64) {
+        let start = self.dispatched_at_unix.unwrap_or(self.observed_at_unix);
+        let end = self.completed_at_unix.unwrap_or(self.observed_at_unix);
+        (start, end.max(start))
+    }
 }
 
 /// Everything that can go wrong reading or writing the evidence ledger.
@@ -1030,6 +1129,259 @@ impl ObservedIdentity {
     }
 }
 
+/// One route as [`correlate_routes`] tells routes apart: the `provider` and
+/// `model` already on every [`RoutingObservation`] — capability map line
+/// 1373's "provider metadata", and nothing fetched from anywhere.
+///
+/// `model` is part of the identity because line 1373 asks for
+/// *model-specific* 5xx events: two providers whose `claude-x` both fail at
+/// once may share an upstream for that model and nothing else, and a
+/// correlation keyed on provider alone would carry that pair's evidence to
+/// models it was never observed on. The ledger's `route` column (the wire
+/// protocol) is deliberately **not** part of it: the question is whether two
+/// front doors lead to one room, and the protocol spoken at the door does
+/// not change what is behind it.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct RouteIdentity {
+    pub provider: String,
+    pub model: String,
+}
+
+impl RouteIdentity {
+    pub fn new(provider: impl Into<String>, model: impl Into<String>) -> Self {
+        Self {
+            provider: provider.into(),
+            model: model.into(),
+        }
+    }
+}
+
+impl std::fmt::Display for RouteIdentity {
+    /// `provider/model` — what every explanation and report prints.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}/{}", self.provider, self.model)
+    }
+}
+
+/// What [`RouteCorrelation::verdict`] answers — capability map line 1376.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum CorrelationVerdict {
+    /// Fewer than [`MIN_CORRELATION_SAMPLE`] informative events — line
+    /// 1376's refusal, carrying the count so a reader prints *2 of 5* rather
+    /// than *unknown*. **A consumer treats this exactly as no correlation.**
+    InsufficientEvidence { sample_size: usize, required: usize },
+    /// Enough events to say something, and what they say: the share of them
+    /// in which the other route failed the same way at the same moment.
+    Measured { confidence: f64, sample_size: usize },
+}
+
+/// What this project's ledger has observed about whether two routes fail
+/// together — capability map lines 1370, 1373, 1374 and 1376, as one value.
+///
+/// # What is counted
+///
+/// An **informative failure event** is a correlatable failure
+/// ([`FailureClass::is_correlatable`]) on one route during which the other
+/// route was *observed at all* — had an exchange with a recorded outcome
+/// whose window overlaps the failure's within
+/// [`CORRELATION_OVERLAP_TOLERANCE_SECONDS`]. A failure while the other
+/// route was idle says nothing about the pair and is counted nowhere: line
+/// 1370's "measured, never assumed" cuts both ways, and treating an
+/// unobserved route as having survived would manufacture independence.
+///
+/// Of the informative events, `overlaps` are those where the other route
+/// failed with the **same class** inside the tolerance, and `lone` are those
+/// where it was observed and did not. Each failure event is matched at most
+/// once, so a burst of five on each side is ten events and not twenty-five
+/// pairs.
+///
+/// # Why the confidence moves both ways (line 1374)
+///
+/// [`Self::confidence`] is `overlaps / (overlaps + lone)`. A new overlapping
+/// failure raises it; a new failure the other route sat out lowers it.
+/// Nothing here is a stored flag: the value is recomputed from the rows on
+/// every read and never persisted, because the rows are the claim and the
+/// rows keep arriving.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteCorrelation {
+    routes: (RouteIdentity, RouteIdentity),
+    overlaps: usize,
+    lone: usize,
+}
+
+impl RouteCorrelation {
+    /// A pair nothing has been observed about — zero events, which
+    /// [`Self::verdict`] reports as insufficient with a count of zero.
+    pub fn unmeasured(a: RouteIdentity, b: RouteIdentity) -> Self {
+        let routes = if a <= b { (a, b) } else { (b, a) };
+        Self {
+            routes,
+            overlaps: 0,
+            lone: 0,
+        }
+    }
+
+    /// The two routes, in a fixed order so `(a, b)` and `(b, a)` are the
+    /// same pair.
+    pub fn routes(&self) -> (&RouteIdentity, &RouteIdentity) {
+        (&self.routes.0, &self.routes.1)
+    }
+
+    /// Failure events the other route failed the same way during.
+    pub fn overlaps(&self) -> usize {
+        self.overlaps
+    }
+
+    /// Failure events the other route was observed during and did not
+    /// fail the same way.
+    pub fn lone(&self) -> usize {
+        self.lone
+    }
+
+    /// Every informative failure event — the denominator, and the count
+    /// line 1376 requires beside any confidence.
+    pub fn sample_size(&self) -> usize {
+        self.overlaps + self.lone
+    }
+
+    /// Line 1376: a confidence only once [`MIN_CORRELATION_SAMPLE`] events
+    /// exist, and otherwise the count that fell short.
+    pub fn verdict(&self) -> CorrelationVerdict {
+        let sample_size = self.sample_size();
+        if sample_size < MIN_CORRELATION_SAMPLE {
+            return CorrelationVerdict::InsufficientEvidence {
+                sample_size,
+                required: MIN_CORRELATION_SAMPLE,
+            };
+        }
+        CorrelationVerdict::Measured {
+            confidence: self.overlaps as f64 / sample_size as f64,
+            sample_size,
+        }
+    }
+
+    /// [`Self::verdict`]'s confidence, or `None` below the minimum — the
+    /// shape a consumer composes with, where absent contributes nothing.
+    pub fn confidence(&self) -> Option<f64> {
+        match self.verdict() {
+            CorrelationVerdict::Measured { confidence, .. } => Some(confidence),
+            CorrelationVerdict::InsufficientEvidence { .. } => None,
+        }
+    }
+}
+
+/// Every pair of routes [`correlate_routes`] found anything about, looked
+/// up by either ordering of the pair. [`Default`] is the empty set — every
+/// pair unmeasured — which is what a caller with no ledger passes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RouteCorrelations {
+    pairs: std::collections::BTreeMap<(RouteIdentity, RouteIdentity), RouteCorrelation>,
+}
+
+impl RouteCorrelations {
+    /// What is known about `a` and `b` failing together — never `None`: a
+    /// pair with no rows is [`RouteCorrelation::unmeasured`], so "nothing
+    /// observed" and "too little observed" reach a consumer as the same
+    /// verdict rather than as two shapes to handle.
+    pub fn between(&self, a: &RouteIdentity, b: &RouteIdentity) -> RouteCorrelation {
+        let key = if a <= b {
+            (a.clone(), b.clone())
+        } else {
+            (b.clone(), a.clone())
+        };
+        self.pairs
+            .get(&key)
+            .cloned()
+            .unwrap_or_else(|| RouteCorrelation::unmeasured(key.0, key.1))
+    }
+
+    /// Every pair with at least one informative event, in route order.
+    pub fn iter(&self) -> impl Iterator<Item = &RouteCorrelation> {
+        self.pairs.values()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.pairs.is_empty()
+    }
+}
+
+/// Whether two windows touch, or come within `tolerance` seconds of it.
+fn overlaps_within(a: (i64, i64), b: (i64, i64), tolerance: i64) -> bool {
+    a.0 <= b.1.saturating_add(tolerance) && b.0 <= a.1.saturating_add(tolerance)
+}
+
+/// Fold every correlatable failure in `failing` into `into`, judged against
+/// what `other` was doing at the time — see [`RouteCorrelation`] for the
+/// three outcomes an event can have.
+fn count_failures_against(
+    failing: &[&RoutingObservation],
+    other: &[&RoutingObservation],
+    into: &mut RouteCorrelation,
+) {
+    for failure in failing {
+        let Some(class) = failure
+            .failure_class
+            .filter(|class| class.is_correlatable())
+        else {
+            continue;
+        };
+        let window = failure.window();
+        let mut observed = false;
+        let mut matched = false;
+        for row in other {
+            if !overlaps_within(window, row.window(), CORRELATION_OVERLAP_TOLERANCE_SECONDS) {
+                continue;
+            }
+            observed = true;
+            if row.failure_class == Some(class) {
+                matched = true;
+                break;
+            }
+        }
+        match (observed, matched) {
+            (false, _) => {}
+            (true, true) => into.overlaps += 1,
+            (true, false) => into.lone += 1,
+        }
+    }
+}
+
+/// Capability map lines 1370, 1373, 1374 and 1376 as one pure function over
+/// raw rows, so every decision in it — the tolerance, the class match, the
+/// route identity, the minimum — is reachable by a test with no database.
+/// [`EvidenceLedger::route_correlations`] is the one door that feeds it.
+///
+/// Rows with no recorded outcome never inform a pair (an exchange nobody
+/// judged is not evidence the route was up), and rows written under
+/// [`CORRELATION_PURPOSE`] are this function's own consequence and are never
+/// read back as its cause.
+pub fn correlate_routes(observations: &[RoutingObservation]) -> RouteCorrelations {
+    let mut by_route: std::collections::BTreeMap<RouteIdentity, Vec<&RoutingObservation>> =
+        Default::default();
+    for row in observations {
+        if row.outcome.is_none() || row.purpose.as_deref() == Some(CORRELATION_PURPOSE) {
+            continue;
+        }
+        by_route
+            .entry(RouteIdentity::new(&row.provider, &row.model))
+            .or_default()
+            .push(row);
+    }
+    let routes: Vec<&RouteIdentity> = by_route.keys().collect();
+    let mut pairs = std::collections::BTreeMap::new();
+    for (index, a) in routes.iter().enumerate() {
+        for b in &routes[index + 1..] {
+            let mut correlation = RouteCorrelation::unmeasured((*a).clone(), (*b).clone());
+            count_failures_against(&by_route[*a], &by_route[*b], &mut correlation);
+            count_failures_against(&by_route[*b], &by_route[*a], &mut correlation);
+            if correlation.sample_size() > 0 {
+                pairs.insert(((*a).clone(), (*b).clone()), correlation);
+            }
+        }
+    }
+    RouteCorrelations { pairs }
+}
+
 /// Request and token consumption for one `(purpose, harness_recorded)`
 /// group, within a queried window — capability map line 1464's "measure
 /// routing-model token and request consumption separately from coding-agent
@@ -1155,7 +1507,7 @@ pub struct RoutingOverhead {
     ///
     /// **This stays the line-1466 denominator and keeps its meaning**, and
     /// the four fields below are its breakdown rather than a partition that
-    /// replaces it: `extraction + routing_latency + coding_agent +
+    /// replaces it: `extraction + routing_latency + tier_movement + coding_agent +
     /// unstamped == task_requests` exactly, by construction.
     pub task_requests: usize,
     pub task_tokens: Option<i64>,
@@ -1172,6 +1524,12 @@ pub struct RoutingOverhead {
     /// is honestly absent rather than zero.
     pub routing_latency_requests: usize,
     pub routing_latency_tokens: Option<i64>,
+    /// Rows whose `purpose` is [`TIER_ESCALATION_PURPOSE`] or
+    /// [`TIER_DOWNGRADE_PURPOSE`] — line 1566's record of the session
+    /// router moving the tier it prefers. No tokens by construction, for
+    /// [`ROUTING_LATENCY_PURPOSE`]'s reason.
+    pub tier_movement_requests: usize,
+    pub tier_movement_tokens: Option<i64>,
     /// Rows no producer stamped that **did** name a harness — the gateway
     /// relay, and today nothing else. This is *"interactive coding cost"* as
     /// lines 1832 and 1833 use the phrase, and it is the one side of the
@@ -1231,9 +1589,18 @@ impl RoutingOverhead {
                     &mut overhead.extraction_requests,
                     &mut overhead.extraction_tokens,
                 ),
+                // Line 1852's rows: one per steered failover, no tokens and
+                // no request to any model. Not spend on either side of line
+                // 1466's comparison, so neither a bucket nor the denominator
+                // — see `CORRELATION_PURPOSE`'s own doc comment.
+                Some(CORRELATION_PURPOSE) => continue,
                 Some(ROUTING_LATENCY_PURPOSE) => (
                     &mut overhead.routing_latency_requests,
                     &mut overhead.routing_latency_tokens,
+                ),
+                Some(TIER_ESCALATION_PURPOSE | TIER_DOWNGRADE_PURPOSE) => (
+                    &mut overhead.tier_movement_requests,
+                    &mut overhead.tier_movement_tokens,
                 ),
                 None if group.harness_recorded => (
                     &mut overhead.coding_agent_requests,
@@ -1594,6 +1961,55 @@ impl EvidenceLedger {
         Ok(out)
     }
 
+    /// Every pair of routes this project has observed failing or serving at
+    /// the same moments, over the window ending at `now_unix` — lines 1370,
+    /// 1373, 1374 and 1376's reader, and the one door
+    /// `crate::gateway::session::SessionRouting::observe_exchange` reaches
+    /// [`correlate_routes`] through.
+    ///
+    /// Reads every outcome-carrying row in the window in one pass and hands
+    /// them to the pure function rather than joining in SQL: the overlap
+    /// tolerance, the class match and the minimum are decisions, and a
+    /// decision belongs where a test reaches it without a database. Rows
+    /// with no outcome never inform a pair (see [`RouteCorrelation`]), so
+    /// the query leaves them on disk.
+    ///
+    /// Called once per provider failure, not per exchange: a failover is a
+    /// small minority of exchanges, and a full-window read at that moment
+    /// costs less than keeping a correlation warm across every exchange that
+    /// moved nothing.
+    pub fn route_correlations(
+        &self,
+        now_unix: i64,
+        window_seconds: i64,
+    ) -> Result<RouteCorrelations, EvidenceLedgerError> {
+        let earliest = now_unix.saturating_sub(window_seconds);
+        let observations = {
+            let conn = self.lock();
+            let mut statement = conn
+                .prepare(
+                    "SELECT * FROM routing_observations
+                     WHERE project_id = ?1
+                       AND observed_at >= ?2 AND observed_at <= ?3
+                       AND outcome IS NOT NULL
+                     ORDER BY observed_at ASC",
+                )
+                .map_err(sql_err("read routing observations for correlation"))?;
+            let rows = statement
+                .query_map(
+                    params![self.project_id, earliest, now_unix],
+                    row_to_observation,
+                )
+                .map_err(sql_err("read routing observations for correlation"))?;
+            let mut observations = Vec::new();
+            for row in rows {
+                observations.push(row.map_err(sql_err("read a routing observation"))??);
+            }
+            observations
+        };
+        Ok(correlate_routes(&observations))
+    }
+
     /// [`Self::summarize`] for whichever `(route, harness, context_state)`
     /// this `(provider, model)` was most recently observed under — additive,
     /// because a caller that only knows a routing selection's provider and
@@ -1662,6 +2078,57 @@ impl EvidenceLedger {
             now_unix,
             window_seconds,
         )?))
+    }
+
+    /// Capability map line 1564's producer: the [`FailureClass`] of the
+    /// **most recent** exchange this project recorded against `(provider,
+    /// model)` within the window — `Ok(None)` when nothing was recorded, or
+    /// the latest row carried no class (it succeeded, or a producer wrote a
+    /// verdict without a kind).
+    ///
+    /// The latest row and not a count: line 1564 says *after* a clearly
+    /// attributable failure, and "the last thing that happened on this
+    /// backend" is the attribution this ledger can honestly make — rows
+    /// carry no session id, so a count over the window would mix in every
+    /// other session's exchanges. `main.rs`'s task-boundary `route` path
+    /// reads it for the destination the work is on and hands it to
+    /// `SessionRouter::with_retry_after`, which promotes one tier on a
+    /// [`FailureClass::RequestIncompatibility`] or
+    /// [`FailureClass::EmptyCompletion`] and on nothing else.
+    ///
+    /// Scoped to this ledger's `project_id`, like [`Self::observed_identities`].
+    pub fn latest_failure_class_for_model(
+        &self,
+        provider: &str,
+        model: &str,
+        now_unix: i64,
+        window_seconds: i64,
+    ) -> Result<Option<FailureClass>, EvidenceLedgerError> {
+        let earliest = now_unix.saturating_sub(window_seconds);
+        let stored: Option<Option<String>> = {
+            let conn = self.lock();
+            conn.query_row(
+                "SELECT failure_class
+                 FROM routing_observations
+                 WHERE project_id = ?1 AND provider = ?2 AND model = ?3
+                   AND observed_at >= ?4 AND observed_at <= ?5
+                 ORDER BY observed_at DESC, seq DESC
+                 LIMIT 1",
+                params![self.project_id, provider, model, earliest, now_unix],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(sql_err("find the most recent failure class for a model"))?
+        };
+        match stored.flatten() {
+            None => Ok(None),
+            Some(text) => FailureClass::from_stored(&text).map(Some).ok_or(
+                EvidenceLedgerError::UnknownAggregateValue {
+                    column: "failure_class",
+                    value: text,
+                },
+            ),
+        }
     }
 
     /// The distinct `(provider, model, route, context_state)` identities
@@ -2262,6 +2729,65 @@ mod tests {
         NewObservation::new(provider, model)
             .with_route(Some("anthropic-messages"))
             .with_harness(Some("claude-code"))
+    }
+
+    /// Line 1564's producer: the **latest** row decides, a succeeded latest
+    /// row answers `None` even after earlier failures, and a pair nobody
+    /// recorded answers `None` rather than borrowing a neighbour's history.
+    #[test]
+    fn the_latest_failure_class_is_the_most_recent_rows_and_nothing_older() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let ledger = fixture.ledger();
+        let record = |at: i64, outcome: Outcome, class: Option<FailureClass>| {
+            ledger
+                .record(
+                    observation("alpha", "mid")
+                        .with_timing(Some(at), Some(at))
+                        .with_outcome(outcome)
+                        .with_failure_class(class),
+                    at,
+                )
+                .unwrap();
+        };
+
+        assert_eq!(
+            ledger
+                .latest_failure_class_for_model("alpha", "mid", 1_000, 600)
+                .unwrap(),
+            None
+        );
+        record(900, Outcome::Failed, Some(FailureClass::Throttle));
+        record(950, Outcome::Failed, Some(FailureClass::EmptyCompletion));
+        assert_eq!(
+            ledger
+                .latest_failure_class_for_model("alpha", "mid", 1_000, 600)
+                .unwrap(),
+            Some(FailureClass::EmptyCompletion),
+            "the most recent row, not the first or the most frequent"
+        );
+        record(980, Outcome::Succeeded, None);
+        assert_eq!(
+            ledger
+                .latest_failure_class_for_model("alpha", "mid", 1_000, 600)
+                .unwrap(),
+            None,
+            "a success after a failure is not a failure to promote on"
+        );
+        assert_eq!(
+            ledger
+                .latest_failure_class_for_model("alpha", "other-model", 1_000, 600)
+                .unwrap(),
+            None,
+            "another model's history is not this one's"
+        );
+        assert_eq!(
+            ledger
+                .latest_failure_class_for_model("alpha", "mid", 2_000, 600)
+                .unwrap(),
+            None,
+            "outside the window there is no history"
+        );
     }
 
     #[test]
@@ -3260,5 +3786,280 @@ mod tests {
             .expect("target-model was observed");
         assert_eq!(summary.route.as_deref(), Some("route-a"));
         assert_eq!(*summary.median_duration_ms.unwrap().value(), 2_000);
+    }
+}
+
+/// Capability map lines 1370, 1373, 1374 and 1376 on the pure function,
+/// with no database — each test here is the named killer of one of the
+/// packet's four mutations, and the helpers build rows the way the gateway
+/// producer writes them (a window, an outcome, a class when it failed).
+#[cfg(test)]
+mod correlation_tests {
+    use super::*;
+
+    fn row(
+        provider: &str,
+        model: &str,
+        start: i64,
+        end: i64,
+        class: Option<FailureClass>,
+    ) -> RoutingObservation {
+        RoutingObservation {
+            seq: 0,
+            project_id: "project".to_owned(),
+            observed_at_unix: end,
+            provider: provider.to_owned(),
+            model: model.to_owned(),
+            route: Some("anthropic-messages".to_owned()),
+            quota_context: None,
+            harness: Some("claude-code".to_owned()),
+            purpose: None,
+            dispatched_at_unix: Some(start),
+            first_byte_at_unix: None,
+            first_token_at_unix: None,
+            first_tool_call_at_unix: None,
+            completed_at_unix: Some(end),
+            input_tokens: None,
+            output_tokens: None,
+            cached_input_tokens: None,
+            cost: None,
+            tool_rounds: None,
+            retries: None,
+            repairs: None,
+            failovers: None,
+            outcome: Some(if class.is_some() {
+                Outcome::Failed
+            } else {
+                Outcome::Succeeded
+            }),
+            failure_class: class,
+            context_state: ContextState::Unknown,
+        }
+    }
+
+    fn five_xx(provider: &str, start: i64) -> RoutingObservation {
+        row(
+            provider,
+            "the-model",
+            start,
+            start + 5,
+            Some(FailureClass::Upstream5xx),
+        )
+    }
+
+    fn served(provider: &str, start: i64) -> RoutingObservation {
+        row(provider, "the-model", start, start + 5, None)
+    }
+
+    fn route(provider: &str) -> RouteIdentity {
+        RouteIdentity::new(provider, "the-model")
+    }
+
+    /// Line 1370 — kills *drop the overlap test*. Two 5xx thirty seconds
+    /// apart are one moment; two 5xx sixty-one seconds apart (measured from
+    /// the first window's end) are two, and the second one, with the other
+    /// route serving in between, is a lone failure rather than an overlap.
+    #[test]
+    fn an_overlap_is_measured_within_the_tolerance_and_not_beyond_it() {
+        let rows = vec![
+            five_xx("a", 0),
+            five_xx("b", 30),
+            five_xx("a", 1_000),
+            served("b", 1_010),
+            five_xx("b", 1_005 + CORRELATION_OVERLAP_TOLERANCE_SECONDS + 1),
+        ];
+        let pair = correlate_routes(&rows).between(&route("a"), &route("b"));
+        assert_eq!(
+            (pair.overlaps(), pair.lone()),
+            (2, 1),
+            "a's first failure and b's answer to it are one overlap each way; a's second \
+             failure saw b serving and b's late failure saw nobody: {pair:?}"
+        );
+    }
+
+    /// Line 1373 — kills *match on class only* in its provider-metadata
+    /// half: the identity is `(provider, model)`, so `b/x` failing beside
+    /// `a/x` says nothing about `b/y`, which was serving at the time.
+    #[test]
+    fn a_correlation_is_model_specific_not_provider_wide() {
+        let rows = vec![
+            five_xx("a", 0),
+            five_xx("b", 10),
+            row("b", "other-model", 10, 15, None),
+        ];
+        let correlations = correlate_routes(&rows);
+        let same_model = correlations.between(&route("a"), &route("b"));
+        assert_eq!((same_model.overlaps(), same_model.lone()), (2, 0));
+        let other_model =
+            correlations.between(&route("a"), &RouteIdentity::new("b", "other-model"));
+        assert_eq!(
+            (other_model.overlaps(), other_model.lone()),
+            (0, 1),
+            "the other model on the same provider was observed serving through a's failure, \
+             and that is evidence against it sharing a's failure domain: {other_model:?}"
+        );
+    }
+
+    /// Line 1373 — kills *match on class only* in its serving-behaviour
+    /// half: a credential failure beside a 5xx, or a throttle beside a 5xx,
+    /// is the other route being observed and **not** failing the same way.
+    #[test]
+    fn a_different_failure_class_at_the_same_moment_is_not_a_match() {
+        let rows = vec![
+            five_xx("a", 0),
+            row(
+                "b",
+                "the-model",
+                10,
+                15,
+                Some(FailureClass::CredentialFailure),
+            ),
+            row("a", "the-model", 100, 105, Some(FailureClass::Throttle)),
+            five_xx("b", 110),
+        ];
+        let pair = correlate_routes(&rows).between(&route("a"), &route("b"));
+        assert_eq!(
+            (pair.overlaps(), pair.lone()),
+            (0, 3),
+            "a's 5xx saw a bad key, a's throttle saw a 5xx, b's 5xx saw a throttle — three \
+             observed failures, none matched: {pair:?}"
+        );
+    }
+
+    /// Line 1374 — kills *freeze the confidence*: the same pair read three
+    /// times as rows arrive goes 1.00, then down to 0.50, then up to 0.75.
+    #[test]
+    fn new_rows_move_the_confidence_both_ways() {
+        let mut rows = Vec::new();
+        for i in 0..5 {
+            rows.push(five_xx("a", i * 1_000));
+            rows.push(five_xx("b", i * 1_000 + 10));
+        }
+        let first = correlate_routes(&rows).between(&route("a"), &route("b"));
+        assert_eq!(first.confidence(), Some(1.0), "{first:?}");
+
+        for i in 0..10 {
+            rows.push(five_xx("a", 100_000 + i * 1_000));
+            rows.push(served("b", 100_000 + i * 1_000 + 10));
+        }
+        let second = correlate_routes(&rows).between(&route("a"), &route("b"));
+        assert_eq!(second.confidence(), Some(0.5), "{second:?}");
+
+        for i in 0..10 {
+            rows.push(five_xx("a", 200_000 + i * 1_000));
+            rows.push(five_xx("b", 200_000 + i * 1_000 + 10));
+        }
+        let third = correlate_routes(&rows).between(&route("a"), &route("b"));
+        assert_eq!(third.confidence(), Some(0.75), "{third:?}");
+        assert_eq!(third.sample_size(), 40);
+    }
+
+    /// Line 1376 — kills *ignore the minimum*: four informative events is
+    /// insufficient, says so with both numbers, and yields no confidence;
+    /// the fifth makes it a measurement.
+    #[test]
+    fn below_the_minimum_sample_the_verdict_is_insufficient_and_says_the_count() {
+        let mut rows = vec![
+            five_xx("a", 0),
+            five_xx("b", 10),
+            five_xx("a", 1_000),
+            five_xx("b", 1_010),
+        ];
+        let short = correlate_routes(&rows).between(&route("a"), &route("b"));
+        assert_eq!(
+            short.verdict(),
+            CorrelationVerdict::InsufficientEvidence {
+                sample_size: 4,
+                required: MIN_CORRELATION_SAMPLE,
+            }
+        );
+        assert_eq!(short.confidence(), None);
+
+        rows.push(five_xx("a", 2_000));
+        rows.push(served("b", 2_010));
+        let enough = correlate_routes(&rows).between(&route("a"), &route("b"));
+        assert_eq!(
+            enough.verdict(),
+            CorrelationVerdict::Measured {
+                confidence: 0.8,
+                sample_size: 5,
+            }
+        );
+    }
+
+    /// Line 1370's other half: a failure while the other route was idle is
+    /// not evidence of independence, and a pair nobody has observed together
+    /// is unmeasured rather than absent.
+    #[test]
+    fn a_failure_while_the_other_route_was_idle_informs_nothing() {
+        let rows = vec![five_xx("a", 0), served("b", 10_000)];
+        let correlations = correlate_routes(&rows);
+        assert!(correlations.is_empty());
+        let pair = correlations.between(&route("b"), &route("a"));
+        assert_eq!(pair.sample_size(), 0);
+        assert_eq!(
+            pair.routes(),
+            (&route("a"), &route("b")),
+            "either order is the same pair"
+        );
+    }
+
+    /// The reader never feeds on its own output or on rows nobody judged:
+    /// a `CORRELATION_PURPOSE` row and an outcome-less row beside a failure
+    /// leave that failure uninformative.
+    #[test]
+    fn a_correlation_row_and_an_unjudged_row_are_not_evidence() {
+        let mut steer = served("b", 10);
+        steer.purpose = Some(CORRELATION_PURPOSE.to_owned());
+        let mut unjudged = served("b", 20);
+        unjudged.outcome = None;
+        let rows = vec![five_xx("a", 0), steer, unjudged];
+        assert!(correlate_routes(&rows).is_empty());
+    }
+
+    /// Line 1852's rows are not spend on either side of line 1466.
+    #[test]
+    fn from_consumption_leaves_correlation_rows_out_of_every_bucket() {
+        let groups = [
+            PurposeConsumption {
+                purpose: Some(CORRELATION_PURPOSE.to_owned()),
+                harness_recorded: false,
+                sample_count: 3,
+                input_tokens: None,
+                output_tokens: None,
+                cached_input_tokens: None,
+                first_byte_sample_count: 0,
+                mean_time_to_first_byte_ms: None,
+            },
+            PurposeConsumption {
+                purpose: Some("a-purpose-this-build-does-not-know".to_owned()),
+                harness_recorded: false,
+                sample_count: 2,
+                input_tokens: None,
+                output_tokens: None,
+                cached_input_tokens: None,
+                first_byte_sample_count: 0,
+                mean_time_to_first_byte_ms: None,
+            },
+        ];
+        let overhead = RoutingOverhead::from_consumption(&groups);
+        assert_eq!(
+            (overhead.task_requests, overhead.unstamped_requests),
+            (2, 2),
+            "the unknown purpose still degrades visibly into unstamped; the correlation rows \
+             are nowhere: {overhead:?}"
+        );
+    }
+
+    #[test]
+    fn a_window_falls_back_to_observed_at_and_never_runs_backwards() {
+        let mut point = served("a", 100);
+        point.dispatched_at_unix = None;
+        point.completed_at_unix = None;
+        point.observed_at_unix = 42;
+        assert_eq!(point.window(), (42, 42));
+        let mut backwards = served("a", 100);
+        backwards.completed_at_unix = Some(50);
+        assert_eq!(backwards.window(), (100, 100));
     }
 }

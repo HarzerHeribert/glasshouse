@@ -25,6 +25,7 @@ use glasshouse::routing::classify::{
 use glasshouse::routing::disposable::{
     DisposableCandidate, DisposableRouting, JobKind, MeteredUse, NoResource,
 };
+use glasshouse::routing::evidence::RouteCorrelations;
 use glasshouse::routing::free::{
     FreePool, FreePreferences, FreeResource, FreeResourceKey, PoolReading, WorkloadOutcome,
 };
@@ -460,6 +461,7 @@ mod order_dependence {
             PairingPreference::Strong,
             &PairingOverrides::default(),
             &NoObservations,
+            &RouteCorrelations::default(),
         );
         let reversed = routing.on_provider_failure(
             &current,
@@ -468,6 +470,7 @@ mod order_dependence {
             PairingPreference::Strong,
             &PairingOverrides::default(),
             &NoObservations,
+            &RouteCorrelations::default(),
         );
 
         for (label, response) in [
@@ -507,6 +510,7 @@ mod order_dependence {
             PairingPreference::Strong,
             &PairingOverrides::default(),
             &NoObservations,
+            &RouteCorrelations::default(),
         );
         match a_first {
             FailureResponse::FailOver { to, .. } => assert_eq!(to.provider(), "kilo"),
@@ -520,6 +524,7 @@ mod order_dependence {
             PairingPreference::Strong,
             &PairingOverrides::default(),
             &NoObservations,
+            &RouteCorrelations::default(),
         );
         match b_first {
             FailureResponse::FailOver { to, .. } => assert_eq!(
@@ -600,6 +605,7 @@ mod identity {
             PairingPreference::Strong,
             &PairingOverrides::default(),
             &NoObservations,
+            &RouteCorrelations::default(),
         );
 
         match response {
@@ -632,6 +638,7 @@ mod identity {
             PairingPreference::Strong,
             &PairingOverrides::default(),
             &NoObservations,
+            &RouteCorrelations::default(),
         );
 
         match response {
@@ -1055,6 +1062,7 @@ mod failure_domain {
             PairingPreference::Off,
             &PairingOverrides::default(),
             &NoObservations,
+            &RouteCorrelations::default(),
         );
 
         match response {

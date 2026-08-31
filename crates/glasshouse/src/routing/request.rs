@@ -942,6 +942,16 @@ impl StickyClassification {
         self.recorded_at_unix
     }
 
+    /// The classification this record stores, when this build can read it —
+    /// Phase 36 line 1582's producer, read by `main.rs::routing_destinations`
+    /// for the session [`Self::session`] names and attached to that
+    /// destination as its last classified task. `None` on a record from a
+    /// build with a different vocabulary, exactly as [`Self::reuse_for`]
+    /// refuses one.
+    pub fn classification(&self) -> Option<TaskClassification> {
+        self.classification.classification()
+    }
+
     /// The bytes a caller writes. Pretty, because a person may read the file.
     pub fn to_json(&self) -> Result<Vec<u8>, serde_json::Error> {
         serde_json::to_vec_pretty(self)

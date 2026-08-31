@@ -3928,3 +3928,21 @@ the batch of five instead of five gates — practice §87's trap 2 applied.
 multi-file firing, `710394d`) and `mutate.sh --script` (false KILLED on every
 deletion row, `efd6e65`). Register drift corrected: P2 closed, `with_purpose`
 exists, 1129 refused in-source, 514 wrongly offered by the handoff.
+
+
+## Batch 58 outcomes — 2026-08-31, three Fable packages in one hour
+
+Dispatched sequentially the hour batch 57 landed (`d46ed16`), all three
+Fable 5 at xhigh with mutual co-edits declared on `session.rs`, `evidence.rs`
+and `main.rs`. All three reported within ~50 minutes. **21 lines, 21 boxes,
+39 mutations killed, 0 survived.**
+
+| package | lines | boxes | mutations | notable |
+|---|---|---|---|---|
+| escalation | 35C 1559–1566 | 8 | 12/12 | shipped without gate lines; integration's gate stands in and the evidence says so |
+| affinity | 36 1581–1588 | 8 | 16/16 | one number kept, seven facets behind it; four packet anchors corrected |
+| route-correlation | 33C ×4 + 1852 | 5 | 11/11 | the reader `phase-33c.md:101` named as missing; EXPECTED FILES omitted its only production caller |
+
+Integration: two clean applies, one import-union conflict, one real
+cross-package seam (`session_affinity`'s widened signature) — found by
+`cargo check` on the merged tree, not by any report. Gate: one for the three.

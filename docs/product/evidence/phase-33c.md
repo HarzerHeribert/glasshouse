@@ -295,3 +295,139 @@ relay's own structural scan (`body_bytes_relayed` → `Framing.relayed`);
 paths; `Timeout` has no live producer (kept because the map names it and the
 mapping is real code on the path — in tension with `database.rs`'s "variants
 follow producers" rule, and said so).
+
+### Lines 1370, 1373, 1374, 1376 — temporal route correlation, with a sample size
+
+Package `GH-ROUTE-CORRELATION`, 2026-08-31, Fable 5 at xhigh. The reader `phase-33c.md:101` said was missing now exists: `correlate_routes` over `RoutingObservation` rows joins routes by overlapping failure windows and matching class, and yields `RouteCorrelations` with a `CorrelationVerdict` per pair. `CORRELATION_OVERLAP_TOLERANCE_SECONDS = 60` is argued from the conservative side — a missed overlap lands on `InsufficientEvidence`, line 1378's safe side, while an invented one penalises a route that did nothing wrong. `MIN_CORRELATION_SAMPLE` is deliberately `MIN_SAMPLE_FOR_SUMMARY` (5): the ledger keeps one answer to *how many observations before a figure is trusted*. `CORRELATION_PURPOSE` rows are excluded from the reader's own input so it cannot read its consequence back as evidence. The production caller is `gateway/session.rs:604` (`observe_exchange`, the only caller of `on_provider_failure`), which the packet's EXPECTED FILES had omitted and the worker added with its reason. Eleven mutations, eleven killed; 61-target blast radius, exit 0.
+
+### Measure temporally overlapping failures between routes rather than assuming different front doors are independent providers. (line 1370)
+
+Contract: Given routing observations on two or more routes, when Glasshouse asks whether two routes fail together, it counts a failure on one route against what the other route was observed doing within CORRELATION_OVERLAP_TOLERANCE_SECONDS of it — overlap, lone, or uninformative when the other route was idle — while preserving that an unobserved route is never read as independent and that a same-provider pair is judged by identity, not by overlap.
+
+State: COMPLETE — ruled 2026-08-31 by the orchestrator from the report's five artifacts and the diff of the decision.
+
+Production evidence:
+- `src/routing/evidence.rs` — `correlate_routes`
+- `src/routing/evidence.rs` — `overlaps_within`
+- `src/routing/evidence.rs` — `CORRELATION_OVERLAP_TOLERANCE_SECONDS`
+- `src/routing/evidence.rs` — `RoutingObservation::window`
+- `src/routing/evidence.rs` — `EvidenceLedger::route_correlations`
+- `src/gateway/session.rs` — `SessionRouting::observe_exchange`
+
+Regression evidence:
+- `routing::evidence::correlation_tests::an_overlap_is_measured_within_the_tolerance_and_not_beyond_it`
+- `routing::evidence::correlation_tests::a_failure_while_the_other_route_was_idle_informs_nothing`
+- `gateway::session::tests::observe_exchange_steers_a_real_failover_off_a_route_the_ledger_shows_failing_with_it`
+- `route_correlation::correlations_are_read_from_a_real_ledger_with_their_sample_size_and_window`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| if !overlaps_within(window, row.window(), CORRELATION_OVERLAP_TOLERANCE_SECONDS) { -> if false { | `remove-guard` | **killed** | `routing::evidence::correlation_tests::an_overlap_is_measured_within_the_tolerance_and_not_beyond_it` |
+| explanation.push(contribution); -> let _ = contribution; | `skip-state-update` | **killed** | `routing::interactive::tests::on_provider_failure_steers_off_a_measured_correlation_and_names_the_route` |
+| gateway/session.rs: &correlations, -> &RouteCorrelations::default(), | `skip-state-update` | **killed** | `gateway::session::tests::observe_exchange_steers_a_real_failover_off_a_route_the_ledger_shows_failing_with_it` |
+
+> remove-guard observed: assertion `left == right` failed: ... RouteCorrelation { overlaps: 4, lone: 0 } (expected (2, 1))
+
+> skip-state-update observed: a route observed failing with the failed backend every time must lose to one with no such record, even though it is configured first
+
+> skip-state-update observed: a route the ledger shows failing at the same moments as the failed backend must lose the failover to one it shows serving through them, even though it is configured first
+
+Recorded scope limits — stated by the worker, not discovered later:
+- Throttle overlap is proven in the pure function only; the gateway-level test uses Upstream5xx
+- No Windows leg
+
+
+---
+
+
+### Treat correlated model-specific 5xx events, matching provider metadata, or matching serving behavior as evidence of a shared failure domain. (line 1373)
+
+Contract: Given two failures at the same moment, when Glasshouse decides whether they are one shared-domain event, it requires the same failure class (Upstream5xx or Throttle) and keys the pair by the provider and model already on the rows, fetching nothing — while preserving that a different class beside a failure is evidence the other route did not share it, and that the wire-protocol `route` column plays no part.
+
+State: COMPLETE — ruled 2026-08-31 by the orchestrator from the report's five artifacts and the diff of the decision.
+
+Production evidence:
+- `src/routing/evidence.rs` — `FailureClass::is_correlatable`
+- `src/routing/evidence.rs` — `RouteIdentity`
+- `src/routing/evidence.rs` — `count_failures_against`
+- `src/routing/interactive.rs` — `route_correlation_contribution`
+
+Regression evidence:
+- `routing::evidence::correlation_tests::a_correlation_is_model_specific_not_provider_wide`
+- `routing::evidence::correlation_tests::a_different_failure_class_at_the_same_moment_is_not_a_match`
+- `routing::interactive::tests::a_same_provider_candidate_carries_no_correlation_term`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| RouteIdentity::new(&row.provider, &row.model) -> RouteIdentity::new(&row.provider, "") | `alter-boundary` | **killed** | `routing::evidence::correlation_tests::a_correlation_is_model_specific_not_provider_wide` |
+| if row.failure_class == Some(class) { -> if row.failure_class.is_some() { | `invert-condition` | **killed** | `routing::evidence::correlation_tests::a_different_failure_class_at_the_same_moment_is_not_a_match` |
+
+> alter-boundary observed: assertion `left == right` failed at evidence.rs:3750 — the same-model pair read back unmeasured
+
+> invert-condition observed: three observed failures, none matched: RouteCorrelation { overlaps: 3, lone: 0 }
+
+Recorded scope limits — stated by the worker, not discovered later:
+- The line's third clause, `matching serving behavior`, is read as same-class-at-the-same-moment; no latency or framing signature is compared
+
+
+---
+
+
+### Preserve route-topology claims as confidence-weighted observations that can change when new evidence arrives. (line 1374)
+
+Contract: Given a pair of routes, when Glasshouse states how likely they are to share a failure domain, it states a confidence in [0,1] recomputed from the rows on every read that new overlapping failures raise and new lone failures lower, and the router weighs it as that share of a shared provider's penalty — while preserving that nothing is stored as a same-provider flag and that FailureDomain::between still never returns Independent.
+
+State: COMPLETE — ruled 2026-08-31 by the orchestrator from the report's five artifacts and the diff of the decision.
+
+Production evidence:
+- `src/routing/evidence.rs` — `RouteCorrelation::verdict`
+- `src/routing/evidence.rs` — `RouteCorrelation::confidence`
+- `src/routing/interactive.rs` — `correlation_penalty`
+- `src/routing/interactive.rs` — `route_correlation_contribution`
+
+Regression evidence:
+- `routing::evidence::correlation_tests::new_rows_move_the_confidence_both_ways`
+- `routing::interactive::tests::on_provider_failure_steers_off_a_measured_correlation_and_names_the_route`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| confidence: self.overlaps as f64 / sample_size as f64, -> confidence: 1.0, | `freeze-value` | **killed** | `routing::evidence::correlation_tests::new_rows_move_the_confidence_both_ways` |
+
+> freeze-value observed: assertion `left == right` failed: RouteCorrelation { overlaps: 10, lone: 10 } (expected Some(0.5))
+
+Recorded scope limits — stated by the worker, not discovered later:
+- The confidence is a plain ratio; no recency weighting inside the window
+
+
+---
+
+
+### Require sufficient overlapping observations and expose sample size before presenting a route correlation as meaningful. (line 1376)
+
+Contract: Given fewer than MIN_CORRELATION_SAMPLE informative failure events for a pair, when Glasshouse reports or weighs that pair, it reports InsufficientEvidence with the count and the requirement, contributes exactly 0.0 to the ranking, and `glasshouse route` prints the sample size before any confidence — while preserving that a measured pair prints its overlaps of its sample size beside the confidence.
+
+State: COMPLETE — ruled 2026-08-31 by the orchestrator from the report's five artifacts and the diff of the decision.
+
+Production evidence:
+- `src/routing/evidence.rs` — `MIN_CORRELATION_SAMPLE`
+- `src/routing/evidence.rs` — `CorrelationVerdict`
+- `src/routing/interactive.rs` — `route_correlation_contribution`
+- `src/main.rs` — `route_correlations_section`
+
+Regression evidence:
+- `routing::evidence::correlation_tests::below_the_minimum_sample_the_verdict_is_insufficient_and_says_the_count`
+- `routing::interactive::tests::on_provider_failure_treats_insufficient_correlation_evidence_exactly_as_none`
+- `route_correlation::the_route_command_prints_every_pairs_sample_size_before_any_correlation`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| if sample_size < MIN_CORRELATION_SAMPLE { -> if sample_size < 1 { | `alter-boundary` | **killed** | `routing::evidence::correlation_tests::below_the_minimum_sample_the_verdict_is_insufficient_and_says_the_count` |
+| same change, judged at the router | `alter-boundary` | **killed** | `routing::interactive::tests::on_provider_failure_treats_insufficient_correlation_evidence_exactly_as_none` |
+
+> alter-boundary observed: assertion `left == right` failed at evidence.rs:3827 — four events reported as Measured
+
+> alter-boundary observed: assertion `left == right` failed: configuration order still decides
+
+Recorded scope limits — stated by the worker, not discovered later:
+- The `glasshouse route` test drives the shipped binary on macOS only
+

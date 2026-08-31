@@ -76,6 +76,7 @@ use crate::integrations::IntegrationId;
 use crate::routing::{HardConstraint, apply_hard_constraints};
 
 use super::domain::FailureDomain;
+use super::evidence::{CorrelationVerdict, RouteCorrelations, RouteIdentity};
 use super::{Backend, CacheLocality, Contribution, RoutingExplanation, ToolSemantics};
 
 /// The backend serving one live gateway-backed session, and the harness it is
@@ -713,6 +714,15 @@ impl InteractiveRouting {
     /// `self.pin` is session *policy* state that a pin or an unpin replaces
     /// wholesale, while a resolved preference must survive that replacement
     /// unchanged.
+    ///
+    /// `correlations` is Phase 33C lines 1370–1376's answer to *do these
+    /// two front doors fail together* — read off the same ledger as
+    /// `evidence`, by the same caller, and passed beside it for the same
+    /// reason: this function stays pure. [`RouteCorrelations::default`]
+    /// (every pair unmeasured) reproduces the ranking exactly as it was
+    /// before that package, which is what every test here that passes it
+    /// checks.
+    #[allow(clippy::too_many_arguments)]
     pub fn on_provider_failure(
         &self,
         current: &Assignment,
@@ -721,6 +731,7 @@ impl InteractiveRouting {
         preference: PairingPreference,
         overrides: &pairing::PairingOverrides,
         evidence: &dyn ObservationSource,
+        correlations: &RouteCorrelations,
     ) -> FailureResponse {
         let _ = failure;
 
@@ -770,6 +781,15 @@ impl InteractiveRouting {
                     // and evidenced like every other contribution here — see
                     // `failure_domain_contribution`'s own doc comment.
                     explanation.push(failure_domain_contribution(current.backend(), candidate));
+                    // Phase 33C lines 1370–1376: what the ledger has
+                    // *measured* about this pair failing together, as its
+                    // own term beside the provider-identity one — see
+                    // `route_correlation_contribution`.
+                    if let Some(contribution) =
+                        route_correlation_contribution(current.backend(), candidate, correlations)
+                    {
+                        explanation.push(contribution);
+                    }
                     if candidate.model() == current.backend().model() {
                         // Line 513: the same model, served elsewhere. Every
                         // one found is kept; the best-scoring one is what
@@ -1032,6 +1052,96 @@ fn failure_domain_contribution(current: &Backend, candidate: &Backend) -> Contri
 /// *not prevented* and would look exactly like a correct measurement.
 const FAILURE_DOMAIN_TERM: &str = "failure-domain diversity";
 
+/// The name [`route_correlation_contribution`] gives its [`Contribution`],
+/// and the key [`best`] removes to rank a third time — capability map line
+/// 1852's derivation, with the same one-spelling rule as
+/// [`FAILURE_DOMAIN_TERM`] and for the same reason.
+const ROUTE_CORRELATION_TERM: &str = "route correlation";
+
+/// The `(provider, model)` a backend is observed under in the evidence
+/// ledger — the same two strings `gateway::session` writes on every row.
+fn route_of(backend: &Backend) -> RouteIdentity {
+    RouteIdentity::new(backend.provider(), backend.model().label())
+}
+
+/// Capability map lines 1370, 1373, 1374 and 1376 at the one place a
+/// correlation changes a decision: what the ledger has **measured** about
+/// `candidate` failing at the same moments as the backend that just failed.
+///
+/// # A sibling of `failure_domain_contribution`, not a change to it
+///
+/// [`FailureDomain::between`] is a certainty about provider identity and
+/// stays exactly what it was; this term is evidence about behaviour, and it
+/// is only ever consulted for a pair that identity calls
+/// [`FailureDomain::Unknown`]. A same-provider candidate gets [`None`] here:
+/// the provider term already carries the whole penalty, and a second term
+/// for the same fact would count it twice. Keeping the two terms apart is
+/// also what keeps line 1851's count meaning what `glasshouse route` prints
+/// beside it — *steered off a candidate sharing the failed backend's
+/// provider* — while line 1852 is derived from this term alone.
+///
+/// # What the magnitude is
+///
+/// [`RouteCorrelation::confidence`] scaled by [`SHARED_FAILURE_DOMAIN_PENALTY`]:
+/// a pair observed failing together every time is penalised exactly as a
+/// shared provider is, a pair that never did is penalised nothing, and a
+/// pair between moves between — line 1374's "confidence-weighted", with the
+/// weight recomputed from the rows on every failover rather than stored.
+///
+/// # Line 1376
+///
+/// Below [`super::evidence::MIN_CORRELATION_SAMPLE`] events the term is
+/// `0.0` — indistinguishable in the ranking from no correlation at all —
+/// and its detail says how many of how many, so the explanation `glasshouse
+/// route` prints names the sample size before anything reads as meaningful.
+fn route_correlation_contribution(
+    current: &Backend,
+    candidate: &Backend,
+    correlations: &RouteCorrelations,
+) -> Option<Contribution> {
+    if FailureDomain::between(current, candidate) == FailureDomain::Shared {
+        return None;
+    }
+    let failed = route_of(current);
+    let route = route_of(candidate);
+    let correlation = correlations.between(&failed, &route);
+    Some(match correlation.verdict() {
+        CorrelationVerdict::InsufficientEvidence {
+            sample_size,
+            required,
+        } => Contribution::new(
+            ROUTE_CORRELATION_TERM,
+            0.0,
+            format!(
+                "`{route}` and `{failed}` have been observed at the same moment in {sample_size} \
+                 of the {required} failures a correlation needs — insufficient evidence, \
+                 treated as no correlation"
+            ),
+        ),
+        CorrelationVerdict::Measured {
+            confidence,
+            sample_size,
+        } => Contribution::new(
+            ROUTE_CORRELATION_TERM,
+            correlation_penalty(confidence),
+            format!(
+                "`{route}` failed the same way as `{failed}` at the same moment in {} of \
+                 {sample_size} observed failures — correlation {confidence:.2}, weighed as that \
+                 share of a shared provider's penalty",
+                correlation.overlaps()
+            ),
+        ),
+    })
+}
+
+/// [`SHARED_FAILURE_DOMAIN_PENALTY`] scaled by a confidence in `[0, 1]`,
+/// with a zero confidence yielding `0.0` rather than IEEE's `-0.0` so an
+/// explanation never prints a signed nothing.
+fn correlation_penalty(confidence: f64) -> f64 {
+    let penalty = SHARED_FAILURE_DOMAIN_PENALTY * confidence;
+    if penalty == 0.0 { 0.0 } else { penalty }
+}
+
 /// What the failure-domain term did to one ranking — **capability map line
 /// 1851**, derived rather than decided.
 ///
@@ -1065,6 +1175,13 @@ const FAILURE_DOMAIN_TERM: &str = "failure-domain diversity";
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FailureDomainEffect {
     displaced: Option<String>,
+    /// Capability map line 1852, derived the same way one paragraph up:
+    /// the route the **correlation** term displaced, when removing that one
+    /// term alone would have made it win. Always a candidate on a
+    /// different provider than the failed backend's — the only kind that
+    /// term ever scores — which is exactly the line's *"nominally different
+    /// routes"* that turned out to share failure resilience.
+    correlation_displaced: Option<RouteIdentity>,
 }
 
 impl FailureDomainEffect {
@@ -1086,6 +1203,18 @@ impl FailureDomainEffect {
     /// nothing by leaving the rest out.
     pub fn displaced(&self) -> Option<&str> {
         self.displaced.as_deref()
+    }
+
+    /// Line 1852: the correlation term changed which candidate won.
+    pub fn correlation_steered(&self) -> bool {
+        self.correlation_displaced.is_some()
+    }
+
+    /// The route the correlation term steered this failover off — a route
+    /// on a different provider whose observed failures overlap the failed
+    /// backend's — or [`None`] when that term changed nothing.
+    pub fn correlation_displaced(&self) -> Option<&RouteIdentity> {
+        self.correlation_displaced.as_ref()
     }
 }
 
@@ -1116,8 +1245,24 @@ fn best(
         let backend = candidates[without_index].0.backend();
         format!("{}/{}", backend.provider(), backend.model().label())
     });
+    // Line 1852, by the same construction with the other term: the same
+    // vector, the same order, only the correlation term's magnitude taken
+    // back out. The provider-identity term stays in both rankings, so this
+    // comparison isolates what the *measured* correlation did.
+    let without_correlation_index = argmax(&candidates, |explanation| {
+        explanation.total() - route_correlation_magnitude(explanation)
+    });
+    let correlation_displaced = (without_correlation_index != best_index)
+        .then(|| route_of(candidates[without_correlation_index].0.backend()));
     let (assignment, explanation) = candidates.swap_remove(best_index);
-    (assignment, explanation, FailureDomainEffect { displaced })
+    (
+        assignment,
+        explanation,
+        FailureDomainEffect {
+            displaced,
+            correlation_displaced,
+        },
+    )
 }
 
 /// The index of the highest `score`, preferring the first on a tie — the
@@ -1147,6 +1292,19 @@ fn failure_domain_magnitude(explanation: &RoutingExplanation) -> f64 {
         .contributions()
         .iter()
         .filter(|contribution| contribution.name() == FAILURE_DOMAIN_TERM)
+        .map(Contribution::magnitude)
+        .sum()
+}
+
+/// What [`route_correlation_contribution`] put into this explanation,
+/// summed — `0.0` when the pair was same-provider, unmeasured, or below the
+/// minimum sample, and for every explanation built anywhere but
+/// [`InteractiveRouting::on_provider_failure`].
+fn route_correlation_magnitude(explanation: &RoutingExplanation) -> f64 {
+    explanation
+        .contributions()
+        .iter()
+        .filter(|contribution| contribution.name() == ROUTE_CORRELATION_TERM)
         .map(Contribution::magnitude)
         .sum()
 }
@@ -1710,6 +1868,7 @@ mod tests {
             PairingPreference::Strong,
             &pairing::PairingOverrides::default(),
             &NoObservations,
+            &RouteCorrelations::default(),
         );
 
         match response {
@@ -1737,6 +1896,7 @@ mod tests {
             PairingPreference::Strong,
             &pairing::PairingOverrides::default(),
             &NoObservations,
+            &RouteCorrelations::default(),
         );
         match response {
             FailureResponse::OfferMigration { to, .. } => {
@@ -1768,6 +1928,7 @@ mod tests {
             PairingPreference::Strong,
             &pairing::PairingOverrides::default(),
             &NoObservations,
+            &RouteCorrelations::default(),
         );
 
         match response {
@@ -1814,6 +1975,7 @@ mod tests {
             PairingPreference::Strong,
             &pairing::PairingOverrides::default(),
             &NoObservations,
+            &RouteCorrelations::default(),
         );
 
         match response {
@@ -1845,6 +2007,7 @@ mod tests {
             PairingPreference::Strong,
             &pairing::PairingOverrides::default(),
             &NoObservations,
+            &RouteCorrelations::default(),
         );
 
         assert_eq!(
@@ -1905,6 +2068,7 @@ mod tests {
             &FakeEvidence {
                 good_provider: "nous",
             },
+            &RouteCorrelations::default(),
         );
 
         match response {
@@ -1935,6 +2099,7 @@ mod tests {
             PairingPreference::Strong,
             &pairing::PairingOverrides::default(),
             &NoObservations,
+            &RouteCorrelations::default(),
         );
 
         match response {
@@ -1975,6 +2140,7 @@ mod tests {
                 preference,
                 &pairing::PairingOverrides::default(),
                 &NoObservations,
+                &RouteCorrelations::default(),
             );
             match response {
                 FailureResponse::FailOver { explanation, .. } => explanation
@@ -2016,6 +2182,7 @@ mod tests {
             PairingPreference::Strong,
             &pairing::PairingOverrides::default(),
             &NoObservations,
+            &RouteCorrelations::default(),
         );
 
         match response {
@@ -2140,6 +2307,7 @@ mod tests {
             PairingPreference::Off,
             &pairing::PairingOverrides::default(),
             &NoObservations,
+            &RouteCorrelations::default(),
         );
 
         match response {
@@ -2151,6 +2319,193 @@ mod tests {
             ),
             other => panic!("expected a same-model failover: {other:?}"),
         }
+    }
+
+    /// `n` moments at which the failed backend (`session()`'s
+    /// `openrouter/the-model`) and `provider/the-model` both answered
+    /// `5xx`, as the rows the gateway would have written, folded through
+    /// the real `correlate_routes` — so these tests exercise the same
+    /// door the ledger feeds rather than a hand-built correlation.
+    fn correlated_with_the_failed_backend(provider: &str, n: usize) -> RouteCorrelations {
+        use crate::routing::evidence::{ContextState, FailureClass, Outcome, RoutingObservation};
+        let row = |provider: &str, start: i64| RoutingObservation {
+            seq: 0,
+            project_id: "project".to_owned(),
+            observed_at_unix: start + 5,
+            provider: provider.to_owned(),
+            model: "the-model".to_owned(),
+            route: Some("anthropic-messages".to_owned()),
+            quota_context: None,
+            harness: Some("claude-code".to_owned()),
+            purpose: None,
+            dispatched_at_unix: Some(start),
+            first_byte_at_unix: None,
+            first_token_at_unix: None,
+            first_tool_call_at_unix: None,
+            completed_at_unix: Some(start + 5),
+            input_tokens: None,
+            output_tokens: None,
+            cached_input_tokens: None,
+            cost: None,
+            tool_rounds: None,
+            retries: None,
+            repairs: None,
+            failovers: None,
+            outcome: Some(Outcome::Failed),
+            failure_class: Some(FailureClass::Upstream5xx),
+            context_state: ContextState::Unknown,
+        };
+        let mut rows = Vec::new();
+        for i in 0..n as i64 {
+            rows.push(row("openrouter", i * 1_000));
+            rows.push(row(provider, i * 1_000 + 10));
+        }
+        crate::routing::evidence::correlate_routes(&rows)
+    }
+
+    /// Line 1376 at the consumer: two overlapping moments (four events, one
+    /// short of `MIN_CORRELATION_SAMPLE`) change nothing — the correlated
+    /// candidate still wins on configuration order exactly as with no
+    /// correlations at all — and the explanation says how many of how many
+    /// rather than pretending to a confidence.
+    #[test]
+    fn on_provider_failure_treats_insufficient_correlation_evidence_exactly_as_none() {
+        let routing = InteractiveRouting::new();
+        let current = session();
+        let candidates = [
+            backend("nous", "the-model"),
+            backend("mistral", "the-model"),
+        ];
+        let short = correlated_with_the_failed_backend("nous", 2);
+
+        let with_none = routing.on_provider_failure(
+            &current,
+            ProviderFailure::Unreachable,
+            &candidates,
+            PairingPreference::Off,
+            &pairing::PairingOverrides::default(),
+            &NoObservations,
+            &RouteCorrelations::default(),
+        );
+        let with_short = routing.on_provider_failure(
+            &current,
+            ProviderFailure::Unreachable,
+            &candidates,
+            PairingPreference::Off,
+            &pairing::PairingOverrides::default(),
+            &NoObservations,
+            &short,
+        );
+        let (
+            FailureResponse::FailOver { to: none_to, .. },
+            FailureResponse::FailOver {
+                to,
+                explanation,
+                domain_effect,
+                ..
+            },
+        ) = (with_none, with_short)
+        else {
+            panic!("both must be same-model failovers");
+        };
+        assert_eq!(to.provider(), "nous", "configuration order still decides");
+        assert_eq!(none_to.provider(), to.provider());
+        assert!(!domain_effect.correlation_steered());
+        let rendered = explanation.render();
+        assert!(
+            rendered.contains("+0.000  route correlation")
+                && rendered.contains(
+                    "observed at the same moment in 4 of the 5 failures a correlation needs — \
+                     insufficient evidence, treated as no correlation"
+                ),
+            "the sample size is named before anything reads as meaningful: {rendered}"
+        );
+    }
+
+    /// Lines 1370, 1373, 1374 and 1852 at the consumer: five overlapping
+    /// moments make `nous` a measured correlation of `1.00`, weighed as the
+    /// whole shared-provider penalty, so the candidate configured second
+    /// wins — and the effect names `nous/the-model` as the route the
+    /// correlation steered off while line 1851's own count stays
+    /// untouched, because no candidate shared the failed provider.
+    #[test]
+    fn on_provider_failure_steers_off_a_measured_correlation_and_names_the_route() {
+        let routing = InteractiveRouting::new();
+        let current = session();
+        let candidates = [
+            backend("nous", "the-model"),
+            backend("mistral", "the-model"),
+        ];
+        let measured = correlated_with_the_failed_backend("nous", 5);
+
+        let response = routing.on_provider_failure(
+            &current,
+            ProviderFailure::Unreachable,
+            &candidates,
+            PairingPreference::Off,
+            &pairing::PairingOverrides::default(),
+            &NoObservations,
+            &measured,
+        );
+        let FailureResponse::FailOver {
+            to,
+            explanation,
+            domain_effect,
+            ..
+        } = response
+        else {
+            panic!("expected a same-model failover: {response:?}");
+        };
+        assert_eq!(
+            to.provider(),
+            "mistral",
+            "a route observed failing with the failed backend every time must lose to one \
+             with no such record, even though it is configured first: {}",
+            explanation.render()
+        );
+        assert_eq!(
+            domain_effect.correlation_displaced(),
+            Some(&RouteIdentity::new("nous", "the-model")),
+            "line 1852: the route the correlation steered off is named"
+        );
+        assert!(
+            !domain_effect.prevented(),
+            "line 1851 counts the provider-identity term alone, and neither candidate shares \
+             the failed provider"
+        );
+        let rendered = explanation.render();
+        assert!(
+            rendered.contains("+0.000  route correlation")
+                && rendered.contains("observed at the same moment in 0 of the 5"),
+            "the winner's own term says it was never observed failing with the failed backend: \
+             {rendered}"
+        );
+    }
+
+    /// A candidate on the failed backend's own provider carries the
+    /// provider term and no correlation term: one fact, counted once.
+    #[test]
+    fn a_same_provider_candidate_carries_no_correlation_term() {
+        let routing = InteractiveRouting::new();
+        let current = session();
+        let shared = backend_with_credential("openrouter", "the-model", "OPENROUTER_API_KEY_2");
+        let response = routing.on_provider_failure(
+            &current,
+            ProviderFailure::Unreachable,
+            &[shared],
+            PairingPreference::Off,
+            &pairing::PairingOverrides::default(),
+            &NoObservations,
+            &correlated_with_the_failed_backend("openrouter", 5),
+        );
+        let FailureResponse::FailOver { explanation, .. } = response else {
+            panic!("expected a same-model failover: {response:?}");
+        };
+        assert!(
+            !explanation.render().contains("route correlation"),
+            "{}",
+            explanation.render()
+        );
     }
 
     /// Acceptance test 2: a candidate on a different provider is scored
@@ -2172,6 +2527,7 @@ mod tests {
             PairingPreference::Off,
             &pairing::PairingOverrides::default(),
             &NoObservations,
+            &RouteCorrelations::default(),
         );
 
         match response {
@@ -2210,6 +2566,7 @@ mod tests {
             PairingPreference::Off,
             &pairing::PairingOverrides::default(),
             &NoObservations,
+            &RouteCorrelations::default(),
         );
 
         match response {
@@ -2350,6 +2707,7 @@ mod tests {
             PairingPreference::Strong,
             &pairing::PairingOverrides::default(),
             &source,
+            &RouteCorrelations::default(),
         );
 
         match response {
@@ -2420,6 +2778,7 @@ mod tests {
             PairingPreference::Strong,
             &pairing::PairingOverrides::default(),
             source,
+            &RouteCorrelations::default(),
         ) {
             FailureResponse::FailOver { explanation, .. } => prior_magnitude(&explanation),
             other => panic!("expected a failover: {other:?}"),
@@ -2569,6 +2928,7 @@ mod tests {
             PairingPreference::Strong,
             &pairing::PairingOverrides::default(),
             source,
+            &RouteCorrelations::default(),
         ) {
             FailureResponse::FailOver { explanation, .. } => explanation.total(),
             other => panic!("expected a failover: {other:?}"),
@@ -2613,6 +2973,7 @@ mod tests {
             PairingPreference::Strong,
             &pairing::PairingOverrides::default(),
             &source,
+            &RouteCorrelations::default(),
         );
 
         match response {

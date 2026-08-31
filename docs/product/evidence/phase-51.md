@@ -443,3 +443,46 @@ Recorded scope limits — stated by the worker, not discovered later:
 - The row carries no session id. The gateway holds none.
 - No Windows leg; the sink opens one SQLite handle on a gateway exchange thread, which is the thing a `--windows-vm` run should look at.
 
+### Line 1852 — how often a route correlation changed a failover
+
+Package `GH-ROUTE-CORRELATION`, 2026-08-31, Fable 5 at xhigh. The reader `phase-33c.md:101` said was missing now exists: `correlate_routes` over `RoutingObservation` rows joins routes by overlapping failure windows and matching class, and yields `RouteCorrelations` with a `CorrelationVerdict` per pair. `CORRELATION_OVERLAP_TOLERANCE_SECONDS = 60` is argued from the conservative side — a missed overlap lands on `InsufficientEvidence`, line 1378's safe side, while an invented one penalises a route that did nothing wrong. `MIN_CORRELATION_SAMPLE` is deliberately `MIN_SAMPLE_FOR_SUMMARY` (5): the ledger keeps one answer to *how many observations before a figure is trusted*. `CORRELATION_PURPOSE` rows are excluded from the reader's own input so it cannot read its consequence back as evidence. The production caller is `gateway/session.rs:604` (`observe_exchange`, the only caller of `on_provider_failure`), which the packet's EXPECTED FILES had omitted and the worker added with its reason. Eleven mutations, eleven killed; 61-target blast radius, exit 0.
+
+
+### Measure how often nominally different routes provide separate quota capacity but not independent failure resilience. (line 1852)
+
+Contract: Given a gateway failover the correlation term changed the winner of, when the failover is taken, Glasshouse records one routing_observations row under CORRELATION_PURPOSE naming the route it steered off, and `glasshouse route` counts those rows back with an honest zero — while preserving that line 1851's count means what it prints, that the row is never read as an exchange or as spend, and that correlate_routes never reads it back as evidence.
+
+State: COMPLETE — ruled 2026-08-31 by the orchestrator from the report's five artifacts and the diff of the decision.
+
+Production evidence:
+- `src/routing/interactive.rs` — `best (third ranking)`
+- `src/routing/interactive.rs` — `FailureDomainEffect::correlation_displaced`
+- `src/routing/evidence.rs` — `CORRELATION_PURPOSE`
+- `src/routing/evidence.rs` — `RoutingOverhead::from_consumption (continue arm)`
+- `src/main.rs` — `failover_prevention_sink`
+- `src/main.rs` — `record_correlation_steer`
+- `src/main.rs` — `route_correlations_section`
+
+Regression evidence:
+- `routing::interactive::tests::on_provider_failure_steers_off_a_measured_correlation_and_names_the_route`
+- `gateway::session::tests::observe_exchange_steers_a_real_failover_off_a_route_the_ledger_shows_failing_with_it`
+- `tests::a_correlation_steered_failover_is_recorded_by_purpose_and_never_as_an_exchange (bin)`
+- `routing::evidence::correlation_tests::from_consumption_leaves_correlation_rows_out_of_every_bucket`
+- `routing::evidence::correlation_tests::a_correlation_row_and_an_unjudged_row_are_not_evidence`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| let correlation_displaced = (without_correlation_index != best_index) -> let correlation_displaced = false | `freeze-value` | **killed** | `routing::interactive::tests::on_provider_failure_steers_off_a_measured_correlation_and_names_the_route` |
+| .with_purpose(Some(glasshouse::routing::evidence::CORRELATION_PURPOSE)) -> .with_purpose(None::<&str>) | `skip-state-update` | **killed** | `tests::a_correlation_steered_failover_is_recorded_by_purpose_and_never_as_an_exchange` |
+| if let Err(err) = ledger.record(row, now_unix) { -> if let Err(err) = { let _ = (&ledger, row); Ok::<i64, EvidenceLedgerError>(0) } { | `skip-state-update` | **killed** | `tests::a_correlation_steered_failover_is_recorded_by_purpose_and_never_as_an_exchange` |
+
+> freeze-value observed: line 1852: the route the correlation steered off is named
+
+> skip-state-update observed: assertion `left == right` failed at main.rs:9987 — purpose read back None
+
+> skip-state-update observed: one steered failover, one row: []
+
+Recorded scope limits — stated by the worker, not discovered later:
+- The two-line call from the sink closure to record_correlation_steer is not under a test; deleting it would survive. The effect reaching a sink (mutation 9) and the write itself (mutations 10, 11) are proven; the closure is built only by launch_session/resume, which no test drives to a correlated failover — the same gap 1851 was ruled COMPLETE across
+- The row appears in observed_identities under route = None, as ROUTING_LATENCY rows already do
+

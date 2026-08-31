@@ -1367,13 +1367,13 @@ Phase 33C — Failure, quota, and route correlation
 ☐ Reserve known paced capacity at dispatch so concurrent workers do not all consume the same apparent allowance.
 ☐ Avoid retrying a paced route in place when the current cadence makes the retry predictably unavailable.
 ☐ Reduce or suppress active probes when probing would consume a material fraction of a scarce request pool.
-☐ Measure temporally overlapping failures between routes rather than assuming different front doors are independent providers.
+☑ Measure temporally overlapping failures between routes rather than assuming different front doors are independent providers.
 ☑ Represent a quota domain separately from a failure domain.
 ☑ Treat uncorrelated account-level 429 events as evidence of separate quota buckets, not automatically as independent upstreams.
-☐ Treat correlated model-specific 5xx events, matching provider metadata, or matching serving behavior as evidence of a shared failure domain.
-☐ Preserve route-topology claims as confidence-weighted observations that can change when new evidence arrives.
+☑ Treat correlated model-specific 5xx events, matching provider metadata, or matching serving behavior as evidence of a shared failure domain.
+☑ Preserve route-topology claims as confidence-weighted observations that can change when new evidence arrives.
 ☑ Use failure-domain diversity when selecting failover candidates so a nominally different route does not provide fictitious resilience.
-☐ Require sufficient overlapping observations and expose sample size before presenting a route correlation as meaningful.
+☑ Require sufficient overlapping observations and expose sample size before presenting a route correlation as meaningful.
 ☑ Record whether a routing benefit came from independent capacity, independent quota, independent failure handling, or merely a different queue onto the same upstream.
 ☑ Keep correlation analysis optional for V1 routing and prevent absent evidence from being interpreted as independence.
 
@@ -1556,14 +1556,14 @@ Fixed architectural requirements
 Phase 35C — Capacity-aware tier escalation and downgrade
 
 ☑ Prefer the cheapest healthy candidate that satisfies the required workload tier and hard capabilities.
-☐ Escalate to a higher tier when lower-tier candidates are unhealthy, exhausted, or repeatedly fail the task.
-☐ Escalate to a higher tier when the routing classifier reports low confidence and task failure would be expensive.
-☐ Preserve a warm higher-tier session when its existing context makes it cheaper or safer than starting a nominally cheaper cold session.
-☐ Downgrade routine support work to free, local, or low-cost resources when premium capacity is tight.
-☐ Avoid downgrading work when the expected cost of failure and retry exceeds the premium-resource savings.
-☐ Allow retry policy to promote a task by one tier after a clearly attributable model-capability failure.
-☐ Cap automatic escalation so a malformed task cannot consume every premium resource without user visibility.
-☐ Record escalation and downgrade decisions for later evaluation.
+☑ Escalate to a higher tier when lower-tier candidates are unhealthy, exhausted, or repeatedly fail the task.
+☑ Escalate to a higher tier when the routing classifier reports low confidence and task failure would be expensive.
+☑ Preserve a warm higher-tier session when its existing context makes it cheaper or safer than starting a nominally cheaper cold session.
+☑ Downgrade routine support work to free, local, or low-cost resources when premium capacity is tight.
+☑ Avoid downgrading work when the expected cost of failure and retry exceeds the premium-resource savings.
+☑ Allow retry policy to promote a task by one tier after a clearly attributable model-capability failure.
+☑ Cap automatic escalation so a malformed task cannot consume every premium resource without user visibility.
+☑ Record escalation and downgrade decisions for later evaluation.
 
 Phase 35D — Routing under subscription pressure
 
@@ -1578,14 +1578,14 @@ Phase 35D — Routing under subscription pressure
 
 Phase 36 — Session affinity
 
-☐ Compute a session-affinity score for candidate existing sessions.
-☐ Increase affinity when the session is already working on the same task or feature.
-☐ Increase affinity when the session has recently touched relevant files.
-☐ Increase affinity when the native context is still semantically useful.
-☐ Increase affinity when the prompt cache is likely hot.
-☐ Decrease affinity when the session context has become noisy or unrelated.
-☐ Decrease affinity when the session’s quota resource is under significant pressure.
-☐ Keep the affinity calculation inspectable so the user can understand why a session was selected.
+☑ Compute a session-affinity score for candidate existing sessions.
+☑ Increase affinity when the session is already working on the same task or feature.
+☑ Increase affinity when the session has recently touched relevant files.
+☑ Increase affinity when the native context is still semantically useful.
+☑ Increase affinity when the prompt cache is likely hot.
+☑ Decrease affinity when the session context has become noisy or unrelated.
+☑ Decrease affinity when the session’s quota resource is under significant pressure.
+☑ Keep the affinity calculation inspectable so the user can understand why a session was selected.
 
 Phase 37 — Basic session-aware router
 
@@ -1849,7 +1849,7 @@ Phase 51 — Evaluation hooks
 ☑ Measure routing latency added before interactive task execution.
 ☐ Measure whether effective TTFC predicts usable agent turns better than raw TTFC, TTFT, or decode throughput.
 ☑ Measure how often failure-domain evidence prevents a failover onto the same unhealthy upstream.
-☐ Measure how often nominally different routes provide separate quota capacity but not independent failure resilience.
+☑ Measure how often nominally different routes provide separate quota capacity but not independent failure resilience.
 ☐ Measure how much scarce capacity is consumed by probes and whether passive observations can replace them.
 ☐ Measure how often sparse, stale, or incorrectly segmented evidence causes a poor routing decision.
 ☐ Measure estimated versus actual marginal token or request consumption when telemetry permits.

@@ -54,12 +54,13 @@ use crate::integrations::IntegrationId;
 use crate::provider::quota::{CapacityBand, RemainingCapacityScore};
 
 use super::capability::{self, ResourceFacts};
-use super::classify::{HardCapability, WorkloadTier};
+use super::classify::{DurationClass, HardCapability, TaskClassification, WorkloadTier};
+use super::evidence::FailureClass;
 use super::free::{FreePool, FreeResource};
 use super::pressure::{
     self, Alternatives, CapacityFacts, PressureInputs, ReservePolicies, ReserveScope,
 };
-use super::request::RouterAnswer;
+use super::request::{RouterAnswer, TaskClass};
 use super::{
     Backend, CacheLocality, Contribution, HardConstraint, RoutingExplanation, ToolSemantics,
     apply_hard_constraints,
@@ -169,6 +170,95 @@ impl CheckpointQuality {
     }
 }
 
+/// Phase 36 (lines 1581–1588): what the caller read about an existing
+/// session's native context, beyond the warmth a [`WarmSession`] carries.
+///
+/// Every field is a value the **caller looked up**, on the terms this
+/// module's header sets — it names neither `crate::session` nor
+/// `crate::checkpoint`, so the compaction count arrives as the integer the
+/// session record holds, the last task as the classification the sticky
+/// classification cache recorded against this session, and the touched
+/// files as the paths this session's own latest checkpoint listed. The
+/// production caller is `main.rs::routing_destinations`.
+///
+/// `None` everywhere means **unknown**, never zero: the facet an absent
+/// field feeds contributes nothing and says so in [`AffinityBreakdown`],
+/// exactly as `capacity: None` is neither full nor empty. `Some(0)`
+/// compactions is a counted clean history; `None` is a row nobody counted.
+///
+/// `task_named_paths` is a fact about the *task* rather than the session,
+/// carried here because it is the other half of line 1583's intersection
+/// and the router holds no task text of its own: `main.rs` runs
+/// [`paths_named_in`] once and attaches the same answer to every existing
+/// destination. `None` is "no task was stated"; `Some(vec![])` is "a task
+/// was stated and it names no path" — different facts, both unknown to
+/// the facet, and both said in its evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SessionContextFacts {
+    observed_compactions: Option<i64>,
+    last_task: Option<TaskClassification>,
+    touched_files: Option<Vec<String>>,
+    task_named_paths: Option<Vec<String>>,
+}
+
+impl SessionContextFacts {
+    /// Nothing read — the honest floor, and what every destination carries
+    /// until `main.rs::routing_destinations` attaches what it looked up.
+    pub const UNREAD: Self = Self {
+        observed_compactions: None,
+        last_task: None,
+        touched_files: None,
+        task_named_paths: None,
+    };
+
+    /// Lines 1584 and 1586: how many compactions a harness has said it was
+    /// about to perform on this session — `SessionRecord::observed_compactions`
+    /// verbatim, `None` when nobody was counting.
+    pub fn with_observed_compactions(mut self, count: Option<i64>) -> Self {
+        self.observed_compactions = count;
+        self
+    }
+
+    /// Line 1582: the classification the sticky classification cache
+    /// recorded as the last task classified onto **this** session. `None`
+    /// when the cache names another session, or nothing.
+    pub fn with_last_task(mut self, classification: Option<TaskClassification>) -> Self {
+        self.last_task = classification;
+        self
+    }
+
+    /// Line 1583: the repo-relative paths this session's latest checkpoint
+    /// lists — its handoff's files and its working tree's changed files.
+    /// `None` when the session has no checkpoint at all.
+    pub fn with_touched_files(mut self, files: Option<Vec<String>>) -> Self {
+        self.touched_files = files;
+        self
+    }
+
+    /// Line 1583's other operand: [`paths_named_in`] the task text, or `None`
+    /// when no task was stated.
+    pub fn with_task_named_paths(mut self, paths: Option<Vec<String>>) -> Self {
+        self.task_named_paths = paths;
+        self
+    }
+
+    pub fn observed_compactions(&self) -> Option<i64> {
+        self.observed_compactions
+    }
+
+    pub fn last_task(&self) -> Option<&TaskClassification> {
+        self.last_task.as_ref()
+    }
+
+    pub fn touched_files(&self) -> Option<&[String]> {
+        self.touched_files.as_deref()
+    }
+
+    pub fn task_named_paths(&self) -> Option<&[String]> {
+        self.task_named_paths.as_deref()
+    }
+}
+
 /// Whether a destination continues something or starts something.
 ///
 /// The axis lines 1593 and 1594 are about, as a type rather than a `bool`,
@@ -243,6 +333,10 @@ pub struct Destination {
     /// one, the same rule `capability`'s `Unverified` and line 1434's
     /// absent-headroom reading both follow.
     tier_ceiling: Option<WorkloadTier>,
+    /// Phase 36: what was read about this session's native context, attached
+    /// via [`Self::with_session_context`]. [`SessionContextFacts::UNREAD`] for
+    /// a fresh destination and for any caller that did not look.
+    context: SessionContextFacts,
 }
 
 impl Destination {
@@ -301,6 +395,7 @@ impl Destination {
                 .collect(),
             resource_facts: ResourceFacts::UNVERIFIED,
             tier_ceiling: None,
+            context: SessionContextFacts::UNREAD,
         }
     }
 
@@ -375,6 +470,24 @@ impl Destination {
 
     pub fn tier_ceiling(&self) -> Option<WorkloadTier> {
         self.tier_ceiling
+    }
+
+    /// Attach what the caller read about this session's native context —
+    /// Phase 36's producers, lines 1582–1586. Meaningful only on an existing
+    /// session: [`session_affinity`] never reads it off a fresh destination,
+    /// which has no context to have facts about.
+    ///
+    /// **The production caller is `main.rs::routing_destinations`**, which
+    /// attaches the session record's compaction count, the sticky
+    /// classification cache's last task when it names this session, and the
+    /// session's own latest checkpoint's file list.
+    pub fn with_session_context(mut self, facts: SessionContextFacts) -> Self {
+        self.context = facts;
+        self
+    }
+
+    pub fn session_context(&self) -> &SessionContextFacts {
+        &self.context
     }
 
     /// The stable identifier a user names in an override, and the one a
@@ -642,6 +755,63 @@ const BOOTSTRAP_COST: f64 = -1.0;
 /// argued with, moved, or mutated to find out what watches it.
 const FRESH_SESSION_AFFINITY: f64 = 0.0;
 
+// ---------------------------------------------------------------------------
+// Phase 36, lines 1582–1587: the facets of the affinity score. Each is a
+// named constant so that a mutation can move exactly one, and each is small
+// against warmth's `1.5` ceiling on purpose — warmth is the one signal here
+// that is measured rather than inferred, and no inferred facet may outweigh
+// it on its own.
+// ---------------------------------------------------------------------------
+
+/// Line 1582. What it is worth that the last task classified onto a session
+/// was classed the same way as this one — the nearest thing to task identity
+/// this build stores (the sticky classification cache keeps a classification,
+/// never task text).
+const SAME_TASK_AFFINITY: f64 = 0.5;
+
+/// Line 1583. The full value of a session whose latest checkpoint lists every
+/// path the task names; scaled by the fraction it lists.
+const TOUCHED_FILES_AFFINITY: f64 = 0.6;
+
+/// Line 1584. A session whose native context was never compacted and is
+/// still inside the warm-session relevance window holds exactly what was
+/// said to it, which is the only sense of "semantically useful" this build
+/// can observe.
+const NATIVE_CONTEXT_INTACT: f64 = 0.3;
+
+/// Line 1585. What a prompt cache that is *likely* still hot is worth. Below
+/// [`CACHE_PRESERVED`] because that term prices a locality Glasshouse can
+/// establish and this one prices a lifetime it only reasons about.
+const PROMPT_CACHE_HOT: f64 = 0.4;
+
+/// Line 1585's lifetime: five minutes. The shortest published default among
+/// the providers in scope — Anthropic documents its prompt-cache lifetime as
+/// five minutes by default, refreshed on each use
+/// (`docs.anthropic.com/en/docs/build-with-claude/prompt-caching`) — and the
+/// same figure the session store's advisory cache state reasons from. A
+/// reasoned constant, not a reading: no provider reports a cache hit.
+const PROMPT_CACHE_TTL_SECONDS: i64 = 5 * 60;
+
+/// Line 1586. From how many observed compactions a session's context is
+/// priced as noisy: each compaction replaces context with a summary of it,
+/// and by the third the session is mostly summaries of summaries.
+const NOISY_COMPACTION_COUNT: i64 = 3;
+/// Per observed compaction at or past that count, bounded.
+const COMPACTION_NOISE_PENALTY: f64 = -0.2;
+const COMPACTION_NOISE_FLOOR: f64 = -0.6;
+
+/// Line 1586. A session whose last classified task was classed differently
+/// from this one, or whose checkpoint lists files and none the task names.
+const UNRELATED_TASK_PENALTY: f64 = -0.3;
+const UNRELATED_FILES_PENALTY: f64 = -0.3;
+
+/// Line 1587. What significant pressure on the session's quota resource
+/// takes off its affinity. Read from the **same** capacity reading
+/// [`quota_pressure`] prices — the band the caller derived from it with the
+/// user's thresholds — never a second reading; "significant" is the reserve
+/// band or below, the same threshold `super::pressure` gates spending at.
+const QUOTA_PRESSURE_AFFINITY_PENALTY: f64 = -0.4;
+
 /// The same, when a good checkpoint exists to boot from — line 1594's own
 /// clause. Reduced, never removed: a checkpoint carries the objective, the
 /// state and the next actions, and it does not carry the conversation.
@@ -856,11 +1026,24 @@ pub fn capability_fit(destination: &Destination, requirements: &TaskRequirements
 ///
 /// Only called when a tier is stated (`score` skips it otherwise, so a
 /// launch that states no task renders exactly the explanation it always
-/// has). A destination below the required tier is never scored here — line
-/// 1516's gate in `hard_constraint` removed it — so the three cases are
-/// exact, headroom, and not established.
+/// has). `required` is the tier this decision **prefers** — the classified
+/// tier, or the one a [`TierMovement`] moved it to. A destination below the
+/// *classified* tier is never scored here — line 1516's gate in
+/// `hard_constraint` removed it — so the fourth arm is reachable only after
+/// an escalation: a destination established at the classified tier, kept
+/// eligible because it can serve the work, and not the fit preferred now.
 pub fn workload_tier_fit(destination: &Destination, required: WorkloadTier) -> Contribution {
     match destination.tier_ceiling() {
+        Some(ceiling) if ceiling < required => Contribution::new(
+            "workload tier fit",
+            TIER_FIT_BELOW_MOVED,
+            format!(
+                "this decision escalated its preference to the `{required}` tier and `{}` is \
+                 established to serve up to `{ceiling}` — still eligible for the classified \
+                 tier, and not the fit preferred now (line 1559)",
+                destination.id()
+            ),
+        ),
         Some(ceiling) if ceiling == required => Contribution::new(
             "workload tier fit",
             TIER_FIT_EXACT,
@@ -961,50 +1144,624 @@ fn classification_note(answer: &RouterAnswer) -> Contribution {
     Contribution::new("task classification", 0.0, answer.explain())
 }
 
-/// Line 1596: what an existing session's affinity contributes.
+/// One named term of the affinity score — Phase 36's unit of inspection.
 ///
-/// The affinity Glasshouse can actually compute today is **warmth**: whether
-/// the session is live or merely resumable, and how long it has been idle.
-/// The arithmetic is
-/// [`crate::config::pairing::session_continuity_contribution`]'s own, reused
-/// rather than copied so that the decay window and the live/resumable ratio
-/// have one definition; only the name changes, because line 569 and line 1596
-/// ask for the same quantity at two different decisions.
+/// `known` separates *"this facet read its signal and it is worth this"*
+/// from *"this facet's signal did not arrive"*: both can be `0.0`, and a
+/// reader of line 1588's explanation is owed the difference, because an
+/// unread signal is a producer to go and look for and a read zero is not.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AffinityFacet {
+    name: &'static str,
+    line: u16,
+    magnitude: f64,
+    known: bool,
+    evidence: String,
+}
+
+impl AffinityFacet {
+    fn known(name: &'static str, line: u16, magnitude: f64, evidence: String) -> Self {
+        Self {
+            name,
+            line,
+            magnitude,
+            known: true,
+            evidence,
+        }
+    }
+
+    fn unknown(name: &'static str, line: u16, evidence: String) -> Self {
+        Self {
+            name,
+            line,
+            magnitude: 0.0,
+            known: false,
+            evidence,
+        }
+    }
+
+    pub fn name(&self) -> &'static str {
+        self.name
+    }
+
+    /// The capability-map line this facet answers.
+    pub fn line(&self) -> u16 {
+        self.line
+    }
+
+    pub fn magnitude(&self) -> f64 {
+        self.magnitude
+    }
+
+    /// `false` when the signal this facet reads did not arrive, in which case
+    /// `magnitude` is `0.0` and `evidence` says what is missing.
+    pub fn is_known(&self) -> bool {
+        self.known
+    }
+
+    pub fn evidence(&self) -> &str {
+        &self.evidence
+    }
+}
+
+/// Line 1581: the session-affinity score of one existing session, as its
+/// facets — **the struct is the score** ([`Self::total`]) **and its
+/// `Display` is the explanation** (line 1588).
 ///
-/// **What this is not.** Phase 36 (lines 1581–1588) asks for an affinity
-/// score that rises with same-task work, recently touched files and
-/// semantically useful context, and falls with noise. None of those three has
-/// a producer in this build — the session store records no turn count, no
-/// touched-file set and no task identity — so this term is warmth alone and
-/// says so in its own evidence string rather than implying a richer signal.
-pub fn session_affinity(destination: &Destination) -> Contribution {
-    let Continuation::Existing(warm) = destination.continuation() else {
-        return Contribution::new(
+/// Seven named terms, one per map line, each with its own evidence
+/// sentence, summed into the one `session affinity` contribution
+/// [`session_affinity`] has always pushed. Nothing here is a filter: every
+/// facet is additive, an unknown facet is `0.0` and says so, and the
+/// bounded magnitudes above keep warmth — the only measured signal — the
+/// largest single term.
+///
+/// A fresh destination has no breakdown: it has no context to be affine to,
+/// and [`session_affinity`] prices it at `FRESH_SESSION_AFFINITY` with the
+/// sentence it always used.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AffinityBreakdown {
+    /// Lines 569 and 1596, the term as it was: live or resumable, and how
+    /// long idle, through `crate::config::pairing`'s one definition.
+    pub warmth: AffinityFacet,
+    /// Line 1582.
+    pub same_task: AffinityFacet,
+    /// Line 1583.
+    pub touched_files: AffinityFacet,
+    /// Line 1584.
+    pub native_context: AffinityFacet,
+    /// Line 1585.
+    pub prompt_cache: AffinityFacet,
+    /// Line 1586.
+    pub noise: AffinityFacet,
+    /// Line 1587.
+    pub quota_pressure: AffinityFacet,
+}
+
+impl AffinityBreakdown {
+    /// Every facet, in the order a reader compares them.
+    pub fn facets(&self) -> [&AffinityFacet; 7] {
+        [
+            &self.warmth,
+            &self.same_task,
+            &self.touched_files,
+            &self.native_context,
+            &self.prompt_cache,
+            &self.noise,
+            &self.quota_pressure,
+        ]
+    }
+
+    /// The facet answering `line`, if any.
+    pub fn for_line(&self, line: u16) -> Option<&AffinityFacet> {
+        self.facets().into_iter().find(|facet| facet.line() == line)
+    }
+
+    /// The score — the sum of the facets, and the magnitude of the
+    /// `session affinity` contribution.
+    pub fn total(&self) -> f64 {
+        self.facets().iter().map(|facet| facet.magnitude()).sum()
+    }
+
+    /// How many facets read no signal.
+    pub fn unknown_count(&self) -> usize {
+        self.facets()
+            .iter()
+            .filter(|facet| !facet.is_known())
+            .count()
+    }
+}
+
+impl std::fmt::Display for AffinityBreakdown {
+    /// Line 1588: one summary line, then one line per facet — signed
+    /// magnitude, name, and its evidence — so the explanation a person
+    /// reads carries every term the score was built from.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let unknown = self.unknown_count();
+        write!(
+            f,
+            "the sum of {} facets, {} of which read no signal and weigh nothing:",
+            self.facets().len(),
+            unknown
+        )?;
+        for facet in self.facets() {
+            write!(
+                f,
+                "\n    {:+.3}  {} (line {}{}) — {}",
+                facet.magnitude(),
+                facet.name(),
+                facet.line(),
+                if facet.is_known() { "" } else { ", unknown" },
+                facet.evidence()
+            )?;
+        }
+        Ok(())
+    }
+}
+
+/// Lines 1581–1588: what an existing session's affinity contributes, and
+/// every facet behind it.
+///
+/// One contribution, as before, so that the ranking, the overview and every
+/// existing assertion on the `session affinity` term keep reading one
+/// number; the number is now [`AffinityBreakdown::total`] and the evidence
+/// is its `Display`. [`affinity_breakdown`] is the same computation with the
+/// facets kept apart, for a caller or a test that wants one of them.
+///
+/// `current` is where the work is now — `None` at a session start — and is
+/// read by exactly one facet, line 1585's, for the cache locality of the
+/// move. `requirements` carries the classification of the work in hand,
+/// read by lines 1582 and 1586; a launch that stated no task leaves both
+/// facets unknown rather than inventing a task to compare against.
+pub fn session_affinity(
+    destination: &Destination,
+    current: Option<&Destination>,
+    requirements: &TaskRequirements,
+) -> Contribution {
+    match affinity_breakdown(destination, current, requirements) {
+        Some(breakdown) => {
+            Contribution::new("session affinity", breakdown.total(), breakdown.to_string())
+        }
+        None => Contribution::new(
             "session affinity",
             FRESH_SESSION_AFFINITY,
             "a fresh session has no accumulated context to be affine to — not a penalty, only \
              the absence of the term (the bootstrap cost is where starting from nothing is \
              priced)",
-        );
-    };
+        ),
+    }
+}
 
+/// [`session_affinity`] with the facets kept apart. `None` for a fresh
+/// destination, which has no context and therefore no breakdown.
+pub fn affinity_breakdown(
+    destination: &Destination,
+    current: Option<&Destination>,
+    requirements: &TaskRequirements,
+) -> Option<AffinityBreakdown> {
+    let Continuation::Existing(warm) = destination.continuation() else {
+        return None;
+    };
+    let id = destination.id();
+    let facts = destination.session_context();
+    let current_task = requirements
+        .classification
+        .as_ref()
+        .map(RouterAnswer::classification);
+
+    // Lines 569 and 1596 — warmth, exactly as the term has always computed
+    // it: the decay window and the live/resumable ratio have one definition
+    // and it is not here.
     let reused = crate::config::pairing::session_continuity_contribution(
         &evidence_key_for(destination),
         &OneWarmSession(warm),
     );
-
-    Contribution::new(
-        "session affinity",
+    let warmth = AffinityFacet::known(
+        "warmth",
+        1596,
         reused.magnitude(),
         format!(
-            "`{}` is a {} session, idle {}s — warmth is the whole of the affinity this build can \
-             compute: Phase 36's same-task, touched-file and semantic-quality signals have no \
-             producer here",
-            destination.id(),
+            "`{id}` is a {} session, idle {}s — {}",
             warm.state,
-            warm.idle_seconds.max(0)
+            warm.idle_seconds.max(0),
+            reused.evidence()
         ),
-    )
+    );
+    let stale = warmth.magnitude() <= 0.0;
+
+    // Line 1582 — the same task, as far as the sticky classification cache
+    // can say it.
+    let same_task_verdict = match (facts.last_task(), current_task) {
+        (Some(previous), Some(now)) => Some(same_work(previous, now)),
+        _ => None,
+    };
+    let same_task = match (facts.last_task(), current_task) {
+        (Some(previous), Some(now)) if same_work(previous, now) => AffinityFacet::known(
+            "same task",
+            1582,
+            SAME_TASK_AFFINITY,
+            format!(
+                "the last task classified onto `{id}` was classed the way this one is — tier \
+                 `{}`, {} — which is the nearest thing to task identity this build records; \
+                 the sticky classification cache keeps a classification, never the task text",
+                now.workload_tier(),
+                describe_capabilities(now),
+            ),
+        ),
+        (Some(previous), Some(now)) => AffinityFacet::known(
+            "same task",
+            1582,
+            0.0,
+            format!(
+                "the last task classified onto `{id}` was classed differently from this one \
+                 (tier `{}` then, `{}` now) — the noise facet prices that",
+                previous.workload_tier(),
+                now.workload_tier(),
+            ),
+        ),
+        (Some(_), None) => AffinityFacet::unknown(
+            "same task",
+            1582,
+            format!(
+                "a last classified task is recorded against `{id}` and this launch stated no \
+                 task — nothing to compare it with"
+            ),
+        ),
+        (None, Some(_)) => AffinityFacet::unknown(
+            "same task",
+            1582,
+            format!(
+                "no classified task is recorded against `{id}` — the sticky classification \
+                 cache names another session, or was never written"
+            ),
+        ),
+        (None, None) => AffinityFacet::unknown(
+            "same task",
+            1582,
+            format!("no task was stated and none is recorded against `{id}`"),
+        ),
+    };
+
+    // Line 1583 — the files this session touched, against the paths the
+    // task names.
+    let hits: Option<Vec<&str>> = match (facts.task_named_paths(), facts.touched_files()) {
+        (Some(named), Some(touched)) if !named.is_empty() && !touched.is_empty() => Some(
+            named
+                .iter()
+                .filter(|name| touched.iter().any(|path| path_names(path, name)))
+                .map(String::as_str)
+                .collect(),
+        ),
+        _ => None,
+    };
+    let touched_files = match (facts.task_named_paths(), facts.touched_files(), &hits) {
+        (Some(named), Some(_), Some(hits)) if hits.is_empty() => AffinityFacet::known(
+            "touched files",
+            1583,
+            0.0,
+            format!(
+                "the task names {} path{} and `{id}`'s latest checkpoint lists none of them — \
+                 the noise facet prices that",
+                named.len(),
+                if named.len() == 1 { "" } else { "s" },
+            ),
+        ),
+        (Some(named), Some(_), Some(hits)) => AffinityFacet::known(
+            "touched files",
+            1583,
+            TOUCHED_FILES_AFFINITY * hits.len() as f64 / named.len() as f64,
+            format!(
+                "`{id}`'s latest checkpoint lists {} of the {} path{} the task names ({})",
+                hits.len(),
+                named.len(),
+                if named.len() == 1 { "" } else { "s" },
+                hits.join(", "),
+            ),
+        ),
+        (None, _, _) => AffinityFacet::unknown(
+            "touched files",
+            1583,
+            "no task was stated, so there is nothing to intersect the session's files with"
+                .to_owned(),
+        ),
+        (Some([]), _, _) => AffinityFacet::unknown(
+            "touched files",
+            1583,
+            "the task text names no path, so there is nothing to intersect the session's \
+             files with"
+                .to_owned(),
+        ),
+        (Some(_), None, _) => AffinityFacet::unknown(
+            "touched files",
+            1583,
+            format!("no checkpoint records which files `{id}` touched"),
+        ),
+        (Some(_), Some(_), None) => AffinityFacet::unknown(
+            "touched files",
+            1583,
+            format!("`{id}`'s latest checkpoint lists no files"),
+        ),
+    };
+
+    // Line 1584 — the native context, as compactions and staleness say it.
+    let native_context = match facts.observed_compactions() {
+        None => AffinityFacet::unknown(
+            "native context",
+            1584,
+            format!(
+                "nobody counted `{id}`'s compactions — a row from before the count existed — \
+                 and an uncounted history is not a clean one"
+            ),
+        ),
+        Some(_) if stale => AffinityFacet::known(
+            "native context",
+            1584,
+            0.0,
+            format!(
+                "`{id}` is past the window a warm session stays relevant for, so whatever its \
+                 context holds is not credited as still useful"
+            ),
+        ),
+        Some(0) => AffinityFacet::known(
+            "native context",
+            1584,
+            NATIVE_CONTEXT_INTACT,
+            format!(
+                "no compaction has been observed on `{id}` and it is inside the relevance \
+                 window — its native context holds exactly what was said to it"
+            ),
+        ),
+        Some(count) if count < NOISY_COMPACTION_COUNT => AffinityFacet::known(
+            "native context",
+            1584,
+            NATIVE_CONTEXT_INTACT / 2.0,
+            format!(
+                "`{id}` has been compacted {count} time{} — a summary stands in for part of \
+                 its context, so it is credited at half",
+                if count == 1 { "" } else { "s" },
+            ),
+        ),
+        Some(count) => AffinityFacet::known(
+            "native context",
+            1584,
+            0.0,
+            format!(
+                "`{id}` has been compacted {count} times — what survives is mostly summaries \
+                 of summaries, credited as neither intact nor useful (the noise facet prices \
+                 the count)"
+            ),
+        ),
+    };
+
+    // Line 1585 — is the provider-side prefix likely still there.
+    let locality =
+        current.map(|current| CacheLocality::between(current.backend(), destination.backend()));
+    let prompt_cache = match locality {
+        Some(locality @ CacheLocality::Lost(_)) => AffinityFacet::known(
+            "prompt cache",
+            1585,
+            0.0,
+            format!("the work is moving off the backend that built `{id}`'s prefix: {locality}"),
+        ),
+        Some(locality @ CacheLocality::LikelyLost(_)) => AffinityFacet::known(
+            "prompt cache",
+            1585,
+            0.0,
+            format!("moving to `{id}` changes the credential: {locality}"),
+        ),
+        _ if warm.idle_seconds < 0 => AffinityFacet::unknown(
+            "prompt cache",
+            1585,
+            format!(
+                "`{id}`'s last activity is in the future — a clock moved backwards — and a \
+                 cache lifetime cannot be measured against that"
+            ),
+        ),
+        _ if warm.idle_seconds <= PROMPT_CACHE_TTL_SECONDS => AffinityFacet::known(
+            "prompt cache",
+            1585,
+            PROMPT_CACHE_HOT,
+            format!(
+                "`{id}` was active {}s ago, inside the {PROMPT_CACHE_TTL_SECONDS}s a \
+                 provider-side cached prefix is published to survive by default — likely \
+                 hot, not observed: no provider reports a hit",
+                warm.idle_seconds
+            ),
+        ),
+        _ => AffinityFacet::known(
+            "prompt cache",
+            1585,
+            0.0,
+            format!(
+                "`{id}` was active {}s ago, past the {PROMPT_CACHE_TTL_SECONDS}s default \
+                 lifetime of a provider-side cached prefix — likely expired",
+                warm.idle_seconds
+            ),
+        ),
+    };
+
+    // Line 1586 — the same signals, read for noise and unrelatedness.
+    let mut noise_magnitude = 0.0;
+    let mut noise_notes: Vec<String> = Vec::new();
+    let mut noise_readable = false;
+    if let Some(count) = facts.observed_compactions() {
+        noise_readable = true;
+        if count >= NOISY_COMPACTION_COUNT {
+            noise_magnitude +=
+                (count as f64 * COMPACTION_NOISE_PENALTY).max(COMPACTION_NOISE_FLOOR);
+            noise_notes.push(format!(
+                "compacted {count} times, and each compaction replaces context with a summary \
+                 of it"
+            ));
+        }
+    }
+    if let Some(verdict) = same_task_verdict {
+        noise_readable = true;
+        if !verdict {
+            noise_magnitude += UNRELATED_TASK_PENALTY;
+            noise_notes.push(
+                "the last task classified onto it was classed differently from this one".to_owned(),
+            );
+        }
+    }
+    if let (Some(named), Some(hits)) = (facts.task_named_paths(), &hits) {
+        noise_readable = true;
+        // A bare `foo.rs` in prose is a weaker claim than `src/foo.rs`; the
+        // penalty needs the stronger spelling so a word that merely looks
+        // like a file name cannot cost every session a third of a point.
+        let names_a_directory_path = named.iter().any(|name| name.contains('/'));
+        if hits.is_empty() && names_a_directory_path {
+            noise_magnitude += UNRELATED_FILES_PENALTY;
+            noise_notes.push(
+                "the task names paths and its latest checkpoint lists none of them".to_owned(),
+            );
+        }
+    }
+    let noise = if !noise_readable {
+        AffinityFacet::unknown(
+            "noise",
+            1586,
+            format!(
+                "no compaction count, no classified task to compare and no checkpoint file \
+                 list — nothing to read `{id}`'s noise from"
+            ),
+        )
+    } else if noise_notes.is_empty() {
+        AffinityFacet::known(
+            "noise",
+            1586,
+            0.0,
+            format!(
+                "nothing read says `{id}`'s context is noisy or unrelated — the absence of a \
+                 signal, not a clean bill"
+            ),
+        )
+    } else {
+        AffinityFacet::known(
+            "noise",
+            1586,
+            noise_magnitude,
+            format!("`{id}`: {}", noise_notes.join("; ")),
+        )
+    };
+
+    // Line 1587 — significant pressure on the resource this session spends,
+    // from the band the caller derived from the same reading `quota_pressure`
+    // prices.
+    let credential = destination.backend().credential().label();
+    let quota_pressure = match destination.capacity_facts().band() {
+        Some(band) if band <= CapacityBand::Reserve => AffinityFacet::known(
+            "quota pressure",
+            1587,
+            QUOTA_PRESSURE_AFFINITY_PENALTY,
+            format!(
+                "`{credential}` is in the `{}` band — significant pressure on the \
+                 resource this session spends; the reading itself is priced once, by the \
+                 `known quota pressure` term, and this is the map's own decrease in affinity",
+                band.as_str()
+            ),
+        ),
+        Some(band) => AffinityFacet::known(
+            "quota pressure",
+            1587,
+            0.0,
+            format!(
+                "`{credential}` is in the `{}` band — not significant pressure",
+                band.as_str()
+            ),
+        ),
+        None => AffinityFacet::unknown(
+            "quota pressure",
+            1587,
+            format!(
+                "nothing has been read about `{credential}`'s remaining quota — an unread \
+                 resource is neither preferred nor withheld"
+            ),
+        ),
+    };
+
+    Some(AffinityBreakdown {
+        warmth,
+        same_task,
+        touched_files,
+        native_context,
+        prompt_cache,
+        noise,
+        quota_pressure,
+    })
+}
+
+/// Line 1582's "same task or feature", as far as a stored classification can
+/// say it: the same hard capabilities, the same workload tier, and the same
+/// answer to whether the work touches the repository and modifies code.
+/// Confidence and source are deliberately not compared — the same task
+/// classed by heuristics one launch and by a model the next is one task.
+fn same_work(previous: &TaskClassification, current: &TaskClassification) -> bool {
+    previous.hard_capabilities() == current.hard_capabilities()
+        && previous.workload_tier() == current.workload_tier()
+        && previous.needs_repo_context() == current.needs_repo_context()
+        && previous.needs_code_modification() == current.needs_code_modification()
+}
+
+fn describe_capabilities(classification: &TaskClassification) -> String {
+    let capabilities = classification.hard_capabilities();
+    if capabilities.is_empty() {
+        "no hard capability".to_owned()
+    } else {
+        capabilities
+            .iter()
+            .map(|capability| capability.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+/// Whether a checkpoint's `path` is the file the task's `name` names: the
+/// same repo-relative path, or a bare file name the path ends in. A name is
+/// never matched as a substring — `foo.rs` is not `barfoo.rs`.
+fn path_names(path: &str, name: &str) -> bool {
+    let name = name.trim_start_matches("./");
+    path == name || path.ends_with(&format!("/{name}"))
+}
+
+/// Line 1583's "relevant": the path-shaped tokens in a task's text.
+///
+/// A spelling test and not a vocabulary — a token names a path when it
+/// contains a `/` (and is not a URL), or ends in a dotted extension of one to
+/// five lowercase ASCII alphanumerics with at least one letter, after a stem
+/// of at least two characters. The stem rule is what keeps `e.g.` and `i.e.`
+/// out; the lowercase rule keeps `Ph.D.` out; the letter rule keeps `v1.2`
+/// out. `Node.js` gets in, which is the price of a spelling test, and the
+/// reason [`affinity_breakdown`]'s unrelated-files penalty needs a `/`.
+///
+/// Surrounding punctuation and backticks are stripped, so `` `src/foo.rs`, ``
+/// names `src/foo.rs`. Order is first mention, without repeats.
+pub fn paths_named_in(task_text: &str) -> Vec<String> {
+    let mut named: Vec<String> = Vec::new();
+    for raw in task_text.split_whitespace() {
+        let token = raw
+            .trim_matches(|c: char| !(c.is_alphanumeric() || matches!(c, '/' | '.' | '_' | '-')));
+        if token.is_empty() || token.contains("://") {
+            continue;
+        }
+        let has_separator = token.contains('/') && token.trim_matches('/').len() > 1;
+        if (has_separator || has_file_extension(token)) && !named.iter().any(|n| n == token) {
+            named.push(token.to_owned());
+        }
+    }
+    named
+}
+
+fn has_file_extension(token: &str) -> bool {
+    let Some((stem, extension)) = token.rsplit_once('.') else {
+        return false;
+    };
+    stem.chars().count() >= 2
+        && !stem.ends_with('/')
+        && (1..=5).contains(&extension.len())
+        && extension
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        && extension.chars().any(|c| c.is_ascii_lowercase())
 }
 
 /// Line 1597: what this destination does to provider-side prompt caching.
@@ -1250,6 +2007,492 @@ pub fn switching_and_bootstrap_cost(
 }
 
 // ---------------------------------------------------------------------------
+// Phase 35C, lines 1559–1565 — the tier-movement decision.
+//
+// Escalation and downgrade are one decision, made once per `choose` over the
+// candidate set, and they act on the ranking through the terms that already
+// exist: the tier the fit term prefers, the tier the gate admits, and the
+// tier the pressure terms read. No second warmth signal, no second health
+// signal, no second capacity signal — every input below is one the terms
+// above already price, read the same way they read it. What is new is the
+// *movement* itself: a named, explained, recordable change to which tier this
+// decision prefers, and the rules for when it may happen.
+//
+// Every threshold is stated once, here, with its reason.
+// ---------------------------------------------------------------------------
+
+/// Line 1559's *"repeatedly fail"*: this many consecutive observed failures
+/// on a candidate, short of the cooldown [`super::free::ResourceHealth`]
+/// would already have imposed. Two, because once is an incident and the
+/// health term prices it at [`HEALTH_FAILURE_PENALTY`]; twice is a pattern
+/// the tier above should be preferred over.
+const REPEATED_FAILURES: u32 = 2;
+
+/// Line 1565's cap: how many tiers one routing decision may escalate by
+/// itself, whatever the triggers. **One.** A malformed task that trips every
+/// trigger at once still moves one step, the step is printed, and the
+/// triggers that would have moved it further are named as capped — so the
+/// premium resources it did not reach are reachable only by a person.
+const MAX_ESCALATION_STEPS: usize = 1;
+
+/// Line 1560's *"task failure would be expensive"*: a task stated at this
+/// tier or above. [`WorkloadTier::Heavy`]'s own doc — difficult debugging,
+/// architecture-sensitive changes, broad refactors — is where a wrong tier
+/// costs a whole attempt rather than a turn.
+const EXPENSIVE_FAILURE_TIER: WorkloadTier = WorkloadTier::Heavy;
+
+/// Line 1562's *"routine support work"*, tier half: at or below this tier.
+/// Above it the work is by definition not routine, and the map's own tier
+/// descriptions say so.
+const ROUTINE_SUPPORT_CEILING: WorkloadTier = WorkloadTier::Standard;
+
+/// Line 1562's *"premium capacity is tight"*: every metered candidate with a
+/// reading is in this band or worse. The same band `pressure::TIGHT_BAND_PENALTY`
+/// starts at, so "tight" means one thing across the module.
+const DOWNGRADE_PRESSURE_BAND: CapacityBand = CapacityBand::Tight;
+
+/// Line 1563: the longest expected duration a downgrade may bet on. A task
+/// that runs several turns below its tier and fails is redone **in full** on
+/// the premium resource the downgrade meant to spare — the retry then costs
+/// at least what was saved, plus every turn already spent. Only single-turn
+/// work has a retry cheap enough to risk.
+const DOWNGRADE_RETRY_TOLERANCE: DurationClass = DurationClass::SingleTurn;
+
+/// Line 1561: the tier delta a warm session's affinity is weighed against —
+/// what an exact tier fit is worth over headroom, the one step a downgrade
+/// would trade a warm higher-tier session's context for. Not a new number:
+/// the difference between two constants this module already prices the tier
+/// with, so the comparison is on the module's own scale.
+const WARM_CONTEXT_TIER_DELTA: f64 = TIER_FIT_EXACT - TIER_FIT_HEADROOM;
+
+/// The fit of a destination established *below* the tier an escalation moved
+/// the preference to — reachable only after an escalation, because the gate
+/// still admits the classified tier. Zero: kept eligible (it can serve the
+/// work), not preferred (the escalation exists to prefer something else),
+/// and its own health terms say why it was passed over.
+const TIER_FIT_BELOW_MOVED: f64 = 0.0;
+
+/// What asked for an escalation. Ordered as evaluated: a failure that
+/// already happened outranks the set's health, which outranks the
+/// classifier's uncertainty.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EscalationTrigger {
+    /// Line 1564: the last exchange on the current destination ended in a
+    /// model-capability failure.
+    AttributableFailure(FailureClass),
+    /// Line 1559: every candidate established at the classified tier is
+    /// refused, cooling down, exhausted, or repeatedly failing.
+    TierStruggling,
+    /// Line 1560: deterministic heuristics rated the work heavy and no model
+    /// confirmed it.
+    HeuristicHeavy,
+}
+
+impl std::fmt::Display for EscalationTrigger {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::AttributableFailure(class) => write!(
+                f,
+                "the last exchange on the current destination ended in `{class}`, a \
+                 model-capability failure (line 1564)"
+            ),
+            Self::TierStruggling => f.write_str(
+                "every candidate established at the classified tier is refused, cooling down, \
+                 exhausted or repeatedly failing (line 1559)",
+            ),
+            Self::HeuristicHeavy => f.write_str(
+                "deterministic heuristics rated the work heavy and no model confirmed it — the \
+                 verdict most expensive to be wrong about (line 1560)",
+            ),
+        }
+    }
+}
+
+/// Why a stated tier stood. Every arm is a sentence a person reads in the
+/// explanation, because "nothing moved" is only useful when it says why.
+#[derive(Debug, Clone, PartialEq)]
+pub enum HoldReason {
+    /// No trigger fired. `retry_after` is what the router was told about the
+    /// last exchange, kept so the explanation can say a health failure was
+    /// seen and deliberately not promoted on.
+    NoTrigger { retry_after: Option<FailureClass> },
+    /// Triggers fired and the classified tier is already the top.
+    AtTop { triggers: Vec<EscalationTrigger> },
+    /// Triggers fired and no healthy candidate is established at the tier
+    /// above — the preference stays rather than pointing at nothing.
+    NoTarget {
+        to: WorkloadTier,
+        triggers: Vec<EscalationTrigger>,
+    },
+    /// Line 1563: routine work under pressure, not downgraded, because a
+    /// failed retry would cost more than the downgrade saves.
+    RetryCost { duration: DurationClass },
+    /// Line 1561: routine work under pressure, not downgraded, because an
+    /// existing higher-tier session's context outweighs the tier delta.
+    WarmContext { session: String, affinity: f64 },
+    /// Line 1562 wanted to downgrade and no free candidate adequate for the
+    /// work is available to take it.
+    NoFreeResource { to: WorkloadTier },
+}
+
+/// What one routing decision did to the tier it prefers — lines 1559–1565.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TierMovement {
+    /// The classified tier stands, and `reason` says why.
+    Held {
+        tier: WorkloadTier,
+        reason: HoldReason,
+    },
+    /// One tier up (line 1565: never more). `trigger` is what moved it;
+    /// `capped` is every further trigger that fired and was not applied.
+    Escalated {
+        from: WorkloadTier,
+        to: WorkloadTier,
+        trigger: EscalationTrigger,
+        capped: Vec<EscalationTrigger>,
+    },
+    /// One tier down (line 1562). `target` is the free destination that made
+    /// the downgrade worth taking — the existence proof, not the winner.
+    Downgraded {
+        from: WorkloadTier,
+        to: WorkloadTier,
+        target: String,
+    },
+}
+
+impl TierMovement {
+    /// The tier the work was classified at.
+    pub fn classified(&self) -> WorkloadTier {
+        match self {
+            Self::Held { tier, .. } => *tier,
+            Self::Escalated { from, .. } | Self::Downgraded { from, .. } => *from,
+        }
+    }
+
+    /// The tier this decision prefers — what [`workload_tier_fit`] reads.
+    pub fn preferred_tier(&self) -> WorkloadTier {
+        match self {
+            Self::Held { tier, .. } => *tier,
+            Self::Escalated { to, .. } | Self::Downgraded { to, .. } => *to,
+        }
+    }
+
+    /// The tier the hard gate admits — what line 1516's arm reads. A
+    /// downgrade lowers it, so a cheaper resource the classified tier would
+    /// have refused becomes eligible; an escalation **never** raises it,
+    /// because a preference may not remove a candidate that can serve the
+    /// work (design decision 1).
+    pub fn gate_tier(&self) -> WorkloadTier {
+        match self {
+            Self::Downgraded { to, .. } => *to,
+            Self::Held { .. } | Self::Escalated { .. } => self.classified(),
+        }
+    }
+
+    /// The tier the pressure terms read: the **lower** of the classified and
+    /// the preferred tier. A downgrade reaches the spending protections —
+    /// a leaf-tier reading makes `low_tier_spend` and the reserve gate
+    /// stricter, the fail-closed direction — and an escalation never
+    /// reaches them: a preference for a stronger resource must not be what
+    /// unlocks protected premium reserve for work the classifier did not
+    /// rate that high (the hazard practice §79 records for exactly this
+    /// input).
+    pub fn pressure_tier(&self) -> WorkloadTier {
+        self.classified().min(self.preferred_tier())
+    }
+
+    /// Whether the preference actually moved.
+    pub fn fired(&self) -> bool {
+        !matches!(self, Self::Held { .. })
+    }
+
+    /// One sentence a person reads — the whole decision and its reason.
+    pub fn describe(&self) -> String {
+        match self {
+            Self::Held {
+                tier,
+                reason: HoldReason::NoTrigger { retry_after },
+            } => {
+                let mut out = format!(
+                    "the classified `{tier}` tier stands — no escalation trigger fired and the \
+                     work is not routine support work under premium pressure"
+                );
+                if let Some(class) = retry_after {
+                    out.push_str(&format!(
+                        "; the last exchange's `{class}` failure is a provider-health or quota \
+                         fact, priced by provider health and not promoted on (line 1564)"
+                    ));
+                }
+                out
+            }
+            Self::Held {
+                tier,
+                reason: HoldReason::AtTop { triggers },
+            } => format!(
+                "`{tier}` is the top of the scale, so it stands although {} asked to escalate",
+                list(triggers)
+            ),
+            Self::Held {
+                tier,
+                reason: HoldReason::NoTarget { to, triggers },
+            } => format!(
+                "{} asked to escalate to `{to}` and no healthy candidate is established at that \
+                 tier — the preference stays at `{tier}` rather than pointing at nothing",
+                list(triggers)
+            ),
+            Self::Held {
+                tier,
+                reason: HoldReason::RetryCost { duration },
+            } => format!(
+                "routine work under premium pressure, kept at `{tier}`: it is expected to run \
+                 {duration}, and a multi-turn task that fails below its tier is redone in full \
+                 on the premium resource the downgrade meant to spare (line 1563)"
+            ),
+            Self::Held {
+                tier,
+                reason: HoldReason::WarmContext { session, affinity },
+            } => format!(
+                "routine work under premium pressure, kept at `{tier}`: `{session}` is an \
+                 existing session established at or above it whose session affinity \
+                 ({affinity:+.3}) outweighs the tier delta ({WARM_CONTEXT_TIER_DELTA:+.3}) a \
+                 downgrade would trade its context for (line 1561)"
+            ),
+            Self::Held {
+                tier,
+                reason: HoldReason::NoFreeResource { to },
+            } => format!(
+                "routine work under premium pressure, kept at `{tier}`: no free candidate \
+                 adequate for it and able to serve `{to}` is available to take it (line 1562)"
+            ),
+            Self::Escalated {
+                from,
+                to,
+                trigger,
+                capped,
+            } => {
+                let mut out = format!(
+                    "escalated from `{from}` to `{to}` — {trigger}; one tier per decision \
+                     (line 1565)"
+                );
+                if !capped.is_empty() {
+                    out.push_str(&format!(
+                        ", and {} would also have escalated and were capped",
+                        list(capped)
+                    ));
+                }
+                out
+            }
+            Self::Downgraded { from, to, target } => format!(
+                "downgraded from `{from}` to `{to}` — routine support work, every metered \
+                 candidate with a reading is in the {DOWNGRADE_PRESSURE_BAND} band or worse, \
+                 and `{target}` is a free resource able to take it (line 1562)"
+            ),
+        }
+    }
+}
+
+fn list(triggers: &[EscalationTrigger]) -> String {
+    triggers
+        .iter()
+        .map(|trigger| format!("[{trigger}]"))
+        .collect::<Vec<_>>()
+        .join(" and ")
+}
+
+/// The tier one step down, when there is one a model serves.
+/// [`WorkloadTier::Deterministic`] is *"should not require an LLM"*, so
+/// nothing below [`WorkloadTier::Leaf`] is a place to route model work to.
+fn one_tier_below(tier: WorkloadTier) -> Option<WorkloadTier> {
+    match tier {
+        WorkloadTier::Deterministic | WorkloadTier::Leaf => None,
+        WorkloadTier::Standard => Some(WorkloadTier::Leaf),
+        WorkloadTier::Heavy => Some(WorkloadTier::Standard),
+        WorkloadTier::Frontier => Some(WorkloadTier::Heavy),
+    }
+}
+
+/// Whether `destination` is one line 1559 would escalate away from: refused
+/// or cooling down (the two facts [`provider_health`] prices at
+/// [`HEALTH_UNAVAILABLE_PENALTY`]), exhausted (the band the pressure terms
+/// read), or repeatedly failing ([`REPEATED_FAILURES`]).
+fn struggling(destination: &Destination, inputs: &RouterInputs<'_>) -> bool {
+    let health = inputs.health.health(&FreeResource::new(
+        destination.backend().credential().clone(),
+        destination.backend().model().label(),
+    ));
+    health.credential_was_rejected()
+        || !health.is_available(inputs.now)
+        || health.consecutive_failures() >= REPEATED_FAILURES
+        || destination.capacity_facts().band() == Some(CapacityBand::Exhausted)
+}
+
+/// Lines 1559–1565 in one function: decide whether this decision moves the
+/// tier it prefers, over the candidates that survived the capability
+/// constraints and before the tier gate runs.
+///
+/// `None` when no tier was stated — no task, so nothing to move and nothing
+/// to explain, the same preservation clause every tier term keeps.
+///
+/// Escalation is decided first and downgrade second, and they are exclusive:
+/// a decision that escalates does not also ask whether it should have
+/// downgraded. Within escalation the triggers are collected in a fixed
+/// order, the first moves the tier by [`MAX_ESCALATION_STEPS`], and the rest
+/// are reported as capped (line 1565). An escalation needs somewhere to go:
+/// a candidate established at the tier above that is not itself struggling,
+/// or the preference would point at nothing.
+fn decide_tier_movement(
+    candidates: &[&Destination],
+    inputs: &RouterInputs<'_>,
+    retry_after: Option<FailureClass>,
+) -> Option<TierMovement> {
+    let from = inputs.requirements.minimum_tier?;
+    let answer = inputs.requirements.classification.as_ref();
+
+    // --- escalation triggers, in order ------------------------------------
+    let mut triggers = Vec::new();
+    if let Some(class @ (FailureClass::RequestIncompatibility | FailureClass::EmptyCompletion)) =
+        retry_after
+    {
+        triggers.push(EscalationTrigger::AttributableFailure(class));
+    }
+    let at_tier: Vec<&Destination> = candidates
+        .iter()
+        .copied()
+        .filter(|destination| destination.tier_ceiling() == Some(from))
+        .collect();
+    if !at_tier.is_empty()
+        && at_tier
+            .iter()
+            .all(|destination| struggling(destination, inputs))
+    {
+        triggers.push(EscalationTrigger::TierStruggling);
+    }
+    if let Some(answer) = answer
+        && answer.classification().source().is_heuristic()
+        && answer.stated_tier() >= EXPENSIVE_FAILURE_TIER
+        && !answer.is_conservative()
+    {
+        triggers.push(EscalationTrigger::HeuristicHeavy);
+    }
+
+    if !triggers.is_empty() {
+        let steps = triggers.len().min(MAX_ESCALATION_STEPS);
+        let mut to = from;
+        for _ in 0..steps {
+            to = to.escalate();
+        }
+        if to == from {
+            return Some(TierMovement::Held {
+                tier: from,
+                reason: HoldReason::AtTop { triggers },
+            });
+        }
+        let target_exists = candidates.iter().any(|destination| {
+            destination
+                .tier_ceiling()
+                .is_some_and(|ceiling| ceiling >= to)
+                && !struggling(destination, inputs)
+        });
+        if !target_exists {
+            return Some(TierMovement::Held {
+                tier: from,
+                reason: HoldReason::NoTarget { to, triggers },
+            });
+        }
+        let trigger = triggers[0];
+        let capped = triggers[steps..].to_vec();
+        return Some(TierMovement::Escalated {
+            from,
+            to,
+            trigger,
+            capped,
+        });
+    }
+
+    let held = |reason| Some(TierMovement::Held { tier: from, reason });
+    let no_trigger = HoldReason::NoTrigger { retry_after };
+
+    // --- downgrade: routine support work under premium pressure -----------
+    let Some(answer) = answer else {
+        return held(no_trigger);
+    };
+    let routine = matches!(
+        answer.task_class(),
+        TaskClass::Question | TaskClass::Investigation
+    ) && from <= ROUTINE_SUPPORT_CEILING;
+    let Some(to) = one_tier_below(from).filter(|_| routine) else {
+        return held(no_trigger);
+    };
+    // "Premium capacity is tight": every metered candidate with a reading
+    // is in the tight band or worse, and at least one was read. An unread
+    // resource is neither tight nor healthy, here as everywhere.
+    let metered_bands: Vec<CapacityBand> = candidates
+        .iter()
+        .filter(|destination| !destination.backend().cost().is_free())
+        .filter_map(|destination| destination.capacity_facts().band())
+        .collect();
+    if metered_bands.is_empty()
+        || metered_bands
+            .iter()
+            .any(|band| *band > DOWNGRADE_PRESSURE_BAND)
+    {
+        return held(no_trigger);
+    }
+    // Somewhere to go: free, able to serve now, adequate for the task, and
+    // not established below the tier the downgrade moves to.
+    let Some(target) = candidates.iter().find(|destination| {
+        destination.backend().cost().is_free()
+            && provider_available(destination, inputs.health, inputs.now)
+            && is_adequate(destination, &inputs.requirements)
+            && destination
+                .tier_ceiling()
+                .is_none_or(|ceiling| ceiling >= to)
+    }) else {
+        return held(HoldReason::NoFreeResource { to });
+    };
+    // Line 1563: the retry brake.
+    let duration = answer.expected_duration();
+    if duration > DOWNGRADE_RETRY_TOLERANCE {
+        return held(HoldReason::RetryCost { duration });
+    }
+    // Line 1561: the warm-context brake, on the affinity term itself.
+    if let Some((session, affinity)) = candidates
+        .iter()
+        .filter(|destination| {
+            !destination.is_fresh()
+                && destination
+                    .tier_ceiling()
+                    .is_some_and(|ceiling| ceiling >= from)
+        })
+        .map(|destination| {
+            (
+                destination.id().to_owned(),
+                // `current` is `None` here on purpose: this brake runs before a
+                // destination is chosen, so there is no move whose cache locality
+                // the prompt-cache facet could read. Leaving it unknown makes the
+                // brake slightly LESS likely to hold, which is the conservative
+                // side for a rule that keeps work on a premium session.
+                session_affinity(destination, None, &inputs.requirements).magnitude(),
+            )
+        })
+        .find(|(_, affinity)| *affinity >= WARM_CONTEXT_TIER_DELTA)
+    {
+        return held(HoldReason::WarmContext { session, affinity });
+    }
+    Some(TierMovement::Downgraded {
+        from,
+        to,
+        target: target.id().to_owned(),
+    })
+}
+
+/// The movement as a zero-weight line in every candidate's explanation, so
+/// the terms it changed are read beside the reason they changed.
+fn tier_movement_note(movement: &TierMovement) -> Contribution {
+    Contribution::new("tier movement", 0.0, movement.describe())
+}
+
+// ---------------------------------------------------------------------------
 // The router.
 // ---------------------------------------------------------------------------
 
@@ -1340,6 +2583,10 @@ pub struct Routed {
     rejected: Vec<(Destination, HardConstraint)>,
     automatic: Option<String>,
     override_refused: Option<OverrideRefusal>,
+    /// Lines 1559–1565: what this decision did to the tier it prefers.
+    /// `None` when no tier was stated — no task, nothing to move — and
+    /// `Some(Held { .. })` when one was and nothing moved, with the reason.
+    movement: Option<TierMovement>,
 }
 
 impl Routed {
@@ -1385,6 +2632,13 @@ impl Routed {
         self.override_refused.as_ref()
     }
 
+    /// Lines 1559–1565: the tier movement this decision made, when a tier
+    /// was stated at all. [`TierMovement::fired`] tells a moved preference
+    /// from one that was held with a reason.
+    pub fn movement(&self) -> Option<&TierMovement> {
+        self.movement.as_ref()
+    }
+
     /// Line 1601's debug mode: the decision and the contributions behind it.
     pub fn render(&self) -> String {
         use std::fmt::Write as _;
@@ -1401,6 +2655,11 @@ impl Routed {
             }
         );
         let _ = writeln!(out, "score        {:+.3}", self.explanation.total());
+        // Line 1565's visibility half: a moved tier is never only a term
+        // inside a candidate's block — it is a heading a person reads first.
+        if let Some(movement) = self.movement.as_ref().filter(|m| m.fired()) {
+            let _ = writeln!(out, "tier         {}", movement.describe());
+        }
         if let Some(automatic) = self.overrode() {
             let _ = writeln!(
                 out,
@@ -1476,6 +2735,10 @@ pub struct SessionRouter {
     /// than imported, because this module may not reach that module
     /// (`super::tests::the_session_router_cannot_reach_the_disposable_policy_class`).
     reserve_override_sessions: BTreeSet<String>,
+    /// Line 1564: the failure class the most recent exchange on the
+    /// *current* destination's backend recorded, when the caller looked one
+    /// up — see [`Self::with_retry_after`].
+    retry_after: Option<FailureClass>,
 }
 
 impl SessionRouter {
@@ -1506,6 +2769,28 @@ impl SessionRouter {
         sessions: impl IntoIterator<Item = S>,
     ) -> Self {
         self.reserve_override_sessions = sessions.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Line 1564: tell the router how the last attempt at this work ended.
+    ///
+    /// `Some(class)` is what the evidence ledger recorded for the most recent
+    /// exchange on the current destination's provider and model —
+    /// `main.rs`'s task-boundary `route` path reads it through
+    /// `EvidenceLedger::latest_failure_class_for_model`. Only a
+    /// [`FailureClass::RequestIncompatibility`] or
+    /// [`FailureClass::EmptyCompletion`] promotes (the model could not do the
+    /// work); every other class is a provider-health or quota fact that
+    /// [`provider_health`] and the pressure terms already price, and the
+    /// explanation says so rather than promoting on it.
+    ///
+    /// A builder on the router rather than a field on [`RouterInputs`]: that
+    /// struct is written as a literal at every caller in and out of this
+    /// crate, and a per-decision fact the caller may not have looked up
+    /// belongs beside the other caller-resolved state this router carries.
+    #[must_use]
+    pub fn with_retry_after(mut self, class: Option<FailureClass>) -> Self {
+        self.retry_after = class;
         self
     }
 
@@ -1584,6 +2869,7 @@ impl SessionRouter {
                 rejected: Vec::new(),
                 automatic: None,
                 override_refused: None,
+                movement: None,
             });
         }
 
@@ -1591,9 +2877,28 @@ impl SessionRouter {
             return None;
         }
 
+        // Step 2, in two halves. The tier-movement decision (lines
+        // 1559–1565) has to see the candidate set — "every candidate at the
+        // classified tier is struggling" is a fact about the set — and it
+        // has to be settled *before* the tier gate, because a downgrade
+        // admits a resource the classified tier would have refused. So the
+        // two capability constraints run first, the movement is decided over
+        // what survived them, and the tier gate then reads the tier the
+        // movement settled. An escalation never changes the gate: it moves
+        // a preference, and a preference does not remove a candidate
+        // (design decision 1, "additive, never a filter").
+        let capability_survivors: Vec<&Destination> = destinations
+            .iter()
+            .filter(|destination| hard_constraint(destination, inputs, None).is_ok())
+            .collect();
+        let movement = decide_tier_movement(&capability_survivors, inputs, self.retry_after);
+        let gate_tier = match &movement {
+            Some(movement) => Some(movement.gate_tier()),
+            None => inputs.requirements.minimum_tier,
+        };
         let (eligible, rejected) =
             apply_hard_constraints(destinations.to_vec(), |destination: &Destination| {
-                hard_constraint(destination, inputs)
+                hard_constraint(destination, inputs, gate_tier)
             });
 
         if eligible.is_empty() {
@@ -1621,6 +2926,7 @@ impl SessionRouter {
                 rejected,
                 automatic: None,
                 override_refused: None,
+                movement,
             });
         }
 
@@ -1642,15 +2948,17 @@ impl SessionRouter {
                     facts: destination.capacity_facts(),
                     // `None` is "not established": `super::pressure` takes it
                     // conservatively at the reserve gate (line 1459) and is
-                    // inert on it for the low-tier term.
-                    tier: inputs.requirements.minimum_tier,
+                    // inert on it for the low-tier term. A moved tier reaches
+                    // the pressure terms only downward — see
+                    // [`TierMovement::pressure_tier`].
+                    tier: movement.as_ref().map(TierMovement::pressure_tier),
                     existing: !destination.is_fresh(),
                     alternatives: &alternatives,
                     policies: self.reserve_policies,
                     scope: ReserveScope::Interactive,
                     user_override: self.reserve_overridden(destination),
                 };
-                let explanation = score(destination, current, inputs, &pressure);
+                let explanation = score(destination, current, inputs, &pressure, movement.as_ref());
                 (destination.clone(), explanation)
             })
             .collect();
@@ -1697,6 +3005,7 @@ impl SessionRouter {
             rejected,
             automatic: overrode,
             override_refused: refusal,
+            movement,
         })
     }
 
@@ -1751,6 +3060,7 @@ fn score(
     current: Option<&Destination>,
     inputs: &RouterInputs<'_>,
     pressure: &PressureInputs<'_>,
+    movement: Option<&TierMovement>,
 ) -> RoutingExplanation {
     let mut explanation = RoutingExplanation::new();
     if let Some(answer) = &inputs.requirements.classification {
@@ -1758,14 +3068,19 @@ fn score(
     }
     explanation.push(harness_capability_fit(destination, inputs.overrides));
     explanation.push(capability_fit(destination, &inputs.requirements));
-    if let Some(required) = inputs.requirements.minimum_tier {
-        explanation.push(workload_tier_fit(destination, required));
+    // `movement` is `Some` exactly when a tier was stated — `decide_tier_movement`
+    // answers `None` otherwise — so the three terms under it keep the
+    // preservation clause every tier term has kept: a launch that states no
+    // task renders exactly what it rendered before any of them existed.
+    if let Some(movement) = movement {
+        explanation.push(workload_tier_fit(destination, movement.preferred_tier()));
         // Line 1558, pushed under the same condition and for the same
         // reason: "the cheapest candidate that satisfies the required
         // workload tier" has no subject until a tier has been required.
         explanation.push(cost_preference(destination));
+        explanation.push(tier_movement_note(movement));
     }
-    explanation.push(session_affinity(destination));
+    explanation.push(session_affinity(destination, current, &inputs.requirements));
     explanation.push(prompt_cache_state(destination, current));
     explanation.push(quota_pressure(destination));
     // Phase 35D, lines 1570–1577: the band the quota reading falls in, and
@@ -1866,9 +3181,16 @@ fn provider_available(destination: &Destination, pool: &FreePool, now: Instant) 
 /// passes, because "nobody has said" is not "cannot"; the same rule the two
 /// constraints above already follow for `Unverified` tool semantics and an
 /// unknown protocol.
+///
+/// `minimum_tier` is the tier the gate reads — [`TierMovement::gate_tier`]
+/// once the movement is decided, and `None` for the pass that decides it
+/// (the two capability constraints only). It is an argument rather than
+/// `inputs.requirements.minimum_tier` so a downgrade (line 1562) can admit
+/// a resource the classified tier would have refused, in exactly one place.
 fn hard_constraint(
     destination: &Destination,
     inputs: &RouterInputs<'_>,
+    minimum_tier: Option<WorkloadTier>,
 ) -> Result<(), HardConstraint> {
     if inputs.requirements.needs_tool_calls
         && destination.backend().tools() == ToolSemantics::KnownAbsent
@@ -1880,8 +3202,7 @@ fn hard_constraint(
     {
         return Err(HardConstraint::Protocol);
     }
-    if let (Some(required), Some(offered)) =
-        (inputs.requirements.minimum_tier, destination.tier_ceiling())
+    if let (Some(required), Some(offered)) = (minimum_tier, destination.tier_ceiling())
         && offered < required
     {
         return Err(HardConstraint::WorkloadTier { required, offered });

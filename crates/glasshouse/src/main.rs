@@ -740,8 +740,9 @@ fn routing_destinations(
     effective: &EffectiveConfig<'_>,
     harness: glasshouse::integrations::IntegrationId,
     scope: DestinationScope<'_>,
+    task: Option<&str>,
 ) -> anyhow::Result<Vec<glasshouse::routing::session::Destination>> {
-    use glasshouse::routing::session::Destination;
+    use glasshouse::routing::session::{Destination, SessionContextFacts};
 
     let now_unix = glasshouse::provider::cache::now_unix_seconds();
     let telemetry = glasshouse::provider::resources::GatheredTelemetry::new().gather_gateway_quota(
@@ -751,9 +752,29 @@ fn routing_destinations(
     let mut destinations = Vec::new();
 
     // 1. The sessions this project already has.
-    let sessions = ProjectSessions::open(runtime)?;
-    let store = sessions.store();
-    for record in store.list()? {
+    //
+    // Read and released before the checkpoint store below is opened:
+    // sequential handles, never two live ones (practice §65).
+    let records = {
+        let sessions = ProjectSessions::open(runtime)?;
+        sessions.store().list()?
+    };
+    // Phase 36's producers (lines 1582–1586), read once for the whole set
+    // rather than once per session: the sticky classification cache is one
+    // file, the task's named paths are one function of one string, and the
+    // checkpoint store is one handle — dropped before
+    // `latest_checkpoint_quality` opens its own. Each arrives at the router as
+    // a value read here, on the same terms `warm_session` and
+    // `destination_capacity` already meet; `SessionContextFacts` says which
+    // absences mean *unknown*.
+    let sticky =
+        ClassificationStickyCache::new(runtime.paths(), runtime.project().id().as_str()).load();
+    let task_named_paths = task
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .map(glasshouse::routing::session::paths_named_in);
+    let checkpoints = ProjectCheckpoints::open(runtime).ok();
+    for record in records {
         // A session on another harness is not a destination for a launch that
         // has already selected this one, and `resume` reads the harness off
         // the record rather than ranking across them.
@@ -763,6 +784,16 @@ fn routing_destinations(
         let Some(warm) = warm_session(&record, now_unix, scope) else {
             continue;
         };
+        let context = SessionContextFacts::UNREAD
+            .with_observed_compactions(record.observed_compactions)
+            .with_last_task(
+                sticky
+                    .as_ref()
+                    .filter(|sticky| sticky.session() == record.id.as_str())
+                    .and_then(|sticky| sticky.classification()),
+            )
+            .with_touched_files(session_touched_files(checkpoints.as_ref(), &record.id))
+            .with_task_named_paths(task_named_paths.clone());
         // The profile the session actually ran under, re-resolved so that its
         // backend, model and protocol are read the same way a fresh
         // destination's are. A profile that has since been deleted or renamed
@@ -794,9 +825,11 @@ fn routing_destinations(
                 ),
                 destination_capacity(&profile, effective, &telemetry, now_unix),
             )
-            .with_tier_ceiling(ceiling),
+            .with_tier_ceiling(ceiling)
+            .with_session_context(context),
         );
     }
+    drop(checkpoints);
 
     // 2. One fresh destination per *enabled* configured launch profile, each
     //    carrying what the most recent checkpoint would give it to boot from.
@@ -933,6 +966,47 @@ fn warm_session(
         state,
         idle_seconds: now_unix - record.last_activity_at,
     })
+}
+
+/// Line 1583's producer: the files a session's **own** latest checkpoint
+/// lists — the handoff's `files` (the path part of each entry, before any
+/// `::symbol` or note) and the working tree's changed files at capture.
+///
+/// `None` when the session has no checkpoint, which the router reads as
+/// unknown; `Some(vec![])` when it has one that lists nothing. Read off
+/// `CheckpointStore::latest_for`, the same reader `glasshouse checkpoint`
+/// uses, and never off another session's checkpoint: a file touched by a
+/// sibling session says nothing about this one.
+///
+/// `memory_files` (migration 17) is the other producer the map names, and
+/// it is **not** read here: this build writes it and reads it nowhere, and a
+/// reader is a query on `memories.source_session_id` that this package did
+/// not add. When one exists its paths extend this list; the facet already
+/// accepts any path set.
+fn session_touched_files(
+    checkpoints: Option<&ProjectCheckpoints>,
+    session: &SessionId,
+) -> Option<Vec<String>> {
+    let stored = checkpoints?.store().latest_for(session).ok()??;
+    let mut files: Vec<String> = stored
+        .checkpoint
+        .handoff
+        .files
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .split(|c: char| c.is_whitespace() || c == ':')
+                .next()
+                .filter(|path| !path.is_empty())
+        })
+        .map(str::to_owned)
+        .collect();
+    if let Some(tree) = &stored.checkpoint.working_tree {
+        files.extend(tree.changed_files.iter().cloned());
+    }
+    files.sort();
+    files.dedup();
+    Some(files)
 }
 
 /// The backend a destination running `profile` would serve on, and every wire
@@ -1169,6 +1243,82 @@ fn routing_evidence_for(
     glasshouse::evaluation::RoutingEvidence::from_observation(observed_at, now_unix)
 }
 
+/// Capability map line 1564's caller half: how the most recent exchange on
+/// `current`'s backend ended, from the evidence ledger, keyed exactly as the
+/// gateway writes it (`exchange.provider`, `assignment.backend().model().label()`).
+/// `None` when the ledger cannot be opened or holds nothing for the pair — a
+/// missing history is not a failure, and the router's explanation says so.
+fn latest_failure_class(
+    runtime: &Runtime,
+    current: &glasshouse::routing::session::Destination,
+) -> Option<glasshouse::routing::evidence::FailureClass> {
+    use glasshouse::routing::evidence::{CLASSIFICATION_EVIDENCE_WINDOW_SECONDS, EvidenceLedger};
+
+    let ledger = match EvidenceLedger::open(runtime) {
+        Ok(ledger) => ledger,
+        Err(err) => {
+            tracing::debug!(error = %err, "evidence ledger unavailable; no retry promotion");
+            return None;
+        }
+    };
+    ledger
+        .latest_failure_class_for_model(
+            current.backend().provider(),
+            current.backend().model().label(),
+            glasshouse::provider::cache::now_unix_seconds(),
+            CLASSIFICATION_EVIDENCE_WINDOW_SECONDS,
+        )
+        .unwrap_or_else(|err| {
+            tracing::debug!(error = %err, "could not read the last failure class");
+            None
+        })
+}
+
+/// Capability map line 1566: one ledger row per tier movement the launch
+/// path acted on, under [`glasshouse::routing::evidence::TIER_ESCALATION_PURPOSE`]
+/// or [`glasshouse::routing::evidence::TIER_DOWNGRADE_PURPOSE`], so a later
+/// evaluation can count how often the router moved a tier and which way.
+///
+/// The same `glasshouse`/`session-router` identity and the same
+/// open-write-drop shape as [`record_routing_latency`], for the same reasons
+/// — and a `Held` movement writes nothing, because "the tier stood" is the
+/// row's absence, exactly as a launch that classified nothing leaves no
+/// latency row.
+fn record_tier_movement(
+    runtime: &Runtime,
+    harness: glasshouse::integrations::IntegrationId,
+    movement: &glasshouse::routing::session::TierMovement,
+) {
+    use glasshouse::routing::evidence::{
+        EvidenceLedger, NewObservation, TIER_DOWNGRADE_PURPOSE, TIER_ESCALATION_PURPOSE,
+    };
+    use glasshouse::routing::session::TierMovement;
+
+    let purpose = match movement {
+        TierMovement::Escalated { .. } => TIER_ESCALATION_PURPOSE,
+        TierMovement::Downgraded { .. } => TIER_DOWNGRADE_PURPOSE,
+        TierMovement::Held { .. } => return,
+    };
+    let ledger = match EvidenceLedger::open(runtime) {
+        Ok(ledger) => ledger,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "routing evidence ledger unavailable; the tier movement is not recorded"
+            );
+            return;
+        }
+    };
+    let now_unix = glasshouse::provider::cache::now_unix_seconds();
+    let observation = NewObservation::new("glasshouse", "session-router")
+        .with_harness(Some(harness.slug()))
+        .with_purpose(Some(purpose))
+        .with_timing(Some(now_unix), Some(now_unix));
+    if let Err(err) = ledger.record(observation, now_unix) {
+        tracing::warn!(error = %err, "could not record the tier movement");
+    }
+}
+
 /// The workload tier a launch's routing decision used, and whether line
 /// 1459's conservative rule moved it — **capability map line 1834**'s
 /// producer input, from the classification that decision actually acted on.
@@ -1231,8 +1381,55 @@ fn failover_prevention_sink(
                 effect.displaced(),
                 glasshouse::evaluation::now_unix(),
             );
+            // Capability map line 1852: the route the *measured* correlation
+            // steered this failover off — one that looked independent by
+            // provider and was not by observation. Its own row in the
+            // routing ledger, because that is where the observations it was
+            // derived from live and where `glasshouse route` reads it back.
+            if let Some(route) = effect.correlation_displaced() {
+                record_correlation_steer(&runtime, route, glasshouse::evaluation::now_unix());
+            }
         },
     )
+}
+
+/// Capability map line 1852's producer: one `routing_observations` row
+/// under [`glasshouse::routing::evidence::CORRELATION_PURPOSE`] per failover
+/// the correlation term steered, naming the route it steered off.
+///
+/// The row is an observation *about* `displaced` — its `provider` and
+/// `model` — and nothing else: no outcome, no failure class, no harness and
+/// no tokens, so every reader keyed on an exchange having happened ignores
+/// it by construction (see the purpose constant's own doc comment), and
+/// [`glasshouse::routing::evidence::correlate_routes`] never reads it back
+/// as evidence for the correlation that produced it. Best-effort for the
+/// same reason `record_failover_prevention` is: a ledger that cannot be
+/// opened costs the measurement, never the failover.
+fn record_correlation_steer(
+    runtime: &Runtime,
+    displaced: &glasshouse::routing::evidence::RouteIdentity,
+    now_unix: i64,
+) {
+    let ledger = match glasshouse::routing::evidence::EvidenceLedger::open(runtime) {
+        Ok(ledger) => ledger,
+        Err(err) => {
+            tracing::debug!(
+                error = %err,
+                "routing evidence ledger unavailable; a correlation-steered failover is not \
+                 recorded"
+            );
+            return;
+        }
+    };
+    let row = glasshouse::routing::evidence::NewObservation::new(
+        displaced.provider.clone(),
+        displaced.model.clone(),
+    )
+    .with_purpose(Some(glasshouse::routing::evidence::CORRELATION_PURPOSE))
+    .with_timing(Some(now_unix), Some(now_unix));
+    if let Err(err) = ledger.record(row, now_unix) {
+        tracing::debug!(error = %err, "could not record a correlation-steered failover");
+    }
 }
 
 /// Apply line 1595's protocol list, and only when there is one.
@@ -1632,7 +1829,121 @@ fn route_report(
     let mut report = render_route_recommendation(&recommendation);
     report.push('\n');
     report.push_str(&route_outcomes_section(runtime));
+    report.push_str(&route_correlations_section(runtime));
     Ok(report)
+}
+
+/// Capability map lines 1370, 1373, 1374, 1376 and 1852, printed for a
+/// person: every pair of routes this project's ledger has observed at the
+/// same moments, with the sample size **before** any confidence — line
+/// 1376's rule, that a correlation is presented as meaningful only once
+/// enough overlapping observations exist, and otherwise as the count that
+/// fell short — and beneath them how many gateway failovers the correlation
+/// term actually steered.
+///
+/// Reads the routing ledger over
+/// [`glasshouse::routing::evidence::CLASSIFICATION_EVIDENCE_WINDOW_SECONDS`]
+/// — the same seven days the failover itself reads — so what this prints is
+/// what the router weighed. Practice §65: opened here, dropped on return,
+/// and a ledger that cannot be opened costs this section and never the
+/// recommendation above it.
+fn route_correlations_section(runtime: &Runtime) -> String {
+    use glasshouse::routing::evidence::{
+        CLASSIFICATION_EVIDENCE_WINDOW_SECONDS, CORRELATION_PURPOSE, CorrelationVerdict,
+        EvidenceLedger,
+    };
+
+    let header =
+        "\nRoute correlations in this project, last 7 days (map lines 1370-1376)\n".to_owned();
+    let ledger = match EvidenceLedger::open(runtime) {
+        Ok(ledger) => ledger,
+        Err(err) => {
+            tracing::debug!(
+                error = %err,
+                "could not open the routing evidence ledger for the route-correlation section"
+            );
+            return format!("{header}\n  the routing evidence ledger could not be opened\n");
+        }
+    };
+    let now_unix = glasshouse::provider::cache::now_unix_seconds();
+    let correlations =
+        match ledger.route_correlations(now_unix, CLASSIFICATION_EVIDENCE_WINDOW_SECONDS) {
+            Ok(correlations) => correlations,
+            Err(err) => return format!("{header}\n  {err}\n"),
+        };
+    // Line 1852, counted back by purpose: every row the failover-prevention
+    // sink wrote for a steered failover, and nothing else.
+    let steered: usize =
+        match ledger.consumption_by_purpose(now_unix, CLASSIFICATION_EVIDENCE_WINDOW_SECONDS) {
+            Ok(groups) => groups
+                .iter()
+                .filter(|group| group.purpose.as_deref() == Some(CORRELATION_PURPOSE))
+                .map(|group| group.sample_count)
+                .sum(),
+            Err(err) => return format!("{header}\n  {err}\n"),
+        };
+
+    let mut out = header;
+    out.push('\n');
+    if correlations.is_empty() {
+        out.push_str(
+            "  no two routes have been observed at the same moment, so nothing is known about \
+             whether any pair fails together\n",
+        );
+    }
+    for correlation in correlations.iter() {
+        let (a, b) = correlation.routes();
+        match correlation.verdict() {
+            CorrelationVerdict::InsufficientEvidence {
+                sample_size,
+                required,
+            } => {
+                let _ = writeln_str(
+                    &mut out,
+                    format!(
+                        "  {a} and {b}: insufficient evidence — {sample_size} of the {required} \
+                         overlapping observations a correlation needs; treated as no correlation"
+                    ),
+                );
+            }
+            CorrelationVerdict::Measured {
+                confidence,
+                sample_size,
+            } => {
+                let _ = writeln_str(
+                    &mut out,
+                    format!(
+                        "  {a} and {b}: failed the same way at the same moment in {} of \
+                         {sample_size} overlapping observations — correlation {confidence:.2}",
+                        correlation.overlaps()
+                    ),
+                );
+            }
+        }
+    }
+    out.push('\n');
+    if steered == 0 {
+        out.push_str(
+            "  no gateway failover in this window was steered by a measured route \
+             correlation (map line 1852)\n",
+        );
+    } else {
+        let _ = writeln_str(
+            &mut out,
+            format!(
+                "  {steered} gateway failover(s) in this window went somewhere other than a route \
+                 whose failures overlap the failed backend's — separate quota, not separate \
+                 failure resilience (map line 1852)"
+            ),
+        );
+    }
+    out
+}
+
+/// `writeln!` without the `use std::fmt::Write` every caller would need.
+fn writeln_str(out: &mut String, line: String) -> std::fmt::Result {
+    use std::fmt::Write as _;
+    writeln!(out, "{line}")
 }
 
 /// How far back `glasshouse route`'s outcome section looks.
@@ -2151,8 +2462,13 @@ fn route_recommendation(
         .filter(|id| id.kind() == IntegrationKind::Harness)
         .filter(|id| effective.enabled(*id, false).value)
     {
-        let everything =
-            routing_destinations(runtime, effective, harness, DestinationScope::Everything)?;
+        let everything = routing_destinations(
+            runtime,
+            effective,
+            harness,
+            DestinationScope::Everything,
+            task,
+        )?;
         refused_by_launch.extend(
             everything
                 .iter()
@@ -2231,12 +2547,18 @@ fn route_recommendation(
             .cloned(),
     };
 
-    let Some(routed) = session_router(effective, user_override).choose(
-        moment,
-        current.as_ref(),
-        &destinations,
-        &inputs,
-    ) else {
+    // Line 1564's caller: at a task boundary the work is somewhere, and how
+    // its last exchange there ended is a fact the ledger holds. Read only
+    // when there is a current destination — a session start has no last
+    // attempt to promote after — and handed to the router, which promotes
+    // on a model-capability class and names any other.
+    let retry_after = current
+        .as_ref()
+        .and_then(|current| latest_failure_class(runtime, current));
+    let Some(routed) = session_router(effective, user_override)
+        .with_retry_after(retry_after)
+        .choose(moment, current.as_ref(), &destinations, &inputs)
+    else {
         // `choose` answers `None` in exactly two situations, and they are
         // different facts about this project rather than one error.
         return Ok(RouteRecommendation::Nowhere(if moment.permits_routing() {
@@ -2921,6 +3243,7 @@ fn launch_session(
             DestinationScope::Launchable {
                 profile: fresh_profile,
             },
+            task,
         )?;
         let overrides = effective.pairing_overrides();
         // **Map line 1599's bridge, on the path that acts.** The live pool a
@@ -3002,6 +3325,20 @@ fn launch_session(
             // this launch (line 1849), recorded before anything below opens a
             // ledger handle of its own.
             eprintln!("glasshouse: {}", classified.answer.explain());
+            // Lines 1565 and 1566, on the path that acts: a moved tier is
+            // said before the destination it produced is announced below,
+            // and recorded so it can be counted. `glasshouse route` renders
+            // the same movement in its report and records nothing.
+            if let Some(routed) = &routed
+                && let Some(movement) = routed.movement().filter(|movement| movement.fired())
+            {
+                eprintln!(
+                    "glasshouse: tier {}. `glasshouse route --task ...` says why; `--to <id>` \
+                     overrules it.",
+                    movement.describe()
+                );
+                record_tier_movement(runtime, selection.id(), movement);
+            }
             record_routing_latency(
                 runtime,
                 routing_started,
@@ -6994,9 +7331,13 @@ fn report_task_boundary_routing(runtime: &Runtime, session: &str) {
     };
     let effective = EffectiveConfig::new(&user, project.as_ref());
 
-    let Ok(destinations) =
-        routing_destinations(runtime, &effective, harness, DestinationScope::Everything)
-    else {
+    let Ok(destinations) = routing_destinations(
+        runtime,
+        &effective,
+        harness,
+        DestinationScope::Everything,
+        None,
+    ) else {
         return;
     };
     let current = destinations
@@ -7507,6 +7848,15 @@ fn render_routing_economics(out: &mut String, runtime: &Runtime, now_unix: i64) 
                 "routing model",
                 tokens(overhead.routing_latency_tokens),
                 overhead.routing_latency_requests
+            );
+            let _ = writeln!(
+                out,
+                "  {:<16}{} over {} decision rows — tier escalations and downgrades the session \
+                 router acted on (map line 1566); no tokens, because a decision is not a model \
+                 call",
+                "tier movement",
+                tokens(overhead.tier_movement_tokens),
+                overhead.tier_movement_requests
             );
             let _ = writeln!(
                 out,
@@ -9782,6 +10132,71 @@ mod tests {
     /// A harness enabled with a decoy executable, so `session::select::select`
     /// succeeds without a real install; the runtime it was bootstrapped
     /// against comes back too, so the caller can inspect state afterward.
+    /// Capability map line 1852's write, read back the way `glasshouse
+    /// route` reads it: by purpose, and by nothing that would make it an
+    /// exchange.
+    #[test]
+    fn a_correlation_steered_failover_is_recorded_by_purpose_and_never_as_an_exchange() {
+        use glasshouse::routing::evidence::{
+            CORRELATION_PURPOSE, EvidenceLedger, ObservationQuery, RouteIdentity,
+        };
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("project");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        let cli = Cli::try_parse_from([
+            "glasshouse",
+            "--data-dir",
+            tmp.path().join("data").to_str().unwrap(),
+            "--config-dir",
+            tmp.path().join("config").to_str().unwrap(),
+        ])
+        .unwrap();
+        let runtime = glasshouse::bootstrap(&cli, &root).unwrap();
+
+        record_correlation_steer(
+            &runtime,
+            &RouteIdentity::new("looked-independent", "the-model"),
+            1_800_000_000,
+        );
+
+        let ledger = EvidenceLedger::open(&runtime).unwrap();
+        let rows = ledger
+            .recent(
+                ObservationQuery {
+                    provider: "looked-independent",
+                    model: "the-model",
+                    route: None,
+                    harness: None,
+                },
+                10,
+            )
+            .unwrap();
+        assert_eq!(rows.len(), 1, "one steered failover, one row: {rows:?}");
+        assert_eq!(rows[0].purpose.as_deref(), Some(CORRELATION_PURPOSE));
+        assert_eq!(
+            (rows[0].outcome, rows[0].failure_class),
+            (None, None),
+            "the row is about a decision, not an exchange, and must never count as one"
+        );
+        let steered: usize = ledger
+            .consumption_by_purpose(1_800_000_000, 60)
+            .unwrap()
+            .iter()
+            .filter(|group| group.purpose.as_deref() == Some(CORRELATION_PURPOSE))
+            .map(|group| group.sample_count)
+            .sum();
+        assert_eq!(steered, 1, "`glasshouse route` counts it back by purpose");
+        assert!(
+            ledger
+                .failure_classes_by_provider(1_800_000_000, 60)
+                .unwrap()
+                .get("looked-independent")
+                .is_none_or(|counts| counts.is_empty()),
+            "a steered failover is not an exchange on the route it steered off"
+        );
+    }
+
     fn fixture_with_enabled_claude_code(tmp: &std::path::Path) -> Runtime {
         let root = tmp.join("project");
         std::fs::create_dir_all(root.join(".git")).unwrap();

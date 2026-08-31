@@ -37,7 +37,8 @@ use crate::config::pairing::{
 };
 use crate::provider::telemetry::RateLimitHeaders;
 use crate::routing::evidence::{
-    EvidenceLedger, FailureClass, NewObservation, ObservedEvidenceSource, Outcome as RoutingOutcome,
+    EvidenceLedger, FailureClass, NewObservation, ObservedEvidenceSource,
+    Outcome as RoutingOutcome, RouteCorrelations,
 };
 use crate::routing::free::{FreePool, FreeResource, WorkloadOutcome};
 use crate::routing::interactive::{
@@ -593,6 +594,23 @@ impl SessionRouting {
             }
             None => &no_observations,
         };
+        // Phase 33C lines 1370–1376's one production consumer, beside the
+        // evidence source and under the same `None` rule: no ledger, no
+        // correlation, and the ranking is exactly what it was before that
+        // package. Read here, at the moment of a real provider failure, and
+        // not kept warm across the exchanges that move nothing.
+        let correlations = match ledger {
+            Some(ledger) => ledger
+                .route_correlations(now_unix, FAILOVER_EVIDENCE_WINDOW_SECONDS)
+                .unwrap_or_else(|err| {
+                    tracing::debug!(
+                        error = %err,
+                        "could not read route correlations; this failover is ranked without them"
+                    );
+                    RouteCorrelations::default()
+                }),
+            None => RouteCorrelations::default(),
+        };
 
         match state.policy.on_provider_failure(
             &current,
@@ -601,6 +619,7 @@ impl SessionRouting {
             state.pairing_preference,
             &state.pairing_overrides,
             evidence,
+            &correlations,
         ) {
             FailureResponse::FailOver {
                 to,
@@ -1512,6 +1531,140 @@ mod tests {
             Some("good-evidence".to_owned()),
             "the candidate with strong recorded evidence must win the real failover, not \
              `poor-evidence`, which is configured first among the two survivors"
+        );
+    }
+
+    /// Phase 33C lines 1370–1376 and 1852, at the production caller (§35):
+    /// a **real** [`EvidenceLedger`] whose rows show `correlated` answering
+    /// `5xx` at the same moments `first` did, and `independent` serving
+    /// through those same moments, driven through
+    /// [`SessionRouting::observe_exchange`] itself. Both survivors carry the
+    /// same failure rate (five failed, five served each), the same harness,
+    /// model and route, and `correlated` is configured first — so nothing
+    /// but the correlation term can move the winner, and the sink must be
+    /// told that it did.
+    ///
+    /// Mutating this method's `&correlations` back to
+    /// `&RouteCorrelations::default()` fails this test, because it is the
+    /// only one that supplies correlated rows here at all.
+    #[test]
+    fn observe_exchange_steers_a_real_failover_off_a_route_the_ledger_shows_failing_with_it() {
+        use crate::routing::evidence::RouteIdentity;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger = ledger_fixture(tmp.path());
+        let now_unix = 1_800_000_000_i64;
+        let row = |provider: &str, outcome: RoutingOutcome, class: Option<FailureClass>| {
+            NewObservation::new(provider, "the-routed-model")
+                .with_route(Some("anthropic-messages"))
+                .with_harness(Some("claude-code"))
+                .with_outcome(outcome)
+                .with_failure_class(class)
+        };
+
+        for i in 0..5 {
+            // The failed backend's own 5xx, and what the two survivors were
+            // doing ten seconds later: one failing the same way, one serving.
+            let failed_at = now_unix - 3_600 + i * 120;
+            ledger
+                .record(
+                    row(
+                        "first",
+                        RoutingOutcome::Failed,
+                        Some(FailureClass::Upstream5xx),
+                    )
+                    .with_timing(Some(failed_at), Some(failed_at + 5)),
+                    failed_at + 5,
+                )
+                .unwrap();
+            ledger
+                .record(
+                    row(
+                        "correlated",
+                        RoutingOutcome::Failed,
+                        Some(FailureClass::Upstream5xx),
+                    )
+                    .with_timing(Some(failed_at + 10), Some(failed_at + 15)),
+                    failed_at + 15,
+                )
+                .unwrap();
+            ledger
+                .record(
+                    row("independent", RoutingOutcome::Succeeded, None)
+                        .with_timing(Some(failed_at + 10), Some(failed_at + 15)),
+                    failed_at + 15,
+                )
+                .unwrap();
+            // Balance the two survivors' own records so the local-evidence
+            // term ties: `correlated` served, and `independent` failed, at
+            // moments nothing else was observed.
+            let alone_at = now_unix - 7_200 + i * 120;
+            ledger
+                .record(
+                    row("correlated", RoutingOutcome::Succeeded, None)
+                        .with_timing(Some(alone_at), Some(alone_at + 5)),
+                    alone_at + 5,
+                )
+                .unwrap();
+            let alone_at = now_unix - 10_800 + i * 120;
+            ledger
+                .record(
+                    row(
+                        "independent",
+                        RoutingOutcome::Failed,
+                        Some(FailureClass::Upstream5xx),
+                    )
+                    .with_timing(Some(alone_at), Some(alone_at + 5)),
+                    alone_at + 5,
+                )
+                .unwrap();
+        }
+
+        let seen: std::sync::Arc<std::sync::Mutex<Vec<Option<RouteIdentity>>>> = Default::default();
+        let sink_seen = std::sync::Arc::clone(&seen);
+        let sink: FailoverPreventionSink = std::sync::Arc::new(move |effect| {
+            sink_seen
+                .lock()
+                .unwrap()
+                .push(effect.correlation_displaced().cloned());
+        });
+
+        let upstream = Upstream::with_failover(vec![
+            upstream_backend("first"),
+            upstream_backend("correlated"),
+            upstream_backend("independent"),
+        ])
+        .expect("three backends is not none");
+        let routing = SessionRouting::new();
+        routing.bind(
+            "claude-code",
+            "anthropic-messages",
+            AssignedModel::named("the-routed-model"),
+            &upstream,
+        );
+
+        routing.observe_exchange(
+            &upstream,
+            &unreachable_exchange("first"),
+            Instant::now(),
+            Some(&ledger),
+            now_unix,
+            None,
+            Some(&sink),
+        );
+
+        assert_eq!(
+            routing.assignment().map(|a| a.provider().to_owned()),
+            Some("independent".to_owned()),
+            "a route the ledger shows failing at the same moments as the failed backend must \
+             lose the failover to one it shows serving through them, even though it is \
+             configured first"
+        );
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            &[Some(RouteIdentity::new("correlated", "the-routed-model"))],
+            "line 1852: the sink is told which nominally different route the correlation \
+             steered this failover off"
         );
     }
 
