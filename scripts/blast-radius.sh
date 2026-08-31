@@ -108,6 +108,14 @@ if [ ${#FILES[@]} -eq 0 ]; then
   esac
 fi
 
+# A deleted or renamed-away file still appears in the diff; cargo refuses a
+# test target that no longer exists (measured 2026-08-31: the deleted
+# tests/subscription_rules.rs turned a green 86-target run red). Trace only
+# files that are still on disk.
+EXISTING=()
+for f in "${FILES[@]}"; do [ -f "$f" ] && EXISTING+=("$f"); done
+FILES=("${EXISTING[@]}")
+
 if [ ${#FILES[@]} -eq 0 ]; then
   echo "blast-radius: no changed .rs files — nothing to do"
   exit 0
