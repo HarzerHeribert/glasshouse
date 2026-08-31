@@ -4,13 +4,19 @@
 //! [`Response`], each a single line of JSON. A protocol this small has no
 //! framing to get wrong: a caller writes one line, reads one line, and closes
 //! the connection. Nothing here is transport-specific — [`super::unix`] is
-//! the only module that knows this travels over a Unix domain socket.
+//! the module that knows this travels over a Unix domain socket, and
+//! `super::mcp` is the one that knows the same requests arrive as MCP tool
+//! calls over stdio. Both answer through the same handlers; neither adds a
+//! verb this file does not name.
 
 use glasshouse::events::MessageOrigin;
 use glasshouse::memory::snapshot::SnapshotBudget;
 use serde::{Deserialize, Serialize};
 
-fn default_memory_limit() -> usize {
+/// `pub(super)` so `super::mcp`'s search tool defaults exactly as a bare
+/// [`Request::QueryMemory`] does, rather than carrying a copy of this number
+/// that could drift from the door it is talking to.
+pub(super) fn default_memory_limit() -> usize {
     20
 }
 
@@ -44,8 +50,9 @@ fn default_route_alternatives() -> usize {
 /// against the ceiling `unix::MAX_RECENT_OUTPUT_BYTES` allows a caller that
 /// wants more. Stated once, here, because `cli::ApiCommand::Read`'s
 /// `--max-bytes` is deliberately optional rather than carrying a copy of
-/// this number that could drift from the door it is talking to.
-fn default_recent_output_bytes() -> usize {
+/// this number that could drift from the door it is talking to. `pub(super)`
+/// for the same reason, for `super::mcp`'s recent-output tool.
+pub(super) fn default_recent_output_bytes() -> usize {
     8192
 }
 

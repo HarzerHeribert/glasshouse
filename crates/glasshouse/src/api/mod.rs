@@ -71,19 +71,26 @@
 //! **Authentication.** See `unix::authorize` for the mechanism and its
 //! limits — a filesystem-permission and peer-credential check, not a secret.
 
-/// Gated to match its only consumer, `unix`. Every item in `protocol` is
-/// reached from `unix::serve` and from nothing else, so on a platform without
-/// Unix domain sockets the whole module is dead code — and `-D warnings` makes
-/// that a hard error, not a warning. Practice: anything used only by a
-/// platform-gated module needs the same gate as that module.
-#[cfg(unix)]
+/// Not gated, since Phase 43. `protocol` used to be `#[cfg(unix)]` because
+/// its only consumer was `unix::serve`, and a platform without Unix domain
+/// sockets made the whole module dead code under `-D warnings`. The MCP door
+/// below reaches every request over stdio on every platform, so the wire
+/// shape is live everywhere now — and so are the handlers in `unix`, whose
+/// socket-specific items carry their own `#[cfg(unix)]` item by item (see
+/// that module's doc for why it kept its name).
 mod protocol;
 
-#[cfg(unix)]
+/// See [`protocol`]: the handlers compile everywhere, the socket does not.
 mod unix;
 
-/// Gated to match the transport it speaks over, exactly as `protocol` and
-/// `unix` are. It is the *client* half of this door — the half that connects,
+/// The MCP door — Phase 43. A second transport over the same handlers, on
+/// stdio, and therefore on every platform: nothing in it is gated.
+mod mcp;
+
+pub use mcp::serve as serve_mcp;
+
+/// Gated to match the transport it speaks over, exactly as `unix`'s socket
+/// items are. It is the *client* half of this door — the half that connects,
 /// writes one request and reads one answer — and it is separate from `unix`
 /// because that module is the server and the two share nothing but the wire
 /// shape in `protocol`.

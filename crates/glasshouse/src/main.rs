@@ -9,7 +9,7 @@ use glasshouse::checkpoint::{
     Checkpoint, CheckpointReason, CheckpointStore, Handoff, ProjectCheckpoints, Stored,
     WorkingTreeStatus,
 };
-use glasshouse::cli::{ApiCommand, CheckpointCommand};
+use glasshouse::cli::{ApiCommand, CheckpointCommand, McpCommand};
 use glasshouse::config::response::{ResponseProfileEntry, ResponseRequest};
 use glasshouse::config::{self, EffectiveConfig, ProjectConfig, UserConfig};
 use glasshouse::events::{
@@ -401,6 +401,13 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
             ApiCommand::Read { session, max_bytes } => {
                 api::read_output(&runtime, session, *max_bytes)?;
             }
+        },
+        // The MCP door — the same handlers `api serve` answers with, over
+        // stdio, bound to the project `runtime` was resolved for exactly as
+        // every other arm here is. See `api::mcp` for the ruling it
+        // implements.
+        Some(Command::Mcp { command }) => match command {
+            McpCommand::Serve => api::serve_mcp(&runtime)?,
         },
         None => {
             // Setup runs by itself the first time, so a new user does not have
@@ -1354,11 +1361,11 @@ fn routing_moment_from_str(moment: &str) -> Option<glasshouse::routing::session:
 /// [`ROUTING_MOMENTS`], read the other way: the spelling a caller may send
 /// back, for the control door's answer.
 ///
-/// Gated to match its only consumer, `api::unix`, for the reason
-/// `api/mod.rs` states about `protocol`: an item reached only from a
-/// platform-gated module is dead code everywhere else, and `-D warnings`
-/// makes that a hard error rather than a warning.
-#[cfg(unix)]
+/// Not gated, since Phase 43. It used to be `#[cfg(unix)]` to match its
+/// only consumer, `api::unix`, which was itself gated; the handlers in that
+/// module now compile on every platform because the MCP door reaches them
+/// over stdio, so this is live everywhere too — and a gate left here would
+/// be a Windows build error, which the cross-check caught.
 fn routing_moment_slug(moment: glasshouse::routing::session::RoutingMoment) -> &'static str {
     ROUTING_MOMENTS
         .iter()

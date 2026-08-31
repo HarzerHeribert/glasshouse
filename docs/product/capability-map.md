@@ -1691,16 +1691,16 @@ Fixed architectural requirements
 - The MCP surface is a controlled interface to existing Glasshouse core capabilities.
 - It does not create a parallel orchestration runtime or bypass project isolation, session ownership, permissions, or routing constraints.
 
-☐ Expose selected Glasshouse control operations as MCP tools for compatible orchestrator harnesses.
-☐ Expose session listing through MCP.
-☐ Expose worker spawning through MCP.
-☐ Expose session messaging through MCP.
-☐ Expose session status through MCP.
-☐ Expose worker interruption through MCP.
-☐ Expose project-memory search through MCP.
-☐ Expose checkpoint retrieval through MCP.
-☐ Restrict MCP tools to the active project scope.
-☐ Keep dangerous operations explicit enough that native harness permission controls can still be applied where possible.
+☑ Expose selected Glasshouse control operations as MCP tools for compatible orchestrator harnesses.
+☑ Expose session listing through MCP.
+☑ Expose worker spawning through MCP.
+☑ Expose session messaging through MCP.
+☑ Expose session status through MCP.
+☑ Expose worker interruption through MCP.
+☑ Expose project-memory search through MCP.
+☑ Expose checkpoint retrieval through MCP.
+☑ Restrict MCP tools to the active project scope.
+☑ Keep dangerous operations explicit enough that native harness permission controls can still be applied where possible.
 
 Phase 44 — User control and override
 
@@ -1743,7 +1743,7 @@ Phase 46 — Security and contamination tests
 ☑ Add automated tests proving canonicalized paths cannot escape the project root through ...
 ☑ Add automated tests proving symlink targets outside the project root are rejected by Glasshouse-controlled file operations.
 ☐ Add automated tests proving cmux session metadata cannot bypass project-scope validation.
-☐ Add automated tests proving MCP operations remain bound to the active project.
+☑ Add automated tests proving MCP operations remain bound to the active project.
 ☑ Add automated tests proving memory extraction cannot write into another project’s database.
 ☑ Add automated tests proving each project’s Glasshouse state is physically separated, so that deleting one project’s state directory removes only that project’s state.
 

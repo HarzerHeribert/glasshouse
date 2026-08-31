@@ -564,6 +564,17 @@ pub enum Command {
         #[command(subcommand)]
         command: ApiCommand,
     },
+    /// Serve this project's control operations as MCP tools — Phase 43.
+    ///
+    /// The same door as `api serve`, spoken as the Model Context Protocol
+    /// over stdio, so an orchestrator harness that speaks MCP (Claude Code,
+    /// Codex, and others) can list, spawn, message, and interrupt this
+    /// project's sessions, search its memory, and read its checkpoints as
+    /// ordinary tools — gated by that harness's own permission controls.
+    Mcp {
+        #[command(subcommand)]
+        command: McpCommand,
+    },
     /// Report what Glasshouse's own routing model has consumed, in tokens
     /// and requests, apart from every other row this project's evidence
     /// ledger holds — capability map line 1464.
@@ -580,6 +591,37 @@ pub enum Command {
         #[arg(long, value_name = "N", default_value_t = 24)]
         hours: u32,
     },
+}
+
+/// `glasshouse mcp` subcommands.
+#[derive(Debug, Subcommand)]
+pub enum McpCommand {
+    /// Answer MCP requests on stdin/stdout until the client closes stdin.
+    ///
+    /// Start it INSIDE THE PROJECT: the server binds to the project it is
+    /// started in (the working directory's Git root, or `--scope`), and no
+    /// tool takes a project, path, or socket argument — the process is the
+    /// scope. Register it with the harness that will call it, for example:
+    ///
+    ///   Claude Code   claude mcp add glasshouse -- glasshouse mcp serve
+    ///
+    ///   .mcp.json /   {"mcpServers": {"glasshouse":
+    ///   settings        {"command": "glasshouse", "args": ["mcp", "serve"]}}}
+    ///
+    ///   Codex         [mcp_servers.glasshouse]   (in ~/.codex/config.toml)
+    ///                 command = "glasshouse"
+    ///                 args = ["mcp", "serve"]
+    ///
+    /// Eight tools: five read-only (list sessions, session status, recent
+    /// output, search memory, get checkpoint) and three that change a
+    /// session's state and say so in their own descriptions — spawn a
+    /// session (starts a process), send a message (injects input into a
+    /// running harness), and interrupt a session. They are separate tools
+    /// rather than one tool with an action argument precisely so a harness
+    /// can allow the five and ask about the three.
+    ///
+    /// Stdout carries protocol frames only; diagnostics go to stderr.
+    Serve,
 }
 
 /// `glasshouse api` subcommands.

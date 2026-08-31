@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**824 / 1280 mandatory capabilities (64%)** — 456 open across 61 phases.
+**835 / 1280 mandatory capabilities (65%)** — 445 open across 60 phases.
 
 ## Where the work is
 
@@ -32,13 +32,13 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 32B | Quota telemetry sources | **1** | 13 | `1220` |
 | Phase 32F | Protected quota reserve | **1** | 7 | `1285` |
 | Phase 37 | Basic session-aware router | **1** | 10 | `1590` |
+| Phase 46 | Security and contamination tests | **1** | 7 | `1739` |
 | Phase 9 | Antigravity adapter | **2** | 5 | `330` |
 | Phase 9E | Secret storage | **2** | 11 | `432` |
 | Phase 9J | Harness-model pairing model | **2** | 18 | `545` |
 | Phase 20 | Minimal durable project memory | **2** | 16 | `805` |
 | Phase 21F | Memory retrieval quality | **2** | 9 | `927` |
 | Phase 32D | Normalized remaining-capacity score | **2** | 10 | `1257` |
-| Phase 46 | Security and contamination tests | **2** | 6 | `1739` |
 | Phase 49 | Configuration | **2** | 14 | `1784` |
 | Phase 34A | Workload tiers | **3** | 7 | `1393` |
 | Phase 21E | Decision ladder and conflict handling | **4** | 8 | `907` |
@@ -70,7 +70,6 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 32E | Burn rate and exhaustion forecasting | **10** | 0 | `1272` |
 | Phase 32G | Provider-aware request-cost estimation | **10** | 0 | `1296` |
 | Phase 33C | Failure, quota, and route correlation | **10** | 5 | `1362` |
-| Phase 43 | MCP surface for orchestrators | **10** | 0 | `1687` |
 | Phase 54A | Setup and portability completion criteria | **10** | 0 | `1897` |
 | Phase 9K | Harness-aware response profiles | **11** | 26 | `578` |
 | Phase 21I | Production-aware implementation checks | **11** | 0 | `966` |
@@ -84,13 +83,13 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 51 | Evaluation hooks | **32** | 5 | `1818` |
 | Phase 21K | Assumption-aware implementation guardrails | **43** | 0 | `992` |
 
-**Fully closed (43):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 8, Phase 9B, Phase 9C, Phase 9D, Phase 9F, Phase 9G, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 16, Phase 18, Phase 19, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 22, Phase 23, Phase 25, Phase 26, Phase 32, Phase 34, Phase 35, Phase 40, Phase 41, Phase 42, Phase 45, Phase 48.
+**Fully closed (44):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 8, Phase 9B, Phase 9C, Phase 9D, Phase 9F, Phase 9G, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 16, Phase 18, Phase 19, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 22, Phase 23, Phase 25, Phase 26, Phase 32, Phase 34, Phase 35, Phase 40, Phase 41, Phase 42, Phase 43, Phase 45, Phase 48.
 
 ## The nearly-finished phases, in full
 
 Every phase with **three or fewer** open lines, quoted verbatim. These are
 where a single package finishes a phase, so they are listed here and the
-other ~427 open lines are not.
+other ~417 open lines are not.
 
 For any other phase: `scripts/discover.py --phase <id>` prints its open
 lines and evidence together. **Do not open the 178 KB map to read them.**
@@ -139,6 +138,10 @@ these unwrapped.
 
 - **1594** ☐ Prefer a fresh session when existing relevant sessions are cold, bloated, or semantically poor and a good checkpoint exists.
 
+### Phase 46 — Security and contamination tests  (1 open, 7 closed)
+
+- **1745** ☐ Add automated tests proving cmux session metadata cannot bypass project-scope validation.
+
 ### Phase 9 — Antigravity adapter  (2 open, 5 closed)
 
 - **340** ☐ Integrate structured Antigravity lifecycle events where the CLI exposes them.
@@ -168,11 +171,6 @@ these unwrapped.
 
 - **1263** ☐ Lower the score when user-defined spending budget is close to exhaustion.
 - **1267** ☐ Treat unlimited local inference as high-capacity but still account for measured latency and concurrency.
-
-### Phase 46 — Security and contamination tests  (2 open, 6 closed)
-
-- **1745** ☐ Add automated tests proving cmux session metadata cannot bypass project-scope validation.
-- **1746** ☐ Add automated tests proving MCP operations remain bound to the active project.
 
 ### Phase 49 — Configuration  (2 open, 14 closed)
 
@@ -272,7 +270,7 @@ the rest are context you probably do not need.
 `docs/product/evidence/` — open the one for the phase you are working,
 never the directory.
 
-    phase-0.md  phase-1.md  phase-10.md  phase-10a.md  phase-11.md  phase-12-13-and-45.md  phase-12-18-and-19.md  phase-14.md  phase-15.md  phase-16.md  phase-2.md  phase-20-22-and-23.md  phase-21-credential-acceptance-condition.md  phase-21-extraction-contract.md  phase-21-manual-extraction.md  phase-21.md  phase-21a-authority-classes.md  phase-21b.md  phase-21c.md  phase-21d.md  phase-21e.md  phase-21f.md  phase-21g.md  phase-24.md  phase-25.md  phase-26.md  phase-27.md  phase-2a.md  phase-2b.md  phase-2c.md  phase-2d.md  phase-3.md  phase-30.md  phase-31.md  phase-32.md  phase-32a.md  phase-32b.md  phase-32d.md  phase-32f.md  phase-33.md  phase-33a.md  phase-33c.md  phase-34.md  phase-34a.md  phase-34b.md  phase-34c.md  phase-34d.md  phase-34e.md  phase-35.md  phase-35b.md  phase-37.md  phase-4-unfocused-control.md  phase-4.md  phase-40.md  phase-41.md  phase-42.md  phase-45.md  phase-46.md  phase-47.md  phase-48.md  phase-49.md  phase-5-7.md  phase-5.md  phase-51.md  phase-6.md  phase-7.md  phase-8.md  phase-9.md  phase-9a.md  phase-9b.md  phase-9c-9d.md  phase-9c.md  phase-9d-9a.md  phase-9d.md  phase-9e.md  phase-9f-preflight.md  phase-9f.md  phase-9g-refined.md  phase-9g.md  phase-9h.md  phase-9i.md  phase-9j.md  phase-9k.md  unfiled.md
+    phase-0.md  phase-1.md  phase-10.md  phase-10a.md  phase-11.md  phase-12-13-and-45.md  phase-12-18-and-19.md  phase-14.md  phase-15.md  phase-16.md  phase-2.md  phase-20-22-and-23.md  phase-21-credential-acceptance-condition.md  phase-21-extraction-contract.md  phase-21-manual-extraction.md  phase-21.md  phase-21a-authority-classes.md  phase-21b.md  phase-21c.md  phase-21d.md  phase-21e.md  phase-21f.md  phase-21g.md  phase-24.md  phase-25.md  phase-26.md  phase-27.md  phase-2a.md  phase-2b.md  phase-2c.md  phase-2d.md  phase-3.md  phase-30.md  phase-31.md  phase-32.md  phase-32a.md  phase-32b.md  phase-32d.md  phase-32f.md  phase-33.md  phase-33a.md  phase-33c.md  phase-34.md  phase-34a.md  phase-34b.md  phase-34c.md  phase-34d.md  phase-34e.md  phase-35.md  phase-35b.md  phase-37.md  phase-4-unfocused-control.md  phase-4.md  phase-40.md  phase-41.md  phase-42.md  phase-43.md  phase-45.md  phase-46.md  phase-47.md  phase-48.md  phase-49.md  phase-5-7.md  phase-5.md  phase-51.md  phase-6.md  phase-7.md  phase-8.md  phase-9.md  phase-9a.md  phase-9b.md  phase-9c-9d.md  phase-9c.md  phase-9d-9a.md  phase-9d.md  phase-9e.md  phase-9f-preflight.md  phase-9f.md  phase-9g-refined.md  phase-9g.md  phase-9h.md  phase-9i.md  phase-9j.md  phase-9k.md  unfiled.md
 
 ## The three things that are always true here
 

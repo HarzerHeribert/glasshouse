@@ -1,10 +1,35 @@
-//! The Unix domain socket transport and its request handlers.
+//! The request handlers every control-API transport shares, and the Unix
+//! domain socket transport that was the first of them.
+//!
+//! Two halves live here, and only one of them is Unix-specific. The handlers
+//! — [`dispatch`] and everything it calls — are plain functions over the
+//! project's stores and this process's [`SessionRuntime`], and they compile
+//! on every platform Glasshouse ships for, because the MCP door
+//! (`super::mcp`, Phase 43) reaches them over stdio on every one of those
+//! platforms. The socket transport — [`serve`], [`handle_connection`], and
+//! the peer-credential check behind them — is `#[cfg(unix)]`, item by item,
+//! for the same reason the module used to be gated as a whole: a Unix domain
+//! socket is a Unix thing. The module keeps its name because the handlers
+//! are the same handlers, the co-editing rounds in flight on this file are
+//! easier to reconcile against a file that stayed put, and a rename is a
+//! cheap follow-up once those have landed.
+//!
+//! [`ServerContext`] is the seam between the halves: it owns what every
+//! handler needs and offers exactly one verb, `handle`. A transport holds a
+//! context and nothing else, which is how the rule that no door may reach a
+//! store except through `dispatch` is a property of the types rather than a
+//! matter of discipline.
 
 use std::collections::{HashMap, HashSet};
+#[cfg(unix)]
 use std::io::{BufRead, BufReader, Write};
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
 use std::os::unix::io::AsRawFd;
+#[cfg(unix)]
 use std::os::unix::net::{UnixListener, UnixStream};
+#[cfg(unix)]
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -30,6 +55,7 @@ use super::protocol::{Request, Response};
 
 /// The socket file's name inside the project's own state directory, when
 /// nothing overrides it.
+#[cfg(unix)]
 const DEFAULT_SOCKET_NAME: &str = "control.sock";
 
 /// `sockaddr_un.sun_path` is 104 bytes on macOS/BSD and 108 on Linux,
@@ -39,6 +65,7 @@ const DEFAULT_SOCKET_NAME: &str = "control.sock";
 /// single connection. Chosen as 90 rather than the tighter platform minimum
 /// so the margin survives a slightly longer project id without needing a
 /// per-platform constant.
+#[cfg(unix)]
 const MAX_SOCKET_PATH_BYTES: usize = 90;
 
 /// The hard ceiling on how many events [`Request::Events`] returns in one
@@ -118,7 +145,7 @@ const MAX_RECENT_OUTPUT_BYTES: usize = 64 * 1024;
 /// # Why this is in memory and not in the database
 ///
 /// A hot session is a session this process holds a pseudo-terminal for. It
-/// exists exactly as long as [`serve`]'s own [`SessionRuntime`] does, and so
+/// exists exactly as long as [`ServerContext`]'s own [`SessionRuntime`] does, and so
 /// does the fact that it has already read a memory: a session that has been
 /// restarted has read nothing, and a `glasshouse` process that is not this
 /// one holds no such session at all (see `super`'s module doc comment). A
@@ -146,75 +173,121 @@ const MAX_REMEMBERED_INJECTIONS: usize = 256;
 /// not to spin the accept thread's sibling for no reason.
 const TICK: Duration = Duration::from_millis(50);
 
-/// Run the control API until the process is killed.
+/// Everything a request handler needs, owned once per server process and
+/// shared by every transport that answers a [`Request`].
 ///
-/// Binds a fresh Unix domain socket at `socket_override`, or the project's
-/// own state directory when nothing is given and that path fits
-/// `sockaddr_un` — see [`socket_path_for`] for what happens when it does
-/// not. Refuses to keep a stale file from a crashed prior run. Every
-/// accepted connection is authorized (see [`authorize`]) before its one
-/// request is read.
-pub fn serve(runtime: &Runtime, socket_override: Option<PathBuf>) -> anyhow::Result<()> {
-    let socket_path = match socket_override {
-        Some(path) => path,
-        None => socket_path_for(runtime),
-    };
-    if let Some(parent) = socket_path.parent() {
-        std::fs::create_dir_all(parent)?;
+/// # One context, two doors
+///
+/// [`dispatch`] needs six things — the project's [`Runtime`], its open
+/// session store, the [`SessionRuntime`] this process holds pseudo-terminals
+/// in, the registry of orchestrator watches, the event recorder, and the
+/// memory-injection ledger. Until this type existed [`serve`] built all six
+/// on its own stack and threaded them through every call, which was fine
+/// while the Unix socket was the only transport. The MCP door (`super::mcp`,
+/// Phase 43) is a second transport onto the same handlers, and the design
+/// ruling behind it is that no tool may perform an operation this door does
+/// not already perform, nor reach a store except through the same
+/// `dispatch`. The cheapest way to make that structural is for there to be
+/// exactly one thing a transport can hold, and for its only verb to be
+/// [`ServerContext::handle`].
+///
+/// # The tick comes with it
+///
+/// The background tick — reaping exited sessions, answering terminal
+/// queries, pumping orchestrator watches — is started by
+/// [`ServerContext::open`], not by the transport, because a session spawned
+/// through either door needs its exit reaped by *somebody*, and the process
+/// that spawned it is the only one that can. A transport that forgot to tick
+/// would leave every one of its sessions `running` forever; a transport that
+/// cannot forget is better.
+///
+/// # Scope
+///
+/// Opened for one already-resolved [`Runtime`] and answering only against
+/// it — see `super`'s module doc. There is no way to construct one for a
+/// project the process was not started in, and nothing in it names a
+/// project, a path, or a database that a request could override.
+pub(crate) struct ServerContext {
+    runtime: Runtime,
+    sessions: ProjectSessions,
+    live: Arc<Mutex<SessionRuntime>>,
+    watches: Arc<Watches>,
+    recorder: EventRecorder,
+    injected: Injected,
+}
+
+impl ServerContext {
+    /// Open the project's session store, build the runtime every handler
+    /// shares, and start the tick that keeps it honest.
+    ///
+    /// Fallible before anything is announced on purpose: a project database
+    /// that cannot be opened read-write ends this before a transport has
+    /// said it is listening, which is the order [`serve`]'s ready line
+    /// depends on.
+    pub(crate) fn open(runtime: &Runtime) -> anyhow::Result<Self> {
+        let sessions = ProjectSessions::open(runtime)?;
+        // The door's own lifecycle stream, and the durable recording of it.
+        // See [`EventRecorder`] for why the runtime is built around a bus
+        // this function owns rather than `SessionRuntime::new`'s private one.
+        let events = EventBus::new();
+        let recorder = EventRecorder::attach(runtime, &events);
+        let live = Arc::new(Mutex::new(SessionRuntime::with_event_bus(
+            glasshouse::session::runtime::DEFAULT_SCROLLBACK_BYTES,
+            events,
+        )));
+        let watches: Arc<Watches> = Arc::new(Mutex::new(Vec::new()));
+        // Line 1135's record, alongside the runtime whose sessions it is
+        // about.
+        let injected: Injected = Arc::new(Mutex::new(HashMap::new()));
+
+        let context = Self {
+            runtime: runtime.clone(),
+            sessions,
+            live,
+            watches,
+            recorder,
+            injected,
+        };
+        context.start_tick();
+        Ok(context)
     }
-    // A stale socket from a process that never got to unlink it on the way
-    // out must not permanently block this project's door.
-    if socket_path.exists() {
-        std::fs::remove_file(&socket_path)?;
+
+    /// Answer one request against this project.
+    ///
+    /// This is the whole of what a transport may do with a context. Every
+    /// verb, every bound, and every scope check is [`dispatch`]'s, so two
+    /// doors cannot disagree about what a request means.
+    pub(crate) fn handle(&self, request: Request) -> Response {
+        dispatch(
+            request,
+            &self.runtime,
+            &self.sessions,
+            &self.live,
+            &self.watches,
+            &self.recorder,
+            &self.injected,
+        )
     }
-    let listener = UnixListener::bind(&socket_path)?;
-    // Owner-only. Box 12's first half — see `authorize` for the second.
-    std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
 
-    let sessions = ProjectSessions::open(runtime)?;
-    // The door's own lifecycle stream, and the durable recording of it. See
-    // [`EventRecorder`] for why the runtime is built around a bus this
-    // function owns rather than `SessionRuntime::new`'s private one.
-    let events = EventBus::new();
-    let recorder = EventRecorder::attach(runtime, &events);
-    let live = Arc::new(Mutex::new(SessionRuntime::with_event_bus(
-        glasshouse::session::runtime::DEFAULT_SCROLLBACK_BYTES,
-        events,
-    )));
-    let watches: Arc<Watches> = Arc::new(Mutex::new(Vec::new()));
-    // Line 1135's record, alongside the runtime whose sessions it is about.
-    let injected: Injected = Arc::new(Mutex::new(HashMap::new()));
-
-    // Announced here rather than straight after `bind`, because everything
-    // above it can still fail — a project database that cannot be opened
-    // read-write ends this function — and a door that has said it is
-    // listening and then exits is worse than one that has not spoken yet.
-    // Every caller in this repository treats this line as the ready signal,
-    // which is only true if it comes after the last thing that can refuse to
-    // start. The socket is bound by now, so a client that connects between
-    // this line and the accept loop waits in the backlog rather than being
-    // refused.
-    eprintln!(
-        "glasshouse: control API listening on {}",
-        socket_path.display()
-    );
-
-    // The accept loop only touches the runtime while a request is being
-    // handled; a session with nothing asking about it between requests would
-    // otherwise never have its exit reaped. This mirrors `run_headless`'s own
-    // reason for ticking outside the wait for the next event.
-    //
-    // The orchestrator wake-up flow rides the same tick — see
-    // [`pump_watches`]. It belongs here rather than in a thread of its own
-    // because it needs exactly what this one already holds, and because a
-    // watch that only advanced while a request happened to arrive would wake
-    // an orchestrator only when it was already talking to the door.
-    // `Runtime` is cheap to clone and holds no connection, so the thread
-    // owns one rather than borrowing this function's.
-    {
-        let live = Arc::clone(&live);
-        let watches = Arc::clone(&watches);
-        let runtime = runtime.clone();
+    /// Start the background tick.
+    ///
+    /// A transport only touches the runtime while a request is being
+    /// handled; a session with nothing asking about it between requests
+    /// would otherwise never have its exit reaped. This mirrors
+    /// `run_headless`'s own reason for ticking outside the wait for the next
+    /// event.
+    ///
+    /// The orchestrator wake-up flow rides the same tick — see
+    /// [`pump_watches`]. It belongs here rather than in a thread of its own
+    /// because it needs exactly what this one already holds, and because a
+    /// watch that only advanced while a request happened to arrive would
+    /// wake an orchestrator only when it was already talking to the door.
+    /// `Runtime` is cheap to clone and holds no connection, so the thread
+    /// owns one rather than borrowing this context's.
+    fn start_tick(&self) {
+        let live = Arc::clone(&self.live);
+        let watches = Arc::clone(&self.watches);
+        let runtime = self.runtime.clone();
         std::thread::spawn(move || {
             let mut state: Option<WatchState> = None;
             let mut complained = false;
@@ -246,6 +319,49 @@ pub fn serve(runtime: &Runtime, socket_override: Option<PathBuf>) -> anyhow::Res
             }
         });
     }
+}
+
+/// Run the control API until the process is killed.
+///
+/// Binds a fresh Unix domain socket at `socket_override`, or the project's
+/// own state directory when nothing is given and that path fits
+/// `sockaddr_un` — see [`socket_path_for`] for what happens when it does
+/// not. Refuses to keep a stale file from a crashed prior run. Every
+/// accepted connection is authorized (see [`authorize`]) before its one
+/// request is read.
+#[cfg(unix)]
+pub fn serve(runtime: &Runtime, socket_override: Option<PathBuf>) -> anyhow::Result<()> {
+    let socket_path = match socket_override {
+        Some(path) => path,
+        None => socket_path_for(runtime),
+    };
+    if let Some(parent) = socket_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    // A stale socket from a process that never got to unlink it on the way
+    // out must not permanently block this project's door.
+    if socket_path.exists() {
+        std::fs::remove_file(&socket_path)?;
+    }
+    let listener = UnixListener::bind(&socket_path)?;
+    // Owner-only. Box 12's first half — see `authorize` for the second.
+    std::fs::set_permissions(&socket_path, std::fs::Permissions::from_mode(0o600))?;
+
+    let context = ServerContext::open(runtime)?;
+
+    // Announced here rather than straight after `bind`, because everything
+    // above it can still fail — a project database that cannot be opened
+    // read-write ends this function — and a door that has said it is
+    // listening and then exits is worse than one that has not spoken yet.
+    // Every caller in this repository treats this line as the ready signal,
+    // which is only true if it comes after the last thing that can refuse to
+    // start. The socket is bound by now, so a client that connects between
+    // this line and the accept loop waits in the backlog rather than being
+    // refused.
+    eprintln!(
+        "glasshouse: control API listening on {}",
+        socket_path.display()
+    );
 
     for incoming in listener.incoming() {
         let stream = match incoming {
@@ -259,9 +375,7 @@ pub fn serve(runtime: &Runtime, socket_override: Option<PathBuf>) -> anyhow::Res
             eprintln!("glasshouse: control API refused a connection: {refusal}");
             continue;
         }
-        if let Err(err) = handle_connection(
-            stream, runtime, &sessions, &live, &watches, &recorder, &injected,
-        ) {
+        if let Err(err) = handle_connection(stream, &context) {
             eprintln!("glasshouse: control API connection error: {err}");
         }
     }
@@ -281,6 +395,7 @@ pub fn serve(runtime: &Runtime, socket_override: Option<PathBuf>) -> anyhow::Res
 /// When the preferred path would not fit, this falls back to a short name
 /// under the system temp directory, keyed by the project id so two projects
 /// never collide and one project always gets the same path back.
+#[cfg(unix)]
 fn socket_path_for(runtime: &Runtime) -> PathBuf {
     let preferred = runtime.state_dir().join(DEFAULT_SOCKET_NAME);
     if preferred.as_os_str().len() <= MAX_SOCKET_PATH_BYTES {
@@ -306,6 +421,7 @@ fn socket_path_for(runtime: &Runtime) -> PathBuf {
 /// itself — supplied by the connecting process's own kernel-verified
 /// identity, not by anything the peer said — so there is nothing for an
 /// unrelated local process to spoof by sending a convincing first line.
+#[cfg(unix)]
 fn authorize(stream: &UnixStream) -> Result<(), String> {
     let peer_uid =
         peer_uid(stream).map_err(|err| format!("could not read peer identity: {err}"))?;
@@ -318,13 +434,14 @@ fn authorize(stream: &UnixStream) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn process_uid() -> u32 {
     // SAFETY: `getuid` takes no arguments, has no failure mode, and returns
     // a plain integer — there is no invariant for the caller to uphold.
     unsafe { libc::getuid() }
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(unix, target_os = "linux"))]
 fn peer_uid(stream: &UnixStream) -> std::io::Result<u32> {
     let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
     let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
@@ -346,7 +463,7 @@ fn peer_uid(stream: &UnixStream) -> std::io::Result<u32> {
     Ok(cred.uid)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 fn peer_uid(stream: &UnixStream) -> std::io::Result<u32> {
     let mut uid: libc::uid_t = 0;
     let mut gid: libc::gid_t = 0;
@@ -484,25 +601,15 @@ impl EventRecorder {
 }
 
 /// Read one request line, dispatch it, and write back one response line.
-#[allow(clippy::too_many_arguments)]
-fn handle_connection(
-    stream: UnixStream,
-    runtime: &Runtime,
-    sessions: &ProjectSessions,
-    live: &Mutex<SessionRuntime>,
-    watches: &Watches,
-    recorder: &EventRecorder,
-    injected: &Injected,
-) -> anyhow::Result<()> {
+#[cfg(unix)]
+fn handle_connection(stream: UnixStream, context: &ServerContext) -> anyhow::Result<()> {
     let mut writer = stream.try_clone()?;
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     reader.read_line(&mut line)?;
 
     let response = match serde_json::from_str::<Request>(line.trim_end()) {
-        Ok(request) => dispatch(
-            request, runtime, sessions, live, watches, recorder, injected,
-        ),
+        Ok(request) => context.handle(request),
         Err(err) => Response::err(format!("malformed request: {err}")),
     };
 
