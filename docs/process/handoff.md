@@ -4,7 +4,37 @@
 > here is a product requirement. Capability requirements live only in
 > `docs/product/capability-map.md`.
 
-Last updated: 2026-08-30 (Europe/Berlin)
+Last updated: 2026-08-31 (Europe/Berlin)
+
+## Checkpoint — 2026-08-31, batches 56–57: 896 / 1280 (70%)
+
+**Batch 56 landed whole**: seven workers, 79 lines, 65 boxes, 824 → 889 in one
+morning, integrated one at a time (every package co-edited `main.rs`), ~150k
+output tokens per box against 811k the day before. `orchestration-measurements.md`
+has the row. Tracked-knowledge (Phase 50) followed for 896.
+
+**Seven parked or unexamined phases were ruled from the tree and built the same
+day** (`design-decisions.md`): Phase 43 — MCP is a stdio transport over the
+existing API door; Phase 51 RC-B — a routing decision's outcome is the harness's
+own `TurnEnded` verdict; Phase 33 — framing is not content, so the relay records
+nine failure classes and migration 18; Phase 21K — assumptions are stated by the
+agent through the door (migration 19, integrating at this checkpoint); Phase
+21H–J — the implementation policy is Glasshouse-authored text delivered like a
+briefing; Phase 17 — cmux via its documented CLI, a pane as `presentation_ref`
+(migration 20); Phase 29 — a memory commit is the existing extraction with its
+trigger named (migration 21).
+
+**Batch 57 is live**: implementation-policy (30 lines), cmux-presentation (14,
+reported), memory-commits (8), evaluation-producers (5), tier-ceiling (8),
+support-work-economy (5). `.agent-runtime/CONTINUATION.md` is the exact bridge:
+the assumption-guardrails merge is in the working tree under its gates, and the
+migration order 19 → 20 → 21 is fixed.
+
+**Two process facts worth carrying**: every migration ripples into literal
+schema-version pins in five test files the blast radius does not trace (memory
+note `migration-ripple-into-test-schema-pins`); and a six-way declared co-edit on
+`main.rs` integrated cleanly because each packet confined its `main.rs` edits to
+the call site and each worker wrote its reconciliation into its report.
 
 ## Checkpoint — 2026-08-30, batch 55 continued: 821 / 1280 (64%)
 
