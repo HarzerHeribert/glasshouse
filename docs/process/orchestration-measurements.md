@@ -4199,3 +4199,80 @@ settings_persistence and events_lifecycle remain the known in-lib/fixture
 families (each green twice alone today); session_supervision showed
 load-race failures on two trees — watch whether it recurs on a quiet
 machine before suspecting the fixture conversion.
+
+## Batches 73–75 (2026-09-01, evening) — three small packages, and the first day the ratio argued back
+
+Written by the Opus 5 orchestrator that inherited the board at `4f0c1cf`.
+**These rows were missing when this session started** — batches 73, 74 and
+75 had all landed and none had a ledger entry. That is trap 6 firing
+exactly where §87 predicted it would: the span with no rows is the span
+where the ratio moves.
+
+**What landed.** Map `1118 → 1129`, eleven net boxes across four commits:
+
+| commit | package | boxes | shape |
+|---|---|---|---|
+| `25deef0` | `score-terms-35b` | 1537, 1538 (+1534 held open) | provider health and structurally-partitioned marginal cost enter candidate scoring |
+| `984f503` | `subscription-estimator` | 1244/1245/1246/1250/1251/1254 | 32C's estimator, derived on read — no table, no migration |
+| `9cc1180` | `style-cache-declaration` | 618 | a style change declares its measured cache cost |
+| `4f0c1cf` | `session-style-surface` | 619, 620 | restyle warns before costing a warm session; the 9K surface cluster closes |
+
+**The number that matters, and it is not flattering.** Output tokens per
+net closed box:
+
+- **two-day window (08-31 + 09-01): ~96k/box** — 29.41M output over
+  822 → 1129 boxes. Comfortably under §86's 250k ceiling.
+- **2026-09-01 alone: ~254k/box** — 4.31M output over 1112 → 1129 (17
+  boxes closed today across batches 72–75).
+
+The two-day figure is inflated: the map was restructured on 08-31 (the
+`^☑` total went 1509 → 1534 across that day's commits), so a share of that
++307 is re-marking rather than closing. **The honest reading of today is
+the 254k one, and it sits on the ceiling rather than under it.** This
+session therefore ruled that its next dispatch had to be implementation,
+and declined a Phase 9K measurement-channel investigation (627–630, the
+register's §83 "attack the channel" candidate) on exactly that basis. The
+rule fired for the first time since it was written, and it fired correctly:
+the alternative was an investigation package on a day already paying a
+quarter of a million output tokens per box.
+
+**Why the packages were small, and what that cost.** Three of the four
+closed 1–3 boxes. `subscription-estimator` was the only §87-shaped one —
+six map lines that were facets of one `estimate_subscription_headroom`
+call — and it closed more boxes than the other three combined. Batch 75
+split what was arguably one mechanism (the response-profile style surface)
+across two packages and two integrations, paying trap 2's fixed integration
+cost twice for three boxes.
+
+**A trailing sweep survived an orchestrator handoff, which had not been
+tested.** The wave-75 sweep (`blast-radius.sh --since 984f503`) was started
+detached by the predecessor and was still running, three lanes wide, when
+this session inherited the board. Its log lived in the predecessor's
+scratchpad — a directory this session does not own but *can* read, since a
+scratchpad is an ordinary path. The successor's instinct was to re-run the
+sweep; that would have put **two full sweeps on one checkout**, the precise
+condition the `never-run-two-integrations-at-once` memory records as having
+made four gates lie. The duplicate was started, detected by
+`ps -o pid,ppid,lstart -ax` within ninety seconds, and killed.
+
+**Rule now, and it generalises past sweeps:** a handoff inherits *running
+background jobs*, not just workers and worktrees. Before starting any
+long-running job named in a checkpoint, `ps` for it first — the checkpoint
+says what was started, never what is still running.
+
+### Open questions this entry creates
+
+- Is 254k/box today a regime change or three small packages in a row? The
+  next batch answers it, and the answer is only visible if its row is
+  written. Two rows, not one, is the whole instrument here.
+- Does the 250k rule need a same-day arm? It is written as a two-day
+  average, and a two-day average containing a map restructure hid a
+  ceiling-level day. The rule's *spirit* fired only because the
+  orchestrator computed both numbers rather than the one it was told to.
+- `subscription-estimator` closed six boxes and left four (1247, 1248,
+  1249, 1252, 1253, 1255 open at the time). This session packaged four of
+  those six as `estimator-signals` and refused 1247 and 1253 at Phase −1 —
+  1247 has nothing persisting a prior plan to compare against, and 1253's
+  *"so the scheduler can improve"* has no consumer while nothing scores on
+  the estimate. **Both belong in the refusal register**, and neither was
+  there when this session looked.
