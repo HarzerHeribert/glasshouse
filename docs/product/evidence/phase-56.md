@@ -1,5 +1,10 @@
 # Capability evidence — phase 56
 
+**This file is the evidence entry for Phase 56 AND for Phase 56A.** They are
+kept together because 56A refined 56 the same day and their entries
+interleave — `scripts/check-evidence-coverage.py` reads headings, so this
+line is what tells it Phase 56A is covered here rather than missing.
+
 Split from the single evidence ledger this project used to keep at the repository root (see `docs/product/evidence/README.md` for the full index and the entry template / evidence rules). Phase 56 — *choose the harness, not the provider* — was recorded on 2026-08-31 from the user's instruction of record (`design-decisions.md` §Phase 56), and refined the same day by Phase 56A (the entitlement pool). Its packages land in the order that section gives; each entry below names its package.
 
 ### Lines 1946, 1947 and 1954 — a subscription is a configured routing resource with rules, and the router refuses by name
@@ -762,7 +767,7 @@ Recorded limits — stated by the worker, not discovered later:
   grep missed it), and `SessionRecord` has no `Default`, so the new field broke
   seven test-only struct literals in four files
 
-# Lines 1970, 1971, 1974 — COMPLETE 2026-09-01; PHASE 56A CLOSED
+# Phase 56A lines 1970, 1971, 1974 — COMPLETE 2026-09-01; PHASE 56A CLOSED
 
 Package `GH-BROKER-FALLBACK-56A` (Opus, high, Red; batch 70c), plus the
 orchestrator landing the one sub-step the packet's own file boundary
