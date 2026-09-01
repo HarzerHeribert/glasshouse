@@ -19,7 +19,7 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`█████████████████████████████████░░░░░░░` 1129 / 1332 mandatory capabilities (84%)
+`██████████████████████████████████░░░░░░` 1133 / 1332 mandatory capabilities (85%)
 
 <details>
 <summary>Per-phase breakdown (61 of 107 phases complete)</summary>

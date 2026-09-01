@@ -26,7 +26,8 @@ use glasshouse::provider::quota::Confidence;
 use glasshouse::provider::telemetry::{GatewayQuotaCache, RateLimitHeaders};
 use glasshouse::routing::evidence::{
     CLASSIFICATION_EVIDENCE_WINDOW_SECONDS, EvidenceLedger, FailureClass, HeadroomBand,
-    HeadroomBasis, NewObservation, Outcome, estimate_subscription_headroom,
+    HeadroomBasis, LongWindowPressure, NewObservation, Outcome, ResetBasis,
+    estimate_subscription_headroom,
 };
 use glasshouse::session::{NewSession, ProjectSessions};
 
@@ -61,6 +62,14 @@ struct Fixture {
 
 impl Fixture {
     fn new(base: &Path) -> Self {
+        Self::with_pool_config(base, &pool_config())
+    }
+
+    /// Map lines 1252/1255: a fixture over a caller-supplied
+    /// `[providers]`/`[entitlements]` block rather than the fixed two-account
+    /// `pool_config()`, so a test can plant an override or a disable switch
+    /// on one account without disturbing the other.
+    fn with_pool_config(base: &Path, pool_config: &str) -> Self {
         let root = base.join("workspace");
         std::fs::create_dir_all(root.join(".git")).unwrap();
         let root = std::fs::canonicalize(&root).unwrap();
@@ -69,7 +78,7 @@ impl Fixture {
         std::fs::create_dir_all(&config_dir).unwrap();
         std::fs::write(
             config_dir.join("config.toml"),
-            format!("version = 1\n\n{}", pool_config()),
+            format!("version = 1\n\n{pool_config}"),
         )
         .unwrap();
 
@@ -389,6 +398,146 @@ fn required_behavior_zero_evidence_reads_unknown() {
     );
 }
 
+/// **Map line 1248.** Two throttle→success recoveries in window, with no
+/// stated reset reading, learn a fallback window — and the same rows, with a
+/// real `Some(_)` reading supplied, leave that reading's own basis untouched
+/// rather than recomputing anything from the recoveries at all.
+#[test]
+fn test_1248_two_or_more_recoveries_learn_a_window_and_never_displace_a_real_reading() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(tmp.path());
+    let ledger = fixture.ledger();
+    let now = 1_800_000_000_i64;
+    // Two throttle→success recoveries, ~300s apart each.
+    ledger
+        .record(throttle(Some(LABEL_A), now - 1_000), now - 995)
+        .unwrap();
+    ledger
+        .record(accepted(Some(LABEL_A), now - 700), now - 695)
+        .unwrap();
+    ledger
+        .record(throttle(Some(LABEL_A), now - 500), now - 495)
+        .unwrap();
+    ledger
+        .record(accepted(Some(LABEL_A), now - 200), now - 195)
+        .unwrap();
+    let rows = ledger
+        .observations_in_window(now, CLASSIFICATION_EVIDENCE_WINDOW_SECONDS)
+        .unwrap();
+
+    let learned = estimate_subscription_headroom(&rows, PROVIDER, Some(LABEL_A), now, None, None)
+        .expect("accepted and throttle rows are real evidence");
+    assert_eq!(
+        learned.reset_basis,
+        ResetBasis::Learned,
+        "two recoveries clear the anecdote guard: {learned:?}"
+    );
+
+    let stated =
+        estimate_subscription_headroom(&rows, PROVIDER, Some(LABEL_A), now, Some(42), None)
+            .expect("a stated reading is real evidence");
+    assert_eq!(
+        stated.reset_basis,
+        ResetBasis::Stated,
+        "a real seconds_until_reset reading is never recomputed from recoveries: {stated:?}"
+    );
+}
+
+/// **Map line 1248, the anecdote rule.** One throttle→success recovery is
+/// not enough to learn a fallback window — the honest answer stays
+/// [`ResetBasis::Unknown`], not a window inferred from a single coincidence.
+#[test]
+fn test_1248_one_recovery_is_an_anecdote_and_learns_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(tmp.path());
+    let ledger = fixture.ledger();
+    let now = 1_800_000_000_i64;
+    ledger
+        .record(throttle(Some(LABEL_A), now - 1_000), now - 995)
+        .unwrap();
+    ledger
+        .record(accepted(Some(LABEL_A), now - 700), now - 695)
+        .unwrap();
+    let rows = ledger
+        .observations_in_window(now, CLASSIFICATION_EVIDENCE_WINDOW_SECONDS)
+        .unwrap();
+
+    let estimate = estimate_subscription_headroom(&rows, PROVIDER, Some(LABEL_A), now, None, None)
+        .expect("accepted rows are real evidence");
+    assert_eq!(
+        estimate.reset_basis,
+        ResetBasis::Unknown,
+        "one recovery is an anecdote, not a learned window: {estimate:?}"
+    );
+}
+
+/// **Map line 1249.** A throttle inside the short horizon and a second one
+/// only inside the longer horizon are reported as different pressure: the
+/// band still reflects the recent one, and [`LongWindowPressure::Present`]
+/// reports the older one separately rather than folding it into the same
+/// signal or dropping it.
+#[test]
+fn test_1249_a_long_only_throttle_is_reported_separately_from_short_window_pressure() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(tmp.path());
+    let ledger = fixture.ledger();
+    let now = 1_800_000_000_i64;
+    // Inside the short horizon.
+    ledger
+        .record(throttle(Some(LABEL_A), now - 60), now - 55)
+        .unwrap();
+    // Outside the short horizon, inside the longer one — two days ago.
+    ledger
+        .record(
+            throttle(Some(LABEL_A), now - 2 * 24 * 3_600),
+            now - 2 * 24 * 3_600 + 5,
+        )
+        .unwrap();
+    let rows = ledger
+        .observations_in_window(now, CLASSIFICATION_EVIDENCE_WINDOW_SECONDS)
+        .unwrap();
+
+    let estimate = estimate_subscription_headroom(&rows, PROVIDER, Some(LABEL_A), now, None, None)
+        .expect("throttle rows are real evidence");
+    assert_eq!(
+        estimate.band,
+        HeadroomBand::Exhausted,
+        "the recent throttle still drives the band: {estimate:?}"
+    );
+    assert_eq!(
+        estimate.long_window_pressure,
+        LongWindowPressure::Present,
+        "the two-day-old throttle is reported as its own, separate fact: {estimate:?}"
+    );
+}
+
+/// **Map line 1249, "when evidence allows."** A single throttle an hour old
+/// is real evidence of short-window pressure, but it says nothing at all
+/// about whether pressure exists further back — the rows never reached that
+/// far. The honest answer is [`LongWindowPressure::Undistinguished`], not a
+/// guessed [`LongWindowPressure::NoPressure`].
+#[test]
+fn test_1249_thin_evidence_renders_undistinguished_not_a_guessed_bucket() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(tmp.path());
+    let ledger = fixture.ledger();
+    let now = 1_800_000_000_i64;
+    ledger
+        .record(throttle(Some(LABEL_A), now - 60), now - 55)
+        .unwrap();
+    let rows = ledger
+        .observations_in_window(now, CLASSIFICATION_EVIDENCE_WINDOW_SECONDS)
+        .unwrap();
+
+    let estimate = estimate_subscription_headroom(&rows, PROVIDER, Some(LABEL_A), now, None, None)
+        .expect("a throttle is real evidence");
+    assert_eq!(
+        estimate.long_window_pressure,
+        LongWindowPressure::Undistinguished,
+        "nothing in `scoped` reaches the long horizon, so absence cannot be claimed: {estimate:?}"
+    );
+}
+
 // ===========================================================================
 // The resolver — proving the wiring, not the band logic again.
 // ===========================================================================
@@ -588,5 +737,136 @@ fn required_behavior_opaque_account_never_renders_an_exact_token_figure_through_
     assert!(
         !facets.contains("60222") && !facets.contains("7111") && !facets.contains("67333"),
         "no planted token figure may appear anywhere the estimate renders: {facets}"
+    );
+}
+
+/// **Map line 1252.** `headroom_override` is authoritative over the derived
+/// band at the one consumer: a recent throttle with no reset in sight would
+/// derive `exhausted` (map line 1245's own worst reading) if nothing
+/// overrode it, but the account's stated override reads `ample` instead —
+/// and renders in its own distinct vocabulary, never the derived estimate's
+/// confidence-and-basis phrasing, so the substitution is never silent.
+#[test]
+fn test_1252_a_user_override_displaces_a_wrong_derived_band_at_the_consumer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let pool = format!(
+        "[providers.{PROVIDER}]\ntemplate = \"openrouter\"\n\
+         credential_env = [\"{VAR_A}\"]\n\n\
+         [entitlements.acct-a]\nkind = \"claude\"\nvendor = \"claude\"\n\
+         provider = \"{PROVIDER}\"\ncredential = {{ env = \"{VAR_A}\" }}\n\
+         headroom_override = \"ample\"\n"
+    );
+    let fixture = Fixture::with_pool_config(tmp.path(), &pool);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let ledger = fixture.ledger();
+    ledger
+        .record(throttle(Some(LABEL_A), now - 60), now - 55)
+        .unwrap();
+
+    let out = fixture.glasshouse(&["entitlements"]);
+    let said = both_streams(&out);
+    assert!(out.status.success(), "{said}");
+
+    let facets = facets_line(&said, "acct-a");
+    assert!(
+        facets.contains("headroom estimate: ~ample (your reading"),
+        "the override must displace the wrong derived band: {facets}"
+    );
+    assert!(
+        !facets.contains("exhausted"),
+        "the derived (and wrong) band must not leak through beside the override: {facets}"
+    );
+}
+
+/// **Map line 1255.** A disabled entitlement renders `headroom estimate:
+/// unknown` — never zero, never a band with a "disabled" label — while an
+/// enabled entitlement in the *same* config still renders its own estimate,
+/// which is why this is per-entitlement rather than global. Disabling
+/// touches nothing else: `capacity` and `throttling` render exactly as they
+/// would without the switch.
+#[test]
+fn test_1255_a_disabled_entitlement_renders_unknown_while_an_enabled_one_beside_it_still_estimates()
+{
+    let tmp = tempfile::tempdir().unwrap();
+    let pool = format!(
+        "[providers.{PROVIDER}]\ntemplate = \"openrouter\"\n\
+         credential_env = [\"{VAR_A}\", \"{VAR_B}\"]\n\n\
+         [entitlements.acct-a]\nkind = \"claude\"\nvendor = \"claude\"\n\
+         provider = \"{PROVIDER}\"\ncredential = {{ env = \"{VAR_A}\" }}\n\
+         disable_headroom_estimate = true\n\n\
+         [entitlements.acct-b]\nkind = \"claude\"\nvendor = \"claude\"\n\
+         provider = \"{PROVIDER}\"\ncredential = {{ env = \"{VAR_B}\" }}\n"
+    );
+    let fixture = Fixture::with_pool_config(tmp.path(), &pool);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let ledger = fixture.ledger();
+    ledger
+        .record(accepted(Some(LABEL_A), now - 300), now - 295)
+        .unwrap();
+    ledger
+        .record(accepted(Some(LABEL_B), now - 300), now - 295)
+        .unwrap();
+
+    let out = fixture.glasshouse(&["entitlements"]);
+    let said = both_streams(&out);
+    assert!(out.status.success(), "{said}");
+
+    let disabled = facets_line(&said, "acct-a");
+    assert!(
+        disabled.contains("headroom estimate: unknown"),
+        "disabled means absent, never zero and never a band: {disabled}"
+    );
+    assert!(
+        disabled.contains("capacity: unknown"),
+        "disabling must not disturb the capacity facet beside it: {disabled}"
+    );
+    assert!(
+        disabled.contains("throttling: none observed"),
+        "disabling must not disturb the throttling facet beside it: {disabled}"
+    );
+
+    let enabled = facets_line(&said, "acct-b");
+    assert!(
+        enabled.contains("headroom estimate: ~ample"),
+        "an enabled entitlement in the same config still estimates: {enabled}"
+    );
+}
+
+/// **Regression, REQUIRED BEHAVIOR.** With no new config set and no learned
+/// window derivable, the rendered line is byte-identical to what `4f0c1cf`
+/// shipped: one accepted row is real evidence (`~ample`), but it is alone,
+/// so no reset is learned, no long-window throttle exists, and no
+/// override/disable config is set — every facet this package adds stays
+/// silent. Pins the four honesty facets as additive, never as a change to
+/// the shipped surface.
+#[test]
+fn regression_no_new_signal_renders_byte_identical_to_batch_74() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(tmp.path());
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    let ledger = fixture.ledger();
+    ledger
+        .record(accepted(Some(LABEL_A), now - 300), now - 295)
+        .unwrap();
+
+    let out = fixture.glasshouse(&["entitlements"]);
+    let said = both_streams(&out);
+    assert!(out.status.success(), "{said}");
+
+    let facets = facets_line(&said, "acct-a");
+    assert_eq!(
+        facets.trim(),
+        "capacity: unknown · reset: unknown · throttling: none observed (provider-wide) · \
+         models: unknown · headroom estimate: ~ample (this account, low confidence, request activity)",
+        "no facet this package adds may change the rendered line when nothing new applies: {facets}"
     );
 }

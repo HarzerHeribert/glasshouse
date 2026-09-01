@@ -1681,6 +1681,81 @@ impl<'de> Deserialize<'de> for ConfiguredJobKind {
     }
 }
 
+/// A [`crate::routing::evidence::HeadroomBand`] as it is written in a
+/// configuration file — map line 1252's override. Same shape and same
+/// reason as [`ConfiguredWorkloadTier`] just above: `HeadroomBand` is a
+/// routing type this crate derives from evidence it reads itself, and
+/// giving it a `Deserialize` impl directly would make that derived value and
+/// a user's typed-in correction the same surface. This newtype is the
+/// config file's side of that boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ConfiguredHeadroomBand(crate::routing::evidence::HeadroomBand);
+
+/// Every [`crate::routing::evidence::HeadroomBand`], in the type's own
+/// presentation order — the same order `main.rs::entitlement_facets` renders
+/// them in.
+const HEADROOM_BAND_SPELLINGS: [crate::routing::evidence::HeadroomBand; 4] = {
+    use crate::routing::evidence::HeadroomBand as B;
+    [B::Exhausted, B::Low, B::Moderate, B::Ample]
+};
+
+fn headroom_band_spelling(band: crate::routing::evidence::HeadroomBand) -> &'static str {
+    use crate::routing::evidence::HeadroomBand as B;
+    match band {
+        B::Exhausted => "exhausted",
+        B::Low => "low",
+        B::Moderate => "moderate",
+        B::Ample => "ample",
+    }
+}
+
+impl ConfiguredHeadroomBand {
+    pub fn new(band: crate::routing::evidence::HeadroomBand) -> Self {
+        Self(band)
+    }
+
+    pub fn band(self) -> crate::routing::evidence::HeadroomBand {
+        self.0
+    }
+
+    /// The spelling a user writes.
+    pub fn as_str(self) -> &'static str {
+        headroom_band_spelling(self.0)
+    }
+
+    /// The band a spelling names, or `None` for one no variant answers to.
+    /// Case-sensitive and untrimmed, the same discipline
+    /// [`ConfiguredWorkloadTier::parse`] applies.
+    pub fn parse(text: &str) -> Option<Self> {
+        HEADROOM_BAND_SPELLINGS
+            .into_iter()
+            .find(|band| headroom_band_spelling(*band) == text)
+            .map(Self)
+    }
+}
+
+impl Serialize for ConfiguredHeadroomBand {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for ConfiguredHeadroomBand {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let text = String::deserialize(deserializer)?;
+        Self::parse(&text).ok_or_else(|| {
+            let known = HEADROOM_BAND_SPELLINGS
+                .into_iter()
+                .map(headroom_band_spelling)
+                .collect::<Vec<_>>()
+                .join(", ");
+            serde::de::Error::custom(format!(
+                "unknown headroom band `{text}` — expected one of: {known}"
+            ))
+        })
+    }
+}
+
 /// One configured entitlement — a specific subscription or API-credit
 /// account, the unit of capacity — as stored in an `[entitlements.<name>]`
 /// table. Map lines 1946, 1947, 1962 and 1963.
@@ -1793,6 +1868,31 @@ pub struct EntitlementConfig {
     /// uncounted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     spend_ceiling_tokens: Option<u64>,
+    /// Map line 1252: a user's own correction of an obviously incorrect
+    /// subscription-headroom estimate. Authoritative over the derived
+    /// band the moment it is set — that is the whole point of the line —
+    /// but [`main.rs::entitlement_facets`] renders it in its own distinct
+    /// vocabulary ("your reading", never the confidence-and-basis phrasing
+    /// the derived estimate uses) so a substitution is never silent.
+    /// Expressed as a [`crate::routing::evidence::HeadroomBand`], the same
+    /// vocabulary the estimate itself uses — never a percentage or a token
+    /// figure, so 1250/1251's honesty rules are not weakened by the one
+    /// value a person, not evidence, supplies.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    headroom_override: Option<ConfiguredHeadroomBand>,
+    /// Map line 1255: skip the subscription-headroom estimator for this
+    /// entitlement entirely, for a user who wants only authoritative usage
+    /// data. `false` on a file written before this field existed, the same
+    /// "absent reads as off" contract [`ProfileConfig::pin_gateway_backend`]
+    /// already keeps. Per-entitlement rather than global: two entitlements
+    /// in one config can disagree, which is exactly what
+    /// `tests/subscription_estimator.rs`'s 1255 acceptance test proves side
+    /// by side. Disabling touches nothing else this entry renders —
+    /// `capacity`, `reset`, `throttling` and `models` are populated earlier
+    /// in [`ResolvedEntitlement::populate_provider_facets`] and this field
+    /// is read only afterward, to skip the estimator call alone.
+    #[serde(default, skip_serializing_if = "is_false")]
+    disable_headroom_estimate: bool,
 }
 
 impl EntitlementConfig {
@@ -1900,6 +2000,31 @@ impl EntitlementConfig {
         self
     }
 
+    /// Map line 1252's user override, or `None` for *the estimator's own
+    /// reading stands*.
+    pub fn headroom_override(&self) -> Option<crate::routing::evidence::HeadroomBand> {
+        self.headroom_override.map(ConfiguredHeadroomBand::band)
+    }
+
+    pub fn set_headroom_override(
+        &mut self,
+        value: Option<crate::routing::evidence::HeadroomBand>,
+    ) -> &mut Self {
+        self.headroom_override = value.map(ConfiguredHeadroomBand::new);
+        self
+    }
+
+    /// Map line 1255: `true` when this entitlement asked to skip the
+    /// subscription-headroom estimator entirely.
+    pub fn disable_headroom_estimate(&self) -> bool {
+        self.disable_headroom_estimate
+    }
+
+    pub fn set_disable_headroom_estimate(&mut self, value: bool) -> &mut Self {
+        self.disable_headroom_estimate = value;
+        self
+    }
+
     /// This entry's six lists and its spend ceiling as the router's one
     /// rules value.
     pub fn rules(&self) -> crate::routing::EntitlementRules {
@@ -1955,6 +2080,8 @@ impl EntitlementConfig {
             models: None,
             spend: None,
             headroom_estimate: None,
+            headroom_override: self.headroom_override(),
+            disable_headroom_estimate: self.disable_headroom_estimate,
         })
     }
 }
@@ -2092,6 +2219,16 @@ pub struct ResolvedEntitlement {
     /// produce that scope, so the estimate populates in every reachable case
     /// today).
     headroom_estimate: Option<crate::routing::evidence::SubscriptionHeadroomEstimate>,
+    /// Map line 1252 — the user's own stated correction, read straight from
+    /// `[entitlements.<name>] headroom_override` at load time, not touched
+    /// by [`Self::populate_provider_facets`]. `None` is "no correction
+    /// stated", never "the estimate is confirmed correct".
+    headroom_override: Option<crate::routing::evidence::HeadroomBand>,
+    /// Map line 1255 — `true` when this entry's config asked the
+    /// subscription-headroom estimator to stay off. Read only inside
+    /// [`Self::populate_provider_facets`], after `capacity`/`reset` are
+    /// already populated, so disabling never touches those facets.
+    disable_headroom_estimate: bool,
 }
 
 impl ResolvedEntitlement {
@@ -2168,6 +2305,16 @@ impl ResolvedEntitlement {
         &self,
     ) -> Option<&crate::routing::evidence::SubscriptionHeadroomEstimate> {
         self.headroom_estimate.as_ref()
+    }
+
+    /// Map line 1252's user override — `[entitlements.<name>]
+    /// headroom_override`, read at load time. Authoritative over
+    /// [`Self::headroom_estimate`] at the one consumer,
+    /// `main.rs::entitlement_facets`, but this accessor hands both back
+    /// unmixed so a caller decides how to combine them rather than this
+    /// type silently doing it.
+    pub fn headroom_override(&self) -> Option<crate::routing::evidence::HeadroomBand> {
+        self.headroom_override
     }
 
     /// This account's key in the ledger's `quota_context` column — the
@@ -2289,7 +2436,15 @@ impl ResolvedEntitlement {
         // estimator where the provider-wide reading is all headers gave"
         // the packet asks for — and the moment a future per-account reading
         // exists (56A-3+), this stays inert rather than displacing it.
-        if self.capacity_scope != Some(TelemetryScope::PerAccount) {
+        //
+        // Map line 1255 sits in front of that guard, not behind it: a
+        // disabled entitlement leaves `headroom_estimate` at its default
+        // `None` and never calls the estimator at all — `capacity`, `reset`,
+        // `throttling` and `models` above are already populated by the time
+        // this runs, so disabling touches nothing but this one facet.
+        if self.disable_headroom_estimate {
+            self.headroom_estimate = None;
+        } else if self.capacity_scope != Some(TelemetryScope::PerAccount) {
             let label = self.credential_label();
             let session_count = telemetry
                 .session_counts
@@ -5349,6 +5504,8 @@ impl<'a> EffectiveConfig<'a> {
                 models: None,
                 spend: None,
                 headroom_estimate: None,
+                headroom_override: None,
+                disable_headroom_estimate: false,
             });
         }
         Ok(resolved)

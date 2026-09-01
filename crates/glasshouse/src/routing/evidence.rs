@@ -1869,6 +1869,62 @@ pub fn recent_credential_spend(
 /// pressure.
 pub const RECENT_SIGNAL_HORIZON_SECONDS: i64 = 3_600;
 
+/// Map line 1249's second horizon — pressure that persists well past the
+/// short window rather than a single accident. Three days, not a week or a
+/// month: the one production caller queries rows only
+/// [`CLASSIFICATION_EVIDENCE_WINDOW_SECONDS`] deep (seven days), and setting
+/// this horizon at or past that bound would make
+/// [`LongWindowPressure::NoPressure`] structurally unreachable — no query
+/// could ever cover it, so the honest answer would always collapse to
+/// [`LongWindowPressure::Undistinguished`]. Three days leaves the full
+/// window room to actually prove an absence.
+pub const LONG_SIGNAL_HORIZON_SECONDS: i64 = 3 * 24 * 3_600;
+
+/// Map line 1248's anecdote guard: fewer than this many observed
+/// throttle→success recoveries in window, and no reset window is learned at
+/// all. Two is the floor at which a single unlucky pairing — a throttle
+/// immediately followed, by coincidence, by an unrelated success — cannot be
+/// the whole story behind the learned value.
+pub const MIN_LEARNED_RESET_RECOVERIES: usize = 2;
+
+/// Map line 1248 — whose reset reading, if any, informed this estimate's
+/// "is a reset imminent" term. Kept off [`HeadroomBand`] itself (1250/1251's
+/// own rule: no numeric field, no invented precision) and reported here
+/// instead, so a consumer can label an inferred reading as what it is rather
+/// than letting it render identically to the provider's own stated word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResetBasis {
+    /// No reset behaviour — stated or inferred — entered this estimate.
+    Unknown,
+    /// The caller's own authoritative reading: the provider's stated word,
+    /// read from the gateway-quota cache. Never displaced by a learned
+    /// value — see [`estimate_subscription_headroom`].
+    Stated,
+    /// No stated reading existed. Inferred from
+    /// [`MIN_LEARNED_RESET_RECOVERIES`] or more throttle→success recoveries
+    /// already in window.
+    Learned,
+}
+
+/// Map line 1249 — whether the rows behind this estimate reach back far
+/// enough to say anything about pressure beyond
+/// [`RECENT_SIGNAL_HORIZON_SECONDS`], out to
+/// [`LONG_SIGNAL_HORIZON_SECONDS`]. A third state, not a bucket guessed from
+/// thin evidence: two rows an hour apart cannot tell a multi-hour window
+/// from a monthly one, and the honest answer there is
+/// [`Self::Undistinguished`] rather than a guessed [`Self::NoPressure`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LongWindowPressure {
+    /// No informative row reached back far enough to say anything about the
+    /// longer window — absence of evidence, not evidence of absence.
+    Undistinguished,
+    /// Coverage reached the long horizon and no throttle fell inside it.
+    NoPressure,
+    /// A throttle fell inside the long horizon, outside the short one:
+    /// pressure the short window alone would miss entirely.
+    Present,
+}
+
 /// Map lines 1244/1245/1246/1250/1251/1254's estimator output: never a bare
 /// number.
 ///
@@ -1937,6 +1993,11 @@ pub struct SubscriptionHeadroomEstimate {
     /// row this estimate drew from named its own account; widened to
     /// provider scope the moment one does not.
     pub account_narrowed: bool,
+    /// Map line 1248 — whose reset reading, if any, fed this estimate.
+    pub reset_basis: ResetBasis,
+    /// Map line 1249 — whether evidence separates short-window pressure
+    /// from pressure that persists into the longer horizon.
+    pub long_window_pressure: LongWindowPressure,
 }
 
 /// Map line 1245's estimator, and lines 1244/1246/1250/1251/1254 with it —
@@ -1961,7 +2022,11 @@ pub struct SubscriptionHeadroomEstimate {
 ///   recorded on the returned value's [`HeadroomBasis`] (line 1251);
 /// - **reset behavior**, as `seconds_until_reset` — the caller's own
 ///   gateway-quota-cache reading, already computed for the provider-wide
-///   capacity facet and handed in rather than re-read;
+///   capacity facet and handed in rather than re-read. Map line 1248: when
+///   this is `None`, a fallback is learned from `scoped`'s own
+///   throttle→success recoveries rather than left unused — see
+///   [`ResetBasis`]. The learned value never displaces a real reading;
+///   [`SubscriptionHeadroomEstimate::reset_basis`] says which one applied;
 /// - **historical sessions**, as `recent_session_count` — this project's own
 ///   count of sessions charged to this account (`sessions.entitlement`,
 ///   migration 22), read by the caller and handed in: this function stays a
@@ -2021,9 +2086,45 @@ pub fn estimate_subscription_headroom(
     let recent_pressure =
         most_recent_throttle_age.is_some_and(|age| age <= RECENT_SIGNAL_HORIZON_SECONDS);
     let any_pressure = most_recent_throttle_age.is_some();
-    let reset_imminent = seconds_until_reset
-        .is_some_and(|seconds| (0..=RECENT_SIGNAL_HORIZON_SECONDS).contains(&seconds));
     let has_activity = accepted > 0 || session_count > 0;
+
+    // Map line 1248: a stated reading is authoritative and is never
+    // recomputed; only its absence opens the door to a learned fallback,
+    // and even then only past the anecdote guard.
+    let (effective_seconds_until_reset, reset_basis) = match seconds_until_reset {
+        Some(seconds) => (Some(seconds), ResetBasis::Stated),
+        None => match learn_reset_window_seconds(&scoped) {
+            Some(window) => (Some(window), ResetBasis::Learned),
+            None => (None, ResetBasis::Unknown),
+        },
+    };
+    let reset_imminent = effective_seconds_until_reset
+        .is_some_and(|seconds| (0..=RECENT_SIGNAL_HORIZON_SECONDS).contains(&seconds));
+
+    // Map line 1249: positive evidence of long-window pressure needs no
+    // full coverage of the horizon — one throttle out there is real
+    // evidence regardless of how far back the rest of `scoped` reaches.
+    // Its *absence* does, or the honest answer is "we did not look that
+    // far", not "nothing happened".
+    let long_window_pressure = {
+        let present = scoped
+            .iter()
+            .filter(|row| row.failure_class == Some(FailureClass::Throttle))
+            .map(|row| now_unix.saturating_sub(row.observed_at_unix))
+            .any(|age| age > RECENT_SIGNAL_HORIZON_SECONDS && age <= LONG_SIGNAL_HORIZON_SECONDS);
+        if present {
+            LongWindowPressure::Present
+        } else {
+            let deepest_age = scoped
+                .iter()
+                .map(|row| now_unix.saturating_sub(row.observed_at_unix))
+                .max();
+            match deepest_age {
+                Some(age) if age >= LONG_SIGNAL_HORIZON_SECONDS => LongWindowPressure::NoPressure,
+                _ => LongWindowPressure::Undistinguished,
+            }
+        }
+    };
 
     let band = match (recent_pressure, any_pressure, reset_imminent, has_activity) {
         (true, _, true, _) => HeadroomBand::Low,
@@ -2042,7 +2143,44 @@ pub fn estimate_subscription_headroom(
             HeadroomBasis::RequestActivity
         },
         account_narrowed,
+        reset_basis,
+        long_window_pressure,
     })
+}
+
+/// Map line 1248's fallback window: the interval between a `Throttle` row
+/// and the next `Succeeded` row after it in `scoped`, averaged across every
+/// such recovery — `None` below [`MIN_LEARNED_RESET_RECOVERIES`] of them,
+/// the anecdote rule stated in the packet this shipped from. Only ever
+/// consulted by [`estimate_subscription_headroom`] when the caller supplied
+/// no real `seconds_until_reset` at all.
+fn learn_reset_window_seconds(scoped: &[&RoutingObservation]) -> Option<i64> {
+    let mut ordered: Vec<&RoutingObservation> = scoped.to_vec();
+    ordered.sort_by_key(|row| row.observed_at_unix);
+
+    let mut recoveries = Vec::new();
+    for (index, row) in ordered.iter().enumerate() {
+        if row.failure_class != Some(FailureClass::Throttle) {
+            continue;
+        }
+        if let Some(success) = ordered[index + 1..]
+            .iter()
+            .find(|later| later.outcome == Some(Outcome::Succeeded))
+        {
+            let recovery = success
+                .observed_at_unix
+                .saturating_sub(row.observed_at_unix);
+            if recovery > 0 {
+                recoveries.push(recovery);
+            }
+        }
+    }
+
+    if recoveries.len() < MIN_LEARNED_RESET_RECOVERIES {
+        return None;
+    }
+    let sum: i64 = recoveries.iter().sum();
+    Some(sum / recoveries.len() as i64)
 }
 
 /// Request and token consumption for one `(purpose, harness_recorded)`

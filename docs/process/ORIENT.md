@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1129 / 1332 mandatory capabilities (85%)** — 203 open across 46 phases.
+**1133 / 1332 mandatory capabilities (85%)** — 199 open across 46 phases.
 
 ## Where the work is
 
@@ -42,6 +42,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 9J | Harness-model pairing model | **2** | 18 | `545` |
 | Phase 20 | Minimal durable project memory | **2** | 16 | `805` |
 | Phase 21F | Memory retrieval quality | **2** | 9 | `927` |
+| Phase 32C | Subscription capacity estimation | **2** | 10 | `1242` |
 | Phase 32D | Normalized remaining-capacity score | **2** | 10 | `1257` |
 | Phase 33 | Resource health | **2** | 13 | `1309` |
 | Phase 38 | Quota-preserving routing | **2** | 5 | `1604` |
@@ -55,7 +56,6 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 33A | Routing evidence ledger | **5** | 10 | `1327` |
 | Phase 53 | Criteria before adding graph storage | **5** | 0 | `1872` |
 | Phase 21G | Memory revalidation | **6** | 3 | `941` |
-| Phase 32C | Subscription capacity estimation | **6** | 6 | `1242` |
 | Phase 52 | Criteria before adding semantic/vector retrieval | **6** | 0 | `1858` |
 | Phase 47 | Observability without spectacle | **7** | 8 | `1750` |
 | Phase 56 | Harness–subscription decoupling: choose the harness, route the subscription and model | **7** | 5 | `1941` |
@@ -75,7 +75,7 @@ closures are usually at the top. Open the map at the line number given.
 
 Every phase with **three or fewer** open lines, quoted verbatim. These are
 where a single package finishes a phase, so they are listed here and the
-other ~164 open lines are not.
+other ~158 open lines are not.
 
 For any other phase: `scripts/discover.py --phase <id>` prints its open
 lines and evidence together. **Do not open the 178 KB map to read them.**
@@ -168,6 +168,11 @@ these unwrapped.
 
 - **932** ☐ Penalize memories whose assumptions conflict with current repository state.
 - **939** ☐ Record false-positive or harmful memory retrievals so the retrieval policy can be evaluated.
+
+### Phase 32C — Subscription capacity estimation  (2 open, 10 closed)
+
+- **1247** ☐ Reset or re-calibrate an estimator when Glasshouse detects a plan change or materially different quota behavior.
+- **1253** ☐ Preserve historical estimation data so the scheduler can improve over repeated usage.
 
 ### Phase 32D — Normalized remaining-capacity score  (2 open, 10 closed)
 

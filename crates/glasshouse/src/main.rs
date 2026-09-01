@@ -11052,7 +11052,18 @@ fn entitlement_facets(
     thresholds: &glasshouse::provider::quota::CapacityBandThresholds,
 ) -> String {
     use glasshouse::config::{EntitlementModels, TelemetryScope};
-    use glasshouse::routing::evidence::{HeadroomBand, HeadroomBasis};
+    use glasshouse::routing::evidence::{
+        HeadroomBand, HeadroomBasis, LongWindowPressure, ResetBasis,
+    };
+
+    fn band_str(band: HeadroomBand) -> &'static str {
+        match band {
+            HeadroomBand::Exhausted => "exhausted",
+            HeadroomBand::Low => "low",
+            HeadroomBand::Moderate => "moderate",
+            HeadroomBand::Ample => "ample",
+        }
+    }
 
     let scope_note = |scope: TelemetryScope| format!(" ({})", scope.as_str());
 
@@ -11108,14 +11119,25 @@ fn entitlement_facets(
     // "never dressed as an authoritative reading" the packet asks for.
     // Never a number: a band, its confidence, its basis, and whose reading
     // it is.
-    let headroom_estimate = match entry.headroom_estimate() {
-        Some(estimate) => {
-            let band = match estimate.band {
-                HeadroomBand::Exhausted => "exhausted",
-                HeadroomBand::Low => "low",
-                HeadroomBand::Moderate => "moderate",
-                HeadroomBand::Ample => "ample",
-            };
+    //
+    // Map line 1252's override is checked first and rendered in its own
+    // vocabulary — "your reading" rather than a confidence and a basis — so
+    // a user's correction can never be mistaken for Glasshouse's own
+    // inference; it is still only ever a band, never a percentage or a
+    // token figure, so 1250/1251 hold for it too. Map line 1255's disabled
+    // scope reaches here as `None`, indistinguishable from genuinely
+    // unknown, unless an override is also set — an override is the user's
+    // own stated reading and disabling the *derived* estimate does not
+    // retract it.
+    let headroom_estimate = match (entry.headroom_override(), entry.headroom_estimate()) {
+        (Some(band), _) => {
+            format!(
+                "headroom estimate: ~{} (your reading, overrides the estimate)",
+                band_str(band)
+            )
+        }
+        (None, Some(estimate)) => {
+            let band = band_str(estimate.band);
             let basis = match estimate.basis {
                 HeadroomBasis::RequestActivity => "request activity",
                 HeadroomBasis::TokenUsage => "token usage",
@@ -11125,12 +11147,26 @@ fn entitlement_facets(
             } else {
                 "provider-wide"
             };
-            format!(
+            let mut rendered = format!(
                 "headroom estimate: ~{band} ({scope}, {}, {basis})",
                 estimate.confidence.as_str()
-            )
+            );
+            // Map line 1248: an inferred reset window must never render
+            // identically to the provider's own stated word.
+            if estimate.reset_basis == ResetBasis::Learned {
+                rendered.push_str(", reset: learned");
+            }
+            // Map line 1249: only the positive, evidence-backed distinction
+            // is worth a consumer's attention — `Undistinguished` and
+            // `NoPressure` both render nothing new, which is also what
+            // keeps the no-new-config regression byte-identical to
+            // `4f0c1cf`'s output.
+            if estimate.long_window_pressure == LongWindowPressure::Present {
+                rendered.push_str(", persistent pressure beyond the short window");
+            }
+            rendered
         }
-        None => "headroom estimate: unknown".to_owned(),
+        (None, None) => "headroom estimate: unknown".to_owned(),
     };
 
     format!("{capacity} · {reset} · {throttling} · {models} · {headroom_estimate}")
