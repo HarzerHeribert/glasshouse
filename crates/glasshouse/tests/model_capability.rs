@@ -563,3 +563,74 @@ fn a_configured_capability_record_excludes_a_destination_below_the_required_tier
          said\" is not \"cannot\":\n{report}"
     );
 }
+
+/// **Line 1482's closing half, on the shipped binary.**
+/// `line_1482_a_harness_scoped_record_is_inert_to_context_blind_resolution`
+/// proves a harness-scoped record is safely *inert* on the context-blind
+/// path; this proves it is actually *applied* on the context-aware one —
+/// `main.rs::destination_tier_ceiling` now builds a `CapabilityQuery` from
+/// the harness it is iterating and calls
+/// `EffectiveConfig::model_ceiling_for`, so a record scoped to `claude-code`
+/// caps `claude-code`'s own destination and leaves `codex`'s destination on
+/// the identical provider and model untouched.
+///
+/// The control is `big`'s record, which states no harness at all: it caps
+/// **both** harnesses' destinations, attributing the isolation above to the
+/// harness scope specifically rather than to some other difference between
+/// the four profiles.
+#[test]
+fn a_harness_scoped_capability_record_applies_only_to_its_own_harness_on_the_shipped_binary() {
+    let fixture = Fixture::new(
+        &["claude-code", "codex"],
+        &format!(
+            "[providers.alpha]\ntemplate = \"openrouter\"\n\
+             credential_env = [\"{CREDENTIAL_VAR}\"]\n\n\
+             [providers.alpha.model_capabilities.small]\n\
+             harness = \"claude-code\"\n\
+             ceiling = \"leaf\"\n\
+             provenance = \"user\"\n\n\
+             [providers.alpha.model_capabilities.big]\n\
+             ceiling = \"leaf\"\n\
+             provenance = \"user\"\n\n\
+             [profiles.cc-scoped]\nharness = \"claude-code\"\nmodel = \"small\"\n\
+             expected_protocol = \"openai-chat\"\n\
+             [profiles.cc-scoped.backend]\nkind = \"direct-provider\"\nprovider = \"alpha\"\n\n\
+             [profiles.cc-control]\nharness = \"claude-code\"\nmodel = \"big\"\n\
+             expected_protocol = \"openai-chat\"\n\
+             [profiles.cc-control.backend]\nkind = \"direct-provider\"\nprovider = \"alpha\"\n\n\
+             [profiles.codex-scoped]\nharness = \"codex\"\nmodel = \"small\"\n\
+             expected_protocol = \"openai-chat\"\n\
+             [profiles.codex-scoped.backend]\nkind = \"direct-provider\"\nprovider = \"alpha\"\n\n\
+             [profiles.codex-control]\nharness = \"codex\"\nmodel = \"big\"\n\
+             expected_protocol = \"openai-chat\"\n\
+             [profiles.codex-control.backend]\nkind = \"direct-provider\"\nprovider = \"alpha\"\n"
+        ),
+    );
+    let report = fixture.route(&["route", "--task", STANDARD_REPO_TASK]);
+
+    let rejected = report
+        .split_once("\nrejected\n")
+        .unwrap_or_else(|| panic!("nothing was rejected at all:\n{report}"))
+        .1;
+
+    assert!(
+        rejected.contains("fresh:claude-code:cc-scoped"),
+        "the harness-scoped record must cap its own harness's destination:\n{report}"
+    );
+    assert!(
+        !rejected.contains("fresh:codex:codex-scoped"),
+        "a record scoped to claude-code must be invisible to codex's identical provider and \
+         model — leaking it would cap every harness a scoped calibration was never measured on:\
+         \n{report}"
+    );
+    assert!(
+        rejected.contains("fresh:claude-code:cc-control"),
+        "the control: an unscoped record must still cap claude-code:\n{report}"
+    );
+    assert!(
+        rejected.contains("fresh:codex:codex-control"),
+        "the control: the same unscoped record must ALSO cap codex — proving the isolation \
+         above is caused by the harness scope, not by some other difference between the four \
+         profiles:\n{report}"
+    );
+}

@@ -94,3 +94,36 @@ package: an unpinned launch under default-on automatic routing may now
 legitimately land on an account destination. The test's premise (a launch no
 entitlement serves) now requires automatic routing off, which is what it
 states since 70b; 21/21 twice on the merged tree.
+
+# Lines 1481, 1482 — COMPLETE 2026-09-01; PHASE 34F CLOSED (11/11)
+
+Package `GH-TIER-WIRING` (Sonnet, high, Amber; batch 70e). Integration gate:
+86 targets, zero failures, rustdoc clean.
+
+**1482** — the context-carrying caller the batch-70b ruling reserved:
+`main.rs::routing_destinations` builds a `CapabilityQuery` (harness, launch
+profile, wire protocol) at every `destination_tier_ceiling` call and resolves
+through `resolved_ceiling_for`/`model_ceiling_for`, which filter with
+`applies_to(query)` instead of the conservative `is_context_general` inert
+default. Proven on the shipped binary with an unscoped control: a record
+scoped to claude-code caps claude-code and is invisible to codex on the same
+provider and model. Mutation `applies-to-ignores-context` KILLED.
+`Destination` carries `capability_tier` (the same resolved value, its own
+builder — the recorded one-axis reading of the tier-attachment ruling), and
+`same_capability_tier` compares two attached values: 1970's same-tier
+fallback steps now fire for two models the user assigned one tier
+(`a_shared_user_assigned_capability_tier_reaches_the_fallbacks_tier_step`)
+and still never on unknown. Limits: profile/protocol axes proven at the
+`applies_to` unit level, harness axis on the shipped binary; no Windows leg
+owed.
+
+**1481** — `capability_suggestions_section` in `route_report`, gated by
+`TierOutcomeVerdict::Measured` itself (the same `MIN_SAMPLE_FOR_SUMMARY`
+floor as `outcomes_by_tier` — no second threshold family), comparing
+measured per-tier failures against `calibrated_model_ceilings`, rendering
+the model, its configured tier and provenance, the counts, and the exact
+config key — and writing NOTHING (config byte-compare asserted in the test;
+no `&mut` config anywhere in the path). Mutation `suggest-below-evidence-gate`
+KILLED. Limits: only capability-record-backed models are compared, and only
+the majority-failing direction renders; the promote-a-prior-on-success
+suggestion is a separate product judgment, deliberately not invented.

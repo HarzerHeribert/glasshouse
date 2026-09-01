@@ -990,31 +990,37 @@ pub enum TierRelation {
 }
 
 /// The seam map line 1970's tier-preserving fallback consumes: are these two
-/// models of the same user-assigned capability tier?
+/// destinations' models of the same user-assigned capability tier?
 ///
-/// # What it answers today, and why that is the honest answer
+/// # The axis, now landed
 ///
-/// **Nothing in this tree ranks models by capability class yet** — the
-/// existing `tier` vocabulary (`classify::WorkloadTier`,
-/// `EntitlementRules::allow_tiers`) ranks *how hard the task is*, and
-/// `capability::CapabilityAxis` answers *can it do this at all*. The model
-/// axis is Phase 34F's, being built in parallel, and this function is the
-/// one place Phase 56A consumes it, so the axis plugs in here without any
-/// other line of this module changing.
+/// `classify::WorkloadTier` ranks *how hard the task is*, and
+/// `capability::CapabilityAxis` answers *can it do this at all* — neither is
+/// "how capable is this model, relative to others". Phase 34F's answer to
+/// that question is the resolved ceiling a user assigns a model (an
+/// override, or a capability record's own `ceiling`): the same `WorkloadTier`
+/// vocabulary, read as *the tier this model is trusted to serve*. The caller
+/// resolves that once per destination — `main.rs::destination_tier_ceiling`,
+/// beside where it attaches [`session::Destination::with_tier_ceiling`] — and
+/// attaches it via [`session::Destination::with_capability_tier`]; this
+/// function compares the two attached values and reads no configuration of
+/// its own, matching every other free function in this module.
 ///
-/// Until it lands, the only same-tier fact this build can establish is the
-/// trivial one: **a model is in its own tier**. Every other pair reads
-/// [`TierRelation::Unknown`], and the fallback's tier steps therefore never
-/// fire — the order collapses to its same-model steps. That is the ruling's
-/// own direction: a fallback that silently downgrades the model *"is worse
-/// than a refusal, because the work continues and looks fine"*.
-pub fn same_capability_tier(from: &str, to: &str) -> TierRelation {
-    if from == to {
-        // Not a guess and not the axis: the identity case, which is the only
-        // same-tier fact available without one.
-        return TierRelation::Same;
+/// [`TierRelation::Unknown`] is not [`TierRelation::Same`]: a destination
+/// whose model nobody assigned a tier answers unknown, and the fallback's
+/// tier steps never fire on it — the ruling's own direction, *"You can't put
+/// a fable 5 task and switch it to a nemotron v3"*, and a fallback that
+/// silently downgrades the model *"is worse than a refusal, because the work
+/// continues and looks fine"*.
+pub fn same_capability_tier(
+    from: Option<crate::routing::classify::WorkloadTier>,
+    to: Option<crate::routing::classify::WorkloadTier>,
+) -> TierRelation {
+    match (from, to) {
+        (Some(from), Some(to)) if from == to => TierRelation::Same,
+        (Some(_), Some(_)) => TierRelation::Different,
+        _ => TierRelation::Unknown,
     }
-    TierRelation::Unknown
 }
 
 /// Map line 1971's spend half, as the router carries it: how much this
@@ -1369,21 +1375,30 @@ pub fn apply_hard_constraints<T>(
 mod entitlement_fallback_seam_tests {
     use super::*;
 
-    /// The seam answers *unknown* for every pair it has not been given an
-    /// axis for, and `Same` only for the identity case. When Phase 34F lands
-    /// this is the one function that changes, and `Different` becomes
-    /// reachable.
+    /// Phase 34F's axis, landed: two attached tiers agree, two attached
+    /// tiers disagree, and either side unattached reads as unknown rather
+    /// than as a guess in either direction.
     #[test]
-    fn the_tier_seam_answers_unknown_until_the_axis_lands() {
+    fn the_tier_seam_compares_two_attached_values() {
+        use crate::routing::classify::WorkloadTier;
+
         assert_eq!(
-            same_capability_tier("fable-5", "fable-5"),
+            same_capability_tier(Some(WorkloadTier::Frontier), Some(WorkloadTier::Frontier)),
             TierRelation::Same
         );
         assert_eq!(
-            same_capability_tier("fable-5", "nemotron-v3"),
-            TierRelation::Unknown,
-            "nothing in this build ranks models by capability class, and a guess here              misroutes work"
+            same_capability_tier(Some(WorkloadTier::Frontier), Some(WorkloadTier::Leaf)),
+            TierRelation::Different,
+            "two established, differing tiers must not read as unknown — a build that folded \
+             this into `Unknown` would silently widen the fallback rather than narrow it"
         );
+        assert_eq!(
+            same_capability_tier(None, Some(WorkloadTier::Frontier)),
+            TierRelation::Unknown,
+            "a model nobody assigned a tier must not read as different, or the fallback would \
+             have grounds to refuse a step it has no evidence about"
+        );
+        assert_eq!(same_capability_tier(None, None), TierRelation::Unknown);
     }
 
     fn entitlement(ceiling: Option<u64>, spend: Option<u64>) -> Entitlement {

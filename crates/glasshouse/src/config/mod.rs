@@ -2823,6 +2823,31 @@ impl ProviderConfig {
         capability::resolve_ceiling(self.ceiling_of(model), record)
     }
 
+    /// [`Self::resolved_ceiling`], for a caller that actually has the
+    /// harness/launch-profile/protocol context a destination is built with —
+    /// capability map line 1482's closing half. Where [`Self::resolved_ceiling`]
+    /// may only trust a record that narrows nothing at all, this checks each
+    /// record's own [`capability::ModelCapabilityRecord::applies_to`] against
+    /// `query` instead: a record scoped to a harness, profile, or protocol the
+    /// query does not name is filtered out exactly as before, and a record
+    /// that narrows to axes `query` *does* state is now honoured rather than
+    /// blanket-excluded.
+    ///
+    /// **The production caller is `main.rs::destination_tier_ceiling`**,
+    /// which builds `query` from the same launch context — harness, launch
+    /// profile, protocol — that `main.rs::routing_destinations` already has
+    /// in hand for every destination it constructs.
+    pub fn resolved_ceiling_for(
+        &self,
+        model: &str,
+        query: &capability::CapabilityQuery<'_>,
+    ) -> capability::CeilingResolution {
+        let record = self
+            .model_capability(model)
+            .filter(|record| record.applies_to(query));
+        capability::resolve_ceiling(self.ceiling_of(model), record)
+    }
+
     /// What this backend does to a prompt on the way through, as the user
     /// described it — Phase 9K line 609. `None` means nothing was declared,
     /// which is not the same as "nothing happens".
@@ -5378,6 +5403,71 @@ impl<'a> EffectiveConfig<'a> {
             return Layered::new(config.resolved_ceiling(model).hard_ceiling(), Layer::User);
         }
         Layered::new(None, Layer::Default)
+    }
+
+    /// [`Self::model_ceiling`], through [`ProviderConfig::resolved_ceiling_for`]
+    /// rather than [`ProviderConfig::resolved_ceiling`] — capability map line
+    /// 1482's closing half, for a caller that has harness, launch-profile, or
+    /// protocol context to narrow a capability record by. Layer precedence
+    /// and every other rule match [`Self::model_ceiling`] exactly; only the
+    /// record filter differs.
+    pub fn model_ceiling_for(
+        &self,
+        provider: &str,
+        model: &str,
+        query: &capability::CapabilityQuery<'_>,
+    ) -> Layered<Option<crate::routing::classify::WorkloadTier>> {
+        if let Some(config) = self.project.and_then(|p| p.providers().get(provider)) {
+            return Layered::new(
+                config.resolved_ceiling_for(model, query).hard_ceiling(),
+                Layer::Project,
+            );
+        }
+        if let Some(config) = self.user.providers().get(provider) {
+            return Layered::new(
+                config.resolved_ceiling_for(model, query).hard_ceiling(),
+                Layer::User,
+            );
+        }
+        Layered::new(None, Layer::Default)
+    }
+
+    /// Every `(provider, model)` pair a calibrated [`capability::ModelCapabilityRecord`]
+    /// actually decides the ceiling for, from the layer that configures that
+    /// provider — project over user, matching every other lookup on this
+    /// type. Map line 1481's own enumeration: the calibrated data a
+    /// suggestion compares observed outcomes against.
+    ///
+    /// A pair whose resolution is [`capability::CeilingResolution::UserOverride`]
+    /// is left out: [`ProviderConfig::model_ceilings`]'s own override
+    /// is what actually governs that destination, so a capability record
+    /// sitting unused beside it is not this line's to suggest changes to.
+    /// Context-blind on purpose — a project-wide report has no one
+    /// destination's harness or launch profile to narrow by, the same
+    /// "genuinely no context" case [`ProviderConfig::resolved_ceiling`]
+    /// documents for its own caller.
+    pub fn calibrated_model_ceilings(
+        &self,
+    ) -> Vec<(String, String, capability::CeilingResolution)> {
+        let mut out = Vec::new();
+        for name in self.provider_names() {
+            let config = self
+                .project
+                .and_then(|p| p.providers().get(&name))
+                .or_else(|| self.user.providers().get(&name));
+            let Some(config) = config else { continue };
+            for model in config.model_capabilities().keys() {
+                let resolution = config.resolved_ceiling(model);
+                if matches!(
+                    resolution,
+                    capability::CeilingResolution::UserCapabilityRecord(_)
+                        | capability::CeilingResolution::Prior(_)
+                ) {
+                    out.push((name.clone(), model.clone(), resolution));
+                }
+            }
+        }
+        out
     }
 
     /// The user's preferred order over free resources, resolved per field —

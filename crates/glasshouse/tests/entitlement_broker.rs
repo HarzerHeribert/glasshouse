@@ -1218,6 +1218,20 @@ fn fresh_on_model(id: &str, model: &str, entitlement: Entitlement) -> Destinatio
     .with_entitlement(Some(entitlement))
 }
 
+/// [`fresh_on_model`], with a user-assigned capability tier attached —
+/// Phase 34F's axis, plugged into the fallback exactly the way
+/// `main.rs::routing_destinations` plugs it in for the shipped binary: one
+/// value, attached at construction, that `same_capability_tier` later
+/// compares.
+fn fresh_on_model_with_tier(
+    id: &str,
+    model: &str,
+    tier: WorkloadTier,
+    entitlement: Entitlement,
+) -> Destination {
+    fresh_on_model(id, model, entitlement).with_capability_tier(Some(tier))
+}
+
 fn ranked(destinations: &[Destination]) -> Vec<&Destination> {
     destinations.iter().collect()
 }
@@ -1289,13 +1303,18 @@ fn the_fallback_order_prefers_a_subscription_and_takes_api_credits_only_when_it_
 
 /// **Line 1970's tier-preserving constraint — the narrowing half.** The same
 /// exhausted subscription, with a healthy sibling subscription that serves a
-/// **different** model. Phase 34F's capability axis has not landed, so
-/// nothing ranks those two models against each other, and
-/// `same_capability_tier` answers *unknown*. Unknown does not widen the
-/// order: there is **no fallback at all**, which is the ruling's own
-/// direction — *"You can't put a fable 5 task and switch it to a nemotron
-/// v3"*, and a fallback that silently downgrades *"is worse than a refusal,
-/// because the work continues and looks fine"*.
+/// **different** model, and neither destination carries an attached
+/// capability tier — the plain state every destination the router sees
+/// arrives in until something assigns one. `same_capability_tier` answers
+/// *unknown* for two unattached values, exactly as it does for two attached
+/// values nobody has ranked the same. Unknown does not widen the order:
+/// there is **no fallback at all**, which is the ruling's own direction —
+/// *"You can't put a fable 5 task and switch it to a nemotron v3"*, and a
+/// fallback that silently downgrades *"is worse than a refusal, because the
+/// work continues and looks fine"*. See
+/// `a_shared_user_assigned_capability_tier_reaches_the_fallbacks_tier_step`
+/// beside this test for the positive case, now that Phase 34F's axis has
+/// landed.
 #[test]
 fn an_unknown_capability_tier_never_widens_the_fallback() {
     let exhausted = fresh(
@@ -1323,6 +1342,54 @@ fn an_unknown_capability_tier_never_widens_the_fallback() {
         entitlement_fallback(&ranked(&all), 0, &pool).is_none(),
         "a model no axis has ranked beside this one is not established to be the same tier, \
          and an unestablished tier is not a fallback"
+    );
+}
+
+/// **Line 1970's tier-preserving constraint — the positive half, now that
+/// Phase 34F's axis has landed.** The same exhausted subscription, with a
+/// healthy sibling subscription that serves a genuinely **different** model
+/// the user has assigned the **same** capability tier.
+/// `same_capability_tier` now answers `Same` for the two attached values, and
+/// `FallbackStep::SubscriptionSameTier` — present in `FallbackStep::ORDER`
+/// since batch 70 but unreachable until this axis existed — fires.
+#[test]
+fn a_shared_user_assigned_capability_tier_reaches_the_fallbacks_tier_step() {
+    let exhausted = fresh_on_model_with_tier(
+        "d-a",
+        "the-same-model",
+        WorkloadTier::Standard,
+        account(
+            "claude-a",
+            EntitlementSource::Subscription,
+            Some(CapacityBand::Exhausted),
+            0,
+        ),
+    );
+    let same_tier_other_model = fresh_on_model_with_tier(
+        "d-c",
+        "a-different-model",
+        WorkloadTier::Standard,
+        account(
+            "claude-c",
+            EntitlementSource::Subscription,
+            Some(CapacityBand::Plenty),
+            0,
+        ),
+    );
+
+    let all = vec![exhausted, same_tier_other_model];
+    let pool = EntitlementPoolView::of(&all);
+    let (index, record) = entitlement_fallback(&ranked(&all), 0, &pool).expect(
+        "two models the user assigned the same capability tier must reach the fallback's tier \
+         step",
+    );
+    assert_eq!(index, 1);
+    assert_eq!(record.from(), "claude-a");
+    assert_eq!(record.to(), "claude-c");
+    assert_eq!(
+        record.step(),
+        FallbackStep::SubscriptionSameTier,
+        "the step must name the tier match, not merely find a candidate"
     );
 }
 

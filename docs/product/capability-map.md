@@ -1478,8 +1478,8 @@ Phase 34F — Model capability and tier calibration
 ☑ Record whether a model is suitable for code editing, debugging, architecture work, or only support tasks.
 ☑ Allow users to manually override a model’s workload ceiling.
 ☑ Record successful and failed task outcomes by workload tier when enough evidence exists.
-☐ Use observed outcomes to suggest calibration changes without silently rewriting the user’s model policy.
-☐ Keep capability calibration local to the configured harness, launch profile, model, backend, and relevant protocol path because the same model may behave differently behind different harnesses, gateways, translations, or quantizations.
+☑ Use observed outcomes to suggest calibration changes without silently rewriting the user’s model policy.
+☑ Keep capability calibration local to the configured harness, launch profile, model, backend, and relevant protocol path because the same model may behave differently behind different harnesses, gateways, translations, or quantizations.
 ☑ Store the harness-model pairing class and the current evidence strength alongside capability calibration.
 ☑ Treat benchmark-derived capability metadata and same-vendor alignment as starting priors rather than proof of performance in the user’s harness.
 ☑ Keep local quantized-model capability profiles distinct from hosted versions of nominally the same model.

@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1099 / 1332 mandatory capabilities (83%)** — 233 open across 47 phases.
+**1101 / 1332 mandatory capabilities (83%)** — 231 open across 46 phases.
 
 ## Where the work is
 
@@ -44,7 +44,6 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 21F | Memory retrieval quality | **2** | 9 | `927` |
 | Phase 32D | Normalized remaining-capacity score | **2** | 10 | `1257` |
 | Phase 33 | Resource health | **2** | 13 | `1309` |
-| Phase 34F | Model capability and tier calibration | **2** | 9 | `1473` |
 | Phase 38 | Quota-preserving routing | **2** | 5 | `1604` |
 | Phase 55 | V1 completion definition | **2** | 21 | `1910` |
 | Phase 28 | File-aware memory lookup | **3** | 2 | `1137` |
@@ -70,7 +69,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 51 | Evaluation hooks | **25** | 12 | `1818` |
 | Phase 57 | Context firewall: tool-output compaction between harness and model | **27** | 0 | `1976` |
 
-**Fully closed (60):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 8, Phase 9A, Phase 9B, Phase 9C, Phase 9D, Phase 9F, Phase 9G, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 16, Phase 17, Phase 18, Phase 19, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 21H, Phase 21I, Phase 21J, Phase 22, Phase 23, Phase 25, Phase 26, Phase 32, Phase 34, Phase 34A, Phase 34D, Phase 35, Phase 35C, Phase 35D, Phase 36, Phase 40, Phase 41, Phase 42, Phase 43, Phase 44, Phase 45, Phase 46, Phase 48, Phase 49, Phase 50, Phase 54, Phase 56A.
+**Fully closed (61):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 8, Phase 9A, Phase 9B, Phase 9C, Phase 9D, Phase 9F, Phase 9G, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 16, Phase 17, Phase 18, Phase 19, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 21H, Phase 21I, Phase 21J, Phase 22, Phase 23, Phase 25, Phase 26, Phase 32, Phase 34, Phase 34A, Phase 34D, Phase 34F, Phase 35, Phase 35C, Phase 35D, Phase 36, Phase 40, Phase 41, Phase 42, Phase 43, Phase 44, Phase 45, Phase 46, Phase 48, Phase 49, Phase 50, Phase 54, Phase 56A.
 
 ## The nearly-finished phases, in full
 
@@ -179,11 +178,6 @@ these unwrapped.
 
 - **1323** ☐ Avoid background probing at an aggressive rate that wastes free-request pools.
 - **1325** ☐ Record whether a health observation came from a real task, a retry, a repair attempt, or an explicit probe.
-
-### Phase 34F — Model capability and tier calibration  (2 open, 9 closed)
-
-- **1481** ☐ Use observed outcomes to suggest calibration changes without silently rewriting the user’s model policy.
-- **1482** ☐ Keep capability calibration local to the configured harness, launch profile, model, backend, and relevant protocol path because the same model may behave differently behind different harnesses, gateways, translations, or quantizations.
 
 ### Phase 38 — Quota-preserving routing  (2 open, 5 closed)
 

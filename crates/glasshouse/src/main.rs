@@ -1042,11 +1042,13 @@ fn routing_destinations(
             .and_then(|name| effective.launch_profile(name, harness).ok())
             .map(|layered| layered.value)
             .unwrap_or_else(|| glasshouse::profile::LaunchProfile::native(harness));
-        let (backend, protocols) = destination_backend(effective, &profile, record.model.clone());
+        let (backend, protocols, wire_protocol) =
+            destination_backend(effective, &profile, record.model.clone());
         // Line 1516's producer, read before the backend is moved into the
         // destination — see `destination_tier_ceiling` for why it is read off
         // the backend's resolved model rather than off the profile.
-        let ceiling = destination_tier_ceiling(effective, &backend);
+        let query = destination_capability_query(harness, &profile.name, wire_protocol);
+        let ceiling = destination_tier_ceiling(effective, &backend, &query);
         // Phase 56 line 1954's producer: the entitlement this session's
         // profile charges, so a rule the user has since written applies to
         // continuing it exactly as it applies to starting a fresh one. When
@@ -1074,6 +1076,7 @@ fn routing_destinations(
                 destination_capacity(&profile, effective, &telemetry, now_unix),
             )
             .with_tier_ceiling(ceiling)
+            .with_capability_tier(ceiling)
             .with_session_context(context)
             .with_entitlement(entitlement),
         );
@@ -1117,7 +1120,8 @@ fn routing_destinations(
             continue;
         };
         let profile = profile.value;
-        let (backend, protocols) = destination_backend(effective, &profile, None);
+        let (backend, protocols, wire_protocol) = destination_backend(effective, &profile, None);
+        let query = destination_capability_query(harness, &profile.name, wire_protocol);
         let capacity = destination_capacity(&profile, effective, &telemetry, now_unix);
         // 56A line 1953 — the entitlement axis. One entry backing this
         // profile's resource (or none) keeps exactly the single candidate,
@@ -1133,7 +1137,7 @@ fn routing_destinations(
         if matches.len() > 1 {
             for resolved in matches {
                 let backend = backend_for_entitlement(&backend, resolved);
-                let ceiling = destination_tier_ceiling(effective, &backend);
+                let ceiling = destination_tier_ceiling(effective, &backend, &query);
                 destinations.push(
                     with_capacity(
                         with_provider_protocols(
@@ -1149,11 +1153,12 @@ fn routing_destinations(
                         capacity.clone(),
                     )
                     .with_tier_ceiling(ceiling)
+                    .with_capability_tier(ceiling)
                     .with_entitlement(Some(routing_entitlement(resolved, &band_thresholds))),
                 );
             }
         } else {
-            let ceiling = destination_tier_ceiling(effective, &backend);
+            let ceiling = destination_tier_ceiling(effective, &backend, &query);
             let fresh_entitlement = matches
                 .first()
                 .map(|resolved| routing_entitlement(resolved, &band_thresholds));
@@ -1172,6 +1177,7 @@ fn routing_destinations(
                     capacity,
                 )
                 .with_tier_ceiling(ceiling)
+                .with_capability_tier(ceiling)
                 .with_entitlement(fresh_entitlement),
             );
         }
@@ -1335,6 +1341,7 @@ fn destination_backend(
 ) -> (
     glasshouse::routing::Backend,
     Vec<glasshouse::harness::WireProtocol>,
+    Option<glasshouse::harness::WireProtocol>,
 ) {
     use glasshouse::profile::BackendResource;
     use glasshouse::routing::{Backend, Cost, CredentialId};
@@ -1342,9 +1349,12 @@ fn destination_backend(
 
     let pairing = session_pairing(effective, profile);
     let model = recorded_model.unwrap_or_else(|| pairing.model().clone());
-    let protocol = pairing
-        .route()
-        .protocol
+    // Line 1482's own context: the wire protocol this pairing actually
+    // resolved to, read once here and carried back to the caller — which has
+    // the harness and launch profile already — rather than re-derived by
+    // calling `session_pairing` a second time at each ceiling call site.
+    let wire_protocol = pairing.route().protocol;
+    let protocol = wire_protocol
         .map(|protocol| protocol.slug().to_owned())
         .unwrap_or_default();
 
@@ -1449,6 +1459,7 @@ fn destination_backend(
             pairing.tool_semantics(),
         ),
         protocols,
+        wire_protocol,
     )
 }
 
@@ -1848,10 +1859,28 @@ fn destination_capacity(
     (score, facts)
 }
 
+/// Map line 1482's own context, built from exactly what `routing_destinations`
+/// has in hand for a destination: the harness it is iterating, the launch
+/// profile's own name, and the wire protocol [`destination_backend`]
+/// resolved. One place this is assembled so the three call sites in
+/// `routing_destinations` cannot state it three different ways.
+fn destination_capability_query(
+    harness: glasshouse::integrations::IntegrationId,
+    launch_profile: &str,
+    protocol: Option<glasshouse::harness::WireProtocol>,
+) -> glasshouse::config::capability::CapabilityQuery<'_> {
+    glasshouse::config::capability::CapabilityQuery {
+        harness: Some(harness),
+        launch_profile: Some(launch_profile),
+        protocol,
+    }
+}
+
 /// **Map line 1516's missing producer**, and the reason the tier gate stops
 /// being inert on the shipped binary: the highest workload tier this
 /// destination's model is established to serve, as the user configured it
-/// (`providers.<p>.model_ceilings`, map line 1796).
+/// (`providers.<p>.model_ceilings`, map line 1796, or a Phase 34F capability
+/// record scoped to `query`).
 ///
 /// Read off the [`glasshouse::routing::Backend`] rather than from the
 /// profile, because the backend is where the *resolved* model lives — a
@@ -1859,6 +1888,13 @@ fn destination_capacity(
 /// `destination_backend` has already applied that rule. Reading the profile
 /// again here would give a warm session the ceiling of the model it *would*
 /// be started with rather than the one it is actually running.
+///
+/// `query` is `routing_destinations`' own launch context — harness, launch
+/// profile, and the wire protocol `destination_backend` resolved — which is
+/// map line 1482's closing half: a capability record scoped to one of those
+/// axes reaches exactly the destinations it applies to, through
+/// [`glasshouse::config::EffectiveConfig::model_ceiling_for`], rather than
+/// staying inert to every context-bearing caller.
 ///
 /// `None` — no ceiling established, which the router never reads as a
 /// refusal — in three honest cases, none of them a guess:
@@ -1874,11 +1910,13 @@ fn destination_capacity(
 fn destination_tier_ceiling(
     effective: &EffectiveConfig<'_>,
     backend: &glasshouse::routing::Backend,
+    query: &glasshouse::config::capability::CapabilityQuery<'_>,
 ) -> Option<glasshouse::routing::classify::WorkloadTier> {
-    backend
-        .model()
-        .name()
-        .and_then(|model| effective.model_ceiling(backend.provider(), model).value)
+    backend.model().name().and_then(|model| {
+        effective
+            .model_ceiling_for(backend.provider(), model, query)
+            .value
+    })
 }
 
 /// Attach [`destination_capacity`]'s two halves to a destination.
@@ -2177,6 +2215,7 @@ fn route_report(
     report.push('\n');
     report.push_str(&route_outcomes_section(runtime));
     report.push_str(&tier_outcome_section(runtime));
+    report.push_str(&capability_suggestions_section(runtime, &effective));
     report.push_str(&harness_efficiency_section(runtime));
     report.push_str(&support_work_section(runtime));
     report.push_str(&route_correlations_section(runtime));
@@ -2590,6 +2629,119 @@ fn tier_outcome_section(runtime: &Runtime) -> String {
                 ),
             );
         }
+    }
+    out
+}
+
+/// Map line 1481, printed for a person: where a tier's observed outcomes
+/// disagree with what a configured capability record says about a model at
+/// that tier — a suggestion, never a rewrite.
+///
+/// **The evidence gate is [`glasshouse::evaluation::TierOutcomeVerdict::Measured`]
+/// itself** — the same [`glasshouse::routing::evidence::MIN_SAMPLE_FOR_SUMMARY`]
+/// floor [`tier_outcome_section`] already gates its own summary on, reused
+/// rather than a second threshold invented for this section: a tier with too
+/// few reported turns to summarize has too few to suggest a calibration
+/// change from either. `TierOutcomeVerdict::InsufficientEvidence` — which
+/// includes the empty-window and zero-sample case — is skipped outright.
+///
+/// **Read-only by construction.** This reads
+/// [`glasshouse::config::EffectiveConfig::calibrated_model_ceilings`] and the
+/// evaluation ledger and writes a string; nothing here holds a `&mut`
+/// `ProviderConfig`, opens a config file for writing, or calls any `set_*`
+/// method. The rendered line names the config key a person would edit
+/// themselves — the suggestion stops at naming it.
+fn capability_suggestions_section(runtime: &Runtime, effective: &EffectiveConfig<'_>) -> String {
+    use glasshouse::config::ConfiguredWorkloadTier;
+    use glasshouse::config::capability::CeilingResolution;
+    use glasshouse::evaluation::{EvaluationObservations, TierOutcomeVerdict};
+
+    let header = "\nCalibration suggestions from observed outcomes, last 30 days (map line \
+                   1481)\n"
+        .to_owned();
+    let ledger = match EvaluationObservations::open(runtime) {
+        Ok(ledger) => ledger,
+        Err(err) => {
+            tracing::debug!(
+                error = %format!("{err:#}"),
+                "could not open the evaluation ledger for the calibration-suggestions section"
+            );
+            return format!("{header}\n  the evaluation ledger could not be opened\n");
+        }
+    };
+    let to = glasshouse::evaluation::now_unix();
+    let from = to - ROUTE_OUTCOME_WINDOW_DAYS * 24 * 60 * 60;
+    let outcomes = match ledger.outcomes_by_tier(from, to) {
+        Ok(outcomes) => outcomes,
+        Err(err) => return format!("{header}\n  {err}\n"),
+    };
+
+    let calibrated = effective.calibrated_model_ceilings();
+    let mut out = header;
+    out.push('\n');
+    let mut suggested = false;
+    for outcome in &outcomes {
+        // The gate: below MIN_SAMPLE_FOR_SUMMARY, `outcomes_by_tier` itself
+        // has already declined to summarize this tier, and a suggestion
+        // built from fewer reported turns than the section beside it trusts
+        // for a summary would be a second, weaker threshold nobody asked for.
+        let TierOutcomeVerdict::Measured {
+            successful,
+            failed,
+            sample_size,
+        } = outcome.verdict
+        else {
+            continue;
+        };
+        // The bucket is a display word (`RoutingTier::as_str`'s vocabulary,
+        // e.g. `standard-escalated`); the escalation suffix is stripped
+        // before parsing because a model's configured ceiling names the
+        // tier itself, never whether a session was escalated into it.
+        let Some(bucket_tier) =
+            ConfiguredWorkloadTier::parse(outcome.bucket.trim_end_matches("-escalated"))
+                .map(ConfiguredWorkloadTier::tier)
+        else {
+            continue;
+        };
+        for (provider, model, resolution) in &calibrated {
+            let (configured_tier, provenance, config_key) = match resolution {
+                CeilingResolution::UserCapabilityRecord(tier) => (
+                    *tier,
+                    "the user's own capability assignment",
+                    format!("providers.{provider}.model_capabilities.{model}.ceiling"),
+                ),
+                CeilingResolution::Prior(Some(tier)) => (
+                    *tier,
+                    "a benchmark-derived prior",
+                    format!("providers.{provider}.model_capabilities.{model}.ceiling"),
+                ),
+                _ => continue,
+            };
+            if configured_tier != bucket_tier {
+                continue;
+            }
+            // The disagreement this section names: a majority of reported
+            // turns at the model's own configured tier failed. Never acted
+            // on — only rendered, with the exact key a person would edit.
+            if failed > successful {
+                suggested = true;
+                let _ = writeln_str(
+                    &mut out,
+                    format!(
+                        "  {provider}/{model} is configured at `{configured_tier}` by \
+                         {provenance}, but {failed} of {sample_size} reported turns at this \
+                         tier failed — consider lowering `{config_key}` (a suggestion; nothing \
+                         was changed)"
+                    ),
+                );
+            }
+        }
+    }
+    if !suggested {
+        out.push_str(
+            "  no disagreement between observed outcomes and configured calibration met the \
+             evidence gate\n",
+        );
     }
     out
 }

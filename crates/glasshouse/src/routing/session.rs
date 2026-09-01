@@ -333,6 +333,22 @@ pub struct Destination {
     /// one, the same rule `capability`'s `Unverified` and line 1434's
     /// absent-headroom reading both follow.
     tier_ceiling: Option<WorkloadTier>,
+    /// Map line 1970's axis: the model's own user-assigned capability tier,
+    /// attached via [`Self::with_capability_tier`]. `None` — the default —
+    /// means nobody assigned this model a tier, and [`super::same_capability_tier`]
+    /// reads that as *unknown*, never as a match.
+    ///
+    /// Deliberately its own field rather than a read of [`Self::tier_ceiling`]
+    /// at the fallback call site: `tier_ceiling` is a hard constraint
+    /// [`hard_constraint`] and [`workload_tier_fit`] gate on, and keeping the
+    /// fallback's identity axis separate means the two can diverge later
+    /// without either call site re-deriving the other's meaning — the
+    /// accepted wiring shape from `docs/product/design-decisions.md`'s
+    /// Phase 56A "Step 5" addendum. Populated by the same caller that
+    /// attaches `tier_ceiling`, from the same resolved value: `main.rs`'s
+    /// `routing_destinations`, at the point `destination_tier_ceiling`
+    /// already calls `resolved_ceiling`.
+    capability_tier: Option<WorkloadTier>,
     /// Phase 36: what was read about this session's native context, attached
     /// via [`Self::with_session_context`]. [`SessionContextFacts::UNREAD`] for
     /// a fresh destination and for any caller that did not look.
@@ -406,6 +422,7 @@ impl Destination {
                 .collect(),
             resource_facts: ResourceFacts::UNVERIFIED,
             tier_ceiling: None,
+            capability_tier: None,
             context: SessionContextFacts::UNREAD,
             entitlement: None,
         }
@@ -507,6 +524,26 @@ impl Destination {
 
     pub fn tier_ceiling(&self) -> Option<WorkloadTier> {
         self.tier_ceiling
+    }
+
+    /// Attach the model's own user-assigned capability tier — map line
+    /// 1970's axis, and the seam [`super::same_capability_tier`] reads.
+    /// `None` withdraws the fact, which the tier-preserving fallback steps
+    /// then read as unknown rather than as a match — unknown never widens
+    /// the fallback (capability map line 1970's ruling).
+    ///
+    /// **The production caller is `main.rs::routing_destinations`**, which
+    /// attaches every destination the shipped binary builds from the same
+    /// resolved value [`Self::with_tier_ceiling`] carries, at the same call
+    /// site — the two fields answer different questions about that one
+    /// resolution rather than being derived from each other.
+    pub fn with_capability_tier(mut self, tier: Option<WorkloadTier>) -> Self {
+        self.capability_tier = tier;
+        self
+    }
+
+    pub fn capability_tier(&self) -> Option<WorkloadTier> {
+        self.capability_tier
     }
 
     /// Attach what the caller read about this session's native context —
@@ -3249,8 +3286,10 @@ impl FallbackStep {
             Self::SubscriptionSameModel | Self::ApiCreditsSameModel => same_model(from, to),
             Self::SubscriptionSameTier | Self::ApiCreditsSameTier => {
                 match (from.backend().model().name(), to.backend().model().name()) {
-                    (Some(from), Some(to)) => {
-                        from != to && same_capability_tier(from, to) == TierRelation::Same
+                    (Some(from_model), Some(to_model)) => {
+                        from_model != to_model
+                            && same_capability_tier(from.capability_tier(), to.capability_tier())
+                                == TierRelation::Same
                     }
                     // A model the harness picks itself has no name for an
                     // axis to have ranked. Unknown, and unknown narrows.

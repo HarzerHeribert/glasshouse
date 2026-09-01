@@ -26,6 +26,8 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
+use glasshouse::routing::classify::WorkloadTier;
+
 /// The provider credential variable. A name only — nothing here resolves a
 /// value.
 const CREDENTIAL_VAR: &str = "GLASSHOUSE_TIER_CEILING_TEST_KEY";
@@ -604,5 +606,201 @@ fn a_task_less_route_reads_exactly_as_it_did_before_ceilings_existed() {
         report.contains("the task named no hard capability requirement"),
         "`capability_fit`'s own no-task evidence string is the byte-level marker that this \
          path is unchanged:\n{report}"
+    );
+}
+
+// --- 1481: calibration suggestions, gated the way 1480's own summary is ----
+
+/// A project that can both plant ledger rows directly (`tests/tier_outcomes.rs`'s
+/// own idiom, for `outcomes_by_tier`'s two producers) and run the shipped
+/// binary against the same data/config directories — the two things map line
+/// 1481's report section joins.
+struct SuggestionFixture {
+    base: PathBuf,
+    root: PathBuf,
+    runtime: glasshouse::Runtime,
+}
+
+impl SuggestionFixture {
+    fn new(base: &std::path::Path) -> Self {
+        use clap::Parser as _;
+
+        let root = base.join("workspace");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        let root = std::fs::canonicalize(&root).unwrap();
+        let cli = glasshouse::Cli::try_parse_from([
+            "glasshouse",
+            "--data-dir",
+            base.join("data").to_str().unwrap(),
+            "--config-dir",
+            base.join("config").to_str().unwrap(),
+        ])
+        .unwrap();
+        let runtime = glasshouse::bootstrap(&cli, &root).unwrap();
+        Self {
+            base: base.to_path_buf(),
+            root,
+            runtime,
+        }
+    }
+
+    fn write_config(&self, extra: &str) {
+        let config_dir = self.base.join("config");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::write(
+            config_dir.join("config.toml"),
+            format!("version = 1\n\n{extra}"),
+        )
+        .unwrap();
+    }
+
+    fn route(&self) -> String {
+        let output = Command::new(env!("CARGO_BIN_EXE_glasshouse"))
+            .arg("--scope")
+            .arg(&self.root)
+            .arg("--data-dir")
+            .arg(self.base.join("data"))
+            .arg("--config-dir")
+            .arg(self.base.join("config"))
+            .arg("route")
+            .output()
+            .expect("the glasshouse binary must be runnable");
+        assert!(
+            output.status.success(),
+            "route must succeed: status {:?}\nstdout:\n{}\nstderr:\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+}
+
+/// Plant `count` sessions at `tier`, `failed` of them with a failed turn end
+/// and the rest completed — `tests/tier_outcomes.rs`'s own producer calls,
+/// the real path `route_session`/`plant` exercise there.
+fn plant_tier_outcomes(
+    runtime: &glasshouse::Runtime,
+    bucket: &str,
+    tier: glasshouse::routing::classify::WorkloadTier,
+    total: usize,
+    failed: usize,
+    at: i64,
+) {
+    use glasshouse::evaluation::{
+        RoutingEvidence, RoutingTier, record_routed_session, record_routing_outcome,
+    };
+    use glasshouse::events::TurnOutcome;
+
+    let classified = RoutingTier::Classified {
+        tier,
+        escalated: false,
+    };
+    for i in 0..total {
+        let session = format!("{bucket}-{i}");
+        record_routed_session(
+            runtime,
+            &session,
+            "probe/a-model",
+            None,
+            RoutingEvidence::Absent,
+            classified,
+            at,
+        );
+        let outcome = if i < failed {
+            TurnOutcome::Failed
+        } else {
+            TurnOutcome::Completed
+        };
+        record_routing_outcome(runtime, &session, outcome, at);
+    }
+}
+
+/// **Line 1481's evidence gate.** A tier bucket with too few reported turns
+/// to clear `outcomes_by_tier`'s own `MIN_SAMPLE_FOR_SUMMARY` gate must never
+/// produce a suggestion, even when every reported turn failed and a
+/// configured capability record names that exact tier — the gate this
+/// section reuses, not a second threshold of its own.
+///
+/// **Line 1481's positive case, beside it in one report.** A tier bucket
+/// that clears the gate, with a majority of reported turns failing against a
+/// model configured at that tier by the user, DOES produce a suggestion —
+/// naming the provider, the model, the configured tier and provenance, the
+/// observed counts, and the exact config key
+/// (`providers.alpha.model_capabilities.workhorse.ceiling`) a person would
+/// edit.
+///
+/// **Never a rewrite.** `config.toml` is read back byte-identical after the
+/// run that printed the suggestion — the report names a key, and nothing
+/// touches the file it lives in.
+#[test]
+fn a_calibration_suggestion_requires_the_same_evidence_gate_outcomes_by_tier_uses() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = SuggestionFixture::new(tmp.path());
+    let bin_dir = tmp.path().join("bin-1481");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+    fixture.write_config(&format!(
+        "[integrations.claude-code]\nenabled = true\nexecutable = \"{}\"\n\n\
+         [providers.alpha]\ntemplate = \"openrouter\"\n\
+         credential_env = [\"GLASSHOUSE_SUGGESTION_TEST_KEY\"]\n\n\
+         [providers.alpha.model_capabilities.tiny]\nceiling = \"leaf\"\nprovenance = \"user\"\n\n\
+         [providers.alpha.model_capabilities.workhorse]\nceiling = \"standard\"\n\
+         provenance = \"user\"\n",
+        install_fake_harness(&bin_dir, "claude-code").display(),
+    ));
+
+    let now = glasshouse::evaluation::now_unix();
+    // Below the gate: one failed reported turn, a `leaf` capability record
+    // at the same tier — a disagreement, but not enough evidence to suggest
+    // from.
+    plant_tier_outcomes(&fixture.runtime, "leaf-thin", WorkloadTier::Leaf, 1, 1, now);
+    // At and above the gate: five reported turns, four failed, a `standard`
+    // capability record at the same tier — enough evidence, and a real
+    // majority-failing disagreement.
+    plant_tier_outcomes(
+        &fixture.runtime,
+        "standard-thin",
+        WorkloadTier::Standard,
+        5,
+        4,
+        now,
+    );
+
+    let config_path = fixture.base.join("config").join("config.toml");
+    let before = std::fs::read(&config_path).unwrap();
+
+    let report = fixture.route();
+
+    let block = report
+        .split_once("Calibration suggestions from observed outcomes, last 30 days (map line 1481)")
+        .unwrap_or_else(|| panic!("no map-line-1481 section in:\n{report}"))
+        .1;
+
+    assert!(
+        !block.contains("alpha/tiny"),
+        "one failed turn is below MIN_SAMPLE_FOR_SUMMARY and must not reach a suggestion even \
+         though the tier and the failure both line up:\n{block}"
+    );
+    assert!(
+        block.contains(
+            "alpha/workhorse is configured at `standard` by the user's own \
+                         capability assignment, but 4 of 5 reported turns at this tier failed"
+        ),
+        "the gated, majority-failing tier must name the model, the configured tier and \
+         provenance, and the observed counts:\n{block}"
+    );
+    assert!(
+        block.contains("providers.alpha.model_capabilities.workhorse.ceiling"),
+        "the suggestion must name the exact config key a person would edit:\n{block}"
+    );
+    assert!(
+        block.contains("nothing was changed"),
+        "the suggestion must say plainly that it changed nothing:\n{block}"
+    );
+
+    let after = std::fs::read(&config_path).unwrap();
+    assert_eq!(
+        before, after,
+        "a run that printed a suggestion must not touch the config file it named a key in"
     );
 }
