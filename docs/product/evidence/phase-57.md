@@ -299,3 +299,31 @@ disposable routing, and the model-independent `validate` above. **2002
 HOLDS.** An auditor that silently drops a row is the same failure mode as a
 report that silently drops a clause; the fix is to check the count, which is
 why it is written down here.
+
+
+## Named follow-up: make 2003's ordering type-enforced (OPTIONAL, closes no box)
+
+Proposed by `GH-AUDIT-BATCH-76-77`, which said in its own words it *"would
+not block on it"* — recorded here so the idea does not evaporate, which is
+trap 1's exact shape.
+
+**The idea.** Require `firewall::reducer::select` (or the equivalent call
+point) to take a `PrivacyCleared` token whose only constructor is
+`privacy_blocks_reduction` returning `false`. The gate then cannot be
+skipped by a refactor that drops or reorders an `&&` clause, because the
+reducer would not be callable without the token. That would move 2003 from
+*"a runtime check with a killed mutation"* to the same type-level standard
+1998 and 1999 already meet.
+
+**Why it is not dispatched.** It closes **no map box** — 2003 is ☑ and its
+capability is met — and the day it was proposed the project's output-per-
+closed-box was running above §86's 250k ceiling, where the standing rule is
+that the next dispatch must be implementation. The killed
+*privacy-gate-dropped* mutation recorded above already covers the realistic
+failure (someone edits the clause and the test catches it); what it does not
+cover is someone editing the clause **and** deleting the test.
+
+**Dispatch it when** the ratio is back under the ceiling and there is no
+box-closing package with a demonstrable Phase −1 competing for the slot. It
+is a small Amber package touching `firewall/reducer.rs` and
+`firewall/mod.rs` only.
