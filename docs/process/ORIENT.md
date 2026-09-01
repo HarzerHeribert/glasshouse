@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1145 / 1332 mandatory capabilities (86%)** — 187 open across 45 phases.
+**1146 / 1332 mandatory capabilities (86%)** — 186 open across 44 phases.
 
 ## Where the work is
 
@@ -22,7 +22,6 @@ closures are usually at the top. Open the map at the line number given.
 
 | phase | title | open | closed | map line |
 |---|---|---|---|---|
-| Phase 7 | Claude Code adapter | **1** | 9 | `296` |
 | Phase 9H | Sticky gateway routing for harness-backed interactive sessions | **1** | 13 | `501` |
 | Phase 9I | Free-pool routing | **1** | 13 | `523` |
 | Phase 15 | Orchestrator wake-up flow | **1** | 7 | `731` |
@@ -68,7 +67,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 33B | Reliability-adjusted agent performance | **14** | 0 | `1345` |
 | Phase 51 | Evaluation hooks | **25** | 12 | `1818` |
 
-**Fully closed (62):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 8, Phase 9A, Phase 9B, Phase 9C, Phase 9D, Phase 9F, Phase 9G, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 16, Phase 17, Phase 18, Phase 19, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 21H, Phase 21I, Phase 21J, Phase 22, Phase 23, Phase 25, Phase 26, Phase 32, Phase 34, Phase 34A, Phase 34D, Phase 34F, Phase 35, Phase 35C, Phase 35D, Phase 36, Phase 40, Phase 41, Phase 42, Phase 43, Phase 44, Phase 45, Phase 46, Phase 48, Phase 49, Phase 50, Phase 54, Phase 56A, Phase 57.
+**Fully closed (63):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 7, Phase 8, Phase 9A, Phase 9B, Phase 9C, Phase 9D, Phase 9F, Phase 9G, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 16, Phase 17, Phase 18, Phase 19, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 21H, Phase 21I, Phase 21J, Phase 22, Phase 23, Phase 25, Phase 26, Phase 32, Phase 34, Phase 34A, Phase 34D, Phase 34F, Phase 35, Phase 35C, Phase 35D, Phase 36, Phase 40, Phase 41, Phase 42, Phase 43, Phase 44, Phase 45, Phase 46, Phase 48, Phase 49, Phase 50, Phase 54, Phase 56A, Phase 57.
 
 ## The nearly-finished phases, in full
 
@@ -82,10 +81,6 @@ lines and evidence together. **Do not open the 178 KB map to read them.**
 The number is the map line number, which is also the capability's id.
 `validate_round.py` checks a packet's quotes against the map, so paste
 these unwrapped.
-
-### Phase 7 — Claude Code adapter  (1 open, 9 closed)
-
-- **310** ☐ Record Claude compaction events when they can be observed reliably.
 
 ### Phase 9H — Sticky gateway routing for harness-backed interactive sessions  (1 open, 13 closed)
 

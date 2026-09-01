@@ -354,3 +354,74 @@ document bytes.
 `scripts/mutate.sh` also refused the naive form of this mutation outright
 (*"find string occurs 2 times, need exactly 1"*), which is the same trap guarded
 mechanically.
+
+# Line 310 — COMPLETE 2026-09-01; **PHASE 7 CLOSED 10/10**
+
+Package `GH-CLAUDE-COMPACTION` (Sonnet, high, Amber; batch 77). *"Record
+Claude compaction events when they can be observed reliably."* The one open
+line of this phase, and it turned on a premise nobody had tested.
+
+**The orchestrator's Phase −1 was WRONG, and the worker said so instead of
+working around it.** The packet asserted that Glasshouse *"already installs
+a `PreCompact` hook for this harness"*, citing `tests/precompact_memory.rs`
+and `main.rs:~8383`'s 2026-08-31 observation. It does not: **every test in
+`precompact_memory.rs` builds its session with
+`running_session(&fixture, "codex")`.** That file, and the measurement it
+records, are about **Codex**, which has declared `PreCompact`/`PostCompact`
+since Phase 8. Claude Code's adapter asked for nothing about compaction
+until this package. Filed as `packet_errors`, which is exactly what that
+field is for.
+
+**So the premise was settled from nothing, empirically, as the packet asked.**
+
+1. **Static.** The installed binary is Claude Code **2.1.257** — newer than
+   the 2.1.245 `claude_code.rs`'s header cites. `strings` on it surfaces a
+   `### Hook Events` table carrying `| PreCompact | "manual"/"auto" | Before
+   compaction |` and `| PostCompact | … receives summary |`, alongside real
+   dispatch code (`executePreCompactHooks`, `isPostCompaction`) and the
+   user-facing `"compaction blocked by PreCompact hook"`. This is the same
+   class of artifact `claude_code.rs` already cites for `outputStyle`.
+2. **Live.** `claude doctor --settings <a document declaring a PreCompact
+   command>` validated clean — the same probe the file's `outputStyle` note
+   used in the opposite direction — and then a headless session
+   (`--include-hook-events --permission-mode bypassPermissions`) was fed one
+   ordinary turn and a literal `/compact`. **The installed hook ran.**
+
+The stale sentence in `session/lifecycle.rs` — *"Claude Code's observed
+catalogue has no compaction event at all"* — is corrected, and the adapter
+now lists `PreCompact` in both `HOOK_EVENTS` and `REPORTED_EVENTS`. Nothing
+else in the chain needed changing: `precedes_native_compaction` already
+matched the event, `report_hook_with` already called
+`record_observed_compaction`, migration 16's column already persisted it,
+and `main.rs:1123` already read it back into the router's affinity facet.
+
+**One behavioural change beyond the constant, and it is right.** The
+compaction record is now gated on `record.lifecycle.is_live()` at the call
+site, mirroring how `may_apply` gates every other lifecycle transition: a
+hook process outlives its harness, and a `PreCompact` arriving after the
+session is recorded finished must not move the record.
+`record_observed_compaction` is deliberately an unconditional `UPDATE`
+(so a pre-migration-16 session still counts), which is why the check belongs
+at the caller.
+
+**Tests** (`tests/claude_compaction.rs`, six): the increment is readable
+through `sessions show`; one session's compaction never touches another's; a
+report for an unknown session costs nothing; one for an already-finished
+session is discarded; a completed turn does not move the count; and the
+**rendered settings document** subscribes to `PreCompact`.
+
+**Mutation.** *drop-event-from-reported-set* — removing `"PreCompact"` from
+`REPORTED_EVENTS` — KILLED by
+`the_settings_document_glasshouse_installs_for_claude_code_subscribes_to_precompact`.
+**Re-run by the orchestrator on the merged tree and KILLED again by the same
+named test.**
+
+**Recorded limits, kept and worth reading.** The live firing observation is a
+**one-time manual probe**, not a CI-reproducible test; automatic
+(token-threshold) compaction was not separately probed. The store-increment
+test drives `glasshouse hook` directly and therefore *cannot* depend on
+`REPORTED_EVENTS` — **only the rendered-document test catches a
+`REPORTED_EVENTS` regression**, matching the `adapter_lifecycle.rs`
+`PermissionRequest` precedent. The liveness gate covers
+`record_observed_compaction`'s call site only; `hook_extraction` and the
+checkpoint call in the same branch stay ungated and were out of scope.

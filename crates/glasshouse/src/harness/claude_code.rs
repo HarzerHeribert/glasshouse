@@ -27,6 +27,16 @@ pub struct ClaudeCode;
 ///
 /// Observed, not catalogued: these are the events a live installation was
 /// found accepting. Claude Code may well support more.
+///
+/// `PreCompact` was **added on 2026-09-01**, read from Claude Code 2.1.257's
+/// own installed binary rather than from `claude --help` (which says nothing
+/// about hook events): its `strings` output carries a `### Hook Events` table
+/// — `| PreCompact | "manual"/"auto" | Before compaction |`, alongside
+/// `PostCompact` — and real functions (`executePreCompactHooks`,
+/// `isPostCompaction`, `"compaction blocked by PreCompact hook"`) that use it.
+/// `PostCompact` is not added below for the same reason `session/lifecycle.rs`
+/// gives for not asking Codex to run extraction twice: see
+/// `session::lifecycle::precedes_native_compaction`.
 const HOOK_EVENTS: &[&str] = &[
     "PreToolUse",
     "PostToolUse",
@@ -37,6 +47,7 @@ const HOOK_EVENTS: &[&str] = &[
     "StopFailure",
     "SubagentStart",
     "SubagentStop",
+    "PreCompact",
 ];
 
 /// The events Glasshouse asks Claude Code to report.
@@ -49,11 +60,27 @@ const HOOK_EVENTS: &[&str] = &[
 /// `SessionStart` is **not** here, and not by oversight: Claude Code 2.1.245
 /// does not fire it. A settings document declaring one was installed and the
 /// hook never ran, while `UserPromptSubmit` from the same document did.
+///
+/// `PreCompact` **is** here, added 2026-09-01, map line 310. Until then this
+/// build asked Claude Code for nothing about its own compaction — not because
+/// the harness had no such event, but because nobody had looked past
+/// `claude --help` for one. **Run and observed** against Claude Code 2.1.257:
+/// a headless session (`--print --input-format=stream-json
+/// --output-format=stream-json --settings <a document declaring a
+/// `PreCompact` command>`) sent a manual `/compact`; the installed hook ran,
+/// its stdin payload read
+/// `{"session_id":"<the --session-id given>",...,"hook_event_name":"PreCompact","trigger":"manual",...}`,
+/// and the stream's own `system status` event carried a `compact_result`.
+/// `session::lifecycle::precedes_native_compaction` already matched the
+/// string `"PreCompact"` before this change — Codex sends exactly that
+/// spelling and has since Phase 8 — so subscribing to it here is what closes
+/// map line 310, not a change to the translation.
 const REPORTED_EVENTS: &[&str] = &[
     "UserPromptSubmit",
     "PermissionRequest",
     "Stop",
     "StopFailure",
+    "PreCompact",
 ];
 
 /// Seconds a reporting hook may take before Claude Code abandons it.

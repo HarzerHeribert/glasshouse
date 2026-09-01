@@ -154,8 +154,18 @@ pub fn lifecycle_for(event: &str) -> Option<SessionLifecycle> {
 /// it is about to lose. Named explicitly, rather than left to the wildcard,
 /// so the omission reads as a decision.
 ///
-/// Claude Code's observed catalogue has no compaction event at all, so this
-/// answers `false` for every event that harness sends today.
+/// # Claude Code, corrected 2026-09-01
+///
+/// This predicate matches on the event string alone, so it was never the
+/// reason Claude Code's compactions went uncounted — a stale version of this
+/// comment used to say otherwise, from a 2.1.245 reading that found no
+/// compaction hook at all. Claude Code 2.1.257 has one: run and observed
+/// (`harness::claude_code`'s `REPORTED_EVENTS` doc), a manual `/compact`
+/// against a real installation fired a `PreCompact` hook whose payload named
+/// this exact string. The gap was one link earlier — `harness::claude_code`'s
+/// `REPORTED_EVENTS` never asked Claude Code to report it, so no hook was
+/// ever installed and this predicate never saw the event. That is now fixed;
+/// this function itself did not need to change.
 ///
 /// Event names are the harness's own, exactly as its adapter declares them.
 pub fn precedes_native_compaction(event: &str) -> bool {

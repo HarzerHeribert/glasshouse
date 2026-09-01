@@ -307,7 +307,7 @@ Fixed architectural requirements
 ☑ Translate supported Claude lifecycle events into Glasshouse lifecycle events.
 ☑ Detect when Claude Code requires user input or permission through structured events when possible.
 ☑ Detect normal Claude turn completion through hooks rather than terminal-text heuristics when possible.
-☐ Record Claude compaction events when they can be observed reliably.
+☑ Record Claude compaction events when they can be observed reliably.
 ☑ Keep terminal-text parsing only as a fallback for state that cannot be obtained structurally.
 
 Phase 8 — Codex adapter

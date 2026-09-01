@@ -7914,7 +7914,20 @@ fn report_hook_with(
                 // hook that failed to write a counter must not fail the turn
                 // over it, which is the same stance every other write on this
                 // path takes.
-                if let Err(err) = store.record_observed_compaction(&id) {
+                //
+                // Gated on liveness for the reason `session::lifecycle::may_apply`
+                // gates every lifecycle transition: a hook process outlives its
+                // harness, and a `PreCompact` report arriving after the session
+                // is recorded as finished must not move the record either —
+                // `record_observed_compaction` itself has no such check (it is
+                // an unconditional `UPDATE ... WHERE id = ?1`, by design, so a
+                // session created before migration 16 still gets counted), so
+                // the check belongs at this call site, the same way `may_apply`
+                // belongs at the lifecycle-event call site below rather than
+                // inside the write it guards.
+                if record.lifecycle.is_live()
+                    && let Err(err) = store.record_observed_compaction(&id)
+                {
                     tracing::debug!(
                         error = %err,
                         session = %id,
