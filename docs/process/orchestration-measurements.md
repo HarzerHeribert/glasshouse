@@ -4122,3 +4122,46 @@ orchestrator therefore **held two validated packets rather than dispatch into
 unreliable gates** — the first time this batch that the constraint was machine
 capacity rather than review capacity, and worth recording as the real ceiling
 alongside §74's review-collision one.
+
+## Batch 70 (2026-09-01) — the ruling's whole program landed in one day
+
+Six packages: four Sonnet + one Opus dispatched as one validated wave (all
+four packets cross-validated, no file conflicts, two declared coedits), plus
+one Sonnet infra package by user instruction mid-batch. **Twelve map boxes
+closed** — 372 (both clauses), 34F×8 (the model-capability record), 56A×3
+(fallback order, per-entitlement rules, broker e2e — **Phase 56A 13/13**) —
+plus two crash-class defects (zero-byte DB wipe, the fifth tilde input) and
+the two-lane blast radius. 1096→1099 by evening, 84%.
+
+**Tier evidence.** Sonnet-high closed a NINE-line package (tier-axis) with
+exactly one review-caught defect — the 1482 scoping leak, fixed by the same
+worker within the hour of the ruling. Sonnet-medium handled the defect pair
+including a concurrency interaction the packet's sketch missed (and flagged
+its scope overflow instead of shipping it silently). Opus-high on the Red
+broker package produced the batch's best report: six KILLED mutations, two
+packet errors caught (one contradicting a closed contract — resolved
+correctly without inverting it), and its blocked sub-step delivered as an
+exact two-file patch the orchestrator landed verbatim (one rename), tested,
+and mutation-killed. **The default is still not Opus** — but Red kept
+earning it.
+
+**What review caught that gates did not:** the 1482 context-blind leak
+(reading the decision's diff); the 372 tripwire firing by design (the
+worker's STOP, the orchestrator's flip). **What gates caught that review did
+not:** four premise-stale tests encoding "an unpinned launch is native,"
+found only on merged trees — the exact cross-patch class integration exists
+for.
+
+**Orchestrator error, twice, same shape:** gate-failure enumeration by
+truncated grep — a multi-line flake family hid a real `entitlement_pool` red
+(shipped in e8d0823's wrong gate claim, corrected in 689bc03) and a rustdoc
+red (shipped in 689bc03, fixed in 9bea0e5). Rule now in memory: count
+`test result: FAILED` lines first, list every failing TARGET, attribute per
+target — and rustdoc/clippy are failures the test-grep never sees.
+
+**Open question answered a little:** review collision (§74's ceiling) held
+at five workers only because their finishes staggered naturally; the two
+coedit members finishing within minutes of each other still serialized ~40
+minutes of integration wall-clock. The two-lane blast radius attacks the
+other half of that cost; the fixture-reuse successor (Gatekeeper) is named
+and unbuilt.
