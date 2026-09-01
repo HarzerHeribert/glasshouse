@@ -255,9 +255,47 @@ designed, and the reason a re-run is cheap to attempt.
 Twenty-seven boxes across four batches in three days: the deterministic core
 and raw store (71), the harness bridge and shadow mode (72), the semantic
 reducer (76), and observability (77). The subsystem is off by default,
-provider-agnostic, harness-abstracted, fail-open, and measured — and the
-three properties it most needed are enforced by SHAPE rather than by
-discipline: the reducer cannot be handed a transcript (no field can carry
-one), it cannot generate (verdicts are ids, rebuild copies verbatim), and it
-cannot transmit past the privacy gate (the gate runs first). Each of those
-three has a mutation that was killed twice.
+provider-agnostic, harness-abstracted, fail-open, and measured.
+
+**TWO properties are enforced by SHAPE — corrected 2026-09-01 after an audit,
+because the first version of this paragraph said three.**
+
+- The reducer **cannot be handed a transcript**: `ReductionRequest` has four
+  fields and none can carry one. A violation does not compile.
+- It **cannot generate**: `Verdict` carries ids, `rebuild()` copies candidate
+  text verbatim, and the containment test compares against the original.
+- **2002's "regardless of which model a router answered with" is also
+  structural**, and was not claimed before: `reducer::validate(verdicts,
+  candidates)` (`reducer.rs:237`) takes **no model parameter**, so validation
+  cannot vary by model even in principle.
+
+**2003's privacy gate is NOT structural, and saying it was is an overclaim
+this ledger made.** `GH-AUDIT-BATCH-76-77` read the gate and was right:
+`firewall/mod.rs:337-348` is an ordinary `bool` from an `&&` chain, and a
+refactor that dropped `!reducer::privacy_blocks_reduction(...)` — or turned
+the chain into a match missing that arm — **would compile cleanly** and route
+secret-shaped paths into the reducer.
+
+What is true, and what the audit could not know because the check did not
+exist when it looked: the orchestrator then ran that mutation. **`&& !reducer::privacy_blocks_reduction(semantic.file_paths)` → `&& true`:
+KILLED** by `firewall::tests::a_secret_shaped_path_suppresses_semantic_reduction`
+(panic at `firewall/mod.rs:941`). `GH-FIREWALL-REDUCER`'s three mutations
+were never-generate, safe-mode-uncertain and fail-open — **none touched the
+privacy gate**, so this is the fourth and it closes the gap the audit named.
+
+So 2003 is a **runtime check with a killed mutation behind it**, which is a
+real standard and the one most of this codebase meets — it is simply not the
+type-level guarantee 1998 and 1999 have. The distinction matters because a
+reader who believes it is type-enforced will not write the test that catches
+the refactor.
+
+**The audit's own gap, recorded for symmetry.** Its verdict table covered
+fifteen of the sixteen boxes ticked that day and **omitted 2002 entirely**,
+mentioning it only in passing while arguing about 2003. The orchestrator
+checked 2002 separately — `a_pinned_reducer_model_reaches_the_wire`
+(`tests/firewall_reducer.rs:613`), `set_reducer(provider, model)` covering
+the pinned and unpinned cases, aliases arriving free through 1997's
+disposable routing, and the model-independent `validate` above. **2002
+HOLDS.** An auditor that silently drops a row is the same failure mode as a
+report that silently drops a clause; the fix is to check the count, which is
+why it is written down here.
