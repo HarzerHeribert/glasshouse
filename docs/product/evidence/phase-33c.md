@@ -545,3 +545,47 @@ Targeted gate on the merged tree: `--lib gateway` 176 passed, `gateway_retry_aft
 the declared remainder, 1367 a reservation model (`routing/free.rs` has no
 reservation, lease or in-flight machinery at all), 1369 a probe budget. None
 has an established Phase −1.
+
+## The 1368 fixture repair (`GH-PACED-FIXTURES`), 2026-09-02
+
+The trailing full sweep for this wave found **one** failing target and it was
+this line's: three reds in `gateway_failure_taxonomy`, from `ca439cd` shipping
+on a green *targeted* gate. Everything else in the sweep was green.
+
+**Attributed mechanically, not guessed.** All three drive one gateway with one
+credential through a *sequence* of requests, and each sequence contains a `429`
+carrying `Retry-After` (`:318`, `:499`, `:519`, `:829`/`:834`). From `ca439cd`
+onward the case *after* a throttled one receives Glasshouse's own local refusal
+instead of the stub's next scripted response, so *"the gateway must relay the
+provider's own status"* fails. **The fixtures encoded a premise — every request
+in my sequence reaches the provider — that line 1368 deliberately invalidated.**
+
+**The repair is not uniform across the three tests, and that is the ruling.**
+The worker tried the single obvious fix first and reported why it fails:
+
+- `each_failure_class_is_recorded_from_status_headers_and_framing_alone`
+  asserts `row.failovers == Some(0)` with the message *"one backend, so nothing
+  to fail over to"*. Adding a sibling credential to suppress `paced_refusal`
+  makes a **real** failover happen — it observed `failovers: Some(1)` on the
+  next row — so the sibling fix would have meant weakening a load-bearing
+  assertion. Repaired by **reordering** the one `Retry-After` case last, with a
+  comment saying order is load-bearing.
+- the other two each contain **two** declared waits (one of them 1800s), so
+  reordering cannot help and no sleep can outlast it. Repaired with **one
+  credential per case**; neither asserts on `failovers`, and their assertions
+  key only on the shared provider string every sibling carries.
+
+**Accepted as non-uniform.** Uniforming it is not available without a tradeoff:
+either reorder the two-wait tests (does not work) or accept a real failover in
+the first (weakens its assertion).
+
+**Zero assertions were removed** — verified at integration by the integrator,
+not taken from the report: `git diff` shows no deleted `assert` line in the
+file. And 1368's own mutation (`is_available` -> `if true`) is still **KILLED**
+after the repair, which is what proves the fixtures were changed and the guard
+was not.
+
+**This is the trailing-sweep ruling working as designed** (user ruling
+2026-09-01): targeted green shipped, the sweep caught what `--targeted` skipped
+— 13 full-trace targets on that integration — a fix-forward worker took it, and
+the line never stopped moving.

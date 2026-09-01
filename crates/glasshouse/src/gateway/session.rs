@@ -37,7 +37,7 @@ use crate::config::pairing::{
 };
 use crate::provider::telemetry::RateLimitHeaders;
 use crate::routing::evidence::{
-    EvidenceLedger, FailureClass, NewObservation, ObservedEvidenceSource,
+    EvidenceLedger, FailureClass, HARNESS_TURN_PURPOSE, NewObservation, ObservedEvidenceSource,
     Outcome as RoutingOutcome, RouteCorrelations,
 };
 use crate::routing::free::{FreePool, FreeResource, WorkloadOutcome};
@@ -460,6 +460,7 @@ impl SessionRouting {
         )
         .with_route(exchange.protocol.clone())
         .with_harness(Some(assignment.harness().to_owned()))
+        .with_purpose(Some(HARNESS_TURN_PURPOSE))
         .with_quota_context(Some(assignment.backend().credential().label()))
         .with_timing(
             Some(reading.dispatched_at_unix),

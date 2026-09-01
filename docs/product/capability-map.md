@@ -1327,7 +1327,7 @@ Phase 33 — Resource health
 Phase 33A — Routing evidence ledger
 
 ☑ Store project-local routing observations as an append-oriented evidence ledger rather than only maintaining current aggregate counters.
-☐ Record provider, route, model identity, authenticated quota context, harness, request purpose, and observation timestamp for each measurable turn.
+☑ Record provider, route, model identity, authenticated quota context, harness, request purpose, and observation timestamp for each measurable turn.
 ☐ Record dispatch time, first-byte time, time to first real token, time to first tool call, and completion time when the protocol exposes them.
 ☐ Do not treat whitespace padding, transport keepalives, or reasoning-only deltas as the first generated token.
 ☐ Record input tokens, output tokens, cached-input tokens, and monetary cost only when they are actually exposed or can be estimated with an explicit confidence label.

@@ -748,7 +748,7 @@ fn gateway_to_with_evidence_ledger(
 #[test]
 fn a_real_forwarded_exchange_reaches_the_routing_evidence_ledger() {
     use crate::routing::AssignedModel;
-    use crate::routing::evidence::{ObservationQuery, Outcome};
+    use crate::routing::evidence::{HARNESS_TURN_PURPOSE, ObservationQuery, Outcome};
 
     let tmp = tempfile::tempdir().unwrap();
     let ledger = evidence_ledger_fixture(tmp.path());
@@ -833,6 +833,7 @@ fn a_real_forwarded_exchange_reaches_the_routing_evidence_ledger() {
         first_byte_at <= row.completed_at_unix.expect("asserted Some above"),
         "first_byte_at ({first_byte_at}) must not follow completed_at"
     );
+    assert_eq!(row.purpose.as_deref(), Some(HARNESS_TURN_PURPOSE));
 }
 
 /// The production case the test above does not cover, and the one the

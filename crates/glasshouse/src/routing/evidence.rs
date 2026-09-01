@@ -308,6 +308,12 @@ pub const CLASSIFICATION_EVIDENCE_WINDOW_SECONDS: i64 = 7 * 24 * 60 * 60;
 /// back as evidence — excludes it explicitly.
 pub const CORRELATION_PURPOSE: &str = "route-correlation";
 
+/// A turn Glasshouse relayed on a harness's behalf, as opposed to the
+/// calls Glasshouse makes for its own bookkeeping. See the other
+/// `*_PURPOSE` constants in this module: each names why *Glasshouse*
+/// called a provider; this one names the case where it did not.
+pub const HARNESS_TURN_PURPOSE: &str = "harness-turn";
+
 /// How far apart two exchanges' windows may sit and still be *the same
 /// moment* for [`correlate_routes`] — capability map line 1370's
 /// "temporally overlapping", with the tolerance named rather than assumed.
@@ -2366,9 +2372,11 @@ pub struct RoutingOverhead {
     /// as a provider's own report.
     pub context_firewall_requests: usize,
     pub context_firewall_tokens: Option<i64>,
-    /// Rows no producer stamped that **did** name a harness — the gateway
-    /// relay, and today nothing else. This is *"interactive coding cost"* as
-    /// lines 1832 and 1833 use the phrase, and it is the one side of the
+    /// The gateway relay's own traffic, and today nothing else: rows whose
+    /// `purpose` is [`HARNESS_TURN_PURPOSE`], plus rows no producer stamped
+    /// that **did** name a harness — the same traffic, from before the build
+    /// that added the constant. This is *"interactive coding cost"* as lines
+    /// 1832 and 1833 use the phrase, and it is the one side of the
     /// separation this build cannot count in tokens:
     /// `crate::gateway::ingress` relays a body it is designed never to
     /// parse, so every one of these rows leaves all three token columns
@@ -2416,6 +2424,10 @@ impl RoutingOverhead {
             // [`PurposeConsumption`]'s own doc comment — so an unstamped row
             // that named a harness is the coding agent's, and one that named
             // none is a row written before this build stamped a purpose.
+            // [`HARNESS_TURN_PURPOSE`] is the same coding-agent traffic,
+            // stamped explicitly from the build that added the constant
+            // onward — the two guards below are one bucket across the
+            // stamped/unstamped boundary, not two different facts.
             let named = match group.purpose.as_deref() {
                 Some(CLASSIFICATION_PURPOSE) => (
                     &mut overhead.classification_requests,
@@ -2452,7 +2464,7 @@ impl RoutingOverhead {
                     &mut overhead.context_firewall_requests,
                     &mut overhead.context_firewall_tokens,
                 ),
-                None if group.harness_recorded => (
+                Some(HARNESS_TURN_PURPOSE) | None if group.harness_recorded => (
                     &mut overhead.coding_agent_requests,
                     &mut overhead.coding_agent_tokens,
                 ),

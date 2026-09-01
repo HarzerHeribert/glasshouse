@@ -310,17 +310,19 @@ fn each_failure_class_is_recorded_from_status_headers_and_framing_alone() {
     const CREDENTIAL_VAR: &str = "GLASSHOUSE_FAILURE_TAXONOMY_KEY_EACH";
 
     let hundred = vec![b'x'; 100];
+    // "a 429 with a stated wait" is the one case here that carries a
+    // `Retry-After` header, and since ca439cd (map line 1368) `paced_refusal`
+    // refuses the *next* request locally, without dialing, whenever the
+    // assigned resource is still inside a declared wait and no sibling
+    // credential exists to rotate to — which every other case here would be,
+    // were this case not last. This file's own row-by-row assertions below
+    // require exactly one backend ("one backend, so nothing to fail over
+    // to"), so a sibling credential is not an option here (it would cause a
+    // real failover and a nonzero `failovers` on the row that follows);
+    // ordering this case last is what keeps the single-backend premise true
+    // while still reaching every one of the other eight cases. Order here is
+    // load-bearing: a case added after this one would inherit its wait.
     let cases: Vec<(&str, Vec<u8>, &str, Option<FailureClass>)> = vec![
-        (
-            "a 429 with a stated wait",
-            response(
-                "429 Too Many Requests",
-                &["Retry-After: 2", "Content-Length: 0"],
-                b"",
-            ),
-            "HTTP/1.1 429",
-            Some(FailureClass::Throttle),
-        ),
         (
             "a 429 whose headers say nothing remains for an hour",
             response(
@@ -385,6 +387,16 @@ fn each_failure_class_is_recorded_from_status_headers_and_framing_alone() {
             ),
             "HTTP/1.1 200",
             None,
+        ),
+        (
+            "a 429 with a stated wait",
+            response(
+                "429 Too Many Requests",
+                &["Retry-After: 2", "Content-Length: 0"],
+                b"",
+            ),
+            "HTTP/1.1 429",
+            Some(FailureClass::Throttle),
         ),
     ];
 
@@ -491,8 +503,26 @@ fn a_refused_connection_is_recorded_as_unknown_not_guessed_as_a_timeout() {
 #[test]
 fn throttle_and_exhausted_quota_are_told_apart_by_headers_not_guessed() {
     const PROVIDER: &str = "fixture-headers";
-    const CREDENTIAL_VAR: &str = "GLASSHOUSE_FAILURE_TAXONOMY_KEY_HEADERS";
-
+    // Two of these cases (the stated two-second wait, and the long-stated-
+    // wait exhausted case) each declare their own `Retry-After`, and since
+    // ca439cd `paced_refusal` refuses the next request locally, without
+    // dialing, when the assigned resource is still inside a declared wait
+    // and no sibling credential exists to rotate to. Reordering cannot fix
+    // this here the way it does in the previous test: with two different
+    // cases each declaring a wait, whichever one is not last still has a
+    // case after it that would inherit its cooldown, and one of the waits
+    // (1800s) cannot be outlasted by a fast test at all. So each case gets
+    // its own credential (all siblings of the same provider, all pointed at
+    // the one ordered stub) rather than one shared credential across the
+    // sequence. This test makes no assertion about `failovers`, so the real
+    // rotation a sibling causes on a failed exchange (`observe_exchange`,
+    // not `paced_refusal` itself) is not in tension with anything here —
+    // unlike the previous test's "one backend" premise. One spare sibling
+    // was not enough: after the first wait forces a rotation, the *second*
+    // wait paces the sibling it rotated to, and with only two credentials in
+    // the pool that leaves `rotate_from` with nobody again. A fresh,
+    // never-yet-failed credential per case guarantees rotation always has
+    // somewhere available to go.
     let cases: Vec<(&str, Vec<&str>, FailureClass)> = vec![
         (
             "a stated wait of two seconds",
@@ -538,9 +568,16 @@ fn throttle_and_exhausted_quota_are_told_apart_by_headers_not_guessed() {
             })
             .collect(),
     );
-    let upstream =
-        Upstream::with_failover(vec![backend(PROVIDER, CREDENTIAL_VAR, upstream_address)])
-            .expect("one backend is not none");
+    let backends = (0..cases.len())
+        .map(|index| {
+            backend(
+                PROVIDER,
+                &format!("GLASSHOUSE_FAILURE_TAXONOMY_KEY_HEADERS_{index}"),
+                upstream_address,
+            )
+        })
+        .collect();
+    let upstream = Upstream::with_failover(backends).expect("cases is non-empty");
     let gateway = gateway_over(upstream, Some(Arc::clone(&ledger)), None);
 
     for _ in &cases {
@@ -819,8 +856,19 @@ fn a_relayed_body_is_never_read_and_never_leaks_into_the_ledger_or_logs() {
 /// separate figures over a stated denominator, plus the per-class list.
 #[test]
 fn resources_renders_cadence_quota_and_health_as_three_figures_with_denominators() {
-    const CREDENTIAL_VAR: &str = "GLASSHOUSE_FAILURE_TAXONOMY_KEY_RESOURCES";
-
+    // Same reasoning as `throttle_and_exhausted_quota_are_told_apart_by_headers_not_guessed`:
+    // the first two scripted 429s each carry their own `Retry-After: 1`, and
+    // since ca439cd the requests that follow one would be refused locally
+    // instead of reaching the stub. Two consecutive declared waits would
+    // exhaust a two-credential pool (the first rotates onto the second, and
+    // the second's own wait then paces that one too), so this gives each
+    // exchange its own never-yet-failed credential — all siblings of
+    // `REGISTRY_PROVIDER`, all pointed at the one ordered stub — rather than
+    // reordering, since the report block asserted below is over the
+    // scripted sequence's own order and counts, not an independent set of
+    // cases. The row-count and rendered-report assertions below key only on
+    // `REGISTRY_PROVIDER`, which every credential here shares, so which
+    // sibling a real failover actually rotates onto does not matter.
     let tmp = tempfile::tempdir().expect("a temp directory can be created");
     let (_runtime, ledger) = ledger_at(tmp.path());
     let scripted = vec![
@@ -848,12 +896,16 @@ fn resources_renders_cadence_quota_and_health_as_three_figures_with_denominators
     ];
     let exchanges = scripted.len();
     let upstream_address = stub_server(scripted);
-    let upstream = Upstream::with_failover(vec![backend(
-        REGISTRY_PROVIDER,
-        CREDENTIAL_VAR,
-        upstream_address,
-    )])
-    .expect("one backend is not none");
+    let backends = (0..exchanges)
+        .map(|index| {
+            backend(
+                REGISTRY_PROVIDER,
+                &format!("GLASSHOUSE_FAILURE_TAXONOMY_KEY_RESOURCES_{index}"),
+                upstream_address,
+            )
+        })
+        .collect();
+    let upstream = Upstream::with_failover(backends).expect("scripted is non-empty");
     let gateway = gateway_over(upstream, Some(Arc::clone(&ledger)), None);
     for _ in 0..exchanges {
         send_and_read(

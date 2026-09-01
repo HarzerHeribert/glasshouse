@@ -248,12 +248,18 @@ real gateway write, mutation-killed. Not yet reached from `main.rs`.
 
 **Record provider, route, model identity, authenticated quota context,
 harness, request purpose, and observation timestamp for each measurable
-turn.** **PARTIAL.** Provider, model, route, harness and quota context are
-all captured once a session is bound, proven through a real exchange.
-`purpose` is never supplied by this producer — nothing in the gateway's
-partition knows why a turn was made — and stays `NULL` on every row this
-build writes. Open on `purpose` alone; the rest closes with the wiring
-patch.
+turn.** **COMPLETE as of 2026-09-02** — see *"Line 1330 — CLOSED"* at the end
+of this file. Provider, model, route, harness and quota context were captured
+from the start, proven through a real exchange; `purpose` was the one gap and
+`GH-TURN-PURPOSE` closed it by stamping `HARNESS_TURN_PURPOSE` in
+`record_routing_observation`, mutation KILLED.
+
+*The disposition this replaces read:* **PARTIAL** — *"`purpose` is never
+supplied by this producer — nothing in the gateway's partition knows why a turn
+was made — and stays `NULL` on every row this build writes. Open on `purpose`
+alone; the rest closes with the wiring patch."* That was accurate when written
+and it is what correctly held the box open through the 2026-08-29 re-open. The
+"wiring patch" it predicted is exactly what landed.
 
 **Record dispatch time, first-byte time, time to first real token, time to
 first tool call, and completion time when the protocol exposes them.**
@@ -537,3 +543,103 @@ target. Approved.
 ## From `GH-FAILURE-TAXONOMY` (2026-08-31) — 1334 stays OPEN on two quantities
 
 `failovers` (this exchange's own `ChangeCause::Failover`, 0/1) and `retries` (0 — the gateway forwards exactly once, verified in `ureq` 3.4.0's source) are now written on every row, and a 2xx whose stream was cut or whose permitted body never came records `outcome = failed`. **`tool_rounds` and `repairs`** still need a turn structure and a body this layer cannot see. 1331–1333 are unchanged: first real token, padding-vs-token and token counts require reading content, which the ruling does not permit. Full entry: `phase-33c.md`.
+
+---
+
+# Line 1330 — CLOSED 2026-09-02 (`GH-TURN-PURPOSE`), and the re-open was right to happen
+
+The 2026-08-29 re-open above is vindicated, not overturned: it held this line
+open on `purpose` alone, and `purpose` is exactly what this package supplied.
+**Its stated reason had since gone stale, and that is worth recording.** It
+said:
+
+> *"There is no `with_purpose` builder anywhere on the type. A field with no
+> setter cannot be set by any caller, production **or test**."*
+
+`NewObservation::with_purpose` now exists (`routing/evidence.rs:792`) with
+**ten** production call sites in `main.rs` — each naming why *Glasshouse
+itself* called a provider (`CORRELATION_PURPOSE`, `CLASSIFICATION_PURPOSE`,
+`EXTRACTION_PURPOSE`, `ROUTING_LATENCY_PURPOSE`, the three
+`CONTEXT_FIREWALL_*`). What remained true is narrower and is the actual gap
+this package closed: `SessionRouting::record_routing_observation`
+(`gateway/session.rs:425`), the **only** production writer of a real forwarded
+turn, called seven builders and not that one.
+
+**What ships.** `HARNESS_TURN_PURPOSE = "harness-turn"`
+(`routing/evidence.rs`), stamped in `record_routing_observation`'s builder
+chain. It is a *recording*, not an inference: the gateway already knows the row
+came from relaying a harness request — that is the precondition the function
+documents for writing a row at all (the exchange reached the provider **and**
+`assignment` is `Some`).
+
+The other six facts were already proven; the seventh joins them in the same
+test.
+
+Regression: `gateway::conformance::a_real_forwarded_exchange_reaches_the_routing_evidence_ledger`.
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| delete `.with_purpose(Some(HARNESS_TURN_PURPOSE))` from `record_routing_observation` | `forwarded-turn-records-no-purpose` | **killed** | `gateway::conformance::a_real_forwarded_exchange_reaches_the_routing_evidence_ledger` |
+
+> observed: ``assertion `left == right` failed`` — `left: None`, `right: Some("harness-turn")` (`conformance.rs:836`)
+
+## The orchestrator's Phase −1 was wrong, and the worker caught it
+
+The packet's FEASIBILITY asserted: *"Verified safe: no consumer anywhere treats
+`purpose IS NULL` as meaningful — every `purpose: None` in the tree is a struct
+construction or query default, not a filter."*
+
+**False.** `RoutingOverhead::from_consumption` (`routing/evidence.rs`) matched
+`None if group.harness_recorded =>` into
+`coding_agent_requests`/`coding_agent_tokens` — `harness_recorded` being what
+tells the two `NULL`-purpose producers apart, `true` only for gateway rows,
+which is precisely the traffic this box stamps. The orchestrator's grep looked
+for `purpose.is_none()`, `purpose == None` and `purpose: None`, and **a match
+arm is none of those shapes.**
+
+Stamping the purpose without touching that match would have dropped every
+future gateway row through to the catch-all `_ => unstamped_*` arm, silently
+zeroing `coding_agent_requests` — map lines 1464/1832/1833's *"interactive
+coding cost"* — from this build forward. The existing test
+`from_consumption_leaves_correlation_rows_out_of_every_bucket` proves that
+fall-through is real and intended for *unknown* purposes, which is exactly what
+the new constant would have been.
+
+The worker added `Some(HARNESS_TURN_PURPOSE) | None if group.harness_recorded`
+so the bucket spans the stamped/unstamped boundary as one fact rather than two,
+and updated the two adjacent doc comments. **The integrator read that diff and
+accepted it**: the guard binds the whole or-pattern, and a gateway row always
+records a harness, so a stamped row that somehow lacked one still falls back
+conservatively.
+
+**Lesson, recorded because the check is cheap and the miss was not:** a Phase −1
+consumer search must cover **match arms**, not only method calls and struct
+literals. `grep 'purpose'` in the consuming module would have found it; three
+narrower greps did not.
+
+## Owed follow-up — named so it does not evaporate
+
+`from_consumption`'s new arm is **production code with no direct test**. It is
+covered only by the pre-existing suite continuing to pass (54/54, including the
+correlation-bucket test). It protects **1464/1832/1833**, not 1330, so it does
+not hold this line — but it is exactly the unwatched-production shape behind
+all ten of this project's historical un-tickings.
+
+**Successor: one Green package adding a `from_consumption` assertion that a
+`HARNESS_TURN_PURPOSE` row lands in `coding_agent_requests`,** plus a mutation
+on that arm. The worker flagged this itself rather than leaving it to be found.
+
+## Recorded limits
+
+- Proves the builder call is load-bearing for one row shape (a bound,
+  provider-reaching exchange). The call is unconditional before the `outcome`
+  match's early returns, so no variant-specific behaviour was possible to
+  introduce, but no per-variant mutation was run.
+- The named test lives in `src/gateway/conformance.rs:749`, **not**
+  `tests/routing_evidence.rs` as the packet claimed — that file's own module doc
+  says it deliberately does not re-prove the gateway's production wiring.
+  `conformance.rs` was outside the packet's `EXPECTED FILES` and is recorded as
+  justified `scope_overflow`.
+
+**Phase 33A now stands at 11/15.** 1331-1334 remain blocked on the relay-path
+`ingress` reader — the same blocker as line 1263 — and nothing here changes that.
