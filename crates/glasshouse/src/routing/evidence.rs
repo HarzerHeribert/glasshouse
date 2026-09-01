@@ -5122,6 +5122,57 @@ mod correlation_tests {
         );
     }
 
+    /// Phase 33A line 1330's owed follow-up: the arm spans the
+    /// stamped/unstamped boundary and must route both sides into the same
+    /// bucket, while a harness-recorded row with an unrelated purpose still
+    /// falls through to unstamped.
+    #[test]
+    fn from_consumption_routes_harness_turn_rows_across_the_stamped_boundary() {
+        let groups = [
+            PurposeConsumption {
+                purpose: Some(HARNESS_TURN_PURPOSE.to_owned()),
+                harness_recorded: true,
+                sample_count: 3,
+                input_tokens: Some(100),
+                output_tokens: Some(50),
+                cached_input_tokens: None,
+                first_byte_sample_count: 0,
+                mean_time_to_first_byte_ms: None,
+            },
+            PurposeConsumption {
+                purpose: None,
+                harness_recorded: true,
+                sample_count: 2,
+                input_tokens: Some(10),
+                output_tokens: Some(5),
+                cached_input_tokens: None,
+                first_byte_sample_count: 0,
+                mean_time_to_first_byte_ms: None,
+            },
+            PurposeConsumption {
+                purpose: Some("a-purpose-this-build-does-not-know".to_owned()),
+                harness_recorded: true,
+                sample_count: 7,
+                input_tokens: None,
+                output_tokens: None,
+                cached_input_tokens: None,
+                first_byte_sample_count: 0,
+                mean_time_to_first_byte_ms: None,
+            },
+        ];
+        let overhead = RoutingOverhead::from_consumption(&groups);
+        assert_eq!(
+            (overhead.coding_agent_requests, overhead.coding_agent_tokens),
+            (5, Some(165)),
+            "the stamped harness-turn row and the pre-stamp unstamped-but-harness-recorded row \
+             must land in the same bucket: {overhead:?}"
+        );
+        assert_eq!(
+            overhead.unstamped_requests, 7,
+            "a harness-recorded row with an unrelated purpose must still fall through: {overhead:?}"
+        );
+    }
+
     #[test]
     fn a_window_falls_back_to_observed_at_and_never_runs_backwards() {
         let mut point = served("a", 100);

@@ -625,9 +625,26 @@ correlation-bucket test). It protects **1464/1832/1833**, not 1330, so it does
 not hold this line — but it is exactly the unwatched-production shape behind
 all ten of this project's historical un-tickings.
 
-**Successor: one Green package adding a `from_consumption` assertion that a
-`HARNESS_TURN_PURPOSE` row lands in `coding_agent_requests`,** plus a mutation
-on that arm. The worker flagged this itself rather than leaving it to be found.
+~~**Successor: one Green package adding a `from_consumption` assertion …**~~
+**DONE the same night** (`GH-CONSUMPTION-ARM`, 2026-09-02) — dispatched rather
+than filed, because an owed follow-up that becomes a note is this process's
+most common trap.
+
+`routing::evidence::correlation_tests::from_consumption_routes_harness_turn_rows_across_the_stamped_boundary`
+asserts all three cases the arm spans: a `Some(HARNESS_TURN_PURPOSE)` row and a
+`None`-with-`harness_recorded` row land in the **same** `coding_agent_*` bucket,
+and a row with some other purpose still falls through to `unstamped_*`. No
+production line changed; the existing
+`from_consumption_leaves_correlation_rows_out_of_every_bucket` was not touched.
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| remove `Some(HARNESS_TURN_PURPOSE) \| ` from the arm, leaving `None if group.harness_recorded` | `harness-turn-falls-through-to-unstamped` | **killed** | the test above |
+
+> observed: ``assertion `left == right` failed`` — `coding_agent_requests` 2 not 5, `coding_agent_tokens` `Some(15)` not `Some(165)` (`routing/evidence.rs:5164`)
+
+That mutation **is** the regression the arm was added to prevent, so lines
+1464/1832/1833 are now watched at the consumer rather than only at the producer.
 
 ## Recorded limits
 
