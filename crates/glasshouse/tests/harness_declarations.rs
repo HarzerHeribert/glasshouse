@@ -17,7 +17,7 @@
 //!    [`every_verified_style_cites_something_a_reader_could_go_and_check`] is
 //!    what makes that sentence enforceable instead of aspirational.
 
-use glasshouse::harness::{Declared, StyleChange, all};
+use glasshouse::harness::{CacheInvalidation, Declared, StyleChange, all};
 use glasshouse::integrations::IntegrationId;
 
 /// Every adapter, with what it declares about its communication style.
@@ -92,6 +92,56 @@ fn the_session_cost_of_changing_a_style_is_still_a_real_distinction() {
         "Hermes reassigns its personality overlay inside the running session; recording it as \
          `NewSession` would throw away a warm conversation to apply a style it could have taken \
          where it stood"
+    );
+}
+
+/// Cache invalidation is a measured fact about one harness, not a guess spread
+/// across all of them.
+///
+/// `CacheInvalidation` is orthogonal to [`StyleChange`]: Claude Code's style
+/// change is `NewSession` (the mechanism is launch-only) and its cache
+/// invalidation is still measured `Partial { one_turn: true }`, because the
+/// measurement ran with `--resume` and no new session at all. Every other
+/// adapter must stay `Unverified` — the recon behind this field probed only
+/// Claude Code, and copying its verdict onto a harness nobody measured would
+/// be exactly the fabrication line 618's blocker warned against.
+#[test]
+fn cache_invalidation_is_measured_for_claude_code_and_unknown_elsewhere() {
+    let styles = declared_styles();
+
+    let cache = |wanted: IntegrationId| {
+        styles
+            .iter()
+            .find(|(id, _)| *id == wanted)
+            .unwrap_or_else(|| panic!("{wanted:?} has no adapter"))
+            .1
+            .value()
+            .map(|style| style.cache_invalidation)
+    };
+
+    assert_eq!(
+        cache(IntegrationId::ClaudeCode),
+        Some(Declared::verified(
+            CacheInvalidation::Partial { one_turn: true },
+            "Claude Code 2.1.252 (2026-09-01): a session resumed with `--settings \
+             '{\"outputStyle\": \"<name>\"}'` or with `--append-system-prompt \
+             \"<text>\"` shows `cache_read_input_tokens` drop from the prior \
+             turn's level (~28,800-30,100) to ~18,500 and \
+             `cache_creation_input_tokens` rise from an undisturbed residual of \
+             57-432 to 13,300-13,960 on that turn, reproduced in 2 runs per \
+             mechanism (4 runs total) against a 2-run no-change control; the \
+             effect is partial (a base cache segment survives) and lasts exactly \
+             one turn. Changing the output style materially invalidates the \
+             prompt cache.",
+        )),
+        "Claude Code's cache-invalidation declaration must carry GH-STYLE-CACHE-MEASUREMENT's \
+         exact verdict; a changed value here without a re-measurement would be a guess"
+    );
+    assert_eq!(
+        cache(IntegrationId::Hermes),
+        Some(Declared::Unverified),
+        "Hermes's cache behavior was never measured; declaring anything but Unverified would \
+         copy Claude Code's finding onto a harness nobody probed"
     );
 }
 
@@ -228,6 +278,20 @@ fn the_doctor_report_shows_each_harnesss_communication_style_and_its_session_cos
                 rows.iter().any(|row| row.contains(cost)),
                 "line 290 asks for the session cost as well as the mechanism, and \
                  {id:?}'s report does not say {cost:?}"
+            );
+
+            let cache_phrase_present = match value.cache_invalidation.value() {
+                Some(CacheInvalidation::Partial { .. }) => rows
+                    .iter()
+                    .any(|row| row.contains("invalidates part of the prompt cache")),
+                None => rows
+                    .iter()
+                    .any(|row| row.contains("prompt-cache effect unverified")),
+            };
+            assert!(
+                cache_phrase_present,
+                "line 618's cache-invalidation clause must render for {id:?} too, distinguishing \
+                 measured from unknown; report:\n{report}"
             );
         }
     }

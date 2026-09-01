@@ -686,6 +686,14 @@ impl Backends {
 pub struct CommunicationStyle {
     pub mechanism: &'static str,
     pub change: StyleChange,
+    /// Whether applying the change disturbs the harness's prompt cache.
+    ///
+    /// Orthogonal to `change`: a style can be applied `InPlace` and still
+    /// invalidate part of the cache on the turn it lands — measured for
+    /// Claude Code, whose `change` is `NewSession` for an unrelated reason
+    /// (the mechanism is launch-only) while the cache hit was observed with
+    /// `--resume`, no new session at all.
+    pub cache_invalidation: Declared<CacheInvalidation>,
 }
 
 /// Whether changing the communication style needs a new native session.
@@ -696,6 +704,19 @@ pub enum StyleChange {
     /// A change takes effect only in a session started afterwards, so
     /// changing it means giving up a warm session.
     NewSession,
+}
+
+/// What a measured style change costs a harness's prompt cache.
+///
+/// The only shape observed so far (Claude Code 2.1.252, 2026-09-01): the
+/// turn the change lands rebuilds part of the cache, and the effect does not
+/// persist past that turn. A bare `bool` would flatten "invalidates" into a
+/// claim no measurement supports — the finding is partial and one-turn, not
+/// total or sticky, and the type says so rather than a caller having to
+/// remember it from a comment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheInvalidation {
+    Partial { one_turn: bool },
 }
 
 /// One approval mode, as the harness's own launch interface exposes it.
@@ -1696,6 +1717,19 @@ mod tests {
                         mechanism: "output style, supplied in the settings document passed with \
                                     `--settings` when the session starts",
                         change: StyleChange::NewSession,
+                        cache_invalidation: Declared::verified(
+                            CacheInvalidation::Partial { one_turn: true },
+                            "Claude Code 2.1.252 (2026-09-01): a session resumed with `--settings \
+                             '{\"outputStyle\": \"<name>\"}'` or with `--append-system-prompt \
+                             \"<text>\"` shows `cache_read_input_tokens` drop from the prior \
+                             turn's level (~28,800-30,100) to ~18,500 and \
+                             `cache_creation_input_tokens` rise from an undisturbed residual of \
+                             57-432 to 13,300-13,960 on that turn, reproduced in 2 runs per \
+                             mechanism (4 runs total) against a 2-run no-change control; the \
+                             effect is partial (a base cache segment survives) and lasts exactly \
+                             one turn. Changing the output style materially invalidates the \
+                             prompt cache.",
+                        ),
                     }),
                 ),
                 (IntegrationId::Codex, None),
@@ -1710,6 +1744,7 @@ mod tests {
                                     inside a running session and stored as the \
                                     `display.personality` configuration key",
                         change: StyleChange::InPlace,
+                        cache_invalidation: Declared::Unverified,
                     }),
                 ),
             ],

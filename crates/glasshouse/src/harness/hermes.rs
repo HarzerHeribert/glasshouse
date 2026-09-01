@@ -67,6 +67,11 @@ const COMMUNICATION_STYLE: Declared<CommunicationStyle> = Declared::verified(
         mechanism: "personality overlay, selected with `/personality <name>` inside a running \
                     session and stored as the `display.personality` configuration key",
         change: StyleChange::InPlace,
+        // Not measured. The recon behind `CacheInvalidation` probed only Claude Code
+        // (GH-STYLE-CACHE-MEASUREMENT) — copying its verdict onto a different harness's cache
+        // behavior would be exactly the fabrication `Declared`'s own module documentation
+        // rules out.
+        cache_invalidation: Declared::Unverified,
     },
     "Hermes Agent 0.15.1 `hermes --ignore-user-config config show` prints `Personality:` under \
      `Display`; the installed `hermes_cli/config.py` default `display` block holds \

@@ -615,7 +615,7 @@ Additive fallback and cache behavior
 ☑ Inject the fallback through the safest adapter-supported session-start, append-system, instruction-message, hook-context, or equivalent mechanism.
 ☐ Avoid repeatedly injecting an unchanged response contract on every turn when the harness already retains it.
 ☑ Prefer selecting a response profile when a session is created so the session’s system-prefix and prompt-cache behavior remain stable.
-☐ Let adapters declare whether a live profile change is supported, delayed until a new session, or likely to invalidate prompt caching.
+☑ Let adapters declare whether a live profile change is supported, delayed until a new session, or likely to invalidate prompt caching.
 ☐ Warn before a profile change that requires clearing or recreating a valuable warm session.
 ☐ Allow a lightweight in-session communication instruction for a one-turn override when supported without rewriting the system prefix.
 ☐ Preserve raw native terminal output even when Glasshouse offers optional folding of verbose progress or detail sections.

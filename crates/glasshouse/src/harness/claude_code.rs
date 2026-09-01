@@ -10,10 +10,10 @@ use std::ffi::OsString;
 use anyhow::Context as _;
 
 use super::{
-    ApprovalMode, ApprovalModes, BackendSelection, Backends, Capabilities, CommunicationStyle,
-    CredentialPlacement, Declared, DirectProviderPlan, DirectProviderRequest, HarnessAdapter,
-    HarnessDescription, HookCommand, HookDestination, HookInstallation, Hooks, Invocation,
-    ModelOverride, SessionIds, StyleChange, Vendor, WireProtocol,
+    ApprovalMode, ApprovalModes, BackendSelection, Backends, CacheInvalidation, Capabilities,
+    CommunicationStyle, CredentialPlacement, Declared, DirectProviderPlan, DirectProviderRequest,
+    HarnessAdapter, HarnessDescription, HookCommand, HookDestination, HookInstallation, Hooks,
+    Invocation, ModelOverride, SessionIds, StyleChange, Vendor, WireProtocol,
     pairing::OfficialModelSupport,
     response::{AdditiveInjection, NativeDelivery, NativeStyle},
 };
@@ -131,9 +131,28 @@ const COMMUNICATION_STYLE: Declared<CommunicationStyle> = Declared::verified(
         mechanism: "output style, supplied in the settings document passed with \
                     `--settings` when the session starts",
         change: StyleChange::NewSession,
+        cache_invalidation: CACHE_INVALIDATION,
     },
     "a Claude Code 2.1.245 session's status-line payload reports its output style; Claude Code \
      2.1.246 `claude --help` documents `--settings <file-or-json>` as a launch option",
+);
+
+/// Measured directly against the installed binary (GH-STYLE-CACHE-MEASUREMENT,
+/// `.agent-runtime/swarm-2026-09-01/style-cache.md`), not inferred from the
+/// `--settings`/`change` reasoning above: a session resumed with a changed
+/// `--settings` document, no new session at all, still paid a real cache
+/// rebuild cost on that turn. `--append-system-prompt` (the 620 surface)
+/// measured identically in the same recon, so this same value covers both
+/// mechanisms.
+const CACHE_INVALIDATION: Declared<CacheInvalidation> = Declared::verified(
+    CacheInvalidation::Partial { one_turn: true },
+    "Claude Code 2.1.252 (2026-09-01): a session resumed with `--settings \
+     '{\"outputStyle\": \"<name>\"}'` or with `--append-system-prompt \"<text>\"` shows \
+     `cache_read_input_tokens` drop from the prior turn's level (~28,800-30,100) to ~18,500 \
+     and `cache_creation_input_tokens` rise from an undisturbed residual of 57-432 to \
+     13,300-13,960 on that turn, reproduced in 2 runs per mechanism (4 runs total) against a \
+     2-run no-change control; the effect is partial (a base cache segment survives) and lasts \
+     exactly one turn. Changing the output style materially invalidates the prompt cache.",
 );
 
 /// The name of the settings document Glasshouse writes for a Claude Code

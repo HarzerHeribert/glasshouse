@@ -1158,9 +1158,16 @@ fn write_adapter_report(out: &mut String, adapter: &'static dyn crate::harness::
     let _ = writeln!(out, "      model:        {model}");
 
     // Map line 290: each adapter declares which native communication-style
-    // mechanism it supports **and whether changing it needs a new or cleared
-    // native session**. Both clauses are rendered, because the second is the
-    // one that costs a user a warm session and it is invisible otherwise.
+    // mechanism it supports, **whether changing it needs a new or cleared
+    // native session**, and **whether it is likely to invalidate prompt
+    // caching**. All three clauses are rendered, because each costs a user
+    // something invisible otherwise: a warm session, or a cache rebuild.
+    //
+    // The cache clause covers `--append-system-prompt`'s one-turn mechanism
+    // too, not only a persistent style change — GH-STYLE-CACHE-MEASUREMENT
+    // found no behavioral difference between the two, so a sibling surface
+    // that appends a one-turn instruction can point at this same
+    // declaration rather than measuring its own.
     //
     // `Unverified` prints as itself rather than as "none". They are different
     // claims — `Declared`'s own documentation is that an unverified value is
@@ -1172,7 +1179,17 @@ fn write_adapter_report(out: &mut String, adapter: &'static dyn crate::harness::
                 crate::harness::StyleChange::InPlace => "changeable in place",
                 crate::harness::StyleChange::NewSession => "changing it needs a new session",
             };
-            format!("{} ({change})", style.mechanism)
+            let cache = match style.cache_invalidation.value() {
+                Some(crate::harness::CacheInvalidation::Partial { one_turn: true }) => {
+                    "invalidates part of the prompt cache for the turn it changes on, including \
+                     an appended one-turn instruction"
+                }
+                Some(crate::harness::CacheInvalidation::Partial { one_turn: false }) => {
+                    "invalidates part of the prompt cache beyond the turn it changes on"
+                }
+                None => "prompt-cache effect unverified",
+            };
+            format!("{} ({change}; {cache})", style.mechanism)
         }
         None => "unverified".to_string(),
     };

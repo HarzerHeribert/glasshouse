@@ -575,3 +575,24 @@ the four lines (§83).
 they are "closeable with a test rather than a feature"; that is exactly how map
 lines 1455 and 1456 were closed and then un-ticked the same week. A guard over
 an absent capability is a useful **tripwire** and does not tick a box.
+
+# Line 618 — COMPLETE 2026-09-01, on a real measurement
+
+Packages `GH-STYLE-CACHE-MEASUREMENT` (recon) + `GH-STYLE-CACHE-DECLARATION`
+(batch 75). The measurement this entry's own correction said nobody had
+made: on Claude Code 2.1.252, an output-style change — and an appended
+one-turn system prompt, identically — invalidates the prompt cache
+**partially, for exactly one turn, non-sticky** (~13–14k re-cached over an
+~18.5k surviving base; 4 experimental runs vs 2 controls, raw numbers in
+`.agent-runtime/swarm-2026-09-01/style-cache.md`). Landed as
+`CommunicationStyle::cache_invalidation: Declared<CacheInvalidation>` — the
+separate field this entry ruled for, one variant (`Partial { one_turn }`)
+because no other shape was observed; `Declared::verified` with the
+measurement's evidence string on Claude Code, honestly `Unverified` on
+Hermes, and no literal to change on the five whole-struct-Unverified
+adapters. `doctor` renders measured and unknown distinctly. Mutation
+(declaration flipped to does-not-invalidate) KILLED.
+
+9K's remainder after this batch: 616/622 (Cluster Q, standing), 623 (a
+standalone surface), 627–630 (one missing measurement channel — attack the
+channel).
