@@ -230,7 +230,36 @@ Recorded scope limits — stated by the worker, not discovered later:
 
 Contract: Cross-platform support is stable only after PTY/session smoke tests pass on macOS, Linux, and native Windows CI runners.
 
-State: PARTIALLY VERIFIED — ruled 2026-08-31 by the orchestrator, agreeing with the worker's `open`: the line's own words require macOS, Linux AND native Windows CI runners. The macOS smoke leg is green locally (quoted in the report); the Linux and native-Windows CI legs are the missing clauses. Not a refusal: closes on CI evidence once the runners are available (the local gate has been the mirror until September per practice §27); pushing for CI is the orchestrator's standing job.
+State: PARTIALLY VERIFIED — ruled 2026-08-31 by the orchestrator, agreeing with the worker's `open`: the line's own words require macOS, Linux AND native Windows CI runners. The macOS smoke leg is green locally (quoted in the report); the Linux and native-Windows CI legs are the missing clauses. Not a refusal: closes on CI evidence once the runners are available (the local gate has been the mirror until September per practice §27); ~~pushing for CI is the orchestrator's standing job.~~
+
+**STALE as of 2026-09-01, and it now contradicts a user ruling — do not act on
+it.** The user instructed: *"this projects CI is way too demanding to be ran on
+github fully … only run in the github CI in the future when absolutely
+necessary"*, then *"if ci is good on this machine then just skip it on github."*
+`.github/workflows/ci.yml` is therefore **`workflow_dispatch` only**; a push
+fires nothing. **Pushing for CI is no longer anyone's standing job**, and an
+orchestrator who reads the sentence above and dispatches the matrix is spending
+a monthly allowance the user asked to conserve.
+
+**This leaves 1908 needing a ruling, not a package, and the ruling is the
+user's** because it trades a map line's literal words against their own cost
+instruction. Two defensible readings:
+
+- **The gate is the gate.** `scripts/ci-local.sh --macos --linux --windows-vm`
+  runs macOS natively, Linux in a container, and drives a **real Windows VM**.
+  That is an automated three-platform smoke gate; the line's intent — do not
+  call cross-platform support stable until all three are exercised — is
+  satisfiable today, on this machine, at no cost.
+- **"CI runners" means hosted CI.** Then the line needs a GitHub Actions run on
+  all three, which is exactly what the user restricted, and the line cannot
+  close without spending that allowance.
+
+**What to do:** do not reinterpret the map line unilaterally, and do not
+dispatch the GitHub matrix to satisfy it. Put the choice to the user. If they
+take the first reading, the evidence path is one clean
+`ci-local.sh --macos --linux --windows-vm` run — **on a quiet machine**, since
+concurrent `cargo` load makes that gate report its own CPU contention as a
+Linux PTY failure.
 
 Regression evidence:
 - `pty_smoke (71 tests, macOS only, this worktree)`

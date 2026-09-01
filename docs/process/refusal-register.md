@@ -625,7 +625,7 @@ path. **Do not conflate them again.**
 | # | missing producer | open lines | migration? |
 |---|---|---|---|
 | **P1a** | usage reader on Glasshouse's own model calls | ~12 | **no** — in flight |
-| **P1b** | usage reader on the relay path | 1333, 1263, 1158, most of 32E + 32G, much of 51 | no — **needs the `ingress` ruling** |
+| **P1b** | usage reader on the relay path | 1333, 1263, 1158, ~~most of 32E~~ **32E line 1275 ONLY (censused 2026-09-02, see `phase-32e.md`: eight of the ten are packageable or need a ruling — *"most of 32E"* was wrong in the direction that keeps a phase shut)** + 32G, much of 51 | no — **needs the `ingress` ruling** |
 | ↳ P1b, ruled in part 2026-08-31 | design-decisions §Phase 56 *"the user's answer on pairs"*: `ingress` keeps relaying served protocols byte for byte and never parses them — but a **translated** exchange (a target the provider does not serve, entering a codec) is parsed by construction, so its usage is recorded as *exact* where the provider states it. P1b therefore opens for translated pairs as `gateway-translate` (T1) lands, and stays refused for relayed ones. Readers must carry tokens where a row has them and say *not exposed* where it does not (`harness-efficiency`). | partly — translated pairs only |
 | **P2** | a caller that dispatches a Classification/Reranking disposable job | ~38 (34C, 34D, 34E, 1089–1092, 1455/1456) | no |
 | **P3** | measured quantities for the evaluation channel | Phase 51 (34), 627–630 | no — **mostly P1+P2 renamed** |
