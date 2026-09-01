@@ -303,6 +303,11 @@ pub fn process(
     }
 
     let reduction = reduce::reduce(original_text);
+    // Map line 2005's shadow-comparison record, populated here because this
+    // is the one point in the pipeline that has the deterministic ladder's
+    // own answer but has not yet run the optional semantic stage — see
+    // `RawEntry::forwarded_token_estimate`'s doc comment for why it is
+    // this stage's number and not the (possibly further-reduced) final one.
     let entry = RawEntry {
         session_id: session_id.to_string(),
         tool_use_id: tool_use_id.to_string(),
@@ -310,6 +315,9 @@ pub fn process(
         timestamp_unix,
         content: original_text.to_string(),
         original_token_estimate: original_tokens,
+        forwarded_token_estimate: Some(estimate::estimate_tokens(&reduction.forwarded)),
+        retained_candidates: Some(reduction.retained_candidates),
+        total_candidates: Some(reduction.total_candidates),
     };
     let raw_ref = match store.write(&entry) {
         Ok(reference) => reference,

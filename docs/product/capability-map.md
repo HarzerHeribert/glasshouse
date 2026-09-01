@@ -2001,9 +2001,9 @@ Recorded 2026-09-01 from the user's instruction of record: a coding model should
 ☑ Fail open on every reducer failure — timeout, transport, rate limit, schema, validation, or outage — forwarding the original output with a recorded bypass reason and never an empty result.
 ☑ Support pinned models and free-router aliases through the existing provider and free-model configuration, validating reducer output regardless of which model a router answered with.
 ☑ Respect existing secret handling and privacy policy before any external reduction: local-only operation, path and tool exclusions, secret-file defaults, and no transmission to a provider the user has not configured.
-☐ Let the session expand a suppressed result — whole, by candidate, by file, or by range — through a supported Glasshouse surface rather than an invented side channel.
-☐ Compare shadow-mode reductions against forwarded originals so recall and savings claims rest on recorded evidence rather than on the compression ratio alone.
-☐ Show the firewall's mode and per-session aggregate savings in the existing status and settings surfaces without cluttering the primary workflow.
+☑ Let the session expand a suppressed result — whole, by candidate, by file, or by range — through a supported Glasshouse surface rather than an invented side channel.
+☑ Compare shadow-mode reductions against forwarded originals so recall and savings claims rest on recorded evidence rather than on the compression ratio alone.
+☑ Show the firewall's mode and per-session aggregate savings in the existing status and settings surfaces without cluttering the primary workflow.
 
 
 ────────

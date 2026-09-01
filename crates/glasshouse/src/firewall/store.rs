@@ -28,6 +28,26 @@ pub struct RawEntry {
     pub timestamp_unix: i64,
     pub content: String,
     pub original_token_estimate: u64,
+    /// Map line 2005's shadow-comparison record: the deterministic ladder's
+    /// own forwarded-size estimate, recorded at write time — before the
+    /// optional semantic stage ever runs, so it reflects exactly what this
+    /// entry's own bytes went through. The semantic stage's own additional
+    /// savings are the evidence ledger's reducer-call rows (map line
+    /// 1987's second half); this field never doubles that count and never
+    /// touches a ledger token column. `None` only for an entry a build
+    /// before this package wrote — read back and shown honestly as
+    /// "no recorded estimate", never backfilled with a guess.
+    #[serde(default)]
+    pub forwarded_token_estimate: Option<u64>,
+    /// The deterministic ladder's own retained/total candidate counts for
+    /// this entry, beside [`Self::forwarded_token_estimate`] — map line
+    /// 2005's "record what was dropped and whether it mattered". Same
+    /// backward-compatibility rule: `None` for an entry written before this
+    /// field existed.
+    #[serde(default)]
+    pub retained_candidates: Option<usize>,
+    #[serde(default)]
+    pub total_candidates: Option<usize>,
 }
 
 /// A raw store rooted at one directory — normally
@@ -60,6 +80,46 @@ impl RawStore {
             write_atomically(&dir, &path, &json)?;
         }
         Ok(format!("{REFERENCE_PREFIX}{session_key}-{content_key}"))
+    }
+
+    /// Every entry currently stored, across every session — map line 2006's
+    /// aggregate-savings reader walks this rather than adding a query
+    /// surface to the store's own files (no migration, no database table:
+    /// design-decisions.md's Phase 57 ruling stands). Fail-soft in both
+    /// directions: a store that has never been written to answers with an
+    /// empty list rather than a "not found" error, and one unreadable
+    /// session directory or entry (partial write, corrupt file) is skipped
+    /// rather than failing the whole scan — the same posture
+    /// [`Self::read`] already takes for one entry, extended to a walk of
+    /// all of them.
+    pub fn all_entries(&self) -> io::Result<Vec<RawEntry>> {
+        let mut out = Vec::new();
+        let session_dirs = match std::fs::read_dir(&self.root) {
+            Ok(dirs) => dirs,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => return Ok(out),
+            Err(err) => return Err(err),
+        };
+        for session_dir in session_dirs.flatten() {
+            let path = session_dir.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let Ok(files) = std::fs::read_dir(&path) else {
+                continue;
+            };
+            for file in files.flatten() {
+                let file_path = file.path();
+                if file_path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                    continue;
+                }
+                if let Ok(bytes) = std::fs::read(&file_path)
+                    && let Ok(entry) = serde_json::from_slice::<RawEntry>(&bytes)
+                {
+                    out.push(entry);
+                }
+            }
+        }
+        Ok(out)
     }
 
     /// Read back an entry by its `gh-tool://<id>` reference (the bare id
@@ -145,6 +205,9 @@ mod tests {
             timestamp_unix: 1_700_000_000,
             content: content.to_string(),
             original_token_estimate: 42,
+            forwarded_token_estimate: Some(10),
+            retained_candidates: Some(1),
+            total_candidates: Some(3),
         }
     }
 
@@ -194,5 +257,63 @@ mod tests {
         let first = store.write(&entry("session-a", "dup")).unwrap();
         let second = store.write(&entry("session-a", "dup")).unwrap();
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn all_entries_is_empty_for_a_store_never_written_to() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RawStore::open(dir.path().join("never-created"));
+        assert_eq!(store.all_entries().unwrap(), Vec::new());
+    }
+
+    #[test]
+    fn all_entries_walks_every_session() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RawStore::open(dir.path());
+        store.write(&entry("session-a", "content a")).unwrap();
+        store.write(&entry("session-a", "content a2")).unwrap();
+        store.write(&entry("session-b", "content b")).unwrap();
+
+        let mut entries = store.all_entries().unwrap();
+        assert_eq!(entries.len(), 3);
+        entries.sort_by(|a, b| a.content.cmp(&b.content));
+        assert_eq!(entries[0].content, "content a");
+        assert_eq!(entries[1].content, "content a2");
+        assert_eq!(entries[2].content, "content b");
+    }
+
+    /// An entry written by a build before map line 2005's fields existed
+    /// still reads back — `None`, never a deserialization failure or a
+    /// fabricated `Some(0)`.
+    #[test]
+    fn an_entry_without_the_2005_fields_still_reads_back() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RawStore::open(dir.path());
+        let legacy = serde_json::json!({
+            "session_id": "session-legacy",
+            "tool_use_id": "tu-1",
+            "tool": "Grep",
+            "timestamp_unix": 1_700_000_000i64,
+            "content": "old bytes\n",
+            "original_token_estimate": 5,
+        });
+        let session_dir = dir.path().join(session_key("session-legacy"));
+        std::fs::create_dir_all(&session_dir).unwrap();
+        let path = session_dir.join(format!("{}.json", content_key("old bytes\n")));
+        std::fs::write(&path, serde_json::to_vec(&legacy).unwrap()).unwrap();
+
+        let reference = format!(
+            "{REFERENCE_PREFIX}{}-{}",
+            session_key("session-legacy"),
+            content_key("old bytes\n")
+        );
+        let read_back = store.read(&reference).unwrap().expect("must still read");
+        assert_eq!(read_back.content, "old bytes\n");
+        assert_eq!(read_back.forwarded_token_estimate, None);
+        assert_eq!(read_back.retained_candidates, None);
+        assert_eq!(read_back.total_candidates, None);
+
+        let all = store.all_entries().unwrap();
+        assert_eq!(all.len(), 1);
     }
 }

@@ -229,13 +229,54 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
                     mode,
                 )?;
             }
-            ContextFirewallCommand::Show { id } => match context_firewall_show(&runtime, id)? {
-                Some(content) => print!("{content}"),
-                None => {
-                    eprintln!("glasshouse: no context-firewall raw result stored under `{id}`");
-                    return Ok(ExitCode::FAILURE);
+            ContextFirewallCommand::Show {
+                id,
+                candidate,
+                file,
+                range,
+                stats,
+            } => {
+                if *stats {
+                    match context_firewall_show_stats(&runtime, id)? {
+                        Some(summary) => print!("{summary}"),
+                        None => {
+                            eprintln!(
+                                "glasshouse: no context-firewall raw result stored under `{id}`"
+                            );
+                            return Ok(ExitCode::FAILURE);
+                        }
+                    }
+                } else {
+                    let request = if let Some(candidate_id) = candidate {
+                        ExpansionRequest::Candidate(*candidate_id)
+                    } else if let Some(file) = file {
+                        ExpansionRequest::File(file.clone())
+                    } else if let Some(range) = range {
+                        match parse_line_range(range) {
+                            Ok(bounds) => ExpansionRequest::Range(bounds),
+                            Err(reason) => {
+                                eprintln!("glasshouse: {reason}");
+                                return Ok(ExitCode::FAILURE);
+                            }
+                        }
+                    } else {
+                        ExpansionRequest::Whole
+                    };
+                    match context_firewall_show(&runtime, id, request)? {
+                        ExpansionOutcome::Content(content) => print!("{content}"),
+                        ExpansionOutcome::NotFound => {
+                            eprintln!(
+                                "glasshouse: no context-firewall raw result stored under `{id}`"
+                            );
+                            return Ok(ExitCode::FAILURE);
+                        }
+                        ExpansionOutcome::Refused(reason) => {
+                            eprintln!("glasshouse: {reason}");
+                            return Ok(ExitCode::FAILURE);
+                        }
+                    }
                 }
-            },
+            }
         },
         Some(Command::Sessions { command }) => match command {
             // The bare command still lists, which is what every existing
@@ -1930,11 +1971,44 @@ fn record_context_firewall_telemetry(
     }
 }
 
-/// `context-firewall show <id>`: print the raw stored result
-/// byte-identically (map line 1985's round-trip), and record the map line
-/// 1988 expansion-request telemetry either way — a miss is still a
-/// request, and still part of the recall signal.
-fn context_firewall_show(runtime: &Runtime, id: &str) -> anyhow::Result<Option<String>> {
+/// Map line 2004's four granularities. `Whole` is the pre-existing
+/// behaviour every earlier package relied on; the other three are this
+/// package's own, and are reached only through this same subcommand — no
+/// invented side channel.
+enum ExpansionRequest {
+    Whole,
+    Candidate(usize),
+    File(String),
+    Range((usize, usize)),
+}
+
+/// What `context_firewall_show` decided, once the reference itself
+/// resolved (or did not).
+enum ExpansionOutcome {
+    Content(String),
+    /// The reference itself does not name a stored entry — the pre-existing
+    /// refusal `Show`'s bare form already had.
+    NotFound,
+    /// The reference resolved, but the requested slice of it does not exist
+    /// (an out-of-range candidate id, a file the result never names, or a
+    /// reversed/out-of-bounds range). Kept distinct from `NotFound`: the
+    /// expansion-request telemetry below already counted this reference as
+    /// found, because it was — the refusal is about the *granularity*, not
+    /// the reference.
+    Refused(String),
+}
+
+/// `context-firewall show <id>`: expand a previously stored raw tool
+/// result at the granularity `request` names, and record the map line 1988
+/// expansion-request telemetry either way — a miss is still a request, and
+/// still part of the recall signal. `request = Whole` reproduces map line
+/// 1985's exact byte-identical round-trip; the other three variants are map
+/// line 2004's.
+fn context_firewall_show(
+    runtime: &Runtime,
+    id: &str,
+    request: ExpansionRequest,
+) -> anyhow::Result<ExpansionOutcome> {
     use anyhow::Context as _;
 
     let store = glasshouse::firewall::RawStore::open(runtime.state_dir().join("context-firewall"));
@@ -1942,7 +2016,143 @@ fn context_firewall_show(runtime: &Runtime, id: &str) -> anyhow::Result<Option<S
         .read(id)
         .with_context(|| format!("could not read the context-firewall raw store for `{id}`"))?;
     record_context_firewall_expansion(runtime, entry.as_ref().map(|entry| entry.tool.as_str()));
-    Ok(entry.map(|entry| entry.content))
+    let Some(entry) = entry else {
+        return Ok(ExpansionOutcome::NotFound);
+    };
+
+    Ok(match request {
+        ExpansionRequest::Whole => ExpansionOutcome::Content(entry.content),
+        ExpansionRequest::Candidate(candidate_id) => {
+            // Recomputed rather than stored: `reduce` is a pure function of
+            // `entry.content`, which is the exact original this entry has
+            // held since it was written — the same id therefore always
+            // names the same candidate, with nothing new to persist.
+            let reduction = glasshouse::firewall::reduce::reduce(&entry.content);
+            match reduction
+                .candidates
+                .iter()
+                .find(|candidate| candidate.id == candidate_id)
+            {
+                Some(candidate) => ExpansionOutcome::Content(candidate.text.clone()),
+                None => ExpansionOutcome::Refused(format!(
+                    "`{id}` has no candidate `{candidate_id}` (0..{})",
+                    reduction.candidates.len()
+                )),
+            }
+        }
+        ExpansionRequest::File(file) => {
+            let matches: Vec<&str> = entry
+                .content
+                .lines()
+                .filter(|line| line_names_file(line, &file))
+                .collect();
+            if matches.is_empty() {
+                ExpansionOutcome::Refused(format!("`{id}` names no file `{file}`"))
+            } else {
+                ExpansionOutcome::Content(format!("{}\n", matches.join("\n")))
+            }
+        }
+        ExpansionRequest::Range((start, end)) => {
+            if start == 0 {
+                ExpansionOutcome::Refused(
+                    "line ranges are 1-indexed; `0` is not a line".to_string(),
+                )
+            } else if start > end {
+                ExpansionOutcome::Refused(format!(
+                    "range `{start}-{end}` is reversed; start must not exceed end"
+                ))
+            } else {
+                let lines: Vec<&str> = entry.content.lines().collect();
+                if end > lines.len() {
+                    ExpansionOutcome::Refused(format!(
+                        "range `{start}-{end}` is out of bounds; `{id}` has {} line{}",
+                        lines.len(),
+                        if lines.len() == 1 { "" } else { "s" }
+                    ))
+                } else {
+                    ExpansionOutcome::Content(format!("{}\n", lines[start - 1..end].join("\n")))
+                }
+            }
+        }
+    })
+}
+
+/// Map line 2004's file granularity: a line naming `file` is either the
+/// bare path on its own (Glob-shaped output) or a `path:...` prefix
+/// (ripgrep-shaped search-hit output) — the two file-per-line shapes this
+/// build's own eligible tools (Grep, Glob) actually produce. An exact
+/// prefix only: a line about a different file that merely contains `file`
+/// as a substring must never match.
+fn line_names_file(line: &str, file: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed == file || trimmed.starts_with(&format!("{file}:"))
+}
+
+/// Map line 2004's range granularity: `START-END`, 1-indexed and
+/// inclusive. Malformed input (non-numeric, no separator) is refused with
+/// the same clear-error posture as a reversed or out-of-bounds range —
+/// `context_firewall_show` never sees anything but a validated pair.
+fn parse_line_range(spec: &str) -> Result<(usize, usize), String> {
+    let (start, end) = spec
+        .split_once('-')
+        .ok_or_else(|| format!("`{spec}` is not a `START-END` line range"))?;
+    let start: usize = start
+        .trim()
+        .parse()
+        .map_err(|_| format!("`{spec}` is not a `START-END` line range"))?;
+    let end: usize = end
+        .trim()
+        .parse()
+        .map_err(|_| format!("`{spec}` is not a `START-END` line range"))?;
+    Ok((start, end))
+}
+
+/// `context-firewall show <id> --stats`: the entry's own recorded map line
+/// 2005 comparison — original/forwarded token estimates and
+/// retained/total candidate counts — never its content. This is the
+/// "check for yourself" surface a savings claim needs, kept separate from
+/// content expansion rather than folded into it, so a caller can always
+/// tell which one it asked for.
+fn context_firewall_show_stats(runtime: &Runtime, id: &str) -> anyhow::Result<Option<String>> {
+    use anyhow::Context as _;
+    use std::fmt::Write as _;
+
+    let store = glasshouse::firewall::RawStore::open(runtime.state_dir().join("context-firewall"));
+    let entry = store
+        .read(id)
+        .with_context(|| format!("could not read the context-firewall raw store for `{id}`"))?;
+    record_context_firewall_expansion(runtime, entry.as_ref().map(|entry| entry.tool.as_str()));
+    let Some(entry) = entry else {
+        return Ok(None);
+    };
+
+    let mut out = String::new();
+    let _ = writeln!(out, "tool: {}", entry.tool);
+    let _ = writeln!(out, "original_tokens: {}", entry.original_token_estimate);
+    match entry.forwarded_token_estimate {
+        Some(tokens) => {
+            let _ = writeln!(out, "forwarded_tokens: {tokens}");
+        }
+        None => {
+            let _ = writeln!(
+                out,
+                "forwarded_tokens: unknown (recorded before map line 2005)"
+            );
+        }
+    }
+    match (entry.retained_candidates, entry.total_candidates) {
+        (Some(retained), Some(total)) => {
+            let _ = writeln!(out, "retained_candidates: {retained}");
+            let _ = writeln!(out, "total_candidates: {total}");
+        }
+        _ => {
+            let _ = writeln!(
+                out,
+                "retained_candidates/total_candidates: unknown (recorded before map line 2005)"
+            );
+        }
+    }
+    Ok(Some(out))
 }
 
 /// Map line 1988: track raw-expansion requests as their own telemetry
@@ -11092,7 +11302,81 @@ fn status_report(runtime: &Runtime) -> anyhow::Result<String> {
         }
     }
 
+    // Map line 2006: mode and per-session aggregate savings, shown only
+    // when the firewall is configured on — "with the firewall off, nothing
+    // changes" (the guarantee every one of map lines 1980-2003 already
+    // keeps) extends to this section too, so an `off` session's status
+    // output stays exactly what it was before this package existed.
+    let firewall_mode = effective.context_firewall_mode().value;
+    if firewall_mode != glasshouse::config::firewall::FirewallMode::Off {
+        let _ = writeln!(out);
+        let _ = writeln!(out, "Context firewall  mode: {firewall_mode}");
+        match context_firewall_savings_summary(runtime) {
+            Some(summary) => {
+                let _ = writeln!(out, "  {summary}");
+            }
+            None => {
+                let _ = writeln!(out, "  no context-firewall activity recorded yet");
+            }
+        }
+    }
+
     Ok(out)
+}
+
+/// Map line 2006's savings figure: an honest aggregate over every entry the
+/// raw store currently holds, walked with [`glasshouse::firewall::RawStore::all_entries`]
+/// rather than any evidence-ledger reader — the packet's own constraint
+/// stands (map line 1987's ruling): the ledger's token columns are a
+/// provider's own reported count, and this build's raw/forwarded figures
+/// are `chars/4` estimates, so they are never written there. Chosen over a
+/// bare request-count ("N of M reduced") because [`RawEntry::original_token_estimate`]
+/// and [`RawEntry::forwarded_token_estimate`] are already persisted per
+/// entry (map line 2005) and a token figure is closer to what "savings"
+/// means than a request count alone — see this package's report for the
+/// full reasoning. `None` when the store holds nothing yet, a different
+/// fact from "0 saved".
+fn context_firewall_savings_summary(runtime: &Runtime) -> Option<String> {
+    let store = glasshouse::firewall::RawStore::open(runtime.state_dir().join("context-firewall"));
+    let entries = store.all_entries().ok()?;
+    if entries.is_empty() {
+        return None;
+    }
+
+    let sessions: std::collections::HashSet<&str> = entries
+        .iter()
+        .map(|entry| entry.session_id.as_str())
+        .collect();
+    let mut original_of_estimated = 0u64;
+    let mut forwarded_total = 0u64;
+    let mut unestimated = 0usize;
+    for entry in &entries {
+        match entry.forwarded_token_estimate {
+            Some(forwarded) => {
+                original_of_estimated += entry.original_token_estimate;
+                forwarded_total += forwarded;
+            }
+            // An entry recorded before map line 2005 carries no comparison
+            // — counted toward "results", never folded into a savings
+            // figure it never measured.
+            None => unestimated += 1,
+        }
+    }
+    let kept_local = original_of_estimated.saturating_sub(forwarded_total);
+    let unestimated_note = if unestimated > 0 {
+        format!(" ({unestimated} without a recorded estimate)")
+    } else {
+        String::new()
+    };
+
+    Some(format!(
+        "{} session{}, {} result{} reduced, ~{kept_local} of ~{original_of_estimated} estimated \
+         tokens kept local{unestimated_note}",
+        sessions.len(),
+        if sessions.len() == 1 { "" } else { "s" },
+        entries.len(),
+        if entries.len() == 1 { "" } else { "s" },
+    ))
 }
 
 /// One entitlement's four telemetry facets, as `glasshouse status` renders

@@ -894,14 +894,41 @@ pub enum ContextFirewallCommand {
         #[arg(long, default_value = "safe")]
         mode: String,
     },
-    /// Print a previously stored raw tool result, byte-identically.
+    /// Print a previously stored raw tool result, byte-identically by
+    /// default — map line 2004's four granularities: the whole result, one
+    /// reduced-ladder candidate by id, the lines naming one file, or a
+    /// 1-indexed inclusive line range. At most one of `--candidate`,
+    /// `--file`, `--range` may be given; none of them is the whole result.
     ///
-    /// Whole-result expansion only — a later package covers range and
-    /// candidate-scoped expansion (map line 1984's remaining shape).
+    /// A reference that does not exist, a candidate id out of range, a file
+    /// naming nothing in the result, or a reversed/out-of-bounds range each
+    /// refuse clearly on stderr with a non-zero exit — never a panic, never
+    /// a silently empty stdout.
     Show {
         /// The `gh-tool://` reference `context-firewall hook` recorded in a
         /// provenance header (the bare id after `gh-tool://` also works).
         id: String,
+
+        /// Expand exactly one deterministic-ladder candidate, by the id its
+        /// own provenance or `--stats` names.
+        #[arg(long, value_name = "ID", conflicts_with_all = ["file", "range"])]
+        candidate: Option<usize>,
+
+        /// Expand only the lines naming this file — a bare path on its own
+        /// line, or a `path:...` prefix (ripgrep-style search-hit output).
+        #[arg(long, value_name = "PATH", conflicts_with_all = ["candidate", "range"])]
+        file: Option<String>,
+
+        /// Expand a 1-indexed inclusive line range of the ORIGINAL text,
+        /// e.g. `12-40`.
+        #[arg(long, value_name = "START-END", conflicts_with_all = ["candidate", "file"])]
+        range: Option<String>,
+
+        /// Print the entry's recorded metadata (map line 2005's shadow
+        /// comparison: original/forwarded token estimates and
+        /// retained/total candidate counts) instead of its content.
+        #[arg(long, conflicts_with_all = ["candidate", "file", "range"])]
+        stats: bool,
     },
 }
 

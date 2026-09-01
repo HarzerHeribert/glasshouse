@@ -192,3 +192,72 @@ targets quoted with counts.
 **Phase 57 stands at 24/27.** The remaining three (2004 expansion
 granularity, 2005 shadow-vs-original comparison, 2006 mode and per-session
 savings) have their Phase −1 established and are the next package.
+
+# Lines 2004, 2005, 2006 — COMPLETE 2026-09-01; **PHASE 57 CLOSED 27/27**
+
+Package `GH-FIREWALL-OBSERVABILITY` (Sonnet, high, Amber; batch 77). The
+firewall's observability half, and the last three boxes of the phase: getting
+a suppressed result back, proving the reduction was safe, and showing what it
+saved.
+
+**2004 — expansion at four granularities.** `context-firewall show` already
+returned a whole result by its `gh-tool://` reference; it now also expands by
+candidate id, by file, and by line range, through the same subcommand rather
+than a second door — the line's own *"supported Glasshouse surface rather
+than an invented side channel"*. Every bad input refuses clearly: an unknown
+reference, an out-of-range candidate id, a file not in the result, a reversed
+range. Mutation *skip-refusal-fallback-to-whole* — returning the whole entry
+instead of refusing an out-of-range id — KILLED by
+`line_2004_an_out_of_range_candidate_id_refuses_clearly`. That refusal is the
+security-relevant half: the raw store holds unredacted output, and a
+too-generous expansion is how it would leak.
+
+**2005 — shadow comparison against the forwarded original.** A shadow run
+records both sides — `original_tokens`/`forwarded_tokens` and
+`retained_candidates`/`total_candidates` beside the `raw_ref` that lets a
+reader check for themselves — so recall and savings rest on recorded evidence
+rather than on a compression ratio. **And shadow stays shadow**: the harness
+receives the original, byte-identically. Mutation *shadow-emits-reduced-anyway*
+(dropping `&& mode != FirewallMode::Shadow` from the emit guard) — KILLED by
+`line_2005_a_shadow_mode_run_records_both_sides_and_forwards_the_original`,
+*"shadow mode must never substitute anything, whatever the flag says"*.
+**Re-run by the orchestrator on the merged tree and KILLED again by the same
+named test.**
+
+**2006 — mode and savings in `status`, from the RIGHT source.** The packet
+constrained this one hard and the constraint held: the ledger's
+`input_tokens`/`output_tokens` columns are documented as *a provider's own
+reported count* and are NULL for firewall rows by ruling, so savings could
+not come from there. They come from **`RawStore::all_entries`** — the
+per-session originals with their `original_token_estimate`, already durable
+— rendered as a session count, a result count and estimated tokens kept
+local. `git diff` confirms the package added **no** write to a provider token
+column anywhere. The section is absent entirely when the firewall is off
+(*"without cluttering the primary workflow"*), and says "no activity yet" when
+on but unused.
+
+**Gates.** Merged tree: `--lib firewall` 30 passed, `--lib config` 81 passed,
+`--lib` (cli) 8 passed, `firewall_observability` 16 passed — all 0 failed;
+`blast-radius.sh --targeted` every traced target passed. Scope was clean: the
+package touched only `cli.rs`, `firewall/mod.rs`, `firewall/store.rs`,
+`main.rs` and its own new test file, and never opened
+`routing/evidence.rs`, which was forbidden to it because a peer held it.
+
+**One report inaccuracy, minor and worth recording.** The mutation entry
+described the shadow guard's `change:` without naming its file, and the
+orchestrator's first re-run attempt aimed at `firewall/mod.rs`; the guard is
+at `main.rs:1872`. `mutate.sh` refused loudly (*"find string occurs 0
+times"*) rather than silently mutating nothing — the tool behaving exactly as
+designed, and the reason a re-run is cheap to attempt.
+
+## Phase 57, end to end
+
+Twenty-seven boxes across four batches in three days: the deterministic core
+and raw store (71), the harness bridge and shadow mode (72), the semantic
+reducer (76), and observability (77). The subsystem is off by default,
+provider-agnostic, harness-abstracted, fail-open, and measured — and the
+three properties it most needed are enforced by SHAPE rather than by
+discipline: the reducer cannot be handed a transcript (no field can carry
+one), it cannot generate (verdicts are ids, rebuild copies verbatim), and it
+cannot transmit past the privacy gate (the gate runs first). Each of those
+three has a mutation that was killed twice.
