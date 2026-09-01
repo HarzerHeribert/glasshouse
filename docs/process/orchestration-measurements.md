@@ -4276,3 +4276,120 @@ says what was started, never what is still running.
   *"so the scheduler can improve"* has no consumer while nothing scores on
   the estimate. **Both belong in the refusal register**, and neither was
   there when this session looked.
+
+## Batch 76 (2026-09-01, evening) — eleven boxes, three workers, and four orchestrator errors the process caught
+
+The successor Opus session's first batch, inherited hot from the Fable
+orchestrator at `4f0c1cf`. Map **1129 → 1140 (86%)**, eleven net boxes, nine
+commits, three Sonnet-high Amber packages.
+
+| package | boxes | note |
+|---|---|---|
+| `estimator-signals` | 1248, 1249, 1252, 1255 | 32C's estimator gains a learned reset window, a second horizon, an override and a disable switch |
+| `firewall-reducer` | 1997–2003 | Phase 57's semantic rung; 17 → 24 of 27 |
+| `pricing-channel` | **none — both held open** | mechanism + production caller landed; see below |
+
+**Cost.** 2026-09-01 output totalled **5.36M** for ~17 boxes closed across
+batches 72–76, ≈ **315k/box** — still on the wrong side of §86's 250k
+ceiling, and the second day in a row it has read that way. The two-day
+figure (~96k) remains flattered by 08-31's map restructure. **Treat the
+same-day number as the real one until a clean two-day window exists.** This
+session declined an investigation package on exactly that basis.
+
+### The one that did NOT close, and why that is the entry's most useful row
+
+`pricing-channel` built Phase 32G's price-metadata channel — `PriceTable`,
+`load_from_dir`, and `expected_marginal_cost` learning to say *unknown*
+instead of collapsing to free. Two mutations KILLED, six tests, clippy and
+fmt clean. **Both boxes were held open anyway.**
+
+Its own report named the reason in its limits: *"no production caller wires
+`PriceTable::load_from_dir` into main.rs yet"* — `main.rs` was held by two
+other workers and forbidden to it. That is `cluster-b.py`'s shape, the shape
+behind **all ten** wrongly-ticked boxes in this project's history. The
+script was run before any ruling and confirmed it: every reference lived in
+the two new files or their own doc comments.
+
+The orchestrator added the caller (in `session_router`, the one function all
+three ranking paths share) and **still held both boxes**, because no one had
+yet watched a `pricing.toml` change what the shipped binary prints — the
+worker's proof stopped at the `SessionRouter` API, and a live
+`glasshouse route --task` attempt produced no ranked candidate for an
+unrelated profile-config reason and was abandoned after two tries rather
+than dug into.
+
+**This is the first time the shape was caught BEFORE the tick rather than by
+a later audit.** Eleven instances, ten of them retrospective. The cost of
+catching it early was one held package and one named successor; the cost of
+the other ten was an audit worker each.
+
+### Four orchestrator errors, every one caught by a mechanism rather than by care
+
+Recorded because the pattern is identical in all four: **a section written
+from scratch where a correct idiom already existed.**
+
+1. **A premature "your gate has finished"** told to `estimator-signals`. The
+   wait loop matched the *test binaries'* paths, not `blast-radius.sh`
+   itself, so a gap between binaries ended it. **The worker checked `ps`,
+   disputed it, and was right.** Wait on the script's own pid
+   (`while kill -0`) — which the worker had already done correctly.
+2. **A bare `scripts/blast-radius.sh` in VERIFICATION COMMANDS**, in the
+   same section that said the full sweep was not owed. `estimator-signals`
+   resolved the contradiction the expensive way: 4 changed files traced
+   **802 symbols into ~90 test targets and 66 lib filters**, 25+ minutes,
+   and the load produced **three reds that were all load** — including
+   `handoff_lines` timing out at 20.05s while the main sweep passed that
+   same target **1-of-1 in 2.82s at the same moment**. `firewall-reducer`'s
+   packet, written by the *predecessor*, said `--targeted` and "your full
+   sweep is NOT owed". The idiom existed; it was not copied.
+3. **A one-sided co-edit claim.** The §77 ritual went into the new packet
+   only; `firewall-reducer`, already running, was never told to claim the
+   same files. The barrier read **1/1 claimants for a file two worktrees
+   were both editing**, and the Stop hook caught it. Reconciliation was
+   clean (hunks disjoint, closest pair 47 lines apart), but the bookkeeping
+   was wrong. `validate_round.py` mechanises this — it demands a literal
+   `COEDIT:` line in **both** packets — and the next round's two packets
+   were written that way.
+4. **A doc-comment-only change gated on rustdoc plus a compile.** `6117446`
+   fixed three product sources that cited a process document; one of them
+   was pinned by a **tripwire test asserting on the text of that very
+   comment**, and the trailing sweep went red. §79's rule — *once a grep
+   names a file, run its target; do not read it and decide* — was quoted at
+   two workers by the same orchestrator that then broke it. Fixed forward
+   in two commits (the second because the comment *explaining* the boundary
+   rule quoted the forbidden path literal and tripped it).
+
+**None reached main uncorrected.** A worker caught one, a hook caught one, a
+validator now blocks one, and the trailing sweep caught one — which is the
+trailing-sweep model working exactly as ruled on 2026-09-01: a red arrived,
+the line kept moving, the fix landed two commits later.
+
+### Two gates were red on main and nobody was running them
+
+- **`check-doc-boundary.sh`**: three product sources cited
+  `refusal-register.md`. Fixed by promoting both refusals into
+  `design-decisions.md` as decisions about behavior, which is what they were.
+- **`check-evidence-coverage.py`**: reported *"Phase 56A: 13 ticked boxes
+  with no evidence entry"*. The evidence existed and was thorough; no
+  heading spelled `Phase 56A` in the form the script matches. **Its own
+  docstring records this false-positive shape biting twice before.** This was
+  the third. Fixed on the documentation side rather than by loosening the
+  check — 101/102 → 102/102, no box touched.
+
+**Rule:** run every gate in CLAUDE.md's Verification list at the START of a
+session, not before a commit. Two of six were red on inherited `main`, and
+neither had anything to do with the work in flight.
+
+### Open questions this entry creates
+
+- Same-day out-per-box has now read ≈254k and ≈315k on consecutive
+  measurements. Is that a regime change, or the cost of a session that spent
+  heavily on inherited-gate repair and packet authoring rather than on boxes?
+  The next batch's row is the only thing that answers it.
+- Every one of the four errors was a from-scratch rewrite of an existing
+  idiom. Would a packet **template** derived from the last accepted packet —
+  rather than `new-packet.sh`'s empty skeleton — remove that class outright?
+- `PriceTable::empty()` tripped `validate_round.py`'s seam check while being
+  production-reachable as `Self::empty()`. The check greps one spelling. Two
+  such near-misses in one session (this and the 56A heading) suggest the
+  scripts' matchers deserve a pass of their own.
