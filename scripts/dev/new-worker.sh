@@ -148,6 +148,14 @@ fi
 WORKER_CACHE_DIR="$HOME/.cache/glasshouse-worker-targets/$NAME"
 mkdir -p "$WORKER_CACHE_DIR"
 mkdir -p "$CWD/.cargo"
+# Keep the cache config out of the worktree's untracked view: integrate.sh
+# copies every untracked file as a deliverable (ls-files --exclude-standard),
+# and without this exclude the config rode into the main checkout on
+# 2026-09-01 and silently redirected main builds at a worker's cache.
+EXCLUDE_FILE="$(git -C "$CWD" rev-parse --git-path info/exclude)"
+case "$EXCLUDE_FILE" in /*) : ;; *) EXCLUDE_FILE="$CWD/$EXCLUDE_FILE" ;; esac
+mkdir -p "$(dirname "$EXCLUDE_FILE")"
+grep -qx '\.cargo/' "$EXCLUDE_FILE" 2>/dev/null || echo '.cargo/' >> "$EXCLUDE_FILE"
 cat > "$CWD/.cargo/config.toml" <<CARGOCFG
 # Written by scripts/dev/new-worker.sh. Points this worktree's cargo builds at
 # a target-dir that outlives the worktree, keyed by worker NAME ($NAME), so a

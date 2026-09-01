@@ -124,6 +124,15 @@ for n in "${NAMES[@]}"; do
   # whole package — a tests-only worker has no tracked changes at all.
   git -C "$wt" ls-files --others --exclude-standard | while read -r f; do
     [ -n "$f" ] || continue
+    # A worker worktree's .cargo/config.toml is new-worker.sh's build-cache
+    # redirect, never a deliverable — copying it into the main checkout
+    # silently redirects every main build at a worker's cache (it happened,
+    # 2026-09-01, keyed fix-v1-1907-race). new-worker.sh also excludes it via
+    # the worktree's info/exclude; this is the belt to that suspender.
+    case "$f" in .cargo/*)
+      printf '  skipped  %-22s %s (worker build-cache config, never a deliverable)\n' "$n" "$f"
+      continue ;;
+    esac
     mkdir -p "$(dirname "$REPO/$f")"
     cp "$wt/$f" "$REPO/$f"
     printf '  copied   %-22s %s\n' "$n" "$f"
