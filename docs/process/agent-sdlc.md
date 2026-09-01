@@ -159,26 +159,18 @@ handoff, and create one accurate coherent commit. The Opus orchestrator is the
 only role that integrates, commits, or changes project-status records. Leave
 main clean at coherent boundaries.
 
-**Pushing to origin is rationed, and the ration is the point.** Cross-platform
-claims are unprovable without real runners, and a green local suite is precisely
-the state in which a platform-specific defect stays hidden — that is why the
-push exists. But `.github/workflows/ci.yml` fires **seven jobs** per push
-(`test` and `msrv` each across ubuntu/macos/windows, plus `lint`), and on
-private-repo billing **macOS bills at 10× and Windows at 2×**, so one push can
-cost hundreds of billable minutes and a monthly allowance dies in roughly ten.
-The user's instruction of record, 2026-08-31: *"this projects CI is way too
-demanding to be ran on github fully … only run in the github CI in the future
-when absolutely necessary."*
-
-So: **the local gate is the gate.** `scripts/ci-local.sh` covers macOS and Linux
-and drives a real **Windows VM** (`--windows-vm`); this machine *is* the macOS
-coverage, which makes the GitHub macOS leg the most redundant and most expensive
-job in the matrix. Push only when a specific contract cannot be settled locally
-or on the VM, batch a session's commits into **at most one** push, say in the
-commit why the run was needed — and never push a `claude/**` worker branch,
-which costs another seven jobs. Every push also sends the user a failure email,
-so noise here is a cost to a person, not only to quota. Pushing at all remains
-the orchestrator's job and nobody else's.
+**GitHub CI is manual-only; the local gate is the gate.** By user instruction
+(2026-08-31, then "just skip it on github" on 2026-09-01),
+`.github/workflows/ci.yml` triggers on **`workflow_dispatch` only** — a push
+fires nothing and costs nothing, on any branch. Cross-platform claims are
+settled by `scripts/ci-local.sh`, which covers macOS and Linux and drives a
+real **Windows VM** (`--windows-vm`); this machine *is* the macOS coverage.
+The GitHub jobs are kept intact for the rare contract that genuinely cannot be
+settled locally or on the VM: trigger them by hand from the Actions tab, and
+say in the triggering commit why the run was needed — the cost that motivated
+the change (seven jobs, macOS billed 10×, an allowance gone in ~10 runs)
+returns in full for every manual dispatch. Pushing at all remains the
+orchestrator's job and nobody else's.
 
 ### 9. Continue or checkpoint
 

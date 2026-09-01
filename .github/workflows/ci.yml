@@ -1,11 +1,13 @@
 name: CI
 
+# Manual-only since 2026-09-01, by user instruction: the local gate
+# (scripts/ci-local.sh --macos --linux --windows-vm) is the gate — this
+# machine IS the macOS coverage and a Windows VM covers that leg, so the
+# push-triggered matrix (7 jobs, macOS billed 10×) was pure cost. Run this
+# workflow from the Actions tab only when a contract genuinely cannot be
+# settled locally, and say why in the triggering commit.
 on:
-  push:
-    branches:
-      - main
-      - "claude/**"
-  pull_request:
+  workflow_dispatch:
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}

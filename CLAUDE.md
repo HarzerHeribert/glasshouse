@@ -384,24 +384,19 @@ batch 51's eight closures) · `pipeline.sh` (nags when the board runs dry) ·
 suppresses the macOS+Linux default**) · `blast-radius.sh` · `mutate.sh` ·
 `msrv-check.sh` · `check-doc-boundary.sh` · `check-evidence-coverage.py`
 
-**GitHub CI is rationed — the LOCAL gate is the gate.** User instruction of
-record, 2026-08-31: *"this projects CI is way too demanding to be ran on github
-fully … only run in the github CI in the future when absolutely necessary."*
-`.github/workflows/ci.yml` fires **seven jobs** per push (`test` and `msrv` each
-across ubuntu/macos/windows, plus `lint`), and macOS bills at **10×** and
-Windows at **2×** — one push can cost hundreds of billable minutes, and a fresh
-monthly allowance dies in about **ten**. Meanwhile `ci-local.sh` already covers
-macOS and Linux and drives a real **Windows VM**, and this machine *is* the
-macOS coverage, so the GitHub macOS leg is the most redundant and most expensive
-job in the matrix.
-
-Therefore: **do not push to "run CI", and do not push once per commit.** Batch a
-session's commits into **at most one** push, only when a specific contract
-cannot be settled locally or on the VM, and say in the commit why the run was
-needed. **Never push a `claude/**` worker branch** — the workflow triggers on
-those too, at another seven jobs. Every push also emails the user a failure, so
-noise costs a person, not just quota. Permission to push is not the constraint
-and never needs re-asking; **cost is.**
+**GitHub CI is manual-only — the LOCAL gate is the gate.** User instruction of
+record, 2026-08-31/09-01: *"this projects CI is way too demanding to be ran on
+github fully … only run in the github CI in the future when absolutely
+necessary"*, then *"if ci is good on this machine then just skip it on github."*
+`.github/workflows/ci.yml` therefore triggers on **`workflow_dispatch` only** —
+a push fires **nothing** and costs nothing, on any branch. The jobs are intact
+for the rare cross-platform contract that genuinely cannot be settled locally:
+run them from the Actions tab, and say in the triggering commit why the run was
+needed. The cost that motivated this stands if anyone re-adds a push trigger:
+seven jobs (`test`+`msrv` × 3 OS, plus `lint`), macOS billed **10×**, a fresh
+monthly allowance gone in about ten pushes. `ci-local.sh` covers macOS and
+Linux and drives a real **Windows VM**, and this machine *is* the macOS
+coverage. Pushing to main is now cost-free and needs no CI justification.
 
 **Sharing a contended file — read §77 before queueing on `main.rs`:**
 `coedit.sh claim|peers|diff|done|status|ready|list|release`. Contention on
