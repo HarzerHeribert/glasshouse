@@ -955,9 +955,21 @@ fn a_launch_under_one_entitlement_never_carries_the_other_accounts_variable() {
 /// **The scrub's other direction.** A session no entitlement describes — a
 /// plain native launch — carries *neither* account's variable: a session
 /// charged to no account has no business holding any account's key.
+///
+/// Since map line 372 closed (2026-09-01), an unpinned launch under
+/// automatic routing — the default — ranks every enabled profile
+/// destination, the per-account ones included, so the ranking may
+/// legitimately land on an account and carry that account's credential into
+/// the launch it now serves (the previous test proves exactly that scrub).
+/// This test's premise is the *other* path — a session no entitlement
+/// serves — so it turns automatic routing off (map line 1712's own switch),
+/// which keeps the unpinned launch native.
 #[test]
 fn a_launch_no_entitlement_serves_carries_no_accounts_variable() {
-    let binary = Binary::with_config(&pool_config());
+    let binary = Binary::with_config(&format!(
+        "{}\n[routing]\nautomatic = false\n",
+        pool_config()
+    ));
 
     let out = binary.glasshouse(&["launch", "claude-code", "--headless"]);
     let said = Binary::both_streams(&out);

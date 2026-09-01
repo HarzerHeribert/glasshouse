@@ -44,6 +44,7 @@
 //! `tests::serialized_form_has_no_secret_capable_field` for a structural
 //! guard, not just a string search.
 
+pub mod capability;
 pub mod pairing;
 pub mod response;
 
@@ -842,6 +843,16 @@ pub struct ProviderConfig {
     /// as eligible as it was before this field existed.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     model_ceilings: BTreeMap<String, ConfiguredWorkloadTier>,
+    /// Calibrated model-capability records — Phase 34F, capability map
+    /// lines 1475–1479 and 1482–1485, widening [`ProviderConfig::model_ceilings`]
+    /// to the rest of that neighbourhood rather than duplicating it. Keyed
+    /// by the same model identifier `model_ceilings` uses; this provider
+    /// entry is the `backend` axis capability map line 1482 asks calibration
+    /// to stay local to. See [`capability::ModelCapabilityRecord`] for the
+    /// record's other narrowing fields and [`capability::resolve_ceiling`]
+    /// for how its ceiling and this field's own override reconcile.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    model_capabilities: BTreeMap<String, capability::ModelCapabilityRecord>,
     /// A prompt transformation this backend performs on the way through —
     /// Phase 9K line 609.
     ///
@@ -2499,6 +2510,7 @@ impl ProviderConfig {
             free_models: Vec::new(),
             metered_models: Vec::new(),
             model_ceilings: BTreeMap::new(),
+            model_capabilities: BTreeMap::new(),
             prompt_transform: None,
             quota: None,
         }
@@ -2627,6 +2639,57 @@ impl ProviderConfig {
         self.model_ceilings
             .get(model)
             .map(|configured| configured.tier())
+    }
+
+    /// The calibrated capability records the user configured for this
+    /// provider — Phase 34F, capability map line 1475. See the field's own
+    /// doc for why `model` and `backend` are not fields of the record
+    /// itself.
+    pub fn model_capabilities(&self) -> &BTreeMap<String, capability::ModelCapabilityRecord> {
+        &self.model_capabilities
+    }
+
+    pub fn set_model_capabilities(
+        &mut self,
+        records: BTreeMap<String, capability::ModelCapabilityRecord>,
+    ) -> &mut Self {
+        self.model_capabilities = records;
+        self
+    }
+
+    /// The calibrated record for `model` on this provider, or `None` when
+    /// nobody has recorded one — capability map line 1475's "configurable
+    /// data" read back.
+    pub fn model_capability(&self, model: &str) -> Option<&capability::ModelCapabilityRecord> {
+        self.model_capabilities.get(model)
+    }
+
+    /// The one lookup capability map lines 1476, 1478, 1479, and 1484 share:
+    /// [`ProviderConfig::ceiling_of`]'s own override always wins; failing
+    /// that, `model`'s capability record contributes its initial ceiling
+    /// (capped by its task-kind suitability) when the user assigned it
+    /// themselves, or only a non-binding prior when a benchmark seeded it.
+    /// See [`capability::resolve_ceiling`] for why a benchmark-derived
+    /// record can rank but never refuse.
+    ///
+    /// **This lookup is context-blind** — it knows only `model` and the
+    /// provider `self` is — and only a record that states no
+    /// harness/launch-profile/protocol narrowing at all
+    /// ([`capability::ModelCapabilityRecord::is_context_general`]) is
+    /// eligible here. A record that narrows to even one of those axes is
+    /// filtered out rather than applied without checking them: this path
+    /// has no harness, launch profile, or protocol in hand to check a
+    /// narrowed record's [`capability::ModelCapabilityRecord::applies_to`]
+    /// against — that context exists only in `main.rs`'s destination
+    /// construction — so honouring a narrowed record here would leak its
+    /// calibration onto every destination sharing this provider and model,
+    /// including ones on a harness the record was never calibrated for.
+    /// Capability map line 1482.
+    pub fn resolved_ceiling(&self, model: &str) -> capability::CeilingResolution {
+        let record = self
+            .model_capability(model)
+            .filter(|record| record.is_context_general());
+        capability::resolve_ceiling(self.ceiling_of(model), record)
     }
 
     /// What this backend does to a prompt on the way through, as the user
@@ -5158,16 +5221,29 @@ impl<'a> EffectiveConfig<'a> {
     /// capped. The layer is still reported, so a reader can tell "the project
     /// layer states no ceiling for this model" from "nothing configures this
     /// provider"; the value is the same either way.
+    ///
+    /// Reads through [`ProviderConfig::resolved_ceiling`] rather than
+    /// [`ProviderConfig::ceiling_of`] directly — Phase 34F widens this same
+    /// call, the one `main.rs::destination_tier_ceiling` makes for every
+    /// destination the shipped binary builds, to also honour a
+    /// capability-record ceiling once no override states one.
+    /// [`capability::CeilingResolution::hard_ceiling`] is what keeps a
+    /// benchmark-provenance record out of this value: only the user's own
+    /// word, override or capability record, may narrow what a destination is
+    /// established to serve.
     pub fn model_ceiling(
         &self,
         provider: &str,
         model: &str,
     ) -> Layered<Option<crate::routing::classify::WorkloadTier>> {
         if let Some(config) = self.project.and_then(|p| p.providers().get(provider)) {
-            return Layered::new(config.ceiling_of(model), Layer::Project);
+            return Layered::new(
+                config.resolved_ceiling(model).hard_ceiling(),
+                Layer::Project,
+            );
         }
         if let Some(config) = self.user.providers().get(provider) {
-            return Layered::new(config.ceiling_of(model), Layer::User);
+            return Layered::new(config.resolved_ceiling(model).hard_ceiling(), Layer::User);
         }
         Layered::new(None, Layer::Default)
     }

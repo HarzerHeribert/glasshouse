@@ -479,10 +479,20 @@ impl Destination {
     ///
     /// **The production caller is `main.rs::routing_destinations`**, which
     /// attaches every destination the shipped binary builds with
-    /// `destination_tier_ceiling`'s reading of the user's own
-    /// `providers.<p>.model_ceilings` (map line 1796) — so the gate in
+    /// `destination_tier_ceiling`'s reading of
+    /// [`crate::config::EffectiveConfig::model_ceiling`] — so the gate in
     /// `hard_constraint` and the term in [`workload_tier_fit`] act on the
     /// binary's path, not only on the library's.
+    ///
+    /// Phase 34F widened what that reading may establish without changing
+    /// this method or its caller: `model_ceiling` now reads
+    /// `providers.<p>.model_ceilings` (map line 1796) *or* a matching
+    /// `providers.<p>.model_capabilities` record's own ceiling, through
+    /// [`crate::config::capability::CeilingResolution::hard_ceiling`]. Only a
+    /// record the user assigned themselves can reach here — a
+    /// benchmark-provenance record's ceiling is a prior, never a hard
+    /// constraint, and never arrives as a `Some` this method sees (capability
+    /// map line 1484).
     ///
     /// It is still `None` for most destinations, and that is the design
     /// rather than a gap: a ceiling exists only where the user stated one for

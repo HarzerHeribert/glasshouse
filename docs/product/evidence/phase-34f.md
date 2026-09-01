@@ -40,3 +40,57 @@ Recorded scope limits — stated by the worker, not discovered later:
 - no Windows leg run
 - line 1481 (calibration suggestions) is explicitly not built here
 
+
+# Lines 1475–1479, 1483–1485 — COMPLETE 2026-09-01; 1482 OPEN by ruling
+
+Package `GH-TIER-AXIS-34F` (Sonnet, high, Amber; batch 70b). One mechanism:
+`ModelCapabilityRecord` (`config/capability.rs`, new) under
+`providers.<p>.model_capabilities.<model>`, resolved by `resolve_ceiling` /
+`ProviderConfig::resolved_ceiling` and consumed in production through the
+already-wired `EffectiveConfig::model_ceiling` →
+`main.rs::destination_tier_ceiling` → `Destination::with_tier_ceiling` chain
+— zero `main.rs` lines changed, proved on the shipped binary
+(`a_configured_capability_record_excludes_a_destination_below_the_required_tier_on_the_shipped_binary`).
+
+- **1475** stored as configurable data; unknown fields refused
+  (`deny_unknown_fields`), round-trip tested.
+- **1476** initial ceiling, resolving when no override exists.
+- **1477** structured-output suitability recorded ("record" is the line's
+  verb; 34C is its consumer phase).
+- **1478** task-kind suitability: `SupportOnly` caps the effective ceiling at
+  Leaf, gate-reachable; a record with no stated ceiling stays unknown.
+- **1479** override precedence: `model_ceilings` beats the seeded ceiling
+  beats nothing. Mutation `invert-1479-precedence` KILLED by
+  `line_1479_the_override_beats_the_seeded_ceiling`.
+- **1483** pairing class + evidence strength stored alongside ("store" is the
+  verb; nothing consumes them yet, and the line does not ask it).
+- **1484** benchmark provenance can rank and can never refuse:
+  `CeilingResolution::hard_ceiling` returns `None` for `Prior`, the identical
+  ceiling with `User` provenance does bind, and `explain()` says "not proof".
+- **1485** two provider entries with the same nominal model resolve
+  independently — the provider entry IS the backend axis of the key.
+
+**1482 stays OPEN, and the ruling matters.** The record stores the
+harness/launch-profile/protocol narrowing and `applies_to` enforces it in
+isolation — but the live resolution path reads records by `(provider, model)`
+alone. The worker's first submission consumed scoped records on that
+context-blind path anyway, which would have let a harness-scoped record cap
+every harness; the orchestrator caught it in review and the worker fixed it
+the same hour: `is_context_general` makes any record stating a narrowing axis
+INERT to context-blind resolution
+(`line_1482_a_harness_scoped_record_is_inert_to_context_blind_resolution`,
+with an unscoped control). Conservative-inert is safe; it is not the line's
+promise. 1482 closes when a caller with harness/profile/protocol context in
+hand — `main.rs`, per the broker package's accepted seam: attach the tier to
+`Destination` beside `tier_ceiling` — actually applies scoped records
+per-context. That successor also unblocks line 1970's tier steps.
+
+Gates on the merged tree (batch 70b integration): blast radius across the
+full traced set; the two reds were `shell::settings_persistence_tests`
+(documented Gatekeeper flake family, file untouched, green in isolation) and
+`entitlement_pool::a_launch_no_entitlement_serves_carries_no_accounts_variable`
+— a real cross-patch consequence of batch 70a's line-372 closure, not of this
+package: an unpinned launch under default-on automatic routing may now
+legitimately land on an account destination. The test's premise (a launch no
+entitlement serves) now requires automatic routing off, which is what it
+states since 70b; 21/21 twice on the merged tree.

@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1088 / 1305 mandatory capabilities (83%)** — 217 open across 47 phases.
+**1096 / 1305 mandatory capabilities (84%)** — 209 open across 47 phases.
 
 ## Where the work is
 
@@ -44,6 +44,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 21F | Memory retrieval quality | **2** | 9 | `927` |
 | Phase 32D | Normalized remaining-capacity score | **2** | 10 | `1257` |
 | Phase 33 | Resource health | **2** | 13 | `1309` |
+| Phase 34F | Model capability and tier calibration | **2** | 9 | `1473` |
 | Phase 38 | Quota-preserving routing | **2** | 5 | `1604` |
 | Phase 55 | V1 completion definition | **2** | 21 | `1910` |
 | Phase 28 | File-aware memory lookup | **3** | 2 | `1137` |
@@ -62,7 +63,6 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 32A | Unified quota and capacity model | **8** | 13 | `1196` |
 | Phase 32E | Burn rate and exhaustion forecasting | **10** | 0 | `1272` |
 | Phase 32G | Provider-aware request-cost estimation | **10** | 0 | `1296` |
-| Phase 34F | Model capability and tier calibration | **10** | 1 | `1473` |
 | Phase 35A | Candidate generation | **10** | 1 | `1504` |
 | Phase 9K | Harness-aware response profiles | **11** | 26 | `578` |
 | Phase 35B | Candidate scoring | **11** | 14 | `1523` |
@@ -76,7 +76,7 @@ closures are usually at the top. Open the map at the line number given.
 
 Every phase with **three or fewer** open lines, quoted verbatim. These are
 where a single package finishes a phase, so they are listed here and the
-other ~175 open lines are not.
+other ~165 open lines are not.
 
 For any other phase: `scripts/discover.py --phase <id>` prints its open
 lines and evidence together. **Do not open the 178 KB map to read them.**
@@ -179,6 +179,11 @@ these unwrapped.
 
 - **1323** ☐ Avoid background probing at an aggressive rate that wastes free-request pools.
 - **1325** ☐ Record whether a health observation came from a real task, a retry, a repair attempt, or an explicit probe.
+
+### Phase 34F — Model capability and tier calibration  (2 open, 9 closed)
+
+- **1481** ☐ Use observed outcomes to suggest calibration changes without silently rewriting the user’s model policy.
+- **1482** ☐ Keep capability calibration local to the configured harness, launch profile, model, backend, and relevant protocol path because the same model may behave differently behind different harnesses, gateways, translations, or quantizations.
 
 ### Phase 38 — Quota-preserving routing  (2 open, 5 closed)
 
