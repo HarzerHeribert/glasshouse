@@ -30,10 +30,19 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 // ---------------------------------------------------------------------------
 
 /// `JobKind`'s variant set is exactly {Classification, MemoryExtraction,
-/// Reranking, Evaluation} and every one is a name, not a session: the
-/// exhaustive match below stops compiling the day a variant is added without
-/// updating this test, which is what makes the list a claim about *all* of
-/// them rather than the ones somebody remembered.
+/// Reranking, Evaluation, ContextReduction} and every one is a name, not a
+/// session: the exhaustive match below stops compiling the day a variant is
+/// added without updating this test, which is what makes the list a claim
+/// about *all* of them rather than the ones somebody remembered.
+///
+/// `ContextReduction` (Phase 57B, map line 1997) is this roster's designed
+/// tripwire firing: adding a fifth variant broke this match on purpose, and
+/// updating it here is the signal — per this line's own doc comment and
+/// Phase 39's 1625 refusal — to re-read whether 1625 is now reachable. It is
+/// not: 1625 is about *reranking* (a job that reorders candidates), and the
+/// context reducer never reorders anything — it only keeps or drops the
+/// candidates it is given, by id. `docs/product/evidence/phase-39.md`'s
+/// 1625 row stays open, and this package does not close it.
 ///
 /// `DisposableRouting::choose` takes a `JobKind` by value — there is no
 /// "unknown kind" it could be handed, because the type has no variant able to
@@ -50,15 +59,17 @@ fn job_kind_is_a_closed_vocabulary_of_bounded_internal_calls() {
         JobKind::MemoryExtraction,
         JobKind::Reranking,
         JobKind::Evaluation,
+        JobKind::ContextReduction,
     ];
 
-    // Exhaustiveness: a fifth variant stops this compiling.
+    // Exhaustiveness: a sixth variant stops this compiling.
     for kind in kinds {
         match kind {
             JobKind::Classification
             | JobKind::MemoryExtraction
             | JobKind::Reranking
-            | JobKind::Evaluation => {}
+            | JobKind::Evaluation
+            | JobKind::ContextReduction => {}
         }
     }
 
@@ -69,7 +80,8 @@ fn job_kind_is_a_closed_vocabulary_of_bounded_internal_calls() {
             "classification",
             "memory extraction",
             "reranking",
-            "evaluation"
+            "evaluation",
+            "context-reduction",
         ],
         "the closed vocabulary a disposable job may name itself with has changed"
     );

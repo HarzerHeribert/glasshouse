@@ -854,12 +854,21 @@ pub enum ContextFirewallCommand {
         #[arg(long, value_name = "TOKENS", default_value_t = 4000)]
         passthrough_tokens: u64,
 
-        /// Reserved for the semantic-reduction package (map lines
-        /// 1997-2003); deterministic reduction here does not read it.
-        /// Accepted now so the 57A bridge's registered command line does
-        /// not have to change shape when that package lands.
-        #[arg(long, value_name = "TOKENS")]
-        target_tokens: Option<u64>,
+        /// Map line 1997's semantic gate: the deterministic ladder's own
+        /// forwarded size must exceed this before the semantic reducer is
+        /// ever asked, whatever mode or reducer `[context_firewall]`
+        /// configures. Renamed from batch 71's reserved `--target-tokens`,
+        /// which this package is.
+        #[arg(long, value_name = "TOKENS", default_value_t = crate::config::firewall::DEFAULT_MIN_SEMANTIC_TOKENS)]
+        min_semantic_tokens: u64,
+
+        /// The stated task this hook invocation is part of — map line
+        /// 1998's "the stated task the hook was given". Empty (the
+        /// default) is allowed and common: not every invocation has one,
+        /// and the semantic reducer never sees the conversational
+        /// transcript regardless.
+        #[arg(long, default_value = "")]
+        task: String,
 
         /// A tool eligible for reduction. Repeatable. Unset, this resolves
         /// to Grep, Glob, Read, and Bash's stdout; Edit, Write, and any

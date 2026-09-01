@@ -64,6 +64,16 @@ pub enum JobKind {
     Reranking,
     /// Glasshouse's own automated evaluation or test run.
     Evaluation,
+    /// The context firewall's semantic reducer (Phase 57B, map line 1997) —
+    /// a disposable job that selects which of the deterministic ladder's
+    /// retained candidates a coding session actually needs. Never a
+    /// reranking job: it never reorders the candidates it is given, only
+    /// keeps or drops them by id. Adding this variant fires
+    /// `disposable_interface.rs`'s roster tripwire by design — see that
+    /// test's own doc comment and Phase 39's 1625 refusal, which this
+    /// variant does not by itself make reachable (1625 is about
+    /// *reranking*, and this job never reorders).
+    ContextReduction,
 }
 
 impl JobKind {
@@ -73,6 +83,7 @@ impl JobKind {
             Self::MemoryExtraction => "memory extraction",
             Self::Reranking => "reranking",
             Self::Evaluation => "evaluation",
+            Self::ContextReduction => "context-reduction",
         }
     }
 }

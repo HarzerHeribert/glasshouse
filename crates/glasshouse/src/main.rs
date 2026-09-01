@@ -201,7 +201,8 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
         Some(Command::ContextFirewall { command }) => match command {
             ContextFirewallCommand::Hook {
                 passthrough_tokens,
-                target_tokens: _,
+                min_semantic_tokens,
+                task,
                 tools,
                 emit_updated_output,
                 mode,
@@ -221,6 +222,8 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
                 context_firewall_hook(
                     &runtime,
                     *passthrough_tokens,
+                    *min_semantic_tokens,
+                    task,
                     tools,
                     *emit_updated_output,
                     mode,
@@ -1745,6 +1748,8 @@ fn record_entitlement_fallback(
 fn context_firewall_hook(
     runtime: &Runtime,
     passthrough_tokens: u64,
+    min_semantic_tokens: u64,
+    task: &str,
     tools: &[String],
     emit_updated_output: bool,
     mode: glasshouse::config::firewall::FirewallMode,
@@ -1774,6 +1779,37 @@ fn context_firewall_hook(
     let store = glasshouse::firewall::RawStore::open(runtime.state_dir().join("context-firewall"));
     let now_unix = glasshouse::provider::cache::now_unix_seconds();
 
+    // Phase 57B, map lines 1997-2003: resolved once, from configuration and
+    // disposable routing, and handed to `process` as a trait object — the
+    // core itself never touches `DisposableRouting`, a `JobKind`, or a
+    // provider (see `firewall::mod`'s own header). A configuration this
+    // build cannot read degrades to "no reducer" — the same fail-open
+    // posture every other step of this hook already has.
+    let user = UserConfig::load(runtime.paths()).ok();
+    let project = config::load_project_config(runtime.project())
+        .ok()
+        .flatten();
+    let aggressive_drops_uncertain = user.as_ref().is_some_and(|user| {
+        EffectiveConfig::new(user, project.as_ref())
+            .context_firewall_aggressive_drops_uncertain()
+            .value
+    });
+    let active_reducer = match &user {
+        Some(user) => disposable_reducer(runtime, user, project.as_ref(), &event.session_id),
+        None => None,
+    };
+    let tool_query = glasshouse::firewall::adapter::tool_query(&event.tool_input);
+    let file_paths = glasshouse::firewall::adapter::tool_input_paths(&event.tool_input);
+    let semantic = glasshouse::firewall::SemanticContext {
+        mode,
+        reducer: active_reducer.as_deref(),
+        task,
+        tool_query: tool_query.as_deref(),
+        file_paths: &file_paths,
+        min_semantic_tokens,
+        aggressive_drops_uncertain,
+    };
+
     let outcome = glasshouse::firewall::process(
         &store,
         &config,
@@ -1782,6 +1818,7 @@ fn context_firewall_hook(
         now_unix,
         &event.tool_name,
         normalized,
+        &semantic,
     );
 
     record_context_firewall_telemetry(runtime, &outcome, now_unix);
@@ -1858,6 +1895,38 @@ fn record_context_firewall_telemetry(
         .with_timing(Some(now_unix), Some(now_unix));
     if let Err(err) = ledger.record(observation, now_unix) {
         tracing::warn!(error = %err, "could not record a context-firewall event");
+    }
+
+    // Map line 1987's second half (the 1987 ruling in
+    // `docs/product/evidence/phase-57.md`): a reducer call is a REAL model
+    // call, so its own row carries the real provider/model identity and the
+    // provider-reported token counts in the ledger's token columns —
+    // distinct from the bookkeeping row above, which is not a model call
+    // and therefore never carries tokens. Recorded whenever a call actually
+    // completed with a parseable reply, applied or not (map line 1987: the
+    // cost was real either way).
+    if let glasshouse::firewall::Outcome::Reduced {
+        semantic: Some(semantic),
+        ..
+    } = outcome
+        && let Some(call) = &semantic.call
+    {
+        let call_observation = NewObservation::new(call.provider.clone(), call.model.clone())
+            .with_harness(Some(
+                glasshouse::integrations::IntegrationId::ClaudeCode.slug(),
+            ))
+            .with_purpose(Some(CONTEXT_FIREWALL_REDUCTION_PURPOSE))
+            .with_route(call.route.clone())
+            .with_quota_context(Some(outcome.tool_name().to_owned()))
+            .with_timing(Some(now_unix), Some(now_unix))
+            .with_tokens(
+                call.input_tokens,
+                call.output_tokens,
+                call.cached_input_tokens,
+            );
+        if let Err(err) = ledger.record(call_observation, now_unix) {
+            tracing::warn!(error = %err, "could not record a context-firewall reducer call");
+        }
     }
 }
 
@@ -6585,6 +6654,171 @@ fn disposable_candidates(
         }
     }
     candidates
+}
+
+/// Phase 57B's production caller (map lines 1997, 2002): resolve
+/// `[context_firewall].reducer` (and its optional `reducer_model` pin) into
+/// a real [`glasshouse::firewall::reducer::Reducer`], routed through
+/// [`glasshouse::routing::disposable::DisposableRouting`] over the same
+/// candidates [`disposable_candidates`] builds for every other disposable
+/// job — never a firewall-private provider client (map line 1997).
+///
+/// `None` whenever there is nothing to route: no `reducer` configured (map
+/// line 1992's guarantee — an absent reducer disables the whole semantic
+/// stage), no configured candidate matches it, or
+/// [`glasshouse::routing::disposable::DisposableRouting::choose`] found no
+/// resource at all — including because an entitlement's `deny_job_kinds`
+/// refuses [`glasshouse::routing::disposable::JobKind::ContextReduction`]
+/// for every matching candidate, which is this line's own per-entitlement
+/// job-kind rule applying unchanged.
+fn disposable_reducer(
+    runtime: &Runtime,
+    user: &UserConfig,
+    project: Option<&ProjectConfig>,
+    session_id: &str,
+) -> Option<Box<dyn glasshouse::firewall::reducer::Reducer>> {
+    use glasshouse::provider::registry::Locality;
+    use glasshouse::routing::disposable::{DisposableRouting, JobKind};
+    use glasshouse::routing::free::{FreePool, FreePreferences};
+
+    let effective = EffectiveConfig::new(user, project);
+    let reducer_ref = effective.context_firewall_reducer().value?;
+    let reducer_model_pin = effective.context_firewall_reducer_model().value;
+    let local_only = effective.context_firewall_reducer_local_only().value;
+
+    let secrets = glasshouse::secret::native::PreferNativeSecretStore::detect();
+    let now_unix = glasshouse::provider::cache::now_unix_seconds();
+    let telemetry = glasshouse::provider::resources::GatheredTelemetry::new().gather_gateway_quota(
+        &glasshouse::provider::telemetry::GatewayQuotaCache::new(runtime.paths()),
+    );
+    let candidates =
+        disposable_candidates(user, project, &effective, &secrets, &telemetry, now_unix);
+
+    let mut filtered: Vec<_> = candidates
+        .into_iter()
+        .filter(|candidate| {
+            candidate.provider() == reducer_ref
+                || candidate
+                    .entitlement()
+                    .is_some_and(|entitlement| entitlement.name() == reducer_ref)
+        })
+        .filter(|candidate| {
+            reducer_model_pin
+                .as_deref()
+                .is_none_or(|model| candidate.model() == model)
+        })
+        .collect();
+    if local_only {
+        filtered.retain(|candidate| candidate.locality() == Some(Locality::Local));
+    }
+    if filtered.is_empty() {
+        return None;
+    }
+
+    let free_preferences = FreePreferences::new()
+        .with_order(
+            effective
+                .free_resource_order()
+                .value
+                .iter()
+                .map(|order| order.to_key())
+                .collect(),
+        )
+        .with_disabled(
+            effective
+                .free_resource_disabled()
+                .value
+                .iter()
+                .map(|disabled| disabled.to_key())
+                .collect(),
+        )
+        .with_pin(
+            effective
+                .free_resource_pin()
+                .value
+                .as_ref()
+                .map(|pin| pin.to_key()),
+        );
+    let reserve_override = glasshouse::routing::disposable::ReserveOverride::for_sessions(
+        effective.reserve_override_sessions().value,
+    )
+    .deciding_for(session_id.to_string());
+    let routing = DisposableRouting::for_support_work(
+        effective.prefer_free_routing().value,
+        free_preferences,
+    )
+    .with_reserve_override(reserve_override)
+    .with_reserve_policy(
+        effective
+            .reserve_policies()
+            .for_scope(glasshouse::routing::pressure::ReserveScope::Background),
+    );
+
+    let pool = FreePool::new();
+    let choice = routing
+        .choose(
+            JobKind::ContextReduction,
+            &filtered,
+            &pool,
+            std::time::Instant::now(),
+            None,
+        )
+        .ok()?;
+
+    match context_firewall_reducer_model(user, project, choice.provider(), choice.model()) {
+        Ok(reducer) => Some(Box::new(reducer)),
+        Err(err) => {
+            tracing::warn!(error = %err, "the configured context-firewall reducer cannot be used");
+            None
+        }
+    }
+}
+
+/// Build the [`glasshouse::firewall::reducer::ConfiguredReducer`]
+/// `DisposableRouting` chose — [`classification_model`]'s exact shape,
+/// restated for the reducer's own type, since both build a real client from
+/// a provider name and a model name after routing has already decided them.
+fn context_firewall_reducer_model(
+    user: &UserConfig,
+    project: Option<&ProjectConfig>,
+    provider_name: &str,
+    model_name: &str,
+) -> Result<glasshouse::firewall::reducer::ConfiguredReducer, String> {
+    use glasshouse::firewall::reducer::{ConfiguredReducer, ConfiguredReducerError};
+    use glasshouse::secret::{SecretRef, SecretStore as _};
+
+    let Some(provider_config) = project
+        .and_then(|p| p.providers().get(provider_name))
+        .or_else(|| user.providers().get(provider_name))
+    else {
+        return Err(format!(
+            "the context-firewall reducer names `{provider_name}`, which this project has not \
+             configured"
+        ));
+    };
+    if !provider_config.enabled() {
+        return Err(format!(
+            "the context-firewall reducer names `{provider_name}`, which is disabled"
+        ));
+    }
+    let provider = provider_config.to_provider(provider_name).map_err(|err| {
+        format!("the context-firewall reducer's provider does not resolve: {err}")
+    })?;
+
+    let secrets = glasshouse::secret::native::PreferNativeSecretStore::detect();
+    let credential = provider
+        .credential_env
+        .iter()
+        .find_map(|var| secrets.resolve(&SecretRef::Environment { var: var.clone() }));
+
+    ConfiguredReducer::new(&provider, model_name, credential).map_err(|err| match err {
+        ConfiguredReducerError::UnsupportedProtocol { protocol, .. } => format!(
+            "the context-firewall reducer speaks OpenAI chat completions, and \
+             `{provider_name}` serves `{protocol}`; configure a provider that serves \
+             openai-chat"
+        ),
+        other => format!("the context-firewall reducer cannot be used: {other}"),
+    })
 }
 
 /// What `routing_observations.purpose` records for a call `glasshouse

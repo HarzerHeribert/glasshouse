@@ -775,6 +775,7 @@ fn no_repository_summarization_job_exists_to_route_cheaply_yet() {
         JobKind::MemoryExtraction,
         JobKind::Reranking,
         JobKind::Evaluation,
+        JobKind::ContextReduction,
     ];
     for kind in kinds {
         assert!(
@@ -785,12 +786,18 @@ fn no_repository_summarization_job_exists_to_route_cheaply_yet() {
     }
     // Exhaustiveness: if a variant is added, this match stops compiling and
     // the list above stops being a claim about all of them.
+    //
+    // GH-FIREWALL-REDUCER added `JobKind::ContextReduction` (Phase 57B, map
+    // line 1997) and is updating this arm as that addition's own tripwire —
+    // this line does not by itself bear on 1608's summarization refusal,
+    // which stays open.
     for kind in kinds {
         match kind {
             JobKind::Classification
             | JobKind::MemoryExtraction
             | JobKind::Reranking
-            | JobKind::Evaluation => {}
+            | JobKind::Evaluation
+            | JobKind::ContextReduction => {}
         }
     }
 }

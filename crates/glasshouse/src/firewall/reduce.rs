@@ -25,6 +25,20 @@
 const BLOB_MIN_CHARS: usize = 500;
 const BLOB_KEEP_CHARS: usize = 60;
 
+/// One line-granular unit the deterministic ladder actually forwarded, kept
+/// verbatim and addressed by a stable id — the seam Phase 57B's semantic
+/// reducer plugs into (map lines 1997-2003). `id` is this candidate's
+/// position among the *retained* output, in forwarding order, so a reducer
+/// that names an id back can only ever refer to bytes this module itself
+/// produced; nothing downstream ever rebuilds a result from anything but
+/// this list (map line 1999's "never generate evidence" containment
+/// guarantee, extended one stage further).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Candidate {
+    pub id: usize,
+    pub text: String,
+}
+
 /// The forwarded text plus how many line/run/blob decisions the ladder made
 /// and how many of them survived byte-for-byte — the provenance header's
 /// "retained/total candidate counts" (map line 1986). A blob elision counts
@@ -36,6 +50,24 @@ pub struct Reduction {
     pub forwarded: String,
     pub total_candidates: usize,
     pub retained_candidates: usize,
+    /// Every candidate this reduction actually forwarded, in the same order
+    /// concatenating their `text` fields reproduces `forwarded` exactly.
+    /// Populated even when nothing calls the semantic reducer — a `Vec` here
+    /// costs nothing a passthrough-mode caller has to pay for, and having it
+    /// unconditionally is what keeps `forwarded` and `candidates` from ever
+    /// being computed by two different passes that could disagree.
+    pub candidates: Vec<Candidate>,
+}
+
+/// Append `text` to both the forwarded body and the candidate list, as one
+/// operation — the two must never drift, since [`Candidate::text`]'s whole
+/// purpose is to be an exact slice of what `forwarded` actually carries.
+fn forward(forwarded: &mut String, candidates: &mut Vec<Candidate>, text: &str) {
+    forwarded.push_str(text);
+    candidates.push(Candidate {
+        id: candidates.len(),
+        text: text.to_owned(),
+    });
 }
 
 /// Run the deterministic ladder over `original`. Never called below the
@@ -43,6 +75,7 @@ pub struct Reduction {
 /// decision.
 pub fn reduce(original: &str) -> Reduction {
     let mut forwarded = String::with_capacity(original.len());
+    let mut candidates = Vec::new();
     let mut seen_nonblank: std::collections::HashSet<&str> = std::collections::HashSet::new();
     let mut prev_line_was_blank = false;
     let mut total_candidates = 0usize;
@@ -58,7 +91,7 @@ pub fn reduce(original: &str) -> Reduction {
                 // A later line in the same blank run: dropped, positively —
                 // "blank" is decided by `trim().is_empty()`, nothing else.
             } else {
-                forwarded.push_str(line);
+                forward(&mut forwarded, &mut candidates, line);
                 retained_candidates += 1;
             }
             prev_line_was_blank = true;
@@ -76,11 +109,17 @@ pub fn reduce(original: &str) -> Reduction {
         seen_nonblank.insert(content);
 
         if content.len() >= BLOB_MIN_CHARS && !content.chars().any(char::is_whitespace) {
-            elide_blob(&mut forwarded, line, content);
+            let mut blob = String::new();
+            elide_blob(&mut blob, line, content);
+            forwarded.push_str(&blob);
+            candidates.push(Candidate {
+                id: candidates.len(),
+                text: blob,
+            });
             continue;
         }
 
-        forwarded.push_str(line);
+        forward(&mut forwarded, &mut candidates, line);
         retained_candidates += 1;
     }
 
@@ -88,7 +127,23 @@ pub fn reduce(original: &str) -> Reduction {
         forwarded,
         total_candidates,
         retained_candidates,
+        candidates,
     }
+}
+
+/// Rebuild a forwarded body from exactly the candidates in `keep`, in their
+/// original order — map line 1999's "rebuild the final result from trusted
+/// original candidates by id". `candidates` is always the untouched list
+/// [`reduce`] produced; nothing here ever reads reducer-generated text, only
+/// reducer-generated ids.
+pub fn rebuild(candidates: &[Candidate], keep: &std::collections::HashSet<usize>) -> String {
+    let mut out = String::new();
+    for candidate in candidates {
+        if keep.contains(&candidate.id) {
+            out.push_str(&candidate.text);
+        }
+    }
+    out
 }
 
 /// Keep `content`'s first and last [`BLOB_KEEP_CHARS`] bytes verbatim,
@@ -242,5 +297,51 @@ mod tests {
         let original = "one\ntwo";
         let out = reduce(original);
         assert_eq!(out.forwarded, original);
+    }
+
+    /// The seam Phase 57B's semantic reducer plugs into: every candidate's
+    /// text, concatenated in id order, reproduces `forwarded` exactly.
+    #[test]
+    fn concatenating_every_candidate_in_id_order_reproduces_forwarded() {
+        let original = "alpha\nalpha\nbeta\n\n\ngamma\n";
+        let out = reduce(original);
+        let mut ids: Vec<usize> = out.candidates.iter().map(|c| c.id).collect();
+        ids.sort_unstable();
+        assert_eq!(ids, (0..out.candidates.len()).collect::<Vec<_>>());
+
+        let rejoined: String = out.candidates.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(rejoined, out.forwarded);
+    }
+
+    #[test]
+    fn rebuild_keeps_only_the_ids_named_and_preserves_order() {
+        let original = "one\ntwo\nthree\n";
+        let out = reduce(original);
+        assert_eq!(out.candidates.len(), 3);
+
+        let keep: std::collections::HashSet<usize> = [0, 2].into_iter().collect();
+        assert_eq!(rebuild(&out.candidates, &keep), "one\nthree\n");
+    }
+
+    #[test]
+    fn rebuild_from_an_empty_keep_set_is_empty() {
+        let original = "one\ntwo\n";
+        let out = reduce(original);
+        assert_eq!(
+            rebuild(&out.candidates, &std::collections::HashSet::new()),
+            ""
+        );
+    }
+
+    #[test]
+    fn rebuild_ignores_an_id_the_original_never_had() {
+        let original = "one\ntwo\n";
+        let out = reduce(original);
+        let keep: std::collections::HashSet<usize> = [0, 9999].into_iter().collect();
+        assert_eq!(
+            rebuild(&out.candidates, &keep),
+            "one\n",
+            "an unknown id must never invent content — it is simply never matched"
+        );
     }
 }

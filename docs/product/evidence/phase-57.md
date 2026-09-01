@@ -115,3 +115,80 @@ tests stable ×4, 144 unit tests across firewall/config/harness modules.
 Phase 57 stands at 17/27: the remaining ten are 57B (the semantic reducer
 as a disposable job, 1997–2003) and 57C (expansion granularity, shadow
 evaluation, status surfaces, 2004–2006).
+
+# Lines 1997–2003 — COMPLETE 2026-09-01; Phase 57 at 24/27
+
+Package `GH-FIREWALL-REDUCER` (Sonnet, high, Amber; batch 76). The semantic
+rung of the ladder. 1,559 insertions across eleven files; the deterministic
+core (batch 71) and the harness bridge (batch 72) are untouched beneath it.
+
+**1997 — a disposable support job, never a firewall-private client.**
+`JobKind::ContextReduction` routes through `DisposableRouting` unchanged, so
+Phase 39's job-kind roster, Phase 9I's free-pool routing and Phase 56A's
+per-entitlement `deny_job_kinds` all apply to the reducer without a line of
+new policy. **The `disposable_interface.rs` variant-roster tripwire fired by
+design** and was updated to the new set; `support_work_economy.rs` carried a
+second exhaustive `JobKind` match and was updated the same way (declared as
+scope overflow, and correct — it could not compile otherwise).
+
+**1998 — the reducer cannot be handed a transcript, because there is no
+field for one.** `ReductionRequest` has exactly four: `task`, `tool_name`,
+`tool_query`, `candidates`. Its own doc comment states the guarantee —
+*"there is no field here able to carry one"* — which is the structural form
+of the rule rather than a convention the code has to remember.
+
+**1999 — rebuilt from trusted originals by id.** `Verdict` carries ids,
+never text; `rebuild()` copies candidate text verbatim. Mutation
+*rebuild-generates-text-instead-of-copying-by-id* — KILLED by
+`firewall::tests::semantic_reduction_never_introduces_text_absent_from_the_original`,
+*"forwarded line `[GENERATED-0][GENERATED-1]` is not a verbatim slice of the
+original"*. **Re-run by the orchestrator on the merged tree and KILLED
+again by the same named test** — this is the subsystem's whole safety claim
+(*it reduces and ranks; it never generates*) and it is the one worth paying
+twice for.
+
+**2000 — thresholds biased toward inclusion.** Safe mode keeps an uncertain
+candidate; aggressive mode drops it only when configured to, and says so.
+Mutation *uncertain-always-dropped-in-safe-mode* — KILLED by
+`firewall::tests::safe_mode_forwards_a_needle_the_reducer_marked_only_uncertain`.
+
+**2001 — fail open on every reducer failure.** Timeout, transport, rate
+limit, schema, validation and outage each fall back to the deterministic
+result with a recorded bypass reason, never to an empty one. Mutation
+*fail-open-replaced-by-empty-result* — KILLED by
+`firewall::tests::a_timed_out_reducer_fails_open_to_the_deterministic_result`,
+*"a failed reducer must never lose the deterministic result"*.
+
+**2002 — pinned models and free-router aliases** through the existing
+provider and free-model configuration, with reducer output validated
+regardless of which model a router answered with.
+
+**2003 — privacy before transmission, and the ORDER is the capability.**
+`privacy_blocks_reduction(file_paths)` is evaluated **before** the reducer
+runs (`firewall/mod.rs`: *"Order matters: the privacy gate (2003) is checked
+before the …"*), so a secret-shaped path suppresses semantic reduction
+rather than being noticed after the bytes have left. Pinned by
+`a_secret_shaped_path_suppresses_semantic_reduction`. Tool-input path
+parsing lives in `firewall/adapter.rs` — declared scope overflow, and
+correct: `design-decisions.md` confines all Claude Code JSON parsing to that
+file, so no other file could have added it.
+
+**1625 is NOT unlocked by this, and the worker said so first.** Phase 39's
+refusal was blocked on *"no reduction-shaped JobKind"*; one now exists, and
+1625 still names **reranking** — a job that reorders candidates — which this
+does not provide. The refusal stands on its own terms. The worker raised
+this itself rather than reaching for a nearby box.
+
+**Gates.** Worker: `--lib firewall::` 74 passed, `--lib config::` 95 passed,
+`context_firewall` 13, `firewall_bridge` 11, `disposable_interface` 7,
+`support_work_economy` 13, `firewall_reducer` 9 — all 0 failed; clippy
+`-D warnings`, fmt and rustdoc clean; its own full sweep green except
+`tests/handoff_lines.rs`, attributed as a flake that passed alone twice with
+the file untouched — **an attribution the orchestrator reached independently
+on a different run** (a fresh-binary spawn timing out under load). Merged
+tree: `blast-radius.sh --targeted` — every traced target passed, twelve
+targets quoted with counts.
+
+**Phase 57 stands at 24/27.** The remaining three (2004 expansion
+granularity, 2005 shadow-vs-original comparison, 2006 mode and per-session
+savings) have their Phase −1 established and are the next package.

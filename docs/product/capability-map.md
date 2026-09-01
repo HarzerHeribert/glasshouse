@@ -1994,13 +1994,13 @@ Recorded 2026-09-01 from the user's instruction of record: a coding model should
 ☑ Verify at session start that the installed harness supports tool-output replacement, and fall back to shadow mode with a stated reason when it does not.
 ☑ Adapt each supported Claude Code tool's output shape explicitly and pass unknown or unsupported shapes through unchanged.
 ☑ Keep firewall state and raw-result stores separated per session, so concurrent sessions and subagents never observe one another's reductions.
-☐ Route semantic reduction as a disposable support job through the existing provider abstraction and per-entitlement job-kind rules, never through a firewall-private provider client.
-☐ Give the reducer only the stated task, tool query, and candidate output — never the conversational transcript — and keep its prompt small.
-☐ Require structured candidate-selection output from the reducer and rebuild the final result from trusted original candidates by id.
-☐ Bias thresholds toward inclusion: safe mode retains uncertain candidates by default, and aggressive mode states plainly that it trades recall for reduction.
-☐ Fail open on every reducer failure — timeout, transport, rate limit, schema, validation, or outage — forwarding the original output with a recorded bypass reason and never an empty result.
-☐ Support pinned models and free-router aliases through the existing provider and free-model configuration, validating reducer output regardless of which model a router answered with.
-☐ Respect existing secret handling and privacy policy before any external reduction: local-only operation, path and tool exclusions, secret-file defaults, and no transmission to a provider the user has not configured.
+☑ Route semantic reduction as a disposable support job through the existing provider abstraction and per-entitlement job-kind rules, never through a firewall-private provider client.
+☑ Give the reducer only the stated task, tool query, and candidate output — never the conversational transcript — and keep its prompt small.
+☑ Require structured candidate-selection output from the reducer and rebuild the final result from trusted original candidates by id.
+☑ Bias thresholds toward inclusion: safe mode retains uncertain candidates by default, and aggressive mode states plainly that it trades recall for reduction.
+☑ Fail open on every reducer failure — timeout, transport, rate limit, schema, validation, or outage — forwarding the original output with a recorded bypass reason and never an empty result.
+☑ Support pinned models and free-router aliases through the existing provider and free-model configuration, validating reducer output regardless of which model a router answered with.
+☑ Respect existing secret handling and privacy policy before any external reduction: local-only operation, path and tool exclusions, secret-file defaults, and no transmission to a provider the user has not configured.
 ☐ Let the session expand a suppressed result — whole, by candidate, by file, or by range — through a supported Glasshouse surface rather than an invented side channel.
 ☐ Compare shadow-mode reductions against forwarded originals so recall and savings claims rest on recorded evidence rather than on the compression ratio alone.
 ☐ Show the firewall's mode and per-session aggregate savings in the existing status and settings surfaces without cluttering the primary workflow.

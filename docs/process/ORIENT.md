@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1133 / 1332 mandatory capabilities (85%)** — 199 open across 46 phases.
+**1140 / 1332 mandatory capabilities (86%)** — 192 open across 46 phases.
 
 ## Where the work is
 
@@ -49,6 +49,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 55 | V1 completion definition | **2** | 21 | `1910` |
 | Phase 28 | File-aware memory lookup | **3** | 2 | `1137` |
 | Phase 34C | Automatic routing-model selection | **3** | 10 | `1429` |
+| Phase 57 | Context firewall: tool-output compaction between harness and model | **3** | 24 | `1976` |
 | Phase 21E | Decision ladder and conflict handling | **4** | 8 | `907` |
 | Phase 33C | Failure, quota, and route correlation | **4** | 11 | `1362` |
 | Phase 24 | Memory reranking | **5** | 1 | `1082` |
@@ -65,7 +66,6 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 32E | Burn rate and exhaustion forecasting | **10** | 0 | `1272` |
 | Phase 32G | Provider-aware request-cost estimation | **10** | 0 | `1296` |
 | Phase 35A | Candidate generation | **10** | 1 | `1504` |
-| Phase 57 | Context firewall: tool-output compaction between harness and model | **10** | 17 | `1976` |
 | Phase 33B | Reliability-adjusted agent performance | **14** | 0 | `1345` |
 | Phase 51 | Evaluation hooks | **25** | 12 | `1818` |
 
@@ -75,7 +75,7 @@ closures are usually at the top. Open the map at the line number given.
 
 Every phase with **three or fewer** open lines, quoted verbatim. These are
 where a single package finishes a phase, so they are listed here and the
-other ~158 open lines are not.
+other ~148 open lines are not.
 
 For any other phase: `scripts/discover.py --phase <id>` prints its open
 lines and evidence together. **Do not open the 178 KB map to read them.**
@@ -205,6 +205,12 @@ these unwrapped.
 - **1436** ☐ Filter automatic candidates by maximum marginal routing cost.
 - **1439** ☐ Prefer a cheap metered model over an unreliable free model when failed routing attempts would cost more time than the price difference.
 - **1440** ☐ Avoid using a scarce premium subscription session as the classifier when a cheaper adequate routing resource exists.
+
+### Phase 57 — Context firewall: tool-output compaction between harness and model  (3 open, 24 closed)
+
+- **2004** ☐ Let the session expand a suppressed result — whole, by candidate, by file, or by range — through a supported Glasshouse surface rather than an invented side channel.
+- **2005** ☐ Compare shadow-mode reductions against forwarded originals so recall and savings claims rest on recorded evidence rather than on the compression ratio alone.
+- **2006** ☐ Show the firewall's mode and per-session aggregate savings in the existing status and settings surfaces without cluttering the primary workflow.
 
 ## Practice sections, by number
 

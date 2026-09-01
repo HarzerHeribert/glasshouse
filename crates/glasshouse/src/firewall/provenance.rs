@@ -1,5 +1,39 @@
 //! The provenance header — map line 1986. One compact block prefixed to a
-//! reduced result; nothing is ever added to a passthrough result.
+//! reduced result; nothing is ever added to a passthrough result. Extended
+//! by Phase 57B (map lines 1997-2003) with an optional second line stating
+//! what the semantic stage did, when it was attempted at all.
+
+/// What the header's semantic line states — present only when
+/// [`crate::firewall::SemanticOutcome`] is, i.e. the stage was actually
+/// attempted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SemanticProvenance {
+    pub applied: bool,
+    /// How many of the candidates the semantic stage considered survived —
+    /// `0` when `applied` is `false`, since nothing from this attempt was
+    /// applied.
+    pub kept: usize,
+    /// How many candidates the semantic stage was given to decide over.
+    pub considered: usize,
+    /// The bypass reason's stable name, when `applied` is `false`.
+    pub reason: Option<String>,
+}
+
+impl SemanticProvenance {
+    fn render(&self) -> String {
+        if self.applied {
+            format!(
+                "[glasshouse context firewall: semantic reduction kept {}/{} candidates]\n",
+                self.kept, self.considered
+            )
+        } else {
+            format!(
+                "[glasshouse context firewall: semantic reduction bypassed ({})]\n",
+                self.reason.as_deref().unwrap_or("unknown")
+            )
+        }
+    }
+}
 
 /// What the header states about one reduction.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -9,6 +43,9 @@ pub struct Provenance {
     pub retained_candidates: usize,
     pub total_candidates: usize,
     pub raw_ref: String,
+    /// Present only when the semantic stage was attempted — see
+    /// [`SemanticProvenance`].
+    pub semantic: Option<SemanticProvenance>,
 }
 
 impl Provenance {
@@ -16,14 +53,18 @@ impl Provenance {
     /// itself needs to parse back — the raw store round-trip (map line
     /// 1984/1985) never reads this, only `original_bytes`.
     pub fn render(&self) -> String {
-        format!(
+        let mut out = format!(
             "[glasshouse context firewall: reduced ~{orig} tokens to ~{fwd}; kept {retained}/{total} candidates; raw: {raw}]\n",
             orig = self.original_tokens,
             fwd = self.forwarded_tokens,
             retained = self.retained_candidates,
             total = self.total_candidates,
             raw = self.raw_ref,
-        )
+        );
+        if let Some(semantic) = &self.semantic {
+            out.push_str(&semantic.render());
+        }
+        out
     }
 
     /// Prefix this header onto `body`.
@@ -46,6 +87,7 @@ mod tests {
             retained_candidates: 5,
             total_candidates: 400,
             raw_ref: "gh-tool://abc123".to_string(),
+            semantic: None,
         };
         let rendered = provenance.render();
         assert!(rendered.contains("9000"));
@@ -62,10 +104,66 @@ mod tests {
             retained_candidates: 1,
             total_candidates: 2,
             raw_ref: "gh-tool://x".to_string(),
+            semantic: None,
         };
         let body = "the reduced content\n";
         let out = provenance.prepend_to(body);
         assert!(out.ends_with(body));
         assert!(out.starts_with("[glasshouse context firewall:"));
+    }
+
+    #[test]
+    fn no_semantic_line_appears_when_the_stage_was_never_attempted() {
+        let provenance = Provenance {
+            original_tokens: 10,
+            forwarded_tokens: 5,
+            retained_candidates: 1,
+            total_candidates: 2,
+            raw_ref: "gh-tool://x".to_string(),
+            semantic: None,
+        };
+        assert!(!provenance.render().contains("semantic"));
+    }
+
+    /// The applied half: the header states how many of the candidates the
+    /// semantic stage was given actually survived.
+    #[test]
+    fn an_applied_semantic_line_states_kept_and_considered() {
+        let provenance = Provenance {
+            original_tokens: 9000,
+            forwarded_tokens: 400,
+            retained_candidates: 5,
+            total_candidates: 400,
+            raw_ref: "gh-tool://abc123".to_string(),
+            semantic: Some(SemanticProvenance {
+                applied: true,
+                kept: 3,
+                considered: 5,
+                reason: None,
+            }),
+        };
+        let rendered = provenance.render();
+        assert!(rendered.contains("semantic reduction kept 3/5"));
+    }
+
+    /// The bypassed half: the header names the reason, never leaves a
+    /// silent gap where the reader might assume nothing was attempted.
+    #[test]
+    fn a_bypassed_semantic_line_states_the_reason() {
+        let provenance = Provenance {
+            original_tokens: 9000,
+            forwarded_tokens: 400,
+            retained_candidates: 5,
+            total_candidates: 400,
+            raw_ref: "gh-tool://abc123".to_string(),
+            semantic: Some(SemanticProvenance {
+                applied: false,
+                kept: 0,
+                considered: 5,
+                reason: Some("reducer-timed-out".to_string()),
+            }),
+        };
+        let rendered = provenance.render();
+        assert!(rendered.contains("semantic reduction bypassed (reducer-timed-out)"));
     }
 }

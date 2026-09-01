@@ -1613,13 +1613,14 @@ pub struct ConfiguredJobKind(crate::routing::disposable::JobKind);
 
 /// Every [`crate::routing::disposable::JobKind`], in the type's own order.
 /// Kept complete by `job_kind_ordinal`.
-const JOB_KIND_SPELLINGS: [crate::routing::disposable::JobKind; 4] = {
+const JOB_KIND_SPELLINGS: [crate::routing::disposable::JobKind; 5] = {
     use crate::routing::disposable::JobKind as J;
     [
         J::Classification,
         J::MemoryExtraction,
         J::Reranking,
         J::Evaluation,
+        J::ContextReduction,
     ]
 };
 
@@ -1634,6 +1635,7 @@ fn job_kind_ordinal(kind: crate::routing::disposable::JobKind) -> usize {
         J::MemoryExtraction => 1,
         J::Reranking => 2,
         J::Evaluation => 3,
+        J::ContextReduction => 4,
     }
 }
 
@@ -5175,6 +5177,84 @@ impl<'a> EffectiveConfig<'a> {
         Layered::new(default_value, Layer::Default)
     }
 
+    /// `context_firewall.reducer` — map line 1997's opt-in: `None` (the
+    /// [`Layer::Default`] case, and the only state a user who never
+    /// configured a reducer has) disables semantic reduction in every mode,
+    /// per map line 1992's guarantee.
+    pub fn context_firewall_reducer(&self) -> Layered<Option<String>> {
+        if let Some(value) = self.project.and_then(|p| p.context_firewall().reducer()) {
+            return Layered::new(Some(value.to_owned()), Layer::Project);
+        }
+        if let Some(value) = self.user.context_firewall().reducer() {
+            return Layered::new(Some(value.to_owned()), Layer::User);
+        }
+        Layered::new(None, Layer::Default)
+    }
+
+    /// `context_firewall.reducer_model` — map line 2002's pin. `None` lets
+    /// `DisposableRouting` choose among whatever
+    /// [`EffectiveConfig::context_firewall_reducer`] names.
+    pub fn context_firewall_reducer_model(&self) -> Layered<Option<String>> {
+        if let Some(value) = self
+            .project
+            .and_then(|p| p.context_firewall().reducer_model())
+        {
+            return Layered::new(Some(value.to_owned()), Layer::Project);
+        }
+        if let Some(value) = self.user.context_firewall().reducer_model() {
+            return Layered::new(Some(value.to_owned()), Layer::User);
+        }
+        Layered::new(None, Layer::Default)
+    }
+
+    /// `context_firewall.min_semantic_tokens` — map line 1997's gate,
+    /// defaulting to [`firewall::DEFAULT_MIN_SEMANTIC_TOKENS`].
+    pub fn context_firewall_min_semantic_tokens(&self) -> Layered<u64> {
+        if let Some(value) = self
+            .project
+            .and_then(|p| p.context_firewall().min_semantic_tokens())
+        {
+            return Layered::new(value, Layer::Project);
+        }
+        if let Some(value) = self.user.context_firewall().min_semantic_tokens() {
+            return Layered::new(value, Layer::User);
+        }
+        Layered::new(firewall::DEFAULT_MIN_SEMANTIC_TOKENS, Layer::Default)
+    }
+
+    /// `context_firewall.aggressive_drops_uncertain` — map line 2000's
+    /// explicit opt-in for aggressive mode to drop `uncertain` candidates.
+    /// Defaults to `false`: bias to inclusion is the state nobody had to ask
+    /// for.
+    pub fn context_firewall_aggressive_drops_uncertain(&self) -> Layered<bool> {
+        if let Some(value) = self
+            .project
+            .and_then(|p| p.context_firewall().aggressive_drops_uncertain())
+        {
+            return Layered::new(value, Layer::Project);
+        }
+        if let Some(value) = self.user.context_firewall().aggressive_drops_uncertain() {
+            return Layered::new(value, Layer::User);
+        }
+        Layered::new(false, Layer::Default)
+    }
+
+    /// `context_firewall.reducer_local_only` — map line 2003's local-only
+    /// operation. Defaults to `false`, matching every reducer field's
+    /// "nobody configured anything" state.
+    pub fn context_firewall_reducer_local_only(&self) -> Layered<bool> {
+        if let Some(value) = self
+            .project
+            .and_then(|p| p.context_firewall().reducer_local_only())
+        {
+            return Layered::new(value, Layer::Project);
+        }
+        if let Some(value) = self.user.context_firewall().reducer_local_only() {
+            return Layered::new(value, Layer::User);
+        }
+        Layered::new(false, Layer::Default)
+    }
+
     /// Resolve which routing model classifies requests, reporting which
     /// layer decided it.
     ///
@@ -8257,6 +8337,95 @@ mod tests {
             effective.memory_extraction_enabled(),
             Layered::new(false, Layer::User),
             "a project that recorded nothing must fall through to the user layer"
+        );
+    }
+
+    #[test]
+    fn context_firewall_reducer_layers_project_over_user_and_defaults_to_none() {
+        let user = UserConfig::default();
+        let effective = EffectiveConfig::new(&user, None);
+        assert_eq!(
+            effective.context_firewall_reducer(),
+            Layered::new(None, Layer::Default),
+            "nobody who never configured a reducer has one"
+        );
+
+        let mut user = UserConfig::default();
+        user.context_firewall_mut()
+            .set_reducer(Some("openrouter".to_owned()));
+        let effective = EffectiveConfig::new(&user, None);
+        assert_eq!(
+            effective.context_firewall_reducer(),
+            Layered::new(Some("openrouter".to_owned()), Layer::User)
+        );
+
+        let mut project = ProjectConfig::default();
+        project
+            .context_firewall_mut()
+            .set_reducer(Some("a-project-entitlement".to_owned()));
+        let effective = EffectiveConfig::new(&user, Some(&project));
+        assert_eq!(
+            effective.context_firewall_reducer(),
+            Layered::new(Some("a-project-entitlement".to_owned()), Layer::Project),
+            "a project's own reducer choice must win over the user's"
+        );
+    }
+
+    #[test]
+    fn context_firewall_min_semantic_tokens_defaults_and_layers() {
+        let user = UserConfig::default();
+        let effective = EffectiveConfig::new(&user, None);
+        assert_eq!(
+            effective.context_firewall_min_semantic_tokens(),
+            Layered::new(firewall::DEFAULT_MIN_SEMANTIC_TOKENS, Layer::Default)
+        );
+
+        let mut user = UserConfig::default();
+        user.context_firewall_mut()
+            .set_min_semantic_tokens(Some(500));
+        let effective = EffectiveConfig::new(&user, None);
+        assert_eq!(
+            effective.context_firewall_min_semantic_tokens(),
+            Layered::new(500, Layer::User)
+        );
+    }
+
+    #[test]
+    fn context_firewall_aggressive_drops_uncertain_defaults_to_false() {
+        let user = UserConfig::default();
+        let effective = EffectiveConfig::new(&user, None);
+        assert_eq!(
+            effective.context_firewall_aggressive_drops_uncertain(),
+            Layered::new(false, Layer::Default),
+            "bias to inclusion is the default nobody had to ask for"
+        );
+
+        let mut user = UserConfig::default();
+        user.context_firewall_mut()
+            .set_aggressive_drops_uncertain(Some(true));
+        let effective = EffectiveConfig::new(&user, None);
+        assert_eq!(
+            effective.context_firewall_aggressive_drops_uncertain(),
+            Layered::new(true, Layer::User)
+        );
+    }
+
+    #[test]
+    fn context_firewall_reducer_local_only_defaults_to_false() {
+        let user = UserConfig::default();
+        let effective = EffectiveConfig::new(&user, None);
+        assert_eq!(
+            effective.context_firewall_reducer_local_only(),
+            Layered::new(false, Layer::Default)
+        );
+
+        let mut user = UserConfig::default();
+        user.context_firewall_mut()
+            .set_reducer_local_only(Some(true));
+        let effective = EffectiveConfig::new(&user, None);
+        assert_eq!(
+            effective.context_firewall_reducer_local_only(),
+            Layered::new(true, Layer::User)
         );
     }
 

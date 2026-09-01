@@ -21,6 +21,15 @@ pub struct PostToolUseEvent {
     pub tool_response: Value,
     pub tool_use_id: String,
     pub session_id: String,
+    /// The tool's own input — absent from every batch-71/72 fixture, and
+    /// still optional here: a document that omits it parses exactly as
+    /// before, with [`tool_query`] and [`tool_input_paths`] both answering
+    /// as if it were `{}`. Phase 57B (map lines 1998, 2003) is the first
+    /// package to read it, for the semantic reducer's own "tool query"
+    /// field and the privacy gate's path exclusions — never for anything
+    /// the deterministic ladder or the raw store need.
+    #[serde(default)]
+    pub tool_input: Value,
 }
 
 /// Parse one `PostToolUse` JSON document.
@@ -90,6 +99,39 @@ fn normalize_bash(value: &Value) -> Option<ToolPayload> {
     })
 }
 
+/// The tool's own query or command, read from `tool_input` — map line
+/// 1998's "tool query", the second thing (besides the task) the semantic
+/// reducer's request may carry. Best-effort and generic across tools rather
+/// than a per-tool table: the first of a small, ordered set of common field
+/// names that is actually a string wins. `None` for a tool whose input
+/// carries nothing query-shaped, or an event with no `tool_input` at all.
+pub fn tool_query(tool_input: &Value) -> Option<String> {
+    const QUERY_KEYS: &[&str] = &["pattern", "command", "query", "glob"];
+    QUERY_KEYS.iter().find_map(|key| {
+        tool_input
+            .get(key)
+            .and_then(Value::as_str)
+            .map(str::to_owned)
+    })
+}
+
+/// Every string value in `tool_input` whose key names a path — map line
+/// 2003's privacy gate reads this to refuse a `.env`-shaped result before
+/// any candidate leaves the process. A key match is by substring
+/// (`contains("path")`, case-insensitive) rather than an exact per-tool
+/// list, so a future tool's `notebook_path` or `directory_path` is covered
+/// without this function learning its name.
+pub fn tool_input_paths(tool_input: &Value) -> Vec<String> {
+    let Value::Object(map) = tool_input else {
+        return Vec::new();
+    };
+    map.iter()
+        .filter(|(key, _)| key.to_ascii_lowercase().contains("path"))
+        .filter_map(|(_, value)| value.as_str())
+        .map(str::to_owned)
+        .collect()
+}
+
 /// The `PostToolUse` hook response Claude Code reads back on stdout.
 ///
 /// `hookSpecificOutput.updatedToolOutput` is the field the Phase 57
@@ -119,6 +161,7 @@ mod tests {
             tool_response: serde_json::json!({"type": "text", "text": "hello"}),
             tool_use_id: "tu".to_string(),
             session_id: "s".to_string(),
+            tool_input: serde_json::Value::Null,
         };
         let result = normalize(&event).expect("must recognize the text shape");
         assert_eq!(result.payload, ToolPayload::Text("hello".to_string()));
@@ -136,6 +179,7 @@ mod tests {
             }),
             tool_use_id: "tu".to_string(),
             session_id: "s".to_string(),
+            tool_input: serde_json::Value::Null,
         };
         let result = normalize(&event).expect("must recognize the command shape");
         assert_eq!(
@@ -169,6 +213,7 @@ mod tests {
             }),
             tool_use_id: "capture-tool-use-id".to_string(),
             session_id: "capture-session".to_string(),
+            tool_input: serde_json::Value::Null,
         };
         let result = normalize(&event).expect("must recognize the real captured command shape");
         assert_eq!(
@@ -198,6 +243,7 @@ mod tests {
             tool_response: serde_json::json!({"type": "text", "text": "ok"}),
             tool_use_id: "tu".to_string(),
             session_id: "s".to_string(),
+            tool_input: serde_json::Value::Null,
         };
         assert_eq!(normalize(&event), None);
     }
@@ -209,8 +255,55 @@ mod tests {
             tool_response: serde_json::json!({"content": [{"type": "image"}]}),
             tool_use_id: "tu".to_string(),
             session_id: "s".to_string(),
+            tool_input: serde_json::Value::Null,
         };
         assert_eq!(normalize(&event), None);
+    }
+
+    #[test]
+    fn an_event_with_no_tool_input_still_parses() {
+        let event = PostToolUseEvent {
+            tool_name: "Grep".to_string(),
+            tool_response: serde_json::json!({"type": "text", "text": "hello"}),
+            tool_use_id: "tu".to_string(),
+            session_id: "s".to_string(),
+            tool_input: serde_json::Value::default(),
+        };
+        assert_eq!(
+            normalize(&event).unwrap().payload,
+            ToolPayload::Text("hello".to_string())
+        );
+    }
+
+    #[test]
+    fn tool_query_reads_the_first_known_field_that_is_a_string() {
+        assert_eq!(
+            tool_query(&serde_json::json!({"pattern": "TODO"})),
+            Some("TODO".to_string())
+        );
+        assert_eq!(
+            tool_query(&serde_json::json!({"command": "ls -la"})),
+            Some("ls -la".to_string())
+        );
+        assert_eq!(tool_query(&serde_json::json!({"file_path": "a.rs"})), None);
+        assert_eq!(tool_query(&serde_json::Value::Null), None);
+    }
+
+    #[test]
+    fn tool_input_paths_collects_every_key_containing_path() {
+        let paths = tool_input_paths(&serde_json::json!({
+            "file_path": "src/main.rs",
+            "notebook_path": ".env",
+            "pattern": "TODO",
+        }));
+        assert_eq!(paths.len(), 2);
+        assert!(paths.contains(&"src/main.rs".to_string()));
+        assert!(paths.contains(&".env".to_string()));
+    }
+
+    #[test]
+    fn tool_input_paths_is_empty_for_a_non_object_input() {
+        assert!(tool_input_paths(&serde_json::Value::Null).is_empty());
     }
 
     #[test]
