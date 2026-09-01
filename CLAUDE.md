@@ -200,6 +200,24 @@ the worker then *read* that file and judged it unaffected — costing a full gat
 cycle for something one eight-second test run catches. Once a grep names a file,
 run its tests; do not read them and decide.
 
+**The full sweep is TRAILING, not blocking — user ruling 2026-09-01** (*"most
+of our SDLC has become waiting … do this the smarter way"*). The blocking gate
+before an integration commit is the TARGETED one: the changed files' own
+targets plus the worker's quoted tests, re-run on the merged tree
+(`blast-radius.sh --targeted` once GH-GATE-ECONOMICS lands; until then, run
+the equivalent target list by hand). Commit and push on targeted green. The
+FULL two-lane sweep runs in the background per WAVE — once per two-to-four
+integrations, not once each — and a trailing red spawns a fix-forward worker
+(§84) while the line keeps moving; 2026-09-01's own history is the model: a
+missed regression shipped, the next tree's sweep caught it, the fix landed
+two commits later with zero damage. What does NOT weaken: per-box targeted
+tests and mutations stay blocking for every tick, `--targeted` prints how
+many full-trace targets it skipped so nobody mistakes it for the sweep, and
+the trailing sweep's failures are enumerated PER TARGET before attribution
+(the truncated-grep rule in the batch-70 measurements entry). Batch waves
+into one integrate call where finishes align; co-editors stay serial but now
+pay only the targeted price.
+
 **Dispatch with `scripts/dev/new-worker.sh <name> <cwd> <packet>`.** It creates
 the pane, launches the harness, types the prompt in, and **proves the prompt
 landed** before returning. Passing a prompt as a command-line argument silently
