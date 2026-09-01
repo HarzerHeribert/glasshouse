@@ -1,4 +1,19 @@
 {
+  "permissions": {
+    "allow": [
+      "Read(/Users/eneas/projects/glasshouse/.agent-runtime/packet-*.md)",
+      "Read(/Users/eneas/projects/glasshouse/.agent-runtime/report-*.md)",
+      "Read(/Users/eneas/projects/glasshouse/.agent-runtime/subpacket-*.md)",
+      "Write(/Users/eneas/projects/glasshouse/.agent-runtime/report-*.md)",
+      "Edit(/Users/eneas/projects/glasshouse/.agent-runtime/report-*.md)",
+      "Write(/Users/eneas/projects/glasshouse/.agent-runtime/subpacket-*.md)",
+      "Edit(/Users/eneas/projects/glasshouse/.agent-runtime/subpacket-*.md)"
+    ],
+    "deny": [
+      "Read(/Users/eneas/projects/glasshouse/.agent-runtime/provider-keys.env)",
+      "Read(/Users/eneas/projects/glasshouse/.agent-runtime/*.env)"
+    ]
+  },
   "hooks": {
     "PreToolUse": [
       {
