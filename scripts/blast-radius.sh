@@ -28,7 +28,36 @@
 #   scripts/blast-radius.sh --staged        # staged changes
 #   scripts/blast-radius.sh --since <ref>   # changed since a ref
 #   scripts/blast-radius.sh --dry-run       # print the plan, run nothing
+#   scripts/blast-radius.sh --list          # print traced targets + lanes, run nothing
+#   scripts/blast-radius.sh --serial        # today's single-lane behavior, byte-for-byte
+#   scripts/blast-radius.sh --jobs N        # override the parallel-lane worker count
 #   scripts/blast-radius.sh f1.rs f2.rs     # explicit files
+#
+# TWO LANES
+# ---------
+# The blast radius is wall-clock-bound, not compute-bound: most traced targets
+# sleep through deliberate waits (harness health windows, shutdown graces) and
+# every fresh fixture executable queues behind macOS Gatekeeper's first-exec
+# scan, while pure-logic targets that could saturate idle cores wait in line
+# behind them. So targets run in two lanes instead of one:
+#
+#   parallel lane  -- pure config/routing/translation logic, bounded-parallel,
+#                     runs FIRST so it can saturate idle cores.
+#   serial lane    -- everything that spawns a process or asserts on
+#                     wall-clock, one target at a time, in order, exactly as
+#                     before -- runs SECOND, on a quiet machine, which is load
+#                     hygiene for the wall-clock-bound tests in it.
+#
+# Classification lives in one place below ("lane classification"). Unknown
+# defaults to the serial lane: misclassifying a fixture-spawner as parallel
+# reintroduces the false-red gate this project already paid for four times in
+# one evening; misclassifying logic as serial only costs seconds.
+#
+# `--serial` restores today's single-lane behavior byte-for-byte (one lane,
+# original order) -- the escape hatch for attribution reruns (practice §34).
+# The output contract is unchanged in both modes: same per-target
+# `=== cargo test --test X ===` headers, same `test result:` lines, same
+# final verdict line, same exit semantics (non-zero iff any target failed).
 set -uo pipefail
 
 ORIG_CWD="$(pwd)"
@@ -86,13 +115,16 @@ fi
 
 cd "$REPO" || exit 1
 
-DRY=0; MODE="head"; SINCE=""; FILES=()
+DRY=0; LIST=0; SERIAL=0; JOBS=""; MODE="head"; SINCE=""; FILES=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run) DRY=1 ;;
+    --list)    LIST=1 ;;
+    --serial)  SERIAL=1 ;;
+    --jobs)    JOBS="${2:-}"; shift ;;
     --staged)  MODE="staged" ;;
     --since)   MODE="since"; SINCE="${2:-}"; shift ;;
-    -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,52p' "$0"; exit 0 ;;
     *)         FILES+=("$1") ;;
   esac
   shift
@@ -191,11 +223,99 @@ mapfile -t TESTS < <(printf '%s\n' "${TESTS[@]-}" | sort -u | sed '/^$/d')
 mapfile -t BINS  < <(printf '%s\n' "${BINS[@]-}"  | sort -u | sed '/^$/d')
 mapfile -t FILTERS < <(printf '%s\n' "${FILTERS[@]-}" | sort -u | sed '/^$/d')
 
+# ---- lane classification (ONE place — extend here) -------------------------
+# Serial lane: every target that spawns a process, drives a PTY, or asserts on
+# wall-clock. Parallel lane: everything else (pure config/routing/translation
+# logic). Default-serial for the unknown (see the file header): misclassifying
+# a fixture-spawner as parallel reintroduces the false-red gate this project
+# already paid for four times in one evening; misclassifying logic as serial
+# only costs seconds.
+#
+# Explicit seeds, listed even though most also match the auto-detector below,
+# so the next reader sees WHY each is serial without reconstructing it from a
+# grep:
+KNOWN_SERIAL_TESTS=(
+  pty_smoke               # drives a real PTY end to end
+  events_lifecycle        # spawns via HarnessLaunch/platform::exec -- no literal Command::new of its own
+  handoff_lines           # spawns under a real pty (PtyProcess::spawn)
+  session_supervision     # spawns the built glasshouse binary (CARGO_BIN_EXE) and polls its exit
+  checkpoint_portability  # spawns via HarnessLaunch/platform::exec
+  entitlement_shell_scrub # spawns via HarnessLaunch/platform::exec
+)
+
+# --lib is always serial. A single `cargo test --lib` invocation bundles
+# whatever modules the changed files traced into it, and three of its modules
+# are known flaky/process-bound -- settings_persistence (in shell::mod),
+# integrations::version (the ETXTBSY fork/exec race documented below), and
+# session::api -- with no cargo filter fine-grained enough to split them out
+# of one invocation. Default-serial-for-the-unknown applies to the whole
+# invocation rather than trying to positively clear each module filter.
+LIB_IS_SERIAL=1
+
+# --bin targets: same default-serial rule. A binary integration target is
+# exactly the "spawns/drives a real process" shape this script exists to keep
+# out of the parallel lane, and there is no cheap positive signal to check.
+BIN_IS_SERIAL=1
+
+is_serial_test() {   # is_serial_test <target-name> -- 0 (serial) or 1 (parallel)
+  local t="$1" k f="crates/glasshouse/tests/${t}.rs"
+  for k in "${KNOWN_SERIAL_TESTS[@]}"; do [ "$t" = "$k" ] && return 0; done
+  # A missing/unreadable source can't be positively cleared as pure logic.
+  [ -f "$f" ] || return 0
+  grep -qE 'Command::new|std::process::Command|tokio::process::Command|PtyProcess::spawn|CARGO_BIN_EXE|Child::' "$f"
+}
+
+declare -a SERIAL_TESTS=() PARALLEL_TESTS=()
+for t in "${TESTS[@]-}"; do
+  [ -n "$t" ] || continue
+  if is_serial_test "$t"; then SERIAL_TESTS+=("$t"); else PARALLEL_TESTS+=("$t"); fi
+done
+
+# Bounded parallelism for the parallel lane: physical cores / 2 by default
+# (leaves headroom for the fixture/Gatekeeper-bound serial lane's own
+# single-threaded cargo overhead), overridable with --jobs or
+# BLAST_PARALLEL_JOBS.
+if [ -n "$JOBS" ]; then
+  PARALLEL_JOBS="$JOBS"
+elif [ -n "${BLAST_PARALLEL_JOBS:-}" ]; then
+  PARALLEL_JOBS="$BLAST_PARALLEL_JOBS"
+else
+  PHYS="$(sysctl -n hw.physicalcpu 2>/dev/null || nproc 2>/dev/null || echo 2)"
+  PARALLEL_JOBS=$((PHYS / 2))
+fi
+[ "$PARALLEL_JOBS" -lt 1 ] 2>/dev/null && PARALLEL_JOBS=1
+[ "$PARALLEL_JOBS" -ge 1 ] 2>/dev/null || PARALLEL_JOBS=1
+
 echo
 printf '\033[1m=== plan ===\033[0m\n'
-[ "$LIB" -eq 1 ] && echo "  --lib  (module filters: ${FILTERS[*]-none})"
+[ "$LIB" -eq 1 ] && echo "  --lib  (module filters: ${FILTERS[*]-none})  [serial]"
 [ ${#TESTS[@]} -gt 0 ] && echo "  --test ${TESTS[*]}"
-[ ${#BINS[@]}  -gt 0 ] && echo "  --bin  ${BINS[*]}"
+[ ${#BINS[@]}  -gt 0 ] && echo "  --bin  ${BINS[*]}  [serial]"
+
+if [ "$LIST" -eq 1 ]; then
+  echo
+  printf '\033[1m=== targets by lane ===\033[0m\n'
+  [ "$LIB" -eq 1 ] && printf '  serial    --lib  (module filters: %s)\n' "${FILTERS[*]-none}"
+  for t in "${SERIAL_TESTS[@]-}"; do
+    [ -n "$t" ] || continue
+    printf '  serial    --test %s\n' "$t"
+  done
+  for b in "${BINS[@]-}"; do
+    [ -n "$b" ] || continue
+    printf '  serial    --bin  %s\n' "$b"
+  done
+  for t in "${PARALLEL_TESTS[@]-}"; do
+    [ -n "$t" ] || continue
+    printf '  parallel  --test %s\n' "$t"
+  done
+  echo
+  printf '  parallel lane: %d target(s), bounded to %d job(s)\n' "${#PARALLEL_TESTS[@]}" "$PARALLEL_JOBS"
+  printf '  serial lane:   %d target(s) (--lib counts as one)\n' \
+    "$(( (LIB) + ${#SERIAL_TESTS[@]} + ${#BINS[@]} ))"
+  echo
+  echo "blast-radius: --list, nothing executed"
+  exit 0
+fi
 
 # Platform-conditional code: warn that this tool is macOS-only evidence.
 #
@@ -259,17 +379,73 @@ run_target() {                     # run_target <label> <cargo args...>
   return "$status"
 }
 
-if [ "$LIB" -eq 1 ]; then
-  run_target "cargo test --lib" --lib || rc=1
+if [ "$SERIAL" -eq 1 ]; then
+  echo
+  printf '\033[1m=== --serial: single lane, original order ===\033[0m\n'
+  if [ "$LIB" -eq 1 ]; then
+    run_target "cargo test --lib" --lib || rc=1
+  fi
+  for t in "${TESTS[@]-}"; do
+    [ -n "$t" ] || continue
+    run_target "cargo test --test $t" --test "$t" || rc=1
+  done
+  for b in "${BINS[@]-}"; do
+    [ -n "$b" ] || continue
+    run_target "cargo test --bin $b" --bin "$b" || rc=1
+  done
+else
+  echo
+  printf '\033[1m=== lane counts ===\033[0m\n'
+  printf '  parallel lane: %d target(s), bounded to %d job(s)\n' "${#PARALLEL_TESTS[@]}" "$PARALLEL_JOBS"
+  printf '  serial lane:   %d target(s) (--lib counts as one)\n' \
+    "$(( (LIB) + ${#SERIAL_TESTS[@]} + ${#BINS[@]} ))"
+
+  # Parallel lane first -- it is the one that can saturate idle cores, and
+  # running it before the serial lane keeps the serial lane's fixture/
+  # Gatekeeper-bound targets off a machine that is also running N other
+  # cargo processes (load hygiene for the wall-clock-bound tests, requirement
+  # 3). A failing parallel target does not abort the run: every target always
+  # runs and every failure is listed at the end, exactly as the serial lane
+  # already does (requirement 6).
+  if [ ${#PARALLEL_TESTS[@]} -gt 0 ]; then
+    echo
+    printf '\033[1m=== parallel lane (%d target(s), %d job(s)) ===\033[0m\n' \
+      "${#PARALLEL_TESTS[@]}" "$PARALLEL_JOBS"
+    declare -a _PIDS=() _OUTS=()
+    drain_one() {
+      local pid="${_PIDS[0]}" out="${_OUTS[0]}"
+      wait "$pid"; local status=$?
+      cat "$out"; rm -f "$out"
+      _PIDS=("${_PIDS[@]:1}"); _OUTS=("${_OUTS[@]:1}")
+      return "$status"
+    }
+    for t in "${PARALLEL_TESTS[@]}"; do
+      while [ "${#_PIDS[@]}" -ge "$PARALLEL_JOBS" ]; do
+        drain_one || rc=1
+      done
+      out="$(mktemp)"
+      ( run_target "cargo test --test $t" --test "$t" ) >"$out" 2>&1 &
+      _PIDS+=("$!"); _OUTS+=("$out")
+    done
+    while [ "${#_PIDS[@]}" -gt 0 ]; do
+      drain_one || rc=1
+    done
+  fi
+
+  # Serial lane second, on a now-quiet machine: unchanged one-at-a-time
+  # execution, exactly today's order (lib, then tests, then bins).
+  if [ "$LIB" -eq 1 ]; then
+    run_target "cargo test --lib" --lib || rc=1
+  fi
+  for t in "${SERIAL_TESTS[@]-}"; do
+    [ -n "$t" ] || continue
+    run_target "cargo test --test $t" --test "$t" || rc=1
+  done
+  for b in "${BINS[@]-}"; do
+    [ -n "$b" ] || continue
+    run_target "cargo test --bin $b" --bin "$b" || rc=1
+  done
 fi
-for t in "${TESTS[@]-}"; do
-  [ -n "$t" ] || continue
-  run_target "cargo test --test $t" --test "$t" || rc=1
-done
-for b in "${BINS[@]-}"; do
-  [ -n "$b" ] || continue
-  run_target "cargo test --bin $b" --bin "$b" || rc=1
-done
 
 # Rustdoc, unconditionally, because this tool could not see it and the gate can.
 #
