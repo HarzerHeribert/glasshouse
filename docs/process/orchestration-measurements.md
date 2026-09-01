@@ -4713,3 +4713,31 @@ falsified them.
    appends a second copy and `ctrl+u` does not reliably clear it.
 
 Neither is mechanised yet. Both are one-line checks at inherit and at dispatch.
+
+### The output-per-box ratio, actually measured — 2026-09-02
+
+CLAUDE.md's rule 3 says *"above 250k output tokens per net closed box over the
+last two days, the next dispatch must be implementation"*, and gives the two
+commands. **This session ran them rather than citing the rule, and the answer
+matters.**
+
+    python3 scripts/usage-snapshot.py --glasshouse --since 2026-08-31   ->  33.03M output tokens
+    git show fba16c0:docs/product/capability-map.md | grep -c '^☑'      ->  824   (2026-08-31 01:47)
+    grep -c '^☑' docs/product/capability-map.md                          ->  1154  (2026-09-02 ~02:00)
+
+**330 net closed boxes / 33.03M output tokens = ~100k output tokens per box.**
+
+Denominator checked rather than assumed: total box lines went 1509 -> 1561
+(+52, the deliberate map extensions), and open went 685 -> 407. `685 + 52 - 407
+= 330`, so the closures are real and not a re-indexing artefact.
+
+**Against the recorded series — 57k, 109k, 126k, 811k (2026-08-27..30) — the
+811k day was an excursion, not a new regime, and the ratio is back inside the
+healthy band.** That day's entry read the 6.4x step as a possible regime change
+and it was right to; the instrument then showed the recovery, which is exactly
+what trap 6 says the ledger row is for.
+
+The rule's practical consequence today: **investigation dispatches are
+permitted** — ~100k is well under the 250k gate — which is why `recon-33b` (a
+read-only census of the largest never-investigated phase) went out beside an
+implementation package rather than waiting behind it.
