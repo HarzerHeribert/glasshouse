@@ -41,6 +41,27 @@ set -uo pipefail
 # paths it hands a worker are right from any worktree. See the prompt below.
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 
+# The TRUE main checkout -- NOT $REPO. Every worktree carries its own copy of
+# this script, so BASH_SOURCE-derived $REPO resolves to whichever tree the
+# invoked copy happens to live in: running this script's own worktree copy
+# against the worktree itself as CWD makes $REPO == $CWD and a same-tree
+# guard below would never fire. Measured live during this packet's own
+# testing: that exact call actually created a workspace and typed a prompt
+# into a real Claude session running IN the main checkout with --permission-
+# mode auto, before this fix existed. git's own worktree metadata names the
+# one real main checkout regardless of which copy is running -- same
+# technique as scripts/reap-worktrees.sh's REPO resolution.
+MAIN_COMMON="$(git -C "$REPO" rev-parse --git-common-dir 2>/dev/null)"
+case "$MAIN_COMMON" in
+  /*) : ;;
+  *)  MAIN_COMMON="$(cd "$REPO/$MAIN_COMMON" 2>/dev/null && pwd -P)" ;;
+esac
+if [ -n "$MAIN_COMMON" ] && [ "$(basename "$MAIN_COMMON")" = ".git" ]; then
+  MAIN_CHECKOUT="$(dirname "$MAIN_COMMON")"
+else
+  MAIN_CHECKOUT="$REPO"
+fi
+
 NAME="${1:?worker name}"; CWD="${2:?working directory}"; PACKET="${3:?packet path}"
 MODEL="sonnet"
 EFFORT=""
@@ -106,6 +127,37 @@ if [ "${PRINT_PROMPT:-}" = 1 ] || [ "$PRINT_PROMPT_FLAG" = 1 ]; then
   exit 0
 fi
 
+# Persistent per-worker build cache: a worker's target-dir survives under its
+# NAME rather than living inside its worktree, so a second-ever dispatch under
+# the same name -- and every rebuild inside one dispatch -- reuses artifacts
+# instead of cold-building (today's default: ~10+ min per fresh worktree).
+# `close-worker.sh` removes the worktree but never this directory; reclaim it
+# explicitly with `scripts/reap-worktrees.sh --reap-caches`. Only reached past
+# the --print-prompt short-circuit above, so a prompt-only invocation stays
+# side-effect-free.
+#
+# CWD_REAL, not CWD: a worker's cwd can be passed with a trailing slash or a
+# non-canonical relative form, and comparing that literally against
+# $MAIN_CHECKOUT (always canonical, resolved via `cd ... && pwd`) would let a
+# spelling difference slip a worker's cache config past this guard.
+CWD_REAL="$(cd "$CWD" && pwd)"
+if [ "$CWD_REAL" = "$MAIN_CHECKOUT" ]; then
+  echo "new-worker: refusing to write a build-cache config into the MAIN checkout ($MAIN_CHECKOUT)"
+  exit 1
+fi
+WORKER_CACHE_DIR="$HOME/.cache/glasshouse-worker-targets/$NAME"
+mkdir -p "$WORKER_CACHE_DIR"
+mkdir -p "$CWD/.cargo"
+cat > "$CWD/.cargo/config.toml" <<CARGOCFG
+# Written by scripts/dev/new-worker.sh. Points this worktree's cargo builds at
+# a target-dir that outlives the worktree, keyed by worker NAME ($NAME), so a
+# later dispatch under the same name reuses build output instead of cold-
+# building. Removing this worktree (scripts/close-worker.sh) does NOT remove
+# this cache -- see scripts/reap-worktrees.sh --reap-caches.
+[build]
+target-dir = "$WORKER_CACHE_DIR"
+CARGOCFG
+echo "new-worker: build cache -> $WORKER_CACHE_DIR"
 
 ws="$(cmux workspace create --name "$NAME" --cwd "$CWD" 2>&1 | grep -oE 'workspace:[0-9]+' | head -1)"
 [ -n "$ws" ] || { echo "new-worker: could not create a workspace"; exit 1; }

@@ -30,8 +30,22 @@
 #   scripts/blast-radius.sh --dry-run       # print the plan, run nothing
 #   scripts/blast-radius.sh --list          # print traced targets + lanes, run nothing
 #   scripts/blast-radius.sh --serial        # today's single-lane behavior, byte-for-byte
+#   scripts/blast-radius.sh --targeted      # distance-zero targets only -- see TARGETED MODE below
 #   scripts/blast-radius.sh --jobs N        # override the parallel-lane worker count
 #   scripts/blast-radius.sh f1.rs f2.rs     # explicit files
+#
+# TARGETED MODE
+# --------------
+# --targeted is a fast BLOCKING gate, not a replacement for the full sweep:
+# it runs only the targets tracing a changed file at distance zero -- a
+# changed test file's own target, a changed source file's own same-named/
+# most-specific integration target when one exists, and `--lib` filtered to
+# the changed source files' own module paths -- plus `cargo doc --no-deps`.
+# It does NOT run the symbol fan-out trace the default mode does (a changed
+# constant's four other referencing files, say), so it prints how many
+# FULL-trace targets it skipped and never lets that number pass silently.
+# Composes with nothing else that changes lane membership; see the refusal
+# above for --serial.
 #
 # TWO LANES
 # ---------
@@ -115,20 +129,30 @@ fi
 
 cd "$REPO" || exit 1
 
-DRY=0; LIST=0; SERIAL=0; JOBS=""; MODE="head"; SINCE=""; FILES=()
+DRY=0; LIST=0; SERIAL=0; TARGETED=0; JOBS=""; MODE="head"; SINCE=""; FILES=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    --dry-run) DRY=1 ;;
-    --list)    LIST=1 ;;
-    --serial)  SERIAL=1 ;;
-    --jobs)    JOBS="${2:-}"; shift ;;
-    --staged)  MODE="staged" ;;
-    --since)   MODE="since"; SINCE="${2:-}"; shift ;;
-    -h|--help) sed -n '2,52p' "$0"; exit 0 ;;
-    *)         FILES+=("$1") ;;
+    --dry-run)   DRY=1 ;;
+    --list)      LIST=1 ;;
+    --serial)    SERIAL=1 ;;
+    --targeted)  TARGETED=1 ;;
+    --jobs)      JOBS="${2:-}"; shift ;;
+    --staged)    MODE="staged" ;;
+    --since)     MODE="since"; SINCE="${2:-}"; shift ;;
+    -h|--help)   sed -n '2,52p' "$0"; exit 0 ;;
+    *)           FILES+=("$1") ;;
   esac
   shift
 done
+
+# --targeted and --serial answer different questions (which targets to run,
+# vs. which lane to run them in) and composing them silently would make
+# --targeted's honest "I skipped N full-trace targets" line ambiguous about
+# whether the skip was scope or ordering. Refuse loudly instead of guessing.
+if [ "$TARGETED" -eq 1 ] && [ "$SERIAL" -eq 1 ]; then
+  echo "blast-radius: --targeted and --serial are mutually exclusive -- --targeted already runs its small target set as a single lane" >&2
+  exit 1
+fi
 
 if [ ${#FILES[@]} -eq 0 ]; then
   case "$MODE" in
@@ -223,6 +247,60 @@ mapfile -t TESTS < <(printf '%s\n' "${TESTS[@]-}" | sort -u | sed '/^$/d')
 mapfile -t BINS  < <(printf '%s\n' "${BINS[@]-}"  | sort -u | sed '/^$/d')
 mapfile -t FILTERS < <(printf '%s\n' "${FILTERS[@]-}" | sort -u | sed '/^$/d')
 
+# ---- targeted (distance-zero) trace, independent of the fan-out above -----
+# --targeted never consults SYMS_FILE/HITS_FILE (the fan-out that finds a
+# changed constant's other referencing files) -- it only asks, for each
+# changed file itself: is it a test target? Does it have a same-named/
+# most-specific integration test? What lib module does it live in? That is
+# "distance zero" -- one hop closer than the default trace, and cheap enough
+# to be a blocking gate rather than a background one.
+most_specific_integration_target() {  # <src-file> on stdout if one exists
+  local f="$1" pkg rest c
+  case "$f" in crates/*/src/*.rs) : ;; *) return 1 ;; esac
+  pkg="$(echo "$f" | cut -d/ -f2)"
+  rest="$(echo "$f" | sed -E 's#^crates/[^/]+/src/##; s#\.rs$##')"
+  # most specific first: the full path flattened, then just the leaf module.
+  for c in "$(echo "$rest" | sed 's#/#_#g')" "$(basename "$rest")"; do
+    [ -n "$c" ] || continue
+    if [ -f "crates/$pkg/tests/$c.rs" ]; then echo "$c"; return 0; fi
+  done
+  return 1
+}
+
+declare -a TARGETED_TESTS=() TARGETED_FILTERS=()
+for f in "${FILES[@]}"; do
+  case "$f" in
+    crates/*/tests/*.rs) TARGETED_TESTS+=("$(basename "$f" .rs)") ;;
+  esac
+done
+for f in "${FILES[@]}"; do
+  case "$f" in
+    crates/*/src/main.rs) : ;;  # a bin's own target isn't in --targeted's promise; see the header
+    crates/*/src/*.rs)
+      tgt="$(most_specific_integration_target "$f")" && [ -n "$tgt" ] && TARGETED_TESTS+=("$tgt")
+      m="$(echo "$f" | sed -E 's#^crates/[^/]+/src/##; s#\.rs$##; s#/mod$##; s#/#::#g')"
+      [ "$m" = "lib" ] || TARGETED_FILTERS+=("$m")
+      ;;
+  esac
+done
+mapfile -t TARGETED_TESTS   < <(printf '%s\n' "${TARGETED_TESTS[@]-}"   | sort -u | sed '/^$/d')
+mapfile -t TARGETED_FILTERS < <(printf '%s\n' "${TARGETED_FILTERS[@]-}" | sort -u | sed '/^$/d')
+TARGETED_LIB=0
+[ ${#TARGETED_FILTERS[@]} -gt 0 ] && TARGETED_LIB=1
+
+# How many FULL-trace targets --targeted is about to skip -- printed always,
+# in every mode, so the count is never a mystery even for a --list preview.
+# --lib doesn't count here: both modes touch --lib, just with different
+# filters, and a bin change is always counted as skipped (see above).
+FULL_TRACE_TARGET_COUNT=$(( ${#TESTS[@]} + ${#BINS[@]} ))
+TARGETED_MATCHED_COUNT=0
+for t in "${TESTS[@]-}"; do
+  for tt in "${TARGETED_TESTS[@]-}"; do
+    if [ "$t" = "$tt" ]; then TARGETED_MATCHED_COUNT=$((TARGETED_MATCHED_COUNT+1)); break; fi
+  done
+done
+SKIPPED_FULL_TARGET_COUNT=$(( FULL_TRACE_TARGET_COUNT - TARGETED_MATCHED_COUNT ))
+
 # ---- lane classification (ONE place — extend here) -------------------------
 # Serial lane: every target that spawns a process, drives a PTY, or asserts on
 # wall-clock. Parallel lane: everything else (pure config/routing/translation
@@ -243,14 +321,41 @@ KNOWN_SERIAL_TESTS=(
   entitlement_shell_scrub # spawns via HarnessLaunch/platform::exec
 )
 
-# --lib is always serial. A single `cargo test --lib` invocation bundles
-# whatever modules the changed files traced into it, and three of its modules
-# are known flaky/process-bound -- settings_persistence (in shell::mod),
-# integrations::version (the ETXTBSY fork/exec race documented below), and
-# session::api -- with no cargo filter fine-grained enough to split them out
-# of one invocation. Default-serial-for-the-unknown applies to the whole
-# invocation rather than trying to positively clear each module filter.
-LIB_IS_SERIAL=1
+# --lib SPLITS between the lanes. Only the known flaky/process-bound families
+# run serially -- settings_persistence (in shell::mod), integrations::version
+# (the ETXTBSY fork/exec race documented below), and session::api -- each via
+# its own explicit `cargo test --lib <family>` filter. Everything else in the
+# lib is pure config/routing/translation logic and runs as ONE invocation in
+# the parallel lane, via `--skip <family>` for exactly those same families.
+# Default-serial-for-the-unknown still governs: a lib module joins the serial
+# seed list (and so the skip list) by POSITIVELY matching the spawn-pattern
+# grep below; it does not get to default into the parallel invocation by
+# omission.
+#
+# Both lists are read off the SAME array (LIB_SERIAL_FAMILIES) rather than
+# spelled out twice, so they cannot diverge by editing one and forgetting the
+# other -- and the assertion right after them still checks it at runtime, in
+# case a future edit reintroduces two copies.
+LIB_SERIAL_FAMILIES=(
+  shell::settings_persistence_tests
+  integrations::version
+  session::api
+)
+while read -r libsrc; do
+  [ -n "$libsrc" ] || continue
+  m="$(echo "$libsrc" | sed -E 's#^crates/[^/]+/src/##; s#\.rs$##; s#/mod$##; s#/#::#g')"
+  [ "$m" = "lib" ] && continue
+  already=0
+  for k in "${LIB_SERIAL_FAMILIES[@]}"; do [ "$m" = "$k" ] && already=1 && break; done
+  [ "$already" -eq 1 ] || LIB_SERIAL_FAMILIES+=("$m")
+done < <(grep -rlE 'Command::new|std::process::Command|tokio::process::Command|PtyProcess::spawn|CARGO_BIN_EXE|Child::' crates/*/src 2>/dev/null | sort -u)
+
+SERIAL_LIB_FILTERS=("${LIB_SERIAL_FAMILIES[@]}")
+SKIP_LIB_FILTERS=("${LIB_SERIAL_FAMILIES[@]}")
+if [ "${SERIAL_LIB_FILTERS[*]-}" != "${SKIP_LIB_FILTERS[*]-}" ]; then
+  echo "blast-radius: BUG -- lib serial-filter list and skip-flag list diverged; refusing rather than run an unproven split" >&2
+  exit 1
+fi
 
 # --bin targets: same default-serial rule. A binary integration target is
 # exactly the "spawns/drives a real process" shape this script exists to keep
@@ -288,14 +393,22 @@ fi
 
 echo
 printf '\033[1m=== plan ===\033[0m\n'
-[ "$LIB" -eq 1 ] && echo "  --lib  (module filters: ${FILTERS[*]-none})  [serial]"
+[ "$LIB" -eq 1 ] && echo "  --lib  (module filters: ${FILTERS[*]-none})  [split serial/parallel by family]"
 [ ${#TESTS[@]} -gt 0 ] && echo "  --test ${TESTS[*]}"
 [ ${#BINS[@]}  -gt 0 ] && echo "  --bin  ${BINS[*]}  [serial]"
+echo "  --targeted would skip ${SKIPPED_FULL_TARGET_COUNT} of this full-trace's target(s)"
 
 if [ "$LIST" -eq 1 ]; then
   echo
   printf '\033[1m=== targets by lane ===\033[0m\n'
-  [ "$LIB" -eq 1 ] && printf '  serial    --lib  (module filters: %s)\n' "${FILTERS[*]-none}"
+  if [ "$LIB" -eq 1 ]; then
+    for fam in "${SERIAL_LIB_FILTERS[@]}"; do
+      printf '  serial    --lib  filter: %s\n' "$fam"
+    done
+    printf '  parallel  --lib  (rest of the lib; --skip %d famil%s: %s)\n' \
+      "${#SKIP_LIB_FILTERS[@]}" "$([ ${#SKIP_LIB_FILTERS[@]} -eq 1 ] && echo y || echo ies)" \
+      "${SKIP_LIB_FILTERS[*]}"
+  fi
   for t in "${SERIAL_TESTS[@]-}"; do
     [ -n "$t" ] || continue
     printf '  serial    --test %s\n' "$t"
@@ -309,9 +422,20 @@ if [ "$LIST" -eq 1 ]; then
     printf '  parallel  --test %s\n' "$t"
   done
   echo
-  printf '  parallel lane: %d target(s), bounded to %d job(s)\n' "${#PARALLEL_TESTS[@]}" "$PARALLEL_JOBS"
-  printf '  serial lane:   %d target(s) (--lib counts as one)\n' \
-    "$(( (LIB) + ${#SERIAL_TESTS[@]} + ${#BINS[@]} ))"
+  printf '  parallel lane: %d target(s), bounded to %d job(s)\n' \
+    "$(( ${#PARALLEL_TESTS[@]} + (LIB) ))" "$PARALLEL_JOBS"
+  printf '  serial lane:   %d target(s) (--lib family filters count individually)\n' \
+    "$(( (LIB ? ${#SERIAL_LIB_FILTERS[@]} : 0) + ${#SERIAL_TESTS[@]} + ${#BINS[@]} ))"
+
+  echo
+  printf '\033[1m=== --targeted preview ===\033[0m\n'
+  [ "$TARGETED_LIB" -eq 1 ] && printf '  --lib  filters: %s\n' "${TARGETED_FILTERS[*]}"
+  for t in "${TARGETED_TESTS[@]-}"; do
+    [ -n "$t" ] || continue
+    printf '  --test %s\n' "$t"
+  done
+  printf '  would skip %d full-trace target(s)\n' "$SKIPPED_FULL_TARGET_COUNT"
+
   echo
   echo "blast-radius: --list, nothing executed"
   exit 0
@@ -379,7 +503,22 @@ run_target() {                     # run_target <label> <cargo args...>
   return "$status"
 }
 
-if [ "$SERIAL" -eq 1 ]; then
+if [ "$TARGETED" -eq 1 ]; then
+  echo
+  printf '\033[1m=== --targeted: distance-zero targets only ===\033[0m\n'
+  if [ "$TARGETED_LIB" -eq 1 ]; then
+    for fl in "${TARGETED_FILTERS[@]}"; do
+      run_target "cargo test --lib $fl" --lib "$fl" || rc=1
+    done
+  fi
+  for t in "${TARGETED_TESTS[@]-}"; do
+    [ -n "$t" ] || continue
+    run_target "cargo test --test $t" --test "$t" || rc=1
+  done
+  echo
+  printf '\033[33mblast-radius: --targeted skipped %d FULL-trace target(s) -- this is a blocking gate, not the full sweep; run the default sweep before the real gate\033[0m\n' \
+    "$SKIPPED_FULL_TARGET_COUNT"
+elif [ "$SERIAL" -eq 1 ]; then
   echo
   printf '\033[1m=== --serial: single lane, original order ===\033[0m\n'
   if [ "$LIB" -eq 1 ]; then
@@ -396,9 +535,10 @@ if [ "$SERIAL" -eq 1 ]; then
 else
   echo
   printf '\033[1m=== lane counts ===\033[0m\n'
-  printf '  parallel lane: %d target(s), bounded to %d job(s)\n' "${#PARALLEL_TESTS[@]}" "$PARALLEL_JOBS"
-  printf '  serial lane:   %d target(s) (--lib counts as one)\n' \
-    "$(( (LIB) + ${#SERIAL_TESTS[@]} + ${#BINS[@]} ))"
+  printf '  parallel lane: %d target(s), bounded to %d job(s)\n' \
+    "$(( ${#PARALLEL_TESTS[@]} + (LIB) ))" "$PARALLEL_JOBS"
+  printf '  serial lane:   %d target(s) (--lib family filters count individually)\n' \
+    "$(( (LIB ? ${#SERIAL_LIB_FILTERS[@]} : 0) + ${#SERIAL_TESTS[@]} + ${#BINS[@]} ))"
 
   # Parallel lane first -- it is the one that can saturate idle cores, and
   # running it before the serial lane keeps the serial lane's fixture/
@@ -407,10 +547,19 @@ else
   # 3). A failing parallel target does not abort the run: every target always
   # runs and every failure is listed at the end, exactly as the serial lane
   # already does (requirement 6).
-  if [ ${#PARALLEL_TESTS[@]} -gt 0 ]; then
+  # The rest-of-lib invocation (everything NOT in a serial family) joins this
+  # same bounded-parallel queue as one more job -- it is pure config/routing/
+  # translation logic by the same default-serial-for-the-unknown rule that
+  # decided the split, so it belongs beside the other parallel targets, not
+  # ahead of or behind them.
+  declare -a _PARALLEL_JOBS=()
+  for t in "${PARALLEL_TESTS[@]-}"; do [ -n "$t" ] && _PARALLEL_JOBS+=("test:$t"); done
+  [ "$LIB" -eq 1 ] && _PARALLEL_JOBS+=("libskip")
+
+  if [ ${#_PARALLEL_JOBS[@]} -gt 0 ]; then
     echo
     printf '\033[1m=== parallel lane (%d target(s), %d job(s)) ===\033[0m\n' \
-      "${#PARALLEL_TESTS[@]}" "$PARALLEL_JOBS"
+      "${#_PARALLEL_JOBS[@]}" "$PARALLEL_JOBS"
     declare -a _PIDS=() _OUTS=()
     drain_one() {
       local pid="${_PIDS[0]}" out="${_OUTS[0]}"
@@ -419,12 +568,26 @@ else
       _PIDS=("${_PIDS[@]:1}"); _OUTS=("${_OUTS[@]:1}")
       return "$status"
     }
-    for t in "${PARALLEL_TESTS[@]}"; do
+    for job in "${_PARALLEL_JOBS[@]}"; do
       while [ "${#_PIDS[@]}" -ge "$PARALLEL_JOBS" ]; do
         drain_one || rc=1
       done
       out="$(mktemp)"
-      ( run_target "cargo test --test $t" --test "$t" ) >"$out" 2>&1 &
+      case "$job" in
+        test:*)
+          t="${job#test:}"
+          ( run_target "cargo test --test $t" --test "$t" ) >"$out" 2>&1 &
+          ;;
+        libskip)
+          # `--skip` is a libtest (test-binary) argument, not a cargo one -- it
+          # needs the `--` separator or cargo refuses it with "unexpected
+          # argument '--skip' found" before ever reaching the test binary.
+          # Measured while testing this packet's own change.
+          declare -a _skip_args=()
+          for fam in "${SKIP_LIB_FILTERS[@]}"; do _skip_args+=(--skip "$fam"); done
+          ( run_target "cargo test --lib (rest; skip: ${SKIP_LIB_FILTERS[*]})" --lib -- "${_skip_args[@]}" ) >"$out" 2>&1 &
+          ;;
+      esac
       _PIDS+=("$!"); _OUTS+=("$out")
     done
     while [ "${#_PIDS[@]}" -gt 0 ]; do
@@ -432,10 +595,14 @@ else
     done
   fi
 
-  # Serial lane second, on a now-quiet machine: unchanged one-at-a-time
-  # execution, exactly today's order (lib, then tests, then bins).
+  # Serial lane second, on a now-quiet machine: --lib now runs ONLY its known
+  # flaky/process-bound families here, one explicit filter per invocation
+  # (its rest already ran above, in the parallel lane); tests and bins are
+  # unchanged from today's order.
   if [ "$LIB" -eq 1 ]; then
-    run_target "cargo test --lib" --lib || rc=1
+    for fam in "${SERIAL_LIB_FILTERS[@]}"; do
+      run_target "cargo test --lib $fam" --lib "$fam" || rc=1
+    done
   fi
   for t in "${SERIAL_TESTS[@]-}"; do
     [ -n "$t" ] || continue

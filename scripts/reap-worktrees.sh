@@ -18,10 +18,22 @@
 #   the worktree itself     NEVER — it holds the diff, and until the work is
 #                           integrated and pushed that diff is the only copy
 #   any tracked file        NEVER
+#   ~/.cache/glasshouse-worker-targets/<name>
+#                           a worker's PERSISTENT build cache (written by
+#                           scripts/dev/new-worker.sh's per-worker
+#                           .cargo/config.toml). It lives OUTSIDE the
+#                           worktree on purpose, so closing or removing a
+#                           worktree does NOT remove its cache — that is what
+#                           makes a worker's second-ever dispatch under the
+#                           same name skip a cold build. Reclaim it
+#                           explicitly with --reap-caches once no worktree of
+#                           that name is live; plain --clean never touches it.
 #
 # USAGE
-#   scripts/reap-worktrees.sh              # report only
-#   scripts/reap-worktrees.sh --clean      # remove build output + ci volumes
+#   scripts/reap-worktrees.sh                # report only
+#   scripts/reap-worktrees.sh --clean        # remove build output + ci volumes
+#   scripts/reap-worktrees.sh --reap-caches  # remove per-worker build caches
+#                                             # with no matching live worktree
 set -uo pipefail
 
 # REPO here has one job: match `git worktree list`'s own row for the main
@@ -48,8 +60,13 @@ if [ -n "$MAIN_COMMON" ] && [ "$(basename "$MAIN_COMMON")" = ".git" ]; then
 else
   REPO="$SCRIPT_DIR"
 fi
-CLEAN=0
-[ "${1:-}" = "--clean" ] && CLEAN=1
+CLEAN=0; REAP_CACHES=0
+for a in "$@"; do
+  case "$a" in
+    --clean)       CLEAN=1 ;;
+    --reap-caches) REAP_CACHES=1 ;;
+  esac
+done
 
 printf '%-42s %8s  %-22s %s\n' "WORKTREE" "target/" "UNCOMMITTED" "BRANCH"
 printf '%s\n' "----------------------------------------------------------------------------------------"
@@ -94,4 +111,45 @@ else
   echo "Nothing removed. Re-run with --clean to reclaim build output and ci volumes."
   echo "UNCOMMITTED marks a worktree whose diff is not yet integrated — its"
   echo "target/ is still safe to remove, but do not delete the worktree itself."
+fi
+
+# ---- persistent per-worker build caches (scripts/dev/new-worker.sh) --------
+# These live OUTSIDE every worktree by design (see the header), so neither the
+# reporting loop above nor plain --clean ever sees or touches them. A cache
+# is reclaimable only once no worktree of that exact name is live -- matched
+# by NAME, the same key new-worker.sh keys the cache by, not by path, since a
+# worktree can be removed and recreated at the same path under a different
+# name.
+CACHE_ROOT="$HOME/.cache/glasshouse-worker-targets"
+echo
+printf '%-42s %8s  %s\n' "WORKER CACHE" "size" "STATE"
+printf '%s\n' "----------------------------------------------------------------------------------------"
+if [ -d "$CACHE_ROOT" ]; then
+  live_names="$(git -C "$REPO" worktree list | awk '{print $1}' | while read -r p; do [ -n "$p" ] && basename "$p"; done)"
+  cache_total_k=0
+  for d in "$CACHE_ROOT"/*/; do
+    [ -d "$d" ] || continue
+    cname="$(basename "$d")"
+    k=$(du -sk "$d" 2>/dev/null | cut -f1)
+    human=$(du -sh "$d" 2>/dev/null | cut -f1)
+    cache_total_k=$((cache_total_k + k))
+    if printf '%s\n' "$live_names" | grep -qxF "$cname"; then
+      printf '%-42s %8s  %s\n' "$cname" "$human" "KEEP — worktree $cname is live"
+    elif [ "$REAP_CACHES" -eq 1 ]; then
+      rm -rf "$d"
+      printf '%-42s %8s  removed — no matching live worktree\n' "$cname" "$human"
+    else
+      printf '%-42s %8s  reclaimable — no matching live worktree\n' "$cname" "$human"
+    fi
+  done
+  printf '\n'
+  printf 'persistent worker build caches: %s\n' "$(echo "$cache_total_k" | awk '{printf "%.1f GB", $1/1024/1024}')"
+else
+  echo "(none — $CACHE_ROOT does not exist yet)"
+fi
+
+if [ "$REAP_CACHES" -eq 1 ]; then
+  echo "reclaimed caches with no matching live worktree."
+else
+  echo "Re-run with --reap-caches to reclaim caches with no matching live worktree."
 fi
