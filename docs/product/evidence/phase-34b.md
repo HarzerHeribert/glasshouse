@@ -214,7 +214,42 @@ any of these seven contracts. Run on macOS, Linux and Windows in
 
 ## From `GH-ROUTING-ECONOMICS` (2026-08-31)
 
-The routing-model selector package closed this phase's lines 1420, 1421, 1422, 1423, 1427 (1419 refused: no per-model price); the full entry — production sites, regression names, the 22 killed mutations and the four refusals with their producers — is in `phase-34c.md` under *Package GH-ROUTING-ECONOMICS*, because the mechanism (`DisposableRouting::choose_for_automatic_classification`) lives in that phase.
+The routing-model selector package closed this phase's lines 1420, 1421, 1422, 1423, 1427 (1419 refused: no per-model price)
+
+**1419 re-checked 2026-09-02 and still REFUSED — but both recorded reasons are
+now stale, which is exactly how a line gets packaged by mistake.** Whoever picks
+this up will find the old blockers false and should not conclude the line is
+open:
+
+- *"there is no candidate set"* (this file, above): **false.**
+  `DisposableRouting::choose_for_automatic_classification`
+  (`routing/disposable.rs:1409`) takes `candidates: &[DisposableCandidate]` and
+  is called in production from `main.rs:7440`.
+- *"no per-model price"*: **false as stated.**
+  `PriceTable::price_for(provider, model)` exists
+  (`provider/pricing.rs:117`), is loaded from the user's own `pricing.toml`,
+  and is already read by `routing/session.rs` — Phase 32G's line 1307 proved
+  it round-trips through the shipped binary.
+
+**What is actually missing, verified rather than assumed:**
+
+1. **The price does not reach the selector.** `DisposableCandidate` carries
+   `cost: Cost` (`routing/disposable.rs:216`), and `Cost` is a two-variant
+   enum — `Free` or `Metered` (`routing/mod.rs:139`). That is a *category*,
+   not a marginal cost. `PriceTable` appears nowhere in `routing/disposable.rs`.
+2. **"the premium capacity it protects" has no established producer at the
+   call site.** The line asks for a *comparison* between two quantities, and
+   only the first is even plumbed. Nothing at `main.rs:7440` has been shown to
+   know which premium destination this classification is protecting or what it
+   is worth.
+3. **"materially lower" is an unmade threshold decision**, and belongs with the
+   other capacity-band thresholds rather than invented in a packet.
+
+**Successor, when someone takes it:** plumb `PriceTable` to `main.rs:7440` and
+onto `DisposableCandidate` as a real per-token price (not a `Cost` variant)
+first — that is a self-contained package with a provable Phase -1. Only then is
+the comparison this line names writable, and the threshold is a ruling before
+it is code.; the full entry — production sites, regression names, the 22 killed mutations and the four refusals with their producers — is in `phase-34c.md` under *Package GH-ROUTING-ECONOMICS*, because the mechanism (`DisposableRouting::choose_for_automatic_classification`) lives in that phase.
 
 
 ---
