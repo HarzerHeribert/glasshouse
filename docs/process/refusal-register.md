@@ -368,6 +368,38 @@ command); and the decay-to-zero pattern 1484 wants already exists as
 |---|---|
 | 1455, 1456 | **RE-OPENED 2026-08-30 after being ticked in error.** *"Avoid sending full repository contents / session transcripts to the router."* **Nothing in this build constructs a request to a routing model** — `routing/classify.rs:23-27` and `:583-586` both say so in production source. A negative requirement over a request that is never made passes vacuously. The type that appears to enforce it, `TaskRequirements`, bounds the input to `SessionRouter`, an in-process function that sends nothing anywhere. **Do not re-package ahead of 1447**, the line that defines the schema and is still open. Full reasoning in `phase-34d.md`. |
 
+### Phase 32G — the census, and the two lines that were reachable
+
+Derived 2026-09-01 at `6117446` while writing `pricing-channel`'s Phase −1.
+The phase is **0/10 and stays mostly 0/10 for one reason**: *there is no
+price data anywhere in this build.* A grep for
+`price|pricing|per_million|cost_per` across `crates/glasshouse/src` returns
+budget configuration (`config/mod.rs`'s `amount_micro_usd`,
+`RouterCostMicroUsd`) and two empty database columns, and nothing else.
+Four independent production doc comments already record the consequence —
+`config/mod.rs:1786`, `routing/mod.rs:1035`, `routing/evidence.rs:90` and
+`:130` all say `routing_observations.cost_micro_usd` has no producer.
+
+`expected_marginal_cost` (`routing/session.rs:1237`) is the phase's only
+consumer and it is **purely structural**: free versus metered, with a flat
+`EXPECTED_MARGINAL_COST_PENALTY`. It consults no price at all.
+
+| line | missing link |
+|---|---|
+| 1298, 1299, 1304 | **No estimated input size at the routing decision point.** `SessionContextFacts` (`routing/session.rs:197`) is the router's own context type and its four fields are `observed_compactions`, `last_task`, `touched_files`, `task_named_paths` — **no size or token field**, and `WarmSession` makes an explicit refusal about accumulated context (`routing/session.rs:137`). `firewall::estimate::estimate_tokens` is public but needs text the router does not hold. A size producer is the blocker for all three. |
+| 1300 | the pricing half is buildable; the **usage** half is not — no cached-input signal exists (`cached_input_tokens` has no setter). Same root as Cluster H's 1760. |
+| 1301 | no expected-output-size signal; *"recent comparable tasks"* would have to be turned into a token count nothing measures. |
+| 1302 | same root as Cluster D's **531** — nothing distinguishes a request pool from a token-priced allowance and no `FreePool` outlives one call. |
+| 1303 | latency aggregates exist and have a production reader; **occupancy does not**. Half a signal. |
+| 1305, 1306 | **NOT REFUSED — packaged 2026-09-01 as `pricing-channel`.** These two ARE the channel: a metadata source updatable without recompiling, and the rule that an absent price reads *unknown* rather than a fake zero. §83's *"attack the channel"* in its clearest form — building them is what makes the six rows above re-derivable rather than permanent. |
+| 1307 | **NOT REFUSED, and closer than any row here.** `RoutingObservation` already carries `pub cost: Option<ObservedCost>` (`routing/evidence.rs:451`) and `EvidenceLedger::record` already accepts it; the producer is what `pricing-channel` builds. It was kept out of that packet **only** because its production writers are `main.rs:1678` and `:1730`, a file two other workers held that round. **This is a successor package, not a refusal — do not file it as one.** |
+
+**The generalisable point, and it is not the first phase to show it:** a
+phase at 0/N is usually one missing producer wearing N hats, not N problems.
+Counting open lines said *"ten"*; reading the one consumer said *"one missing
+producer, plus two lines that describe that producer itself"*. Those two were
+the package.
+
 ## The register's own weakness, measured 2026-08-30
 
 `GH-REGISTER-AUDIT` checked every open row against current source. Verdicts:
