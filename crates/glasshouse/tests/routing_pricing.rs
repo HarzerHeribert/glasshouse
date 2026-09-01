@@ -17,9 +17,10 @@ use std::time::Instant;
 use glasshouse::harness::pairing::PairingOverrides;
 use glasshouse::integrations::IntegrationId;
 use glasshouse::provider::pricing::PriceTable;
+use glasshouse::routing::evidence::CostConfidence;
 use glasshouse::routing::free::FreePool;
 use glasshouse::routing::session::{
-    Destination, RouterInputs, RoutingMoment, SessionRouter, TaskRequirements,
+    Destination, EstimatedInputSize, RouterInputs, RoutingMoment, SessionRouter, TaskRequirements,
 };
 use glasshouse::routing::{AssignedModel, Backend, Cost, CredentialId, ToolSemantics};
 use glasshouse::secret::SecretRef;
@@ -473,5 +474,274 @@ fn with_no_price_table_attached_the_explanation_and_ranking_are_unchanged() {
         metered_evidence.contains("unknown"),
         "with no price table attached, a metered destination's price must read as unknown, \
          exactly as every destination did before this package: {metered_evidence}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// GH-INPUT-SIZE-PRODUCER — map lines 1298, 1299, 1304 and 1307: a known
+// price and a known input-size estimate together become an actual dollar
+// figure, both in the explanation (1298) and on `Routed::cost` (1307).
+// ---------------------------------------------------------------------------
+
+fn priced_destination(
+    dir: &std::path::Path,
+    size: EstimatedInputSize,
+) -> (PriceTable, Destination) {
+    write_pricing_toml(
+        dir,
+        r#"
+        [[prices]]
+        provider = "openrouter"
+        model = "some/model"
+        input_per_million_usd = 3.0
+        output_per_million_usd = 9.0
+        "#,
+    );
+    let prices = PriceTable::load_from_dir(dir);
+    let destination = Destination::fresh(
+        "fresh",
+        IntegrationId::ClaudeCode,
+        "default",
+        backend_with_cost(
+            "openrouter",
+            "some/model",
+            "OPENROUTER_API_KEY",
+            Cost::Metered,
+        ),
+        None,
+    )
+    .with_estimated_input_size(size);
+    (prices, destination)
+}
+
+#[test]
+fn a_known_size_turns_a_known_rate_into_a_dollar_estimate_in_the_explanation() {
+    let dir = temp_dir("known-size-known-price");
+    let (prices, destination) = priced_destination(
+        &dir,
+        EstimatedInputSize::UNESTIMATED.with_project_memory_tokens(Some(1_000_000)),
+    );
+    let fixture = Fixture::new();
+
+    let routed = SessionRouter::new()
+        .with_price_table(prices)
+        .choose(
+            RoutingMoment::SessionStart,
+            None,
+            &[destination],
+            &fixture.inputs(),
+        )
+        .expect("destination was offered");
+
+    let (magnitude, evidence) = contribution_evidence(routed.considered(), "fresh");
+    assert_ne!(
+        magnitude, 0.0,
+        "a metered, priced destination must not score as free"
+    );
+    // 1,000,000 tokens at $3.00/million input is exactly $3.0000.
+    assert!(
+        evidence.contains("3.0000"),
+        "the explanation must state the actual dollar figure this decision's own size \
+         estimate produces: {evidence}"
+    );
+    assert!(
+        evidence.contains("project memory ~1000000 tokens"),
+        "the explanation must say what the estimate is made of, not just a total: {evidence}"
+    );
+}
+
+#[test]
+fn an_unknown_size_keeps_a_known_price_from_becoming_a_cost_in_the_explanation() {
+    let dir = temp_dir("known-price-unknown-size");
+    let (prices, destination) = priced_destination(&dir, EstimatedInputSize::UNESTIMATED);
+    let fixture = Fixture::new();
+
+    let routed = SessionRouter::new()
+        .with_price_table(prices)
+        .choose(
+            RoutingMoment::SessionStart,
+            None,
+            &[destination],
+            &fixture.inputs(),
+        )
+        .expect("destination was offered");
+
+    let (magnitude, evidence) = contribution_evidence(routed.considered(), "fresh");
+    assert_ne!(magnitude, 0.0);
+    assert!(
+        !evidence.contains("project memory ~"),
+        "with no input-size estimate attached, the explanation must not name a component it \
+         never measured: {evidence}"
+    );
+    assert!(
+        evidence.contains("known"),
+        "the price itself is still known and the explanation must say so: {evidence}"
+    );
+}
+
+#[test]
+fn routed_cost_multiplies_the_known_rate_by_the_known_size() {
+    let dir = temp_dir("routed-cost-known");
+    let (prices, destination) = priced_destination(
+        &dir,
+        EstimatedInputSize::UNESTIMATED.with_checkpoint_tokens(Some(2_000_000)),
+    );
+    let fixture = Fixture::new();
+
+    let routed = SessionRouter::new()
+        .with_price_table(prices)
+        .choose(
+            RoutingMoment::SessionStart,
+            None,
+            &[destination],
+            &fixture.inputs(),
+        )
+        .expect("destination was offered");
+
+    // 2,000,000 tokens at $3.00/million input is exactly $6.00 = 6_000_000
+    // micro-USD.
+    let cost = routed
+        .cost()
+        .expect("a known price and a known size must record a cost");
+    assert_eq!(cost.micro_usd, 6_000_000);
+    assert_eq!(
+        cost.confidence,
+        CostConfidence::Estimated,
+        "this cost is built from the user's own pricing.toml and this build's own token \
+         measurement, never a provider-reported figure"
+    );
+}
+
+#[test]
+fn routed_cost_is_none_when_size_is_unknown_even_with_a_known_price() {
+    let dir = temp_dir("routed-cost-unknown-size");
+    let (prices, destination) = priced_destination(&dir, EstimatedInputSize::UNESTIMATED);
+    let fixture = Fixture::new();
+
+    let routed = SessionRouter::new()
+        .with_price_table(prices)
+        .choose(
+            RoutingMoment::SessionStart,
+            None,
+            &[destination],
+            &fixture.inputs(),
+        )
+        .expect("destination was offered");
+
+    assert_eq!(
+        routed.cost(),
+        None,
+        "unknown size must record no cost row at all, never a fabricated zero"
+    );
+}
+
+#[test]
+fn routed_cost_is_none_when_price_is_unknown_even_with_a_known_size() {
+    let dir = temp_dir("routed-cost-unknown-price");
+    // No file at all: the price stays unknown regardless of size.
+    let prices = PriceTable::load_from_dir(&dir);
+    let destination = Destination::fresh(
+        "fresh",
+        IntegrationId::ClaudeCode,
+        "default",
+        backend_with_cost(
+            "openrouter",
+            "some/model",
+            "OPENROUTER_API_KEY",
+            Cost::Metered,
+        ),
+        None,
+    )
+    .with_estimated_input_size(
+        EstimatedInputSize::UNESTIMATED.with_project_memory_tokens(Some(500)),
+    );
+    let fixture = Fixture::new();
+
+    let routed = SessionRouter::new()
+        .with_price_table(prices)
+        .choose(
+            RoutingMoment::SessionStart,
+            None,
+            &[destination],
+            &fixture.inputs(),
+        )
+        .expect("destination was offered");
+
+    assert_eq!(
+        routed.cost(),
+        None,
+        "an unknown price must record no cost row even when the size is known"
+    );
+}
+
+#[test]
+fn a_free_destination_records_a_known_zero_cost_regardless_of_size() {
+    let dir = temp_dir("routed-cost-free");
+    // No file at all: irrelevant for a free destination.
+    let prices = PriceTable::load_from_dir(&dir);
+    let destination = Destination::fresh(
+        "free",
+        IntegrationId::ClaudeCode,
+        "default",
+        backend_with_cost("openrouter", "some/model", "OPENROUTER_API_KEY", Cost::Free),
+        None,
+    );
+    let fixture = Fixture::new();
+
+    let routed = SessionRouter::new()
+        .with_price_table(prices)
+        .choose(
+            RoutingMoment::SessionStart,
+            None,
+            &[destination],
+            &fixture.inputs(),
+        )
+        .expect("destination was offered");
+
+    let cost = routed
+        .cost()
+        .expect("a free destination's cost is a known zero, not an unknown");
+    assert_eq!(cost.micro_usd, 0);
+    assert_eq!(cost.confidence, CostConfidence::Estimated);
+}
+
+// ---------------------------------------------------------------------------
+// Regression — a fresh destination that never attaches an input-size
+// estimate reproduces the pre-package explanation exactly (no price table
+// at all, so the unknown-price branch, byte for byte).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn with_no_estimate_attached_and_no_price_table_the_explanation_is_unchanged() {
+    let fixture = Fixture::new();
+    let destination = Destination::fresh(
+        "fresh",
+        IntegrationId::ClaudeCode,
+        "default",
+        backend_with_cost(
+            "anthropic",
+            "claude-opus-4",
+            "ANTHROPIC_API_KEY",
+            Cost::Metered,
+        ),
+        None,
+    );
+
+    let routed = SessionRouter::new()
+        .choose(
+            RoutingMoment::SessionStart,
+            None,
+            &[destination],
+            &fixture.inputs(),
+        )
+        .expect("destination was offered");
+
+    let (magnitude, evidence) = contribution_evidence(routed.considered(), "fresh");
+    assert_ne!(magnitude, 0.0);
+    assert!(evidence.contains("unknown"));
+    assert_eq!(
+        routed.cost(),
+        None,
+        "no price table at all means no cost, exactly as before this package"
     );
 }

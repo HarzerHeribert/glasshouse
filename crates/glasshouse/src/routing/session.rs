@@ -56,7 +56,7 @@ use crate::provider::quota::{CapacityBand, RemainingCapacityScore};
 
 use super::capability::{self, ResourceFacts};
 use super::classify::{DurationClass, HardCapability, TaskClassification, WorkloadTier};
-use super::evidence::FailureClass;
+use super::evidence::{CostConfidence, FailureClass, ObservedCost};
 use super::free::{FreePool, FreeResource};
 use super::pressure::{
     self, Alternatives, CapacityFacts, PressureInputs, ReservePolicies, ReserveScope,
@@ -260,6 +260,134 @@ impl SessionContextFacts {
     }
 }
 
+/// Map lines 1298, 1299 and 1304: the components of one decision's own
+/// input-size estimate, named rather than folded into a single number — a
+/// reader of `glasshouse route --task` is owed which pieces were counted,
+/// not just a total. Follows [`AffinityFacet`]'s `known`/`unknown` idiom at
+/// the level of a whole estimate: every component is `Some(tokens)` when it
+/// was actually measured and `None` when it was not — never a zero standing
+/// in for "nobody looked" or "the read came back empty" (both degrade to
+/// absent, by this package's own ruling — see `main.rs`'s producers).
+///
+/// [`Self::total_tokens`] is `None` only when every component is `None`;
+/// otherwise it sums the components that were measured, which is the same
+/// "absent, not zero" rule applied to a sum instead of one field — the
+/// component this build could not read simply does not enter the total,
+/// rather than entering it as a zero that would understate a real cost.
+///
+/// The production caller is `main.rs::routing_destinations`, which attaches
+/// one of these per destination it builds: a fresh destination's carries the
+/// project's own memory and checkpoint (line 1304, *"fresh-session cost
+/// estimates"*), an existing session's carries that session's own latest
+/// checkpoint only when the session is cold rather than live (line 1299),
+/// and a live session's stays [`Self::UNESTIMATED`] entirely — `WarmSession`
+/// already refuses to guess at accumulated context, and this estimate does
+/// not overturn that refusal.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct EstimatedInputSize {
+    project_memory_tokens: Option<u64>,
+    checkpoint_tokens: Option<u64>,
+    bootstrap_context_tokens: Option<u64>,
+}
+
+impl EstimatedInputSize {
+    /// Nothing measured — the honest floor, and what every destination
+    /// carries until `main.rs::routing_destinations` attaches what it read.
+    pub const UNESTIMATED: Self = Self {
+        project_memory_tokens: None,
+        checkpoint_tokens: None,
+        bootstrap_context_tokens: None,
+    };
+
+    /// Map line 1304's "project memory": [`crate::firewall::estimate::estimate_tokens`]
+    /// of the real text [`crate::memory::inject::briefing`] would inject for
+    /// this task — a measurement of the actual injection, not a model of it.
+    /// `None` when the store could not be opened, `briefing` itself failed,
+    /// or `briefing` matched nothing to inject — all three read as "this
+    /// component was not counted" rather than "this component counts as
+    /// zero", because none of them is the certain fact [`super::Cost::is_free`]
+    /// is.
+    pub fn with_project_memory_tokens(mut self, tokens: Option<u64>) -> Self {
+        self.project_memory_tokens = tokens;
+        self
+    }
+
+    /// Map lines 1299 and 1304's checkpoint component: the rendered size of
+    /// the checkpoint document this destination would actually read — the
+    /// project's latest for a fresh session's bootstrap half, or the cold
+    /// session's own latest for a resume. `None` when there is no checkpoint
+    /// to measure.
+    pub fn with_checkpoint_tokens(mut self, tokens: Option<u64>) -> Self {
+        self.checkpoint_tokens = tokens;
+        self
+    }
+
+    /// Map line 1304's "bootstrap context": a fixed session document
+    /// installed at launch, distinct from the checkpoint above, when this
+    /// build has one reachable before routing measures it. Always `None`
+    /// today — see this field's producer in `main.rs` for why it is
+    /// deliberately never set rather than modeled.
+    pub fn with_bootstrap_context_tokens(mut self, tokens: Option<u64>) -> Self {
+        self.bootstrap_context_tokens = tokens;
+        self
+    }
+
+    pub fn project_memory_tokens(&self) -> Option<u64> {
+        self.project_memory_tokens
+    }
+
+    pub fn checkpoint_tokens(&self) -> Option<u64> {
+        self.checkpoint_tokens
+    }
+
+    pub fn bootstrap_context_tokens(&self) -> Option<u64> {
+        self.bootstrap_context_tokens
+    }
+
+    /// The components actually measured, summed. `None` when none were —
+    /// never `Some(0)` for an estimate nobody could build any part of, which
+    /// is what keeps a destination nobody can size from becoming the
+    /// cheapest candidate by default.
+    pub fn total_tokens(&self) -> Option<u64> {
+        let known: Vec<u64> = [
+            self.project_memory_tokens,
+            self.checkpoint_tokens,
+            self.bootstrap_context_tokens,
+        ]
+        .into_iter()
+        .flatten()
+        .collect();
+        if known.is_empty() {
+            None
+        } else {
+            Some(known.into_iter().sum())
+        }
+    }
+
+    /// What the estimate is made of, for a routing explanation — names which
+    /// components were counted and which were not, and says outright that
+    /// likely repository reads are never counted at all. Reports counts and
+    /// component names only, never memory or checkpoint content: this
+    /// module counts tokens, it does not quote text.
+    pub fn describe(&self) -> String {
+        let mut parts = Vec::new();
+        match self.project_memory_tokens {
+            Some(tokens) => parts.push(format!("project memory ~{tokens} tokens")),
+            None => parts.push("project memory not measured".to_owned()),
+        }
+        match self.checkpoint_tokens {
+            Some(tokens) => parts.push(format!("checkpoint ~{tokens} tokens")),
+            None => parts.push("checkpoint not measured".to_owned()),
+        }
+        match self.bootstrap_context_tokens {
+            Some(tokens) => parts.push(format!("bootstrap context ~{tokens} tokens")),
+            None => parts.push("bootstrap context not measured".to_owned()),
+        }
+        parts.push("likely repository reads always omitted (unpredictable)".to_owned());
+        parts.join("; ")
+    }
+}
+
 /// Whether a destination continues something or starts something.
 ///
 /// The axis lines 1593 and 1594 are about, as a type rather than a `bool`,
@@ -365,6 +493,12 @@ pub struct Destination {
     /// always arrives with one, because configuration supplies a default
     /// entry for it.
     entitlement: Option<super::Entitlement>,
+    /// Map lines 1298, 1299 and 1304: what the caller measured about this
+    /// decision's own input size, attached via
+    /// [`Self::with_estimated_input_size`]. [`EstimatedInputSize::UNESTIMATED`]
+    /// for any caller that did not measure — including every live (warm)
+    /// session, on purpose.
+    estimated_input_size: EstimatedInputSize,
 }
 
 impl Destination {
@@ -426,6 +560,7 @@ impl Destination {
             capability_tier: None,
             context: SessionContextFacts::UNREAD,
             entitlement: None,
+            estimated_input_size: EstimatedInputSize::UNESTIMATED,
         }
     }
 
@@ -563,6 +698,21 @@ impl Destination {
 
     pub fn session_context(&self) -> &SessionContextFacts {
         &self.context
+    }
+
+    /// Attach what the caller measured about this decision's own input
+    /// size — map lines 1298, 1299 and 1304. The default is
+    /// [`EstimatedInputSize::UNESTIMATED`], on which this decision's own
+    /// expected-marginal-cost term can state a rate but not a cost.
+    ///
+    /// **The production caller is `main.rs::routing_destinations`.**
+    pub fn with_estimated_input_size(mut self, size: EstimatedInputSize) -> Self {
+        self.estimated_input_size = size;
+        self
+    }
+
+    pub fn estimated_input_size(&self) -> &EstimatedInputSize {
+        &self.estimated_input_size
     }
 
     /// The stable identifier a user names in an override, and the one a
@@ -1276,20 +1426,49 @@ fn expected_marginal_cost(
         .name()
         .and_then(|model| prices.price_for(destination.backend().provider(), model));
     let (magnitude, evidence) = match known_price {
-        Some(price) => (
-            EXPECTED_MARGINAL_COST_PENALTY,
-            format!(
-                "`{}` is metered; its price is known — ${:.2} per million input tokens, ${:.2} \
-                 per million output tokens — but no per-call token estimate exists yet at this \
-                 call site to convert that rate into an expected dollar figure (line 1298's job \
-                 once a size producer exists), so it is priced the same as an unpriced metered \
-                 destination and no workload tier is established yet to price it another way \
-                 (line 1558 would once one is)",
-                destination.id(),
-                price.input_per_million_usd,
-                price.output_per_million_usd,
+        Some(price) => match destination.estimated_input_size().total_tokens() {
+            // Map line 1298: the rate and this decision's own input-size
+            // estimate together become an actual dollar figure. The
+            // **magnitude** still does not move — see this function's own
+            // doc comment on why pricing it a second time here would
+            // double-count `cost_preference` — only the evidence gains the
+            // conversion this package exists to make possible.
+            Some(tokens) => {
+                let cost_usd = tokens as f64 * price.input_per_million_usd / 1_000_000.0;
+                (
+                    EXPECTED_MARGINAL_COST_PENALTY,
+                    format!(
+                        "`{}` is metered; its price is known — ${:.2} per million input \
+                         tokens, ${:.2} per million output tokens — and this decision's own \
+                         input-size estimate ({}) puts the expected marginal cost at roughly \
+                         ${:.4} for this call; no workload tier is established yet to price it \
+                         another way (line 1558 would once one is)",
+                        destination.id(),
+                        price.input_per_million_usd,
+                        price.output_per_million_usd,
+                        destination.estimated_input_size().describe(),
+                        cost_usd,
+                    ),
+                )
+            }
+            // Unknown SIZE makes the cost unknown even when the price is
+            // known — the rule this package adds. Priced identically to an
+            // unpriced metered destination, never collapsed toward zero.
+            None => (
+                EXPECTED_MARGINAL_COST_PENALTY,
+                format!(
+                    "`{}` is metered; its price is known — ${:.2} per million input tokens, \
+                     ${:.2} per million output tokens — but this decision's own input-size \
+                     estimate could not measure any component for it, so there is nothing to \
+                     convert that rate with; it is priced the same as an unpriced metered \
+                     destination and no workload tier is established yet to price it another \
+                     way (line 1558 would once one is)",
+                    destination.id(),
+                    price.input_per_million_usd,
+                    price.output_per_million_usd,
+                ),
             ),
-        ),
+        },
         // The magnitude here must stay `EXPECTED_MARGINAL_COST_PENALTY`, not
         // `0.0`: an unknown price is unknown, not free, and collapsing this
         // branch to the free branch's zero is exactly the fake-zero map line
@@ -1306,6 +1485,45 @@ fn expected_marginal_cost(
         ),
     };
     Contribution::new("expected marginal cost", magnitude, evidence)
+}
+
+/// Map line 1307: the marginal input cost this decision actually used, as a
+/// monetary reading with its required confidence — never recomputed once
+/// carried. [`SessionRouter::choose`] calls this exactly once, for the
+/// destination it settled on, and the result travels on [`Routed`] to
+/// whatever records it (`main.rs::record_entitlement_fallback`), rather than
+/// being derived a second time at the writer from a `PriceTable` that may
+/// have changed on disk since the decision was made.
+///
+/// Free is a known zero, regardless of size — nothing is spent whatever the
+/// input turns out to be, the same certainty [`expected_marginal_cost`]'s
+/// free branch reads. A metered destination needs **both** a known price
+/// and a known size; either half missing answers `None` — never a
+/// fabricated zero, matching map line 1307's own rule that unknown size or
+/// unknown price means no cost row at all.
+///
+/// [`CostConfidence::Estimated`], always: every cost this function can
+/// produce is built from the user's own `pricing.toml` and Glasshouse's own
+/// token measurement, never a figure a provider reported — migration 11's
+/// `CHECK` requires a label to be chosen, and this is the one that says so.
+fn estimated_cost(destination: &Destination, prices: &PriceTable) -> Option<ObservedCost> {
+    if destination.backend().cost().is_free() {
+        return Some(ObservedCost {
+            micro_usd: 0,
+            confidence: CostConfidence::Estimated,
+        });
+    }
+    let price = destination
+        .backend()
+        .model()
+        .name()
+        .and_then(|model| prices.price_for(destination.backend().provider(), model))?;
+    let tokens = destination.estimated_input_size().total_tokens()?;
+    let micro_usd = (tokens as f64 * price.input_per_million_usd).round() as i64;
+    Some(ObservedCost {
+        micro_usd,
+        confidence: CostConfidence::Estimated,
+    })
 }
 
 /// The classification a decision acted on, as a zero-weight line in every
@@ -3621,12 +3839,26 @@ pub struct Routed {
     /// launch and so has something to say when it stands, while a fallback
     /// is an event that either occurred or did not.
     fallback: Option<EntitlementFallback>,
+    /// Map line 1307: the marginal input cost this decision actually used
+    /// for [`Self::chosen`], computed once by [`estimated_cost`] and carried
+    /// here rather than recomputed by whatever records it. `None` when
+    /// either half of the multiplication — the price, or this decision's
+    /// own input-size estimate — was unknown; never a fabricated zero.
+    cost: Option<ObservedCost>,
 }
 
 impl Routed {
     /// Where the work goes.
     pub fn chosen(&self) -> &Destination {
         &self.chosen
+    }
+
+    /// Map line 1307: the estimated cost this decision actually used, when
+    /// both halves of the multiplication — the price, and this decision's
+    /// own input-size estimate — were known. A caller recording this writes
+    /// at most one row per decision, and none at all when it is `None`.
+    pub fn cost(&self) -> Option<ObservedCost> {
+        self.cost
     }
 
     /// The winning destination's own contributions, in the order they were
@@ -3708,6 +3940,19 @@ impl Routed {
         // candidate's block.
         if let Some(fallback) = self.fallback.as_ref() {
             let _ = writeln!(out, "fallback     {}", fallback.describe());
+        }
+        // Map line 1307's visibility half: the figure a later evaluation
+        // will compare against actual usage is worth a heading, not only a
+        // buried term — `cost` is `None` whenever either half of the
+        // multiplication was unknown, in which case nothing is printed
+        // rather than a fabricated zero.
+        if let Some(cost) = self.cost {
+            let _ = writeln!(
+                out,
+                "cost         ${:.4} estimated ({})",
+                cost.micro_usd as f64 / 1_000_000.0,
+                cost.confidence.as_str()
+            );
         }
         if let Some(automatic) = self.overrode() {
             let _ = writeln!(
@@ -4006,6 +4251,7 @@ impl SessionRouter {
                     held.id()
                 ),
             ));
+            let cost = estimated_cost(&held, &self.prices);
             return Some(Routed {
                 moment,
                 re_decided: false,
@@ -4017,6 +4263,7 @@ impl SessionRouter {
                 override_refused: None,
                 movement: None,
                 fallback: None,
+                cost,
             });
         }
 
@@ -4056,6 +4303,7 @@ impl SessionRouter {
                     held.id()
                 ),
             ));
+            let cost = estimated_cost(&held, &self.prices);
             return Some(Routed {
                 moment,
                 re_decided: true,
@@ -4067,6 +4315,7 @@ impl SessionRouter {
                 override_refused: None,
                 movement,
                 fallback: None,
+                cost,
             });
         }
 
@@ -4199,6 +4448,7 @@ impl SessionRouter {
             ));
         }
 
+        let cost = estimated_cost(&chosen, &self.prices);
         Some(Routed {
             moment,
             re_decided: true,
@@ -4210,6 +4460,7 @@ impl SessionRouter {
             override_refused: refusal,
             movement,
             fallback,
+            cost,
         })
     }
 

@@ -1860,12 +1860,13 @@ pub struct EntitlementConfig {
     /// this table does.
     ///
     /// **Tokens, not money, and that is not this field's own decision.**
-    /// `routing_observations.cost_micro_usd` has no producer in this build,
-    /// so a ceiling stated in money could never be reached and the broker
-    /// could never be held to it — see
-    /// [`crate::routing::evidence::CredentialSpend`], and map line 1465's
-    /// reader, which already answers the same question the same way in
-    /// production. `[providers.<name>.quota] budget` remains the money
+    /// `routing_observations.cost_micro_usd` has one producer now — map line
+    /// 1307, `main.rs::record_entitlement_fallback` — but it writes only on
+    /// an entitlement-fallback event, so a ceiling stated in money could
+    /// almost never be reached and the broker could almost never be held to
+    /// it — see [`crate::routing::evidence::CredentialSpend`], and map line
+    /// 1465's reader, which already answers the same question the same way
+    /// in production. `[providers.<name>.quota] budget` remains the money
     /// ceiling (map line 1203) and remains, by its own documentation,
     /// uncounted.
     #[serde(default, skip_serializing_if = "Option::is_none")]

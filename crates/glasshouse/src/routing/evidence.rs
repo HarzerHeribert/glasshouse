@@ -887,6 +887,17 @@ impl NewObservation {
         self.context_state = context_state;
         self
     }
+
+    /// Map line 1307: the estimated cost the routing decision this
+    /// observation records actually used, carried in from
+    /// `crate::routing::session::Routed::cost` rather than recomputed here.
+    /// `None` — the default — means unknown size or unknown price, and this
+    /// row then leaves `cost_micro_usd` `NULL` exactly like every other
+    /// producer's absent reading, never a fabricated zero.
+    pub fn with_cost(mut self, cost: Option<ObservedCost>) -> Self {
+        self.cost = cost;
+        self
+    }
 }
 
 /// One observation exactly as it came out of `routing_observations` — the raw
@@ -1773,17 +1784,22 @@ pub fn recent_credential_throttles(
 ///
 /// # Why tokens, and why that is not this reader's own decision
 ///
-/// `routing_observations.cost_micro_usd` has **no producer in this build**
-/// — see [`NewObservation::with_tokens`], which records why — so a reader
-/// that answered in money would answer `None` forever, and a ceiling that
-/// can never be reached is a rule the broker can never be held to. Map line
-/// 1465's reader already settled the same question the same way, in
-/// production, in [`RoutingOverhead`]'s own words: *"'Spend' is tokens,
-/// input plus output as the provider reported them, because that is the only
-/// currency this ledger holds."* This reader is that sentence applied per
-/// account. Cached input tokens are excluded for line 1465's reason too:
-/// providers disagree on whether they are already inside `input_tokens`, and
-/// a sum that might double-count is worse than one that names what it omits.
+/// `routing_observations.cost_micro_usd` has one producer now — map line
+/// 1307, `main.rs::record_entitlement_fallback`, carrying
+/// [`crate::routing::session::Routed::cost`] — but it writes only on an
+/// entitlement-fallback event, at [`CostConfidence::Estimated`] built from
+/// the user's own `pricing.toml` rather than a provider-reported figure. The
+/// overwhelming majority of rows still leave the column `NULL`, so a reader
+/// here that answered in money would answer `None` for nearly every window,
+/// and a ceiling that can almost never be reached is a rule the broker can
+/// almost never be held to. Map line 1465's reader already settled the same
+/// question the same way, in production, in [`RoutingOverhead`]'s own
+/// words: *"'Spend' is tokens, input plus output as the provider reported
+/// them, because that is the only currency this ledger holds."* This reader
+/// is that sentence applied per account. Cached input tokens are excluded
+/// for line 1465's reason too: providers disagree on whether they are
+/// already inside `input_tokens`, and a sum that might double-count is worse
+/// than one that names what it omits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CredentialSpend {
     /// Input plus output tokens summed over the rows that carried a count —
@@ -2286,11 +2302,15 @@ impl ClassificationRecord {
 /// than as a bare ratio.
 ///
 /// "Spend" is **tokens**, input plus output as the provider reported them,
-/// because that is the only currency this ledger holds: `cost_micro_usd`
-/// has no producer in this build (see [`NewObservation::with_tokens`]).
-/// Cached input tokens are left out of the sum — providers disagree on
-/// whether they are already inside `input_tokens`, and a sum that might
-/// double-count is worse than one that names what it omits.
+/// because that is still the only currency this reading can rely on:
+/// `cost_micro_usd` has one producer (map line 1307,
+/// `main.rs::record_entitlement_fallback`), and it fires only on an
+/// entitlement-fallback event — coding-agent spend routed through the
+/// gateway relay, the volume this comparison exists to weigh, leaves the
+/// column `NULL` exactly as before. Cached input tokens are left out of the
+/// sum — providers disagree on whether they are already inside
+/// `input_tokens`, and a sum that might double-count is worse than one that
+/// names what it omits.
 ///
 /// A `None` token figure means *no row in that side carried a count*, the
 /// same convention [`PurposeConsumption`] keeps; a side that mixes counted

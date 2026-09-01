@@ -1032,14 +1032,17 @@ pub fn same_capability_tier(
 ///
 /// # "Spend" is tokens, and that is this ledger's own ruling
 ///
-/// `routing_observations.cost_micro_usd` has **no producer in this build**
-/// (see [`evidence::NewObservation::with_tokens`]), and map line 1465's
-/// reader already settled the consequence in production:
+/// `routing_observations.cost_micro_usd` now has one producer — map line
+/// 1307, `main.rs::record_entitlement_fallback` — but it writes only on an
+/// entitlement-fallback event, so this axis's own spend is almost always
+/// among the rows it leaves `NULL`. Map line 1465's reader already settled
+/// the consequence for that gap in production:
 /// *"'Spend' is tokens, input plus output as the provider reported them,
 /// because that is the only currency this ledger holds."* A ceiling stated
-/// in money that nothing counts could never refuse anything, which is the
-/// one outcome map line 1971 — *"never let the broker exceed them"* — cannot
-/// have. Cached input tokens are left out for line 1465's reason: providers
+/// in money that this axis's own spend almost never counts could not
+/// reliably refuse anything, which is the one outcome map line 1971 —
+/// *"never let the broker exceed them"* — cannot have. Cached input tokens
+/// are left out for line 1465's reason: providers
 /// disagree on whether they are already inside `input_tokens`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct EntitlementSpendFacet {

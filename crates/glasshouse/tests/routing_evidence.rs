@@ -25,8 +25,8 @@ use glasshouse::harness::pairing::{EvidenceKey, ServingRoute};
 use glasshouse::integrations::IntegrationId;
 use glasshouse::routing::AssignedModel;
 use glasshouse::routing::evidence::{
-    ContextState, EvidenceLedger, MIN_SAMPLE_FOR_SUMMARY, NewObservation, ObservationQuery,
-    ObservedEvidenceSource, Outcome,
+    ContextState, CostConfidence, EvidenceLedger, MIN_SAMPLE_FOR_SUMMARY, NewObservation,
+    ObservationQuery, ObservedCost, ObservedEvidenceSource, Outcome,
 };
 use glasshouse::{Cli, Runtime};
 
@@ -656,5 +656,87 @@ fn recent_latency_never_crosses_a_project_boundary() {
     assert!(
         beta_summary.median_duration_ms.is_none(),
         "a sibling project's database must never contribute to this project's latency summary"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// GH-INPUT-SIZE-PRODUCER — map line 1307: `cost_micro_usd` and
+// `cost_confidence` now have a real producer, `NewObservation::with_cost`,
+// and this suite proves the pair round-trips through the real database
+// rather than only through the in-memory type migration 11's `CHECK`
+// already constrains.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_recorded_cost_survives_the_process_that_recorded_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+
+    let cost = ObservedCost {
+        micro_usd: 4_200_000,
+        confidence: CostConfidence::Estimated,
+    };
+    {
+        let ledger = EvidenceLedger::open(&fixture.runtime).unwrap();
+        ledger
+            .record(
+                synthetic_observation(1_000, Outcome::Succeeded).with_cost(Some(cost)),
+                1_000,
+            )
+            .unwrap();
+    }
+
+    let reopened = fixture.reopen();
+    let ledger = EvidenceLedger::open(&reopened).unwrap();
+    let rows = ledger
+        .recent(
+            ObservationQuery {
+                provider: "anyrouter",
+                model: "claude-opus-4-1",
+                route: Some("anthropic-messages"),
+                harness: Some("claude-code"),
+            },
+            10,
+        )
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].cost,
+        Some(cost),
+        "a recorded cost and its confidence must both survive the process that recorded them"
+    );
+}
+
+/// The ordinary case for nearly every producer: no cost was computed, and
+/// the column stays `NULL` rather than becoming a fabricated zero — never
+/// `Some(ObservedCost { micro_usd: 0, .. })` for a decision nobody priced.
+#[test]
+fn an_observation_with_no_cost_leaves_the_column_absent() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+
+    {
+        let ledger = EvidenceLedger::open(&fixture.runtime).unwrap();
+        ledger
+            .record(synthetic_observation(1_000, Outcome::Succeeded), 1_000)
+            .unwrap();
+    }
+
+    let ledger = EvidenceLedger::open(&fixture.runtime).unwrap();
+    let rows = ledger
+        .recent(
+            ObservationQuery {
+                provider: "anyrouter",
+                model: "claude-opus-4-1",
+                route: Some("anthropic-messages"),
+                harness: Some("claude-code"),
+            },
+            10,
+        )
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0].cost, None,
+        "a producer that never called `with_cost` must leave the column absent, not zero"
     );
 }

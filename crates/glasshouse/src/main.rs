@@ -1037,7 +1037,7 @@ fn routing_destinations(
     scope: DestinationScope<'_>,
     task: Option<&str>,
 ) -> anyhow::Result<Vec<glasshouse::routing::session::Destination>> {
-    use glasshouse::routing::session::{Destination, SessionContextFacts};
+    use glasshouse::routing::session::{Destination, EstimatedInputSize, SessionContextFacts};
 
     let now_unix = glasshouse::provider::cache::now_unix_seconds();
     let quota_cache = glasshouse::provider::telemetry::GatewayQuotaCache::new(runtime.paths());
@@ -1104,10 +1104,8 @@ fn routing_destinations(
     // absences mean *unknown*.
     let sticky =
         ClassificationStickyCache::new(runtime.paths(), runtime.project().id().as_str()).load();
-    let task_named_paths = task
-        .map(str::trim)
-        .filter(|text| !text.is_empty())
-        .map(glasshouse::routing::session::paths_named_in);
+    let trimmed_task = task.map(str::trim).filter(|text| !text.is_empty());
+    let task_named_paths = trimmed_task.map(glasshouse::routing::session::paths_named_in);
     let checkpoints = ProjectCheckpoints::open(runtime).ok();
     for record in records {
         // A session on another harness is not a destination for a launch that
@@ -1129,6 +1127,20 @@ fn routing_destinations(
             )
             .with_touched_files(session_touched_files(checkpoints.as_ref(), &record.id))
             .with_task_named_paths(task_named_paths.clone());
+        // Map line 1299: a cold resume's honest approximation is that
+        // session's own latest checkpoint — `warm.state`'s `Resumable` arm
+        // only. A `Live` session carries no estimate at all: `WarmSession`
+        // already refuses to guess at its accumulated context, and this
+        // estimate does not overturn that refusal.
+        let estimated_size = match warm.state {
+            glasshouse::config::pairing::WarmSessionState::Resumable => {
+                EstimatedInputSize::UNESTIMATED.with_checkpoint_tokens(session_checkpoint_tokens(
+                    checkpoints.as_ref(),
+                    &record.id,
+                ))
+            }
+            glasshouse::config::pairing::WarmSessionState::Live => EstimatedInputSize::UNESTIMATED,
+        };
         // The profile the session actually ran under, re-resolved so that its
         // backend, model and protocol are read the same way a fresh
         // destination's are. A profile that has since been deleted or renamed
@@ -1177,7 +1189,8 @@ fn routing_destinations(
             .with_tier_ceiling(ceiling)
             .with_capability_tier(ceiling)
             .with_session_context(context)
-            .with_entitlement(entitlement),
+            .with_entitlement(entitlement)
+            .with_estimated_input_size(estimated_size),
         );
     }
     drop(checkpoints);
@@ -1203,6 +1216,16 @@ fn routing_destinations(
     //    implied Native profile and `profile_enabled` always answers `true`
     //    for it, by construction rather than by configuration.
     let checkpoint = latest_checkpoint_quality(runtime);
+    // Map line 1304's fresh-session estimate: project memory and the
+    // project's own latest checkpoint, each measured once and shared by
+    // every fresh destination below — neither depends on which profile a
+    // candidate runs under. Bootstrap context and likely repository reads
+    // stay unset — see `EstimatedInputSize`'s own doc comment for why.
+    let fresh_estimated_size = EstimatedInputSize::UNESTIMATED
+        .with_project_memory_tokens(
+            trimmed_task.and_then(|task| estimated_project_memory_tokens(runtime, task)),
+        )
+        .with_checkpoint_tokens(latest_checkpoint_tokens(runtime));
     let offered: Vec<String> = match scope {
         DestinationScope::Everything | DestinationScope::LaunchableAcrossProfiles => effective
             .profile_names()
@@ -1253,7 +1276,8 @@ fn routing_destinations(
                     )
                     .with_tier_ceiling(ceiling)
                     .with_capability_tier(ceiling)
-                    .with_entitlement(Some(routing_entitlement(resolved, &band_thresholds))),
+                    .with_entitlement(Some(routing_entitlement(resolved, &band_thresholds)))
+                    .with_estimated_input_size(fresh_estimated_size),
                 );
             }
         } else {
@@ -1277,7 +1301,8 @@ fn routing_destinations(
                 )
                 .with_tier_ceiling(ceiling)
                 .with_capability_tier(ceiling)
-                .with_entitlement(fresh_entitlement),
+                .with_entitlement(fresh_entitlement)
+                .with_estimated_input_size(fresh_estimated_size),
             );
         }
     }
@@ -1407,6 +1432,66 @@ fn session_touched_files(
     files.sort();
     files.dedup();
     Some(files)
+}
+
+/// Map line 1299's cold-resume component: the rendered size of `session`'s
+/// own latest checkpoint, project-scoped through [`ProjectCheckpoints`]
+/// exactly as [`session_touched_files`] reads the same store. `None` when
+/// there is no checkpoint store, or this session has never been check
+/// pointed — the honest answer for a resume nothing measured, never `0`.
+fn session_checkpoint_tokens(
+    checkpoints: Option<&ProjectCheckpoints>,
+    session: &SessionId,
+) -> Option<u64> {
+    let stored = checkpoints?.store().latest_for(session).ok()??;
+    Some(glasshouse::firewall::estimate::estimate_tokens(
+        &stored.checkpoint.render(),
+    ))
+}
+
+/// Map line 1304's project-memory component of a fresh-session cost
+/// estimate: [`glasshouse::firewall::estimate::estimate_tokens`] of the real
+/// text [`glasshouse::memory::inject::briefing`] would inject for `task` —
+/// measuring the actual injection rather than modeling it.
+///
+/// Nothing has been injected yet to skip: `glasshouse route`'s ranking is a
+/// diagnostic over what WOULD be sent, not a delivery, so this reads with an
+/// empty already-injected set on every call rather than a session's own
+/// delivery history the way the control API's own memory-selection door
+/// does (`api/unix.rs::select_memory`).
+///
+/// `None` — never `Some(0)` — whenever nothing was actually measured: the
+/// store could not be opened, `briefing` itself failed, or `briefing`
+/// matched nothing. All three degrade to "this component was not counted",
+/// never "this component counts as zero" — only
+/// [`glasshouse::routing::Cost::is_free`]'s zero is a fact this build is
+/// certain of.
+fn estimated_project_memory_tokens(runtime: &Runtime, task: &str) -> Option<u64> {
+    use glasshouse::memory::ProjectMemory;
+
+    let project = ProjectMemory::open(runtime).ok()?;
+    let injection = glasshouse::memory::inject::briefing(
+        &project.store(),
+        task,
+        &std::collections::HashSet::new(),
+    )
+    .ok()??;
+    Some(glasshouse::firewall::estimate::estimate_tokens(
+        injection.text(),
+    ))
+}
+
+/// Map line 1304's checkpoint component of a fresh-session cost estimate:
+/// the rendered size of the project's own latest checkpoint — the same
+/// document [`latest_checkpoint_quality`] reads its quality facts from,
+/// measured rather than modeled. `None` when this project has no checkpoint
+/// at all.
+fn latest_checkpoint_tokens(runtime: &Runtime) -> Option<u64> {
+    let checkpoints = ProjectCheckpoints::open(runtime).ok()?;
+    let stored = checkpoints.store().latest().ok()??;
+    Some(glasshouse::firewall::estimate::estimate_tokens(
+        &stored.checkpoint.render(),
+    ))
 }
 
 /// The backend a destination running `profile` would serve on, and every wire
@@ -1736,11 +1821,21 @@ fn record_tier_movement(
 /// the work went TO is the `sessions.entitlement` column migration 22
 /// added, written by this same launch from this same decision. `provider`
 /// and `model` are the chosen destination's.
+///
+/// Map line 1307's own producer: `cost`, when given, is
+/// [`glasshouse::routing::session::Routed::cost`] — the value **that
+/// decision itself computed**, carried in rather than recomputed here from a
+/// `PriceTable` that may since have changed on disk. This is the only launch
+/// writer with a `Destination` in scope
+/// (`record_tier_movement`'s `TierMovement` carries none), so it is the only
+/// production caller `cost_micro_usd` has today; most rows still leave it
+/// `NULL`, on every decision that made no fallback at all.
 fn record_entitlement_fallback(
     runtime: &Runtime,
     harness: glasshouse::integrations::IntegrationId,
     destination: &glasshouse::routing::session::Destination,
     fallback: &glasshouse::routing::session::EntitlementFallback,
+    cost: Option<glasshouse::routing::evidence::ObservedCost>,
 ) {
     use glasshouse::routing::evidence::{
         ENTITLEMENT_FALLBACK_EXHAUSTED_PURPOSE, ENTITLEMENT_FALLBACK_THROTTLED_PURPOSE,
@@ -1770,7 +1865,8 @@ fn record_entitlement_fallback(
     .with_harness(Some(harness.slug()))
     .with_purpose(Some(fallback_purpose))
     .with_quota_context(Some(fallback.from().to_owned()))
-    .with_timing(Some(now_unix), Some(now_unix));
+    .with_timing(Some(now_unix), Some(now_unix))
+    .with_cost(cost);
     if let Err(err) = ledger.record(observation, now_unix) {
         tracing::warn!(error = %err, "could not record the entitlement fallback");
     }
@@ -4829,7 +4925,13 @@ fn launch_session(
                 "glasshouse: {}. `glasshouse route` says why.",
                 fallback.describe()
             );
-            record_entitlement_fallback(runtime, selection.id(), routed.chosen(), fallback);
+            record_entitlement_fallback(
+                runtime,
+                selection.id(),
+                routed.chosen(),
+                fallback,
+                routed.cost(),
+            );
         }
         (routed, classified, health)
     };
@@ -15401,6 +15503,227 @@ mod tests {
             "with no task text, nothing needs tool calls, so nothing is rejected on that \
              ground: {:?}",
             routed.rejected()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // GH-INPUT-SIZE-PRODUCER — map lines 1298, 1299 and 1304: the producer
+    // itself. `estimated_project_memory_tokens`, `session_checkpoint_tokens`,
+    // `latest_checkpoint_tokens` and `routing_destinations` all live only in
+    // this binary, so a `tests/routing_pricing.rs` or
+    // `tests/routing_evidence.rs` integration test cannot reach them at
+    // all — this is the only place their wiring against a real
+    // `ProjectMemory`/`ProjectCheckpoints` store can be proven.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn estimated_project_memory_tokens_measures_the_real_briefing_and_changes_with_it() {
+        use glasshouse::memory::{MemoryKind, NewMemory, ProjectMemory};
+
+        let fixture = CliFixture::new();
+        assert_eq!(
+            estimated_project_memory_tokens(&fixture.runtime, "kestrel deploy"),
+            None,
+            "a project with no memories has nothing to inject, which is absent, not zero"
+        );
+
+        ProjectMemory::open(&fixture.runtime)
+            .unwrap()
+            .store()
+            .record(NewMemory::new(
+                MemoryKind::Finding,
+                "The kestrel deploy runs on one instance.",
+            ))
+            .unwrap();
+        let short = estimated_project_memory_tokens(&fixture.runtime, "kestrel deploy")
+            .expect("a matching memory must be measured, not left absent");
+        assert!(short > 0);
+
+        ProjectMemory::open(&fixture.runtime)
+            .unwrap()
+            .store()
+            .record(NewMemory::new(
+                MemoryKind::Finding,
+                "The kestrel deploy runs on one instance, in one region, behind one load \
+                 balancer, with one on-call rotation watching it around the clock every day.",
+            ))
+            .unwrap();
+        let longer = estimated_project_memory_tokens(&fixture.runtime, "kestrel deploy")
+            .expect("a matching memory must still be measured");
+        assert!(
+            longer > short,
+            "the estimate must count the briefing's real rendered size, not a constant: \
+             {short} then {longer}"
+        );
+
+        assert_eq!(
+            estimated_project_memory_tokens(&fixture.runtime, "an unrelated wombat migration"),
+            None,
+            "a task nothing matches has nothing to inject, which the estimate reads as absent"
+        );
+    }
+
+    #[test]
+    fn session_checkpoint_tokens_measures_the_real_document_and_stays_within_its_own_session() {
+        let fixture = CliFixture::new();
+        let sessions = ProjectSessions::open(&fixture.runtime).unwrap();
+        let checkpointed = sessions
+            .store()
+            .create(NewSession::embedded("claude-code"))
+            .unwrap();
+        let untouched = sessions
+            .store()
+            .create(NewSession::embedded("claude-code"))
+            .unwrap();
+
+        let command = CheckpointCommand::Save {
+            objective: "prove the cold-resume estimate measures the real checkpoint".to_owned(),
+            state: "wiring session_checkpoint_tokens to checkpoint::store::latest_for".to_owned(),
+            session: Some(checkpointed.id.as_str().to_owned()),
+            decisions: Vec::new(),
+            failed_approaches: Vec::new(),
+            files: Vec::new(),
+            tests: None,
+            next_actions: Vec::new(),
+        };
+        assert_eq!(
+            checkpoint_command(&fixture.runtime, &command).unwrap(),
+            ExitCode::SUCCESS
+        );
+
+        let checkpoints = ProjectCheckpoints::open(&fixture.runtime).unwrap();
+        let checkpointed_tokens = session_checkpoint_tokens(Some(&checkpoints), &checkpointed.id)
+            .expect("the checkpointed session's own document must be measured");
+        assert!(checkpointed_tokens > 0);
+        assert_eq!(
+            session_checkpoint_tokens(Some(&checkpoints), &untouched.id),
+            None,
+            "a session with no checkpoint of its own is unknown, not zero — even though this \
+             project has a checkpoint, it belongs to a different session"
+        );
+    }
+
+    #[test]
+    fn latest_checkpoint_tokens_is_absent_until_the_project_has_one_then_measures_it() {
+        let fixture = CliFixture::new();
+        assert_eq!(latest_checkpoint_tokens(&fixture.runtime), None);
+
+        let sessions = ProjectSessions::open(&fixture.runtime).unwrap();
+        let session = sessions
+            .store()
+            .create(NewSession::embedded("claude-code"))
+            .unwrap();
+        let command = CheckpointCommand::Save {
+            objective: "prove the fresh-session estimate measures the project's own latest \
+                        checkpoint"
+                .to_owned(),
+            state: "wiring latest_checkpoint_tokens to checkpoint::store::latest".to_owned(),
+            session: Some(session.id.as_str().to_owned()),
+            decisions: Vec::new(),
+            failed_approaches: Vec::new(),
+            files: Vec::new(),
+            tests: None,
+            next_actions: Vec::new(),
+        };
+        assert_eq!(
+            checkpoint_command(&fixture.runtime, &command).unwrap(),
+            ExitCode::SUCCESS
+        );
+
+        let tokens = latest_checkpoint_tokens(&fixture.runtime)
+            .expect("a project with a checkpoint must have it measured");
+        assert!(tokens > 0);
+    }
+
+    #[test]
+    fn routing_destinations_attaches_a_fresh_estimate_naming_project_memory_and_checkpoint() {
+        use glasshouse::memory::{MemoryKind, NewMemory, ProjectMemory};
+
+        let fixture = CliFixture::new();
+        ProjectMemory::open(&fixture.runtime)
+            .unwrap()
+            .store()
+            .record(NewMemory::new(
+                MemoryKind::Finding,
+                "The kestrel deploy runs on one instance.",
+            ))
+            .unwrap();
+        let sessions = ProjectSessions::open(&fixture.runtime).unwrap();
+        let session = sessions
+            .store()
+            .create(NewSession::embedded("claude-code"))
+            .unwrap();
+        let command = CheckpointCommand::Save {
+            objective: "prove routing_destinations attaches a fresh-session estimate".to_owned(),
+            state: "wiring EstimatedInputSize into routing_destinations".to_owned(),
+            session: Some(session.id.as_str().to_owned()),
+            decisions: Vec::new(),
+            failed_approaches: Vec::new(),
+            files: Vec::new(),
+            tests: None,
+            next_actions: Vec::new(),
+        };
+        assert_eq!(
+            checkpoint_command(&fixture.runtime, &command).unwrap(),
+            ExitCode::SUCCESS
+        );
+
+        let user = UserConfig::load(fixture.runtime.paths()).unwrap();
+        let project = config::load_project_config(fixture.runtime.project()).unwrap();
+        let effective = EffectiveConfig::new(&user, project.as_ref());
+        let destinations = routing_destinations(
+            &fixture.runtime,
+            &effective,
+            glasshouse::integrations::IntegrationId::ClaudeCode,
+            DestinationScope::Everything,
+            Some("kestrel deploy"),
+        )
+        .unwrap();
+
+        let fresh = destinations
+            .iter()
+            .find(|d| d.is_fresh())
+            .expect("at least the implied Native profile offers a fresh destination");
+        let size = fresh.estimated_input_size();
+        assert!(
+            size.project_memory_tokens().is_some(),
+            "a matching memory must reach the fresh destination's own estimate"
+        );
+        assert!(
+            size.checkpoint_tokens().is_some(),
+            "the project's latest checkpoint must reach the fresh destination's own estimate"
+        );
+    }
+
+    /// Required behavior: a project with no memories, no checkpoint and no
+    /// `pricing.toml` must reproduce `04060da` exactly. This is the estimate
+    /// half of that: with neither component readable, the fresh destination
+    /// this empty project offers must carry no estimate at all.
+    #[test]
+    fn routing_destinations_reproduces_the_empty_project_regression() {
+        let fixture = CliFixture::new();
+        let user = UserConfig::load(fixture.runtime.paths()).unwrap();
+        let project = config::load_project_config(fixture.runtime.project()).unwrap();
+        let effective = EffectiveConfig::new(&user, project.as_ref());
+
+        let destinations = routing_destinations(
+            &fixture.runtime,
+            &effective,
+            glasshouse::integrations::IntegrationId::ClaudeCode,
+            DestinationScope::Everything,
+            Some("an unrelated task naming nothing this empty project has"),
+        )
+        .unwrap();
+
+        let fresh = destinations
+            .iter()
+            .find(|d| d.is_fresh())
+            .expect("at least the implied Native profile offers a fresh destination");
+        assert_eq!(
+            fresh.estimated_input_size().total_tokens(),
+            None,
+            "a project with no memories and no checkpoint must estimate nothing at all — the \
+             regression `04060da` must reproduce exactly"
         );
     }
 }

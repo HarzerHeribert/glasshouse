@@ -4419,16 +4419,40 @@ declaration could close this — the project already has
 the barrier as advisory and `integrate.sh`'s refusal-on-shared-file as the
 actual gate.
 
-**2. Releasing is not part of any mechanism, so the orchestrator forgets.**
-All three incidents were the same human shape: integrate, gate, commit,
-push — and never release. After the second, the fix was written into the
-checkpoint's next-actions as an ordered sequence, and it was forgotten
-again within the hour. **A step that lives only in a document is not a
-mechanism.** `integrate.sh` is the natural home — it already knows which
-worktree it just applied — but CLAUDE.md states its stopping point is
-deliberate ("it never commits, ticks a box, writes evidence, or runs a
-mutation"), so extending it is a ruling to make explicitly rather than a
-patch to slip in. Proposed, not done.
+**2. The mechanism EXISTS AND FIRED. The orchestrator filtered it out.**
+
+*This section originally said releasing had no mechanism and proposed
+adding one to `integrate.sh`. That was wrong on both counts, and the
+correction is the more useful finding.*
+
+`integrate.sh` §6 is a co-edit release nudge (packet
+`GH-INTEGRATE-RELEASE-NUDGE`). It names any barrier a just-integrated
+worker still holds and prints the exact command. **It fired in all three
+integrations** — `grep -c 'still hold a co-edit barrier'` returns 1 for
+every log:
+
+    One or more just-integrated workers still hold a co-edit barrier (practice §77):
+      scripts/coedit.sh release main.rs
+
+It was never read, because the orchestrator piped each integration through
+`grep -E 'test result:|every traced target|FAILURES'` and discarded the
+rest. CLAUDE.md says the opposite in as many words: *"Integrate with
+`scripts/integrate.sh <name>...`, **and read what it prints**."*
+
+And the "add release to `integrate.sh`" idea was already considered and
+correctly rejected **by the script itself**, in a comment at that very
+section: it never releases, because releasing *"asserts reconciliation
+happened, which is a ruling, the same reason it already refuses to commit
+or tick a box"*. The proposal was also incoherent as stated — the sequence
+was "release after commit", and `integrate.sh` never commits.
+
+**The generalisable rule, and it is the third instance of this shape
+today:** a filter applied to a tool's output is a decision about what that
+tool is allowed to tell you. The truncated-grep rule (batch 70) and §79's
+"once a grep names a file, run its target" are the same lesson from
+different angles. **Read the tail of `integrate.sh` in full.** It is short,
+it is the one place the script tells you what you still owe, and it is
+already right.
 
 **What the barrier is actually worth.** In all three incidents the
 reconciliation itself was trivial and verified: hunk ranges were compared
