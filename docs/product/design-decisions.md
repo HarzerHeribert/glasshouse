@@ -3345,3 +3345,56 @@ key into the SAME session settings document lifecycle hooks and the response
 profile already share; `HarnessLaunch::arg` is untouched in every mode,
 which is also what makes `mode = "off"`'s byte-identical guarantee hold by
 construction.
+
+## Two quantities Glasshouse refuses to approximate, and what the source may cite
+
+Decided 2026-09-01, promoting two standing refusals out of a process
+document. Both were already correct and already recorded — the mistake was
+where the shipped source pointed for them. `check-doc-boundary.sh` is right
+to refuse a product source file that cites `docs/process/`: a reader of the
+binary cannot act on how the binary was built, and a refusal a test enforces
+is a **product** decision about behavior. The rule is enforced now, so the
+two decisions live here.
+
+### A task is never "nearly complete" — Glasshouse does not guess at progress
+
+`ReserveDecisionInputs::task_nearly_complete` is `false` at its one
+production construction site (`routing/pressure.rs::reserve_verdict`) and
+that is a decision, not an omission.
+
+**Nothing in this build observes task progress.** The only completion fact
+available where the reserve verdict is computed is that a turn is already
+over, and a turn boundary is not a task boundary. The available proxies —
+turn counts, elapsed time — all report "almost complete" for work that has
+merely been running a while, which is precisely the long-running work the
+protected reserve exists to keep serving. **A fabricated value here does not
+degrade the policy, it inverts it**, and it inverts it exactly at the moment
+the protection matters.
+
+So the field is carried, spelled honestly, and passed `false`. Two
+capability lines rest on this and are refused on the same ground rather than
+approximated: *"avoid migrating a nearly completed task solely to preserve a
+small amount of quota"* is the same guard seen from a different phase, and
+gets the same answer. **If a real producer of task progress ever lands, both
+lines re-open together** — that is why a test pins the constant rather than
+letting it drift, and why relaxing the test is not a way to close either
+line.
+
+### A file association is observed, never inferred
+
+`FileAssociation` distinguishes a file Glasshouse *watched* a session touch
+from a file a memory *refers to*. Only the first has a producer:
+`MemoryStore::record_observed_files` writes `Observed`, and every row this
+build can produce carries it.
+
+`Referenced` is deliberately unreachable. Its qualifier — *the memory refers
+to this file* — is a claim about a memory's meaning, and nothing on the
+production extraction path reads a memory's body for file paths. Inferring
+it from a path-shaped substring would produce a confident association from a
+file name mentioned in passing, and file-aware retrieval is meant to be
+advisory precisely because a stale association is worse than none.
+
+**The variant stays** because the distinction is real and the day extraction
+can identify a reference reliably it will be needed. Until then, a test
+asserting a row says `observed` is also, structurally, asserting that no
+production path invented `referenced`.

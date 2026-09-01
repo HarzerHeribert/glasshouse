@@ -635,8 +635,9 @@ fn reserve_band(inputs: &PressureInputs<'_>, band: CapacityBand) -> Contribution
 /// # Line 1610 is refused here, and `task_nearly_complete` says so
 ///
 /// `ReserveDecisionInputs::task_nearly_complete` is `false` below, and that
-/// is the standing refusal recorded in `docs/process/refusal-register.md`
-/// under line 1294 and at the field's own doc comment: nothing in this build
+/// is the decision recorded in `docs/product/design-decisions.md` under
+/// *"A task is never 'nearly complete'"*, and at the field's own doc
+/// comment: nothing in this build
 /// can observe that a task is nearly complete, and a proxy from turn counts
 /// or elapsed time would report "almost complete" for work that had merely
 /// been running a while — inverting the protection at exactly the moment it

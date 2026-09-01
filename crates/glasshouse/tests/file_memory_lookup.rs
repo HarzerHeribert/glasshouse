@@ -16,9 +16,10 @@
 //!
 //! Every row this build's only writer (`MemoryStore::record_observed_files`)
 //! can produce carries `FileAssociation::Observed` — never `Referenced`,
-//! which does not exist yet (`docs/process/refusal-register.md`'s Phase 28
-//! section: 1139's own qualifier, *"the memory refers to this file"*, is
-//! unsatisfiable on the production extraction path). So every assertion below
+//! which is deliberately unreachable (`docs/product/design-decisions.md`,
+//! *"A file association is observed, never inferred"*: the qualifier *"the
+//! memory refers to this file"* is a claim about a memory's meaning, and no
+//! production extraction path reads one). So every assertion below
 //! that a row says `observed` is also, structurally, an assertion that it
 //! does not say `referenced`.
 

@@ -892,10 +892,11 @@ fn the_policy_names_no_provider_or_model() {
 }
 
 /// **Line 1610 is refused, and the refusal is in the source.** The reserve
-/// verdict passes `task_nearly_complete: false` — the standing refusal under
-/// line 1294 (`docs/process/refusal-register.md`) — exactly once, with the
-/// register's reasoning beside it. If this ever fails because a producer was
-/// found, line 1294 and line 1610 both re-open; do not relax it.
+/// verdict passes `task_nearly_complete: false` — the decision recorded in
+/// `docs/product/design-decisions.md`, *"A task is never 'nearly complete'"*
+/// — exactly once, with its reasoning beside it. If this ever fails because
+/// a producer of task progress was found, that decision and line 1610
+/// re-open together; do not relax it.
 #[test]
 fn the_policy_does_not_invent_task_completion() {
     assert_eq!(
