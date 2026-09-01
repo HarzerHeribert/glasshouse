@@ -897,6 +897,18 @@ fn the_policy_names_no_provider_or_model() {
 /// — exactly once, with its reasoning beside it. If this ever fails because
 /// a producer of task progress was found, that decision and line 1610
 /// re-open together; do not relax it.
+///
+/// **The citation this pins MOVED on 2026-09-01, and the substance did not.**
+/// This test used to require the production source to name `line 1294` and
+/// `refusal-register`. `scripts/check-doc-boundary.sh` forbids a product
+/// source file from citing `docs/process/` at all — shipped code cannot act
+/// on how the project is run — so the two rules were in direct
+/// contradiction, and this file was one of three that had been shipping past
+/// the boundary gate. The refusal was promoted into `design-decisions.md` as
+/// a decision about behavior, which is what it always was, and the strings
+/// below follow it there. **Every substantive assertion is unchanged**: the
+/// input is still passed `false` exactly once and `true` nowhere. Only where
+/// the reasoning is recorded moved.
 #[test]
 fn the_policy_does_not_invent_task_completion() {
     assert_eq!(
@@ -907,7 +919,7 @@ fn the_policy_does_not_invent_task_completion() {
         "the reserve verdict must pass the refused input as `false` exactly once"
     );
     assert!(!production_source().contains("task_nearly_complete: true"));
-    for cited in ["line 1294", "Line 1610", "refusal-register"] {
+    for cited in ["Line 1610", "design-decisions", "A task is never"] {
         assert!(
             production_source().contains(cited),
             "the refusal must cite `{cited}`"
