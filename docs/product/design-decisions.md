@@ -3223,3 +3223,70 @@ contradicts the COMPLETE contract of lines 1947/1954 (a tier rule fires only
 against an established tier). The worker implemented the packet's intent as
 the *fallback's* narrowing — unknown never widens the candidate a fallback may
 take — and left the closed gate contract intact. That reading stands.
+
+## Phase 57 — Context firewall: the implementation arc, decided 2026-09-01
+
+The user's spec (instruction of record, 2026-09-01) asked for an optional
+tool-output compaction subsystem between harness and model — reduce, never
+decide; preserve everything; fail open; measure from day one. These are the
+architectural decisions that bind its packages, made so the feature embeds in
+what Glasshouse already owns instead of growing a parallel organ.
+
+**The semantic reducer is a disposable support job, not a new client.** The
+spec's provider matrix (OpenRouter, Groq, Cerebras, OpenAI-compatible, local)
+IS Glasshouse's existing provider registry; free-router aliases and pinned
+free models are Phase 9I's free-pool machinery; per-entitlement
+`deny_job_kinds` (56A) applies to reduction jobs unchanged. A new
+`JobKind` variant carries it, and `disposable_interface.rs`'s variant-roster
+tripwire firing on that variant is the designed signal to re-read Phase 39's
+1625 refusal — not a regression. No firewall-private HTTP client exists at
+any point.
+
+**Telemetry is purpose-bucketed evidence-ledger rows.** Reducer calls are
+real model calls: `NewObservation` with a `context-firewall` purpose family
+(reduction, bypass), token counts as reported, provider/model as routed —
+rendered by the same `consumption_by_purpose`/`RoutingOverhead` path the
+tier-movement and pool-fallback rows ride (batch 70's pattern). Raw/
+deterministic/forwarded sizes and the bypass reason live on the reduction
+row; raw-expansion requests are counted as their own rows because they are
+the recall signal the phase treats as primary.
+
+**Raw preservation is a per-session content-addressed file store under the
+data dir, not a migration.** MVP needs write-once blobs addressable by a
+stable reference; SQLite adds a migration (Red tier, schema-pin ripple) for
+no MVP query need. If listing/joining ever demands a table, that is its own
+later ruling. References are `gh-tool://<id>` per the spec's shape.
+
+**The Claude Code bridge's load-bearing premise is contested and gated.**
+`harness-hook-protocol.md` (earlier, process-side experience): *"no hook
+return field carries a substitute tool result — a hook is a gate, not a
+proxy."* The spec asserts current `PostToolUse` supports
+`hookSpecificOutput.updatedToolOutput`. Map line 1994 resolves the tension
+structurally: verify at session start, fall back to shadow with a stated
+reason. Recon against the installed Claude Code decides the bridge package's
+shape; nothing else in the phase depends on the answer.
+
+**Session-scoped hook registration, never the user's settings.** The bridge
+registers through launch-time/session-specific configuration only for
+Glasshouse-managed sessions the user enabled it for; a mechanism that
+requires editing committed `.claude/settings.json` is refused as
+premise-invalid for its package.
+
+**Config is a top-level `[context_firewall]` section, mode `off` default,
+semantic reduction requiring an explicitly named reducer in every mode.**
+Thresholds (passthrough, semantic-minimum, target) are configuration with
+defaults, never architectural constants.
+
+**Harness abstraction from the first line of code:** the core consumes a
+normalized tool result and emits a normalized reduced result; Claude Code
+JSON lives only in an adapter beside the other integrations. Codex and
+later harnesses reuse the core through their own interception mechanisms.
+
+**Package sequencing** (each later package names its predecessor's evidence):
+core + deterministic ladder + preservation + provenance (map 1980–1990,
+reachable through a `context-firewall hook` CLI entry so the boxes have a
+production caller) → modes + Claude Code bridge behind the recon verdict
+(1991–1996) → the disposable-job reducer (1997–2003) → expansion, shadow
+evaluation, and status surfaces (2004–2006). Boxes stay open until their
+production reach exists — ten wrongly ticked boxes taught this project that
+rule, and this phase starts under it.
