@@ -77,3 +77,41 @@ and fixed a path-coupling bug its own conversion surfaced, and named the
 argv-log hoist follow-up for the nine no-win files. New known-flaky note:
 `v1_criteria_setup::v1_1907` fails 2-of-3 ALONE on a quiet machine — a TCP
 listener race, not load; it predates batch 71 and needs its own fix worker.
+
+# Lines 1991–1996 — COMPLETE 2026-09-01; the Claude Code bridge, on verified facts
+
+Package `GH-FIREWALL-BRIDGE` (Sonnet, high, Amber; batch 72). Integration
+gate: 101 green targets, rustdoc clean; the one red (`events_lifecycle`,
+flake family, untouched) 8/8 twice alone. Two mutations KILLED
+(shadow-emits-anyway; version-floor inverted). 11 shipped-binary bridge
+tests stable ×4, 144 unit tests across firewall/config/harness modules.
+
+- **1991** four modes on `[context_firewall]` (project→user→default-off
+  layering mirroring guardrails); off is byte-identical by construction —
+  the registration function returns before touching anything, and `args`
+  is never touched in any mode; shadow runs the full pipeline and provably
+  never emits `updatedToolOutput`.
+- **1992** no mode names a reducer; the config has no reducer field to
+  misuse, plus a tripwire test on the registered command line.
+- **1993** registration merges ONE `PostToolUse` key into the session
+  settings document Glasshouse already owns — never the user's files,
+  never other hooks. The packet's "inject a second `--settings`" reading
+  was refused on a pre-verified fact: `claude --settings A --settings B`
+  silently discards A (design-decisions §57 addendum 2).
+- **1994** version probe (`MIN_UPDATED_OUTPUT_VERSION = 2.1.252`, dated)
+  with shadow fallback, one stated line, one bypass telemetry row; probed
+  per launch, not per tool call.
+- **1995** the REAL Bash payload captured from the installed harness:
+  `{stdout, stderr, interrupted, isImage, noOutputExpected}` — no
+  `exit_code` key, and failing Bash never reaches PostToolUse at all
+  (PostToolUseFailure carries it). `confirmed_clean_exit` corrected:
+  explicit non-zero refuses, absent does not — the previous `Some(0)`
+  requirement made Bash permanently un-reducible against the real
+  harness. Captured payloads are fixtures at unit and shipped-binary
+  level. Grep/Glob/Read stay the recon-verified uniform text shape.
+- **1996** two concurrent sessions through the REGISTERED path: separate
+  stores, separate telemetry, no mixing.
+
+Phase 57 stands at 17/27: the remaining ten are 57B (the semantic reducer
+as a disposable job, 1997–2003) and 57C (expansion granularity, shadow
+evaluation, status surfaces, 2004–2006).

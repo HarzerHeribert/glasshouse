@@ -45,6 +45,7 @@
 //! guard, not just a string search.
 
 pub mod capability;
+pub mod firewall;
 pub mod pairing;
 pub mod response;
 
@@ -3958,6 +3959,16 @@ pub struct UserConfig {
     /// touches another automatic behaviour.
     #[serde(default, skip_serializing_if = "GuardrailsConfig::is_unset")]
     guardrails: GuardrailsConfig,
+    /// The context firewall's mode and thresholds — Phase 57 map lines
+    /// 1991-1996. Skipped when empty for the same reason `guardrails` is: a
+    /// user who never touched it has no `[context_firewall]` table, and
+    /// [`EffectiveConfig::context_firewall_mode`] resolves the missing case
+    /// to `off`.
+    #[serde(
+        default,
+        skip_serializing_if = "firewall::ContextFirewallConfig::is_unset"
+    )]
+    context_firewall: firewall::ContextFirewallConfig,
 }
 
 impl Default for UserConfig {
@@ -3977,6 +3988,7 @@ impl Default for UserConfig {
             implementation_policy: None,
             memory_extraction_model: None,
             guardrails: GuardrailsConfig::default(),
+            context_firewall: firewall::ContextFirewallConfig::default(),
         }
     }
 }
@@ -4091,6 +4103,16 @@ impl UserConfig {
         &mut self.guardrails
     }
 
+    /// This layer's `[context_firewall]` table — see
+    /// [`firewall::ContextFirewallConfig`].
+    pub fn context_firewall(&self) -> &firewall::ContextFirewallConfig {
+        &self.context_firewall
+    }
+
+    pub fn context_firewall_mut(&mut self) -> &mut firewall::ContextFirewallConfig {
+        &mut self.context_firewall
+    }
+
     /// This layer's recorded decision on automatic task-boundary
     /// checkpoints, or `None` for "never decided". See the field's own doc.
     pub fn automatic_checkpoint(&self) -> Option<bool> {
@@ -4200,6 +4222,14 @@ pub struct ProjectConfig {
     /// [`EffectiveConfig::guardrail_mode`] for how the two layer.
     #[serde(default, skip_serializing_if = "GuardrailsConfig::is_unset")]
     guardrails: GuardrailsConfig,
+    /// A project may set its own context-firewall mode and thresholds — see
+    /// [`UserConfig::context_firewall`] for the table this mirrors and
+    /// [`EffectiveConfig::context_firewall_mode`] for how the two layer.
+    #[serde(
+        default,
+        skip_serializing_if = "firewall::ContextFirewallConfig::is_unset"
+    )]
+    context_firewall: firewall::ContextFirewallConfig,
 }
 
 impl Default for ProjectConfig {
@@ -4218,6 +4248,7 @@ impl Default for ProjectConfig {
             implementation_policy: None,
             memory_extraction_model: None,
             guardrails: GuardrailsConfig::default(),
+            context_firewall: firewall::ContextFirewallConfig::default(),
         }
     }
 }
@@ -4322,6 +4353,17 @@ impl ProjectConfig {
 
     pub fn guardrails_mut(&mut self) -> &mut GuardrailsConfig {
         &mut self.guardrails
+    }
+
+    /// This layer's `[context_firewall]` table — see
+    /// [`UserConfig::context_firewall`] for the table this mirrors and
+    /// [`EffectiveConfig::context_firewall_mode`] for how the two layer.
+    pub fn context_firewall(&self) -> &firewall::ContextFirewallConfig {
+        &self.context_firewall
+    }
+
+    pub fn context_firewall_mut(&mut self) -> &mut firewall::ContextFirewallConfig {
+        &mut self.context_firewall
     }
 
     /// This layer's recorded decision on automatic task-boundary
@@ -4844,6 +4886,63 @@ impl<'a> EffectiveConfig<'a> {
             blocking_source: blocking.layer.describe_source(),
             override_: None,
         }
+    }
+
+    /// `context_firewall.mode`, and which layer set it — Phase 57 map line
+    /// 1991. Project first, then user, then [`Layer::Default`] carrying
+    /// [`firewall::FirewallMode::Off`], matching every other lookup on this
+    /// type except [`EffectiveConfig::bypass_acknowledged`].
+    ///
+    /// [`Layer::Default`] carrying `off` is the decision, not merely the
+    /// safe choice: a session nobody configured must launch with a command
+    /// line byte-identical to one built before this phase existed, and that
+    /// is only true if the missing case never registers a hook.
+    pub fn context_firewall_mode(&self) -> Layered<firewall::FirewallMode> {
+        if let Some(value) = self.project.and_then(|p| p.context_firewall().mode()) {
+            return Layered::new(value, Layer::Project);
+        }
+        if let Some(value) = self.user.context_firewall().mode() {
+            return Layered::new(value, Layer::User);
+        }
+        Layered::new(firewall::FirewallMode::Off, Layer::Default)
+    }
+
+    /// The passthrough-token threshold for `mode`, and which layer set it.
+    ///
+    /// Reads a different field per mode — `aggressive_passthrough_tokens`
+    /// under [`firewall::FirewallMode::Aggressive`],
+    /// `passthrough_tokens` under every other mode — so aggressive's own
+    /// threshold can move without safe's changing underneath it (map line
+    /// 1991's one permitted difference between the two). `off` and `shadow`
+    /// still resolve a value here because `shadow` runs the full pipeline
+    /// and needs a real threshold even though it never emits reduced text.
+    pub fn context_firewall_passthrough_tokens(
+        &self,
+        mode: firewall::FirewallMode,
+    ) -> Layered<u64> {
+        let (project_value, user_value, default_value) =
+            if mode == firewall::FirewallMode::Aggressive {
+                (
+                    self.project
+                        .and_then(|p| p.context_firewall().aggressive_passthrough_tokens()),
+                    self.user.context_firewall().aggressive_passthrough_tokens(),
+                    firewall::DEFAULT_AGGRESSIVE_PASSTHROUGH_TOKENS,
+                )
+            } else {
+                (
+                    self.project
+                        .and_then(|p| p.context_firewall().passthrough_tokens()),
+                    self.user.context_firewall().passthrough_tokens(),
+                    firewall::DEFAULT_PASSTHROUGH_TOKENS,
+                )
+            };
+        if let Some(value) = project_value {
+            return Layered::new(value, Layer::Project);
+        }
+        if let Some(value) = user_value {
+            return Layered::new(value, Layer::User);
+        }
+        Layered::new(default_value, Layer::Default)
     }
 
     /// Resolve which routing model classifies requests, reporting which

@@ -1988,12 +1988,12 @@ Recorded 2026-09-01 from the user's instruction of record: a coding model should
 ☑ Track raw-expansion requests as the primary recall signal, so a recall regression is measurable before any savings claim is believed.
 ☑ Restrict reduction to an explicitly configurable tool-eligibility list, defaulting to search, read, and log-shaped outputs and never to edits, writes, permission or security results, small outputs, error details, or unknown shapes.
 ☑ Preserve exit status, stderr, interruption, and failure semantics when reducing command output, and pass through unchanged whenever an adapter cannot guarantee a tool's semantics.
-☐ Support four firewall modes — off, shadow, safe, aggressive — where off is byte-identical to no firewall and shadow runs the full pipeline while always forwarding the original.
-☐ Keep semantic reduction disabled unless the user's configuration explicitly names a reducer, in every mode.
-☐ Bridge Claude Code through its native post-tool hook with per-session registration that never edits the user's own settings files and never disturbs unrelated hooks.
-☐ Verify at session start that the installed harness supports tool-output replacement, and fall back to shadow mode with a stated reason when it does not.
-☐ Adapt each supported Claude Code tool's output shape explicitly and pass unknown or unsupported shapes through unchanged.
-☐ Keep firewall state and raw-result stores separated per session, so concurrent sessions and subagents never observe one another's reductions.
+☑ Support four firewall modes — off, shadow, safe, aggressive — where off is byte-identical to no firewall and shadow runs the full pipeline while always forwarding the original.
+☑ Keep semantic reduction disabled unless the user's configuration explicitly names a reducer, in every mode.
+☑ Bridge Claude Code through its native post-tool hook with per-session registration that never edits the user's own settings files and never disturbs unrelated hooks.
+☑ Verify at session start that the installed harness supports tool-output replacement, and fall back to shadow mode with a stated reason when it does not.
+☑ Adapt each supported Claude Code tool's output shape explicitly and pass unknown or unsupported shapes through unchanged.
+☑ Keep firewall state and raw-result stores separated per session, so concurrent sessions and subagents never observe one another's reductions.
 ☐ Route semantic reduction as a disposable support job through the existing provider abstraction and per-entitlement job-kind rules, never through a firewall-private provider client.
 ☐ Give the reducer only the stated task, tool query, and candidate output — never the conversational transcript — and keep its prompt small.
 ☐ Require structured candidate-selection output from the reducer and rebuild the final result from trusted original candidates by id.

@@ -149,6 +149,45 @@ mod tests {
         );
     }
 
+    /// The REAL shape, captured against the installed Claude Code 2.1.252
+    /// with a throwaway `PostToolUse` hook teeing stdin to a file, driven by
+    /// `claude -p "...echo probe-token-$RANDOM-marker; false..."` in a
+    /// scratch project — GH-FIREWALL-BRIDGE's report documents the exact
+    /// command. Personal paths (`session_id`, `transcript_path`, `cwd`,
+    /// `prompt_id`, `tool_use_id`) are scrubbed; every other key and value
+    /// below, including the absent `exit_code`, is the real capture.
+    #[test]
+    fn the_real_captured_bash_success_shape_normalizes_with_no_exit_code_key() {
+        let event = PostToolUseEvent {
+            tool_name: "Bash".to_string(),
+            tool_response: serde_json::json!({
+                "stdout": "capture-probe-line-one\ncapture-probe-line-two",
+                "stderr": "",
+                "interrupted": false,
+                "isImage": false,
+                "noOutputExpected": false
+            }),
+            tool_use_id: "capture-tool-use-id".to_string(),
+            session_id: "capture-session".to_string(),
+        };
+        let result = normalize(&event).expect("must recognize the real captured command shape");
+        assert_eq!(
+            result.payload,
+            ToolPayload::Command {
+                stdout: "capture-probe-line-one\ncapture-probe-line-two".to_string(),
+                stderr: String::new(),
+                interrupted: false,
+                exit_code: None,
+            }
+        );
+        assert!(
+            result.payload.confirmed_clean_exit(),
+            "a real PostToolUse Bash event never carries a failing exit — \
+             PostToolUseFailure is the exclusive channel for that, verified \
+             empirically and documented on ToolPayload::Command::exit_code"
+        );
+    }
+
     #[test]
     fn a_bash_response_shaped_like_the_uniform_text_wrapper_does_not_normalize() {
         // Verified reality: some builds may report Bash the same way as

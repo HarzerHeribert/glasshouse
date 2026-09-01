@@ -3316,3 +3316,32 @@ capability check) and falls back to shadow with a stated reason.
 `harness-hook-protocol.md`'s "no hook return field carries a substitute tool
 result" is corrected in place: true when written, false for ≥2.1.252, and
 its worker-bridge guidance is unaffected.
+
+### Phase 57 addendum 2 — the REAL Bash payload, and the one-settings-document rule (2026-09-01)
+
+GH-FIREWALL-BRIDGE captured real payloads from the installed Claude Code
+(2.1.252) with a tee-hook against a live `claude -p` run, correcting the
+first addendum on one point:
+
+**Bash is NOT the uniform text shape.** A real successful Bash
+`tool_response` is
+`{"stdout":…,"stderr":"","interrupted":false,"isImage":false,"noOutputExpected":false}`
+— richer than `{"type":"text",…}`, and **with no `exit_code` key at all**.
+And a FAILING Bash call never reaches `PostToolUse`: it fires
+`PostToolUseFailure` instead, with `{"error":…,"is_interrupt":…}` and no
+`tool_response`. Consequences, both landed: `exit_code: None` is the
+ordinary success shape (an explicit non-zero refuses reduction; an absent
+key does not — the previous `Some(0)`-required check made Bash permanently
+un-reducible against the real harness), and since this build registers only
+`PostToolUse`, a failing Bash result is a shape the firewall never sees.
+The captured payloads are fixtures in `firewall::adapter::tests` and
+`firewall_bridge.rs`. Grep/Glob/Read remain the verified uniform text shape.
+
+**One settings document, never a second `--settings`.** The pre-existing,
+verified fact in `session::HarnessSelection::install_session_document`:
+`claude --settings A --settings B` validates only `B` — a second flag
+silently discards the first. The firewall therefore merges its `PostToolUse`
+key into the SAME session settings document lifecycle hooks and the response
+profile already share; `HarnessLaunch::arg` is untouched in every mode,
+which is also what makes `mode = "off"`'s byte-identical guarantee hold by
+construction.

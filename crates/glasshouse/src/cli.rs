@@ -873,6 +873,17 @@ pub enum ContextFirewallCommand {
         /// bridge uses to decide when this is safe to set.
         #[arg(long)]
         emit_updated_output: bool,
+
+        /// One of `off`, `shadow`, `safe`, `aggressive` — map line 1991.
+        /// `shadow` overrides `--emit-updated-output` outright: the response
+        /// never carries `updatedToolOutput` under shadow, whatever that
+        /// flag says, because shadow's whole point is that Claude Code sees
+        /// only originals while the pipeline still runs in full. `off` and
+        /// `safe`/`aggressive` leave `--emit-updated-output` as the caller
+        /// set it; the 57A bridge's own registration is what actually
+        /// decides that flag's value per box 1991's four modes.
+        #[arg(long, default_value = "safe")]
+        mode: String,
     },
     /// Print a previously stored raw tool result, byte-identically.
     ///

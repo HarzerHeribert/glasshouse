@@ -204,8 +204,27 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
                 target_tokens: _,
                 tools,
                 emit_updated_output,
+                mode,
             } => {
-                context_firewall_hook(&runtime, *passthrough_tokens, tools, *emit_updated_output)?;
+                let mode = match glasshouse::config::firewall::FirewallMode::from_stored(
+                    mode.trim(),
+                ) {
+                    Some(mode) => mode,
+                    None => {
+                        eprintln!(
+                            "glasshouse: `{mode}` is not a context-firewall mode; use one of {}",
+                            glasshouse::config::firewall::FirewallMode::spellings()
+                        );
+                        return Ok(ExitCode::FAILURE);
+                    }
+                };
+                context_firewall_hook(
+                    &runtime,
+                    *passthrough_tokens,
+                    tools,
+                    *emit_updated_output,
+                    mode,
+                )?;
             }
             ContextFirewallCommand::Show { id } => match context_firewall_show(&runtime, id)? {
                 Some(content) => print!("{content}"),
@@ -1709,6 +1728,7 @@ fn context_firewall_hook(
     passthrough_tokens: u64,
     tools: &[String],
     emit_updated_output: bool,
+    mode: glasshouse::config::firewall::FirewallMode,
 ) -> anyhow::Result<()> {
     use anyhow::Context as _;
     use std::io::Read;
@@ -1747,8 +1767,15 @@ fn context_firewall_hook(
 
     record_context_firewall_telemetry(runtime, &outcome, now_unix);
 
+    // Map line 1991's mode decision, enforced here rather than trusted to
+    // whatever registered the command line: `shadow` never emits
+    // `updatedToolOutput`, whatever `--emit-updated-output` says, because
+    // shadow's whole point is a session that sees only originals while the
+    // pipeline still runs in full for storage, telemetry and provenance.
+    let effective_emit =
+        emit_updated_output && mode != glasshouse::config::firewall::FirewallMode::Shadow;
     let updated_output = match &outcome {
-        glasshouse::firewall::Outcome::Reduced { forwarded_text, .. } if emit_updated_output => {
+        glasshouse::firewall::Outcome::Reduced { forwarded_text, .. } if effective_emit => {
             Some(forwarded_text.as_str())
         }
         _ => None,
@@ -5121,6 +5148,14 @@ fn launch_session(
             &response_application,
         ),
     );
+    // Map lines 1991-1996: the context firewall's Claude Code bridge. Never
+    // changes `args` itself — it only merges a `PostToolUse` entry into the
+    // settings document `install_session_document` just wrote (a second
+    // `--settings` flag would silently discard the first, so this can never
+    // add one of its own), which keeps `mode = "off"` byte-identical to a
+    // session built before this phase existed by construction: the function
+    // returns before touching anything in that case.
+    install_context_firewall_hook(runtime, &selection, effective, &session_dir);
     let mut launch = HarnessLaunch::new(selection.into_executable(), runtime.project()).args(args);
     // Map line 1973: the child inherits this process's environment, so
     // another entitlement's credential variable would reach a session that
@@ -5833,6 +5868,177 @@ fn install_session_document(
             );
             Vec::new()
         }
+    }
+}
+
+/// Map lines 1991-1996: register the context firewall's `PostToolUse` hook
+/// for a Claude Code session, when the effective configuration enables it.
+///
+/// **Never a second `--settings` flag.** Claude Code 2.1.247 silently
+/// discards every `--settings` but the last (verified in
+/// `session::HarnessSelection::install_session_document`'s own doc), so the
+/// only safe way to add a hook is to merge it into the SAME document
+/// [`install_session_document`] already wrote — this function reads that
+/// file back, adds one `PostToolUse` key, and writes it in place. `args`
+/// itself is never touched, which is what makes `mode = "off"` byte-identical
+/// to a session built before this phase existed: this function returns
+/// before touching anything when the harness is not Claude Code or the
+/// effective mode is `off`.
+///
+/// Best effort, matching [`install_session_document`]'s own policy: any
+/// failure here is a session that starts without the firewall bridge rather
+/// than one that fails to start, and is logged rather than propagated.
+fn install_context_firewall_hook(
+    runtime: &Runtime,
+    selection: &session::HarnessSelection,
+    effective: config::EffectiveConfig<'_>,
+    session_dir: &std::path::Path,
+) {
+    use glasshouse::config::firewall::FirewallMode;
+    use glasshouse::harness::claude_code;
+
+    if selection.id() != glasshouse::integrations::IntegrationId::ClaudeCode {
+        // A non-claude-code harness gets no registration and no warning
+        // spam — one debug line, per the packet's own instruction.
+        tracing::debug!(
+            harness = selection.id().slug(),
+            "context firewall: no verified PostToolUse bridge for this harness"
+        );
+        return;
+    }
+    let configured_mode = effective.context_firewall_mode().value;
+    if configured_mode == FirewallMode::Off {
+        return;
+    }
+
+    let program = match std::env::current_exe() {
+        Ok(program) => program,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "context firewall: could not find the Glasshouse executable; not registered"
+            );
+            return;
+        }
+    };
+
+    // Map line 1994: verify at session start against the installed
+    // harness. Cached for exactly this one registration — the hook
+    // subprocess Claude Code spawns later for every tool call never
+    // re-probes anything; the decision made here is baked into the
+    // registered command line's own `--mode` flag.
+    let probe = std::process::Command::new(selection.executable().path())
+        .arg("--version")
+        .output();
+    let effective_mode = match probe {
+        Ok(output) if output.status.success() => {
+            let text = String::from_utf8_lossy(&output.stdout).into_owned();
+            match claude_code::parse_version(&text)
+                .filter(|version| claude_code::supports_updated_tool_output(*version))
+            {
+                Some(_) => configured_mode,
+                None => {
+                    eprintln!(
+                        "glasshouse: the installed Claude Code (`{}`) is below the verified \
+                         floor for tool-output replacement ({}); the context firewall \
+                         registers in shadow mode for this session",
+                        text.trim(),
+                        claude_code::MIN_UPDATED_OUTPUT_VERSION_STRING,
+                    );
+                    record_context_firewall_registration_fallback(runtime, "version-floor");
+                    FirewallMode::Shadow
+                }
+            }
+        }
+        _ => {
+            eprintln!(
+                "glasshouse: could not verify the installed Claude Code's version; the \
+                 context firewall registers in shadow mode for this session"
+            );
+            record_context_firewall_registration_fallback(runtime, "version-unprobed");
+            FirewallMode::Shadow
+        }
+    };
+
+    let passthrough_tokens = effective
+        .context_firewall_passthrough_tokens(effective_mode)
+        .value;
+    // Map line 1992: no mode, including aggressive, ever names a reducer —
+    // there is no flag here that could carry one, which is the guard by
+    // construction the box asks for.
+    let emit_updated_output = effective_mode != FirewallMode::Shadow;
+    let command_line = claude_code::context_firewall_command_line(
+        &program,
+        effective_mode,
+        passthrough_tokens,
+        emit_updated_output,
+    );
+    let hook_entry = claude_code::context_firewall_hook_entry(&command_line);
+
+    let path = session_dir.join(claude_code::SETTINGS_FILE_NAME);
+    let existing = match std::fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                path = %path.display(),
+                "context firewall: could not read the settings document to merge its hook \
+                 into; not registered"
+            );
+            return;
+        }
+    };
+    match claude_code::merge_context_firewall_hook(&existing, &hook_entry) {
+        Ok(merged) => {
+            if let Err(err) = std::fs::write(&path, merged) {
+                tracing::warn!(
+                    error = %err,
+                    path = %path.display(),
+                    "context firewall: could not write the merged settings document; not \
+                     registered"
+                );
+            }
+        }
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "context firewall: could not merge the PostToolUse hook; not registered"
+            );
+        }
+    }
+}
+
+/// Map line 1994's fallback: one bypass-family telemetry row recorded at
+/// registration time, distinct from [`record_context_firewall_telemetry`]'s
+/// per-tool-call rows — this one is about the registration decision itself,
+/// taken once per launch rather than once per hook invocation.
+fn record_context_firewall_registration_fallback(runtime: &Runtime, reason: &str) {
+    use glasshouse::routing::evidence::{
+        CONTEXT_FIREWALL_BYPASS_PURPOSE, EvidenceLedger, NewObservation,
+    };
+
+    let ledger = match EvidenceLedger::open(runtime) {
+        Ok(ledger) => ledger,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "routing evidence ledger unavailable; a context-firewall registration \
+                 fallback is not recorded"
+            );
+            return;
+        }
+    };
+    let now_unix = glasshouse::provider::cache::now_unix_seconds();
+    let observation = NewObservation::new("glasshouse", "context-firewall")
+        .with_harness(Some(
+            glasshouse::integrations::IntegrationId::ClaudeCode.slug(),
+        ))
+        .with_purpose(Some(CONTEXT_FIREWALL_BYPASS_PURPOSE))
+        .with_route(Some(reason))
+        .with_quota_context(Some("registration".to_string()))
+        .with_timing(Some(now_unix), Some(now_unix));
+    if let Err(err) = ledger.record(observation, now_unix) {
+        tracing::warn!(error = %err, "could not record a context-firewall registration fallback");
     }
 }
 

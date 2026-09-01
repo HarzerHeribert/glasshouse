@@ -145,10 +145,30 @@ echo
 cargo fmt --all || { echo "integrate: cargo fmt failed"; exit 1; }
 echo "  cargo fmt --all: done"
 
-# ---- 5. run what the change could plausibly break, not the whole world.
+# ---- 5. the BLOCKING gate is targeted; the full sweep trails per wave.
+#         User ruling 2026-09-01 (CLAUDE.md "the full sweep is TRAILING"):
+#         integration commits on targeted green — the changed files' own
+#         distance-zero targets plus rustdoc — and the orchestrator runs ONE
+#         full two-lane sweep per wave in the background, spawning a
+#         fix-forward worker on any trailing red. FULL_GATE=1 restores the
+#         old inline full sweep when a wave's sweep should run right here.
 echo
-scripts/blast-radius.sh
-rc=$?
+if [ "${FULL_GATE:-0}" = "1" ]; then
+  scripts/blast-radius.sh
+  rc=$?
+else
+  CHANGED_RS=$(git diff --name-only HEAD -- '*.rs'; git ls-files --others --exclude-standard -- '*.rs')
+  if [ -n "$CHANGED_RS" ]; then
+    # shellcheck disable=SC2086
+    scripts/blast-radius.sh --targeted $CHANGED_RS
+    rc=$?
+    echo
+    echo "integrate: TARGETED gate only — the wave still owes one full sweep (trailing, background)."
+  else
+    echo "integrate: no .rs changes — no targeted gate to run."
+    rc=0
+  fi
+fi
 
 echo
 printf '\033[1m=== NOW READ THE DIFF. This script has not judged anything. ===\033[0m\n'

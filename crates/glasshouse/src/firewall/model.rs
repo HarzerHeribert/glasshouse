@@ -26,10 +26,24 @@ pub enum ToolPayload {
         stdout: String,
         stderr: String,
         interrupted: bool,
-        /// `Some(n)` only when the harness reported it explicitly; `None`
-        /// means this build has no positive signal either way, which
-        /// [`crate::firewall::eligibility`] treats as "cannot guarantee",
-        /// not as success.
+        /// `Some(n)` only when the harness reported it explicitly.
+        ///
+        /// GH-FIREWALL-BRIDGE's real capture (installed Claude Code
+        /// 2.1.252, `PostToolUse` fired against a live Bash tool call,
+        /// documented in that package's report) settled what `None` means
+        /// here: a **successful** Bash call's real `tool_response` is
+        /// `{"stdout", "stderr", "interrupted", "isImage",
+        /// "noOutputExpected"}` — no `exit_code` key at all — and a
+        /// **failing** one never reaches `PostToolUse` in the first place;
+        /// it fires `PostToolUseFailure` instead, with an entirely
+        /// different shape (`error`, `is_interrupt`) this adapter does not
+        /// subscribe to. So `exit_code: None` is the ordinary, expected
+        /// shape of every real success this build's own hook registration
+        /// ever sees, not an unknown to be conservative about — the
+        /// event's own arrival on `PostToolUse` is the positive exit
+        /// signal. An explicit non-zero value, if some future shape ever
+        /// sends one, still refuses reduction; see
+        /// [`ToolPayload::confirmed_clean_exit`].
         exit_code: Option<i64>,
     },
 }
@@ -45,8 +59,15 @@ impl ToolPayload {
     }
 
     /// Whether this command result positively confirms a clean, uninterrupted
-    /// exit. `Text` has no such concept and answers `true` — it carries
-    /// nothing box 1990 needs to preserve.
+    /// exit.
+    ///
+    /// `Text` has no such concept and answers `true` — it carries nothing
+    /// box 1990 needs to preserve. For `Command`, an explicit non-zero
+    /// `exit_code` always refuses; a missing one does not, per
+    /// [`ToolPayload::Command::exit_code`]'s doc — the real harness never
+    /// sends this adapter a failing Bash result to begin with, so treating
+    /// its absence as "cannot guarantee" would keep Bash unreducible
+    /// forever regardless of how conservative the rest of the ladder is.
     pub fn confirmed_clean_exit(&self) -> bool {
         match self {
             ToolPayload::Text(_) => true,
@@ -54,7 +75,7 @@ impl ToolPayload {
                 interrupted,
                 exit_code,
                 ..
-            } => !*interrupted && *exit_code == Some(0),
+            } => !*interrupted && !matches!(exit_code, Some(code) if *code != 0),
         }
     }
 }

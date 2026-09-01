@@ -7,6 +7,8 @@
 
 use std::ffi::OsString;
 
+use anyhow::Context as _;
+
 use super::{
     ApprovalMode, ApprovalModes, BackendSelection, Backends, Capabilities, CommunicationStyle,
     CredentialPlacement, Declared, DirectProviderPlan, DirectProviderRequest, HarnessAdapter,
@@ -144,7 +146,14 @@ const COMMUNICATION_STYLE: Declared<CommunicationStyle> = Declared::verified(
 /// first. Naming the same file from both places is what lets
 /// `crate::session::HarnessSelection::install_session_document` merge them
 /// into one document behind one flag.
-const SETTINGS_FILE_NAME: &str = "claude-settings.json";
+///
+/// `pub` rather than private: GH-FIREWALL-BRIDGE's own registration
+/// (`main.rs::install_context_firewall_hook`, in the separate binary crate)
+/// merges a `PostToolUse` entry into this exact file for the same reason
+/// lifecycle hooks and the response profile already share it — a second
+/// `--settings` flag would silently discard whichever of the two came
+/// first.
+pub const SETTINGS_FILE_NAME: &str = "claude-settings.json";
 
 /// The settings key that selects a session's output style.
 ///
@@ -553,6 +562,140 @@ impl HarnessAdapter for ClaudeCode {
     }
 }
 
+// ===========================================================================
+// GH-FIREWALL-BRIDGE — Phase 57 map lines 1991-1996. Everything below is the
+// Claude Code side of the context-firewall bridge: the `PostToolUse` hook
+// entry, its merge into `SETTINGS_FILE_NAME`, and the session-start version
+// probe map line 1994 requires. `crate::firewall` stays harness-agnostic;
+// this is the one place its registration touches Claude Code's own JSON.
+// ===========================================================================
+
+/// The version floor `hookSpecificOutput.updatedToolOutput` requires —
+/// verified against the installed Claude Code on 2026-09-01
+/// (design-decisions.md's Phase 57 addendum). Below this, or unparseable,
+/// registration falls back to shadow mode regardless of the configured mode
+/// (map line 1994).
+pub const MIN_UPDATED_OUTPUT_VERSION: (u32, u32, u32) = (2, 1, 252);
+
+/// [`MIN_UPDATED_OUTPUT_VERSION`], rendered for a diagnostic line.
+pub const MIN_UPDATED_OUTPUT_VERSION_STRING: &str = "2.1.252";
+
+/// Seconds the context-firewall hook may take before Claude Code abandons
+/// it. Larger than [`HOOK_TIMEOUT_SECONDS`]: unlike a lifecycle hook, which
+/// writes one row to a local database, this one runs the deterministic
+/// reduction ladder over a tool result that can legitimately be tens of
+/// thousands of tokens, plus a raw-store write — still no model call, but
+/// more work than a row insert.
+const CONTEXT_FIREWALL_HOOK_TIMEOUT_SECONDS: u32 = 10;
+
+/// Parse a `claude --version` line into `(major, minor, patch)`.
+///
+/// Observed real output on the installed Claude Code: `"2.1.252 (Claude
+/// Code)"` — a leading semver triple, then free text this build never reads.
+/// `None` for anything that does not start with three dot-separated
+/// integers; map line 1994's own fallback treats that identically to a
+/// version below the floor.
+pub fn parse_version(output: &str) -> Option<(u32, u32, u32)> {
+    let first_token = output.split_whitespace().next()?;
+    let mut parts = first_token.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next()?.parse().ok()?;
+    Some((major, minor, patch))
+}
+
+/// Whether `version` meets [`MIN_UPDATED_OUTPUT_VERSION`].
+pub fn supports_updated_tool_output(version: (u32, u32, u32)) -> bool {
+    version >= MIN_UPDATED_OUTPUT_VERSION
+}
+
+/// The shell command line `context-firewall hook` runs as this session's
+/// `PostToolUse` hook — the session's mode and thresholds baked in as flags
+/// on the registered command, per map line 1991's own requirement, and
+/// carrying no reducer name because no flag here could name one (map line
+/// 1992).
+///
+/// Quoted the same way [`HookCommand::shell_command`] quotes its own
+/// program path, for the same reason: a Windows path is full of backslashes
+/// and an unquoted one would not survive a POSIX shell either.
+pub fn context_firewall_command_line(
+    program: &std::path::Path,
+    mode: crate::config::firewall::FirewallMode,
+    passthrough_tokens: u64,
+    emit_updated_output: bool,
+) -> String {
+    let mut command = format!(
+        "{program} context-firewall hook --passthrough-tokens {passthrough_tokens} --mode \
+         {mode}",
+        program = super::quote(&program.display().to_string()),
+        mode = mode.as_str(),
+    );
+    if emit_updated_output {
+        command.push_str(" --emit-updated-output");
+    }
+    command
+}
+
+/// The `PostToolUse` hooks-array entry that registers `command_line` —
+/// matcher `"*"` so every tool reaches the hook subprocess, exactly as the
+/// real capture that established this shape did; `crate::firewall`'s own
+/// eligibility rules (map line 1989), not this matcher, are what actually
+/// decide whether a given tool's result is ever touched.
+pub fn context_firewall_hook_entry(command_line: &str) -> String {
+    serde_json::json!([
+        {
+            "matcher": "*",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": command_line,
+                    "timeout": CONTEXT_FIREWALL_HOOK_TIMEOUT_SECONDS,
+                }
+            ]
+        }
+    ])
+    .to_string()
+}
+
+/// Merge a `PostToolUse` hook entry into an already-written Claude Code
+/// settings document.
+///
+/// **Never a second `--settings` flag** — see [`SETTINGS_FILE_NAME`]'s doc
+/// for why: this is the one safe way to add the context firewall's own hook
+/// without silently discarding lifecycle hooks or the response profile's
+/// output style, which already share this exact document.
+///
+/// Refuses rather than overwrites when `document` is not the JSON object
+/// this adapter itself always writes, or already carries a `PostToolUse`
+/// key — the second case means something else registered one first, and
+/// silently replacing it is exactly what "never touch other hooks" (map
+/// line 1993) refuses to do.
+pub fn merge_context_firewall_hook(
+    document: &str,
+    hook_entry_json: &str,
+) -> anyhow::Result<String> {
+    let mut root: serde_json::Value = serde_json::from_str(document)
+        .context("the settings document this adapter wrote is not valid JSON")?;
+    let object = root
+        .as_object_mut()
+        .context("the settings document is not a JSON object")?;
+    let hooks = object
+        .entry("hooks")
+        .or_insert_with(|| serde_json::json!({}));
+    let hooks_object = hooks
+        .as_object_mut()
+        .context("the document's `hooks` key is not a JSON object")?;
+    if hooks_object.contains_key("PostToolUse") {
+        anyhow::bail!("a `PostToolUse` hook is already registered in this settings document");
+    }
+    let entry: serde_json::Value = serde_json::from_str(hook_entry_json)
+        .context("the context-firewall hook entry is not valid JSON")?;
+    hooks_object.insert("PostToolUse".to_string(), entry);
+    let mut rendered = serde_json::to_string_pretty(&root)?;
+    rendered.push('\n');
+    Ok(rendered)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -688,5 +831,146 @@ mod tests {
         let injection = ClaudeCode.additive_response_injection().unwrap();
         assert_eq!(injection.flag, "--append-system-prompt");
         assert_ne!(injection.flag, "--system-prompt");
+    }
+
+    // =======================================================================
+    // GH-FIREWALL-BRIDGE
+    // =======================================================================
+
+    #[test]
+    fn the_real_captured_version_line_parses_and_meets_the_floor() {
+        // The exact real output: `claude --version` on the installed
+        // Claude Code, captured while establishing GH-FIREWALL-BRIDGE's
+        // Bash fixture.
+        let version = parse_version("2.1.252 (Claude Code)").expect("must parse");
+        assert_eq!(version, (2, 1, 252));
+        assert!(supports_updated_tool_output(version));
+    }
+
+    #[test]
+    fn a_version_below_the_floor_does_not_support_updated_tool_output() {
+        assert!(!supports_updated_tool_output((2, 1, 251)));
+        assert!(!supports_updated_tool_output((1, 9, 999)));
+        assert!(!supports_updated_tool_output((2, 0, 999)));
+    }
+
+    #[test]
+    fn a_version_above_the_floor_still_supports_updated_tool_output() {
+        assert!(supports_updated_tool_output((2, 1, 253)));
+        assert!(supports_updated_tool_output((3, 0, 0)));
+    }
+
+    #[test]
+    fn an_unparseable_version_line_is_none() {
+        assert_eq!(parse_version(""), None);
+        assert_eq!(parse_version("not a version"), None);
+        assert_eq!(parse_version("2.1"), None);
+        assert_eq!(parse_version("v2.1.252"), None);
+    }
+
+    #[test]
+    fn the_command_line_names_no_reducer_under_any_mode() {
+        // Map line 1992: the registered command line must never name a
+        // reducer or provider, in every mode — a tripwire over the exact
+        // text every mode produces.
+        let program = std::path::Path::new("/usr/local/bin/glasshouse");
+        for mode in crate::config::firewall::FirewallMode::ALL {
+            for emit in [false, true] {
+                let line = context_firewall_command_line(program, *mode, 4000, emit);
+                assert!(
+                    !line.contains("reducer") && !line.contains("provider"),
+                    "mode {mode} emit {emit}: {line}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn shadow_mode_never_carries_emit_updated_output_when_the_caller_says_so() {
+        // The command-line builder itself is a pure function of its
+        // `emit_updated_output` argument — the mode-forces-shadow-off
+        // decision belongs to the caller (`main.rs::install_context_firewall_hook`
+        // and, as a second, independent guard, `context_firewall_hook`'s
+        // own mode check). This test pins the builder's own contract: it
+        // emits the flag exactly when told to, nothing more.
+        let program = std::path::Path::new("/usr/local/bin/glasshouse");
+        let line = context_firewall_command_line(
+            program,
+            crate::config::firewall::FirewallMode::Shadow,
+            4000,
+            false,
+        );
+        assert!(!line.contains("--emit-updated-output"));
+        assert!(line.contains("--mode shadow"));
+    }
+
+    #[test]
+    fn the_command_line_carries_mode_and_threshold_as_flags() {
+        let program = std::path::Path::new("/usr/local/bin/glasshouse");
+        let line = context_firewall_command_line(
+            program,
+            crate::config::firewall::FirewallMode::Aggressive,
+            1500,
+            true,
+        );
+        assert!(line.contains("--mode aggressive"));
+        assert!(line.contains("--passthrough-tokens 1500"));
+        assert!(line.contains("--emit-updated-output"));
+        assert!(line.contains("context-firewall hook"));
+    }
+
+    #[test]
+    fn the_hook_entry_matches_every_tool_and_invokes_the_command_line() {
+        let entry = context_firewall_hook_entry("glasshouse context-firewall hook --mode safe");
+        let parsed: serde_json::Value = serde_json::from_str(&entry).unwrap();
+        assert_eq!(parsed[0]["matcher"], "*");
+        assert_eq!(
+            parsed[0]["hooks"][0]["command"],
+            "glasshouse context-firewall hook --mode safe"
+        );
+        assert_eq!(parsed[0]["hooks"][0]["type"], "command");
+    }
+
+    #[test]
+    fn merging_the_hook_adds_post_tool_use_beside_existing_hooks() {
+        let document = serde_json::json!({
+            "hooks": {
+                "Stop": [{"hooks": [{"type": "command", "command": "existing", "timeout": 5}]}]
+            }
+        })
+        .to_string();
+        let entry = context_firewall_hook_entry("glasshouse context-firewall hook");
+        let merged = merge_context_firewall_hook(&document, &entry).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        // The existing event survives untouched.
+        assert_eq!(
+            parsed["hooks"]["Stop"][0]["hooks"][0]["command"],
+            "existing"
+        );
+        // The new one is added beside it.
+        assert_eq!(parsed["hooks"]["PostToolUse"][0]["matcher"], "*");
+    }
+
+    #[test]
+    fn merging_into_a_document_with_no_hooks_table_still_works() {
+        let document = serde_json::json!({"outputStyle": "Concise"}).to_string();
+        let entry = context_firewall_hook_entry("glasshouse context-firewall hook");
+        let merged = merge_context_firewall_hook(&document, &entry).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&merged).unwrap();
+        assert_eq!(parsed["outputStyle"], "Concise");
+        assert_eq!(parsed["hooks"]["PostToolUse"][0]["matcher"], "*");
+    }
+
+    #[test]
+    fn merging_refuses_to_overwrite_an_existing_post_tool_use_hook() {
+        let document = serde_json::json!({
+            "hooks": {
+                "PostToolUse": [{"hooks": [{"type": "command", "command": "someone-else", "timeout": 5}]}]
+            }
+        })
+        .to_string();
+        let entry = context_firewall_hook_entry("glasshouse context-firewall hook");
+        let result = merge_context_firewall_hook(&document, &entry);
+        assert!(result.is_err());
     }
 }
