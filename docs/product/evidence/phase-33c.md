@@ -447,3 +447,101 @@ Regression evidence:
 Recorded scope limits — stated by the worker, not discovered later:
 - The `glasshouse route` test drives the shipped binary on macOS only
 
+
+---
+
+# Line 1368 — CLOSED 2026-09-01 (`GH-PACED-RETRY`), and the packet was wrong
+
+**The gap.** `FreePool::is_available` (`routing/free.rs:495`) had **no caller
+anywhere in `src/gateway/`**. `observe_exchange` only ever runs *after* an
+exchange completes, and when it finds no sibling to rotate to it returns
+`ExchangeEffect::Unchanged` — so the resource it had just cooled down stayed
+cooled down in the pool while the very next connection dialled it anyway. That
+is *"retrying a paced route in place"* exactly.
+
+**What ships.** `paced_refusal` and `refuse_paced` (`gateway/mod.rs`), called
+from the accept loop after `dispatched_assignment` is read and **before**
+`ingress::serve`. When the assigned resource is inside a wait its provider
+itself declared and no sibling credential can serve instead, the gateway
+answers `429` locally carrying the remaining wait and **never dials upstream**.
+Rotation and failover are untouched: a sibling that exists is still offered the
+chance to serve, and deciding to rotate stays `observe_exchange`'s job.
+
+## The packet was wrong, and the worker's narrowing is the better reading
+
+The packet's REQUIRED BEHAVIOR named the guard as `is_available == false` plus
+`rotate_from == None`, and said the policy was decided and not the worker's to
+revisit. **Implemented literally, that is not implementable without a
+regression**, and `blast-radius.sh --targeted` caught it:
+`gateway::conformance::a_pinned_session_stays_on_its_failing_provider_and_never_reaches_the_other_one`
+failed, because its third ordinary `503` was refused locally instead of
+reaching the provider.
+
+The cause is a conflation the orchestrator's Phase −1 did not see.
+`ResourceHealth` folds **two** kinds of cooldown into one bool:
+
+- a **provider-declared** wait — `ResourceHealth::fail`'s `Some(retry_after)`
+  branch, applied immediately and unclamped, authoritative per line 1319;
+- a cooldown Glasshouse **invents** after `FAILURES_BEFORE_COOLDOWN` ordinary
+  failures that stated no wait — which Phase 9I line 534 deliberately keeps
+  **probeable by real work**: *"the only way to find out … is to let real work
+  try it."*
+
+Line 1368's own text is about **cadence**. The invented backoff is not a
+cadence, and refusing on it is scope the line does not ask for and an existing
+test forbids. `ResourceHealth` does not record which kind is in effect, and
+adding that distinction would mean editing `routing/free.rs` — this packet's
+own FORBIDDEN FILES, and its STOP CONDITIONS said that shape is a
+`packet_errors` row rather than a fix.
+
+The worker did not cross it. It kept `is_available` as a first-pass filter and
+narrowed to the declared case with `SessionRouting::quota_headers()`
+(`gateway/session.rs:372`, already `pub` for line 1229), requiring the most
+recent rate-limit headers to carry a **still-unexpired** `Retry-After`. No new
+state, no new accessor, `routing/free.rs` untouched. It then verified the
+diagnosis rather than asserting it: the conformance test passes at HEAD, fails
+with the literal `is_available`-only guard, and passes again with the narrowed
+one.
+
+**Ruling: the narrowed guard is not a weaker version of the packet, it is a
+more faithful reading of the line, and the packet's "decided, do not revisit"
+framing was the defect.** A packet may fix a policy; it may not fix a policy
+that contradicts a shipped test the packet never looked at.
+
+## Evidence
+
+Regression: `gateway_retry_after::a_second_request_while_still_paced_is_refused_locally_without_dialing_upstream`
+— one credential, two requests, and the assertion that carries the line is the
+**stub's request counter**, not the response code (forwarding to a paced route
+also returns `429`). The stub was extended to keep accepting and to count hits.
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| `if pool.is_available(&resource, now) {` -> `if true {` | `serve-a-cooling-route-anyway` | **killed** | `gateway_retry_after::a_second_request_while_still_paced_is_refused_locally_without_dialing_upstream` |
+
+> observed: ``assertion `left == right` failed: the stub's request counter must not have increased: a paced route must be refused in place, not forwarded and failed again``
+
+Targeted gate on the merged tree: `--lib gateway` 176 passed, `gateway_retry_after`
+3 passed, rustdoc clean, `blast-radius --targeted` exit 0.
+
+## Recorded limits
+
+- **`quota_headers()` is one most-recent reading per `SessionRouting`, not per
+  resource** (`gateway/session.rs:372` — a single `Option<(RateLimitHeaders, i64)>`;
+  verified by the integrator, not taken from the report). If the assigned
+  resource is unavailable for a *non-declared* reason at the same moment a
+  **different** resource's declared wait is the most recent reading, the
+  refusal is attributed to the wrong cause. **This can only produce a spurious
+  refusal, never a missed one** — so it cannot falsify a line that forbids
+  *retrying* a paced route — but it is a real follow-up: a per-resource
+  declared-wait reading, which needs `routing/free.rs`.
+- The local refusal only fires once a real exchange has produced headers with a
+  stated wait this gateway read. A gateway that has never seen such a `429` for
+  a resource cannot refuse on it.
+- macOS only; no `#[cfg(...)]` added, and the new test binds its stub exactly
+  as this file's already cross-platform-proven ones do.
+
+**Phase 33C now stands at 12/15.** 1366 needs a cadence *learner* distinct from
+the declared remainder, 1367 a reservation model (`routing/free.rs` has no
+reservation, lease or in-flight machinery at all), 1369 a probe budget. None
+has an established Phase −1.

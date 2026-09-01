@@ -81,7 +81,7 @@ pub mod translate;
 pub mod upstream;
 
 use std::fmt;
-use std::io::ErrorKind;
+use std::io::{ErrorKind, Read};
 use std::net::{Ipv4Addr, SocketAddr, TcpListener};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -91,6 +91,8 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 
 use crate::profile::{BackendResource, LaunchProfile};
+use crate::routing::free::FreeResource;
+use crate::routing::interactive::Assignment;
 use crate::secret::REDACTED;
 
 pub use session::SessionRouting;
@@ -598,6 +600,21 @@ fn accept_loop(
                         // `SessionRouting::record_routing_observation`'s own
                         // doc for the defect this snapshot closes.
                         let dispatched_assignment = routing.assignment();
+                        // Capability map line 1368: consult the cooldown this
+                        // very loop already recorded before spending an
+                        // upstream request on a route whose declared cadence
+                        // says the request will predictably fail.
+                        // `observe_exchange` below only ever runs *after* an
+                        // exchange completes, so without this check the
+                        // resource it just cooled down stays cooled down in
+                        // the pool while the very next connection dials it
+                        // anyway.
+                        if let Some(wait) =
+                            paced_refusal(&routing, &upstream, dispatched_assignment.as_ref())
+                        {
+                            refuse_paced(stream, wait);
+                            return;
+                        }
                         let (exchange, quota) = ingress::serve(stream, &token, &upstream, &agent);
                         // The exchange is genuinely over here: every byte of
                         // the response has been relayed. Stamped before
@@ -725,6 +742,97 @@ fn accept_loop(
             Err(_) => std::thread::sleep(ACCEPT_POLL),
         }
     }
+}
+
+/// The wait to refuse this connection with, if the resource the session is
+/// currently assigned to is still inside a wait its provider itself declared
+/// — capability map line 1368. `None` means the accept loop should serve
+/// normally.
+///
+/// **Deliberately narrower than [`FreePool::is_available`].** That check
+/// alone cannot be the guard here, because it folds two different kinds of
+/// cooldown into one bool: a provider's own declared wait, which line 1319
+/// makes authoritative, and a bounded cooldown Glasshouse *invents* after
+/// ordinary repeated failures. Phase 9I line 534 and
+/// [`routing::free`](crate::routing::free)'s own `MAX_COOLDOWN` doc make the
+/// second kind deliberately still probed by real work — "the only way to
+/// find out ... is to let real work try it" — and
+/// `gateway::conformance::a_pinned_session_stays_on_its_failing_provider_and_never_reaches_the_other_one`
+/// pins that: three ordinary `503`s must all still reach the provider. Only
+/// the first kind is what line 1368 asks to stop retrying in place, so this
+/// reads the most recent rate-limit headers this gateway observed —
+/// [`SessionRouting::quota_headers`], already public for capability map line
+/// 1229 — rather than trusting the pool's bool to say why it is `false`.
+///
+/// A sibling credential of the same provider is still offered the chance to
+/// serve in its place first; deciding to actually rotate to it is
+/// [`session::SessionRouting::observe_exchange`]'s own job, on the exchange
+/// that runs, and this only asks whether one exists, so it never mutates the
+/// assignment itself.
+fn paced_refusal(
+    routing: &SessionRouting,
+    upstream: &Upstream,
+    assignment: Option<&Assignment>,
+) -> Option<Duration> {
+    let assignment = assignment?;
+    let resource = FreeResource::new(
+        assignment.backend().credential().clone(),
+        assignment.backend().model().label(),
+    );
+    let now = std::time::Instant::now();
+    let pool = routing.free_pool();
+    if pool.is_available(&resource, now) {
+        return None;
+    }
+    let (headers, observed_at_unix) = routing.quota_headers()?;
+    let declared_seconds = headers.retry_after_seconds()?;
+    let now_unix = crate::provider::cache::now_unix_seconds();
+    let remaining = observed_at_unix + declared_seconds - now_unix;
+    if remaining <= 0 {
+        // The declared wait has already elapsed; `is_available` will catch
+        // up once a real exchange observes it, and nothing here should
+        // refuse a request the provider never asked to wait on any more.
+        return None;
+    }
+    let siblings = upstream.credentials_of(assignment.provider());
+    if pool
+        .rotate_from(resource.credential(), &siblings, resource.model(), now)
+        .is_some()
+    {
+        return None;
+    }
+    Some(Duration::from_secs(remaining as u64))
+}
+
+/// Answer `429` on `stream` without dialling upstream at all — capability
+/// map line 1368's refusal. `wait` is the provider-declared wait
+/// [`paced_refusal`] read back from [`SessionRouting::quota_headers`],
+/// carried back as this gateway's own `Retry-After` rather than a fabricated
+/// header.
+fn refuse_paced(mut stream: std::net::TcpStream, wait: Duration) {
+    // Drained before responding, the same reason `ingress::settle` drains
+    // before closing a refusal there: closing a socket with the client's
+    // own bytes still unread resets the connection instead of ending it
+    // cleanly, and the harness would see a network error instead of this
+    // response's 429.
+    let _ = stream.set_nonblocking(false);
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(500)));
+    let mut drained = [0u8; 8192];
+    let _ = stream.read(&mut drained);
+
+    let headers = vec![
+        ("connection".to_owned(), b"close".to_vec()),
+        (
+            "retry-after".to_owned(),
+            wait.as_secs().to_string().into_bytes(),
+        ),
+    ];
+    let _ = http::write_head(
+        &mut stream,
+        ureq::http::StatusCode::TOO_MANY_REQUESTS,
+        &headers,
+    );
+    let _ = stream.shutdown(std::net::Shutdown::Both);
 }
 
 /// Whether any of these launch profiles needs a local gateway.

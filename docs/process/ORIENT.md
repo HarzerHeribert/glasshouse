@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1152 / 1332 mandatory capabilities (86%)** — 180 open across 42 phases.
+**1153 / 1332 mandatory capabilities (87%)** — 179 open across 42 phases.
 
 ## Where the work is
 
@@ -45,10 +45,10 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 38 | Quota-preserving routing | **2** | 5 | `1604` |
 | Phase 55 | V1 completion definition | **2** | 21 | `1910` |
 | Phase 28 | File-aware memory lookup | **3** | 2 | `1137` |
+| Phase 33C | Failure, quota, and route correlation | **3** | 12 | `1362` |
 | Phase 34C | Automatic routing-model selection | **3** | 10 | `1429` |
 | Phase 21E | Decision ladder and conflict handling | **4** | 8 | `907` |
 | Phase 32G | Provider-aware request-cost estimation | **4** | 6 | `1296` |
-| Phase 33C | Failure, quota, and route correlation | **4** | 11 | `1362` |
 | Phase 24 | Memory reranking | **5** | 1 | `1082` |
 | Phase 31 | Compaction-aware behavior | **5** | 2 | `1167` |
 | Phase 33A | Routing evidence ledger | **5** | 10 | `1327` |
@@ -71,7 +71,7 @@ closures are usually at the top. Open the map at the line number given.
 
 Every phase with **three or fewer** open lines, quoted verbatim. These are
 where a single package finishes a phase, so they are listed here and the
-other ~142 open lines are not.
+other ~138 open lines are not.
 
 For any other phase: `scripts/discover.py --phase <id>` prints its open
 lines and evidence together. **Do not open the 178 KB map to read them.**
@@ -183,6 +183,12 @@ these unwrapped.
 - **1139** ☐ Track file paths explicitly referenced by durable memories when extraction can identify them reliably.
 - **1141** ☐ Prefer constraints, decisions, and failed approaches when retrieving memory for an intended code edit.
 - **1142** ☐ Keep file-aware retrieval advisory and never treat stale memory as stronger evidence than the current source code.
+
+### Phase 33C — Failure, quota, and route correlation  (3 open, 12 closed)
+
+- **1366** ☐ Learn or parse provider cadence separately from Retry-After remainder values when evidence permits.
+- **1367** ☐ Reserve known paced capacity at dispatch so concurrent workers do not all consume the same apparent allowance.
+- **1369** ☐ Reduce or suppress active probes when probing would consume a material fraction of a scarce request pool.
 
 ### Phase 34C — Automatic routing-model selection  (3 open, 10 closed)
 

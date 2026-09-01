@@ -28,6 +28,8 @@
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use glasshouse::gateway::{Route, Upstream, UpstreamBackend};
@@ -80,14 +82,19 @@ fn credential_id(var: &str) -> CredentialId {
     )
 }
 
-/// A local HTTP server that answers exactly one connection with a `429`,
-/// optionally carrying `Retry-After`, then exits.
+/// A local HTTP server that answers every connection it accepts with a
+/// `429`, optionally carrying `Retry-After`, up to a deadline — and counts
+/// how many connections it actually accepted.
 ///
 /// Bounded rather than a plain blocking `accept`: the listener is
 /// non-blocking and polled against a deadline, so a gateway that never
 /// dialled it — a defect on its own — fails this test with a normal
-/// assertion instead of hanging the suite.
-fn stub_429_server(retry_after_seconds: Option<u64>) -> SocketAddr {
+/// assertion instead of hanging the suite. Serving more than the one
+/// connection the original version of this helper stopped at is what lets
+/// the counter distinguish "the gateway refused the second request in
+/// place" from "the gateway forwarded it and got a second 429" — a test that
+/// only checked the response code cannot tell those apart.
+fn stub_429_server(retry_after_seconds: Option<u64>) -> (SocketAddr, Arc<AtomicUsize>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback is bindable");
     let address = listener
         .local_addr()
@@ -96,50 +103,53 @@ fn stub_429_server(retry_after_seconds: Option<u64>) -> SocketAddr {
         .set_nonblocking(true)
         .expect("a listener can be put in polling mode");
 
+    let hits = Arc::new(AtomicUsize::new(0));
+    let counted = Arc::clone(&hits);
+
     std::thread::Builder::new()
         .name("gateway-retry-after-stub".to_owned())
         .spawn(move || {
             let deadline = Instant::now() + Duration::from_secs(10);
-            let mut stream = loop {
-                match listener.accept() {
-                    Ok((stream, _peer)) => break Some(stream),
+            loop {
+                let mut stream = match listener.accept() {
+                    Ok((stream, _peer)) => stream,
                     Err(err) if err.kind() == std::io::ErrorKind::WouldBlock => {
                         if Instant::now() >= deadline {
-                            break None;
+                            return;
                         }
                         std::thread::sleep(Duration::from_millis(10));
+                        continue;
                     }
-                    Err(_) => break None,
-                }
-            };
-            let Some(stream) = stream.as_mut() else {
-                return;
-            };
-            // The accepted socket may have inherited the listener's
-            // non-blocking flag (macOS and Windows do this; Linux does not —
-            // `gateway::Gateway`'s own doc names the split) so it is cleared
-            // explicitly rather than assumed, exactly as `gateway::ingress`
-            // does for the identical reason.
-            let _ = stream.set_nonblocking(false);
-            let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
+                    Err(_) => return,
+                };
+                counted.fetch_add(1, Ordering::SeqCst);
+                // The accepted socket may have inherited the listener's
+                // non-blocking flag (macOS and Windows do this; Linux does
+                // not — `gateway::Gateway`'s own doc names the split) so it
+                // is cleared explicitly rather than assumed, exactly as
+                // `gateway::ingress` does for the identical reason.
+                let _ = stream.set_nonblocking(false);
+                let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
 
-            // The request head is drained but not parsed: this stub answers
-            // the same fixed response regardless of what the gateway sent.
-            let mut buf = [0u8; 4096];
-            let _ = stream.read(&mut buf);
+                // The request head is drained but not parsed: this stub
+                // answers the same fixed response regardless of what the
+                // gateway sent.
+                let mut buf = [0u8; 4096];
+                let _ = stream.read(&mut buf);
 
-            let response = match retry_after_seconds {
-                Some(seconds) => format!(
-                    "HTTP/1.1 429 Too Many Requests\r\nRetry-After: {seconds}\r\nContent-Length: 0\r\n\r\n"
-                ),
-                None => "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\n\r\n".to_owned(),
-            };
-            let _ = stream.write_all(response.as_bytes());
-            let _ = stream.flush();
+                let response = match retry_after_seconds {
+                    Some(seconds) => format!(
+                        "HTTP/1.1 429 Too Many Requests\r\nRetry-After: {seconds}\r\nContent-Length: 0\r\n\r\n"
+                    ),
+                    None => "HTTP/1.1 429 Too Many Requests\r\nContent-Length: 0\r\n\r\n".to_owned(),
+                };
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
         })
         .expect("can spawn the stub server thread");
 
-    address
+    (address, hits)
 }
 
 fn messages_request(token: &str) -> Vec<u8> {
@@ -263,7 +273,7 @@ fn a_provider_stated_retry_after_blocks_the_resource_for_the_wait_it_stated() {
         "no reading should exist for this provider before any exchange has run"
     );
 
-    let upstream_address = stub_429_server(Some(STATED_WAIT_SECONDS as u64));
+    let (upstream_address, _hits) = stub_429_server(Some(STATED_WAIT_SECONDS as u64));
     let gateway = gateway_to_stub(CREDENTIAL_VAR, upstream_address, health_cache.clone());
 
     let response = send_and_read(
@@ -328,7 +338,7 @@ fn one_rate_limit_with_no_stated_wait_blocks_nothing() {
         "no reading should exist for this provider before any exchange has run"
     );
 
-    let upstream_address = stub_429_server(None);
+    let (upstream_address, _hits) = stub_429_server(None);
     let gateway = gateway_to_stub(CREDENTIAL_VAR, upstream_address, health_cache.clone());
 
     let response = send_and_read(
@@ -358,5 +368,84 @@ fn one_rate_limit_with_no_stated_wait_blocks_nothing() {
     assert!(
         reading.is_available(now_unix()),
         "a resource with no cooldown must read as available"
+    );
+}
+
+/// Capability map line 1368 — *"Avoid retrying a paced route in place when
+/// the current cadence makes the retry predictably unavailable."*
+///
+/// Deleting this test removes the only proof that the gateway actually
+/// consults the cooldown its own first exchange recorded before dialling the
+/// next one: without it, nothing would fail if the accept loop went back to
+/// forwarding every request regardless of what `FreePool::is_available`
+/// says — which is exactly what this file's mutation on that guard
+/// exercises.
+#[test]
+fn a_second_request_while_still_paced_is_refused_locally_without_dialing_upstream() {
+    const CREDENTIAL_VAR: &str = "GLASSHOUSE_GATEWAY_RETRY_AFTER_TEST_KEY_PACED";
+    const STATED_WAIT_SECONDS: i64 = 3600;
+
+    let health_dir = tempfile::tempdir().expect("a temp directory can be created");
+    let health_cache = GatewayHealthCache::at(health_dir.path());
+
+    // Premise first (§17): nothing has been observed for this provider
+    // before the exchange runs at all.
+    assert!(
+        health_cache.load(PROVIDER).is_empty(),
+        "no reading should exist for this provider before any exchange has run"
+    );
+
+    let (upstream_address, hits) = stub_429_server(Some(STATED_WAIT_SECONDS as u64));
+    let gateway = gateway_to_stub(CREDENTIAL_VAR, upstream_address, health_cache.clone());
+
+    // First request: the provider's own stated wait cools the one
+    // configured credential down — the same premise the first test in this
+    // file already proves end to end.
+    let first_response = send_and_read(
+        gateway.address(),
+        &messages_request(gateway.token().expose()),
+    );
+    assert!(
+        first_response.starts_with("HTTP/1.1 429"),
+        "the gateway must relay the provider's own 429 to the harness: {first_response}"
+    );
+
+    let readings = wait_for_readings(&health_cache, PROVIDER);
+    assert_eq!(
+        readings.len(),
+        1,
+        "exactly one resource must have been observed: {readings:?}"
+    );
+    assert!(
+        readings[0].cooling_down_until_unix.is_some(),
+        "the first 429's stated wait must already be cooling the resource down: {readings:?}"
+    );
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        1,
+        "the stub must have been dialled exactly once, by the first request"
+    );
+
+    // Second request, sent while the wait is still in force. There is one
+    // credential and no sibling to rotate to, so the gateway must refuse it
+    // locally rather than spend an upstream request on a route it already
+    // knows is paced.
+    let second_response = send_and_read(
+        gateway.address(),
+        &messages_request(gateway.token().expose()),
+    );
+    assert!(
+        second_response.starts_with("HTTP/1.1 429"),
+        "the gateway must still answer 429 to the harness: {second_response}"
+    );
+    // The load-bearing assertion: a response code of 429 alone proves
+    // nothing here, because forwarding to the still-paced route would also
+    // produce a 429 from the stub. Only the stub's own request counter
+    // tells "refused in place" and "forwarded and failed again" apart.
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        1,
+        "the stub's request counter must not have increased: a paced route must be refused in \
+         place, not forwarded and failed again"
     );
 }
