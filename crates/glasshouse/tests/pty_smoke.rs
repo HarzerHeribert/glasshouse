@@ -196,6 +196,182 @@ fn strip_terminal_sequences(text: &str) -> String {
     out
 }
 
+/// Every `install_*_harness` helper below that writes a fixture executable
+/// whose bytes do not depend on this test's own tempdir routes its final
+/// write through this cache instead of writing straight into `bin_dir`:
+/// distinct tests that want identical bytes get the identical file, written
+/// once, so macOS Gatekeeper (`syspolicyd`/XProtect) validates it once per
+/// `pty_smoke` binary run instead of once per test — see the project memory
+/// `gatekeeper-scans-make-pty-fixtures-flaky` and GH-FIXTURE-REUSE. Sharing
+/// is keyed by content, never by the caller's requested name, so two
+/// differently-named requests for the same bytes still collapse to one file,
+/// and two identically-named requests for different bytes never collide.
+///
+/// Race-free the same way `provider/cache.rs::write_json_atomically` is: one
+/// process-wide mutex serialises the check-and-write, and the write itself
+/// lands in a same-directory temporary name before an atomic rename, so a
+/// concurrent test thread reading the cache never observes a half-written
+/// executable. The directory is a `OnceLock<TempDir>` that outlives every
+/// individual test's own fixture — it is dropped, and its contents removed,
+/// only when the whole test binary exits.
+fn shared_fixture(unique_name: &str, contents: &str) -> std::path::PathBuf {
+    use std::collections::HashMap;
+    use std::hash::{Hash, Hasher};
+    use std::sync::{Mutex, OnceLock};
+
+    static DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
+    static CACHE: OnceLock<Mutex<HashMap<String, std::path::PathBuf>>> = OnceLock::new();
+
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = cache.lock().expect("shared fixture cache poisoned");
+    if let Some(path) = guard.get(contents) {
+        return path.clone();
+    }
+
+    let dir = DIR.get_or_init(|| tempfile::tempdir().expect("shared fixture dir"));
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    contents.hash(&mut hasher);
+    let digest = format!("{:016x}", hasher.finish());
+    let named = std::path::Path::new(unique_name);
+    let stem = named
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(unique_name);
+    let filename = match named.extension().and_then(|e| e.to_str()) {
+        Some(ext) => format!("{stem}-{digest}.{ext}"),
+        None => format!("{stem}-{digest}"),
+    };
+    let path = dir.path().join(&filename);
+    let temporary = dir.path().join(format!("{filename}.writing"));
+    std::fs::write(&temporary, contents).expect("write shared fixture");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&temporary).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&temporary, perms).unwrap();
+    }
+    std::fs::rename(&temporary, &path).expect("rename shared fixture into place");
+    guard.insert(contents.to_string(), path.clone());
+    path
+}
+
+#[cfg(test)]
+mod shared_fixture_proof {
+    use super::shared_fixture;
+
+    /// **The once-per-binary proof.** Two requests for byte-identical
+    /// content must resolve to the same file without a second write: proven
+    /// by inode/mtime identity rather than a global counter, so it stays
+    /// race-free against every other test in this binary writing unrelated
+    /// fixtures concurrently (a shared counter's delta would be flaky under
+    /// exactly that concurrency).
+    #[test]
+    fn a_repeated_request_for_identical_content_reuses_the_same_file() {
+        let content = "#!/bin/sh\nexit 0\n# shared_fixture_proof::identical_content marker, unique to this test\n";
+        let first = shared_fixture("proof-identical", content);
+        let meta_before = std::fs::metadata(&first).expect("fixture exists after first request");
+
+        let second = shared_fixture("proof-identical", content);
+        assert_eq!(
+            first, second,
+            "identical content must resolve to the same shared path"
+        );
+
+        let meta_after = std::fs::metadata(&second).expect("fixture exists after second request");
+        assert_eq!(
+            meta_before.modified().unwrap(),
+            meta_after.modified().unwrap(),
+            "a repeated request for identical content must not rewrite the file"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(
+                meta_before.ino(),
+                meta_after.ino(),
+                "a repeated request for identical content must return the same inode, \
+                 not a second copy"
+            );
+        }
+    }
+
+    /// The concurrency half of the same proof: several threads racing to
+    /// install the same content — the shape every real test binary runs
+    /// under — must agree on one file rather than each writing its own.
+    #[test]
+    fn concurrent_requests_for_identical_content_agree_on_one_file() {
+        let content =
+            "#!/bin/sh\nexit 0\n# shared_fixture_proof::concurrent marker, unique to this test\n";
+        let handles: Vec<_> = (0..8)
+            .map(|_| std::thread::spawn(move || shared_fixture("proof-concurrent", content)))
+            .collect();
+        let paths: Vec<_> = handles
+            .into_iter()
+            .map(|h| h.join().expect("thread must not panic"))
+            .collect();
+        let first = &paths[0];
+        assert!(
+            paths.iter().all(|p| p == first),
+            "every thread must resolve to the same shared fixture path: {paths:?}"
+        );
+    }
+
+    /// Two distinct contents must never collapse onto one file, whatever
+    /// name the caller asks for — this is the failure mode this test would
+    /// have to look like: two harnesses that behave differently ending up as
+    /// one file on disk. Names deliberately collide; only the bytes differ.
+    #[test]
+    fn distinct_content_under_the_same_requested_name_never_collides() {
+        let a = shared_fixture("proof-distinct", "#!/bin/sh\nexit 0\n# proof-distinct A\n");
+        let b = shared_fixture("proof-distinct", "#!/bin/sh\nexit 1\n# proof-distinct B\n");
+        assert_ne!(a, b, "distinct content must never share a file");
+        let content_a = std::fs::read_to_string(&a).unwrap();
+        let content_b = std::fs::read_to_string(&b).unwrap();
+        assert_ne!(content_a, content_b);
+    }
+
+    /// **A real converted caller, not just the primitive.** Two independent
+    /// per-test tempdirs asking `install_sleep_harness` for the same
+    /// `seconds` — the ordinary shape every test in this binary is in —
+    /// collapse to one file, proving the conversion actually reduces the
+    /// count of executables Gatekeeper has to validate, not merely that the
+    /// cache primitive can.
+    #[cfg(unix)]
+    #[test]
+    fn two_tempdirs_requesting_the_same_sleep_harness_get_one_shared_file() {
+        let tmp_a = tempfile::tempdir().expect("tempdir a");
+        let tmp_b = tempfile::tempdir().expect("tempdir b");
+        let a = super::install_sleep_harness(tmp_a.path(), "proof-sleep-a", 20);
+        let b = super::install_sleep_harness(tmp_b.path(), "proof-sleep-b", 20);
+        assert_eq!(
+            a, b,
+            "two different tempdirs asking for the same seconds must share one file"
+        );
+        assert!(
+            !a.starts_with(tmp_a.path()) && !a.starts_with(tmp_b.path()),
+            "the shared file must live in the per-binary fixture dir, not either \
+             test's own tempdir: {a:?}"
+        );
+    }
+
+    /// **Bytes unchanged.** `install_fake_harness`'s shared output must be
+    /// byte-for-byte what every per-test write used to produce — the exact
+    /// literal this suite shipped before the conversion, not a
+    /// re-derivation of it.
+    #[cfg(unix)]
+    #[test]
+    fn the_shared_fake_harness_fixture_has_the_original_unshared_bytes() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = super::install_fake_harness(tmp.path());
+        let content = std::fs::read_to_string(&path).expect("read shared fixture");
+        assert_eq!(
+            content, "#!/bin/sh\nexec /bin/pwd -P\n",
+            "the shared fixture's bytes must match the original per-test literal exactly"
+        );
+    }
+}
+
 /// Streaming counter for occurrences of a fixed byte pattern across a
 /// sequence of chunks delivered in whatever sizes the reader happens to hand
 /// over.
@@ -932,28 +1108,21 @@ fn the_child_starts_in_the_requested_working_directory() {
     session.wait_for_exit();
 }
 
-/// Write a fake installed harness into `bin_dir` and return its path.
+/// Install the shared fake harness fixture and return its path. Bytes are
+/// fixed — no test parameter reaches the script — so every caller in this
+/// binary gets the one file `shared_fixture` wrote for the first of them.
 ///
 /// Windows: a `.cmd` script, so the resolver classifies it as
 /// `WindowsScript` and the launch really goes through `cmd.exe /D /C`.
 #[cfg(windows)]
-fn install_fake_harness(bin_dir: &std::path::Path) -> std::path::PathBuf {
-    let path = bin_dir.join("fake-harness.cmd");
-    std::fs::write(&path, "@echo off\r\ncd\r\n").expect("write fake harness");
-    path
+fn install_fake_harness(_bin_dir: &std::path::Path) -> std::path::PathBuf {
+    shared_fixture("fake-harness.cmd", "@echo off\r\ncd\r\n")
 }
 
 /// Unix: a plain executable shell script printing its physical cwd.
 #[cfg(unix)]
-fn install_fake_harness(bin_dir: &std::path::Path) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-
-    let path = bin_dir.join("fake-harness");
-    std::fs::write(&path, "#!/bin/sh\nexec /bin/pwd -P\n").expect("write fake harness");
-    let mut perms = std::fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).unwrap();
-    path
+fn install_fake_harness(_bin_dir: &std::path::Path) -> std::path::PathBuf {
+    shared_fixture("fake-harness", "#!/bin/sh\nexec /bin/pwd -P\n")
 }
 
 /// The harness launch seam end to end, with a *fake installed harness*: a
@@ -1223,39 +1392,28 @@ fn pattern_scanner_recovers_after_a_partial_match_that_fails() {
 /// `cmd.exe /D /C`, exactly as a real npm-installed harness shim would.
 #[cfg(windows)]
 fn install_marker_harness(
-    bin_dir: &std::path::Path,
+    _bin_dir: &std::path::Path,
     name: &str,
     marker: &str,
     exit_code: u8,
 ) -> std::path::PathBuf {
-    let path = bin_dir.join(format!("{name}.cmd"));
-    std::fs::write(
-        &path,
-        format!("@echo off\r\necho {marker}\r\ncd\r\nexit /b {exit_code}\r\n"),
+    shared_fixture(
+        &format!("{name}.cmd"),
+        &format!("@echo off\r\necho {marker}\r\ncd\r\nexit /b {exit_code}\r\n"),
     )
-    .expect("write fake harness");
-    path
 }
 
 #[cfg(unix)]
 fn install_marker_harness(
-    bin_dir: &std::path::Path,
+    _bin_dir: &std::path::Path,
     name: &str,
     marker: &str,
     exit_code: u8,
 ) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-
-    let path = bin_dir.join(name);
-    std::fs::write(
-        &path,
-        format!("#!/bin/sh\necho {marker}\n/bin/pwd -P\nexit {exit_code}\n"),
+    shared_fixture(
+        name,
+        &format!("#!/bin/sh\necho {marker}\n/bin/pwd -P\nexit {exit_code}\n"),
     )
-    .expect("write fake harness");
-    let mut perms = std::fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).unwrap();
-    path
 }
 
 /// The whole production consumer, end to end: the real `glasshouse` binary,
@@ -1551,9 +1709,7 @@ fn launching_a_harness_records_a_session_that_a_later_command_reads_back() {
 /// a timestamp captured now would already be too early to fall inside the
 /// window `session::native_id::capture` will check.
 #[cfg(unix)]
-fn install_codex_rollout_harness(bin_dir: &std::path::Path, id: &str) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-
+fn install_codex_rollout_harness(_bin_dir: &std::path::Path, id: &str) -> std::path::PathBuf {
     const PLACEHOLDER: &str = "__ROLLOUT_ID__";
     let template = r#"#!/bin/sh
 echo GLASSHOUSE-CODEX-RAN
@@ -1565,13 +1721,7 @@ printf '{"type":"session_meta","payload":{"id":"__ROLLOUT_ID__","cwd":"%s","time
 exit 0
 "#;
     let script = template.replace(PLACEHOLDER, id);
-
-    let path = bin_dir.join("codex");
-    std::fs::write(&path, script).expect("write fake codex harness");
-    let mut perms = std::fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).unwrap();
-    path
+    shared_fixture("codex", &script)
 }
 
 /// Windows counterpart of the function above. `cmd.exe` batch has no sane
@@ -1581,7 +1731,7 @@ exit 0
 /// does) delegates the actual work to a short PowerShell script, which both
 /// platforms Windows CI runs ship.
 #[cfg(windows)]
-fn install_codex_rollout_harness(bin_dir: &std::path::Path, id: &str) -> std::path::PathBuf {
+fn install_codex_rollout_harness(_bin_dir: &std::path::Path, id: &str) -> std::path::PathBuf {
     const PLACEHOLDER: &str = "__ROLLOUT_ID__";
     let ps1_template = r#"$cwd = (Get-Location).Path.Replace('\', '/')
 $ts = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
@@ -1591,20 +1741,18 @@ $json = '{"type":"session_meta","payload":{"id":"__ROLLOUT_ID__","cwd":"' + $cwd
 Set-Content -Path (Join-Path $dir 'rollout-test-__ROLLOUT_ID__.jsonl') -Value $json
 "#;
     let ps1 = ps1_template.replace(PLACEHOLDER, id);
-    let ps1_path = bin_dir.join("codex-rollout.ps1");
-    std::fs::write(&ps1_path, ps1).expect("write fake codex rollout script");
+    // Same `id` -> same ps1 bytes -> same shared ps1 path, so the .cmd
+    // content that embeds it below is itself deterministic and shareable.
+    let ps1_path = shared_fixture("codex-rollout.ps1", &ps1);
 
-    let path = bin_dir.join("codex.cmd");
-    std::fs::write(
-        &path,
-        format!(
+    shared_fixture(
+        "codex.cmd",
+        &format!(
             "@echo off\r\necho GLASSHOUSE-CODEX-RAN\r\n\
              powershell -NoProfile -ExecutionPolicy Bypass -File \"{}\"\r\nexit /b 0\r\n",
             ps1_path.display()
         ),
     )
-    .expect("write fake codex harness");
-    path
 }
 
 /// The whole point of section D's production wiring: that `glasshouse launch
@@ -1862,9 +2010,7 @@ fn a_codex_session_started_from_the_shell_has_its_identifier_captured_on_exit() 
 /// underneath the same one because Glasshouse passes its environment down to
 /// the harness — exactly the trick the codex fixtures play with `CODEX_HOME`.
 #[cfg(unix)]
-fn install_antigravity_index_harness(bin_dir: &std::path::Path, id: &str) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-
+fn install_antigravity_index_harness(_bin_dir: &std::path::Path, id: &str) -> std::path::PathBuf {
     const PLACEHOLDER: &str = "__CONVERSATION_ID__";
     let template = r#"#!/bin/sh
 echo GLASSHOUSE-ANTIGRAVITY-RAN
@@ -1875,13 +2021,7 @@ printf '{"%s":"__CONVERSATION_ID__"}\n' "$CWD" > "$DIR/last_conversations.json"
 exit 0
 "#;
     let script = template.replace(PLACEHOLDER, id);
-
-    let path = bin_dir.join("agy");
-    std::fs::write(&path, script).expect("write fake antigravity harness");
-    let mut perms = std::fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).unwrap();
-    path
+    shared_fixture("agy", &script)
 }
 
 /// The Antigravity counterpart of
@@ -2258,27 +2398,20 @@ impl RuntimeFixture {
 /// echoes it back prefixed with `GOT:` -- used to prove that specific
 /// keystrokes reached a specific session.
 #[cfg(windows)]
-fn install_echo_harness(bin_dir: &std::path::Path, name: &str) -> std::path::PathBuf {
-    let path = bin_dir.join(format!("{name}.cmd"));
+fn install_echo_harness(_bin_dir: &std::path::Path, name: &str) -> std::path::PathBuf {
     // Plain sequential lines, not one line joined with `&`: cmd.exe parses
     // and executes each line of a script *file* in turn, so `%line%` on the
     // line after `set /p` already sees the value just read -- no delayed
     // expansion needed here, unlike `shell_command`'s single-line form.
-    std::fs::write(&path, "@echo off\r\nset /p line=\r\necho GOT:%line%\r\n")
-        .expect("write echo harness");
-    path
+    shared_fixture(
+        &format!("{name}.cmd"),
+        "@echo off\r\nset /p line=\r\necho GOT:%line%\r\n",
+    )
 }
 
 #[cfg(unix)]
-fn install_echo_harness(bin_dir: &std::path::Path, name: &str) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-
-    let path = bin_dir.join(name);
-    std::fs::write(&path, "#!/bin/sh\nread line\necho GOT:$line\n").expect("write echo harness");
-    let mut perms = std::fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).unwrap();
-    path
+fn install_echo_harness(_bin_dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    shared_fixture(name, "#!/bin/sh\nread line\necho GOT:$line\n")
 }
 
 /// Write a fake installed harness that prints nothing at all and exits with
@@ -2286,30 +2419,23 @@ fn install_echo_harness(bin_dir: &std::path::Path, name: &str) -> std::path::Pat
 /// itself, never on anything appearing in its output.
 #[cfg(windows)]
 fn install_silent_harness(
-    bin_dir: &std::path::Path,
+    _bin_dir: &std::path::Path,
     name: &str,
     exit_code: u8,
 ) -> std::path::PathBuf {
-    let path = bin_dir.join(format!("{name}.cmd"));
-    std::fs::write(&path, format!("@echo off\r\nexit /b {exit_code}\r\n"))
-        .expect("write silent harness");
-    path
+    shared_fixture(
+        &format!("{name}.cmd"),
+        &format!("@echo off\r\nexit /b {exit_code}\r\n"),
+    )
 }
 
 #[cfg(unix)]
 fn install_silent_harness(
-    bin_dir: &std::path::Path,
+    _bin_dir: &std::path::Path,
     name: &str,
     exit_code: u8,
 ) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-
-    let path = bin_dir.join(name);
-    std::fs::write(&path, format!("#!/bin/sh\nexit {exit_code}\n")).expect("write silent harness");
-    let mut perms = std::fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).unwrap();
-    path
+    shared_fixture(name, &format!("#!/bin/sh\nexit {exit_code}\n"))
 }
 
 /// Write a fake installed harness that stays alive doing nothing for roughly
@@ -2317,67 +2443,46 @@ fn install_silent_harness(
 /// running after acting on a different one.
 #[cfg(windows)]
 fn install_sleep_harness(
-    bin_dir: &std::path::Path,
+    _bin_dir: &std::path::Path,
     name: &str,
     seconds: u32,
 ) -> std::path::PathBuf {
-    let path = bin_dir.join(format!("{name}.cmd"));
-    std::fs::write(
-        &path,
-        format!("@echo off\r\nping -n {seconds} 127.0.0.1 > nul\r\n"),
+    shared_fixture(
+        &format!("{name}.cmd"),
+        &format!("@echo off\r\nping -n {seconds} 127.0.0.1 > nul\r\n"),
     )
-    .expect("write sleep harness");
-    path
 }
 
 #[cfg(unix)]
 fn install_sleep_harness(
-    bin_dir: &std::path::Path,
+    _bin_dir: &std::path::Path,
     name: &str,
     seconds: u32,
 ) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-
-    let path = bin_dir.join(name);
-    std::fs::write(&path, format!("#!/bin/sh\nsleep {seconds}\n")).expect("write sleep harness");
-    let mut perms = std::fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).unwrap();
-    path
+    shared_fixture(name, &format!("#!/bin/sh\nsleep {seconds}\n"))
 }
 
 /// Write a fake installed harness that prints `lines` short lines and exits
 /// -- enough output, at any reasonable `lines` count, to overflow a small
 /// scrollback bound many times over.
 #[cfg(windows)]
-fn install_flood_harness(bin_dir: &std::path::Path, name: &str, lines: u32) -> std::path::PathBuf {
-    let path = bin_dir.join(format!("{name}.cmd"));
-    std::fs::write(
-        &path,
-        format!(
+fn install_flood_harness(_bin_dir: &std::path::Path, name: &str, lines: u32) -> std::path::PathBuf {
+    shared_fixture(
+        &format!("{name}.cmd"),
+        &format!(
             "@echo off\r\nfor /L %%i in (1,1,{lines}) do echo flood-line-%%i-0123456789012345678901234567890123456789\r\n"
         ),
     )
-    .expect("write flood harness");
-    path
 }
 
 #[cfg(unix)]
-fn install_flood_harness(bin_dir: &std::path::Path, name: &str, lines: u32) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-
-    let path = bin_dir.join(name);
-    std::fs::write(
-        &path,
-        format!(
+fn install_flood_harness(_bin_dir: &std::path::Path, name: &str, lines: u32) -> std::path::PathBuf {
+    shared_fixture(
+        name,
+        &format!(
             "#!/bin/sh\ni=0\nwhile [ $i -lt {lines} ]; do\n  echo \"flood-line-$i-0123456789012345678901234567890123456789\"\n  i=$((i+1))\ndone\n"
         ),
     )
-    .expect("write flood harness");
-    let mut perms = std::fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).unwrap();
-    path
 }
 
 /// Two sessions started in one runtime run at the same time, each filling its
@@ -3082,10 +3187,8 @@ fn an_environment_override_reaches_a_real_child() {
 /// per line, so a test can search for exactly the pairs it cares about
 /// without having to name every variable in advance.
 #[cfg(windows)]
-fn install_env_dump_harness(bin_dir: &std::path::Path, name: &str) -> std::path::PathBuf {
-    let path = bin_dir.join(format!("{name}.cmd"));
-    std::fs::write(&path, "@echo off\r\nset\r\n").expect("write fake harness");
-    path
+fn install_env_dump_harness(_bin_dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    shared_fixture(&format!("{name}.cmd"), "@echo off\r\nset\r\n")
 }
 
 fn dumped_env_values<'a>(output: &'a str, key: &str) -> Vec<&'a str> {
@@ -3097,15 +3200,8 @@ fn dumped_env_values<'a>(output: &'a str, key: &str) -> Vec<&'a str> {
 }
 
 #[cfg(unix)]
-fn install_env_dump_harness(bin_dir: &std::path::Path, name: &str) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-
-    let path = bin_dir.join(name);
-    std::fs::write(&path, "#!/bin/sh\nenv\n").expect("write fake harness");
-    let mut perms = std::fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).unwrap();
-    path
+fn install_env_dump_harness(_bin_dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    shared_fixture(name, "#!/bin/sh\nenv\n")
 }
 
 /// An environment override applied through [`HarnessLaunch`] — the same seam
@@ -3561,15 +3657,8 @@ fn an_embedded_session_answers_the_cursor_position_query_itself() {
 /// A harness that reports the arguments it was given, so a test can read the
 /// command line Glasshouse actually built rather than the one it meant to.
 #[cfg(unix)]
-fn install_argv_harness(bin_dir: &std::path::Path, name: &str) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-
-    let path = bin_dir.join(name);
-    std::fs::write(&path, "#!/bin/sh\necho \"ARGV:$*\"\nexit 0\n").expect("write fake harness");
-    let mut perms = std::fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).unwrap();
-    path
+fn install_argv_harness(_bin_dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    shared_fixture(name, "#!/bin/sh\necho \"ARGV:$*\"\nexit 0\n")
 }
 
 /// Glasshouse assigns Claude Code its native session identifier, and records
@@ -3902,10 +3991,10 @@ const FIRST_MARKER: &str = "1111111111";
 const SECOND_MARKER: &str = "9999999999";
 
 #[cfg(unix)]
-fn install_argv_log_harness(bin_dir: &std::path::Path, name: &str) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-
-    let path = bin_dir.join(name);
+fn install_argv_log_harness(_bin_dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    // Already hoisted: the log path travels through `$ARGV_LOG`, set by the
+    // caller at spawn time, rather than baked into the script bytes -- so
+    // these bytes are fixed and shareable as written.
     let script = format!(
         "#!/bin/sh\n\
          echo \"$*\" >> \"$ARGV_LOG\"\n\
@@ -3915,11 +4004,7 @@ fn install_argv_log_harness(bin_dir: &std::path::Path, name: &str) -> std::path:
          esac\n\
          exit 0\n"
     );
-    std::fs::write(&path, script).expect("write fake harness");
-    let mut perms = std::fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).unwrap();
-    path
+    shared_fixture(name, &script)
 }
 
 /// Phase 11 line 688, through the shipped binary: `n` starts an embedded
@@ -4092,27 +4177,21 @@ fn a_session_started_from_the_shell_is_resumed_from_the_overview() {
 /// session's text ever different from the other's, wrong-session routing and
 /// right-session routing would print the same thing.
 #[cfg(windows)]
-fn install_tagged_echo_harness(bin_dir: &std::path::Path, name: &str) -> std::path::PathBuf {
-    let path = bin_dir.join(format!("{name}.cmd"));
-    std::fs::write(
-        &path,
+fn install_tagged_echo_harness(_bin_dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    shared_fixture(
+        &format!("{name}.cmd"),
         "@echo off\r\nsetlocal enabledelayedexpansion\r\n\
          :parse\r\nif \"%1\"==\"\" goto read\r\n\
          if \"%1\"==\"--session-id\" set ID=%2\r\n\
          shift\r\ngoto parse\r\n\
          :read\r\nset /p line=\r\necho GOT:%ID%:%line%\r\n",
     )
-    .expect("write tagged echo harness");
-    path
 }
 
 #[cfg(unix)]
-fn install_tagged_echo_harness(bin_dir: &std::path::Path, name: &str) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-
-    let path = bin_dir.join(name);
-    std::fs::write(
-        &path,
+fn install_tagged_echo_harness(_bin_dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    shared_fixture(
+        name,
         "#!/bin/sh\n\
          id=\"\"\n\
          while [ $# -gt 0 ]; do\n\
@@ -4122,11 +4201,6 @@ fn install_tagged_echo_harness(bin_dir: &std::path::Path, name: &str) -> std::pa
          read line\n\
          echo \"GOT:$id:$line\"\n",
     )
-    .expect("write tagged echo harness");
-    let mut perms = std::fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).unwrap();
-    path
 }
 
 /// Phase 11 line 687, through the shipped binary: `Enter` from inside the
@@ -4272,11 +4346,9 @@ fn enter_from_the_overview_focuses_the_cursors_session_not_the_presented_one() {
 /// rollout file; omitting it on Windows is what broke Phase 8 line 2 in CI.
 #[cfg(unix)]
 fn install_codex_rollout_and_argv_harness(
-    bin_dir: &std::path::Path,
+    _bin_dir: &std::path::Path,
     id: &str,
 ) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-
     const PLACEHOLDER: &str = "__ROLLOUT_ID__";
     let template = r#"#!/bin/sh
 echo "ARGV:$*"
@@ -4288,13 +4360,7 @@ printf '{"type":"session_meta","payload":{"id":"__ROLLOUT_ID__","cwd":"%s","time
 exit 0
 "#;
     let script = template.replace(PLACEHOLDER, id);
-
-    let path = bin_dir.join("codex");
-    std::fs::write(&path, script).expect("write fake codex harness");
-    let mut perms = std::fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).unwrap();
-    path
+    shared_fixture("codex", &script)
 }
 
 /// Windows counterpart of the function above, following
@@ -4304,7 +4370,7 @@ exit 0
 /// batch has no sane UTC-instant-formatting primitive of its own.
 #[cfg(windows)]
 fn install_codex_rollout_and_argv_harness(
-    bin_dir: &std::path::Path,
+    _bin_dir: &std::path::Path,
     id: &str,
 ) -> std::path::PathBuf {
     const PLACEHOLDER: &str = "__ROLLOUT_ID__";
@@ -4316,19 +4382,15 @@ $json = '{"type":"session_meta","payload":{"id":"__ROLLOUT_ID__","cwd":"' + $cwd
 Set-Content -Path (Join-Path $dir 'rollout-test-__ROLLOUT_ID__.jsonl') -Value $json
 "#;
     let ps1 = ps1_template.replace(PLACEHOLDER, id);
-    let ps1_path = bin_dir.join("codex-rollout-argv.ps1");
-    std::fs::write(&ps1_path, ps1).expect("write fake codex rollout script");
+    let ps1_path = shared_fixture("codex-rollout-argv.ps1", &ps1);
 
-    let path = bin_dir.join("codex.cmd");
-    std::fs::write(
-        &path,
-        format!(
+    shared_fixture(
+        "codex.cmd",
+        &format!(
             "@echo off\r\necho ARGV:%*\r\npowershell -NoProfile -ExecutionPolicy Bypass -File \"{}\"\r\nexit /b 0\r\n",
             ps1_path.display()
         ),
     )
-    .expect("write fake codex harness");
-    path
 }
 
 /// The Codex counterpart of
@@ -4619,11 +4681,9 @@ fn resuming_a_session_with_no_conversation_is_refused() {
 /// that already carries one.
 #[cfg(unix)]
 fn install_antigravity_index_and_argv_harness(
-    bin_dir: &std::path::Path,
+    _bin_dir: &std::path::Path,
     id: &str,
 ) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-
     const PLACEHOLDER: &str = "__CONVERSATION_ID__";
     let template = r#"#!/bin/sh
 echo "ARGV:$*"
@@ -4634,13 +4694,7 @@ printf '{"%s":"__CONVERSATION_ID__"}\n' "$CWD" > "$DIR/last_conversations.json"
 exit 0
 "#;
     let script = template.replace(PLACEHOLDER, id);
-
-    let path = bin_dir.join("agy");
-    std::fs::write(&path, script).expect("write fake antigravity harness");
-    let mut perms = std::fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).unwrap();
-    path
+    shared_fixture("agy", &script)
 }
 
 /// The Antigravity counterpart of
@@ -4896,16 +4950,8 @@ fn resuming_an_antigravity_session_with_no_recorded_conversation_is_refused() {
 /// A harness that stays alive long enough to be observed, and reports the
 /// arguments it was given.
 #[cfg(unix)]
-fn install_lingering_harness(bin_dir: &std::path::Path, name: &str) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-
-    let path = bin_dir.join(name);
-    std::fs::write(&path, "#!/bin/sh\necho \"ARGV:$*\"\nsleep 20\nexit 0\n")
-        .expect("write fake harness");
-    let mut perms = std::fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).unwrap();
-    path
+fn install_lingering_harness(_bin_dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    shared_fixture(name, "#!/bin/sh\necho \"ARGV:$*\"\nsleep 20\nexit 0\n")
 }
 
 /// The hooks Glasshouse installs move a live session's state.
@@ -5379,19 +5425,11 @@ fn every_startup_question_a_harness_asks_is_answered() {
 /// bare carriage return. That difference is already recorded on
 /// `a_keystroke_typed_into_the_shell_reaches_a_real_harness_and_comes_back`.
 #[cfg(unix)]
-fn install_looping_echo_harness(bin_dir: &std::path::Path, name: &str) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-
-    let path = bin_dir.join(name);
-    std::fs::write(
-        &path,
+fn install_looping_echo_harness(_bin_dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    shared_fixture(
+        name,
         "#!/bin/sh\nwhile IFS= read -r line; do echo \"GOT:$line\"; done\n",
     )
-    .expect("write looping echo harness");
-    let mut perms = std::fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).unwrap();
-    path
 }
 
 /// A fake installed harness that prints `marker` and then stays alive for
@@ -5399,39 +5437,28 @@ fn install_looping_echo_harness(bin_dir: &std::path::Path, name: &str) -> std::p
 /// still running.
 #[cfg(windows)]
 fn install_marker_then_sleep_harness(
-    bin_dir: &std::path::Path,
+    _bin_dir: &std::path::Path,
     name: &str,
     marker: &str,
     seconds: u32,
 ) -> std::path::PathBuf {
-    let path = bin_dir.join(format!("{name}.cmd"));
-    std::fs::write(
-        &path,
-        format!("@echo off\r\necho {marker}\r\nping -n {seconds} 127.0.0.1 > nul\r\n"),
+    shared_fixture(
+        &format!("{name}.cmd"),
+        &format!("@echo off\r\necho {marker}\r\nping -n {seconds} 127.0.0.1 > nul\r\n"),
     )
-    .expect("write marker-then-sleep harness");
-    path
 }
 
 #[cfg(unix)]
 fn install_marker_then_sleep_harness(
-    bin_dir: &std::path::Path,
+    _bin_dir: &std::path::Path,
     name: &str,
     marker: &str,
     seconds: u32,
 ) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-
-    let path = bin_dir.join(name);
-    std::fs::write(
-        &path,
-        format!("#!/bin/sh\necho {marker}\nsleep {seconds}\n"),
+    shared_fixture(
+        name,
+        &format!("#!/bin/sh\necho {marker}\nsleep {seconds}\n"),
     )
-    .expect("write marker-then-sleep harness");
-    let mut perms = std::fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).unwrap();
-    path
 }
 
 /// A fake installed harness that catches an interrupt, says so, and **keeps
@@ -5449,32 +5476,26 @@ fn install_marker_then_sleep_harness(
 /// terminal", and a test that cannot fail on a real regression is worse than
 /// no test.
 #[cfg(unix)]
-fn install_interrupt_trap_harness(bin_dir: &std::path::Path, name: &str) -> std::path::PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-
-    let path = bin_dir.join(name);
-    std::fs::write(
-        &path,
-        // The ready file is how a caller with several of these running can
-        // tell they have *all* installed their traps. An interrupt arriving
-        // in the window between the process starting and `trap` executing
-        // takes the default action and kills the shell, which would make this
-        // harness prove the opposite of what it is for — and that window is
-        // wide enough to lose to, as one run of
-        // `an_interrupt_sent_from_the_overview_reaches_a_real_child` did
-        // before this existed. Named after the script and the pid, so
-        // sessions cannot overwrite each other's.
-        //
-        // Deliberately no `exit` in the trap: the session must still be
-        // running afterwards, so the loop continues.
+fn install_interrupt_trap_harness(_bin_dir: &std::path::Path, name: &str) -> std::path::PathBuf {
+    // The ready file is how a caller with several of these running can tell
+    // they have *all* installed their traps. An interrupt arriving in the
+    // window between the process starting and `trap` executing takes the
+    // default action and kills the shell, which would make this harness
+    // prove the opposite of what it is for — and that window is wide enough
+    // to lose to, as one run of
+    // `an_interrupt_sent_from_the_overview_reaches_a_real_child` did before
+    // this existed. Named after the script's own path and the pid, so
+    // concurrently running sessions of this fixture — including two tests
+    // sharing the one file `shared_fixture` installs — cannot overwrite each
+    // other's ready file: `$$` is the process id, never the shared write.
+    //
+    // Deliberately no `exit` in the trap: the session must still be running
+    // afterwards, so the loop continues.
+    shared_fixture(
+        name,
         "#!/bin/sh\ntrap 'echo CAUGHT-INTERRUPT' INT\necho TRAP-READY\n\
          : > \"$0.ready.$$\"\nwhile true; do sleep 0.1; done\n",
     )
-    .expect("write interrupt trap harness");
-    let mut perms = std::fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).unwrap();
-    path
 }
 
 /// Wait until `count` sessions of the trap harness at `harness` have written

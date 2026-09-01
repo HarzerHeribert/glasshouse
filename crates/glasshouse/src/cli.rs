@@ -824,6 +824,65 @@ pub enum Command {
         #[arg(long, value_name = "N", default_value_t = 24)]
         hours: u32,
     },
+    /// The context firewall — Phase 57's tool-output compaction between
+    /// harness and model, map lines 1980-1990.
+    ContextFirewall {
+        #[command(subcommand)]
+        command: ContextFirewallCommand,
+    },
+}
+
+/// `glasshouse context-firewall` subcommands.
+#[derive(Debug, Subcommand)]
+pub enum ContextFirewallCommand {
+    /// Read one `PostToolUse` hook event on stdin, write the hook response
+    /// on stdout. This is the exact command a Claude Code bridge (map line
+    /// 1994, gated separately) will register per session; run by hand or by
+    /// a test today, it is already the production caller these box lines
+    /// need.
+    ///
+    /// The full pipeline — deterministic reduction, raw preservation,
+    /// provenance, telemetry — runs on every eligible result regardless of
+    /// this flag. What `--emit-updated-output` gates is only whether the
+    /// response actually asks the harness to substitute the reduced text:
+    /// until the replacement premise is verified for the session in hand,
+    /// the default response is a no-op so these boxes close honestly ahead
+    /// of that verification.
+    Hook {
+        /// Below this many estimated tokens, a result passes through
+        /// untouched. Units match this build's own chars/4 estimator.
+        #[arg(long, value_name = "TOKENS", default_value_t = 4000)]
+        passthrough_tokens: u64,
+
+        /// Reserved for the semantic-reduction package (map lines
+        /// 1997-2003); deterministic reduction here does not read it.
+        /// Accepted now so the 57A bridge's registered command line does
+        /// not have to change shape when that package lands.
+        #[arg(long, value_name = "TOKENS")]
+        target_tokens: Option<u64>,
+
+        /// A tool eligible for reduction. Repeatable. Unset, this resolves
+        /// to Grep, Glob, Read, and Bash's stdout; Edit, Write, and any
+        /// permission- or security-shaped tool are never eligible, named
+        /// here or not.
+        #[arg(long = "tool", value_name = "TOOL")]
+        tools: Vec<String>,
+
+        /// Ask the harness to substitute the reduced text. Defaults off:
+        /// map line 1994's session-start verification is what the 57A
+        /// bridge uses to decide when this is safe to set.
+        #[arg(long)]
+        emit_updated_output: bool,
+    },
+    /// Print a previously stored raw tool result, byte-identically.
+    ///
+    /// Whole-result expansion only — a later package covers range and
+    /// candidate-scoped expansion (map line 1984's remaining shape).
+    Show {
+        /// The `gh-tool://` reference `context-firewall hook` recorded in a
+        /// provenance header (the bare id after `gh-tool://` also works).
+        id: String,
+    },
 }
 
 /// `glasshouse mcp` subcommands.

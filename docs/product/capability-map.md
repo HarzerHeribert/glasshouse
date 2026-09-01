@@ -1977,17 +1977,17 @@ Phase 57 — Context firewall: tool-output compaction between harness and model
 
 Recorded 2026-09-01 from the user's instruction of record: a coding model should not automatically receive tens of thousands of tokens of grep hits, logs, test output, and generated files when a fraction is relevant — but a false negative costs a wrong engineering decision while a false positive only costs tokens, so the firewall optimizes hard against false negatives, preserves every original byte for recovery, and makes no substantive coding decision. It reduces and ranks; it never generates. Reduction runs a ladder — passthrough, deterministic compaction, then optional semantic reduction through the existing disposable-job and provider machinery — and the whole subsystem is off by default, provider-agnostic, harness-abstracted, fail-open, and measured from day one. The semantic reducer is a disposable support job: Phase 39's job-kind roster, Phase 9I's free-pool routing, and Phase 56A's per-entitlement job-kind rules apply to it unchanged, and `disposable_interface.rs`'s variant-roster tripwire firing on the new job kind is that design working, not a regression.
 
-☐ Normalize harness tool results into a harness-agnostic form before any reduction, so the firewall core never depends on one harness's JSON shapes.
-☐ Pass small tool results through untouched below a configurable raw-passthrough threshold.
-☐ Reduce oversized tool output deterministically before any model is asked — duplicate hits, repeated log, stack, and progress lines, blank-line runs, and safely identifiable generated noise.
-☐ Never let deterministic reduction drop content it cannot positively classify as redundant; uncertain material always survives.
-☐ Preserve every reduced result's original bytes locally, addressable by a stable per-session reference the session can later expand.
-☐ Reconstruct every forwarded result verbatim from original bytes — reduction selects, ranks, and annotates candidates; it never generates replacement evidence text.
-☐ Annotate each reduced result with one compact provenance header stating original and forwarded sizes, retained-candidate counts, and the raw-result reference.
-☐ Record per-reduction telemetry — raw, deterministic, and forwarded token counts, mode, tool, and any bypass reason — through the existing routing-evidence ledger rather than a parallel metrics store.
-☐ Track raw-expansion requests as the primary recall signal, so a recall regression is measurable before any savings claim is believed.
-☐ Restrict reduction to an explicitly configurable tool-eligibility list, defaulting to search, read, and log-shaped outputs and never to edits, writes, permission or security results, small outputs, error details, or unknown shapes.
-☐ Preserve exit status, stderr, interruption, and failure semantics when reducing command output, and pass through unchanged whenever an adapter cannot guarantee a tool's semantics.
+☑ Normalize harness tool results into a harness-agnostic form before any reduction, so the firewall core never depends on one harness's JSON shapes.
+☑ Pass small tool results through untouched below a configurable raw-passthrough threshold.
+☑ Reduce oversized tool output deterministically before any model is asked — duplicate hits, repeated log, stack, and progress lines, blank-line runs, and safely identifiable generated noise.
+☑ Never let deterministic reduction drop content it cannot positively classify as redundant; uncertain material always survives.
+☑ Preserve every reduced result's original bytes locally, addressable by a stable per-session reference the session can later expand.
+☑ Reconstruct every forwarded result verbatim from original bytes — reduction selects, ranks, and annotates candidates; it never generates replacement evidence text.
+☑ Annotate each reduced result with one compact provenance header stating original and forwarded sizes, retained-candidate counts, and the raw-result reference.
+☑ Record per-reduction telemetry — raw, deterministic, and forwarded token counts, mode, tool, and any bypass reason — through the existing routing-evidence ledger rather than a parallel metrics store.
+☑ Track raw-expansion requests as the primary recall signal, so a recall regression is measurable before any savings claim is believed.
+☑ Restrict reduction to an explicitly configurable tool-eligibility list, defaulting to search, read, and log-shaped outputs and never to edits, writes, permission or security results, small outputs, error details, or unknown shapes.
+☑ Preserve exit status, stderr, interruption, and failure semantics when reducing command output, and pass through unchanged whenever an adapter cannot guarantee a tool's semantics.
 ☐ Support four firewall modes — off, shadow, safe, aggressive — where off is byte-identical to no firewall and shadow runs the full pipeline while always forwarding the original.
 ☐ Keep semantic reduction disabled unless the user's configuration explicitly names a reducer, in every mode.
 ☐ Bridge Claude Code through its native post-tool hook with per-session registration that never edits the user's own settings files and never disturbs unrelated hooks.

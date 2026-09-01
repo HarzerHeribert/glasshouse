@@ -10,7 +10,7 @@ use glasshouse::checkpoint::{
     Checkpoint, CheckpointReason, CheckpointStore, Handoff, ProjectCheckpoints, Stored,
     WorkingTreeStatus,
 };
-use glasshouse::cli::{ApiCommand, CheckpointCommand, McpCommand};
+use glasshouse::cli::{ApiCommand, CheckpointCommand, ContextFirewallCommand, McpCommand};
 use glasshouse::config::response::{ResponseProfileEntry, ResponseRequest};
 use glasshouse::config::{self, EffectiveConfig, ProjectConfig, UserConfig};
 use glasshouse::events::{
@@ -197,6 +197,23 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
                 eprintln!("glasshouse: {err:#}");
                 return Ok(ExitCode::FAILURE);
             }
+        },
+        Some(Command::ContextFirewall { command }) => match command {
+            ContextFirewallCommand::Hook {
+                passthrough_tokens,
+                target_tokens: _,
+                tools,
+                emit_updated_output,
+            } => {
+                context_firewall_hook(&runtime, *passthrough_tokens, tools, *emit_updated_output)?;
+            }
+            ContextFirewallCommand::Show { id } => match context_firewall_show(&runtime, id)? {
+                Some(content) => print!("{content}"),
+                None => {
+                    eprintln!("glasshouse: no context-firewall raw result stored under `{id}`");
+                    return Ok(ExitCode::FAILURE);
+                }
+            },
         },
         Some(Command::Sessions { command }) => match command {
             // The bare command still lists, which is what every existing
@@ -1674,6 +1691,180 @@ fn record_entitlement_fallback(
     .with_timing(Some(now_unix), Some(now_unix));
     if let Err(err) = ledger.record(observation, now_unix) {
         tracing::warn!(error = %err, "could not record the entitlement fallback");
+    }
+}
+
+/// Handle `context-firewall hook` — the production caller map lines
+/// 1980-1990 need. Reads one `PostToolUse` event on stdin, runs it through
+/// [`glasshouse::firewall::process`], records telemetry, and writes the
+/// hook response on stdout.
+///
+/// Fails open at every internal step: a stdin document this build cannot
+/// parse, a raw-store write that fails, or a ledger that cannot be opened
+/// all end in the same no-op response a passthrough result gets, never a
+/// nonzero exit — `docs/product/evidence/phase-57.md`'s "fail open, never
+/// empty" applies to the hook process itself, not only to the reduction.
+fn context_firewall_hook(
+    runtime: &Runtime,
+    passthrough_tokens: u64,
+    tools: &[String],
+    emit_updated_output: bool,
+) -> anyhow::Result<()> {
+    use anyhow::Context as _;
+    use std::io::Read;
+
+    let mut input = Vec::new();
+    std::io::stdin()
+        .read_to_end(&mut input)
+        .context("could not read the PostToolUse event from stdin")?;
+
+    let event = match glasshouse::firewall::adapter::parse_event(&input) {
+        Ok(event) => event,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "context firewall: could not parse the PostToolUse event; answering with a \
+                 no-op response"
+            );
+            return print_context_firewall_response(None);
+        }
+    };
+
+    let normalized = glasshouse::firewall::adapter::normalize(&event);
+    let config = glasshouse::firewall::FirewallConfig::new(passthrough_tokens, tools.to_vec());
+    let store = glasshouse::firewall::RawStore::open(runtime.state_dir().join("context-firewall"));
+    let now_unix = glasshouse::provider::cache::now_unix_seconds();
+
+    let outcome = glasshouse::firewall::process(
+        &store,
+        &config,
+        &event.session_id,
+        &event.tool_use_id,
+        now_unix,
+        &event.tool_name,
+        normalized,
+    );
+
+    record_context_firewall_telemetry(runtime, &outcome, now_unix);
+
+    let updated_output = match &outcome {
+        glasshouse::firewall::Outcome::Reduced { forwarded_text, .. } if emit_updated_output => {
+            Some(forwarded_text.as_str())
+        }
+        _ => None,
+    };
+    print_context_firewall_response(updated_output)
+}
+
+/// Write the `PostToolUse` hook response JSON to stdout — the protocol
+/// channel here exactly as it is for `glasshouse mcp serve`.
+fn print_context_firewall_response(updated_output: Option<&str>) -> anyhow::Result<()> {
+    let response = glasshouse::firewall::adapter::hook_response(updated_output);
+    println!("{}", serde_json::to_string(&response)?);
+    Ok(())
+}
+
+/// Map line 1987: one telemetry row per reduced result and one per bypass —
+/// never for a passthrough result, which line 1981 already defines as
+/// carrying nothing beyond the harness's own original output.
+fn record_context_firewall_telemetry(
+    runtime: &Runtime,
+    outcome: &glasshouse::firewall::Outcome,
+    now_unix: i64,
+) {
+    use glasshouse::routing::evidence::{
+        CONTEXT_FIREWALL_BYPASS_PURPOSE, CONTEXT_FIREWALL_REDUCTION_PURPOSE, EvidenceLedger,
+        NewObservation,
+    };
+
+    let (purpose, route) = match outcome {
+        glasshouse::firewall::Outcome::Passthrough { .. } => return,
+        glasshouse::firewall::Outcome::Reduced { .. } => (CONTEXT_FIREWALL_REDUCTION_PURPOSE, None),
+        glasshouse::firewall::Outcome::Bypass { reason, .. } => {
+            (CONTEXT_FIREWALL_BYPASS_PURPOSE, Some(reason.as_str()))
+        }
+    };
+
+    let ledger = match EvidenceLedger::open(runtime) {
+        Ok(ledger) => ledger,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "routing evidence ledger unavailable; a context-firewall event is not recorded"
+            );
+            return;
+        }
+    };
+    // `provider`/`model` have no real backend here — this is not a model
+    // call — so a fixed, self-describing placeholder stands in, exactly as
+    // `CORRELATION_PURPOSE`'s rows use the displaced route's identity for a
+    // row that is "about" something rather than an exchange. No reader
+    // filters on this pair, so it cannot be mistaken for real spend; the
+    // `purpose` column is what keeps it out of every such reader, per its
+    // own doc comment.
+    let observation = NewObservation::new("glasshouse", "context-firewall")
+        .with_harness(Some(
+            glasshouse::integrations::IntegrationId::ClaudeCode.slug(),
+        ))
+        .with_purpose(Some(purpose))
+        .with_route(route)
+        .with_quota_context(Some(outcome.tool_name().to_owned()))
+        .with_timing(Some(now_unix), Some(now_unix));
+    if let Err(err) = ledger.record(observation, now_unix) {
+        tracing::warn!(error = %err, "could not record a context-firewall event");
+    }
+}
+
+/// `context-firewall show <id>`: print the raw stored result
+/// byte-identically (map line 1985's round-trip), and record the map line
+/// 1988 expansion-request telemetry either way — a miss is still a
+/// request, and still part of the recall signal.
+fn context_firewall_show(runtime: &Runtime, id: &str) -> anyhow::Result<Option<String>> {
+    use anyhow::Context as _;
+
+    let store = glasshouse::firewall::RawStore::open(runtime.state_dir().join("context-firewall"));
+    let entry = store
+        .read(id)
+        .with_context(|| format!("could not read the context-firewall raw store for `{id}`"))?;
+    record_context_firewall_expansion(runtime, entry.as_ref().map(|entry| entry.tool.as_str()));
+    Ok(entry.map(|entry| entry.content))
+}
+
+/// Map line 1988: track raw-expansion requests as their own telemetry
+/// rows, independent of map line 1987's reduction/bypass rows — a recall
+/// regression must be measurable before any savings claim from those rows
+/// is believed.
+fn record_context_firewall_expansion(runtime: &Runtime, found_tool: Option<&str>) {
+    use glasshouse::routing::evidence::{
+        CONTEXT_FIREWALL_EXPANSION_PURPOSE, EvidenceLedger, NewObservation,
+    };
+
+    let ledger = match EvidenceLedger::open(runtime) {
+        Ok(ledger) => ledger,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "routing evidence ledger unavailable; a context-firewall expansion request is \
+                 not recorded"
+            );
+            return;
+        }
+    };
+    let now_unix = glasshouse::provider::cache::now_unix_seconds();
+    let observation = NewObservation::new("glasshouse", "context-firewall")
+        .with_purpose(Some(CONTEXT_FIREWALL_EXPANSION_PURPOSE))
+        .with_route(Some(if found_tool.is_some() {
+            "found"
+        } else {
+            "not-found"
+        }))
+        .with_quota_context(found_tool)
+        .with_timing(Some(now_unix), Some(now_unix));
+    if let Err(err) = ledger.record(observation, now_unix) {
+        tracing::warn!(
+            error = %err,
+            "could not record a context-firewall expansion request"
+        );
     }
 }
 

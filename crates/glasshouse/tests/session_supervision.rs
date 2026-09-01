@@ -37,6 +37,7 @@ struct Fixture {
     _tmp: tempfile::TempDir,
     base: PathBuf,
     root: PathBuf,
+    harness: PathBuf,
 }
 
 impl Fixture {
@@ -67,7 +68,18 @@ impl Fixture {
             _tmp: tmp,
             base,
             root,
+            harness,
         }
+    }
+
+    /// The installed harness's real path. Several tests below resolve this
+    /// executable directly (bypassing `glasshouse launch`'s own resolution)
+    /// to build a `HarnessLaunch` by hand — they must ask for the path
+    /// `install_fake_harness` actually returned rather than reconstructing
+    /// `bin_dir.join("fake-claude")`, because a shared fixture no longer
+    /// lives there.
+    fn harness_path(&self) -> &Path {
+        &self.harness
     }
 
     fn command(&self, args: &[&str]) -> Command {
@@ -314,24 +326,176 @@ impl Row {
     }
 }
 
+/// Write each distinct fixture executable once per test binary instead of
+/// once per test, so macOS Gatekeeper (`syspolicyd`/XProtect) validates it
+/// once per `session_supervision` run instead of once per test — see the
+/// project memory `gatekeeper-scans-make-pty-fixtures-flaky` and
+/// GH-FIXTURE-REUSE. Most of this file's `A_HARNESS_THAT_*` bodies are fixed
+/// strings reused across several tests, so most calls collapse onto a
+/// handful of files.
+///
+/// Race-free the way `provider/cache.rs::write_json_atomically` is: one
+/// process-wide mutex serialises the check-and-write, and the write itself
+/// lands in a same-directory temporary name before an atomic rename.
+fn shared_fixture(unique_name: &str, contents: &str) -> PathBuf {
+    use std::collections::HashMap;
+    use std::hash::{Hash, Hasher};
+    use std::sync::{Mutex, OnceLock};
+
+    static DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
+    static CACHE: OnceLock<Mutex<HashMap<String, PathBuf>>> = OnceLock::new();
+
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = cache.lock().expect("shared fixture cache poisoned");
+    if let Some(path) = guard.get(contents) {
+        return path.clone();
+    }
+
+    let dir = DIR.get_or_init(|| tempfile::tempdir().expect("shared fixture dir"));
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    contents.hash(&mut hasher);
+    let digest = format!("{:016x}", hasher.finish());
+    let named = Path::new(unique_name);
+    let stem = named
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(unique_name);
+    let filename = match named.extension().and_then(|e| e.to_str()) {
+        Some(ext) => format!("{stem}-{digest}.{ext}"),
+        None => format!("{stem}-{digest}"),
+    };
+    let path = dir.path().join(&filename);
+    let temporary = dir.path().join(format!("{filename}.writing"));
+    std::fs::write(&temporary, contents).expect("write shared fixture");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&temporary).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&temporary, perms).unwrap();
+    }
+    std::fs::rename(&temporary, &path).expect("rename shared fixture into place");
+    guard.insert(contents.to_string(), path.clone());
+    path
+}
+
 /// A fake installed harness whose body the test chooses.
+///
+/// A body that names its own script's directory (`dirname "$0"` on Unix,
+/// `%~dp0` on Windows) — `A_HARNESS_THAT_WORKS_ONCE_THEN_CRASH_LOOPS` and
+/// `A_HARNESS_THAT_FINISHES_THEN_STAYS_UP` — keeps a companion marker file
+/// beside itself to tell a session's first launch from its later ones apart.
+/// Sharing that script across tests would carry the first test's marker into
+/// every later test that asks for the same body, silently starting them
+/// already in the "already ran once" state. Those two bodies keep writing a
+/// private copy into this test's own `bin_dir`, exactly as before; every
+/// other body — which carries no state beside itself — is shared.
 #[cfg(unix)]
 fn install_fake_harness(bin_dir: &Path, body: &str) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
 
-    let path = bin_dir.join("fake-claude");
-    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).expect("write fake harness");
-    let mut perms = std::fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).unwrap();
-    path
+    let script = format!("#!/bin/sh\n{body}\n");
+    if body.contains("dirname \"$0\"") {
+        let path = bin_dir.join("fake-claude");
+        std::fs::write(&path, script).expect("write fake harness");
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).unwrap();
+        return path;
+    }
+    shared_fixture("fake-claude", &script)
 }
 
 #[cfg(windows)]
 fn install_fake_harness(bin_dir: &Path, body: &str) -> PathBuf {
-    let path = bin_dir.join("fake-claude.cmd");
-    std::fs::write(&path, format!("@echo off\r\n{body}\r\n")).expect("write fake harness");
-    path
+    let script = format!("@echo off\r\n{body}\r\n");
+    if body.contains("%~dp0") {
+        let path = bin_dir.join("fake-claude.cmd");
+        std::fs::write(&path, script).expect("write fake harness");
+        return path;
+    }
+    shared_fixture("fake-claude.cmd", &script)
+}
+
+#[cfg(test)]
+mod shared_fixture_proof {
+    use super::install_fake_harness;
+
+    /// **The once-per-binary proof, through the real caller.** Two
+    /// independent per-test tempdirs asking for the same stateless body —
+    /// the ordinary shape most of this file's tests are in — collapse to one
+    /// file rather than each writing its own.
+    #[cfg(unix)]
+    #[test]
+    fn two_tempdirs_requesting_the_same_stateless_body_get_one_shared_file() {
+        let tmp_a = tempfile::tempdir().expect("tempdir a");
+        let tmp_b = tempfile::tempdir().expect("tempdir b");
+        let a = install_fake_harness(tmp_a.path(), "exit 0");
+        let meta_before = std::fs::metadata(&a).expect("fixture exists after first install");
+
+        let b = install_fake_harness(tmp_b.path(), "exit 0");
+        assert_eq!(
+            a, b,
+            "two different tempdirs requesting the same body must share one file"
+        );
+        assert!(
+            !a.starts_with(tmp_a.path()) && !a.starts_with(tmp_b.path()),
+            "the shared file must live in the per-binary fixture dir, not either \
+             test's own tempdir: {a:?}"
+        );
+
+        let meta_after = std::fs::metadata(&b).expect("fixture exists after second install");
+        assert_eq!(
+            meta_before.modified().unwrap(),
+            meta_after.modified().unwrap(),
+            "a second install of the same body must not rewrite the file"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(
+                meta_before.ino(),
+                meta_after.ino(),
+                "a second install of the same body must return the same inode, \
+                 not a second copy"
+            );
+        }
+    }
+
+    /// **Bytes unchanged.** The shared fixture is byte-for-byte the same
+    /// script every per-test write used to produce.
+    #[cfg(unix)]
+    #[test]
+    fn the_shared_fixture_has_the_original_unshared_bytes() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = install_fake_harness(tmp.path(), "exit 0");
+        let content = std::fs::read_to_string(&path).expect("read shared fixture");
+        assert_eq!(
+            content, "#!/bin/sh\nexit 0\n",
+            "the shared fixture's bytes must match the original per-test literal exactly"
+        );
+    }
+
+    /// **The excluded case stays private.** A body that carries a
+    /// `dirname "$0"` companion marker must still get its own file in the
+    /// caller's own `bin_dir` — never the shared per-binary directory —
+    /// exactly as before this conversion, so two tests using that body never
+    /// see each other's marker state.
+    #[cfg(unix)]
+    #[test]
+    fn a_self_referential_body_is_never_shared() {
+        let tmp_a = tempfile::tempdir().expect("tempdir a");
+        let tmp_b = tempfile::tempdir().expect("tempdir b");
+        let body = "marker=\"$(dirname \"$0\")/restart-marker\"\nexit 0";
+        let a = install_fake_harness(tmp_a.path(), body);
+        let b = install_fake_harness(tmp_b.path(), body);
+        assert_ne!(
+            a, b,
+            "a self-referential body must get its own file per test, never a shared one"
+        );
+        assert!(a.starts_with(tmp_a.path()));
+        assert!(b.starts_with(tmp_b.path()));
+    }
 }
 
 /// A harness that stays up, so the session it belongs to is really running
@@ -639,9 +803,8 @@ fn a_runtime_refuses_to_start_a_second_session_under_one_identifier() {
 
     let fixture = Fixture::new(A_HARNESS_THAT_STAYS_UP);
     let runtime = fixture.runtime();
-    let executable =
-        glasshouse::platform::exec::resolve_explicit(&fixture.base.join("bin").join("fake-claude"))
-            .expect("the fake harness resolves");
+    let executable = glasshouse::platform::exec::resolve_explicit(fixture.harness_path())
+        .expect("the fake harness resolves");
     let launch = HarnessLaunch::new(executable, runtime.project());
 
     let mut live = SessionRuntime::new();
@@ -788,9 +951,8 @@ fn one_session(
     use glasshouse::launch::HarnessLaunch;
     use glasshouse::session::{SessionPresentation, SessionRuntime};
 
-    let executable =
-        glasshouse::platform::exec::resolve_explicit(&fixture.base.join("bin").join("fake-claude"))
-            .expect("the fake harness resolves");
+    let executable = glasshouse::platform::exec::resolve_explicit(fixture.harness_path())
+        .expect("the fake harness resolves");
     let launch = HarnessLaunch::new(executable, runtime.project());
     let mut live = SessionRuntime::new();
     let id = SessionId::new("aaaaaaaabbbbbbbbccccccccdddddddd");
@@ -1376,8 +1538,7 @@ fn no_two_inputs_are_ever_delivered_to_one_session_at_once() {
     let fixture = Fixture::new(A_HARNESS_THAT_READS_WHAT_IT_IS_SENT);
     let runtime = fixture.runtime();
 
-    let bin_dir = fixture.base.join("bin");
-    let executable = glasshouse::platform::exec::resolve_explicit(&bin_dir.join("fake-claude"))
+    let executable = glasshouse::platform::exec::resolve_explicit(fixture.harness_path())
         .expect("the fake harness resolves");
     let launch = HarnessLaunch::new(executable, runtime.project());
 

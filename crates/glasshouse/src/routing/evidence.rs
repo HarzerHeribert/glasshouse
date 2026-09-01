@@ -251,6 +251,40 @@ pub const ENTITLEMENT_FALLBACK_EXHAUSTED_PURPOSE: &str = "entitlement-fallback-e
 /// [`ENTITLEMENT_FALLBACK_EXHAUSTED_PURPOSE`]'s other trigger.
 pub const ENTITLEMENT_FALLBACK_THROTTLED_PURPOSE: &str = "entitlement-fallback-throttled";
 
+/// Capability map line 1987: one row per tool result the context firewall
+/// deterministically reduced — mirroring
+/// [`ENTITLEMENT_FALLBACK_EXHAUSTED_PURPOSE`]'s own shape, this purpose or
+/// [`CONTEXT_FIREWALL_BYPASS_PURPOSE`] beside it. `quota_context` carries
+/// the tool name (`crate::firewall`'s own categorical label, the same role
+/// [`ENTITLEMENT_FALLBACK_EXHAUSTED_PURPOSE`]'s doc comment gives the
+/// account it records), and `harness` carries the adapter's own harness
+/// slug — today always `claude-code`, since [`crate::firewall::adapter`] is
+/// that harness's own. **This purpose's rows never set
+/// `input_tokens`/`output_tokens`**: those columns are documented as a
+/// provider's own reported count ([`NewObservation::with_tokens`]), and
+/// this build's raw/forwarded figures are `chars/4` estimates, never a
+/// provider's word — writing them there would make "recorded nothing"
+/// indistinguishable from "the provider reported this", the exact
+/// confusion [`NewObservation::with_tokens`]'s own doc comment exists to
+/// prevent.
+pub const CONTEXT_FIREWALL_REDUCTION_PURPOSE: &str = "context-firewall-reduction";
+
+/// [`CONTEXT_FIREWALL_REDUCTION_PURPOSE`]'s other outcome: one row per
+/// eligible result the firewall passed through unreduced, `route` carrying
+/// [`crate::firewall::BypassReason::as_str`]'s word so a later reader can
+/// count bypasses by reason.
+pub const CONTEXT_FIREWALL_BYPASS_PURPOSE: &str = "context-firewall-bypass";
+
+/// Map line 1988: one row per `context-firewall show` call — a raw-result
+/// expansion request, the primary recall signal design-decisions.md's
+/// Phase 57 section names. Not one of the packet's original two constants;
+/// added beside them because line 1988 is its own box and an expansion is
+/// neither a reduction nor a bypass — folding it into either purpose would
+/// make expansion volume unreadable from reduction volume. `route` carries
+/// `"found"` or `"not-found"`; `quota_context` carries the stored entry's
+/// tool name when the id resolved, `None` otherwise.
+pub const CONTEXT_FIREWALL_EXPANSION_PURPOSE: &str = "context-firewall-expansion";
+
 /// How far back [`EvidenceLedger::classification_record`] and the routing
 /// economics readers look — seven days, the same window the shell's
 /// route-evidence view already uses, so a routing model's record and the
@@ -1979,6 +2013,15 @@ pub struct RoutingOverhead {
     /// [`ROUTING_LATENCY_PURPOSE`]'s reason.
     pub entitlement_fallback_requests: usize,
     pub entitlement_fallback_tokens: Option<i64>,
+    /// Rows whose `purpose` is [`CONTEXT_FIREWALL_REDUCTION_PURPOSE`],
+    /// [`CONTEXT_FIREWALL_BYPASS_PURPOSE`], or
+    /// [`CONTEXT_FIREWALL_EXPANSION_PURPOSE`] — map lines 1987 and 1988's
+    /// telemetry. No tokens by construction, for the reason
+    /// [`CONTEXT_FIREWALL_REDUCTION_PURPOSE`]'s own doc comment gives: this
+    /// purpose's producer never writes an estimate into a column documented
+    /// as a provider's own report.
+    pub context_firewall_requests: usize,
+    pub context_firewall_tokens: Option<i64>,
     /// Rows no producer stamped that **did** name a harness — the gateway
     /// relay, and today nothing else. This is *"interactive coding cost"* as
     /// lines 1832 and 1833 use the phrase, and it is the one side of the
@@ -2056,6 +2099,14 @@ impl RoutingOverhead {
                 ) => (
                     &mut overhead.entitlement_fallback_requests,
                     &mut overhead.entitlement_fallback_tokens,
+                ),
+                Some(
+                    CONTEXT_FIREWALL_REDUCTION_PURPOSE
+                    | CONTEXT_FIREWALL_BYPASS_PURPOSE
+                    | CONTEXT_FIREWALL_EXPANSION_PURPOSE,
+                ) => (
+                    &mut overhead.context_firewall_requests,
+                    &mut overhead.context_firewall_tokens,
                 ),
                 None if group.harness_recorded => (
                     &mut overhead.coding_agent_requests,

@@ -11,6 +11,7 @@ pub mod config;
 mod database;
 pub mod evaluation;
 pub mod events;
+pub mod firewall;
 pub mod gateway;
 pub mod guardrails;
 pub mod harness;

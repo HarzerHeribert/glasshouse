@@ -51,6 +51,123 @@ const PLANTED_CREDENTIAL: &str = "planted-opaque-preflight-value-9f";
 /// nothing would also produce.
 const HARNESS_EXIT: i32 = 23;
 
+/// Write each distinct fixture executable once per test binary instead of
+/// once per test, so macOS Gatekeeper (`syspolicyd`/XProtect) validates it
+/// once per `launch_preflight` run instead of once per test — see the
+/// project memory `gatekeeper-scans-make-pty-fixtures-flaky` and
+/// GH-FIXTURE-REUSE. `install_fake_harness` below writes fixed bytes
+/// (`HARNESS_EXIT` is a compile-time constant), so every one of this file's
+/// tests collapses onto the one file the first caller writes.
+///
+/// Sharing is keyed by content, never by the caller's requested name, so a
+/// name never causes two distinct fixtures to collide, and a repeated name
+/// with the same bytes never causes a second write. Race-free the way
+/// `provider/cache.rs::write_json_atomically` is: one process-wide mutex
+/// serialises the check-and-write, and the write itself lands in a
+/// same-directory temporary name before an atomic rename.
+fn shared_fixture(unique_name: &str, contents: &str) -> PathBuf {
+    use std::collections::HashMap;
+    use std::hash::{Hash, Hasher};
+    use std::sync::{Mutex, OnceLock};
+
+    static DIR: OnceLock<tempfile::TempDir> = OnceLock::new();
+    static CACHE: OnceLock<Mutex<HashMap<String, PathBuf>>> = OnceLock::new();
+
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut guard = cache.lock().expect("shared fixture cache poisoned");
+    if let Some(path) = guard.get(contents) {
+        return path.clone();
+    }
+
+    let dir = DIR.get_or_init(|| tempfile::tempdir().expect("shared fixture dir"));
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    contents.hash(&mut hasher);
+    let digest = format!("{:016x}", hasher.finish());
+    let named = Path::new(unique_name);
+    let stem = named
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(unique_name);
+    let filename = match named.extension().and_then(|e| e.to_str()) {
+        Some(ext) => format!("{stem}-{digest}.{ext}"),
+        None => format!("{stem}-{digest}"),
+    };
+    let path = dir.path().join(&filename);
+    let temporary = dir.path().join(format!("{filename}.writing"));
+    std::fs::write(&temporary, contents).expect("write shared fixture");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut perms = std::fs::metadata(&temporary).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&temporary, perms).unwrap();
+    }
+    std::fs::rename(&temporary, &path).expect("rename shared fixture into place");
+    guard.insert(contents.to_string(), path.clone());
+    path
+}
+
+#[cfg(test)]
+mod shared_fixture_proof {
+    use super::{HARNESS_EXIT, install_fake_harness};
+
+    /// **The once-per-binary proof, through the real caller.** Every test in
+    /// this file calls `Fixture::new`, which unconditionally calls
+    /// `install_fake_harness` — so two independent per-test tempdirs asking
+    /// for it, the ordinary shape this binary runs under, must collapse to
+    /// one file rather than each writing its own.
+    #[test]
+    fn two_tempdirs_installing_the_fake_harness_get_one_shared_file() {
+        let tmp_a = tempfile::tempdir().expect("tempdir a");
+        let tmp_b = tempfile::tempdir().expect("tempdir b");
+        let a = install_fake_harness(tmp_a.path());
+        let meta_before = std::fs::metadata(&a).expect("fixture exists after first install");
+
+        let b = install_fake_harness(tmp_b.path());
+        assert_eq!(
+            a, b,
+            "two different tempdirs installing the fixture must share one file"
+        );
+        assert!(
+            !a.starts_with(tmp_a.path()) && !a.starts_with(tmp_b.path()),
+            "the shared file must live in the per-binary fixture dir, not either \
+             test's own tempdir: {a:?}"
+        );
+
+        let meta_after = std::fs::metadata(&b).expect("fixture exists after second install");
+        assert_eq!(
+            meta_before.modified().unwrap(),
+            meta_after.modified().unwrap(),
+            "a second install of the same fixture must not rewrite the file"
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(
+                meta_before.ino(),
+                meta_after.ino(),
+                "a second install of the same fixture must return the same inode, \
+                 not a second copy"
+            );
+        }
+    }
+
+    /// **Bytes unchanged.** The shared fixture is byte-for-byte the same
+    /// script every per-test write used to produce.
+    #[cfg(unix)]
+    #[test]
+    fn the_shared_fixture_has_the_original_unshared_bytes() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = install_fake_harness(tmp.path());
+        let content = std::fs::read_to_string(&path).expect("read shared fixture");
+        assert_eq!(
+            content,
+            format!("#!/bin/sh\nexit {HARNESS_EXIT}\n"),
+            "the shared fixture's bytes must match the original per-test literal exactly"
+        );
+    }
+}
+
 // --- a loopback provider ----------------------------------------------------
 
 /// A server that answers every request with one fixed status line, counting
@@ -240,23 +357,19 @@ impl Fixture {
 }
 
 #[cfg(unix)]
-fn install_fake_harness(bin_dir: &Path) -> PathBuf {
-    use std::os::unix::fs::PermissionsExt;
-
-    let path = bin_dir.join("fake-claude-code");
-    std::fs::write(&path, format!("#!/bin/sh\nexit {HARNESS_EXIT}\n")).expect("write fake harness");
-    let mut perms = std::fs::metadata(&path).unwrap().permissions();
-    perms.set_mode(0o755);
-    std::fs::set_permissions(&path, perms).unwrap();
-    path
+fn install_fake_harness(_bin_dir: &Path) -> PathBuf {
+    shared_fixture(
+        "fake-claude-code",
+        &format!("#!/bin/sh\nexit {HARNESS_EXIT}\n"),
+    )
 }
 
 #[cfg(windows)]
-fn install_fake_harness(bin_dir: &Path) -> PathBuf {
-    let path = bin_dir.join("fake-claude-code.cmd");
-    std::fs::write(&path, format!("@echo off\r\nexit /b {HARNESS_EXIT}\r\n"))
-        .expect("write fake harness");
-    path
+fn install_fake_harness(_bin_dir: &Path) -> PathBuf {
+    shared_fixture(
+        "fake-claude-code.cmd",
+        &format!("@echo off\r\nexit /b {HARNESS_EXIT}\r\n"),
+    )
 }
 
 // --- line 468 ---------------------------------------------------------------
