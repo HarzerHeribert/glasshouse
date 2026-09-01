@@ -563,3 +563,46 @@ different scope.** So the router ranks profiles only where nothing happens.
 Fixing clause 1 is a bounded defect fix. Clause 2 is a product change: making
 automatic routing act on a profile ranking is a behaviour nobody has decided
 on. Closing 372 needs both, and saying so is more useful than a partial tick.
+
+# Line 372 — COMPLETE 2026-09-01, both clauses
+
+Package `GH-AUTO-ROUTE-LAUNCH-372` (Sonnet, high, Amber; batch 70a). Clause 1
+(enabled-profile filtering) closed 2026-08-30; this closes clause 2 — the
+product decision the refusal above said nobody had made was made by the
+orchestrator's packet, from the register's own recon.
+
+Contract: Given automatic routing is enabled and no profile is pinned, when
+`launch_session` resolves a fresh destination, Glasshouse ranks every enabled
+launch profile (`DestinationScope::LaunchableAcrossProfiles`) and launches the
+winner, naming it in the launch explanation — while preserving an explicit
+`--profile` pin, clause 1's disabled-profile filter, and byte-identical
+behavior when automatic routing is off.
+
+Production: `main.rs :: DestinationScope::LaunchableAcrossProfiles`,
+`routing_destinations` (the `offered` match), `launch_session`
+(`profile_selection`, the scope decision, the explanation). The enablement
+signal is the existing `EffectiveConfig::automatic_routing()` — no new flag.
+
+Regression: four launch-path tests in `main.rs`
+(`automatic_routing_selects_among_enabled_profiles_when_none_is_pinned`,
+`a_pinned_profile_still_beats_the_automatic_ranking`,
+`automatic_routing_off_never_reaches_the_profile_ranking`,
+`automatic_profile_selection_never_offers_a_disabled_profile`), plus the
+flipped acceptance test below. Mutation: the scope decision forced to the old
+single-candidate path — KILLED by the selection test (the mutated launch
+resolves `fresh:claude-code:native` instead of `fresh:claude-code:bbb-yolo`).
+
+**The orchestrator's ruling this entry records:** the refusal's own tripwire,
+`tests/route_command.rs::automatic_launch_never_selects_the_higher_ranked_profile_it_did_not_ask_for`,
+failed on the closing branch exactly as designed. The worker stopped at it
+(the file was outside its packet) rather than flipping a documented regression
+test unilaterally — the correct escalation. The orchestrator flipped it into
+`an_unpinned_automatic_launch_starts_under_the_profile_the_ranking_prefers`:
+acceptance test 4 for the closure, green on the merged tree
+(`route_command`: 36 passed; 0 failed).
+
+Recorded limits: the printed explanation text is verified by --nocapture
+inspection, not an automated stderr assertion (the test module has no capture
+idiom); the every-candidate-hard-refused message still names the Native
+profile rather than whichever candidate was refused — pre-existing, named as
+a rough edge for a follow-up.

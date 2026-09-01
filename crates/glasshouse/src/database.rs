@@ -2380,6 +2380,14 @@ pub(crate) enum DatabaseError {
          refusing to adopt an unbound database because it may belong to another project"
     )]
     MissingProjectId { path: PathBuf },
+    #[error(
+        "project database `{path}` exists but is empty (zero bytes); a genuinely new \
+         project has no database file at all, so an existing file this size means it was \
+         likely truncated — by a crashed copy, an interrupted restore, or a disk-full \
+         write. Restore it from a backup, or delete the file deliberately if you want to \
+         start this project fresh"
+    )]
+    EmptyExisting { path: PathBuf },
 }
 
 /// Create or validate the project database of the given runtime's project.
@@ -2535,16 +2543,17 @@ fn verify_identity(
 
 /// Inspect the final database path; refuse symlinks and non-regular entries.
 ///
-/// Returns `Ok(false)` only when the path definitively does not exist (so the
-/// caller should create it), `Ok(true)` when an existing regular file is
-/// ready to open. Any other inspection failure — permission denied and
-/// friends — is preserved with its source rather than being mistaken for
-/// permission to create the file.
-fn check_existing(db_path: &Path) -> Result<bool, DatabaseError> {
+/// Returns `None` only when the path definitively does not exist (so the
+/// caller should create it), `Some(metadata)` for an existing regular file.
+/// Any other inspection failure — permission denied and friends — is
+/// preserved with its source rather than being mistaken for permission to
+/// create the file. Deliberately says nothing about the file's *length* —
+/// see [`check_existing`], its only caller that also needs that judgment.
+fn inspect_existing(db_path: &Path) -> Result<Option<fs::Metadata>, DatabaseError> {
     let metadata = match fs::symlink_metadata(db_path) {
         Ok(metadata) => metadata,
         Err(source) if source.kind() == std::io::ErrorKind::NotFound => {
-            return Ok(false);
+            return Ok(None);
         }
         Err(source) => {
             return Err(DatabaseError::Inspect {
@@ -2570,6 +2579,70 @@ fn check_existing(db_path: &Path) -> Result<bool, DatabaseError> {
     }
     // An existing regular file keeps whatever permissions it has;
     // like `create_state_dir`, this call neither widens nor narrows.
+    Ok(Some(metadata))
+}
+
+/// How long [`check_existing`] tolerates a zero-byte file before concluding
+/// it is genuinely empty rather than mid-creation by a concurrent process.
+/// SQLite grows a database file's page count as soon as its first `CREATE
+/// TABLE` executes, well before that transaction commits, so this only needs
+/// to cover "another process is a few instructions into `migrate`" — not a
+/// whole migration. Bounded well under [`configure`]'s 5-second
+/// `busy_timeout` so a genuinely empty file is still reported promptly.
+const EMPTY_FILE_RETRIES: u32 = 50;
+const EMPTY_FILE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(10);
+
+/// Inspect the final database path for the case where it is expected to
+/// predate this launch: refuses symlinks and non-regular entries (via
+/// [`inspect_existing`]), and additionally refuses a zero-byte existing
+/// file, which is never what a genuinely new project looks like.
+///
+/// Returns `Ok(false)` only when the path definitively does not exist (so the
+/// caller should create it), `Ok(true)` when an existing regular,
+/// nonempty file is ready to open.
+///
+/// **Not** the right check for a file [`prepare_file`] just lost an
+/// `AlreadyExists` race to create — that file is legitimately zero bytes
+/// until the winning process's migration commits, and is not the "this used
+/// to hold real data" case this function's empty-file refusal exists for.
+/// That caller uses [`inspect_existing`] directly instead.
+///
+/// A zero-byte file found *here* is not automatically that same in-flight
+/// case, though: a straggler among several processes racing this exact
+/// function (see `concurrent_first_bootstraps_serialize_on_one_database`)
+/// can observe a sibling's just-created, not-yet-migrated file the same way.
+/// Retrying briefly before refusing tells the two apart: a fresh file grows
+/// past zero bytes within milliseconds once its creator's migration starts
+/// writing; a genuinely truncated one never does.
+fn check_existing(db_path: &Path) -> Result<bool, DatabaseError> {
+    let Some(mut metadata) = inspect_existing(db_path)? else {
+        return Ok(false);
+    };
+    if metadata.len() == 0 {
+        for _ in 0..EMPTY_FILE_RETRIES {
+            std::thread::sleep(EMPTY_FILE_RETRY_DELAY);
+            match inspect_existing(db_path)? {
+                Some(retried) if retried.len() > 0 => return Ok(true),
+                Some(retried) => metadata = retried,
+                // Vanished between retries: nothing left to refuse; the
+                // caller should create it.
+                None => return Ok(false),
+            }
+        }
+    }
+    if metadata.len() == 0 {
+        // A zero-byte file is a valid *empty* SQLite database by
+        // specification, so nothing downstream — not SQLite, not `migrate`
+        // — would ever notice this used to hold a project's sessions,
+        // memories, and checkpoints. A genuinely new project has no file
+        // here at all; an *existing* file of length zero that stayed zero
+        // through the retries above is never that, so this is the one case
+        // this function must refuse rather than let fall through to a
+        // silent fresh migration.
+        return Err(DatabaseError::EmptyExisting {
+            path: db_path.to_path_buf(),
+        });
+    }
     Ok(true)
 }
 
@@ -2615,8 +2688,14 @@ fn prepare_file(db_path: &Path) -> Result<(), DatabaseError> {
     match options.open(db_path) {
         Ok(_) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-            // Lost the race; hold the winner to the same checks.
-            check_existing(db_path).map(|_| ())
+            // Lost the race to a concurrent Glasshouse process creating this
+            // same file right now. That winner's file is legitimately zero
+            // bytes until its migration commits under the write lock both
+            // processes will serialize on in `open` — this is not the
+            // "existing file that used to hold data" case `check_existing`'s
+            // empty-file refusal exists for, so hold the winner only to the
+            // symlink/regular-file checks, not that one.
+            inspect_existing(db_path).map(|_| ())
         }
         Err(source) => Err(DatabaseError::Create {
             path: db_path.to_path_buf(),
@@ -4722,5 +4801,49 @@ mod tests {
                 .is_symlink()
         );
         assert_eq!(std::fs::read(&decoy).unwrap(), b"decoy");
+    }
+
+    #[test]
+    fn a_zero_byte_existing_database_is_refused_not_silently_reinitialized() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let db = fixture.runtime.database_path();
+
+        // Truncate an existing, previously-migrated database to zero bytes —
+        // the shape a crashed `cp`, an interrupted restore, or a full-disk
+        // write leaves behind.
+        std::fs::write(&db, []).unwrap();
+        assert_eq!(std::fs::metadata(&db).unwrap().len(), 0);
+
+        let err = fixture.rebootstrap().unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("empty"), "{msg}");
+        assert!(msg.contains(db.display().to_string().as_str()), "{msg}");
+
+        // The refused open must not have touched the file: still zero bytes,
+        // no migration ever ran against it.
+        assert_eq!(
+            std::fs::metadata(&db).unwrap().len(),
+            0,
+            "a refused open must leave the file byte-identical"
+        );
+    }
+
+    #[test]
+    fn a_missing_database_file_still_creates_a_fresh_project() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let db = fixture.runtime.database_path();
+        let version_before = schema_version(&db);
+
+        // Unlike the zero-byte case, a database that simply does not exist
+        // yet must still be created and migrated exactly as a first launch.
+        std::fs::remove_file(&db).unwrap();
+        assert!(!db.exists());
+
+        let migrated = fixture.rebootstrap().unwrap();
+        assert_eq!(migrated.database_path(), db);
+        assert!(db.exists());
+        assert_eq!(schema_version(&db), version_before);
     }
 }

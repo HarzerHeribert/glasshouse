@@ -4,7 +4,7 @@
 //! global because Glasshouse is project scoped: the project must be resolved
 //! before any subcommand can do anything.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
 
@@ -50,7 +50,7 @@ pub struct Cli {
     pub log_level: Option<String>,
 
     /// Write logs to this file instead of the project log file.
-    #[arg(long, value_name = "PATH", global = true)]
+    #[arg(long, value_name = "PATH", global = true, value_parser = parse_log_file)]
     pub log_file: Option<PathBuf>,
 
     /// Write logs to stderr. Not usable while the interactive TUI is running.
@@ -59,6 +59,15 @@ pub struct Cli {
 
     #[command(subcommand)]
     pub command: Option<Command>,
+}
+
+/// clap value parser for `--log-file`: refuses a literal `~`, the same
+/// hazard already guarded for `--data-dir`/`--config-dir` and their
+/// environment twins in [`crate::paths::reject_literal_tilde`] — there is no
+/// shell in this argument's path to expand it.
+fn parse_log_file(value: &str) -> Result<PathBuf, String> {
+    crate::paths::reject_literal_tilde(Path::new(value), "--log-file")
+        .map_err(|err| err.to_string())
 }
 
 /// Non-interactive commands.
@@ -1182,6 +1191,21 @@ mod tests {
         assert!(
             Cli::try_parse_from(["glasshouse", "--log-file", "a.log", "--log-stderr"]).is_err()
         );
+    }
+
+    #[test]
+    fn a_literal_tilde_log_file_is_refused_with_the_same_wording_as_data_dir() {
+        let err = Cli::try_parse_from(["glasshouse", "--log-file", "~/x.log"]).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("--log-file"), "{msg}");
+        assert!(msg.contains("literal `~`"), "{msg}");
+    }
+
+    #[test]
+    fn an_expanded_log_file_path_is_accepted() {
+        let cli =
+            Cli::try_parse_from(["glasshouse", "--log-file", "/tmp/glasshouse-x.log"]).unwrap();
+        assert_eq!(cli.log_file, Some(PathBuf::from("/tmp/glasshouse-x.log")));
     }
 
     // --- `run` parses the same shape as `launch` --------------------------

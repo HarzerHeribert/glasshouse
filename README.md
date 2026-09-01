@@ -19,10 +19,10 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`█████████████████████████████████░░░░░░░` 1087 / 1305 mandatory capabilities (83%)
+`█████████████████████████████████░░░░░░░` 1088 / 1305 mandatory capabilities (83%)
 
 <details>
-<summary>Per-phase breakdown (58 of 106 phases complete)</summary>
+<summary>Per-phase breakdown (59 of 106 phases complete)</summary>
 
 | Phase | Done |
 |---|---|
@@ -40,7 +40,7 @@ the authoritative specification and tracks what is done.
 | Phase 7 — Claude Code adapter | 9/10 |
 | Phase 8 — Codex adapter | 10/10 ✅ |
 | Phase 9 — Antigravity adapter | 5/7 |
-| Phase 9A — Harness launch profiles | 25/26 |
+| Phase 9A — Harness launch profiles | 26/26 ✅ |
 | Phase 9B — Scoped harness wrappers and shims | 9/9 ✅ |
 | Phase 9C — Provider protocol model | 12/12 ✅ |
 | Phase 9D — Built-in provider templates | 14/14 ✅ |

@@ -908,6 +908,20 @@ enum DestinationScope<'a> {
     /// `glasshouse route` still ranks every profile, because a person reading
     /// a diagnostic is choosing between them and a launch is not.
     Launchable { profile: &'a str },
+    /// Map line 372's remaining clause: what this launch could actually
+    /// enter, ranked across every *enabled* configured launch profile rather
+    /// than pinned to the one `--profile` or the implied fallback would have
+    /// used. Used only when automatic routing is on and the person did not
+    /// name a profile — `launch_session` decides which of the two
+    /// `Launchable` shapes applies before it asks for either.
+    ///
+    /// Session warmth is filtered exactly as plain `Launchable` filters it —
+    /// this is still a launch, not `glasshouse route`, and a launch cannot
+    /// enter a Live session whichever profile ends up deciding the ranking.
+    /// Only the *fresh* side widens: one candidate per enabled profile,
+    /// exactly as `Everything` offers them, so the ranking has more than the
+    /// one destination `Launchable` would have handed it.
+    LaunchableAcrossProfiles,
 }
 
 /// Every place this project's next piece of work could go, and the current
@@ -1088,7 +1102,7 @@ fn routing_destinations(
     //    for it, by construction rather than by configuration.
     let checkpoint = latest_checkpoint_quality(runtime);
     let offered: Vec<String> = match scope {
-        DestinationScope::Everything => effective
+        DestinationScope::Everything | DestinationScope::LaunchableAcrossProfiles => effective
             .profile_names()
             .into_iter()
             .filter(|name| effective.profile_enabled(name).value)
@@ -3756,6 +3770,15 @@ fn launch_session(
     let named_profile = to
         .and_then(|id| fresh_destination_profile(id, selection.id()))
         .or(profile_name);
+    // Map line 372's remaining clause: with no profile named, the router is
+    // asked to rank every *enabled* profile rather than the one implied
+    // fallback below picks for it. `--to`, `--fresh` and `--from-checkpoint`
+    // all leave `named_profile` unset too, and none of them names a profile
+    // either — the ranking still gets to pick which one a fresh session
+    // would run under; only `--to fresh:<harness>:<profile>` and `--profile`
+    // count as "the user pinned one," because those are the only two that
+    // said so by name.
+    let profile_selection = named_profile.is_none();
     // A profile the user disabled is not a profile Glasshouse may start,
     // and being asked for it by name is the one case where saying nothing
     // would be worst: the routing filter above simply stops offering it, so
@@ -3909,15 +3932,19 @@ fn launch_session(
             },
         )
     } else {
-        let destinations = routing_destinations(
-            runtime,
-            &effective,
-            selection.id(),
+        // Map line 372: automatic routing is on here (`routing_off` is
+        // false only when it is), so the fresh side of the candidate set
+        // widens to every enabled profile exactly when the person did not
+        // pin one — `Launchable` unchanged for a pin, `Launchable` unchanged
+        // for automatic off (that branch never reaches this arm at all).
+        let scope = if profile_selection {
+            DestinationScope::LaunchableAcrossProfiles
+        } else {
             DestinationScope::Launchable {
                 profile: fresh_profile,
-            },
-            task,
-        )?;
+            }
+        };
+        let destinations = routing_destinations(runtime, &effective, selection.id(), scope, task)?;
         let overrides = effective.pairing_overrides();
         // **Map line 1599's bridge, on the path that acts.** The live pool a
         // gateway fills still does not exist here — that gateway is started
@@ -4175,6 +4202,19 @@ fn launch_session(
                     "glasshouse: starting a new session; the ranking weighed {continuable} \
                      session(s) this project could have continued and preferred a new one. \
                      `glasshouse route` says why, and `--to <id>` overrules it."
+                );
+            }
+            // Map line 372: no profile was pinned, so this fresh destination
+            // is the ranking's own pick among every enabled profile rather
+            // than the implied fallback — said out loud, reusing the same
+            // `render()` `glasshouse route` prints rather than inventing a
+            // second explanation for the same decision.
+            if profile_selection {
+                eprintln!(
+                    "glasshouse: launching under profile `{}` — automatic routing's choice \
+                     among the enabled profiles.\n{}",
+                    routed.chosen().launch_profile(),
+                    routed.render()
                 );
             }
         }
@@ -11574,6 +11614,252 @@ mod tests {
 
         let sessions = glasshouse::session::ProjectSessions::open(&runtime).unwrap();
         assert!(sessions.store().list().unwrap().is_empty());
+    }
+
+    // --- map line 372 clause 2: automatic routing selects the profile too -
+
+    /// The most recent routing decision `launch_session` recorded, as the
+    /// `fresh:<harness>:<profile>` id [`record_routing_decision`] wrote —
+    /// read back through the same evaluation ledger `glasshouse route`'s own
+    /// counters read, rather than by capturing stderr, which this test
+    /// module has no idiom for.
+    fn last_routed_destination(runtime: &Runtime) -> String {
+        use glasshouse::evaluation::{EvaluationKind, EvaluationObservations};
+
+        let ledger = EvaluationObservations::open(runtime).unwrap();
+        let rows = ledger
+            .recent_of_kind(EvaluationKind::RoutingContinuationDecided, 1)
+            .unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "launch_session must record exactly one routing decision when it routes at all"
+        );
+        rows[0]
+            .detail
+            .clone()
+            .expect("a routing-continuation row always carries the destination id")
+    }
+
+    /// Line 372 clause 1's own mechanism (`enabled = false`), reused here so
+    /// the profile that alphabetically leads every name in this fixture is
+    /// never a legal candidate — which is what makes a winner other than it
+    /// prove the ranking ran rather than a first-configured-name fallback.
+    fn disabled_profile(
+        harness: glasshouse::integrations::IntegrationId,
+    ) -> glasshouse::config::ProfileConfig {
+        let mut profile = glasshouse::config::ProfileConfig::new(harness);
+        profile.set_enabled(false);
+        profile
+    }
+
+    /// An enabled profile whose approval is `Bypass` and unacknowledged —
+    /// `an_unacknowledged_bypass_also_starts_no_process_and_records_no_session`'s
+    /// own construction, reused because it fails *after* routing decides and
+    /// *before* any process starts, on a `BackendResource::Native` backend
+    /// (`ProfileConfig::default`'s own backend) so its router score is the
+    /// same shape as the implied Native profile's — nothing about the
+    /// failure mode should tilt the ranking toward or away from it.
+    fn unacknowledged_bypass_profile(
+        harness: glasshouse::integrations::IntegrationId,
+    ) -> glasshouse::config::ProfileConfig {
+        let mut profile = glasshouse::config::ProfileConfig::new(harness);
+        profile.set_approval(glasshouse::config::ProfileApproval::Bypass);
+        profile
+    }
+
+    /// Required behaviour 1: automatic on, no pinned profile — the ranked
+    /// winner among the *enabled* profiles is what launches, and it is not
+    /// simply the first configured name.
+    ///
+    /// `aaa-disabled` sorts first among every configured name (including
+    /// `native`) and is disabled, so it can never be offered at all —
+    /// `bbb-yolo` is the only other non-native candidate, and it and
+    /// `native` are the same backend class, so nothing but their id order
+    /// separates them for the router in this bare fixture. A mutation that
+    /// swaps the ranked winner for `effective.profile_names()`'s first
+    /// element would answer `aaa-disabled`, which is not even an enabled
+    /// candidate — so this fails loudly rather than by coincidence.
+    #[test]
+    fn automatic_routing_selects_among_enabled_profiles_when_none_is_pinned() {
+        let tmp = tempfile::tempdir().unwrap();
+        let runtime = fixture_with_enabled_claude_code(tmp.path());
+        let harness = glasshouse::integrations::IntegrationId::ClaudeCode;
+
+        let mut user = UserConfig::load(runtime.paths()).unwrap();
+        user.profiles_mut()
+            .set("aaa-disabled", disabled_profile(harness));
+        user.profiles_mut()
+            .set("bbb-yolo", unacknowledged_bypass_profile(harness));
+        user.save(runtime.paths()).unwrap();
+
+        let status = launch_session(
+            &runtime,
+            Some("claude-code"),
+            LaunchDestination::default(),
+            &ResponseRequest::default(),
+            false,
+            ExternalPresentation::Embedded,
+            &[],
+            None,
+        )
+        .unwrap();
+        // `bbb-yolo` wins the ranking (see above) and then fails the same
+        // unacknowledged-bypass check the pinned case does — after routing
+        // decided, before any process starts.
+        assert_eq!(status, ExitCode::FAILURE);
+        let sessions = glasshouse::session::ProjectSessions::open(&runtime).unwrap();
+        assert!(sessions.store().list().unwrap().is_empty());
+
+        assert_eq!(
+            last_routed_destination(&runtime),
+            "fresh:claude-code:bbb-yolo",
+            "the ranking's winner must be an enabled profile the router actually ranked, not \
+             `aaa-disabled` — the first configured name, and disabled"
+        );
+    }
+
+    /// Required behaviour 2: automatic on, a profile pinned with `--profile`
+    /// — the pin wins exactly as it always has, even when the ranking would
+    /// have preferred a different enabled profile.
+    #[test]
+    fn a_pinned_profile_still_beats_the_automatic_ranking() {
+        let tmp = tempfile::tempdir().unwrap();
+        let runtime = fixture_with_enabled_claude_code(tmp.path());
+        let harness = glasshouse::integrations::IntegrationId::ClaudeCode;
+
+        let mut user = UserConfig::load(runtime.paths()).unwrap();
+        // Unpinned, the ranking would prefer `bbb-yolo` (it sorts first and
+        // ties with `ccc-yolo` on every axis in this bare fixture) — pinning
+        // `ccc-yolo` instead must still be what launches.
+        user.profiles_mut()
+            .set("bbb-yolo", unacknowledged_bypass_profile(harness));
+        user.profiles_mut()
+            .set("ccc-yolo", unacknowledged_bypass_profile(harness));
+        user.save(runtime.paths()).unwrap();
+
+        let status = launch_session(
+            &runtime,
+            Some("claude-code"),
+            LaunchDestination {
+                profile: Some("ccc-yolo"),
+                ..LaunchDestination::default()
+            },
+            &ResponseRequest::default(),
+            false,
+            ExternalPresentation::Embedded,
+            &[],
+            None,
+        )
+        .unwrap();
+        assert_eq!(status, ExitCode::FAILURE);
+
+        assert_eq!(
+            last_routed_destination(&runtime),
+            "fresh:claude-code:ccc-yolo",
+            "an explicit `--profile` pin must win over the ranking's own preference"
+        );
+    }
+
+    /// Required behaviour 3: automatic routing off leaves the launch path
+    /// byte-identical to before this box existed — no routing decision is
+    /// even taken, on a launch that would otherwise reach one.
+    #[test]
+    fn automatic_routing_off_never_reaches_the_profile_ranking() {
+        let tmp = tempfile::tempdir().unwrap();
+        let runtime = fixture_with_enabled_claude_code(tmp.path());
+        let harness = glasshouse::integrations::IntegrationId::ClaudeCode;
+
+        let mut user = UserConfig::load(runtime.paths()).unwrap();
+        user.routing_mut().set_automatic(Some(false));
+        user.profiles_mut()
+            .set("bbb-yolo", unacknowledged_bypass_profile(harness));
+        user.save(runtime.paths()).unwrap();
+
+        let status = launch_session(
+            &runtime,
+            Some("claude-code"),
+            LaunchDestination {
+                profile: Some("bbb-yolo"),
+                ..LaunchDestination::default()
+            },
+            &ResponseRequest::default(),
+            false,
+            ExternalPresentation::Embedded,
+            &[],
+            None,
+        )
+        .unwrap();
+        // The same refusal as the pinned-bypass regression above — routing
+        // being off changes nothing about how a pinned profile resolves.
+        assert_eq!(status, ExitCode::FAILURE);
+
+        let ledger = glasshouse::evaluation::EvaluationObservations::open(&runtime).unwrap();
+        let rows = ledger
+            .recent_of_kind(
+                glasshouse::evaluation::EvaluationKind::RoutingContinuationDecided,
+                10,
+            )
+            .unwrap();
+        assert!(
+            rows.is_empty(),
+            "with automatic routing off, `routing_destinations` and `choose` must not run at \
+             all, so no routing decision is ever recorded: {rows:?}"
+        );
+    }
+
+    /// Required behaviour 4, and clause 1's own filter asserted through this
+    /// new path rather than rebuilt: a disabled profile is never offered to
+    /// automatic profile selection, at the producer `launch_session` now
+    /// calls under [`DestinationScope::LaunchableAcrossProfiles`].
+    #[test]
+    fn automatic_profile_selection_never_offers_a_disabled_profile() {
+        let tmp = tempfile::tempdir().unwrap();
+        let runtime = fixture_with_enabled_claude_code(tmp.path());
+        let harness = glasshouse::integrations::IntegrationId::ClaudeCode;
+
+        let mut user = UserConfig::load(runtime.paths()).unwrap();
+        user.profiles_mut()
+            .set("aaa-disabled", disabled_profile(harness));
+        user.profiles_mut()
+            .set("bbb-enabled", unacknowledged_bypass_profile(harness));
+        user.save(runtime.paths()).unwrap();
+
+        let project = config::load_project_config(runtime.project()).unwrap();
+        let effective = EffectiveConfig::new(&user, project.as_ref());
+        let destinations = routing_destinations(
+            &runtime,
+            &effective,
+            harness,
+            DestinationScope::LaunchableAcrossProfiles,
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            destinations
+                .iter()
+                .all(|destination| destination.launch_profile() != "aaa-disabled"),
+            "a disabled profile must never reach automatic profile selection's candidate set: \
+             {:?}",
+            destinations
+                .iter()
+                .map(|d| d.launch_profile())
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            destinations
+                .iter()
+                .any(|destination| destination.launch_profile() == "bbb-enabled"),
+            "the enabled profile must still be offered"
+        );
+        assert!(
+            destinations
+                .iter()
+                .any(|destination| destination.launch_profile()
+                    == glasshouse::profile::NATIVE_PROFILE_NAME),
+            "the implied Native profile is always offered"
+        );
     }
 
     #[test]

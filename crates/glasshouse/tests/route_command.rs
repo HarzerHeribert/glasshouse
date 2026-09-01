@@ -1408,27 +1408,22 @@ fn project_and_user_disagreeing_about_enabled_resolve_project_first() {
     );
 }
 
-/// Acceptance test 4, and the evidence for clause 2 of the refusal: **the
-/// launch path never reaches the candidate set the previous two tests rank.**
+/// Acceptance test 4 for box 372's second clause: **a launch with no
+/// `--profile` flag starts under the profile the ranking actually prefers.**
 ///
-/// `better` outranks the implied `native` profile in `glasshouse route`. If
-/// box 372's second clause held — "the router selects among launch profiles
-/// when automatic routing is enabled" — a launch with no `--profile` flag
-/// would start under whichever profile the ranking actually prefers. It does
-/// not: `routing_destinations`'s `offered` set under
-/// `DestinationScope::Launchable` (`main.rs`, the match feeding the "one
-/// fresh destination per configured launch profile" loop) is a single
-/// already-chosen name, never `effective.profile_names()`. The two
-/// production callers that *do* build the multi-profile candidate set —
-/// `route_recommendation` (reached only by `glasshouse route`, which starts
-/// nothing, see `route_explains_the_ranking_and_starts_nothing` above) and
-/// `report_task_boundary_routing` (called from `resume_session`, which
-/// forces `RoutingOverride::to` the resumed session and uses the ranking
-/// only to print what it *would* have chosen on stderr) — neither acts on
-/// the ranking. `launch_session`, the one caller that does act, never builds
-/// this candidate set at all.
+/// Until 2026-09-01 this test asserted the opposite — it was the executable
+/// evidence for the clause's refusal, written by `GH-PROFILE-SELECTION` to
+/// pin that `launch_session` never built the multi-profile candidate set.
+/// `GH-AUTO-ROUTE-LAUNCH-372` closed the clause: under
+/// `DestinationScope::LaunchableAcrossProfiles`, an unpinned launch with
+/// automatic routing enabled offers one fresh candidate per **enabled**
+/// profile and acts on the winner. The tripwire fired exactly as designed —
+/// its failure on the closing branch was the signal the refusal had expired
+/// — and the orchestrator flipped it into the closure's own regression:
+/// `better` legitimately outranks the implied `native` profile, so the
+/// launch must land on `better`.
 #[test]
-fn automatic_launch_never_selects_the_higher_ranked_profile_it_did_not_ask_for() {
+fn an_unpinned_automatic_launch_starts_under_the_profile_the_ranking_prefers() {
     let fixture = ProfileSelectionFixture::new();
 
     let report = fixture.stdout(&["route"]);
@@ -1447,15 +1442,10 @@ fn automatic_launch_never_selects_the_higher_ranked_profile_it_did_not_ask_for()
 
     let listing = fixture.stdout(&["sessions"]);
     assert!(
-        !listing.contains("better"),
-        "if the router selected among launch profiles when automatic routing is enabled, a \
-         launch naming no profile would start under `better`, the one the ranking actually \
-         prefers:\n{listing}"
-    );
-    assert!(
-        listing.contains("native"),
-        "instead the launch starts under the implied native profile — the one already \
-         chosen by `launch_session`'s own default, before the router ever runs:\n{listing}"
+        listing.contains("better"),
+        "the router selects among enabled launch profiles when automatic routing is \
+         enabled, so a launch naming no profile starts under `better`, the one the \
+         ranking actually prefers:\n{listing}"
     );
 }
 

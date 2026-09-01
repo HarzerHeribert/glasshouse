@@ -369,7 +369,7 @@ Fixed architectural requirements
 ☑ Show the active launch profile next to the harness in session details.
 ☑ Show the resolved launch mechanism and overridden key names for diagnostics while redacting secret values.
 ☑ Allow the user to select a launch profile when creating a session manually.
-☐ Allow the router to select among enabled launch profiles when automatic routing is enabled.
+☑ Allow the router to select among enabled launch profiles when automatic routing is enabled.
 ☑ Allow launch profiles to be marked native-subscription, direct-provider, or glasshouse-gateway.
 ☑ Keep native-subscription profiles available even when gateway providers are configured.
 ☑ Allow a launch profile to declare which wire protocol it expects from its backend.
