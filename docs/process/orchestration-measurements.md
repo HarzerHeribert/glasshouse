@@ -4393,3 +4393,48 @@ neither had anything to do with the work in flight.
   production-reachable as `Self::empty()`. The check greps one spelling. Two
   such near-misses in one session (this and the 56A heading) suggest the
   scripts' matchers deserve a pass of their own.
+
+
+## The co-edit barrier under-reports, and the reason is not the packet (2026-09-01)
+
+Recorded after the Stop hook caught an unreleased `main.rs` barrier three
+times in one session. Two separate defects, and only one of them was fixed
+by the obvious remedy.
+
+**1. The declaration is enforced; the ACTION is not.** After the first
+incident the fix looked clear — the §77 claim had gone into one packet and
+not its peer's, so `validate_round.py`'s `COEDIT:` requirement (which
+refuses a shared path declared in only one packet) was the mechanism. It
+works: the next round's two packets both carried the line and both
+validated.
+
+**And the barrier still read `1/1` for a file two worktrees were both
+editing.** `input-size-producer`'s packet contained
+`scripts/coedit.sh claim main.rs input-size-producer` in plain text, the
+worker modified `main.rs`, and it never ran the command. The validator
+checks what the packet SAYS. Nothing checks what the worker DOES. A
+`PreToolUse` hook on `Edit|Write` matching a path with an open co-edit
+declaration could close this — the project already has
+`coedit-peer-notice.sh` on that same matcher — but it is unbuilt, so treat
+the barrier as advisory and `integrate.sh`'s refusal-on-shared-file as the
+actual gate.
+
+**2. Releasing is not part of any mechanism, so the orchestrator forgets.**
+All three incidents were the same human shape: integrate, gate, commit,
+push — and never release. After the second, the fix was written into the
+checkpoint's next-actions as an ordered sequence, and it was forgotten
+again within the hour. **A step that lives only in a document is not a
+mechanism.** `integrate.sh` is the natural home — it already knows which
+worktree it just applied — but CLAUDE.md states its stopping point is
+deliberate ("it never commits, ticks a box, writes evidence, or runs a
+mutation"), so extending it is a ruling to make explicitly rather than a
+patch to slip in. Proposed, not done.
+
+**What the barrier is actually worth.** In all three incidents the
+reconciliation itself was trivial and verified: hunk ranges were compared
+each time and were disjoint every time — 47 lines apart at the closest in
+`config/mod.rs`, and ~3,300 apart in `main.rs` between `report_hook_with`
+(~7914) and the routing sites (999–4622). Nothing was ever merged by hand
+and nothing was invented. The barrier's value this session was **not**
+catching a collision; it was the Stop hook refusing to let the round end
+with the bookkeeping wrong.
