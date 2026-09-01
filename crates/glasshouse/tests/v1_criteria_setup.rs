@@ -1107,67 +1107,65 @@ fn v1_1907_a_free_tier_model_performs_the_classification_support_job() {
     std::fs::create_dir_all(&config_dir).unwrap();
 
     let requests: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    // Blocking accept on a dedicated thread, armed here before the subprocess
+    // spawns below, matching `launch_preflight.rs`'s `FakeProvider` idiom: a
+    // nonblocking poll can miss the connection window between polls, but a
+    // blocking `accept()` cannot miss a connection the kernel has already
+    // queued, so the server side of this race is gone by construction.
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback must bind");
-    listener.set_nonblocking(true).unwrap();
     let address = listener.local_addr().unwrap();
-    let stop = Arc::new(AtomicBool::new(false));
+    let (served_tx, served_rx) = std::sync::mpsc::channel();
     {
         let requests = Arc::clone(&requests);
-        let stop = Arc::clone(&stop);
         std::thread::spawn(move || {
-            while !stop.load(Ordering::SeqCst) {
-                match listener.accept() {
-                    Ok((mut stream, _)) => {
-                        let mut reader = BufReader::new(stream.try_clone().unwrap());
-                        let mut request_line = String::new();
-                        if reader.read_line(&mut request_line).is_err() {
-                            continue;
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut request_line = String::new();
+                if reader.read_line(&mut request_line).is_ok() {
+                    let mut length = 0usize;
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).is_err() || line.trim().is_empty() {
+                            break;
                         }
-                        let mut length = 0usize;
-                        loop {
-                            let mut line = String::new();
-                            if reader.read_line(&mut line).is_err() || line.trim().is_empty() {
-                                break;
-                            }
-                            if let Some(v) = line
-                                .to_ascii_lowercase()
-                                .strip_prefix("content-length:")
-                                .map(str::trim)
-                                .and_then(|v| v.parse().ok())
-                            {
-                                length = v;
-                            }
+                        if let Some(v) = line
+                            .to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(str::trim)
+                            .and_then(|v| v.parse().ok())
+                        {
+                            length = v;
                         }
-                        let mut body = vec![0u8; length];
-                        let _ = reader.read_exact(&mut body);
-                        requests
-                            .lock()
-                            .unwrap()
-                            .push(String::from_utf8_lossy(&body).into_owned());
-                        let content = "{\"needs_repo_context\":false,\"needs_code_modification\":false,\
-                                        \"needs_shell_execution\":false,\"needs_browser_interaction\":false,\
-                                        \"complexity\":\"trivial\",\"likely_multi_turn\":false,\
-                                        \"workload_tier\":\"leaf\",\"safe_for_disposable_model\":true,\
-                                        \"warm_context\":\"prefer_warm\",\"confidence\":\"high\"}";
-                        let document = serde_json::json!({
-                            "choices": [{ "message": { "role": "assistant", "content": content } }],
-                            "usage": { "prompt_tokens": 10, "completion_tokens": 5 }
-                        })
-                        .to_string();
-                        let response = format!(
-                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
-                             content-length: {}\r\nconnection: close\r\n\r\n{document}",
-                            document.len()
-                        );
-                        let _ = stream.write_all(response.as_bytes());
-                        let _ = stream.flush();
                     }
-                    Err(ref err) if err.kind() == std::io::ErrorKind::WouldBlock => {
-                        std::thread::sleep(Duration::from_millis(5));
-                    }
-                    Err(_) => break,
+                    let mut body = vec![0u8; length];
+                    let _ = reader.read_exact(&mut body);
+                    requests
+                        .lock()
+                        .unwrap()
+                        .push(String::from_utf8_lossy(&body).into_owned());
+                    let content = "{\"needs_repo_context\":false,\"needs_code_modification\":false,\
+                                    \"needs_shell_execution\":false,\"needs_browser_interaction\":false,\
+                                    \"complexity\":\"trivial\",\"likely_multi_turn\":false,\
+                                    \"workload_tier\":\"leaf\",\"safe_for_disposable_model\":true,\
+                                    \"warm_context\":\"prefer_warm\",\"confidence\":\"high\"}";
+                    let document = serde_json::json!({
+                        "choices": [{ "message": { "role": "assistant", "content": content } }],
+                        "usage": { "prompt_tokens": 10, "completion_tokens": 5 }
+                    })
+                    .to_string();
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\n\
+                         content-length: {}\r\nconnection: close\r\n\r\n{document}",
+                        document.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    let _ = stream.flush();
                 }
             }
+            // The subprocess connects only once its request has been fully
+            // read and answered above, so a receiver that never fires means
+            // the connection this test guards never happened at all.
+            let _ = served_tx.send(());
         });
     }
 
@@ -1194,7 +1192,11 @@ fn v1_1907_a_free_tier_model_performs_the_classification_support_job() {
         .arg("what changed in this diff?")
         .output()
         .expect("run glasshouse classify");
-    stop.store(true, Ordering::SeqCst);
+    // The subprocess has already exited, so the accept thread is either done
+    // or never going to hear from anyone; a generous bound just keeps a
+    // genuinely-missed connection from hanging the test instead of failing
+    // the assertions below.
+    let _ = served_rx.recv_timeout(Duration::from_secs(5));
     assert!(
         output.status.success(),
         "{}",
