@@ -231,16 +231,13 @@ fn supervise(process: &Mutex<PtyProcess>, initial_size: TerminalSize) -> Result<
 fn pump_output(mut output: PtyOutput, drained: &AtomicBool) {
     let mut buffer = [0u8; 8192];
     let mut stdout = std::io::stdout();
-    loop {
-        // Both `Ok(0)` and an error mean the same thing here: nothing more is
-        // coming. A pty reports the end of a session as end-of-file on some
-        // platforms and as a read error on others, and neither is a fault to
-        // report — the supervising loop already knows the exit status from
-        // the process itself. A read a signal interrupted is neither, and
-        // [`next_chunk`] keeps it from ending this relay.
-        let Some(read) = next_chunk(&mut output, &mut buffer) else {
-            break;
-        };
+    // Both `Ok(0)` and an error mean the same thing here: nothing more is
+    // coming. A pty reports the end of a session as end-of-file on some
+    // platforms and as a read error on others, and neither is a fault to
+    // report — the supervising loop already knows the exit status from
+    // the process itself. A read a signal interrupted is neither, and
+    // [`next_chunk`] keeps it from ending this relay.
+    while let Some(read) = next_chunk(&mut output, &mut buffer) {
         if stdout.write_all(&buffer[..read]).is_err() || stdout.flush().is_err() {
             break;
         }

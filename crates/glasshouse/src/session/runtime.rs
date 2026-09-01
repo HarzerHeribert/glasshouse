@@ -1834,18 +1834,15 @@ fn pump(
 ) {
     let mut buffer = [0u8; READ_CHUNK];
     let mut scanner = TerminalQueryScanner::default();
-    loop {
-        // `Ok(0)` and an error mean the same thing: nothing more is coming. A
-        // pseudo-terminal reports the end of a session as end-of-file on some
-        // platforms and as a read error on others, and neither is a fault —
-        // the exit status comes from the process, not from here.
-        //
-        // The one exception is a read a signal interrupted, which is not an
-        // ending and must not stop this thread — see [`next_chunk`], which
-        // owns that decision for every reader in the crate.
-        let Some(read) = next_chunk(&mut output, &mut buffer) else {
-            break;
-        };
+    // `Ok(0)` and an error mean the same thing: nothing more is coming. A
+    // pseudo-terminal reports the end of a session as end-of-file on some
+    // platforms and as a read error on others, and neither is a fault —
+    // the exit status comes from the process, not from here.
+    //
+    // The one exception is a read a signal interrupted, which is not an
+    // ending and must not stop this thread — see [`next_chunk`], which
+    // owns that decision for every reader in the crate.
+    while let Some(read) = next_chunk(&mut output, &mut buffer) {
         let chunk = &buffer[..read];
 
         match scrollback.lock() {
