@@ -1954,6 +1954,7 @@ impl EntitlementConfig {
             throttling: None,
             models: None,
             spend: None,
+            headroom_estimate: None,
         })
     }
 }
@@ -2081,6 +2082,16 @@ pub struct ResolvedEntitlement {
     /// `None` thereafter when no row carried a token count — *unknown*,
     /// never "nothing spent".
     spend: Option<EntitlementSpendReading>,
+    /// Map lines 1244/1245/1246/1250/1251/1254's subscription-headroom
+    /// estimate — [`Self::populate_provider_facets`]'s own producer,
+    /// [`crate::routing::evidence::estimate_subscription_headroom`]. `None`
+    /// is unknown, the same rule as every facet above; **also** `None` once
+    /// [`Self::capacity_scope`] is [`TelemetryScope::PerAccount`] — an
+    /// authoritative per-account reading is never displaced by an estimate
+    /// (56A-3+'s own ground; this build's own gateway cache can never
+    /// produce that scope, so the estimate populates in every reachable case
+    /// today).
+    headroom_estimate: Option<crate::routing::evidence::SubscriptionHeadroomEstimate>,
 }
 
 impl ResolvedEntitlement {
@@ -2142,6 +2153,21 @@ impl ResolvedEntitlement {
     /// count), never "nothing spent".
     pub fn spend(&self) -> Option<&EntitlementSpendReading> {
         self.spend.as_ref()
+    }
+
+    /// Map lines 1244/1245/1246/1250/1251/1254's subscription-headroom
+    /// estimate — `None` is unknown (nothing consulted the ledger, or
+    /// nothing at all was available to estimate from), and also `None`
+    /// whenever [`Self::capacity_scope`] already reads
+    /// [`TelemetryScope::PerAccount`]: an authoritative per-account reading
+    /// is never displaced by an estimate. See
+    /// [`crate::routing::evidence::estimate_subscription_headroom`] for what
+    /// this reads and [`crate::routing::evidence::SubscriptionHeadroomEstimate`]
+    /// for why it is never a bare number.
+    pub fn headroom_estimate(
+        &self,
+    ) -> Option<&crate::routing::evidence::SubscriptionHeadroomEstimate> {
+        self.headroom_estimate.as_ref()
     }
 
     /// This account's key in the ledger's `quota_context` column — the
@@ -2254,6 +2280,31 @@ impl ResolvedEntitlement {
             });
         }
 
+        // Map lines 1244/1245/1246/1250/1251/1254 — the subscription
+        // headroom estimator. Guarded on `capacity_scope`, not skipped
+        // outright: this build's gateway cache can only ever narrow capacity
+        // to `TelemetryScope::ProviderWide` (56A-2's own recorded limit), so
+        // this populates in every reachable case today, exactly the
+        // "resolver populates the per-account capacity facet from the
+        // estimator where the provider-wide reading is all headers gave"
+        // the packet asks for — and the moment a future per-account reading
+        // exists (56A-3+), this stays inert rather than displacing it.
+        if self.capacity_scope != Some(TelemetryScope::PerAccount) {
+            let label = self.credential_label();
+            let session_count = telemetry
+                .session_counts
+                .and_then(|counts| counts.get(self.name.as_str()))
+                .copied();
+            self.headroom_estimate = crate::routing::evidence::estimate_subscription_headroom(
+                telemetry.observations.unwrap_or(&[]),
+                provider,
+                label.as_deref(),
+                telemetry.now_unix,
+                self.seconds_until_reset,
+                session_count,
+            );
+        }
+
         if let Some(catalogues) = telemetry.model_catalogues {
             self.models = catalogues
                 .load(provider)
@@ -2305,6 +2356,10 @@ impl ResolvedEntitlement {
                     reading.scope == TelemetryScope::PerAccount,
                 )
             }))
+            // The headroom estimate needs no threshold either — unlike the
+            // capacity band, [`Self::headroom_estimate`] is already a
+            // finished value the moment telemetry ran.
+            .with_headroom_estimate(self.headroom_estimate)
     }
 
     /// What the announcement says inside the parentheses after the name:
@@ -2436,6 +2491,14 @@ pub struct EntitlementTelemetry<'a> {
     /// `None` keeps the throttling facet unknown, because "none observed"
     /// may only be said by a resolver that actually looked.
     observations: Option<&'a [crate::routing::evidence::RoutingObservation]>,
+    /// Map line 1245's "historical sessions" input to the headroom
+    /// estimator: how many of this project's own sessions
+    /// (`sessions.entitlement`, migration 22) were charged to each
+    /// entitlement, keyed by entitlement **name** — not by provider, unlike
+    /// every other source here, because a session names the account that
+    /// served it directly. `None` leaves the estimator without this input,
+    /// exactly like every other absent source.
+    session_counts: Option<&'a std::collections::BTreeMap<String, usize>>,
     now_unix: i64,
 }
 
@@ -2447,6 +2510,7 @@ impl<'a> EntitlementTelemetry<'a> {
             gateway_quota: None,
             model_catalogues: None,
             observations: None,
+            session_counts: None,
             now_unix,
         }
     }
@@ -2473,6 +2537,17 @@ impl<'a> EntitlementTelemetry<'a> {
         observations: &'a [crate::routing::evidence::RoutingObservation],
     ) -> Self {
         self.observations = Some(observations);
+        self
+    }
+
+    /// How many of this project's own sessions were charged to each
+    /// entitlement, keyed by entitlement name — map line 1245's "historical
+    /// sessions" input to the subscription-headroom estimator.
+    pub fn with_session_counts(
+        mut self,
+        counts: &'a std::collections::BTreeMap<String, usize>,
+    ) -> Self {
+        self.session_counts = Some(counts);
         self
     }
 }
@@ -5273,6 +5348,7 @@ impl<'a> EffectiveConfig<'a> {
                 throttling: None,
                 models: None,
                 spend: None,
+                headroom_estimate: None,
             });
         }
         Ok(resolved)

@@ -70,6 +70,7 @@ pub mod request;
 pub mod session;
 
 use crate::provider::quota::CapacityBand;
+use crate::routing::evidence::SubscriptionHeadroomEstimate;
 use crate::secret::SecretRef;
 
 /// Which credential, by name — never by value.
@@ -1117,6 +1118,12 @@ pub struct Entitlement {
     /// [`EntitlementRules::spend_ceiling_tokens`] is compared. `None` is
     /// unknown — nothing consulted the ledger — never "nothing spent".
     spend: Option<EntitlementSpendFacet>,
+    /// Map lines 1244/1245/1246/1250/1251/1254's subscription-headroom
+    /// estimate — carried here so a routing explanation or a pool view can
+    /// render it, never so scoring is wired to it: this package attaches the
+    /// facet, and does not change what any score term reads. `None` is
+    /// unknown, the same rule as every facet above.
+    headroom_estimate: Option<SubscriptionHeadroomEstimate>,
 }
 
 impl Entitlement {
@@ -1136,6 +1143,7 @@ impl Entitlement {
             models: None,
             source: EntitlementSource::Unstated,
             spend: None,
+            headroom_estimate: None,
         }
     }
 
@@ -1197,6 +1205,21 @@ impl Entitlement {
         self
     }
 
+    /// Attach the subscription-headroom estimate — map lines
+    /// 1244/1245/1246/1250/1251/1254. `None` is unknown, the same rule as
+    /// every facet above; the one production caller is
+    /// `crate::config::ResolvedEntitlement::to_routing`, which never sets
+    /// this alongside a `capacity_band` that already reads a true
+    /// per-account reading.
+    #[must_use]
+    pub fn with_headroom_estimate(
+        mut self,
+        headroom_estimate: Option<SubscriptionHeadroomEstimate>,
+    ) -> Self {
+        self.headroom_estimate = headroom_estimate;
+        self
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -1233,6 +1256,10 @@ impl Entitlement {
 
     pub fn spend(&self) -> Option<&EntitlementSpendFacet> {
         self.spend.as_ref()
+    }
+
+    pub fn headroom_estimate(&self) -> Option<&SubscriptionHeadroomEstimate> {
+        self.headroom_estimate.as_ref()
     }
 
     /// Map line 1971's spend half, as the hard constraint the router raises:

@@ -10866,9 +10866,31 @@ fn entitlement_pool_with_telemetry(
             );
         })
         .ok();
+    // Map line 1245's "historical sessions" input to the headroom estimator
+    // — this project's own count of sessions charged to each account
+    // (`sessions.entitlement`, migration 22), read fail-soft exactly like
+    // the ledger rows above: a project whose sessions store will not open
+    // still gets its pool, with the estimator simply missing this one input.
+    let session_counts: std::collections::BTreeMap<String, usize> = ProjectSessions::open(runtime)
+        .and_then(|sessions| Ok(sessions.store().list()?))
+        .map_err(|err| {
+            tracing::debug!(
+                error = %err,
+                "could not read the project sessions for the entitlement pool"
+            );
+        })
+        .unwrap_or_default()
+        .into_iter()
+        .filter_map(|record| record.entitlement)
+        .fold(std::collections::BTreeMap::new(), |mut counts, name| {
+            *counts.entry(name).or_insert(0) += 1;
+            counts
+        });
+
     let mut telemetry = glasshouse::config::EntitlementTelemetry::new(now_unix)
         .with_gateway_quota(&quota_cache)
-        .with_model_catalogues(&model_cache);
+        .with_model_catalogues(&model_cache)
+        .with_session_counts(&session_counts);
     if let Some(observations) = observations.as_deref() {
         telemetry = telemetry.with_observations(observations);
     }
@@ -11011,6 +11033,7 @@ fn entitlement_facets(
     thresholds: &glasshouse::provider::quota::CapacityBandThresholds,
 ) -> String {
     use glasshouse::config::{EntitlementModels, TelemetryScope};
+    use glasshouse::routing::evidence::{HeadroomBand, HeadroomBasis};
 
     let scope_note = |scope: TelemetryScope| format!(" ({})", scope.as_str());
 
@@ -11061,7 +11084,37 @@ fn entitlement_facets(
         None => "models: unknown".to_owned(),
     };
 
-    format!("{capacity} · {reset} · {throttling} · {models}")
+    // Map lines 1244/1245/1246/1250/1251/1254's headroom estimate — always
+    // labelled `estimate` and never merged into `capacity`, exactly the
+    // "never dressed as an authoritative reading" the packet asks for.
+    // Never a number: a band, its confidence, its basis, and whose reading
+    // it is.
+    let headroom_estimate = match entry.headroom_estimate() {
+        Some(estimate) => {
+            let band = match estimate.band {
+                HeadroomBand::Exhausted => "exhausted",
+                HeadroomBand::Low => "low",
+                HeadroomBand::Moderate => "moderate",
+                HeadroomBand::Ample => "ample",
+            };
+            let basis = match estimate.basis {
+                HeadroomBasis::RequestActivity => "request activity",
+                HeadroomBasis::TokenUsage => "token usage",
+            };
+            let scope = if estimate.account_narrowed {
+                "this account"
+            } else {
+                "provider-wide"
+            };
+            format!(
+                "headroom estimate: ~{band} ({scope}, {}, {basis})",
+                estimate.confidence.as_str()
+            )
+        }
+        None => "headroom estimate: unknown".to_owned(),
+    };
+
+    format!("{capacity} · {reset} · {throttling} · {models} · {headroom_estimate}")
 }
 
 /// One line of the session listing, header included.

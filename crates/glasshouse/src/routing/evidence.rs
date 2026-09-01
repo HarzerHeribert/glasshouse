@@ -1859,6 +1859,192 @@ pub fn recent_credential_spend(
     }
 }
 
+/// How recent a throttle must be to read as still-live pressure rather than
+/// history the window happens to still hold, and how close a reset must sit
+/// to count as imminent relief — map line 1245's "recency", one horizon for
+/// both questions rather than a second invented number: an hour is the
+/// shortest cadence window this project's own throttle producers actually
+/// observe (`crate::gateway::session`'s own per-window limiters), so a
+/// throttle or a reset outside it says nothing about the account's *current*
+/// pressure.
+pub const RECENT_SIGNAL_HORIZON_SECONDS: i64 = 3_600;
+
+/// Map lines 1244/1245/1246/1250/1251/1254's estimator output: never a bare
+/// number.
+///
+/// # Why a band, never a percentage
+///
+/// [`crate::provider::quota::Percentage`] already refuses to label an
+/// inferred capacity figure as exact (capability map line 1234); this type
+/// goes one step further and carries no number at all, because none of its
+/// inputs — accepted-request counts, throttle recency, session history — has
+/// a natural denominator to divide by. A computed percentage would be a real
+/// number glued to an invented scale, exactly what line 1251 forbids for
+/// opaque token counts and what this type refuses to make representable for
+/// the same reason.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeadroomBand {
+    /// A throttle inside [`RECENT_SIGNAL_HORIZON_SECONDS`] of `now`, with no
+    /// reset imminent to relieve it.
+    Exhausted,
+    /// A throttle fell inside the window — recently, with a reset close
+    /// behind it to soften the reading, or earlier and not repeated since.
+    Low,
+    /// Neither pressure nor activity was observed. A reset reading with
+    /// nothing else behind it lands exactly here: real evidence the account
+    /// is quota-bound, and none at all that it is under pressure right now.
+    Moderate,
+    /// Requests were accepted, or this project's own session history served
+    /// this account, and no throttle fell in the window.
+    Ample,
+}
+
+/// What kind of row [`estimate_subscription_headroom`] actually had to work
+/// with — carried on the returned value so an opaque-limit account (map line
+/// 1244: no token budget its provider will ever publish) and an account
+/// whose rows happen to carry a token count render differently, without
+/// either claiming more than the estimate has.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeadroomBasis {
+    /// No scoped row carried a token count. Accepted-request counts, throttle
+    /// recency, reset behavior and session history are exactly what an
+    /// opaque-limit account can supply, and this estimator asks nothing more
+    /// of it.
+    RequestActivity,
+    /// At least one scoped row carried a token count. Recorded as a label
+    /// only: map line 1251 forbids turning a raw count into a fictitious
+    /// exact figure with no stated ceiling to divide it by, and this
+    /// estimator does not duplicate the ceiling check
+    /// [`crate::routing::Entitlement::spend_constraint`] already makes — a
+    /// carried token count changes this label alone, never the band.
+    TokenUsage,
+}
+
+/// Map line 1245's estimate, in full: a [`HeadroomBand`], the confidence it
+/// is worth, what it was built from, and whose reading it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SubscriptionHeadroomEstimate {
+    pub band: HeadroomBand,
+    /// Always [`Confidence::Low`] today — every signal behind this estimate
+    /// is Glasshouse's own inference over its own recorded activity, never
+    /// the provider's stated word. That is [`Confidence::Low`]'s own
+    /// definition: *"derived, with no measurement of this quantity behind it
+    /// at all."*
+    pub confidence: Confidence,
+    pub basis: HeadroomBasis,
+    /// Map line 1246's keying rule, reused verbatim from
+    /// [`recent_credential_throttles`]: `true` only when every informative
+    /// row this estimate drew from named its own account; widened to
+    /// provider scope the moment one does not.
+    pub account_narrowed: bool,
+}
+
+/// Map line 1245's estimator, and lines 1244/1246/1250/1251/1254 with it —
+/// see [`SubscriptionHeadroomEstimate`] and [`HeadroomBand`] for the type's
+/// own honesty rules. No new table, no migration, no persisted estimator
+/// state: every call re-derives the estimate from rows the caller already
+/// holds, the same "today's history IS the ledger's own rows in window"
+/// premise every other reader in this module keeps.
+///
+/// Reads five things, none of them queried here:
+///
+/// - **accepted-request counts** and **throttle events with their
+///   recency**, from `observations` — this provider's own informative rows
+///   (`outcome.is_some()`, excluding [`CORRELATION_PURPOSE`] rows, the same
+///   filter [`classify_throttle_scope`] applies), narrowed to
+///   `credential_label` by the widen-when-unsure rule
+///   [`recent_credential_throttles`] and [`recent_credential_spend`] already
+///   apply: only when **every** informative row names its account does the
+///   count narrow, and one contextless row widens the whole estimate to
+///   provider scope rather than silently dropping it (map line 1246);
+/// - **token usage where rows carry it** — never turned into a figure, only
+///   recorded on the returned value's [`HeadroomBasis`] (line 1251);
+/// - **reset behavior**, as `seconds_until_reset` — the caller's own
+///   gateway-quota-cache reading, already computed for the provider-wide
+///   capacity facet and handed in rather than re-read;
+/// - **historical sessions**, as `recent_session_count` — this project's own
+///   count of sessions charged to this account (`sessions.entitlement`,
+///   migration 22), read by the caller and handed in: this function stays a
+///   pure read over values already fetched, the shape every other reader in
+///   this module keeps.
+///
+/// `None` — unknown — when nothing at all is available: no informative row,
+/// no session count, no reset reading. An account this genuinely unmeasured
+/// is not "exhausted" and not "ample"; it is unmeasured, the 32B line-1239
+/// discipline every other facet on `ResolvedEntitlement` already keeps.
+pub fn estimate_subscription_headroom(
+    observations: &[RoutingObservation],
+    provider: &str,
+    credential_label: Option<&str>,
+    now_unix: i64,
+    seconds_until_reset: Option<i64>,
+    recent_session_count: Option<usize>,
+) -> Option<SubscriptionHeadroomEstimate> {
+    let informative: Vec<&RoutingObservation> = observations
+        .iter()
+        .filter(|row| row.provider == provider)
+        .filter(|row| row.outcome.is_some() && row.purpose.as_deref() != Some(CORRELATION_PURPOSE))
+        .collect();
+
+    let every_row_names_its_account =
+        !informative.is_empty() && informative.iter().all(|row| row.quota_context.is_some());
+    let account_narrowed = credential_label.is_some() && every_row_names_its_account;
+
+    let scoped: Vec<&RoutingObservation> = if account_narrowed {
+        informative
+            .into_iter()
+            .filter(|row| row.quota_context.as_deref() == credential_label)
+            .collect()
+    } else {
+        informative
+    };
+
+    let accepted = scoped
+        .iter()
+        .filter(|row| row.outcome == Some(Outcome::Succeeded))
+        .count();
+    let most_recent_throttle_age = scoped
+        .iter()
+        .filter(|row| row.failure_class == Some(FailureClass::Throttle))
+        .map(|row| now_unix.saturating_sub(row.observed_at_unix))
+        .min();
+    let carried_tokens = scoped
+        .iter()
+        .any(|row| row.input_tokens.is_some() || row.output_tokens.is_some());
+
+    let session_count = recent_session_count.unwrap_or(0);
+
+    if scoped.is_empty() && session_count == 0 && seconds_until_reset.is_none() {
+        return None;
+    }
+
+    let recent_pressure =
+        most_recent_throttle_age.is_some_and(|age| age <= RECENT_SIGNAL_HORIZON_SECONDS);
+    let any_pressure = most_recent_throttle_age.is_some();
+    let reset_imminent = seconds_until_reset
+        .is_some_and(|seconds| (0..=RECENT_SIGNAL_HORIZON_SECONDS).contains(&seconds));
+    let has_activity = accepted > 0 || session_count > 0;
+
+    let band = match (recent_pressure, any_pressure, reset_imminent, has_activity) {
+        (true, _, true, _) => HeadroomBand::Low,
+        (true, _, false, _) => HeadroomBand::Exhausted,
+        (false, true, _, _) => HeadroomBand::Low,
+        (false, false, _, true) => HeadroomBand::Ample,
+        (false, false, _, false) => HeadroomBand::Moderate,
+    };
+
+    Some(SubscriptionHeadroomEstimate {
+        band,
+        confidence: Confidence::Low,
+        basis: if carried_tokens {
+            HeadroomBasis::TokenUsage
+        } else {
+            HeadroomBasis::RequestActivity
+        },
+        account_narrowed,
+    })
+}
+
 /// Request and token consumption for one `(purpose, harness_recorded)`
 /// group, within a queried window — capability map line 1464's "measure
 /// routing-model token and request consumption separately from coding-agent
