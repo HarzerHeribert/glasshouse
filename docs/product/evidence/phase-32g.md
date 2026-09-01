@@ -6,7 +6,7 @@ anywhere in this build.** The census — which line is blocked by what, read
 rather than assumed — is in `docs/process/refusal-register.md` under
 *"Phase 32G — the census"*.
 
-# Lines 1305, 1306 — MECHANISM LANDED, BOTH BOXES HELD OPEN 2026-09-01
+# Lines 1305, 1306 — mechanism landed, both boxes HELD OPEN (superseded below, same day)
 
 Package `GH-PRICING-CHANNEL` (Sonnet, high, Amber; batch 76). §83's
 *"attack the channel, not the lines waiting on it"*: the eight other lines
@@ -80,3 +80,79 @@ used in a routing decision"* — `RoutingObservation` already carries
 `EvidenceLedger::record` already accepts it; its production writers are
 `main.rs:1678` and `:1730`. Both halves live in `main.rs` and both are
 additive to the wiring above.
+
+
+# Lines 1305, 1306 — COMPLETE 2026-09-01; the held boxes close on a shipped-binary observation
+
+Package `GH-PRICING-RECORDED` (Sonnet, high, Amber; batch 77). **This package
+changed no production code at all** — 161 insertions, all in
+`crates/glasshouse/tests/route_command.rs` — which is exactly what the
+holding ruling above asked for. The mechanism was already right; what was
+missing was somebody watching it work in the real binary.
+
+Four tests, on the shipped binary's own fixture (a planted harness on PATH,
+an argv log, a real config dir), with `plant_pricing` writing `pricing.toml`
+where `PriceTable::load_from_dir` actually resolves it — so the orchestrator's
+`session_router` wiring is exercised end to end rather than asserted:
+
+- **1306** — `a_pricing_toml_this_binary_was_never_compiled_with_reaches_the_real_route_output`:
+  a provider/model this binary has no compiled knowledge of, and the real
+  `glasshouse route` output contains *"its price is known"*, *"$3.00 per
+  million input tokens"* and *"$9.00 per million output tokens"* — the exact
+  figures from the planted file.
+- **1306** — `correcting_the_price_in_the_file_changes_the_next_runs_real_output`:
+  `$1.00`/`$2.00` before, `$5.00`/`$20.00` after, **and a negative assertion
+  that the old figure is gone**. Updated independently of the router, with no
+  recompilation, which is the line's whole claim.
+- **1305** — `unknown_and_free_are_textually_distinct_in_the_real_route_output`:
+  *"its price is unknown"* for a metered destination with no entry, *"is a
+  zero-cost resource"* for a free one. The distinction the line exists for,
+  in real output rather than at an API boundary.
+- **1305** — `with_no_pricing_toml_the_base_fixture_still_says_unknown_never_a_fabricated_zero`:
+  the default state of every user who has not written the file.
+
+`route_command` goes 39 → **43 passed, 0 failed**. Mutations were not re-run
+and correctly so: the report claims no production code changed, and
+`git diff --stat` confirms one test file — so `GH-PRICING-CHANNEL`'s two
+KILLED mutations still stand over the same production source.
+
+**Recorded limits, kept.** Proven at the `SessionStart` moment (no `--task`,
+`movement = None`); a tier-movement moment takes a separate documented
+zero-priced early return (`session.rs:1254-1261`) and was not exercised —
+expected behaviour, not a gap. macOS and Linux locally; the Windows VM leg
+was not run.
+
+**Why this is worth a paragraph in its own right.** The holding ruling cost
+one extra package and produced a proof that the API-level tests could not
+give. Eleven times in this project a box has been ticked whose mechanism was
+real and whose reachability was not, and ten of those were found later by an
+audit worker. This is the one that was caught first, and the follow-up that
+closed it took a Sonnet under half an hour.
+
+# Line 1307 — REFUSED 2026-09-01, and the refusal corrected the register
+
+`GH-PRICING-RECORDED` was also asked to give
+`routing_observations.cost_micro_usd` its first producer. **It refused, and
+it was right to.** The orchestrator's own register row had called 1307
+*"not refused, and closer than any row here"* because `RoutingObservation::cost`
+and `EvidenceLedger::record` both already exist. They do, and it does not
+help:
+
+- `record_tier_movement` (`main.rs:~1651`) receives **no `Destination` at
+  all** — `TierMovement` carries tier labels and reasons, nothing priceable.
+- `record_entitlement_fallback` (`main.rs:~1698`) does receive one, so
+  `PriceTable::price_for` answers there — **but a per-million-token rate is
+  not a cost without a token count to multiply it by.** Writing a rate into a
+  column documented as a monetary reading would misrepresent `ObservedCost`
+  and make the line's own *"compare estimate against actual usage"*
+  meaningless.
+- A crate-wide grep for any reachable size estimator found none; the single
+  hit, `firewall::store::original_token_estimate`, belongs to the context
+  firewall and is not in scope at any routing call site.
+
+The packet told the worker not to fabricate a second estimate when the value
+is not in scope at the writer, and it followed that instead of producing a
+green box. **1307 therefore joins 1298, 1299 and 1304 waiting on one thing:
+an input-size producer at the routing decision point.** That single producer
+unblocks four of this phase's ten lines. The register's Phase 32G census has
+been corrected accordingly.

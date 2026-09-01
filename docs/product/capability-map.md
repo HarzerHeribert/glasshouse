@@ -1302,8 +1302,8 @@ Phase 32G — Provider-aware request-cost estimation
 ☐ Estimate request-pool cost for free providers whose scarce unit is requests rather than tokens.
 ☐ Estimate local compute cost qualitatively through latency and occupancy instead of pretending local tokens are financially free of all cost.
 ☐ Include bootstrap context, project memory, checkpoints, and likely repository reads in fresh-session cost estimates when possible.
-☐ Treat unknown pricing as unknown instead of assigning a fake zero cost.
-☐ Allow provider price metadata to be updated independently from the router implementation.
+☑ Treat unknown pricing as unknown instead of assigning a fake zero cost.
+☑ Allow provider price metadata to be updated independently from the router implementation.
 ☐ Record the estimated cost used in a routing decision so later evaluation can compare estimate against actual usage.
 
 Phase 33 — Resource health

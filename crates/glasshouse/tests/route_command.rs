@@ -2417,3 +2417,164 @@ fn two_readings_that_disagree_about_one_resource_leave_it_unobserved() {
          of them the file happened to list first:\n{explained}"
     );
 }
+
+// --- lines 1305/1306: a real `pricing.toml`, read by the shipped binary ----
+//
+// `tests/routing_pricing.rs` already proves the mechanism against
+// `SessionRouter`'s own public API: `PriceTable::load_from_dir`, attached
+// with `with_price_table`, changes `expected marginal cost`'s evidence.
+// Nothing there proves anything calls it — `docs/product/evidence/
+// phase-32g.md` held both boxes open for exactly that gap, after a live
+// `glasshouse route --task` attempt produced no ranked candidate at all for
+// an unrelated reason and was abandoned rather than dug into. These tests
+// are that missing shipped-binary observation: a real `pricing.toml` on a
+// real disk, read by `session_router` (`main.rs:~3597`) through `--config-dir`,
+// with its price reaching `glasshouse route`'s real stdout.
+
+/// One more provider than the base fixture, and two profiles that differ in
+/// nothing the router scores except cost: `priced` names a provider/model no
+/// compiled template or any other test in this file has ever named, so its
+/// price can only ever come from `pricing.toml` — never from anything this
+/// binary shipped with. `free` is marked free-tier by the user's own
+/// `free_models` configuration, so 1305's other half — a *known* zero,
+/// textually distinct from an *unknown* price — has a real destination to
+/// render it.
+const PRICING_PROFILES: &str = "\n\
+     [providers.pricing-probe]\ntemplate = \"openrouter\"\n\
+     credential_env = [\"GLASSHOUSE_ROUTE_TEST_KEY\"]\n\
+     free_models = [\"pricing-test-free-model\"]\n\n\
+     [profiles.priced]\nharness = \"claude-code\"\n\
+     expected_protocol = \"anthropic-messages\"\n\
+     model = \"pricing-test-unrecognized-model\"\n\n\
+     [profiles.priced.backend]\nkind = \"direct-provider\"\n\
+     provider = \"pricing-probe\"\n\n\
+     [profiles.free]\nharness = \"claude-code\"\n\
+     expected_protocol = \"anthropic-messages\"\n\
+     model = \"pricing-test-free-model\"\n\n\
+     [profiles.free.backend]\nkind = \"direct-provider\"\n\
+     provider = \"pricing-probe\"\n";
+
+/// Write `pricing.toml` where `PriceTable::load_from_dir` resolves it from
+/// this fixture's own `--config-dir` — the same directory `config.toml`
+/// already lives in.
+fn plant_pricing(fixture: &Fixture, contents: &str) {
+    std::fs::write(
+        fixture
+            .base
+            .join("config")
+            .join(glasshouse::provider::pricing::PRICING_FILE_NAME),
+        contents,
+    )
+    .expect("write pricing.toml");
+}
+
+/// 1306: a price named only in `pricing.toml` — a provider/model this binary
+/// has no compiled knowledge of — reaches `glasshouse route`'s real output,
+/// with no recompilation.
+#[test]
+fn a_pricing_toml_this_binary_was_never_compiled_with_reaches_the_real_route_output() {
+    let fixture = Fixture::with_extra_config(PRICING_PROFILES);
+    plant_pricing(
+        &fixture,
+        r#"
+        [[prices]]
+        provider = "pricing-probe"
+        model = "pricing-test-unrecognized-model"
+        input_per_million_usd = 3.0
+        output_per_million_usd = 9.0
+        "#,
+    );
+
+    let report = fixture.stdout(&["route"]);
+    assert!(
+        report.contains("its price is known")
+            && report.contains("$3.00 per million input tokens")
+            && report.contains("$9.00 per million output tokens"),
+        "a price named only in `pricing.toml` — never compiled into this binary — must \
+         reach `glasshouse route`'s real output:\n{report}"
+    );
+}
+
+/// 1306's other half: correcting the number in the file changes the very
+/// next run's real output, with no rebuild in between.
+#[test]
+fn correcting_the_price_in_the_file_changes_the_next_runs_real_output() {
+    let fixture = Fixture::with_extra_config(PRICING_PROFILES);
+    plant_pricing(
+        &fixture,
+        r#"
+        [[prices]]
+        provider = "pricing-probe"
+        model = "pricing-test-unrecognized-model"
+        input_per_million_usd = 1.0
+        output_per_million_usd = 2.0
+        "#,
+    );
+    let before = fixture.stdout(&["route"]);
+    assert!(
+        before.contains("$1.00 per million input tokens")
+            && before.contains("$2.00 per million output tokens"),
+        "the first run must reflect the first price:\n{before}"
+    );
+
+    plant_pricing(
+        &fixture,
+        r#"
+        [[prices]]
+        provider = "pricing-probe"
+        model = "pricing-test-unrecognized-model"
+        input_per_million_usd = 5.0
+        output_per_million_usd = 20.0
+        "#,
+    );
+    let after = fixture.stdout(&["route"]);
+    assert!(
+        after.contains("$5.00 per million input tokens")
+            && after.contains("$20.00 per million output tokens"),
+        "a corrected price must reach the very next run, with no rebuild in between:\n{after}"
+    );
+    assert!(
+        !after.contains("$1.00 per million input tokens"),
+        "the stale price must not linger in the next run's real output:\n{after}"
+    );
+}
+
+/// 1305, through the shipped binary: a metered destination with no price
+/// entry renders as *unknown*, a free one renders a *known* zero, and the
+/// two are textually distinct in the same real report.
+#[test]
+fn unknown_and_free_are_textually_distinct_in_the_real_route_output() {
+    let fixture = Fixture::with_extra_config(PRICING_PROFILES);
+    // No `pricing.toml` at all: `priced` is metered and nothing names it.
+
+    let report = fixture.stdout(&["route"]);
+    assert!(
+        report.contains("its price is unknown"),
+        "a metered destination with no price entry must say so in the real report:\n{report}"
+    );
+    assert!(
+        report.contains("is a zero-cost resource"),
+        "a free destination must still render a known zero in the same real report:\n{report}"
+    );
+}
+
+/// Regression, and the whole reason both boxes above stayed open until a
+/// shipped-binary run proved it: a project with no `pricing.toml` at all
+/// sees `expected marginal cost` render exactly as it did before
+/// `PriceTable` existed (`2b2ae43`) — a metered destination with nothing
+/// naming its price says so, and nothing is ever assigned a fabricated zero.
+#[test]
+fn with_no_pricing_toml_the_base_fixture_still_says_unknown_never_a_fabricated_zero() {
+    let fixture = Fixture::new();
+    let report = fixture.stdout(&["route"]);
+    assert!(
+        report.contains("its price is unknown"),
+        "a project with no `pricing.toml` at all must still say a metered destination's \
+         price is unknown, never assign it a fabricated zero:\n{report}"
+    );
+    assert!(
+        !report.contains("is a zero-cost resource"),
+        "neither of the base fixture's profiles is marked free-tier, so nothing in this \
+         report may render a known zero:\n{report}"
+    );
+}
