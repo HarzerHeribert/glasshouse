@@ -1151,6 +1151,7 @@ fn a_material_change_in_resource_conditions_re_runs_classification() {
             model: "the harness's own default".to_owned(),
             consecutive_failures: 1,
             cooling_down_until_unix: None,
+            cooldown_cause: None,
             credential_rejected: false,
         }],
         now_unix(),

@@ -429,6 +429,7 @@ fn seed_gateway_telemetry(fixture: &Fixture) {
             // of `SIZES` — the assertion is about the provider's stated
             // window crossing, not about how the view wraps.
             cooling_down_until_unix: None,
+            cooldown_cause: None,
             credential_rejected: true,
         }],
         now,

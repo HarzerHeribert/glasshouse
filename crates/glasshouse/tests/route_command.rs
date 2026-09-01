@@ -1777,6 +1777,7 @@ fn health_reading(
         model: HARNESS_DEFAULT_MODEL.to_owned(),
         consecutive_failures,
         cooling_down_until_unix,
+        cooldown_cause: None,
         credential_rejected,
     }
 }

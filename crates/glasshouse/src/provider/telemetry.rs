@@ -1538,6 +1538,13 @@ pub struct GatewayHealthReading {
     /// field is what lets a reader tell the two apart without inventing a
     /// verdict.
     pub cooling_down_until_unix: Option<i64>,
+    /// Which kind of cooldown `cooling_down_until_unix` is, or `None` when
+    /// there is no cooldown, or the file predates this field — capability
+    /// map line 1546's bridge. `#[serde(default)]` so a cache file written
+    /// by an older build, which has no such key, still deserializes as
+    /// cause-unknown rather than failing.
+    #[serde(default)]
+    pub cooldown_cause: Option<crate::routing::free::CooldownCause>,
     pub credential_rejected: bool,
 }
 
@@ -1814,6 +1821,7 @@ mod gateway_health_cache_tests {
             model: "anyrouter/free-model".to_owned(),
             consecutive_failures: 2,
             cooling_down_until_unix: Some(1_787_800_600),
+            cooldown_cause: Some(crate::routing::free::CooldownCause::Declared),
             credential_rejected: false,
         }];
         cache.store("anyrouter", &entries, 1_787_800_000);
@@ -1835,6 +1843,7 @@ mod gateway_health_cache_tests {
             model: "anyrouter/free-model".to_owned(),
             consecutive_failures: 0,
             cooling_down_until_unix: None,
+            cooldown_cause: None,
             credential_rejected: false,
         }];
         cache.store("anyrouter", &entries, 1_787_800_000);
@@ -1856,6 +1865,7 @@ mod gateway_health_cache_tests {
                 model: "anyrouter/free-model".to_owned(),
                 consecutive_failures: 1,
                 cooling_down_until_unix: None,
+                cooldown_cause: None,
                 credential_rejected: false,
             }],
             1_787_800_000,
@@ -1886,6 +1896,7 @@ mod gateway_health_cache_tests {
                 model: "anyrouter/free-model".to_owned(),
                 consecutive_failures: 1,
                 cooling_down_until_unix: None,
+                cooldown_cause: None,
                 credential_rejected: false,
             }],
             1_787_800_000,
@@ -1913,6 +1924,7 @@ mod gateway_health_cache_tests {
             model: "anyrouter/free-model".to_owned(),
             consecutive_failures: 0,
             cooling_down_until_unix: None,
+            cooldown_cause: None,
             credential_rejected: false,
         };
         assert!(healthy.is_available(1_787_800_000));

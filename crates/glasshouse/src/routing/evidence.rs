@@ -4032,6 +4032,60 @@ mod tests {
         assert_eq!(summary.failure_classes.observed(), 2);
     }
 
+    /// Line 1359: fall back to coarse process-level latency and outcome
+    /// observations when a harness exposes no structured token or tool
+    /// events. Every row here carries only timing and outcome —
+    /// `first_token_at`, `first_tool_call_at` and `tool_rounds` are all
+    /// `None`, the shape every observation on this project has always had
+    /// (the structured path has never actually run) — and `summarize` must
+    /// still produce a usable aggregate from them rather than treating an
+    /// all-`None`-structured row as unusable.
+    #[test]
+    fn summarize_produces_a_usable_aggregate_from_coarse_only_observations() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let ledger = fixture.ledger();
+
+        for (i, at) in [1_000, 1_010, 1_020, 1_030, 1_040].into_iter().enumerate() {
+            let dispatched_at = at;
+            let completed_at = at + 5;
+            let new = observation("anyrouter", "claude-opus-4-1")
+                .with_timing(Some(dispatched_at), Some(completed_at))
+                .with_outcome(Outcome::Succeeded);
+            assert!(new.first_token_at_unix.is_none());
+            assert!(new.first_tool_call_at_unix.is_none());
+            assert!(new.tool_rounds.is_none());
+            ledger.record(new, at + i as i64).unwrap();
+        }
+
+        let summary = ledger
+            .summarize(
+                ObservationQuery {
+                    provider: "anyrouter",
+                    model: "claude-opus-4-1",
+                    route: Some("anthropic-messages"),
+                    harness: Some("claude-code"),
+                },
+                ContextState::Unknown,
+                2_000,
+                2_000,
+            )
+            .unwrap();
+
+        assert!(
+            summary.median_duration_ms.is_some(),
+            "coarse timing alone must produce a duration aggregate, not a skip"
+        );
+        assert!(
+            summary.ewma_duration_ms.is_some(),
+            "coarse timing alone must produce an ewma aggregate, not a skip"
+        );
+        assert!(
+            summary.failure_rate.is_some(),
+            "coarse outcomes alone must produce a failure rate, not a skip"
+        );
+    }
+
     /// [`EvidenceLedger::failure_classes_by_provider`] counts every model,
     /// route and harness of a provider together, within the window only, and
     /// leaves an outcome-less row (the extraction producer's shape) out.

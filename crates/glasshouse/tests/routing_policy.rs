@@ -1282,6 +1282,8 @@ mod command_dispatch {
 mod cadence_availability_scoring {
     use super::*;
     use glasshouse::integrations::IntegrationId;
+    use glasshouse::provider::telemetry::GatewayHealthReading;
+    use glasshouse::routing::free::CooldownCause;
     use glasshouse::routing::session::{Destination, cadence_availability, provider_health};
 
     fn destination(provider: &str, model: &str) -> Destination {
@@ -1405,6 +1407,211 @@ mod cadence_availability_scoring {
             health.magnitude(),
             0.0,
             "Served must also clear the general health history the same outcome always clears"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Line 1546's hold ruling (docs/product/evidence/phase-35b.md): the
+    // mechanism above was real but structurally inert, because
+    // `GatewayHealthReading` carried no `cooldown_cause` and every
+    // production consumer of `cadence_availability` reads a pool built by
+    // `FreePool::adopt_observed` from a *persisted* reading, never a
+    // directly-observed one. These three tests drive the value across that
+    // exact boundary — `health_readings_for`'s own construction, a real JSON
+    // round trip, and `adopt_observed` — rather than constructing a
+    // `ResourceHealth` on the far side and asserting the policy reads it,
+    // which was already provable before this package and proved nothing
+    // about production reach.
+    // -------------------------------------------------------------------
+
+    /// Build the reading exactly the way
+    /// `SessionRouting::health_readings_for` (`gateway/session.rs:332`)
+    /// does, so the "crossing" in each test below is the real write side,
+    /// not a shortcut around it.
+    fn reading_for(
+        resource: &FreeResource,
+        health: &glasshouse::routing::free::ResourceHealth,
+        now: Instant,
+        now_unix: i64,
+    ) -> GatewayHealthReading {
+        GatewayHealthReading {
+            credential_label: resource.credential().label(),
+            model: resource.model().to_owned(),
+            consecutive_failures: health.consecutive_failures(),
+            cooling_down_until_unix: health
+                .cooling_down_until()
+                .map(|until| now_unix + until.saturating_duration_since(now).as_secs() as i64),
+            cooldown_cause: health.cooldown_cause(),
+            credential_rejected: health.credential_was_rejected(),
+        }
+    }
+
+    /// The crossing test: a resource in a declared wait must still score
+    /// strictly worse on cadence after its reading has been built the way
+    /// the gateway builds it, serialized to JSON, deserialized back, and
+    /// adopted into a fresh pool via `adopt_observed` — the exact path
+    /// `main.rs`'s router takes. Before this package this assertion was
+    /// impossible to make truthfully: `adopt_observed` hardcoded the cause
+    /// to `None` regardless of what crossed.
+    #[test]
+    fn a_declared_wait_crosses_the_process_boundary_and_still_scores_worse_on_cadence() {
+        let now = Instant::now();
+        let now_unix = 1_800_000_000i64;
+        let waiting = free_resource("openrouter", "free-model");
+
+        let mut pool = FreePool::new();
+        pool.observe(
+            &waiting,
+            WorkloadOutcome::RateLimited {
+                retry_after: Some(Duration::from_secs(60)),
+            },
+            now,
+        );
+        let health = pool.health(&waiting);
+        assert_eq!(
+            health.cooldown_cause(),
+            Some(CooldownCause::Declared),
+            "premise: a stated retry_after must record a declared cause"
+        );
+
+        let reading = reading_for(&waiting, &health, now, now_unix);
+        let bytes = serde_json::to_vec(&reading).expect("a reading serializes");
+        let crossed: GatewayHealthReading =
+            serde_json::from_slice(&bytes).expect("a reading round-trips");
+
+        let mut adopted = FreePool::new();
+        adopted.adopt_observed(
+            &waiting,
+            crossed.consecutive_failures,
+            crossed.cooling_down_until(now, now_unix),
+            crossed.cooldown_cause,
+            crossed.credential_rejected,
+        );
+
+        let waiting_dest = destination("openrouter", "free-model");
+        let untouched_dest = destination("openrouter", "other-model");
+
+        let waiting_cadence = cadence_availability(&waiting_dest, &adopted, now);
+        let untouched_cadence = cadence_availability(&untouched_dest, &adopted, now);
+
+        assert!(
+            waiting_cadence.magnitude() < untouched_cadence.magnitude(),
+            "a declared wait that crossed the process boundary must still score strictly worse \
+             on cadence than an untouched resource: {} vs {}",
+            waiting_cadence.magnitude(),
+            untouched_cadence.magnitude()
+        );
+    }
+
+    /// The invented case still crosses as inert: an invented cooldown is
+    /// Glasshouse's own caution, never a provider cadence claim, and that
+    /// must hold after the same round trip — while `provider_health`, which
+    /// reads the ordinary failure history rather than the cause, still
+    /// reflects the failures.
+    #[test]
+    fn an_invented_cooldown_crosses_as_inert_while_provider_health_still_reflects_it() {
+        let now = Instant::now();
+        let now_unix = 1_800_000_000i64;
+        let it = free_resource("openrouter", "free-model");
+
+        let mut pool = FreePool::new();
+        for _ in 0..FAILURES_BEFORE_COOLDOWN {
+            pool.observe(&it, WorkloadOutcome::CapacityFailure, now);
+        }
+        let health = pool.health(&it);
+        assert_eq!(
+            health.cooldown_cause(),
+            Some(CooldownCause::Invented),
+            "premise: repeated ordinary failures with no stated wait must invent a cooldown"
+        );
+
+        let reading = reading_for(&it, &health, now, now_unix);
+        let bytes = serde_json::to_vec(&reading).expect("a reading serializes");
+        let crossed: GatewayHealthReading =
+            serde_json::from_slice(&bytes).expect("a reading round-trips");
+
+        let mut adopted = FreePool::new();
+        adopted.adopt_observed(
+            &it,
+            crossed.consecutive_failures,
+            crossed.cooling_down_until(now, now_unix),
+            crossed.cooldown_cause,
+            crossed.credential_rejected,
+        );
+
+        let dest = destination("openrouter", "free-model");
+
+        let cadence = cadence_availability(&dest, &adopted, now);
+        assert_eq!(
+            cadence.magnitude(),
+            0.0,
+            "an invented cooldown must cross the boundary as inert, never as a cadence claim"
+        );
+
+        let provider = provider_health(&dest, &adopted, now);
+        assert!(
+            provider.magnitude() < 0.0,
+            "provider_health must still reflect the failures after adoption: got {}",
+            provider.magnitude()
+        );
+    }
+
+    /// An old cache file stays safe: a reading serialized with no
+    /// `cooldown_cause` key at all — the shape a build before this package
+    /// would have written — must still deserialize, and must adopt as
+    /// cause-unknown rather than failing or guessing. Cadence scores it
+    /// exactly as it did before this package existed.
+    #[test]
+    fn a_reading_with_no_cooldown_cause_key_deserializes_and_adopts_as_cause_unknown() {
+        let now = Instant::now();
+        let now_unix = 1_800_000_000i64;
+        let waiting = free_resource("openrouter", "free-model");
+
+        let mut pool = FreePool::new();
+        pool.observe(
+            &waiting,
+            WorkloadOutcome::RateLimited {
+                retry_after: Some(Duration::from_secs(60)),
+            },
+            now,
+        );
+        let health = pool.health(&waiting);
+
+        // The shape an older build actually wrote: no `cooldown_cause` key
+        // at all, not merely one set to `null`.
+        let value = serde_json::json!({
+            "credential_label": waiting.credential().label(),
+            "model": waiting.model(),
+            "consecutive_failures": health.consecutive_failures(),
+            "cooling_down_until_unix": health.cooling_down_until().map(|until| {
+                now_unix + until.saturating_duration_since(now).as_secs() as i64
+            }),
+            "credential_rejected": health.credential_was_rejected(),
+        });
+        let bytes = serde_json::to_vec(&value).expect("a reading serializes");
+        let crossed: GatewayHealthReading = serde_json::from_slice(&bytes)
+            .expect("a reading with no cooldown_cause key must still deserialize");
+        assert_eq!(
+            crossed.cooldown_cause, None,
+            "a reading with no cooldown_cause key must deserialize as cause-unknown"
+        );
+
+        let mut adopted = FreePool::new();
+        adopted.adopt_observed(
+            &waiting,
+            crossed.consecutive_failures,
+            crossed.cooling_down_until(now, now_unix),
+            crossed.cooldown_cause,
+            crossed.credential_rejected,
+        );
+
+        let dest = destination("openrouter", "free-model");
+        let cadence = cadence_availability(&dest, &adopted, now);
+        assert_eq!(
+            cadence.magnitude(),
+            0.0,
+            "an old cache file with no recorded cause must adopt as cause-unknown, scoring \
+             cadence as inert — today's behaviour, preserved for existing caches"
         );
     }
 }

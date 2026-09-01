@@ -1755,6 +1755,7 @@ mod tests {
             model: model.to_owned(),
             consecutive_failures,
             cooling_down_until_unix,
+            cooldown_cause: None,
             credential_rejected,
         }
     }

@@ -531,7 +531,9 @@ Packet error recorded: `cost_of` moved to `config/mod.rs:2870`.
 
 ---
 
-# Line 1546 — MECHANISM LANDED, BOX **HELD OPEN** 2026-09-02 (`GH-CADENCE-AVAILABILITY`)
+# Line 1546 — held 2026-09-02, **CLOSED the same night** by `GH-CADENCE-CROSSING` (see the end of this section)
+
+## The hold, kept because the reasoning is the point
 
 **The ledger's blocker was stale and the work is good. The box still does not
 tick, and the reason is production reach.**
@@ -610,3 +612,54 @@ Recorded limits carried into the hold:
 - The declared-case evidence string renders whole seconds, so a sub-second
   remainder is dropped from the *string* (never from the score, which is a flat
   penalty). Cosmetic.
+
+
+---
+
+## Line 1546 — CLOSED (`GH-CADENCE-CROSSING`, 2026-09-02)
+
+The hold above named its successor: carry `CooldownCause` across the process
+boundary so the scoring term actually fires. That is what landed.
+
+`GatewayHealthReading` (`provider/telemetry.rs`) gained an **optional**,
+serde-defaulted `cooldown_cause`, written by
+`SessionRouting::health_readings_for` (`gateway/session.rs:332`) off the same
+`ResourceHealth` it already reads `cooling_down_until()` from, and restored by
+`FreePool::adopt_observed` (`routing/free.rs:500`) — which now takes the cause
+instead of hardcoding `None`. **An absent cause still adopts as unknown**, so an
+old cache file behaves exactly as before. No migration: the store is a JSON
+cache, not a table.
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| `health_readings_for` writes the cause as `None` regardless | `cause-dropped-at-the-boundary` | **killed** | `gateway::session::tests::health_readings_for_carries_the_cooldown_cause_the_pool_already_recorded` |
+| `adopt_observed` treats an absent cause as `Declared` | `unknown-cause-adopted-as-declared` | **killed** | the old-cache-file acceptance test (`routing_policy.rs:1610`) |
+
+> observed: *"a provider-declared wait must cross as a recorded Declared cause, never dropped to None"*
+
+### Two corrections to the orchestrator's packet, both the worker's
+
+1. **The struct-field ripple was seven files, not the one the packet named.**
+   Every full-field-list `GatewayHealthReading { .. }` literal, all
+   `#[cfg(test)]`: `provider/resources.rs`, `shell/mod.rs`, and five test
+   files. The worker enumerated them, applied the same one-line fix the packet
+   pre-authorised for `shell/mod.rs`, and verified completeness with a grep
+   before and after plus a clean `--all-targets` build.
+
+2. **The packet's own acceptance test could not have killed the load-bearing
+   mutation, and the worker proved it rather than guessing.** The packet put
+   the crossing test in `tests/routing_policy.rs` and required it to kill a
+   mutation on `health_readings_for`, which is `pub(super)` — unreachable from
+   an external integration-test binary that links the crate and sees only `pub`
+   items. Written as specified, the test necessarily **hand-mirrors** the
+   field-mapping instead of calling it, and the mutation **SURVIVED**
+   (`34 passed; 0 failed` — nothing observed the mutated line at all). The
+   worker diagnosed the visibility cause, kept that test (it still proves the
+   adopt-and-score half after a real JSON round trip), and added a fourth test
+   inside `gateway/session.rs`'s own `#[cfg(test)] mod tests` that drives the
+   real `observe_exchange -> health_readings_for` path. **That** one kills it.
+
+**The rule, recorded because a false SURVIVED is worse than no mutation — it
+looks exactly like a real coverage gap:** *a mutation on a non-`pub` item needs
+its killing test in the same crate. Check the mutated item's visibility when
+writing the MUTATION section, and list that source file under EXPECTED FILES.*

@@ -92,9 +92,26 @@ watches what already ships.
   records dispatch/completion/outcome/failure-class/failovers/retries on every
   real exchange.
 
-**Dispatched as `GH-COARSE-FALLBACK` (Green) on 2026-09-02**, with a mutation per
-line: `failure-penalty-is-flat` (turns the additive penalty into the boolean the
-line distinguishes it from) and `coarse-observation-skipped`.
+**CLOSED 2026-09-02 by `GH-COARSE-FALLBACK` (Green).** No production line
+changed — both capabilities already shipped; what was missing was a test that
+watches each.
+
+| line | mutation | result | killed by |
+|---|---|---|---|
+| **1353** | price the penalty flat, ignoring `consecutive_failures` | **killed** | the additive-and-bounded test |
+| **1359** | make `summarize` skip rows whose structured fields are all `None` | **killed** | the coarse-observation test |
+
+> 1353 observed: *"two consecutive failures (-0.3) must price worse than one (-0.3) — an additive penalty, not a boolean"*
+> 1359 observed: *"coarse timing alone must produce a duration aggregate, not a skip"*
+
+The 1353 test asserts the penalty is **additive and bounded** — two failures
+strictly worse than one, and clamped at `HEALTH_PENALTY_FLOOR`. A test that only
+checked "failures make it worse" would not distinguish an additive penalty from
+a boolean one, which is the distinction the line's own words turn on.
+
+**Phase 33B now stands at 2/14.** Cause A's eight lines remain with the
+`ingress` ruling, Cause B's two are packageable (successor named above), and
+Cause D's two stay Cluster P.
 
 ---
 

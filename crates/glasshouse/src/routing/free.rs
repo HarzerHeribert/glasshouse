@@ -246,7 +246,7 @@ impl FreeResource {
 /// writes `cooling_down_until` — the `Some(declared)` arm versus the `None`
 /// arm's `ResourceHealth::backoff` — and until now nothing retained it past
 /// that call, which is the gap capability map line 1546 names.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum CooldownCause {
     /// The provider itself stated the wait — authoritative per capability
     /// map line 1319, applied immediately and unclamped.
@@ -265,11 +265,12 @@ pub struct ResourceHealth {
     consecutive_failures: u32,
     cooling_down_until: Option<Instant>,
     /// Which kind of cooldown `cooling_down_until` is, or `None` when either
-    /// nothing is cooling down or the cause was never established (adopted
-    /// from another process's persisted reading — see
-    /// [`FreePool::adopt_observed`], which cannot carry this without a new
-    /// persisted column). `None` here reports as inert everywhere this is
-    /// read, the same honest-unknown stance the rest of this module takes.
+    /// nothing is cooling down or the cause was never established — an
+    /// adopted reading from a cache file written before this field existed,
+    /// carries no cause and adopts as unknown (see
+    /// [`FreePool::adopt_observed`]). `None` here reports as inert everywhere
+    /// this is read, the same honest-unknown stance the rest of this module
+    /// takes.
     cooldown_cause: Option<CooldownCause>,
     /// Set when a provider refused the credential itself. Not a cooldown:
     /// waiting does not fix a revoked key, so it is reported rather than
@@ -300,6 +301,15 @@ impl ResourceHealth {
 
     pub fn cooling_down_until(&self) -> Option<Instant> {
         self.cooling_down_until
+    }
+
+    /// Which kind of cooldown `cooling_down_until` is, if any is in force
+    /// and its cause was established here rather than adopted unknown —
+    /// capability map line 1546's write side. See
+    /// [`Self::declared_wait_remaining`] for the one reader that needs the
+    /// distinction.
+    pub fn cooldown_cause(&self) -> Option<CooldownCause> {
+        self.cooldown_cause
     }
 
     /// How long is left on a wait this resource's own provider declared, if
@@ -489,25 +499,29 @@ impl FreePool {
     /// Last write wins, exactly like `observe`: a resource this is called for
     /// twice holds what the second call said.
     ///
-    /// # `cooldown_cause` is not carried across this bridge
+    /// # `cooldown_cause` crosses honestly, never as a guess
     ///
-    /// `GatewayHealthReading` — what actually crosses the process boundary —
-    /// persists no distinction between a declared and an invented cooldown,
-    /// and adding one is a schema decision outside this package's scope. An
-    /// adopted `cooling_down_until` is therefore recorded with its cause
-    /// unknown, which [`ResourceHealth::declared_wait_remaining`] reports as
-    /// inert rather than as a guess in either direction.
+    /// `GatewayHealthReading` persists `cooldown_cause` as an optional field,
+    /// serde-defaulted so a cache file written before it existed still
+    /// deserializes — as `None`, never a guess. The caller hands this method
+    /// exactly what that reading said: a genuinely recorded
+    /// [`CooldownCause::Declared`] or [`CooldownCause::Invented`] crosses as
+    /// itself, and an absent cause — no key in the file, or a resource that
+    /// simply is not cooling down — adopts as `None`, which
+    /// [`ResourceHealth::declared_wait_remaining`] reports as inert rather
+    /// than as a guess in either direction.
     pub fn adopt_observed(
         &mut self,
         resource: &FreeResource,
         consecutive_failures: u32,
         cooling_down_until: Option<Instant>,
+        cooldown_cause: Option<CooldownCause>,
         credential_rejected: bool,
     ) {
         let health = self.health_entry(resource);
         health.consecutive_failures = consecutive_failures;
         health.cooling_down_until = cooling_down_until;
-        health.cooldown_cause = None;
+        health.cooldown_cause = cooldown_cause;
         health.credential_rejected = credential_rejected;
     }
 

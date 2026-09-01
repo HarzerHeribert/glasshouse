@@ -2748,6 +2748,7 @@ fn observed_health_of(
             &resource,
             reading.consecutive_failures,
             reading.cooling_down_until(now, now_unix),
+            reading.cooldown_cause,
             reading.credential_rejected,
         );
         observed_at.push((resource, written_at));
@@ -3755,10 +3756,20 @@ fn render_routing_cost(
 /// read alongside `harness_recorded`, exactly as
 /// [`glasshouse::routing::evidence::PurposeConsumption`]'s own doc comment
 /// explains: only the gateway relay names a harness on every row it writes.
+///
+/// Capability map line 1330 began stamping that same relay traffic with
+/// [`glasshouse::routing::evidence::HARNESS_TURN_PURPOSE`], so the stamped and
+/// the unstamped rows are **one fact across a build boundary**, not two — the
+/// identical treatment `RoutingOverhead::from_consumption` gives them. Without
+/// the first arm below a stamped row falls through to the general case and the
+/// report prints the raw constant `harness-turn` where a person used to read
+/// this label; `tests/routing_cost.rs` caught exactly that.
 fn purpose_group_label(group: &glasshouse::routing::evidence::PurposeConsumption) -> &str {
     match (group.purpose.as_deref(), group.harness_recorded) {
+        (Some(glasshouse::routing::evidence::HARNESS_TURN_PURPOSE), _) | (None, true) => {
+            "coding-agent (gateway relay)"
+        }
         (Some(purpose), _) => purpose,
-        (None, true) => "coding-agent (gateway relay)",
         (None, false) => "(no purpose or harness recorded)",
     }
 }

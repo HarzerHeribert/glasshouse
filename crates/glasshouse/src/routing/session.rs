@@ -4872,3 +4872,75 @@ mod burn_urgency_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod provider_health_tests {
+    use super::*;
+    use crate::routing::{AssignedModel, Cost, CredentialId};
+    use crate::secret::SecretRef;
+
+    fn destination(credential_var: &str) -> Destination {
+        Destination::fresh(
+            "dest-1",
+            IntegrationId::ClaudeCode,
+            "profile",
+            Backend::new(
+                "anthropic",
+                "anthropic-messages",
+                AssignedModel::named("claude-opus-4-1"),
+                CredentialId::new(
+                    "anthropic",
+                    SecretRef::Environment {
+                        var: credential_var.to_owned(),
+                    },
+                ),
+                Cost::Metered,
+                ToolSemantics::Verified,
+            ),
+            None,
+        )
+    }
+
+    /// A pool whose only recorded fact is `failures` consecutive failures on
+    /// `destination`'s resource, with no cooldown in effect — built through
+    /// [`FreePool::adopt_observed`], the public entry point that states a
+    /// failure count directly rather than deriving one from timed `observe`
+    /// calls, so the test needs no assumption about `routing::free`'s
+    /// cooldown length.
+    fn health_with_failures(destination: &Destination, failures: u32) -> FreePool {
+        let mut pool = FreePool::new();
+        let resource = FreeResource::new(
+            destination.backend().credential().clone(),
+            destination.backend().model().label(),
+        );
+        pool.adopt_observed(&resource, failures, None, false);
+        pool
+    }
+
+    /// Line 1353: keep an *additive* failure penalty, not a boolean one —
+    /// two consecutive failures must price worse than one, and the additive
+    /// climb must still be bounded at [`HEALTH_PENALTY_FLOOR`] rather than
+    /// worsening without limit.
+    #[test]
+    fn the_failure_penalty_is_additive_and_bounded() {
+        let now = Instant::now();
+        let dest = destination("PROVIDER_HEALTH_TEST_KEY");
+
+        let one = provider_health(&dest, &health_with_failures(&dest, 1), now);
+        let two = provider_health(&dest, &health_with_failures(&dest, 2), now);
+        assert!(
+            two.magnitude() < one.magnitude(),
+            "two consecutive failures ({}) must price worse than one ({}) — \
+             an additive penalty, not a boolean",
+            two.magnitude(),
+            one.magnitude()
+        );
+
+        let many = provider_health(&dest, &health_with_failures(&dest, 50), now);
+        assert_eq!(
+            many.magnitude(),
+            HEALTH_PENALTY_FLOOR,
+            "the additive climb is bounded, never worsening without limit"
+        );
+    }
+}

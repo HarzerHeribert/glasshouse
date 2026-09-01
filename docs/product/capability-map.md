@@ -1350,13 +1350,13 @@ Phase 33B — Reliability-adjusted agent performance
 ☐ Track successful tool rounds per minute of serving time as an outcome-adjacent agent-system measure.
 ☐ Define effective TTFC as observed TTFC divided by one minus the relevant failure probability when enough observations exist.
 ☐ Use reliability-adjusted latency in route comparison so a fast route that frequently fails is not ranked as genuinely fast.
-☐ Keep an additive failure penalty available because a failed turn can also stop a harness, lose user attention, or require recovery beyond elapsed time.
+☑ Keep an additive failure penalty available because a failed turn can also stop a harness, lose user attention, or require recovery beyond elapsed time.
 ☐ Count empty completions, unusable tool calls, stream aborts, and apparently successful but non-actionable turns as distinct unsuccessful outcomes.
 ☐ Keep raw TTFC, effective TTFC, TTFT, throughput, and rounds per minute visible separately rather than collapsing them into one performance headline.
 ☐ Avoid comparing TTFC across tasks with materially different tool requirements unless the comparison is explicitly normalized or segmented.
 ☐ Allow configurable scoring weights and preserve the exact inputs and terms used for every important routing score.
 ☐ Treat the OX gateway scoring model as implementation evidence and a configurable starting policy rather than a universal Glasshouse constant.
-☐ Fall back to coarser process-level latency and outcome observations when a native subscription harness exposes no structured token or tool events.
+☑ Fall back to coarser process-level latency and outcome observations when a native subscription harness exposes no structured token or tool events.
 ☐ Never infer precise TTFC or token timing from terminal text when the adapter cannot distinguish protocol events reliably.
 
 Phase 33C — Failure, quota, and route correlation
@@ -1543,7 +1543,7 @@ Fixed architectural requirements
 ☐ Prefer effective TTFC over raw TTFC for tool-using gateway routes when reliability evidence is sufficient.
 ☐ Include successful tool rounds per minute as supporting evidence without treating it as a universal quality score.
 ☐ Include cache affinity and the distinction between warm, cold, and unknown observations.
-☐ Include current cadence availability separately from general route health.
+☑ Include current cadence availability separately from general route health.
 ☑ Include failure-domain diversity when ranking fallback and failover candidates.
 ☑ Reduce the influence of performance observations with small samples, low confidence, or stale windows.
 ☑ Include time until quota reset in candidate scoring.

@@ -1140,6 +1140,7 @@ fn planted_health_reading(
         model: model.to_owned(),
         consecutive_failures,
         cooling_down_until_unix,
+        cooldown_cause: None,
         credential_rejected,
     }
 }
@@ -1829,6 +1830,7 @@ fn an_unhealthy_resource_is_not_the_one_automatic_routing_would_select() {
             model: "zeta-model".to_owned(),
             consecutive_failures: 3,
             cooling_down_until_unix: None,
+            cooldown_cause: None,
             credential_rejected: true,
         }],
         TELEMETRY_OBSERVED,
@@ -1866,6 +1868,7 @@ fn a_cooling_down_resource_is_not_the_one_automatic_routing_would_select() {
             model: "zeta-model".to_owned(),
             consecutive_failures: 2,
             cooling_down_until_unix: Some(now + 3_600),
+            cooldown_cause: None,
             credential_rejected: false,
         }],
         now,

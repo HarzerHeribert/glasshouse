@@ -680,6 +680,7 @@ fn health_reading() -> GatewayHealthReading {
         model: MODEL.to_owned(),
         consecutive_failures: 1,
         cooling_down_until_unix: None,
+        cooldown_cause: None,
         credential_rejected: false,
     }
 }

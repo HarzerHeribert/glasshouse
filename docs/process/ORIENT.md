@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1154 / 1332 mandatory capabilities (87%)** — 178 open across 42 phases.
+**1157 / 1332 mandatory capabilities (87%)** — 175 open across 42 phases.
 
 ## Where the work is
 
@@ -59,10 +59,10 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 56 | Harness–subscription decoupling: choose the harness, route the subscription and model | **7** | 5 | `1941` |
 | Phase 9K | Harness-aware response profiles | **8** | 29 | `578` |
 | Phase 32A | Unified quota and capacity model | **8** | 13 | `1196` |
-| Phase 35B | Candidate scoring | **9** | 16 | `1523` |
+| Phase 35B | Candidate scoring | **8** | 17 | `1523` |
 | Phase 32E | Burn rate and exhaustion forecasting | **10** | 0 | `1272` |
 | Phase 35A | Candidate generation | **10** | 1 | `1504` |
-| Phase 33B | Reliability-adjusted agent performance | **14** | 0 | `1345` |
+| Phase 33B | Reliability-adjusted agent performance | **12** | 2 | `1345` |
 | Phase 51 | Evaluation hooks | **25** | 12 | `1818` |
 
 **Fully closed (65):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 7, Phase 8, Phase 9A, Phase 9B, Phase 9C, Phase 9D, Phase 9F, Phase 9G, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 16, Phase 17, Phase 18, Phase 19, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 21H, Phase 21I, Phase 21J, Phase 22, Phase 23, Phase 25, Phase 26, Phase 29, Phase 32, Phase 32B, Phase 34, Phase 34A, Phase 34D, Phase 34F, Phase 35, Phase 35C, Phase 35D, Phase 36, Phase 40, Phase 41, Phase 42, Phase 43, Phase 44, Phase 45, Phase 46, Phase 48, Phase 49, Phase 50, Phase 54, Phase 56A, Phase 57.
@@ -71,7 +71,7 @@ closures are usually at the top. Open the map at the line number given.
 
 Every phase with **three or fewer** open lines, quoted verbatim. These are
 where a single package finishes a phase, so they are listed here and the
-other ~137 open lines are not.
+other ~134 open lines are not.
 
 For any other phase: `scripts/discover.py --phase <id>` prints its open
 lines and evidence together. **Do not open the 178 KB map to read them.**

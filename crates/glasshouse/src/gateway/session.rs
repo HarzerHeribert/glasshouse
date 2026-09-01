@@ -347,6 +347,7 @@ impl SessionRouting {
                     cooling_down_until_unix: health.cooling_down_until().map(|until| {
                         now_unix + until.saturating_duration_since(now).as_secs() as i64
                     }),
+                    cooldown_cause: health.cooldown_cause(),
                     credential_rejected: health.credential_was_rejected(),
                 },
             )
@@ -1020,6 +1021,7 @@ mod tests {
     use super::*;
     use crate::gateway::upstream::{Route, UpstreamBackend};
     use crate::routing::evidence::NewObservation;
+    use crate::routing::free::CooldownCause;
     use crate::routing::interactive::RoutingBenefit;
     use crate::routing::{Cost, CredentialId};
     use crate::secret::{Secret, SecretRef};
@@ -1953,6 +1955,51 @@ mod tests {
             routing.health_readings_for("a-different-provider", now, now_unix),
             Vec::new(),
             "a provider's own snapshot must never include another provider's resource"
+        );
+    }
+
+    /// Capability map line 1546's write side: [`Self::health_readings_for`]
+    /// must carry the *cause* `ResourceHealth::fail` already recorded on the
+    /// same value it reads `cooling_down_until` from, not merely the
+    /// deadline. This is the exact gap the line's hold ruling
+    /// (`docs/product/evidence/phase-35b.md`) named: the mechanism existed
+    /// and this call site silently dropped it.
+    #[test]
+    fn health_readings_for_carries_the_cooldown_cause_the_pool_already_recorded() {
+        let upstream = Upstream::with_failover(vec![upstream_backend("openrouter")])
+            .expect("one backend is not none");
+        let routing = SessionRouting::new();
+        routing.bind(
+            "claude-code",
+            "anthropic-messages",
+            AssignedModel::named("the-routed-model"),
+            &upstream,
+        );
+
+        let now = Instant::now();
+        let now_unix = 1_800_000_000_i64;
+        // A stated `retry_after` applies immediately, on the first failure —
+        // REQUIRED BEHAVIOR of `ResourceHealth::fail`, unchanged here.
+        routing.observe_exchange(
+            &upstream,
+            &rate_limited_exchange("openrouter"),
+            now,
+            None,
+            0,
+            Some(Duration::from_secs(60)),
+            None,
+        );
+
+        let readings = routing.health_readings_for("openrouter", now, now_unix);
+        let reading = readings
+            .iter()
+            .find(|r| r.model == "the-routed-model")
+            .expect("a declared wait must produce a health reading");
+        assert_eq!(
+            reading.cooldown_cause,
+            Some(CooldownCause::Declared),
+            "a provider-declared wait must cross as a recorded Declared cause, never dropped to \
+             None"
         );
     }
 
