@@ -4605,3 +4605,111 @@ locally with the stated wait, never hold the accept loop.
 **Open at close:** the wave's trailing full sweep is deliberately **not** run
 yet — one integration is not a wave, and two workers are compiling. It is owed
 once `paced-retry` integrates.
+
+---
+
+## Batch 79 (2026-09-02, small hours) — six boxes, two phases closed, one package refused, and five stale ledger blockers
+
+Continuation of batch 78's session. **Map 1149 -> 1154** across both batches;
+this batch closed **1152, 1368, 1330** and landed the fix-forward for its own
+regression.
+
+| line | tier | result |
+|---|---|---|
+| 1152 | Sonnet medium, Green | closed — **Phase 29 CLOSED** |
+| 1368 | Sonnet high, Amber | closed — Phase 33C 12/15; **the only production behaviour change of the night** |
+| 1330 | Sonnet high, Amber | closed — Phase 33A 11/15 |
+| — | Sonnet high, Amber | `paced-fixtures`, the fix-forward for 1368's own regression |
+| — | Sonnet high, read-only | two audits; all seven ticks examined were confirmed |
+
+### The three findings worth carrying forward
+
+**1. A restraint line is mutation-proven by violating the restraint.** 1152 had
+code, a passing shipped-binary test, and reachability since 2026-08-31. It was
+open on a *missing mutation*, because the prior worker reasoned that adding a
+checkpoint write "would be inventing a feature rather than removing one." That
+rule does not fit a line whose content is *"X must not do Y"* — there, the
+defect **is** the addition, and requiring deletion-only mutations would make
+every restraint line in this map permanently unclosable. **A rule about
+mutation vocabulary was quietly deciding a capability question.** The violation
+compiled and was killed by the assertion that names the restraint in its own
+message.
+
+**2. A packet may fix a policy; it may not fix one that contradicts a shipped
+test the packet never looked at.** 1368's packet said the policy was decided
+and not the worker's to revisit: guard on `FreePool::is_available`. That is not
+implementable. `ResourceHealth` folds a provider-**declared** wait together
+with a cooldown Glasshouse **invents** after ordinary failures, and Phase 9I
+line 534 deliberately keeps the invented kind probeable by real work. The
+literal guard broke a conformance test whose third ordinary `503` must still
+reach the provider. The worker's blast radius caught it, it narrowed via
+`quota_headers()` without touching the forbidden file, and — the part that
+matters — **it verified rather than asserted**: passes at HEAD, fails with the
+literal design, passes with the narrowed one. Its narrowing is a *more faithful*
+reading of the line than the packet was.
+
+**3. A Phase -1 consumer search must cover match arms.** 1330's packet asserted
+*"no consumer treats `purpose IS NULL` as meaningful — verified."* False.
+`RoutingOverhead::from_consumption` had `None if group.harness_recorded =>`
+feeding `coding_agent_requests`. The orchestrator grepped
+`purpose.is_none()`, `purpose == None` and `purpose: None`; **a match arm is
+none of those shapes.** Wiring the stamp alone would have silently zeroed
+interactive coding cost (lines 1464/1832/1833) from that build forward. The
+worker caught it, fixed it, and asked for the diff to be reviewed. `grep
+'purpose'` in the consuming module would have found it; three narrower greps
+did not. The arm shipped with **no direct test**, and the follow-up package
+(`consumption-arm`) was dispatched rather than recorded and forgotten.
+
+### The trailing sweep earned its keep, for the second time
+
+`blast-radius.sh --since 6fd1888` ran ~35 minutes against the wave and found
+**exactly one** failing target: three reds in `gateway_failure_taxonomy`, from
+1368 shipping on a green *targeted* gate that skipped 13 full-trace targets.
+Everything else green — bin, rustdoc, all other targets.
+
+Attributed **mechanically rather than by a second run**: all three fixtures
+drive one gateway with one credential through a sequence containing a `429`
+with `Retry-After`, so cases after it now meet the new guard. The fix-forward
+worker repaired them **non-uniformly** and was right to: a sibling credential in
+the first test forces a real failover and would have weakened its load-bearing
+`failovers == Some(0)` assertion (it tried it and observed `Some(1)`). Zero
+assertions removed — verified by `git diff` at integration, not taken from the
+report — and 1368's own mutation still KILLED afterward.
+
+### Five stale ledger blockers in one session, and two of them were traps
+
+| line | stale claim | outcome |
+|---|---|---|
+| 1239 | *"nothing asks a routing question of capacity"* | CLOSED |
+| 1368 | *"a cadence signal deliberately not collected"* | CLOSED |
+| 1546 | *"cadence … not yet read by anything"* | packaged |
+| 1263 | *"blocked on Phase 32G, 10 open / 0 closed"* | **still refused** — relay-path `ingress` reader |
+| 1419 | *"no candidate set"*, *"no per-model price"* | **still refused** — `Cost` is a `Free`/`Metered` enum, not a price |
+
+**The last two are the dangerous shape:** the stated reason rots, the line stays
+shut, and an orchestrator who re-checks only the stale half packages it. 1263
+was caught at Phase -1 *before dispatch* — `recent_credential_spend` has zero
+production callers and looks exactly like a Cluster B wiring job; wired today it
+would sum memory-extraction calls and call them the user's spend. **Correct the
+row AND state the live blocker**, which is what `c885038` and `f894f7a` do.
+
+**A ledger blocker is a claim with a date on it, not a fact.** All five were
+written by careful orchestrators and all rotted within days of the line that
+falsified them.
+
+### Two operational traps, both invisible to the mechanisms that exist
+
+1. **A blocked worker looks alive to its watch.** Two inherited workers had done
+   nothing — both sat on *"Allow reads outside the working directories?"*. The
+   prompt is on screen and the token counter is stopped, which
+   `worker-watch.sh` reads as thinking; it fired only its benign "quiet but
+   still moving" note. **A fresh worker at ~7% context with a clean worktree is
+   blocked, not thinking.** The tracked `permissions` block from `6e0850e`
+   cannot answer this one — it is the user-level
+   `blockReadsOutsideWorkingDirectories`.
+2. **`new-worker.sh` reported "DID NOT ACCEPT the prompt" three times and the
+   prompt had already landed** — the submit fired while the pane still showed
+   `/rc connecting…`. `send-key Enter` alone fixes it; re-sending the prompt
+   appends a second copy and `ctrl+u` does not reliably clear it.
+
+Neither is mechanised yet. Both are one-line checks at inherit and at dispatch.
