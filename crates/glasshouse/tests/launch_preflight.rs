@@ -179,7 +179,8 @@ impl Fixture {
                  provider = \"preflight-probe\"\n\n\
                  [profiles.parked]\nharness = \"claude-code\"\nenabled = false\n\n\
                  [profiles.parked.backend]\nkind = \"direct-provider\"\n\
-                 provider = \"preflight-probe\"\n"
+                 provider = \"preflight-probe\"\n\n\
+                 [routing]\nautomatic = false\n"
             ),
         )
         .expect("write user config");
@@ -367,8 +368,11 @@ fn a_native_profile_has_no_check_available_and_makes_no_request_at_all() {
     let provider = FakeProvider::answering("HTTP/1.1 200 OK");
     let fixture = Fixture::new(&provider.base_url, true);
 
-    // No `--profile`: the implied Native profile, which is what an unadorned
-    // `glasshouse launch` gets and therefore the overwhelmingly common case.
+    // No `--profile`: the implied Native profile — what an unadorned
+    // `glasshouse launch` gets while automatic routing is off (the fixture
+    // turns it off; since map line 372 closed, an unpinned launch under
+    // automatic routing ranks every enabled profile and may land on
+    // `direct`, which has a check to make).
     let output = fixture.glasshouse(&["launch", "claude-code", "--headless"]);
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
 

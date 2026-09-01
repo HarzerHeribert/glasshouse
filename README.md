@@ -19,10 +19,10 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`█████████████████████████████████░░░░░░░` 1096 / 1305 mandatory capabilities (83%)
+`█████████████████████████████████░░░░░░░` 1099 / 1305 mandatory capabilities (84%)
 
 <details>
-<summary>Per-phase breakdown (59 of 106 phases complete)</summary>
+<summary>Per-phase breakdown (60 of 106 phases complete)</summary>
 
 | Phase | Done |
 |---|---|
@@ -131,7 +131,7 @@ the authoritative specification and tracks what is done.
 | Phase 54A — Setup and portability completion criteria | 9/10 |
 | Phase 55 — V1 completion definition | 21/23 |
 | Phase 56 — Harness–subscription decoupling: choose the harness, route the subscription and model | 5/12 |
-| Phase 56A — Entitlement pool and subscription broker: several accounts, one scheduler | 10/13 |
+| Phase 56A — Entitlement pool and subscription broker: several accounts, one scheduler | 13/13 ✅ |
 
 </details>
 <!-- progress:end -->

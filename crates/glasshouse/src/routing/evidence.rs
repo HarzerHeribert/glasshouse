@@ -237,6 +237,20 @@ pub const TIER_ESCALATION_PURPOSE: &str = "tier-escalation";
 /// and a reader counting one must not have to subtract the other.
 pub const TIER_DOWNGRADE_PURPOSE: &str = "tier-downgrade";
 
+/// Capability map line 1970: one ledger row per pool fallback the launch
+/// path acted on, under this purpose or
+/// [`ENTITLEMENT_FALLBACK_THROTTLED_PURPOSE`], so a later evaluation can
+/// count how often the broker left an account and why. `quota_context`
+/// carries the account the work **left**, while `provider` and `model` are
+/// the chosen destination's; the purpose column is what keeps these rows
+/// out of any model's own summary. A decision that made no fallback writes
+/// nothing — "the broker stayed put" is the row's absence, exactly as a
+/// held tier is.
+pub const ENTITLEMENT_FALLBACK_EXHAUSTED_PURPOSE: &str = "entitlement-fallback-exhausted";
+
+/// [`ENTITLEMENT_FALLBACK_EXHAUSTED_PURPOSE`]'s other trigger.
+pub const ENTITLEMENT_FALLBACK_THROTTLED_PURPOSE: &str = "entitlement-fallback-throttled";
+
 /// How far back [`EvidenceLedger::classification_record`] and the routing
 /// economics readers look — seven days, the same window the shell's
 /// route-evidence view already uses, so a routing model's record and the
@@ -1719,6 +1733,98 @@ pub fn recent_credential_throttles(
     }
 }
 
+/// Token spend recorded against one account inside a queried window — map
+/// line 1971's *"spend ceilings"* half, read from the rows this ledger
+/// actually holds.
+///
+/// # Why tokens, and why that is not this reader's own decision
+///
+/// `routing_observations.cost_micro_usd` has **no producer in this build**
+/// — see [`NewObservation::with_tokens`], which records why — so a reader
+/// that answered in money would answer `None` forever, and a ceiling that
+/// can never be reached is a rule the broker can never be held to. Map line
+/// 1465's reader already settled the same question the same way, in
+/// production, in [`RoutingOverhead`]'s own words: *"'Spend' is tokens,
+/// input plus output as the provider reported them, because that is the only
+/// currency this ledger holds."* This reader is that sentence applied per
+/// account. Cached input tokens are excluded for line 1465's reason too:
+/// providers disagree on whether they are already inside `input_tokens`, and
+/// a sum that might double-count is worse than one that names what it omits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CredentialSpend {
+    /// Input plus output tokens summed over the rows that carried a count —
+    /// the account's own when `account_narrowed`, the provider's total
+    /// otherwise. `None` when **no** row carried a count at all, which is
+    /// *unknown* and is not `Some(0)`: the columns are nullable so those two
+    /// facts stay apart, and a spend ceiling may only be judged reached
+    /// against a reading that exists.
+    pub tokens: Option<u64>,
+    /// Whether `tokens` is the named credential's own sum rather than the
+    /// provider-wide total.
+    pub account_narrowed: bool,
+    /// How many rows contributed a count to `tokens`. `0` exactly when
+    /// `tokens` is `None`.
+    pub sample_count: usize,
+}
+
+/// See [`CredentialSpend`]. `credential_label` is the
+/// [`crate::routing::CredentialId::label`] shape the gateway stamps into
+/// [`RoutingObservation::quota_context`]; `None` — an entitlement with no
+/// credential of its own — always yields the provider-wide sum.
+///
+/// The narrowing rule is [`recent_credential_throttles`]'s, deliberately
+/// verbatim: the reading is the account's own only when **every** counted
+/// row of that provider names an account, because one contextless row means
+/// the ledger holds spend nobody can attribute, and a sum that quietly
+/// dropped it would under-report the very number a ceiling is checked
+/// against. Under-reporting is the direction that lets a ceiling be
+/// exceeded, so this reader widens rather than narrows when it is unsure.
+///
+/// [`CORRELATION_PURPOSE`] rows are excluded for the reason that constant
+/// gives — they are this ledger's own bookkeeping and not exchanges — and
+/// rows with no outcome are excluded because an exchange that never
+/// completed reported no usage to sum.
+pub fn recent_credential_spend(
+    observations: &[RoutingObservation],
+    provider: &str,
+    credential_label: Option<&str>,
+) -> CredentialSpend {
+    let counted: Vec<&RoutingObservation> = observations
+        .iter()
+        .filter(|row| row.provider == provider)
+        .filter(|row| row.outcome.is_some() && row.purpose.as_deref() != Some(CORRELATION_PURPOSE))
+        .filter(|row| row.input_tokens.is_some() || row.output_tokens.is_some())
+        .collect();
+    let every_row_names_its_account =
+        !counted.is_empty() && counted.iter().all(|row| row.quota_context.is_some());
+    let account_narrowed = match credential_label {
+        Some(_) => every_row_names_its_account,
+        None => false,
+    };
+    let rows: Vec<&&RoutingObservation> = match (account_narrowed, credential_label) {
+        (true, Some(label)) => counted
+            .iter()
+            .filter(|row| row.quota_context.as_deref() == Some(label))
+            .collect(),
+        _ => counted.iter().collect(),
+    };
+    let sample_count = rows.len();
+    let tokens = if sample_count == 0 {
+        None
+    } else {
+        Some(rows.iter().fold(0u64, |sum, row| {
+            let input = row.input_tokens.unwrap_or(0).max(0) as u64;
+            let output = row.output_tokens.unwrap_or(0).max(0) as u64;
+            sum.saturating_add(input).saturating_add(output)
+        }))
+    };
+    CredentialSpend {
+        tokens,
+        account_narrowed,
+        sample_count,
+    }
+}
+
 /// Request and token consumption for one `(purpose, harness_recorded)`
 /// group, within a queried window — capability map line 1464's "measure
 /// routing-model token and request consumption separately from coding-agent
@@ -1867,6 +1973,12 @@ pub struct RoutingOverhead {
     /// [`ROUTING_LATENCY_PURPOSE`]'s reason.
     pub tier_movement_requests: usize,
     pub tier_movement_tokens: Option<i64>,
+    /// Rows whose `purpose` is [`ENTITLEMENT_FALLBACK_EXHAUSTED_PURPOSE`]
+    /// or [`ENTITLEMENT_FALLBACK_THROTTLED_PURPOSE`] — line 1970's record
+    /// of the broker leaving an account. No tokens by construction, for
+    /// [`ROUTING_LATENCY_PURPOSE`]'s reason.
+    pub entitlement_fallback_requests: usize,
+    pub entitlement_fallback_tokens: Option<i64>,
     /// Rows no producer stamped that **did** name a harness — the gateway
     /// relay, and today nothing else. This is *"interactive coding cost"* as
     /// lines 1832 and 1833 use the phrase, and it is the one side of the
@@ -1938,6 +2050,12 @@ impl RoutingOverhead {
                 Some(TIER_ESCALATION_PURPOSE | TIER_DOWNGRADE_PURPOSE) => (
                     &mut overhead.tier_movement_requests,
                     &mut overhead.tier_movement_tokens,
+                ),
+                Some(
+                    ENTITLEMENT_FALLBACK_EXHAUSTED_PURPOSE | ENTITLEMENT_FALLBACK_THROTTLED_PURPOSE,
+                ) => (
+                    &mut overhead.entitlement_fallback_requests,
+                    &mut overhead.entitlement_fallback_tokens,
                 ),
                 None if group.harness_recorded => (
                     &mut overhead.coding_agent_requests,
@@ -5045,6 +5163,135 @@ mod credential_throttle_tests {
                 throttled: 0,
                 account_narrowed: false,
             }
+        );
+    }
+}
+
+/// Map line 1971's spend reader — [`recent_credential_spend`].
+#[cfg(test)]
+mod credential_spend_tests {
+    use super::*;
+
+    fn row(
+        provider: &str,
+        account: Option<&str>,
+        tokens: Option<(i64, i64)>,
+    ) -> RoutingObservation {
+        RoutingObservation {
+            seq: 0,
+            project_id: "project".to_owned(),
+            observed_at_unix: 1_000,
+            provider: provider.to_owned(),
+            model: "m".to_owned(),
+            route: Some("anthropic-messages".to_owned()),
+            quota_context: account.map(str::to_owned),
+            harness: Some("claude-code".to_owned()),
+            purpose: None,
+            dispatched_at_unix: Some(995),
+            first_byte_at_unix: None,
+            first_token_at_unix: None,
+            first_tool_call_at_unix: None,
+            completed_at_unix: Some(1_000),
+            input_tokens: tokens.map(|(input, _)| input),
+            output_tokens: tokens.map(|(_, output)| output),
+            cached_input_tokens: Some(9_999),
+            cost: None,
+            tool_rounds: None,
+            retries: None,
+            repairs: None,
+            failovers: None,
+            outcome: Some(Outcome::Succeeded),
+            failure_class: None,
+            context_state: ContextState::Unknown,
+        }
+    }
+
+    /// Every counted row names its account, so the sum is this account's own
+    /// — and it is input plus output and **not** the cached-input column,
+    /// which providers disagree about.
+    #[test]
+    fn every_row_naming_its_account_narrows_the_sum_to_the_credential() {
+        let rows = vec![
+            row("alpha", Some("alpha/KEY_A"), Some((100, 20))),
+            row("alpha", Some("alpha/KEY_A"), Some((5, 5))),
+            row("alpha", Some("alpha/KEY_B"), Some((900, 900))),
+            row("beta", Some("beta/KEY_A"), Some((1_000, 1_000))),
+        ];
+        assert_eq!(
+            recent_credential_spend(&rows, "alpha", Some("alpha/KEY_A")),
+            CredentialSpend {
+                tokens: Some(130),
+                account_narrowed: true,
+                sample_count: 2,
+            },
+            "KEY_A's own rows on this provider, input plus output, and nothing else"
+        );
+    }
+
+    /// One contextless counted row means the ledger holds spend nobody can
+    /// attribute. The reading widens to provider scope rather than quietly
+    /// dropping it: under-reporting is the direction that would let a
+    /// ceiling be exceeded.
+    #[test]
+    fn a_contextless_counted_row_widens_the_reading_to_provider_scope() {
+        let rows = vec![
+            row("alpha", Some("alpha/KEY_A"), Some((100, 20))),
+            row("alpha", None, Some((7, 3))),
+        ];
+        assert_eq!(
+            recent_credential_spend(&rows, "alpha", Some("alpha/KEY_A")),
+            CredentialSpend {
+                tokens: Some(130),
+                account_narrowed: false,
+                sample_count: 2,
+            }
+        );
+    }
+
+    /// A row that carried no token count at all is not a zero. With no
+    /// counted row anywhere the reading is `None` — unknown — which is what
+    /// keeps a stated ceiling from being judged reached by a build that
+    /// measured nothing.
+    #[test]
+    fn no_counted_row_reads_unknown_and_never_zero() {
+        let rows = vec![
+            row("alpha", Some("alpha/KEY_A"), None),
+            row("alpha", Some("alpha/KEY_A"), None),
+        ];
+        assert_eq!(
+            recent_credential_spend(&rows, "alpha", Some("alpha/KEY_A")),
+            CredentialSpend {
+                tokens: None,
+                account_narrowed: false,
+                sample_count: 0,
+            }
+        );
+
+        // And an account with no rows of its own, beside a sibling that has
+        // them, reads unknown rather than zero for the same reason.
+        let rows = vec![row("alpha", Some("alpha/KEY_B"), Some((10, 10)))];
+        assert_eq!(
+            recent_credential_spend(&rows, "alpha", Some("alpha/KEY_A")).tokens,
+            None
+        );
+    }
+
+    /// This ledger's own bookkeeping is not spend, and neither is an
+    /// exchange that never completed.
+    #[test]
+    fn correlation_rows_and_unfinished_exchanges_are_not_spend() {
+        let mut correlation = row("alpha", Some("alpha/KEY_A"), Some((100, 100)));
+        correlation.purpose = Some(CORRELATION_PURPOSE.to_owned());
+        let mut unfinished = row("alpha", Some("alpha/KEY_A"), Some((100, 100)));
+        unfinished.outcome = None;
+        let rows = vec![
+            correlation,
+            unfinished,
+            row("alpha", Some("alpha/KEY_A"), Some((1, 2))),
+        ];
+        assert_eq!(
+            recent_credential_spend(&rows, "alpha", Some("alpha/KEY_A")).tokens,
+            Some(3)
         );
     }
 }

@@ -642,6 +642,20 @@ pub enum EntitlementRefusal {
     /// Carries the model's name (which is why this enum is no longer
     /// `Copy`), so the refusal a person reads says which model.
     Model(String),
+    /// Map line 1971's fourth axis: the user stated a spend ceiling for this
+    /// entitlement and the spend **observed** against it has reached or
+    /// passed the ceiling. Carries both numbers, because "over its ceiling"
+    /// is only inspectable next to which ceiling and how much was seen —
+    /// the same reason [`HardConstraint::WorkloadTier`] carries its pair.
+    /// Raised only from an established reading: an entitlement whose spend
+    /// nothing measured is never refused by this, exactly as an unknown
+    /// tier ceiling never raises [`HardConstraint::WorkloadTier`].
+    SpendCeiling {
+        /// The ceiling the user wrote, in tokens.
+        ceiling_tokens: u64,
+        /// Input plus output tokens observed in the evidence window.
+        observed_tokens: u64,
+    },
 }
 
 impl std::fmt::Display for EntitlementRefusal {
@@ -651,6 +665,14 @@ impl std::fmt::Display for EntitlementRefusal {
             Self::Tier(tier) => write!(f, "the `{tier}` tier"),
             Self::JobKind(kind) => write!(f, "the `{kind}` job kind"),
             Self::Model(model) => write!(f, "the `{model}` model"),
+            Self::SpendCeiling {
+                ceiling_tokens,
+                observed_tokens,
+            } => write!(
+                f,
+                "any more work — its spend ceiling of {ceiling_tokens} tokens is reached \
+                 ({observed_tokens} observed)"
+            ),
         }
     }
 }
@@ -683,6 +705,18 @@ pub struct EntitlementRules {
     deny_tiers: Vec<classify::WorkloadTier>,
     allow_job_kinds: Vec<disposable::JobKind>,
     deny_job_kinds: Vec<disposable::JobKind>,
+    /// Map line 1971's fourth axis: the cumulative spend, in tokens, past
+    /// which this entitlement may not be charged. `None` — the default and
+    /// the shape [`Self::UNRESTRICTED`] carries — is *the user stated no
+    /// ceiling*, never *the ceiling is zero*.
+    ///
+    /// The other three axes are lists over a closed vocabulary and are
+    /// decided by [`Self::admits`]. This one is a threshold against a
+    /// *reading*, so it does not live in `admits` and is not asked by
+    /// [`Self::refusal`]: it needs telemetry the rules value does not hold,
+    /// and it is asked by [`Entitlement::spend_constraint`], where the
+    /// observed spend is.
+    spend_ceiling_tokens: Option<u64>,
 }
 
 impl EntitlementRules {
@@ -696,6 +730,7 @@ impl EntitlementRules {
         deny_tiers: Vec::new(),
         allow_job_kinds: Vec::new(),
         deny_job_kinds: Vec::new(),
+        spend_ceiling_tokens: None,
     };
 
     #[must_use]
@@ -738,6 +773,19 @@ impl EntitlementRules {
     pub fn deny_job_kinds(mut self, kinds: impl IntoIterator<Item = disposable::JobKind>) -> Self {
         self.deny_job_kinds = kinds.into_iter().collect();
         self
+    }
+
+    /// Map line 1971's spend ceiling, in tokens. Stating none is the same
+    /// as not calling this.
+    #[must_use]
+    pub fn with_spend_ceiling_tokens(mut self, tokens: Option<u64>) -> Self {
+        self.spend_ceiling_tokens = tokens;
+        self
+    }
+
+    /// The ceiling the user wrote, or `None` for *no ceiling was stated*.
+    pub fn spend_ceiling_tokens(&self) -> Option<u64> {
+        self.spend_ceiling_tokens
     }
 
     /// Whether no axis carries a rule — the [`Self::UNRESTRICTED`] shape,
@@ -868,6 +916,162 @@ impl EntitlementModelsFacet {
     }
 }
 
+/// What pays for an entitlement, as the **router** may branch on it — map
+/// line 1970's *"subscription to subscription to API credits"*, and the
+/// user's ruling of 2026-08-31 (`design-decisions.md` §Phase 56A, "Step 4's
+/// fallback order"): *"Determining model if they are api or subscription is
+/// just which entitlement brings them. A api key or a subscription isn't
+/// that the distinction?"*
+///
+/// # Why this exists and [`crate::config::EntitlementKind`] still does not
+///
+/// `EntitlementKind` carries its own invariant — *"No rule depends on it —
+/// so a wrong `kind` misdescribes an entitlement and never misroutes one"* —
+/// and it is optional and absent by default. This value is neither: it is
+/// derived structurally from `crate::config::EntitlementBacking`, which the
+/// loader already **enforces** (an entry that is a native sign-in *and*
+/// names its own credential is refused outright, map line 1973). So the
+/// distinction the router branches on is one the data model guarantees
+/// rather than one a person typed, and `EntitlementKind`'s invariant
+/// survives untouched — it is the *backing*, not the *kind*, that routing
+/// reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EntitlementSource {
+    /// A harness's own first-party sign-in — a plan, authenticated through
+    /// the harness itself
+    /// (`crate::config::EntitlementBacking::NativeHarness`).
+    Subscription,
+    /// The account behind a configured `[providers.<name>]` entry, which
+    /// carries a credential of its own — an API key, billed per call
+    /// (`crate::config::EntitlementBacking::Provider`).
+    ApiCredits,
+    /// The entry names neither backing. *Listed, never matched, never
+    /// charged* — and therefore never a fallback target either: an order
+    /// over subscription and API credits has no step this belongs to.
+    #[default]
+    Unstated,
+}
+
+impl EntitlementSource {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Subscription => "subscription",
+            Self::ApiCredits => "API credits",
+            Self::Unstated => "no backing stated",
+        }
+    }
+}
+
+impl std::fmt::Display for EntitlementSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Whether two models sit in the same **user-assigned capability tier** —
+/// the axis Phase 34F (`GH-TIER-AXIS-34F`, "Model capability and tier
+/// calibration") builds, consumed here through one function and nothing
+/// else.
+///
+/// [`Self::Unknown`] is not [`Self::Different`] and is not
+/// [`Self::Same`]: it is *nobody has said*, which everywhere else in this
+/// module contributes nothing and refuses nothing. Here it does one thing
+/// more, because the ruling is explicit — *"You can't put a fable 5 task and
+/// switch it to a nemotron v3"* — so an unknown relation **narrows** the
+/// fallback rather than widening it: see [`same_capability_tier`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TierRelation {
+    /// Established to be the same capability tier.
+    Same,
+    /// Established to be different capability tiers.
+    Different,
+    /// No axis has ranked one of these models. Never read as `Same`.
+    Unknown,
+}
+
+/// The seam map line 1970's tier-preserving fallback consumes: are these two
+/// models of the same user-assigned capability tier?
+///
+/// # What it answers today, and why that is the honest answer
+///
+/// **Nothing in this tree ranks models by capability class yet** — the
+/// existing `tier` vocabulary (`classify::WorkloadTier`,
+/// `EntitlementRules::allow_tiers`) ranks *how hard the task is*, and
+/// `capability::CapabilityAxis` answers *can it do this at all*. The model
+/// axis is Phase 34F's, being built in parallel, and this function is the
+/// one place Phase 56A consumes it, so the axis plugs in here without any
+/// other line of this module changing.
+///
+/// Until it lands, the only same-tier fact this build can establish is the
+/// trivial one: **a model is in its own tier**. Every other pair reads
+/// [`TierRelation::Unknown`], and the fallback's tier steps therefore never
+/// fire — the order collapses to its same-model steps. That is the ruling's
+/// own direction: a fallback that silently downgrades the model *"is worse
+/// than a refusal, because the work continues and looks fine"*.
+pub fn same_capability_tier(from: &str, to: &str) -> TierRelation {
+    if from == to {
+        // Not a guess and not the axis: the identity case, which is the only
+        // same-tier fact available without one.
+        return TierRelation::Same;
+    }
+    TierRelation::Unknown
+}
+
+/// Map line 1971's spend half, as the router carries it: how much this
+/// entitlement is **observed** to have spent inside the evidence window, and
+/// whether that reading could honestly be narrowed to this account's own
+/// credential — the same two-part shape [`EntitlementThrottleFacet`] carries,
+/// resolved by the same caller from the same rows.
+///
+/// # "Spend" is tokens, and that is this ledger's own ruling
+///
+/// `routing_observations.cost_micro_usd` has **no producer in this build**
+/// (see [`evidence::NewObservation::with_tokens`]), and map line 1465's
+/// reader already settled the consequence in production:
+/// *"'Spend' is tokens, input plus output as the provider reported them,
+/// because that is the only currency this ledger holds."* A ceiling stated
+/// in money that nothing counts could never refuse anything, which is the
+/// one outcome map line 1971 — *"never let the broker exceed them"* — cannot
+/// have. Cached input tokens are left out for line 1465's reason: providers
+/// disagree on whether they are already inside `input_tokens`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EntitlementSpendFacet {
+    tokens: u64,
+    account_scoped: bool,
+}
+
+impl EntitlementSpendFacet {
+    pub fn new(tokens: u64, account_scoped: bool) -> Self {
+        Self {
+            tokens,
+            account_scoped,
+        }
+    }
+
+    /// Input plus output tokens observed in the window — this account's own
+    /// when [`Self::is_account_scoped`], the provider's shared total
+    /// otherwise.
+    pub fn tokens(&self) -> u64 {
+        self.tokens
+    }
+
+    pub fn is_account_scoped(&self) -> bool {
+        self.account_scoped
+    }
+
+    /// The scope word an explanation renders — the same two words
+    /// [`EntitlementThrottleFacet::scope_word`] prints, so one reading
+    /// cannot claim per-account knowledge nothing measured while its sibling
+    /// does not.
+    pub fn scope_word(&self) -> &'static str {
+        if self.account_scoped {
+            "this account"
+        } else {
+            "provider-wide"
+        }
+    }
+}
+
 /// An entitlement as the router sees it — map lines 1946 and 1962: a named
 /// resource with rules, separate from the harness that consumes it.
 ///
@@ -897,6 +1101,16 @@ pub struct Entitlement {
     seconds_until_reset: Option<i64>,
     throttling: Option<EntitlementThrottleFacet>,
     models: Option<EntitlementModelsFacet>,
+    /// What pays for this account — map line 1970's order is over exactly
+    /// this. Derived structurally from the backing by
+    /// `crate::config::ResolvedEntitlement::to_routing`, never typed by a
+    /// person; [`EntitlementSource::Unstated`] is the default a caller
+    /// building one by hand gets, and it belongs to no step of the order.
+    source: EntitlementSource,
+    /// Map line 1971's spend reading, against which
+    /// [`EntitlementRules::spend_ceiling_tokens`] is compared. `None` is
+    /// unknown — nothing consulted the ledger — never "nothing spent".
+    spend: Option<EntitlementSpendFacet>,
 }
 
 impl Entitlement {
@@ -914,6 +1128,8 @@ impl Entitlement {
             seconds_until_reset: None,
             throttling: None,
             models: None,
+            source: EntitlementSource::Unstated,
+            spend: None,
         }
     }
 
@@ -956,6 +1172,25 @@ impl Entitlement {
         self
     }
 
+    /// State what pays for this account — map line 1970's work item 1. The
+    /// one production caller is
+    /// `crate::config::ResolvedEntitlement::to_routing`, which reads it off
+    /// the loader-enforced backing rather than off anything a person wrote.
+    #[must_use]
+    pub fn with_source(mut self, source: EntitlementSource) -> Self {
+        self.source = source;
+        self
+    }
+
+    /// Attach the observed-spend facet — map line 1971. `None` is unknown,
+    /// never "nothing spent": a ceiling may only be judged reached by a
+    /// resolver that actually looked.
+    #[must_use]
+    pub fn with_spend(mut self, spend: Option<EntitlementSpendFacet>) -> Self {
+        self.spend = spend;
+        self
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -982,6 +1217,47 @@ impl Entitlement {
 
     pub fn models(&self) -> Option<&EntitlementModelsFacet> {
         self.models.as_ref()
+    }
+
+    /// What pays for this account — map line 1970's order is over this and
+    /// never over `crate::config::EntitlementKind`.
+    pub fn source(&self) -> EntitlementSource {
+        self.source
+    }
+
+    pub fn spend(&self) -> Option<&EntitlementSpendFacet> {
+        self.spend.as_ref()
+    }
+
+    /// Map line 1971's spend half, as the hard constraint the router raises:
+    /// an entitlement whose **observed** spend has reached the ceiling the
+    /// user stated for it is refused by name.
+    ///
+    /// Both halves must be established. A ceiling nobody wrote refuses
+    /// nothing, and a ceiling whose spend nothing measured refuses nothing
+    /// either — *"nobody has said" is not "cannot"*, the rule every other
+    /// gate in `session::hard_constraint` follows, and the alternative here
+    /// would refuse every entitlement forever on a build whose ledger is
+    /// empty. What the rule does guarantee is the direction map line 1971
+    /// asks for: once the spend **is** known and has reached the ceiling,
+    /// nothing admits the entitlement again — not a better score, and not
+    /// map line 1970's fallback, which reselects only over candidates this
+    /// gate already passed.
+    pub fn spend_constraint(&self) -> Result<(), HardConstraint> {
+        let (Some(ceiling_tokens), Some(spend)) = (self.rules.spend_ceiling_tokens, self.spend)
+        else {
+            return Ok(());
+        };
+        if spend.tokens() < ceiling_tokens {
+            return Ok(());
+        }
+        Err(HardConstraint::Entitlement {
+            entitlement: self.name.clone(),
+            refused: EntitlementRefusal::SpendCeiling {
+                ceiling_tokens,
+                observed_tokens: spend.tokens(),
+            },
+        })
     }
 
     /// Line 1953's model half, as the hard constraint the session router
@@ -1085,6 +1361,73 @@ pub fn apply_hard_constraints<T>(
         }
     }
     (eligible, rejected)
+}
+
+/// Map lines 1970 and 1971 — the seam Phase 34F plugs into, and the spend
+/// gate.
+#[cfg(test)]
+mod entitlement_fallback_seam_tests {
+    use super::*;
+
+    /// The seam answers *unknown* for every pair it has not been given an
+    /// axis for, and `Same` only for the identity case. When Phase 34F lands
+    /// this is the one function that changes, and `Different` becomes
+    /// reachable.
+    #[test]
+    fn the_tier_seam_answers_unknown_until_the_axis_lands() {
+        assert_eq!(
+            same_capability_tier("fable-5", "fable-5"),
+            TierRelation::Same
+        );
+        assert_eq!(
+            same_capability_tier("fable-5", "nemotron-v3"),
+            TierRelation::Unknown,
+            "nothing in this build ranks models by capability class, and a guess here              misroutes work"
+        );
+    }
+
+    fn entitlement(ceiling: Option<u64>, spend: Option<u64>) -> Entitlement {
+        Entitlement::new(
+            "claude-a",
+            EntitlementRules::UNRESTRICTED.with_spend_ceiling_tokens(ceiling),
+        )
+        .with_spend(spend.map(|tokens| EntitlementSpendFacet::new(tokens, true)))
+    }
+
+    /// Both halves must be established, and once they are the refusal
+    /// carries both numbers. At the ceiling exactly is *reached*, which is
+    /// the fail-closed direction a spending protection takes everywhere else
+    /// in this crate.
+    #[test]
+    fn a_spend_ceiling_refuses_only_when_the_ceiling_and_the_spend_are_both_known() {
+        assert_eq!(entitlement(None, Some(9_999)).spend_constraint(), Ok(()));
+        assert_eq!(entitlement(Some(1_000), None).spend_constraint(), Ok(()));
+        assert_eq!(
+            entitlement(Some(1_000), Some(999)).spend_constraint(),
+            Ok(())
+        );
+        assert_eq!(
+            entitlement(Some(1_000), Some(1_000)).spend_constraint(),
+            Err(HardConstraint::Entitlement {
+                entitlement: "claude-a".to_owned(),
+                refused: EntitlementRefusal::SpendCeiling {
+                    ceiling_tokens: 1_000,
+                    observed_tokens: 1_000,
+                },
+            }),
+            "at the ceiling is reached — a ceiling that admitted one more turn is not a ceiling"
+        );
+    }
+
+    /// An entitlement with no rule and no reading is the value every
+    /// unconfigured launch carries, and nothing about it changed.
+    #[test]
+    fn an_unrestricted_entitlement_is_unrestricted_and_says_so() {
+        let bare = Entitlement::new("default", EntitlementRules::UNRESTRICTED);
+        assert!(bare.rules().is_unrestricted());
+        assert_eq!(bare.spend_constraint(), Ok(()));
+        assert_eq!(bare.source(), EntitlementSource::Unstated);
+    }
 }
 
 #[cfg(test)]

@@ -761,3 +761,72 @@ Recorded limits — stated by the worker, not discovered later:
   `DROP COLUMN`, plus a tenth pin in `tests/session_context.rs` phrased so the
   grep missed it), and `SessionRecord` has no `Default`, so the new field broke
   seven test-only struct literals in four files
+
+# Lines 1970, 1971, 1974 — COMPLETE 2026-09-01; PHASE 56A CLOSED
+
+Package `GH-BROKER-FALLBACK-56A` (Opus, high, Red; batch 70c), plus the
+orchestrator landing the one sub-step the packet's own file boundary
+deferred. Six worker mutations KILLED, plus the orchestrator's seventh below.
+
+**1970 — the stated, tier-preserving fallback order.** `FallbackStep::ORDER`
+(`routing/session.rs`) is the ruling's sentence and the only statement of it
+in the build: another subscription serving the same model, a subscription
+serving a same-tier model, then API credits under the same two steps.
+Post-ranking reselection over `Routed::considered()` — nothing removed,
+rescored, or reordered; the winner moves once and says so. The backing
+became routing-significant (`EntitlementBacking::source()` →
+`EntitlementSource`, carried by `ResolvedEntitlement::to_routing`) while
+`EntitlementKind` stayed routing-insignificant, asserted by a test whose
+`kind` lies outright. Tier steps consume Phase 34F through
+`same_capability_tier`, which answers `Unknown` for every non-identical pair
+today — so unknown NARROWS the order to its same-model steps
+(mutation-pinned: `unknown-widens` KILLED). Mutations `invert-order` and
+`bypass-fallback` KILLED, the latter from the library and the shipped binary
+in one run.
+
+The durable record, deferred by the packet (main.rs belonged to another live
+worker) and landed by the orchestrator from the worker's own written patch:
+`ENTITLEMENT_FALLBACK_{EXHAUSTED,THROTTLED}_PURPOSE` (`routing/evidence.rs`),
+their `RoutingOverhead` bucket and consumption arm, and
+`main.rs::record_entitlement_fallback` called from `launch_session` OUTSIDE
+the classified guard (a launch that states no task can still fall back) —
+`purpose` is the trigger, `quota_context` the account the work left, the
+destination the `sessions.entitlement` column of the same launch. Binary
+test `a_launch_that_falls_back_records_the_fallback_with_its_reason` reads
+the row back through `consumption_by_purpose`/`from_consumption` — the same
+aggregation the overhead report renders, chosen because a fallback row
+carries no outcome and the outcome-carrying readers rightly never see it.
+Orchestrator mutation `fallback-row-loses-purpose`
+(`.with_purpose(Some(fallback_purpose))` → `None::<&str>`): **KILLED** by
+that test (`left: 0, right: 1` — the row fell into another bucket).
+
+**1971 — per-entitlement rules the broker never exceeds.** Allowed/denied
+harnesses, tiers, job kinds — and the new fourth axis, `spend_ceiling_tokens`,
+read from the ledger by `recent_credential_spend` with the same
+narrow-by-credential, widen-when-unsure rule as the throttle reader. Rules
+hold under fallback STRUCTURALLY: the reselection reads `considered()`, the
+post-gate list, so no path exists to a candidate a rule removed. Mutations
+`remove-guard` and `wrong-source` KILLED. Spend is TOKENS by ruling
+(design-decisions §Phase 56A step 5): `cost_micro_usd` has no producer, and
+a money ceiling would make "never exceed" vacuous.
+
+**1974 — the broker's end-to-end cover.** Fixture entitlements only; normal
+selection, the stated-order exhaustion fallback, a throttled entitlement,
+capacity returning at the reset boundary, and a rule held under fallback
+pressure — three of them through the shipped binary. `entitlement_broker`:
+35 passed, 0 failed on the merged tree.
+
+Recorded limits carried forward: the exhaustion trigger is proved at
+`entitlement_fallback` (mutation-pinned via `choose`) but a full ranking
+normally pre-empts it (−3.5 penalty) — the throttle arm is the one proved
+end-to-end; the tier steps stay unreachable until 34F's axis wires in
+(successor: attach the tier to `Destination` beside `tier_ceiling`); the
+job-kind axis is enforced where a job kind exists (`DisposableRouting`),
+1947's own recorded limit.
+
+Cross-patch consequence found at integration, fixed in this batch: three
+tests (`entitlements` ×2, `launch_preflight` ×1) premised "an unpinned
+launch is native," which batch 70a's 372 closure made conditional — each now
+states its native premise explicitly (automatic routing off, or the native
+entitlement as the only candidate where continuation itself needs the router
+on). 15/15, 10/10 twice each after the fix.

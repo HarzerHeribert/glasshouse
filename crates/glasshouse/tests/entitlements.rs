@@ -691,7 +691,11 @@ fn route_names_the_entitlement_that_refused_a_destination() {
 /// instead of the entitlement fails the second half.
 #[test]
 fn the_native_default_and_a_configured_native_entitlement_are_announced_by_name() {
-    let unconfigured = Binary::with_config(PROFILES);
+    // Automatic routing off: this test's contract is the NATIVE announcement,
+    // and since map line 372 closed, an unpinned launch under automatic
+    // routing (the default) may legitimately land on a provider profile
+    // instead of the implied native one.
+    let unconfigured = Binary::with_config(&format!("{PROFILES}\n[routing]\nautomatic = false\n"));
     let said = unconfigured.launch_ok(None);
     assert!(
         said.contains(
@@ -700,7 +704,9 @@ fn the_native_default_and_a_configured_native_entitlement_are_announced_by_name(
         "{said}"
     );
 
-    let configured = Binary::with_config(&format!("{PROFILES}{MAX_PLAN}"));
+    let configured = Binary::with_config(&format!(
+        "{PROFILES}{MAX_PLAN}\n[routing]\nautomatic = false\n"
+    ));
     let said = configured.launch_ok(None);
     assert!(
         said.contains(
@@ -720,7 +726,13 @@ fn the_native_default_and_a_configured_native_entitlement_are_announced_by_name(
 /// by the same function.
 #[test]
 fn a_continued_session_announces_its_entitlement() {
-    let binary = Binary::with_config(&format!("{PROFILES}{MAX_PLAN}"));
+    // MAX_PLAN alone, no provider profiles: continuation IS the router
+    // steering the second launch, so automatic routing must stay on — and
+    // since map line 372 closed, an unpinned launch under automatic routing
+    // ranks every enabled profile, so the native entitlement this test
+    // announces must be the only candidate for the first launch to be
+    // native.
+    let binary = Binary::with_config(MAX_PLAN);
     binary.launch_ok(None);
     let said = binary.launch_ok(None);
     assert!(said.contains("continuing session"), "{said}");

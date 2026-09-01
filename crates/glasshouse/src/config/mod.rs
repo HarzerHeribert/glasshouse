@@ -1776,6 +1776,22 @@ pub struct EntitlementConfig {
     allow_job_kinds: Vec<ConfiguredJobKind>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     deny_job_kinds: Vec<ConfiguredJobKind>,
+    /// Map line 1971's fourth axis: the cumulative token spend past which
+    /// this entitlement may not be charged. Absent means *the user stated
+    /// no ceiling*, never *zero*, exactly as every other absent field in
+    /// this table does.
+    ///
+    /// **Tokens, not money, and that is not this field's own decision.**
+    /// `routing_observations.cost_micro_usd` has no producer in this build,
+    /// so a ceiling stated in money could never be reached and the broker
+    /// could never be held to it — see
+    /// [`crate::routing::evidence::CredentialSpend`], and map line 1465's
+    /// reader, which already answers the same question the same way in
+    /// production. `[providers.<name>.quota] budget` remains the money
+    /// ceiling (map line 1203) and remains, by its own documentation,
+    /// uncounted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    spend_ceiling_tokens: Option<u64>,
 }
 
 impl EntitlementConfig {
@@ -1872,7 +1888,19 @@ impl EntitlementConfig {
         self
     }
 
-    /// This entry's six lists as the router's one rules value.
+    /// Map line 1971's spend ceiling, in tokens, or `None` for *none
+    /// stated*.
+    pub fn spend_ceiling_tokens(&self) -> Option<u64> {
+        self.spend_ceiling_tokens
+    }
+
+    pub fn set_spend_ceiling_tokens(&mut self, value: Option<u64>) -> &mut Self {
+        self.spend_ceiling_tokens = value;
+        self
+    }
+
+    /// This entry's six lists and its spend ceiling as the router's one
+    /// rules value.
     pub fn rules(&self) -> crate::routing::EntitlementRules {
         crate::routing::EntitlementRules::UNRESTRICTED
             .allow_harnesses(self.allow_harnesses.iter().map(|h| h.id()))
@@ -1881,6 +1909,7 @@ impl EntitlementConfig {
             .deny_tiers(self.deny_tiers.iter().map(|t| t.tier()))
             .allow_job_kinds(self.allow_job_kinds.iter().map(|k| k.kind()))
             .deny_job_kinds(self.deny_job_kinds.iter().map(|k| k.kind()))
+            .with_spend_ceiling_tokens(self.spend_ceiling_tokens)
     }
 
     /// The resolved value, named `name` — the key this entry was stored
@@ -1923,6 +1952,7 @@ impl EntitlementConfig {
             capacity_scope: None,
             throttling: None,
             models: None,
+            spend: None,
         })
     }
 }
@@ -1973,6 +2003,30 @@ pub enum EntitlementBacking {
     Unstated,
 }
 
+impl EntitlementBacking {
+    /// What pays for this account, as the **router** may branch on it — map
+    /// line 1970's *"subscription to subscription to API credits"*, and the
+    /// user's ruling of 2026-08-31: *"A api key or a subscription isn't that
+    /// the distinction?"* It is, and the distinction is already structural
+    /// here rather than a field somebody typed:
+    /// [`Self::NativeHarness`] authenticates **through the harness**, which
+    /// is a subscription, and [`Self::Provider`] carries a credential of its
+    /// own, which is an API key. The loader **enforces** the separation —
+    /// an entry that is both is refused as
+    /// [`EntitlementLookupError::NativeSignInWithOwnCredential`], map line
+    /// 1973's isolation rule — so nothing here is a guess.
+    ///
+    /// This is why [`EntitlementKind`]'s invariant survives Phase 56A step
+    /// 5 intact: routing branches on the *backing*, never on the *kind*.
+    pub fn source(&self) -> crate::routing::EntitlementSource {
+        match self {
+            Self::NativeHarness(_) => crate::routing::EntitlementSource::Subscription,
+            Self::Provider(_) => crate::routing::EntitlementSource::ApiCredits,
+            Self::Unstated => crate::routing::EntitlementSource::Unstated,
+        }
+    }
+}
+
 /// An entitlement as configuration resolved it — [`EntitlementConfig`] with
 /// its name, its layer, and its rules already turned into the router's
 /// [`crate::routing::EntitlementRules`].
@@ -2019,6 +2073,13 @@ pub struct ResolvedEntitlement {
     throttling: Option<EntitlementThrottleReading>,
     /// Map line 1965's models facet. `None` is unknown, same rule as above.
     models: Option<EntitlementModels>,
+    /// Map line 1971's observed-spend facet, against which this entry's own
+    /// [`crate::routing::EntitlementRules::spend_ceiling_tokens`] is
+    /// compared. Same contract as the four facets above: `None` until
+    /// [`Self::with_telemetry`] runs with the ledger's rows in hand, and
+    /// `None` thereafter when no row carried a token count — *unknown*,
+    /// never "nothing spent".
+    spend: Option<EntitlementSpendReading>,
 }
 
 impl ResolvedEntitlement {
@@ -2073,6 +2134,13 @@ impl ResolvedEntitlement {
     /// Map line 1965's models facet — `None` means *unknown*.
     pub fn models(&self) -> Option<&EntitlementModels> {
         self.models.as_ref()
+    }
+
+    /// Map line 1971's observed-spend facet — `None` means *unknown*
+    /// (nothing consulted the ledger, or no row it holds carried a token
+    /// count), never "nothing spent".
+    pub fn spend(&self) -> Option<&EntitlementSpendReading> {
+        self.spend.as_ref()
     }
 
     /// This account's key in the ledger's `quota_context` column — the
@@ -2163,6 +2231,28 @@ impl ResolvedEntitlement {
             });
         }
 
+        if let Some(observations) = telemetry.observations {
+            // Map line 1971's spend half, read from the same rows and
+            // narrowed by the same rule as the throttle facet above — one
+            // ledger pass' worth of arithmetic, and `None` when no row
+            // carried a count, which is what keeps a stated ceiling from
+            // being judged reached by a build that measured nothing.
+            let label = self.credential_label();
+            let counted = crate::routing::evidence::recent_credential_spend(
+                observations,
+                provider,
+                label.as_deref(),
+            );
+            self.spend = counted.tokens.map(|tokens| EntitlementSpendReading {
+                tokens,
+                scope: if counted.account_narrowed {
+                    TelemetryScope::PerAccount
+                } else {
+                    TelemetryScope::ProviderWide
+                },
+            });
+        }
+
         if let Some(catalogues) = telemetry.model_catalogues {
             self.models = catalogues
                 .load(provider)
@@ -2200,6 +2290,20 @@ impl ResolvedEntitlement {
     pub fn to_routing(&self) -> crate::routing::Entitlement {
         crate::routing::Entitlement::new(self.name.clone(), self.rules.clone())
             .with_configured(self.layer != Layer::Default)
+            // Map line 1970's work item 1, and the two facets that need no
+            // threshold to derive, so they are carried **here** rather than
+            // by the caller: the backing discriminant is structural (see
+            // [`EntitlementBacking::source`]) and the spend reading is a
+            // raw token count. The four 56A-2 facets stay with the caller
+            // for the reason above — a band is derived against the user's
+            // own thresholds, which this method does not hold.
+            .with_source(self.backing.source())
+            .with_spend(self.spend.map(|reading| {
+                crate::routing::EntitlementSpendFacet::new(
+                    reading.tokens,
+                    reading.scope == TelemetryScope::PerAccount,
+                )
+            }))
     }
 
     /// What the announcement says inside the parentheses after the name:
@@ -2268,6 +2372,32 @@ impl EntitlementThrottleReading {
     /// total otherwise.
     pub fn throttled(&self) -> usize {
         self.throttled
+    }
+
+    pub fn scope(&self) -> TelemetryScope {
+        self.scope
+    }
+}
+
+/// Map line 1971's observed-spend facet: how many tokens the evidence
+/// window recorded against this entitlement, and whose reading that is.
+///
+/// **Tokens, not money** — see
+/// [`EntitlementConfig::spend_ceiling_tokens`] and
+/// [`crate::routing::evidence::CredentialSpend`] for why the only currency
+/// this ledger holds is the one a ceiling can be checked against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EntitlementSpendReading {
+    tokens: u64,
+    scope: TelemetryScope,
+}
+
+impl EntitlementSpendReading {
+    /// Input plus output tokens in the window — this account's own when
+    /// [`Self::scope`] is [`TelemetryScope::PerAccount`], the provider's
+    /// total otherwise.
+    pub fn tokens(&self) -> u64 {
+        self.tokens
     }
 
     pub fn scope(&self) -> TelemetryScope {
@@ -5017,6 +5147,7 @@ impl<'a> EffectiveConfig<'a> {
                 capacity_scope: None,
                 throttling: None,
                 models: None,
+                spend: None,
             });
         }
         Ok(resolved)

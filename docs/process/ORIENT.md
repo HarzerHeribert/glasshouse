@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1096 / 1305 mandatory capabilities (84%)** — 209 open across 47 phases.
+**1099 / 1305 mandatory capabilities (84%)** — 206 open across 46 phases.
 
 ## Where the work is
 
@@ -49,7 +49,6 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 55 | V1 completion definition | **2** | 21 | `1910` |
 | Phase 28 | File-aware memory lookup | **3** | 2 | `1137` |
 | Phase 34C | Automatic routing-model selection | **3** | 10 | `1429` |
-| Phase 56A | Entitlement pool and subscription broker: several accounts, one scheduler | **3** | 10 | `1958` |
 | Phase 21E | Decision ladder and conflict handling | **4** | 8 | `907` |
 | Phase 33C | Failure, quota, and route correlation | **4** | 11 | `1362` |
 | Phase 24 | Memory reranking | **5** | 1 | `1082` |
@@ -70,7 +69,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 33B | Reliability-adjusted agent performance | **14** | 0 | `1345` |
 | Phase 51 | Evaluation hooks | **25** | 12 | `1818` |
 
-**Fully closed (59):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 8, Phase 9A, Phase 9B, Phase 9C, Phase 9D, Phase 9F, Phase 9G, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 16, Phase 17, Phase 18, Phase 19, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 21H, Phase 21I, Phase 21J, Phase 22, Phase 23, Phase 25, Phase 26, Phase 32, Phase 34, Phase 34A, Phase 34D, Phase 35, Phase 35C, Phase 35D, Phase 36, Phase 40, Phase 41, Phase 42, Phase 43, Phase 44, Phase 45, Phase 46, Phase 48, Phase 49, Phase 50, Phase 54.
+**Fully closed (60):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 8, Phase 9A, Phase 9B, Phase 9C, Phase 9D, Phase 9F, Phase 9G, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 16, Phase 17, Phase 18, Phase 19, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 21H, Phase 21I, Phase 21J, Phase 22, Phase 23, Phase 25, Phase 26, Phase 32, Phase 34, Phase 34A, Phase 34D, Phase 35, Phase 35C, Phase 35D, Phase 36, Phase 40, Phase 41, Phase 42, Phase 43, Phase 44, Phase 45, Phase 46, Phase 48, Phase 49, Phase 50, Phase 54, Phase 56A.
 
 ## The nearly-finished phases, in full
 
@@ -206,12 +205,6 @@ these unwrapped.
 - **1436** ☐ Filter automatic candidates by maximum marginal routing cost.
 - **1439** ☐ Prefer a cheap metered model over an unreliable free model when failed routing attempts would cost more time than the price difference.
 - **1440** ☐ Avoid using a scarce premium subscription session as the classifier when a cheaper adequate routing resource exists.
-
-### Phase 56A — Entitlement pool and subscription broker: several accounts, one scheduler  (3 open, 10 closed)
-
-- **1970** ☐ Fall back across the pool in a stated order on exhaustion or throttling — subscription to subscription to API credits — and record every fallback with its reason.
-- **1971** ☐ Let the user state per-entitlement rules — allowed harnesses, tiers, job kinds, and spend ceilings — and never let the broker exceed them.
-- **1974** ☐ Cover the broker with an end-to-end test against fixture entitlements, including a reset boundary and an exhaustion fallback, before offering it.
 
 ## Practice sections, by number
 

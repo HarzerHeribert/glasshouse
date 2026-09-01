@@ -1614,6 +1614,58 @@ fn record_tier_movement(
     }
 }
 
+/// Capability map line 1970: one ledger row per pool fallback the launch
+/// path acted on. The same open-write-drop shape as
+/// [`record_tier_movement`], for the same reasons — and **a decision that
+/// made no fallback writes nothing**, because "the broker stayed put" is
+/// the row's absence, exactly as a held tier is.
+///
+/// The row carries the fallback whole **without a migration**: `purpose` is
+/// the trigger, `quota_context` is the account the work LEFT (so the
+/// entitlements view's own per-account reader finds it), and the account
+/// the work went TO is the `sessions.entitlement` column migration 22
+/// added, written by this same launch from this same decision. `provider`
+/// and `model` are the chosen destination's.
+fn record_entitlement_fallback(
+    runtime: &Runtime,
+    harness: glasshouse::integrations::IntegrationId,
+    destination: &glasshouse::routing::session::Destination,
+    fallback: &glasshouse::routing::session::EntitlementFallback,
+) {
+    use glasshouse::routing::evidence::{
+        ENTITLEMENT_FALLBACK_EXHAUSTED_PURPOSE, ENTITLEMENT_FALLBACK_THROTTLED_PURPOSE,
+        EvidenceLedger, NewObservation,
+    };
+    use glasshouse::routing::session::FallbackReason;
+
+    let fallback_purpose = match fallback.reason() {
+        FallbackReason::Exhausted => ENTITLEMENT_FALLBACK_EXHAUSTED_PURPOSE,
+        FallbackReason::Throttled => ENTITLEMENT_FALLBACK_THROTTLED_PURPOSE,
+    };
+    let ledger = match EvidenceLedger::open(runtime) {
+        Ok(ledger) => ledger,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "routing evidence ledger unavailable; the entitlement fallback is not recorded"
+            );
+            return;
+        }
+    };
+    let now_unix = glasshouse::provider::cache::now_unix_seconds();
+    let observation = NewObservation::new(
+        destination.backend().provider(),
+        destination.backend().model().label(),
+    )
+    .with_harness(Some(harness.slug()))
+    .with_purpose(Some(fallback_purpose))
+    .with_quota_context(Some(fallback.from().to_owned()))
+    .with_timing(Some(now_unix), Some(now_unix));
+    if let Err(err) = ledger.record(observation, now_unix) {
+        tracing::warn!(error = %err, "could not record the entitlement fallback");
+    }
+}
+
 /// The workload tier a launch's routing decision used, and whether line
 /// 1459's conservative rule moved it — **capability map line 1834**'s
 /// producer input, from the classification that decision actually acted on.
@@ -4085,6 +4137,21 @@ fn launch_session(
                 selection.id(),
                 &classified.answer,
             );
+        }
+        // Line 1970, on the path that acts — and OUTSIDE the classified
+        // guard, because a fallback is not a classification and a launch
+        // that states no task can still make one. The account the broker
+        // left is said before the destination it produced is announced
+        // below, and recorded so it can be counted. `glasshouse route`
+        // renders the same fallback in its report and records nothing.
+        if let Some(routed) = &routed
+            && let Some(fallback) = routed.fallback()
+        {
+            eprintln!(
+                "glasshouse: {}. `glasshouse route` says why.",
+                fallback.describe()
+            );
+            record_entitlement_fallback(runtime, selection.id(), routed.chosen(), fallback);
         }
         (routed, classified, health)
     };
@@ -8889,6 +8956,14 @@ fn render_routing_economics(out: &mut String, runtime: &Runtime, now_unix: i64) 
                 "tier movement",
                 tokens(overhead.tier_movement_tokens),
                 overhead.tier_movement_requests
+            );
+            let _ = writeln!(
+                out,
+                "  {:<16}{} over {} fallback rows — pool fallbacks the launch path acted on \
+                 (map line 1970); no tokens, because a decision is not a model call",
+                "pool fallback",
+                tokens(overhead.entitlement_fallback_tokens),
+                overhead.entitlement_fallback_requests
             );
             let _ = writeln!(
                 out,

@@ -62,8 +62,8 @@ use super::pressure::{
 };
 use super::request::{RouterAnswer, TaskClass};
 use super::{
-    Backend, CacheLocality, Contribution, HardConstraint, RoutingExplanation, ToolSemantics,
-    apply_hard_constraints,
+    Backend, CacheLocality, Contribution, EntitlementSource, HardConstraint, RoutingExplanation,
+    TierRelation, ToolSemantics, apply_hard_constraints, same_capability_tier,
 };
 
 // ---------------------------------------------------------------------------
@@ -3134,6 +3134,325 @@ impl std::fmt::Display for OverrideRefusal {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Map line 1970 — the tier-preserving fallback across the pool.
+//
+// The user's ruling of 2026-08-31 (`design-decisions.md` §Phase 56A, "Step
+// 4's fallback order") is the instruction of record for everything in this
+// block, and its shape was settled there too: *"line 1970's fallback becomes
+// a post-ranking reselection over `Routed::considered()`'s already-complete
+// list — which preserves additive, never a filter"*. Nothing here removes a
+// candidate, changes a score, or reorders the ranking; it moves the winner,
+// once, and says so.
+// ---------------------------------------------------------------------------
+
+/// Why map line 1970's fallback fired — the two triggers the line names and
+/// no others.
+///
+/// There is deliberately no third variant for *scored badly*. A fallback is
+/// not a preference: the ruling's whole risk is a silent downgrade, so the
+/// trigger is a fact about the account (its capacity band reads exhausted,
+/// or the ledger recorded a throttle against it) and never a comparison
+/// between two accounts. An untriggered decision is byte-identical to the
+/// one this router made before line 1970 existed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FallbackReason {
+    /// The chosen entitlement's capacity band reads
+    /// [`CapacityBand::Exhausted`].
+    Exhausted,
+    /// The evidence window recorded at least one informative throttle
+    /// against the chosen entitlement.
+    Throttled,
+}
+
+impl FallbackReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Exhausted => "exhausted",
+            Self::Throttled => "throttled",
+        }
+    }
+}
+
+impl std::fmt::Display for FallbackReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Which step of the ruling's order matched — map line 1970's *"stated
+/// order"*, as four steps rather than the line's three words, because the
+/// ruling adds the constraint the line does not say and which is the part
+/// that matters: **it is tier-preserving**.
+///
+/// > *"switch to another subscription always if same model or model of
+/// > similar capability is available in another. You can't put a fable 5
+/// > task and switch it to a nemotron v3 … If subscription model of
+/// > capability is not available switch to api one - if available."*
+///
+/// [`Self::ORDER`] is that sentence, in order, and it is the only place the
+/// order is written down: the reselection walks this slice and stops at the
+/// first match, so a build that ranked an API-credit account above a
+/// subscription one would have to reorder this constant to do it. That is
+/// what the order mutation in this package's evidence changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FallbackStep {
+    /// Another **subscription** serving the **same model**.
+    SubscriptionSameModel,
+    /// Another **subscription** serving a model of the **same capability
+    /// tier**. Unreachable until Phase 34F's axis lands — see
+    /// [`super::same_capability_tier`].
+    SubscriptionSameTier,
+    /// An **API-credit** account serving the **same model**.
+    ApiCreditsSameModel,
+    /// An **API-credit** account serving a model of the **same capability
+    /// tier**. Unreachable until Phase 34F's axis lands.
+    ApiCreditsSameTier,
+}
+
+impl FallbackStep {
+    /// The ruling's order, and the only statement of it in this build.
+    pub const ORDER: [Self; 4] = [
+        Self::SubscriptionSameModel,
+        Self::SubscriptionSameTier,
+        Self::ApiCreditsSameModel,
+        Self::ApiCreditsSameTier,
+    ];
+
+    /// What a candidate must be paid for by to match this step.
+    /// [`EntitlementSource::Unstated`] matches no step: an entry that names
+    /// no backing is *listed, never matched, never charged*, and an order
+    /// over subscriptions and API credits has no place for it.
+    fn source(self) -> EntitlementSource {
+        match self {
+            Self::SubscriptionSameModel | Self::SubscriptionSameTier => {
+                EntitlementSource::Subscription
+            }
+            Self::ApiCreditsSameModel | Self::ApiCreditsSameTier => EntitlementSource::ApiCredits,
+        }
+    }
+
+    /// Whether this step accepts a move from `from` to `to` on the model
+    /// axis — the ruling's tier-preserving constraint, and the whole of
+    /// what stops a fallback from silently downgrading the work.
+    ///
+    /// **Unknown narrows, and never widens.** A pair Phase 34F's axis has
+    /// not ranked reads [`TierRelation::Unknown`], which is `false` on the
+    /// tier steps; so while the axis is absent the order collapses to its
+    /// two same-model steps, and a fallback that cannot establish it is
+    /// preserving the tier simply does not happen. The ruling is explicit
+    /// that this is the safe direction: a fallback that silently downgrades
+    /// the model *"is worse than a refusal, because the work continues and
+    /// looks fine"*.
+    fn accepts(self, from: &Destination, to: &Destination) -> bool {
+        match self {
+            Self::SubscriptionSameModel | Self::ApiCreditsSameModel => same_model(from, to),
+            Self::SubscriptionSameTier | Self::ApiCreditsSameTier => {
+                match (from.backend().model().name(), to.backend().model().name()) {
+                    (Some(from), Some(to)) => {
+                        from != to && same_capability_tier(from, to) == TierRelation::Same
+                    }
+                    // A model the harness picks itself has no name for an
+                    // axis to have ranked. Unknown, and unknown narrows.
+                    _ => false,
+                }
+            }
+        }
+    }
+
+    /// The clause a person reads inside the fallback's own sentence.
+    pub fn describe(self) -> &'static str {
+        match self {
+            Self::SubscriptionSameModel => "another subscription serving the same model",
+            Self::SubscriptionSameTier => {
+                "another subscription serving a model of the same capability tier"
+            }
+            Self::ApiCreditsSameModel => "an API-credit account serving the same model",
+            Self::ApiCreditsSameTier => {
+                "an API-credit account serving a model of the same capability tier"
+            }
+        }
+    }
+}
+
+/// One fallback map line 1970 made: which account the ranking had chosen,
+/// which one the work went to instead, why, and which step of the order
+/// matched.
+///
+/// Carried on [`Routed`] beside [`TierMovement`] and for its reason — the
+/// decision is the router's, and what to do with the record is the caller's.
+/// `glasshouse route` renders it (see [`Routed::render`]) and records
+/// nothing, exactly as it does for a moved tier.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EntitlementFallback {
+    from: String,
+    to: String,
+    from_destination: String,
+    to_destination: String,
+    reason: FallbackReason,
+    step: FallbackStep,
+}
+
+impl EntitlementFallback {
+    /// The entitlement the ranking had chosen and the fallback moved off.
+    pub fn from(&self) -> &str {
+        &self.from
+    }
+
+    /// The entitlement the work went to instead.
+    pub fn to(&self) -> &str {
+        &self.to
+    }
+
+    /// [`Destination::id`] of the candidate the ranking had chosen.
+    pub fn from_destination(&self) -> &str {
+        &self.from_destination
+    }
+
+    /// [`Destination::id`] the work went to instead.
+    pub fn to_destination(&self) -> &str {
+        &self.to_destination
+    }
+
+    pub fn reason(&self) -> FallbackReason {
+        self.reason
+    }
+
+    pub fn step(&self) -> FallbackStep {
+        self.step
+    }
+
+    /// The sentence a person reads, and the one a durable record should
+    /// carry: both accounts, the trigger, and the step of the order that
+    /// matched. One wording, so an explanation and a record cannot describe
+    /// one fallback two ways.
+    pub fn describe(&self) -> String {
+        format!(
+            "entitlement `{}` is {} — the work moved to `{}`, {} (map line 1970's order)",
+            self.from,
+            self.reason,
+            self.to,
+            self.step.describe()
+        )
+    }
+}
+
+/// Whether these two candidates would run the **same model** — map line
+/// 1970's first and third steps.
+///
+/// Two named models are the same when their names are. Two
+/// [`super::AssignedModel::HarnessDefault`] candidates are the same when
+/// they are the **same harness on the same launch profile**, which is a
+/// fact rather than a guess: the harness makes one choice for one profile,
+/// so two accounts offered for that profile differ in the account and in
+/// nothing else — and that is the pool's own commonest shape, the
+/// `fresh:<harness>:<profile>@<account>` candidates line 1953 splits a
+/// profile into. Anything else — one named and one harness-picked, or two
+/// harness-picked candidates on different profiles — is **not established**
+/// to be the same model and is therefore not the same model, on the ruling's
+/// own direction.
+fn same_model(from: &Destination, to: &Destination) -> bool {
+    match (from.backend().model().name(), to.backend().model().name()) {
+        (Some(from), Some(to)) => from == to,
+        (None, None) => {
+            from.harness() == to.harness() && from.launch_profile() == to.launch_profile()
+        }
+        _ => false,
+    }
+}
+
+/// Whether this entitlement is in a state map line 1970 falls back **from**,
+/// and which of the line's two triggers it is.
+///
+/// Exhaustion outranks throttling when both read true: a spent allowance is
+/// the stronger fact and the one a person would name. An entitlement whose
+/// band nobody read and whose ledger nobody consulted answers `None` —
+/// *unknown is not exhausted*, the rule every other gate in this module
+/// follows, and the one that keeps a build with no telemetry routing exactly
+/// as it did before this function existed.
+fn fallback_trigger(entitlement: &super::Entitlement) -> Option<FallbackReason> {
+    if entitlement.capacity_band() == Some(CapacityBand::Exhausted) {
+        return Some(FallbackReason::Exhausted);
+    }
+    if entitlement
+        .throttling()
+        .is_some_and(|throttling| throttling.throttled() > 0)
+    {
+        return Some(FallbackReason::Throttled);
+    }
+    None
+}
+
+/// Map line 1970's reselection: given the ranking and the index it settled
+/// on, the index the work should move to instead and the record of why.
+///
+/// `ranked` is the already-ranked, already-gated list `Routed` keeps as
+/// [`Routed::considered`], best first — so every candidate this function can
+/// reach has passed every hard constraint, **map line 1971's rules
+/// included**. That is the whole of
+/// how *"an exhausted pool does not license exceeding a rule"* is enforced:
+/// there is no path from here to a candidate the gate removed, because the
+/// gate ran first and this function never sees its rejections.
+///
+/// `None` — no fallback — whenever any of these holds, and each is a
+/// deliberate narrowing rather than an omission:
+///
+/// - the candidate set carries fewer than two configured entitlements, so
+///   there is no pool to fall back across (the gate every pool term checks);
+/// - the chosen candidate carries no entitlement, or its entitlement is
+///   neither exhausted nor throttled — the untriggered case, which must stay
+///   byte-identical to today's decision;
+/// - no step of [`FallbackStep::ORDER`] matched a **healthy** candidate on a
+///   **different** account. A sibling in the same state is not a refuge, and
+///   a second candidate on the *same* account is the same account.
+pub fn entitlement_fallback(
+    ranked: &[&Destination],
+    chosen_index: usize,
+    pool: &EntitlementPoolView,
+) -> Option<(usize, EntitlementFallback)> {
+    if !pool.offers_a_choice() {
+        return None;
+    }
+    let from = ranked.get(chosen_index)?;
+    let from_entitlement = from.entitlement()?;
+    let reason = fallback_trigger(from_entitlement)?;
+
+    for step in FallbackStep::ORDER {
+        for (index, candidate) in ranked.iter().enumerate() {
+            if index == chosen_index {
+                continue;
+            }
+            let Some(entitlement) = candidate.entitlement() else {
+                continue;
+            };
+            if entitlement.name() == from_entitlement.name() {
+                continue;
+            }
+            if fallback_trigger(entitlement).is_some() {
+                continue;
+            }
+            if entitlement.source() != step.source() {
+                continue;
+            }
+            if !step.accepts(from, candidate) {
+                continue;
+            }
+            return Some((
+                index,
+                EntitlementFallback {
+                    from: from_entitlement.name().to_owned(),
+                    to: entitlement.name().to_owned(),
+                    from_destination: from.id().to_owned(),
+                    to_destination: candidate.id().to_owned(),
+                    reason,
+                    step,
+                },
+            ));
+        }
+    }
+    None
+}
+
 /// What [`SessionRouter::choose`] decided, and everything behind it — map
 /// line 1601.
 ///
@@ -3156,6 +3475,14 @@ pub struct Routed {
     /// `None` when no tier was stated — no task, nothing to move — and
     /// `Some(Held { .. })` when one was and nothing moved, with the reason.
     movement: Option<TierMovement>,
+    /// Map line 1970: the fallback across the pool this decision made, when
+    /// it made one. `None` is *no fallback happened* — the ordinary case,
+    /// and the one in which this decision is byte-identical to the one this
+    /// router made before line 1970 existed. There is no `Held` shape here,
+    /// unlike [`TierMovement`]: a tier is decided on every classified
+    /// launch and so has something to say when it stands, while a fallback
+    /// is an event that either occurred or did not.
+    fallback: Option<EntitlementFallback>,
 }
 
 impl Routed {
@@ -3208,6 +3535,14 @@ impl Routed {
         self.movement.as_ref()
     }
 
+    /// Map line 1970: the pool fallback this decision made, or `None` when
+    /// it made none. **Zero fallbacks is `None` and never an empty record**
+    /// — a caller recording these writes one row per `Some` and nothing at
+    /// all otherwise.
+    pub fn fallback(&self) -> Option<&EntitlementFallback> {
+        self.fallback.as_ref()
+    }
+
     /// Line 1601's debug mode: the decision and the contributions behind it.
     pub fn render(&self) -> String {
         use std::fmt::Write as _;
@@ -3228,6 +3563,13 @@ impl Routed {
         // inside a candidate's block — it is a heading a person reads first.
         if let Some(movement) = self.movement.as_ref().filter(|m| m.fired()) {
             let _ = writeln!(out, "tier         {}", movement.describe());
+        }
+        // Line 1970's visibility half, on the same terms as the moved tier
+        // above: a fallback moved the work to another account, which is a
+        // heading a person reads first rather than a term inside one
+        // candidate's block.
+        if let Some(fallback) = self.fallback.as_ref() {
+            let _ = writeln!(out, "fallback     {}", fallback.describe());
         }
         if let Some(automatic) = self.overrode() {
             let _ = writeln!(
@@ -3515,6 +3857,7 @@ impl SessionRouter {
                 automatic: None,
                 override_refused: None,
                 movement: None,
+                fallback: None,
             });
         }
 
@@ -3564,6 +3907,7 @@ impl SessionRouter {
                 automatic: None,
                 override_refused: None,
                 movement,
+                fallback: None,
             });
         }
 
@@ -3621,8 +3965,47 @@ impl SessionRouter {
         });
 
         let automatic_id = scored[0].0.id().to_owned();
-        let (index, refusal) = self.apply_override(&scored, current, &rejected);
-        let overrode = (scored[index].0.id() != automatic_id).then(|| automatic_id.clone());
+        let (ranked_index, refusal) = self.apply_override(&scored, current, &rejected);
+        let overrode = (scored[ranked_index].0.id() != automatic_id).then(|| automatic_id.clone());
+
+        // Step 5, map line 1970: the post-ranking reselection. It runs after
+        // the override and over the same already-gated list, so it can only
+        // move the work to a candidate every hard constraint already
+        // admitted — which is how line 1971's rules hold under fallback
+        // pressure without a second check.
+        //
+        // **It never moves an account the user named.** An override *"may
+        // overrule a ranking and not a fact about what can serve"*, and this
+        // is neither: it is Glasshouse preferring one admissible account
+        // over another, which is exactly the choice a person who named the
+        // account has already made. Their account being throttled is a thing
+        // the explanation tells them — the throttling term is right there in
+        // the block — not a thing to overrule them about.
+        //
+        // *Named the account*, and not merely used an override: `--to` with
+        // a bare `fresh:<harness>:<profile>` names the **profile**, and
+        // [`destination_answers_to`] records that the ranking still chooses
+        // the account among that profile's candidates (line 1969). So a
+        // prefix override, and `--fresh`, leave the account to Glasshouse
+        // and the fallback applies to it; only an exact id — `@<account>`
+        // included — and `--hold`, which says *stay where you are*, take the
+        // account out of Glasshouse's hands. An override that was refused
+        // leaves the ranking's own answer standing, and the fallback applies
+        // to that.
+        let user_chose = refusal.is_none()
+            && match self.user_override.destination() {
+                Some(DestinationChoice::To(id)) => id == scored[ranked_index].0.id(),
+                Some(DestinationChoice::Hold) => true,
+                Some(DestinationChoice::Fresh) | None => false,
+            };
+        let moved = if user_chose {
+            None
+        } else {
+            let ranked: Vec<&Destination> = scored.iter().map(|(candidate, _)| candidate).collect();
+            entitlement_fallback(&ranked, ranked_index, &pool)
+        };
+        let index = moved.as_ref().map_or(ranked_index, |(to, _)| *to);
+        let fallback = moved.map(|(_, record)| record);
 
         let (chosen, mut explanation) = scored[index].clone();
         if let Some(automatic) = &overrode {
@@ -3643,6 +4026,18 @@ impl SessionRouter {
                 format!("the override was not applied: {refusal}"),
             ));
         }
+        // A contribution of zero magnitude, like the override's own: the
+        // fallback did not out-score anything, it moved the winner after the
+        // scoring was over. Its evidence is the whole record, so the block a
+        // person reads under `why` says which account was left, which was
+        // taken, and under which step of the order.
+        if let Some(fallback) = &fallback {
+            explanation.push(Contribution::new(
+                "entitlement fallback",
+                0.0,
+                fallback.describe(),
+            ));
+        }
 
         Some(Routed {
             moment,
@@ -3654,6 +4049,7 @@ impl SessionRouter {
             automatic: overrode,
             override_refused: refusal,
             movement,
+            fallback,
         })
     }
 
@@ -3888,6 +4284,15 @@ fn hard_constraint(
     // (`super::EntitlementRules::refusal`).
     if let Some(entitlement) = destination.entitlement() {
         entitlement.constraint(destination.harness(), minimum_tier)?;
+        // Map line 1971's fourth axis, asked beside the other three and on
+        // both passes: a spend ceiling is a rule the **user wrote**, not a
+        // reading this build took, so — unlike the model half below — it is
+        // not gated on the pool axis. A person who set a ceiling on their
+        // one account meant it, and an account over its ceiling is over it
+        // whether or not a second one exists. It refuses only when the
+        // ceiling and the spend are BOTH established; see
+        // `super::Entitlement::spend_constraint`.
+        entitlement.spend_constraint()?;
         // Line 1953's model half, asked on both passes like the harness
         // half (the destination's model is known independently of any
         // tier), and only when the offered set carries the entitlement axis

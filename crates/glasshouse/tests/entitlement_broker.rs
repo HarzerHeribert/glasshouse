@@ -27,16 +27,20 @@ use glasshouse::harness::pairing::PairingOverrides;
 use glasshouse::integrations::IntegrationId;
 use glasshouse::provider::quota::{CapacityBand, CapacityBandThresholds};
 use glasshouse::provider::telemetry::{GatewayQuotaCache, RateLimitHeaders};
+use glasshouse::routing::classify::WorkloadTier;
+use glasshouse::routing::disposable::JobKind;
 use glasshouse::routing::evidence::{EvidenceLedger, FailureClass, NewObservation, Outcome};
 use glasshouse::routing::free::FreePool;
 use glasshouse::routing::session::{
-    CheckpointQuality, Destination, EntitlementPoolView, Routed, RouterInputs, RoutingMoment,
-    RoutingOverride, SessionRouter, TaskRequirements, entitlement_capacity,
-    entitlement_model_availability, entitlement_reset_boundary, entitlement_throttling,
+    CheckpointQuality, Destination, EntitlementPoolView, FallbackReason, FallbackStep, Routed,
+    RouterInputs, RoutingMoment, RoutingOverride, SessionRouter, TaskRequirements,
+    entitlement_capacity, entitlement_fallback, entitlement_model_availability,
+    entitlement_reset_boundary, entitlement_throttling,
 };
 use glasshouse::routing::{
     AssignedModel, Backend, Cost, CredentialId, Entitlement, EntitlementModelsFacet,
-    EntitlementRefusal, EntitlementRules, HardConstraint, ToolSemantics,
+    EntitlementRefusal, EntitlementRules, EntitlementSource, EntitlementSpendFacet,
+    EntitlementThrottleFacet, HardConstraint, ToolSemantics,
 };
 use glasshouse::secret::SecretRef;
 
@@ -1159,5 +1163,1016 @@ fn the_view_still_reports_sessions_charged_to_an_entry_no_longer_configured() {
         2,
         "the two configured entries get rows and the retired one does not — it \
          is reported as history, never promoted back into the pool:\n{view}"
+    );
+}
+
+// ===========================================================================
+// Half four — Phase 56A step 5, capability map lines 1970, 1971 and 1974:
+// the tier-preserving fallback across the pool, the user's per-entitlement
+// rules the broker may never exceed, and the end-to-end cover.
+//
+// The order itself (`entitlement_fallback`) is exercised directly, the way
+// this file already exercises the five score terms directly — it is one
+// pure function over a ranked list, and every arm of the ruling's order is
+// reachable that way. Beside it, and load-bearing for practice §35, two
+// tests drive the whole of `SessionRouter::choose`: nothing above them can
+// fail on a build where `choose` stops calling the reselection at all.
+// ===========================================================================
+
+/// An account with a backing, a capacity band and a throttle count — the
+/// three facts map line 1970's order and its trigger read.
+fn account(
+    name: &str,
+    source: EntitlementSource,
+    band: Option<CapacityBand>,
+    throttles: usize,
+) -> Entitlement {
+    Entitlement::new(name, EntitlementRules::UNRESTRICTED)
+        .with_source(source)
+        .with_capacity(band, None)
+        .with_throttling(Some(EntitlementThrottleFacet::new(throttles, true)))
+}
+
+/// A fresh destination on a **named** model other than the one `fresh`
+/// carries — the "different model" half of the narrowing proof.
+fn fresh_on_model(id: &str, model: &str, entitlement: Entitlement) -> Destination {
+    Destination::fresh(
+        id,
+        HARNESS,
+        "profile",
+        Backend::new(
+            "the-same-provider",
+            PROTOCOL,
+            AssignedModel::named(model),
+            CredentialId::new(
+                "the-same-provider",
+                SecretRef::Environment {
+                    var: "THE_SAME_PROVIDER_KEY".to_owned(),
+                },
+            ),
+            Cost::Metered,
+            ToolSemantics::Verified,
+        ),
+        None,
+    )
+    .with_entitlement(Some(entitlement))
+}
+
+fn ranked(destinations: &[Destination]) -> Vec<&Destination> {
+    destinations.iter().collect()
+}
+
+/// **Line 1970's order, the packet's own acceptance test.** An exhausted
+/// subscription is the ranking's winner; a same-model second subscription
+/// and a same-model API-credit account are both available and healthy, and
+/// the **API one is ranked above the subscription on purpose** — so a build
+/// that simply took the best-scoring healthy candidate, rather than walking
+/// `FallbackStep::ORDER`, chooses the API account and fails here. Remove the
+/// subscription and the API account is taken, which is the ruling's own
+/// completion of the order: *"If subscription model of capability is not
+/// available switch to api one - if available."*
+#[test]
+fn the_fallback_order_prefers_a_subscription_and_takes_api_credits_only_when_it_must() {
+    let exhausted = fresh(
+        "d-a",
+        account(
+            "claude-a",
+            EntitlementSource::Subscription,
+            Some(CapacityBand::Exhausted),
+            0,
+        ),
+    );
+    let api = fresh(
+        "d-api",
+        account(
+            "openrouter",
+            EntitlementSource::ApiCredits,
+            Some(CapacityBand::Plenty),
+            0,
+        ),
+    );
+    let subscription = fresh(
+        "d-b",
+        account(
+            "claude-b",
+            EntitlementSource::Subscription,
+            Some(CapacityBand::Healthy),
+            0,
+        ),
+    );
+
+    let all = vec![exhausted.clone(), api.clone(), subscription.clone()];
+    let pool = EntitlementPoolView::of(&all);
+    let (index, record) = entitlement_fallback(&ranked(&all), 0, &pool)
+        .expect("an exhausted account with a healthy same-model sibling falls back");
+    assert_eq!(
+        index, 2,
+        "the subscription is taken even though the API account ranks above it"
+    );
+    assert_eq!(record.from(), "claude-a");
+    assert_eq!(record.to(), "claude-b");
+    assert_eq!(record.from_destination(), "d-a");
+    assert_eq!(record.to_destination(), "d-b");
+    assert_eq!(record.reason(), FallbackReason::Exhausted);
+    assert_eq!(record.step(), FallbackStep::SubscriptionSameModel);
+
+    // Remove the subscription: the API-credit account is step three, and now
+    // it is the one that matches.
+    let without = vec![exhausted.clone(), api.clone()];
+    let pool = EntitlementPoolView::of(&without);
+    let (index, record) = entitlement_fallback(&ranked(&without), 0, &pool)
+        .expect("with no subscription left, API credits serve the same model");
+    assert_eq!(index, 1);
+    assert_eq!(record.to(), "openrouter");
+    assert_eq!(record.step(), FallbackStep::ApiCreditsSameModel);
+}
+
+/// **Line 1970's tier-preserving constraint — the narrowing half.** The same
+/// exhausted subscription, with a healthy sibling subscription that serves a
+/// **different** model. Phase 34F's capability axis has not landed, so
+/// nothing ranks those two models against each other, and
+/// `same_capability_tier` answers *unknown*. Unknown does not widen the
+/// order: there is **no fallback at all**, which is the ruling's own
+/// direction — *"You can't put a fable 5 task and switch it to a nemotron
+/// v3"*, and a fallback that silently downgrades *"is worse than a refusal,
+/// because the work continues and looks fine"*.
+#[test]
+fn an_unknown_capability_tier_never_widens_the_fallback() {
+    let exhausted = fresh(
+        "d-a",
+        account(
+            "claude-a",
+            EntitlementSource::Subscription,
+            Some(CapacityBand::Exhausted),
+            0,
+        ),
+    );
+    let other_model = fresh_on_model(
+        "d-c",
+        "a-different-model",
+        account(
+            "claude-c",
+            EntitlementSource::Subscription,
+            Some(CapacityBand::Plenty),
+            0,
+        ),
+    );
+    let all = vec![exhausted, other_model];
+    let pool = EntitlementPoolView::of(&all);
+    assert!(
+        entitlement_fallback(&ranked(&all), 0, &pool).is_none(),
+        "a model no axis has ranked beside this one is not established to be the same tier, \
+         and an unestablished tier is not a fallback"
+    );
+}
+
+/// **A fallback never lands somewhere in the same state.** The first two
+/// siblings are themselves exhausted and throttled; only the third is
+/// healthy, and it is the one taken. A build that took the first candidate
+/// matching the step's backing would move the work onto an account with
+/// nothing left.
+#[test]
+fn a_fallback_never_lands_on_an_account_in_the_same_state() {
+    let all = vec![
+        fresh(
+            "d-a",
+            account(
+                "claude-a",
+                EntitlementSource::Subscription,
+                Some(CapacityBand::Exhausted),
+                0,
+            ),
+        ),
+        fresh(
+            "d-b",
+            account(
+                "claude-b",
+                EntitlementSource::Subscription,
+                Some(CapacityBand::Exhausted),
+                0,
+            ),
+        ),
+        fresh(
+            "d-c",
+            account(
+                "claude-c",
+                EntitlementSource::Subscription,
+                Some(CapacityBand::Plenty),
+                2,
+            ),
+        ),
+        fresh(
+            "d-d",
+            account(
+                "claude-d",
+                EntitlementSource::Subscription,
+                Some(CapacityBand::Tight),
+                0,
+            ),
+        ),
+    ];
+    let pool = EntitlementPoolView::of(&all);
+    let (index, record) =
+        entitlement_fallback(&ranked(&all), 0, &pool).expect("one healthy sibling remains");
+    assert_eq!(index, 3, "the exhausted and the throttled are both skipped");
+    assert_eq!(record.to(), "claude-d");
+}
+
+/// **An entitlement that names no backing is never a fallback target.** Its
+/// own documentation is *listed, never matched, never charged*, and an order
+/// over subscriptions and API credits has no step it belongs to — so a pool
+/// whose only healthy account is unstated produces no fallback rather than
+/// charging one Glasshouse cannot say who pays for.
+#[test]
+fn an_entitlement_with_no_backing_stated_is_never_a_fallback_target() {
+    let all = vec![
+        fresh(
+            "d-a",
+            account(
+                "claude-a",
+                EntitlementSource::Subscription,
+                Some(CapacityBand::Exhausted),
+                0,
+            ),
+        ),
+        fresh(
+            "d-x",
+            account(
+                "someday",
+                EntitlementSource::Unstated,
+                Some(CapacityBand::Plenty),
+                0,
+            ),
+        ),
+    ];
+    let pool = EntitlementPoolView::of(&all);
+    assert!(entitlement_fallback(&ranked(&all), 0, &pool).is_none());
+}
+
+/// **The untriggered case, and the pool of one.** A healthy winner produces
+/// no fallback, and neither does a set with a single configured entitlement
+/// however bad its state — the same preservation gate every pool term
+/// checks. Zero fallbacks is `None`, never an empty record.
+#[test]
+fn an_untriggered_selection_and_a_pool_of_one_never_fall_back() {
+    let healthy = vec![
+        fresh(
+            "d-a",
+            account(
+                "claude-a",
+                EntitlementSource::Subscription,
+                Some(CapacityBand::Plenty),
+                0,
+            ),
+        ),
+        fresh(
+            "d-b",
+            account(
+                "claude-b",
+                EntitlementSource::Subscription,
+                Some(CapacityBand::Healthy),
+                0,
+            ),
+        ),
+    ];
+    let pool = EntitlementPoolView::of(&healthy);
+    assert!(entitlement_fallback(&ranked(&healthy), 0, &pool).is_none());
+
+    let alone = vec![fresh(
+        "d-a",
+        account(
+            "claude-a",
+            EntitlementSource::Subscription,
+            Some(CapacityBand::Exhausted),
+            0,
+        ),
+    )];
+    let pool = EntitlementPoolView::of(&alone);
+    assert!(entitlement_fallback(&ranked(&alone), 0, &pool).is_none());
+}
+
+/// **Line 1970 through `SessionRouter::choose` — practice §35's caller.**
+/// `claude-a` is in the `plenty` band and was throttled once, `claude-b` is
+/// in the `tight` band and was not: the score prefers `claude-a`
+/// (+0.3 − 0.2 against −0.15), so the ranking's own winner is a throttled
+/// account, and the fallback then moves the work to its healthy sibling.
+///
+/// The assertion on `considered()` is what makes this a *post-ranking*
+/// reselection rather than a filter: `claude-a` is still the top of the
+/// ranking, with its score and its evidence intact — design decision 1,
+/// *additive, never a filter*. A build where `choose` stops calling the
+/// reselection fails here and nowhere above.
+#[test]
+fn a_throttled_winner_is_fallen_back_from_through_choose() {
+    let fixture = Fixture::new();
+    let destinations = vec![
+        fresh(
+            "d-a",
+            account(
+                "claude-a",
+                EntitlementSource::Subscription,
+                Some(CapacityBand::Plenty),
+                1,
+            ),
+        ),
+        fresh(
+            "d-b",
+            account(
+                "claude-b",
+                EntitlementSource::Subscription,
+                Some(CapacityBand::Tight),
+                0,
+            ),
+        ),
+    ];
+    let routed = fixture.choose(&SessionRouter::new(), &destinations);
+
+    assert_eq!(
+        routed.considered()[0].0.id(),
+        "d-a",
+        "the ranking is untouched — the throttled account still scores best"
+    );
+    assert_eq!(
+        routed.chosen().id(),
+        "d-b",
+        "and the work still goes to the healthy account"
+    );
+    let fallback = routed
+        .fallback()
+        .expect("the decision records the fallback it made");
+    assert_eq!(fallback.from(), "claude-a");
+    assert_eq!(fallback.to(), "claude-b");
+    assert_eq!(fallback.reason(), FallbackReason::Throttled);
+    assert_eq!(fallback.step(), FallbackStep::SubscriptionSameModel);
+
+    let report = routed.render();
+    assert!(
+        report.contains("fallback     entitlement `claude-a` is throttled"),
+        "a person reads the fallback as a heading, with both accounts and the reason:\n{report}"
+    );
+    assert!(
+        report.contains("another subscription serving the same model"),
+        "and which step of line 1970's order matched:\n{report}"
+    );
+}
+
+/// **Zero fallbacks leaves zero records.** Two healthy accounts: the
+/// decision is the one this router made before line 1970 existed, and
+/// nothing anywhere says "fallback".
+#[test]
+fn zero_fallbacks_leave_no_record_and_say_nothing() {
+    let fixture = Fixture::new();
+    let destinations = vec![
+        fresh(
+            "d-a",
+            account(
+                "claude-a",
+                EntitlementSource::Subscription,
+                Some(CapacityBand::Plenty),
+                0,
+            ),
+        ),
+        fresh(
+            "d-b",
+            account(
+                "claude-b",
+                EntitlementSource::Subscription,
+                Some(CapacityBand::Tight),
+                0,
+            ),
+        ),
+    ];
+    let routed = fixture.choose(&SessionRouter::new(), &destinations);
+    assert_eq!(routed.chosen().id(), "d-a");
+    assert!(routed.fallback().is_none());
+    assert!(
+        !routed.render_overview().contains("fallback"),
+        "{}",
+        routed.render_overview()
+    );
+}
+
+/// **An account the user named exactly is never moved.** `--to
+/// d-a` pins the account itself, and an override *"may overrule a ranking
+/// and not a fact about what can serve"* — this is neither, it is Glasshouse
+/// preferring one admissible account over another, which the person has
+/// already done. The throttle is still in their explanation.
+#[test]
+fn an_exact_account_override_is_never_moved_by_the_fallback() {
+    let fixture = Fixture::new();
+    let destinations = vec![
+        fresh(
+            "d-b",
+            account(
+                "claude-b",
+                EntitlementSource::Subscription,
+                Some(CapacityBand::Plenty),
+                0,
+            ),
+        ),
+        fresh(
+            "d-a",
+            account(
+                "claude-a",
+                EntitlementSource::Subscription,
+                Some(CapacityBand::Tight),
+                2,
+            ),
+        ),
+    ];
+    let routed = fixture.choose(
+        &SessionRouter::with_override(RoutingOverride::to("d-a")),
+        &destinations,
+    );
+    assert_eq!(routed.chosen().id(), "d-a");
+    assert!(
+        routed.fallback().is_none(),
+        "the person chose this account; the fallback does not overrule them"
+    );
+    assert!(
+        routed
+            .render()
+            .contains("2 recent throttles recorded against `claude-a`"),
+        "and they are told what they chose:\n{}",
+        routed.render()
+    );
+}
+
+/// **1974(d): the reset boundary, and selection returning with the
+/// capacity.** The same pool read twice: while `claude-a` reads exhausted
+/// the work is on `claude-b`, and once the window has turned and `claude-a`
+/// reads `plenty` again the selection returns to it with no fallback left to
+/// record. The second half is the one that matters — a build that remembered
+/// the fallback, or that kept steering away from a recovered account, fails
+/// on it.
+#[test]
+fn capacity_returning_at_the_reset_boundary_brings_the_account_back() {
+    let fixture = Fixture::new();
+    let router = SessionRouter::new();
+
+    let before = vec![
+        fresh(
+            "d-a",
+            account(
+                "claude-a",
+                EntitlementSource::Subscription,
+                Some(CapacityBand::Exhausted),
+                0,
+            ),
+        ),
+        fresh(
+            "d-b",
+            account(
+                "claude-b",
+                EntitlementSource::Subscription,
+                Some(CapacityBand::Healthy),
+                0,
+            ),
+        ),
+    ];
+    let routed = fixture.choose(&router, &before);
+    assert_eq!(
+        routed.chosen().id(),
+        "d-b",
+        "an exhausted account does not serve the next turn"
+    );
+
+    let after = vec![
+        fresh(
+            "d-a",
+            account(
+                "claude-a",
+                EntitlementSource::Subscription,
+                Some(CapacityBand::Plenty),
+                0,
+            ),
+        ),
+        fresh(
+            "d-b",
+            account(
+                "claude-b",
+                EntitlementSource::Subscription,
+                Some(CapacityBand::Healthy),
+                0,
+            ),
+        ),
+    ];
+    let routed = fixture.choose(&router, &after);
+    assert_eq!(
+        routed.chosen().id(),
+        "d-a",
+        "the allowance reset, and the account is selectable again"
+    );
+    assert!(routed.fallback().is_none());
+}
+
+// ---------------------------------------------------------------------------
+// Line 1971 — the user's per-entitlement rules, and that no amount of
+// fallback pressure gets past one.
+//
+// Every one of these is the same shape, and the shape is the point: the
+// ranking's winner is throttled, so line 1970 *wants* to move the work, and
+// the only account it could move to is one a rule removed. The fallback
+// reselects over `Routed::considered()` — the already-gated list — so there
+// is no path from the reselection to a refused candidate at all. *An
+// exhausted pool does not license exceeding a rule*, and it does not do so
+// structurally rather than by a second check that could be forgotten.
+// ---------------------------------------------------------------------------
+
+/// The two-account set every rule test below drives: `claude-a` throttled
+/// and in the plenty band so the ranking picks it and line 1970 wants to
+/// move the work off it, and `claude-b` — the only place it could move to —
+/// healthy but carrying `rules`.
+fn under_fallback_pressure(rules: EntitlementRules) -> Vec<Destination> {
+    vec![
+        fresh(
+            "d-a",
+            account(
+                "claude-a",
+                EntitlementSource::Subscription,
+                Some(CapacityBand::Plenty),
+                1,
+            ),
+        ),
+        fresh(
+            "d-b",
+            Entitlement::new("claude-b", rules)
+                .with_source(EntitlementSource::Subscription)
+                .with_capacity(Some(CapacityBand::Tight), None)
+                .with_throttling(Some(EntitlementThrottleFacet::new(0, true))),
+        ),
+    ]
+}
+
+/// What the gate refused, and by which rule.
+fn rule_refusal(routed: &Routed) -> Option<(String, EntitlementRefusal)> {
+    routed
+        .rejected()
+        .iter()
+        .find_map(|(_, constraint)| match constraint {
+            HardConstraint::Entitlement {
+                entitlement,
+                refused,
+            } => Some((entitlement.clone(), refused.clone())),
+            _ => None,
+        })
+}
+
+/// **The harness rule holds under fallback pressure.** `claude-b` does not
+/// serve this harness, so the gate removed it before the ranking existed —
+/// the work stays on the throttled account rather than being charged to one
+/// the user's rule forbids, and the rejection names the entitlement.
+#[test]
+fn a_harness_rule_holds_under_fallback_pressure() {
+    let fixture = Fixture::new();
+    let destinations =
+        under_fallback_pressure(EntitlementRules::UNRESTRICTED.deny_harnesses([HARNESS]));
+    let routed = fixture.choose(&SessionRouter::new(), &destinations);
+
+    assert_eq!(routed.chosen().id(), "d-a");
+    assert!(
+        routed.fallback().is_none(),
+        "an exhausted or throttled account does not license exceeding a rule"
+    );
+    assert_eq!(
+        rule_refusal(&routed),
+        Some(("claude-b".to_owned(), EntitlementRefusal::Harness(HARNESS))),
+        "and the refusal names the entitlement and the axis:\n{}",
+        routed.render_overview()
+    );
+}
+
+/// **The tier rule holds under fallback pressure.** The same set with a
+/// stated task tier `claude-b`'s rule denies.
+#[test]
+fn a_tier_rule_holds_under_fallback_pressure() {
+    let fixture = Fixture::new();
+    let destinations =
+        under_fallback_pressure(EntitlementRules::UNRESTRICTED.deny_tiers([WorkloadTier::Heavy]));
+    let inputs = RouterInputs {
+        requirements: TaskRequirements {
+            minimum_tier: Some(WorkloadTier::Heavy),
+            ..TaskRequirements::default()
+        },
+        ..fixture.inputs()
+    };
+    let routed = SessionRouter::new()
+        .choose(RoutingMoment::SessionStart, None, &destinations, &inputs)
+        .expect("the throttled account is still eligible");
+
+    assert_eq!(routed.chosen().id(), "d-a");
+    assert!(routed.fallback().is_none());
+    assert_eq!(
+        rule_refusal(&routed),
+        Some((
+            "claude-b".to_owned(),
+            EntitlementRefusal::Tier(WorkloadTier::Heavy)
+        )),
+        "{}",
+        routed.render_overview()
+    );
+}
+
+/// **The spend ceiling holds under fallback pressure.** `claude-b` is
+/// healthy and would be step one of the order, and it is over the ceiling
+/// the user wrote for it — so the gate removed it and the work stays where
+/// it is. The refusal carries both numbers, because *"over its ceiling"* is
+/// only inspectable next to which ceiling and how much was seen.
+#[test]
+fn a_spend_ceiling_holds_under_fallback_pressure() {
+    let fixture = Fixture::new();
+    let mut destinations = under_fallback_pressure(
+        EntitlementRules::UNRESTRICTED.with_spend_ceiling_tokens(Some(1_000)),
+    );
+    destinations[1] = fresh(
+        "d-b",
+        Entitlement::new(
+            "claude-b",
+            EntitlementRules::UNRESTRICTED.with_spend_ceiling_tokens(Some(1_000)),
+        )
+        .with_source(EntitlementSource::Subscription)
+        .with_capacity(Some(CapacityBand::Tight), None)
+        .with_throttling(Some(EntitlementThrottleFacet::new(0, true)))
+        .with_spend(Some(EntitlementSpendFacet::new(1_200, true))),
+    );
+    let routed = fixture.choose(&SessionRouter::new(), &destinations);
+
+    assert_eq!(routed.chosen().id(), "d-a");
+    assert!(routed.fallback().is_none());
+    assert_eq!(
+        rule_refusal(&routed),
+        Some((
+            "claude-b".to_owned(),
+            EntitlementRefusal::SpendCeiling {
+                ceiling_tokens: 1_000,
+                observed_tokens: 1_200,
+            }
+        ))
+    );
+    assert!(
+        routed
+            .render_overview()
+            .contains("its spend ceiling of 1000 tokens is reached (1200 observed)"),
+        "the person reads the rule they wrote:\n{}",
+        routed.render_overview()
+    );
+}
+
+/// **A spend ceiling refuses only against an established reading.** The same
+/// ceiling with nothing measured admits the account and it becomes the
+/// fallback's target — *"nobody has said"* is not *"cannot"*, and the
+/// alternative would refuse every account forever on a build whose ledger is
+/// empty. The direction the rule does guarantee is the other one, which the
+/// test above pins.
+#[test]
+fn a_spend_ceiling_whose_spend_nothing_measured_refuses_nothing() {
+    let fixture = Fixture::new();
+    let destinations = under_fallback_pressure(
+        EntitlementRules::UNRESTRICTED.with_spend_ceiling_tokens(Some(1_000)),
+    );
+    let routed = fixture.choose(&SessionRouter::new(), &destinations);
+
+    assert!(routed.rejected().is_empty(), "{}", routed.render_overview());
+    assert_eq!(
+        routed.considered()[0].0.id(),
+        "d-a",
+        "the throttled account is still the ranking's winner"
+    );
+    assert_eq!(routed.chosen().id(), "d-b");
+    assert_eq!(
+        routed.fallback().map(|f| f.to().to_owned()),
+        Some("claude-b".to_owned())
+    );
+}
+
+/// **The job-kind axis, which no session router asks and one router does.**
+/// A session has no job kind (`EntitlementRefusal`'s own documentation), so
+/// line 1971's third axis is enforced where a job kind exists:
+/// `Entitlement::job_constraint`, the question
+/// `disposable::DisposableRouting` asks of every candidate that carries an
+/// entitlement. It refuses by the same named constraint the other three
+/// axes do.
+#[test]
+fn a_job_kind_rule_refuses_by_name_on_the_router_that_has_a_job_kind() {
+    let entitlement = Entitlement::new(
+        "claude-b",
+        EntitlementRules::UNRESTRICTED.deny_job_kinds([JobKind::MemoryExtraction]),
+    );
+    assert_eq!(
+        entitlement.job_constraint(JobKind::MemoryExtraction),
+        Err(HardConstraint::Entitlement {
+            entitlement: "claude-b".to_owned(),
+            refused: EntitlementRefusal::JobKind(JobKind::MemoryExtraction),
+        })
+    );
+    assert_eq!(entitlement.job_constraint(JobKind::Evaluation), Ok(()));
+}
+
+// ---------------------------------------------------------------------------
+// The backing becomes routing-significant, and the kind still is not — the
+// ruling's work item 1, and the invariant it was careful not to break.
+// ---------------------------------------------------------------------------
+
+/// **Map line 1970's work item 1.** `ResolvedEntitlement::to_routing` used
+/// to render the backing as a human string and carry nothing the router
+/// could branch on; now it carries the discriminant, derived from the
+/// loader-enforced backing.
+///
+/// The second half is the REQUIRED BEHAVIOR of this package, asserted rather
+/// than assumed: `EntitlementKind` stays **routing-insignificant**. Two
+/// entries identical but for their `kind` — one of them lying outright,
+/// calling a harness's own sign-in an `api-key` — produce the *same*
+/// `routing::Entitlement`, source included. A wrong `kind` still
+/// misdescribes an entitlement and still never misroutes one.
+#[test]
+fn the_backing_becomes_the_routing_source_and_the_kind_stays_routing_insignificant() {
+    use glasshouse::config::{EntitlementConfig, EntitlementKind, Layer};
+
+    let routing_of = |config: &EntitlementConfig| {
+        config
+            .to_resolved("an-account", Layer::User)
+            .expect("the entry resolves")
+            .to_routing()
+    };
+
+    let mut native = EntitlementConfig::default();
+    native.set_native_harness(Some(IntegrationId::ClaudeCode));
+    assert_eq!(
+        routing_of(&native).source(),
+        EntitlementSource::Subscription,
+        "a harness's own sign-in authenticates through the harness — that is a subscription"
+    );
+
+    let mut api = EntitlementConfig::default();
+    api.set_provider(Some("alpha-probe".to_owned()));
+    assert_eq!(
+        routing_of(&api).source(),
+        EntitlementSource::ApiCredits,
+        "a `[providers.<name>]` backing carries a credential of its own — that is an API key"
+    );
+
+    assert_eq!(
+        routing_of(&EntitlementConfig::default()).source(),
+        EntitlementSource::Unstated,
+        "an entry naming neither is listed, never matched, never charged"
+    );
+
+    let mut mislabelled = native.clone();
+    mislabelled.set_kind(Some(EntitlementKind::ApiKey));
+    let mut labelled = native.clone();
+    labelled.set_kind(Some(EntitlementKind::Claude));
+    assert_eq!(
+        routing_of(&mislabelled),
+        routing_of(&labelled),
+        "the router's value does not depend on `kind` — including when `kind` is wrong"
+    );
+    assert_eq!(
+        routing_of(&mislabelled),
+        routing_of(&native),
+        "and stating no kind at all is the same value again"
+    );
+}
+
+/// **Line 1971's fourth axis reaches the rules value from the user's own
+/// table.** `spend_ceiling_tokens` is accepted by the loader (the table is
+/// `deny_unknown_fields`, so an unrecognised key is a parse error rather
+/// than a silently ignored ceiling), round-trips, and becomes the one thing
+/// the gate reads.
+#[test]
+fn a_spend_ceiling_round_trips_from_the_entitlements_table_into_the_rules() {
+    use glasshouse::config::EntitlementConfig;
+
+    let parsed: EntitlementConfig = toml::from_str(
+        "provider = \"alpha-probe\"\nspend_ceiling_tokens = 250000\ndeny_harnesses = [\"codex\"]\n",
+    )
+    .expect("the ceiling is a recognised key on an entitlement entry");
+    assert_eq!(parsed.spend_ceiling_tokens(), Some(250_000));
+    assert_eq!(parsed.rules().spend_ceiling_tokens(), Some(250_000));
+
+    let written = toml::to_string(&parsed).expect("serialises");
+    assert!(
+        written.contains("spend_ceiling_tokens = 250000"),
+        "the ceiling survives a write:\n{written}"
+    );
+
+    let stated_none: EntitlementConfig =
+        toml::from_str("provider = \"alpha-probe\"\n").expect("parses");
+    assert_eq!(
+        stated_none.rules().spend_ceiling_tokens(),
+        None,
+        "no ceiling stated is `None` and never a zero"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Line 1974 through the shipped binary — practice §35 again, and the reason
+// this file already keeps a binary half: nothing above here can fail on a
+// build where the ledger's rows never reach the router, where
+// `to_routing` stops carrying the backing discriminant, or where the launch
+// path stops building the pool at all.
+// ---------------------------------------------------------------------------
+
+/// Two providers, one account each, **both serving one named model** — so
+/// the fallback's same-model step has two candidates it can establish are
+/// the same model, which a harness-picked default across two profiles is
+/// not.
+fn two_provider_config_on_one_model() -> String {
+    let config = two_provider_config()
+        .replace(
+            "[profiles.alpha]\nharness = \"claude-code\"\n",
+            "[profiles.alpha]\nharness = \"claude-code\"\nmodel = \"shared-model\"\n",
+        )
+        .replace(
+            "[profiles.beta]\nharness = \"claude-code\"\n",
+            "[profiles.beta]\nharness = \"claude-code\"\nmodel = \"shared-model\"\n",
+        );
+    // The two profiles must genuinely state one model: without it the
+    // fallback's same-model step has nothing it can establish, and a silently
+    // no-op `replace` would turn this fixture into a different test.
+    assert_eq!(
+        config.matches("model = \"shared-model\"").count(),
+        2,
+        "both profiles state the shared model:\n{config}"
+    );
+    config
+}
+
+/// **Line 1970 end to end.** `acct-a` has plenty of quota and one recorded
+/// throttle, `acct-b` is tight — so the five-factor score ranks `acct-a`
+/// first and the ranking's own winner is a throttled account. `glasshouse
+/// route` shows the ranking unchanged, the work moved to `acct-b`, and the
+/// reason and the step of line 1970's order named in one line a person
+/// reads.
+#[test]
+fn route_falls_back_from_a_throttled_winner_and_names_the_reason() {
+    let binary = Binary::with_config(&two_provider_config_on_one_model());
+    let now = now_unix();
+    let quota = GatewayQuotaCache::at(binary.base.join("data").join("gateway-quota"));
+    // prov-a nearly untouched (plenty), prov-b at 25% with a distant reset
+    // (tight, and preserved rather than burned).
+    quota.store("prov-a", &headers("300", "290", "345600"), now);
+    quota.store("prov-b", &headers("300", "75", "345600"), now);
+    {
+        let runtime = binary.runtime();
+        let ledger = EvidenceLedger::open(&runtime).unwrap();
+        ledger
+            .record(
+                NewObservation::new("prov-a", "shared-model")
+                    .with_route(Some("anthropic-messages"))
+                    .with_harness(Some("claude-code"))
+                    .with_quota_context(Some(format!("prov-a/{VAR_A}")))
+                    .with_timing(Some(now - 300), Some(now - 295))
+                    .with_outcome(Outcome::Failed)
+                    .with_failure_class(Some(FailureClass::Throttle)),
+                now - 295,
+            )
+            .unwrap();
+    }
+
+    let out = binary.glasshouse(&["route"]);
+    let said = Binary::both_streams(&out);
+    assert!(out.status.success(), "{said}");
+    assert!(
+        said.contains("destination  fresh:claude-code:beta"),
+        "the work moved to the healthy account:\n{said}"
+    );
+    assert!(
+        said.contains("fallback     entitlement `acct-a` is throttled"),
+        "the fallback is named with the account it left and why:\n{said}"
+    );
+    assert!(
+        said.contains("the work moved to `acct-b`"),
+        "and with the account it went to:\n{said}"
+    );
+    assert!(
+        said.contains("an API-credit account serving the same model"),
+        "and with the step of line 1970's order that matched:\n{said}"
+    );
+}
+
+/// **Line 1970's durable record, on the path that acts.** `glasshouse
+/// route` renders a fallback and records nothing (the test above); the same
+/// fallback on a real launch writes ONE evidence-ledger row whose `purpose`
+/// is the trigger and whose `quota_context` is the account the work left —
+/// read back here through the same purpose-bucketed aggregation the
+/// overhead report uses, so a row written under no purpose (or the wrong
+/// one) fails this test rather than hiding in the unstamped bucket.
+#[test]
+fn a_launch_that_falls_back_records_the_fallback_with_its_reason() {
+    let binary = Binary::with_config(&two_provider_config_on_one_model());
+    let now = now_unix();
+    let quota = GatewayQuotaCache::at(binary.base.join("data").join("gateway-quota"));
+    quota.store("prov-a", &headers("300", "290", "345600"), now);
+    quota.store("prov-b", &headers("300", "75", "345600"), now);
+    {
+        let runtime = binary.runtime();
+        let ledger = EvidenceLedger::open(&runtime).unwrap();
+        ledger
+            .record(
+                NewObservation::new("prov-a", "shared-model")
+                    .with_route(Some("anthropic-messages"))
+                    .with_harness(Some("claude-code"))
+                    .with_quota_context(Some(format!("prov-a/{VAR_A}")))
+                    .with_timing(Some(now - 300), Some(now - 295))
+                    .with_outcome(Outcome::Failed)
+                    .with_failure_class(Some(FailureClass::Throttle)),
+                now - 295,
+            )
+            .unwrap();
+    }
+
+    let out = binary.glasshouse(&["launch", "claude-code", "--headless"]);
+    let said = Binary::both_streams(&out);
+    assert!(out.status.success(), "{said}");
+    assert!(
+        said.contains("is throttled"),
+        "the launch says the fallback out loud before acting on it:\n{said}"
+    );
+
+    // Read back through the same purpose-bucketed aggregation the overhead
+    // report renders (a fallback row carries no outcome, so the
+    // outcome-carrying readers rightly never see it): a row written under no
+    // purpose — or the wrong one — lands in another bucket and fails here.
+    let runtime = binary.runtime();
+    let ledger = EvidenceLedger::open(&runtime).unwrap();
+    let groups = ledger.consumption_by_purpose(now_unix() + 1, 3600).unwrap();
+    let overhead = glasshouse::routing::evidence::RoutingOverhead::from_consumption(&groups);
+    assert_eq!(
+        overhead.entitlement_fallback_requests, 1,
+        "exactly one fallback happened, so exactly one row records it:\n{groups:?}\nSAID:\n{said}"
+    );
+    let fallback_group = groups
+        .iter()
+        .find(|group| {
+            group.purpose.as_deref()
+                == Some(glasshouse::routing::evidence::ENTITLEMENT_FALLBACK_THROTTLED_PURPOSE)
+        })
+        .expect("the throttled-fallback purpose group exists");
+    assert_eq!(
+        fallback_group.sample_count, 1,
+        "and its purpose is the trigger, not the exhausted twin:\n{groups:?}"
+    );
+}
+
+/// **Line 1971 end to end, and the whole spend chain in one run.** The
+/// ledger holds 1,200 tokens against `claude-a`'s own credential label; the
+/// user's `[entitlements.claude-a]` states a 1,000-token ceiling. The
+/// resolver reads the rows, `to_routing` carries the reading, the gate
+/// refuses the account **by name and with both numbers**, and the work goes
+/// to the sibling — which states the same ceiling and whose spend nothing
+/// measured, so it is admitted.
+///
+/// This is the producer→caller→propagation→consumer path in one assertion:
+/// a build that broke any link renders `fresh:claude-code:alpha@claude-a`
+/// as an ordinary candidate instead of a refusal.
+#[test]
+fn route_refuses_an_account_over_the_spend_ceiling_the_user_wrote() {
+    let config = format!("{}\n[entitlements.claude-a.__placeholder]\n", pool_config())
+        .replace(
+            "[entitlements.claude-a]\nkind = \"claude\"",
+            "[entitlements.claude-a]\nspend_ceiling_tokens = 1000\nkind = \"claude\"",
+        )
+        .replace(
+            "[entitlements.claude-b]\nkind = \"claude\"",
+            "[entitlements.claude-b]\nspend_ceiling_tokens = 1000\nkind = \"claude\"",
+        )
+        .replace("\n[entitlements.claude-a.__placeholder]\n", "");
+    let binary = Binary::with_config(&config);
+    let now = now_unix();
+    {
+        let runtime = binary.runtime();
+        let ledger = EvidenceLedger::open(&runtime).unwrap();
+        ledger
+            .record(
+                NewObservation::new("alpha-probe", "some-model")
+                    .with_route(Some("anthropic-messages"))
+                    .with_harness(Some("claude-code"))
+                    .with_quota_context(Some(LABEL_A))
+                    .with_timing(Some(now - 300), Some(now - 295))
+                    .with_tokens(Some(800), Some(400), None)
+                    .with_outcome(Outcome::Succeeded),
+                now - 295,
+            )
+            .unwrap();
+    }
+
+    let out = binary.glasshouse(&["route"]);
+    let said = Binary::both_streams(&out);
+    assert!(out.status.success(), "{said}");
+    assert!(
+        said.contains("its spend ceiling of 1000 tokens is reached (1200 observed)"),
+        "the account over the ceiling the user wrote is refused, with both numbers:\n{said}"
+    );
+    assert!(
+        said.contains(
+            "fresh:claude-code:alpha@claude-a on claude-code via alpha-probe (fresh) \
+                       — hard entitlement constraint"
+        ),
+        "and the refusal names the candidate it removed:\n{said}"
+    );
+    assert!(
+        said.contains("destination  fresh:claude-code:alpha@claude-b"),
+        "the sibling states the same ceiling and nothing measured its spend, so it serves:\n\
+         {said}"
     );
 }
