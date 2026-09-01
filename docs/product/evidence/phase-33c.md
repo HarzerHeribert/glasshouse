@@ -589,3 +589,35 @@ was not.
 2026-09-01): targeted green shipped, the sweep caught what `--targeted` skipped
 — 13 full-trace targets on that integration — a fix-forward worker took it, and
 the line never stopped moving.
+
+### 1368's recorded limit, strengthened by audit (`GH-AUDIT-1368`, 2026-09-02)
+
+The limit above said the `quota_headers()` misattribution window was *"not
+exercised by any test in this file or by the conformance suite"*. A read-only
+audit was asked whether that window is **reachable or structurally
+impossible**, because "no test covers it" is a much weaker claim than "it
+cannot happen". **It is reachable, and the reason is structural:**
+
+- `observe_quota_headers` (`gateway/session.rs:363`) is called from the accept
+  loop (`gateway/mod.rs:717`) **unconditionally and with no resource filter**,
+  from every exchange whose response carries a rate-limit header — regardless
+  of which credential served it.
+- `RateLimitHeaders` (`provider/telemetry.rs:233`) carries **no credential or
+  resource identity at all**. There is no field anywhere in that pipeline that
+  could answer *"is this reading about the resource I am about to refuse?"*
+
+So the single `SessionRouting.quota` field genuinely can hold a wait declared
+by one resource while `paced_refusal` is deciding about another. **The
+direction is unchanged and still cannot falsify this line** — a misattribution
+produces a *spurious refusal*, never a missed one — but the limit's honest
+wording is *"reachable, structurally"*, not *"untested"*.
+
+**This is what `GH-CADENCE-AVAILABILITY` and its successor remove.** Once
+`CooldownCause` crosses the process boundary (see `phase-35b.md`'s line 1546
+hold), `paced_refusal` can consult a **per-resource** declared wait instead of
+the gateway-wide most-recent header reading, and this limit disappears rather
+than being documented again.
+
+Audit verdict on the line itself: **confirmed closed.** `paced_refusal` and
+`refuse_paced` have no callers outside the accept loop, and the locally
+generated `429` fabricates nothing the provider did not say.

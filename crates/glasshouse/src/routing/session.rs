@@ -965,6 +965,12 @@ const HEALTH_PENALTY_FLOOR: f64 = -0.9;
 /// still choose one and say why.
 const HEALTH_UNAVAILABLE_PENALTY: f64 = -1.5;
 
+/// Line 1546. What being inside a wait a provider itself declared costs a
+/// destination — a fact [`provider_health`] does not price, because an
+/// invented cooldown scores there too and this term must not agree with that
+/// one for a reason it was never told.
+const CADENCE_DECLARED_WAIT_PENALTY: f64 = -1.5;
+
 /// Line 1600. What starting a session from nothing costs: the first turn is
 /// spent re-establishing what a warm session already knows.
 const BOOTSTRAP_COST: f64 = -1.0;
@@ -2308,6 +2314,49 @@ pub fn provider_health(destination: &Destination, pool: &FreePool, now: Instant)
             destination.backend().credential().label()
         ),
     )
+}
+
+/// Line 1546: current cadence availability, scored separately from
+/// [`provider_health`]'s general route health.
+///
+/// `provider_health` folds together a provider-declared wait and a cooldown
+/// Glasshouse invented after repeated ordinary failures (Phase 9I line 534
+/// deliberately keeps the invented kind probeable by real work); this term
+/// reads only [`super::free::ResourceHealth::declared_wait_remaining`], which
+/// is `None` for every case except a wait the destination's own provider is
+/// currently inside. An invented cooldown, or a resource nothing has ever
+/// been observed about, scores exactly the same here: inert.
+pub fn cadence_availability(
+    destination: &Destination,
+    pool: &FreePool,
+    now: Instant,
+) -> Contribution {
+    let resource = FreeResource::new(
+        destination.backend().credential().clone(),
+        destination.backend().model().label(),
+    );
+    let health = pool.health(&resource);
+
+    match health.declared_wait_remaining(now) {
+        Some(remaining) => Contribution::new(
+            "cadence availability",
+            CADENCE_DECLARED_WAIT_PENALTY,
+            format!(
+                "`{}` is inside a {}s wait its own provider declared",
+                destination.backend().credential().label(),
+                remaining.as_secs()
+            ),
+        ),
+        None => Contribution::new(
+            "cadence availability",
+            0.0,
+            format!(
+                "no provider-declared wait is in effect for `{}` — not a cadence claim, the \
+                 absence of one",
+                destination.backend().credential().label()
+            ),
+        ),
+    }
 }
 
 /// Line 1600: what it would cost to send the work here.
@@ -4583,6 +4632,7 @@ fn score(
     explanation.push(pressure::capacity_band_pressure(pressure));
     explanation.push(pressure::low_tier_spend(pressure));
     explanation.push(provider_health(destination, inputs.health, inputs.now));
+    explanation.push(cadence_availability(destination, inputs.health, inputs.now));
     explanation.push(switching_and_bootstrap_cost(destination, current));
     // Line 1538, pushed unconditionally (unlike `cost_preference` above) and
     // reading the un-shadowed parameter so it sees `None` exactly when the

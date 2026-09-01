@@ -237,12 +237,40 @@ impl FreeResource {
     }
 }
 
+/// Which kind of cooldown [`ResourceHealth`] is carrying, when it is
+/// carrying one at all — named for what each is, not for the code path that
+/// produced it: a provider's own cadence, or Glasshouse's own caution while
+/// it works out whether a resource has recovered.
+///
+/// `ResourceHealth::fail` already knows this distinction at the moment it
+/// writes `cooling_down_until` — the `Some(declared)` arm versus the `None`
+/// arm's `ResourceHealth::backoff` — and until now nothing retained it past
+/// that call, which is the gap capability map line 1546 names.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CooldownCause {
+    /// The provider itself stated the wait — authoritative per capability
+    /// map line 1319, applied immediately and unclamped.
+    Declared,
+    /// Glasshouse's own bounded backoff, imposed only after
+    /// `FAILURES_BEFORE_COOLDOWN` ordinary failures that stated no wait. Not
+    /// a cadence claim: Phase 9I line 534 deliberately keeps this probeable
+    /// by real work rather than trusted as a fact about the provider.
+    Invented,
+}
+
 /// What is currently known about one [`FreeResource`], learned entirely from
 /// work that was going to happen anyway.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResourceHealth {
     consecutive_failures: u32,
     cooling_down_until: Option<Instant>,
+    /// Which kind of cooldown `cooling_down_until` is, or `None` when either
+    /// nothing is cooling down or the cause was never established (adopted
+    /// from another process's persisted reading — see
+    /// [`FreePool::adopt_observed`], which cannot carry this without a new
+    /// persisted column). `None` here reports as inert everywhere this is
+    /// read, the same honest-unknown stance the rest of this module takes.
+    cooldown_cause: Option<CooldownCause>,
     /// Set when a provider refused the credential itself. Not a cooldown:
     /// waiting does not fix a revoked key, so it is reported rather than
     /// slept off.
@@ -254,6 +282,7 @@ impl ResourceHealth {
         Self {
             consecutive_failures: 0,
             cooling_down_until: None,
+            cooldown_cause: None,
             credential_rejected: false,
         }
     }
@@ -271,6 +300,25 @@ impl ResourceHealth {
 
     pub fn cooling_down_until(&self) -> Option<Instant> {
         self.cooling_down_until
+    }
+
+    /// How long is left on a wait this resource's own provider declared, if
+    /// it is inside one right now — capability map line 1546.
+    ///
+    /// `None` covers every case that is not that one: no cooldown at all, an
+    /// invented cooldown ([`CooldownCause::Invented`]), a declared one that
+    /// has already expired, and a cause never established at all (adopted
+    /// health — see [`FreePool::adopt_observed`]). All four are the same
+    /// answer to *"is a provider cadence in effect"* — no — and this reader
+    /// does not distinguish them further, the same way [`Self::is_available`]
+    /// does not split its own `false` by cause.
+    pub fn declared_wait_remaining(&self, now: Instant) -> Option<Duration> {
+        if !matches!(self.cooldown_cause, Some(CooldownCause::Declared)) {
+            return None;
+        }
+        self.cooling_down_until
+            .filter(|&until| until > now)
+            .map(|until| until - now)
     }
 
     pub fn consecutive_failures(&self) -> u32 {
@@ -298,6 +346,7 @@ impl ResourceHealth {
                 // cooldown can end early.
                 self.consecutive_failures = 0;
                 self.cooling_down_until = None;
+                self.cooldown_cause = None;
                 self.credential_rejected = false;
             }
             WorkloadOutcome::CredentialRejected => {
@@ -342,10 +391,14 @@ impl ResourceHealth {
     fn fail(&mut self, retry_after: Option<Duration>, now: Instant) {
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
         match retry_after {
-            Some(declared) => self.cooling_down_until = Some(now + declared),
+            Some(declared) => {
+                self.cooling_down_until = Some(now + declared);
+                self.cooldown_cause = Some(CooldownCause::Declared);
+            }
             None => {
                 if self.consecutive_failures >= FAILURES_BEFORE_COOLDOWN {
                     self.cooling_down_until = Some(now + self.backoff());
+                    self.cooldown_cause = Some(CooldownCause::Invented);
                 }
             }
         }
@@ -435,6 +488,15 @@ impl FreePool {
     ///
     /// Last write wins, exactly like `observe`: a resource this is called for
     /// twice holds what the second call said.
+    ///
+    /// # `cooldown_cause` is not carried across this bridge
+    ///
+    /// `GatewayHealthReading` — what actually crosses the process boundary —
+    /// persists no distinction between a declared and an invented cooldown,
+    /// and adding one is a schema decision outside this package's scope. An
+    /// adopted `cooling_down_until` is therefore recorded with its cause
+    /// unknown, which [`ResourceHealth::declared_wait_remaining`] reports as
+    /// inert rather than as a guess in either direction.
     pub fn adopt_observed(
         &mut self,
         resource: &FreeResource,
@@ -445,6 +507,7 @@ impl FreePool {
         let health = self.health_entry(resource);
         health.consecutive_failures = consecutive_failures;
         health.cooling_down_until = cooling_down_until;
+        health.cooldown_cause = None;
         health.credential_rejected = credential_rejected;
     }
 

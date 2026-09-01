@@ -1267,3 +1267,144 @@ mod command_dispatch {
         );
     }
 }
+
+// =====================================================================
+// Cadence availability — line 1546
+// =====================================================================
+//
+// `provider_health` folds a provider-declared wait and Glasshouse's own
+// invented backoff into one history-shaped term. These tests prove the two
+// are now genuinely separable: a declared wait scores worse on the new
+// `cadence_availability` term, and an invented cooldown — Glasshouse's own
+// caution, deliberately probeable by real work (Phase 9I line 534) — does
+// not score as a cadence claim at all, even while `provider_health` still
+// reflects it.
+mod cadence_availability_scoring {
+    use super::*;
+    use glasshouse::integrations::IntegrationId;
+    use glasshouse::routing::session::{Destination, cadence_availability, provider_health};
+
+    fn destination(provider: &str, model: &str) -> Destination {
+        Destination::fresh(
+            format!("{provider}-{model}"),
+            IntegrationId::ClaudeCode,
+            "default",
+            backend(provider, model),
+            None,
+        )
+    }
+
+    /// Acceptance test 1: a resource put into a declared wait reports
+    /// cadence-unavailable, and scores strictly worse than an untouched one.
+    #[test]
+    fn a_declared_wait_scores_strictly_worse_on_cadence_than_an_untouched_resource() {
+        let now = Instant::now();
+        let mut pool = FreePool::new();
+        let waiting = free_resource("openrouter", "free-model");
+
+        pool.observe(
+            &waiting,
+            WorkloadOutcome::RateLimited {
+                retry_after: Some(Duration::from_secs(60)),
+            },
+            now,
+        );
+
+        let waiting_dest = destination("openrouter", "free-model");
+        let untouched_dest = destination("openrouter", "other-model");
+
+        let waiting_cadence = cadence_availability(&waiting_dest, &pool, now);
+        let untouched_cadence = cadence_availability(&untouched_dest, &pool, now);
+
+        assert_eq!(
+            untouched_cadence.magnitude(),
+            0.0,
+            "an untouched resource must report cadence as inert, not a partial claim"
+        );
+        assert!(
+            waiting_cadence.magnitude() < untouched_cadence.magnitude(),
+            "a destination inside a declared wait must score strictly worse on cadence than one \
+             that is not: {} vs {}",
+            waiting_cadence.magnitude(),
+            untouched_cadence.magnitude()
+        );
+    }
+
+    /// Acceptance test 2 — the assertion that carries the line: a resource
+    /// cooled down by invented backoff only (repeated failures, no stated
+    /// wait) reports cadence-**available**, while `provider_health` still
+    /// reflects the failures. Without this, the two terms are not proven
+    /// separate — a term that merely renamed `provider_health` would fail
+    /// this test and pass every other one.
+    #[test]
+    fn invented_backoff_alone_reports_cadence_available_while_provider_health_reflects_it() {
+        let now = Instant::now();
+        let mut pool = FreePool::new();
+        let it = free_resource("openrouter", "free-model");
+
+        for _ in 0..FAILURES_BEFORE_COOLDOWN {
+            pool.observe(&it, WorkloadOutcome::CapacityFailure, now);
+        }
+        assert!(
+            !pool.is_available(&it, now),
+            "premise: repeated ordinary failures with no stated wait must cool the resource down"
+        );
+
+        let dest = destination("openrouter", "free-model");
+
+        let cadence = cadence_availability(&dest, &pool, now);
+        assert_eq!(
+            cadence.magnitude(),
+            0.0,
+            "an invented cooldown is Glasshouse's own caution, not a provider cadence, and must \
+             not score as one"
+        );
+
+        let health = provider_health(&dest, &pool, now);
+        assert!(
+            health.magnitude() < 0.0,
+            "provider_health must still reflect the failures even though cadence reports \
+             nothing: got {}",
+            health.magnitude()
+        );
+    }
+
+    /// Acceptance test 3: `Served` clears both a declared wait and the
+    /// general health history it also clears.
+    #[test]
+    fn served_clears_both_a_declared_wait_and_general_health() {
+        let now = Instant::now();
+        let mut pool = FreePool::new();
+        let it = free_resource("openrouter", "free-model");
+
+        pool.observe(
+            &it,
+            WorkloadOutcome::RateLimited {
+                retry_after: Some(Duration::from_secs(60)),
+            },
+            now,
+        );
+        assert!(
+            pool.health(&it).declared_wait_remaining(now).is_some(),
+            "premise: a declared wait must be in effect before Served can be shown to clear it"
+        );
+
+        pool.observe(&it, WorkloadOutcome::Served, now);
+
+        let dest = destination("openrouter", "free-model");
+
+        let cadence = cadence_availability(&dest, &pool, now);
+        assert_eq!(
+            cadence.magnitude(),
+            0.0,
+            "Served must clear a declared wait outright, not leave it to expire on its own"
+        );
+
+        let health = provider_health(&dest, &pool, now);
+        assert_eq!(
+            health.magnitude(),
+            0.0,
+            "Served must also clear the general health history the same outcome always clears"
+        );
+    }
+}

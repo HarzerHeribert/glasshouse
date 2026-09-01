@@ -528,3 +528,85 @@ green on the merged tree; both mutations KILLED in-worktree.
   by counting open lines.
 
 Packet error recorded: `cost_of` moved to `config/mod.rs:2870`.
+
+---
+
+# Line 1546 — MECHANISM LANDED, BOX **HELD OPEN** 2026-09-02 (`GH-CADENCE-AVAILABILITY`)
+
+**The ledger's blocker was stale and the work is good. The box still does not
+tick, and the reason is production reach.**
+
+The stale blocker: this file grouped 1546 under *"cadence — Phase 33A's ledger,
+built this same round and not yet read by anything."* Line 1319 wired the
+cadence signal and line 1368 made the gateway read it, so that has not been
+true for a day.
+
+## What landed, and it is sound
+
+- `CooldownCause { Declared, Invented }` (`routing/free.rs`), recorded by
+  `ResourceHealth::fail` on the branch it already had — `Some(retry_after)` is
+  a provider's own cadence, the `None` path past `FAILURES_BEFORE_COOLDOWN` is
+  Glasshouse's own caution. `Served` clears it with `cooling_down_until`.
+- `ResourceHealth::declared_wait_remaining(now)` — `Some` **only** while a
+  declared wait is in force. `is_available`'s meaning and signature untouched,
+  as the packet required.
+- `routing::session::cadence_availability` — a `Contribution` sibling to
+  `provider_health`, pushed into the same `RoutingExplanation`
+  (`session.rs:4629-4630`). Two terms, two names, two evidence sentences.
+
+Both required mutations **KILLED**, each by the test that names the property:
+
+| mutation | result | killed by |
+|---|---|---|
+| `CooldownCause::Invented` -> `::Declared` on the invented branch | **killed** | `routing_policy::cadence_availability_scoring::invented_backoff_alone_reports_cadence_available_while_provider_health_reflects_it` |
+| `CADENCE_DECLARED_WAIT_PENALTY` -> `0.0` | **killed** | `routing_policy::cadence_availability_scoring::a_declared_wait_scores_strictly_worse_on_cadence_than_an_untouched_resource` |
+
+> observed: *"an invented cooldown is Glasshouse's own caution, not a provider cadence, and must not score as one"*
+
+## Why it is held: the term is structurally inert in the shipped binary
+
+The worker reported the gap honestly and argued it did not block the line —
+that `cadence_availability` works "for every resource whose health this process
+observed directly (the normal, intended case)." **The integrator checked which
+case production actually is, and it is the other one.**
+
+`GatewayHealthReading` (`provider/telemetry.rs:1529`) persists
+`credential_label`, `model`, `consecutive_failures`, `cooling_down_until_unix`
+and `credential_rejected` — **no cause**. So `FreePool::adopt_observed` sets
+`cooldown_cause = None` on every adoption, which is correct rather than
+guessing.
+
+And every production consumer of the new term reads an *adopted* pool:
+
+- `SessionRouter::choose` is called from `main.rs:4073` and `main.rs:4842`;
+  both take `health.pool()` from `observed_provider_health`
+  (`main.rs:2611`) -> `observed_health_of` (`main.rs:2691`) ->
+  `pool.adopt_observed(..)` (`main.rs:2747`), which is the **only**
+  `adopt_observed` call site in the tree.
+- The gateway process, which *does* hold directly-observed health
+  (`SessionRouting.free`), does not call `SessionRouter::choose` at all.
+
+So `declared_wait_remaining` returns `None` for every destination the shipped
+router ever scores, and `cadence_availability` contributes a flat `0.0`
+forever. **The mechanism is real, tested and mutation-proven, and its
+production reach is zero** — the same shape as the `pricing-channel` hold, and
+the shape behind all ten of this project's historical un-tickings.
+
+**Successor, and it is cheap: carry the cause across the process boundary.**
+`GatewayHealthReading` is a plain serde struct persisted as JSON by
+`GatewayHealthCache` — **not a database migration**, so this is not the Red-tier
+schema decision the packet's STOP CONDITIONS reserved. Add an optional
+`cooldown_cause` field (absent in old files, defaulting to `None`), write it
+where `cooling_down_until_unix` is written, and restore it in `adopt_observed`.
+The proof this line then needs is one test showing a **declared** wait recorded
+by the gateway process still scores worse after crossing the cache, and an
+invented one does not. **When that lands, 1546 closes.**
+
+Recorded limits carried into the hold:
+
+- `CADENCE_DECLARED_WAIT_PENALTY` is `-1.5`, matching `HEALTH_UNAVAILABLE_PENALTY`.
+  The packet left the weight to the worker within one bound; the relative
+  severity of "paced" versus "unhealthy" has had no product ruling.
+- The declared-case evidence string renders whole seconds, so a sub-second
+  remainder is dropped from the *string* (never from the score, which is a flat
+  penalty). Cosmetic.

@@ -200,7 +200,7 @@ restraint in its own message. Nothing was left changed: `mutate.sh` restored
 `main.rs` byte-identically and `git status` was clean before and after.
 
 Recorded scope limits — stated by the worker, not discovered later:
-- The mutation proves the **memory-commit → checkpoint-table** direction only. That is deliberate and sufficient: the line's own text is *"during a memory commit"*, so the mutated direction is the one the line names. The test's reverse assertion (`checkpoint save → memory table`) is asserted but not independently mutated.
+- ~~The mutation proves the **memory-commit → checkpoint-table** direction only … The test's reverse assertion is asserted but not independently mutated.~~ **Closed by audit the same night** (`GH-AUDIT-1368`, 2026-09-02): asked whether the reverse assertion is capable of failing at all or is structurally unfalsifiable, the auditor ran the mutation this entry said had never been run — a raw `INSERT INTO memories (...)` inserted into `CheckpointStore::save` before its `Ok(Stored { .. })`. **KILLED**, by `memory_commits.rs:743`'s *"a checkpoint must not write a memory row"*. **Both directions are now mutation-proven**, and the reverse assertion is non-vacuous rather than merely present.
 - It does not prove the two stores' **lifetimes** differ (the pruning code), which neither package touched.
 - It proves the two stores do not cross-write. It does not prove their lifetimes differ; that is a property of the pruning code, which this package did not touch.
 
