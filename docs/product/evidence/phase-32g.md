@@ -277,3 +277,36 @@ Recorded limits, stated rather than discovered later:
 
 **Phase 32G now stands at 6/10** (1298, 1299, 1304, 1305, 1306, 1307). The
 remaining four are blocked on signals the census names.
+
+---
+
+# Independent audit, 2026-09-01 (`GH-AUDIT-BATCH-78`) — 1298, 1299, 1304 and 1307 CONFIRMED
+
+A read-only auditor was dispatched to prove these four **wrong**, on the
+standing evidence that all ten of this project's historical un-tickings were
+found this way and every one was the shape *"production code whose only callers
+are tests"*. It found none of it here.
+
+Method, and it is the one that has actually worked: `cluster-b.py` over the
+whole crate first — none of `record_entitlement_fallback`, `routing_destinations`,
+`estimated_cost`, `session_checkpoint_tokens`, `estimated_project_memory_tokens`,
+`latest_checkpoint_tokens` or `record_tier_movement` appears in its
+zero-production-caller list — then each symbol traced by hand, every call site
+compared against its file's first `#[cfg(test)]`.
+
+The load-bearing finding for **1307**: `record_entitlement_fallback`
+(`main.rs:1833`) is called once, at `main.rs:4928`, inside the **shared** launch
+decision block — **not** inside a `--headless` branch. `main.rs`'s first
+`#[cfg(test)]` is at line 12696. The routing and fallback block runs *before*
+the later `if headless { .. } else { .. }` split, which decides only how the
+session is attached. So the test's `--headless` subprocess exercises the same
+production path a real launch takes; it is not a test-only door.
+
+**One correction to the record:** 1298/1299/1304's implementation landed in
+`645d6cf`, **not** `cd62e83` — `cd62e83` touches only `README.md`, `ORIENT.md`,
+`capability-map.md` and `phase-32g.md`. The audit packet said `cd62e83` and the
+auditor checked rather than believed it.
+
+Note recorded for future auditors, not a gap: `EstimatedInputSize` has no field
+for *"likely repository reads"*, grepped and confirmed absent — so the omission
+this phase's entries record is real rather than asserted.

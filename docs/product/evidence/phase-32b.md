@@ -744,3 +744,41 @@ did not close: an automated write-side production-reach proof through
 side only), and whether today's routing machinery (phases 33–37, outside this
 partition) actually assigns a live gateway session to Groq. See
 `.agent-runtime/report-QUOTA-LIVE.md` for the full account.
+
+---
+
+# Independent audit, 2026-09-01 (`GH-AUDIT-BATCH-78`) — 1239 CONFIRMED
+
+Dispatched to prove 1239 wrong, and pointed straight at the thin spot rather
+than left to find it: the `quota_pressure` term's `unread >= empty` assertion
+passes by equality and cannot be 1239's evidence.
+
+It confirmed that reading exactly — `None` and a known `routing_fraction() == 0.0`
+both price to `0.0` — and then established what does carry the line. The
+line-1587 affinity facet (`routing/session.rs:2042-2071`) is keyed on
+**`CapacityBand`**, not on the raw fraction:
+
+- `Some(band) if band <= CapacityBand::Reserve` (a known, empty-or-nearly reading)
+  → `AffinityFacet::known` with a **negative** magnitude — penalised;
+- `Some(band)` otherwise → `known`, magnitude `0.0`;
+- `None` → `AffinityFacet::unknown`, magnitude `0.0` — **not** penalised.
+
+A known-empty reading therefore scores strictly worse than an unknown one,
+which is the *"not treated as zero"* half of the line. `AffinityBreakdown::total()`
+(`session.rs:1647`) sums these magnitudes and is asserted equal to the
+`session affinity` `Contribution` that `SessionRouter::choose` ranks on — this
+is not display-only. `choose` is called from `main.rs:4842`, before `main.rs`'s
+`#[cfg(test)]` at 12696.
+
+It also checked the thing an orchestrator most often takes on trust: that the
+killing test hits the `None` arm rather than passing coincidentally. It does —
+`the_reserve_band_costs_a_session_affinity_and_the_healthy_band_does_not`
+builds an `unread` session with **no** `with_capacity_facts` call, so `band()`
+is genuinely `None`, and asserts `!unread.is_known() && unread.magnitude() == 0.0`.
+The penalised-`known` mutation flips both halves of that exact assertion.
+
+**Recorded for future auditors, and it is not a gap:** unknown and
+known-`Healthy`/`Plenty` both score `0.0` here, because this mechanism has no
+positive bonus for a good band. The facet separates unknown from known-empty
+but not from known-full — which is the *"neither preferred nor withheld"*
+stance the line asks for, not a hole in it.
