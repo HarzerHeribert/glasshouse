@@ -947,6 +947,14 @@ const TIER_FIT_UNVERIFIED: f64 = 0.0;
 /// "prefer the cheapest **among** them" means.
 const METERED_COST_PREFERENCE: f64 = -0.1;
 
+/// Map line 1538. What a metered destination costs against a free one,
+/// independent of any workload tier — see [`expected_marginal_cost`] for why
+/// this is a separate term from [`METERED_COST_PREFERENCE`] rather than a
+/// second use of it. Same magnitude as [`METERED_COST_PREFERENCE`]: the two
+/// never price the same candidate at once, so there is no compounding to
+/// bound against.
+const EXPECTED_MARGINAL_COST_PENALTY: f64 = -0.1;
+
 // ---------------------------------------------------------------------------
 // The contributions. One public function each, so a mutation can zero
 // exactly one of them.
@@ -1204,6 +1212,57 @@ pub fn cost_preference(destination: &Destination) -> Contribution {
         format!(
             "`{}` is metered, so it is preferred only over candidates this decision's other \
              terms could not already separate it from (line 1558)",
+            destination.id()
+        ),
+    )
+}
+
+/// Map line 1538: *"include expected marginal cost in candidate scoring."*
+///
+/// `Cost` — [`super::Cost`]'s own doc calls it *"whether using a model costs
+/// the user anything at the margin"* — is the only marginal-cost reading
+/// that reaches this scorer; a numeric price is Phase 32G (0/10) and does not
+/// exist in this build, so this term prices the binary rather than inventing
+/// a figure map line 1305 forbids treating unknown pricing as.
+///
+/// **Pushed unconditionally**, unlike [`cost_preference`], because line 1538
+/// names no workload-tier precondition the way line 1558 does. That is also
+/// why it must stay inert exactly where [`cost_preference`] is active: once a
+/// tier is established, [`cost_preference`] already prices the same `Cost`
+/// reading as its own deliberately small tie-break (line 1558's own doc).
+/// Pricing it again here would score the identical fact in the identical
+/// direction a second time — the double-count this term exists to avoid, not
+/// to add — so the two conditions partition rather than overlap: exactly one
+/// of them ever prices a given candidate.
+fn expected_marginal_cost(
+    destination: &Destination,
+    movement: Option<&TierMovement>,
+) -> Contribution {
+    if movement.is_some() {
+        return Contribution::new(
+            "expected marginal cost",
+            0.0,
+            "a workload tier is established for this decision, so `cost preference` (line \
+             1558) already prices free versus metered here — pricing it twice would double- \
+             count the same reading",
+        );
+    }
+    if destination.backend().cost().is_free() {
+        return Contribution::new(
+            "expected marginal cost",
+            0.0,
+            format!(
+                "`{}` is a zero-cost resource for this work — nothing is spent by preferring it",
+                destination.id()
+            ),
+        );
+    }
+    Contribution::new(
+        "expected marginal cost",
+        EXPECTED_MARGINAL_COST_PENALTY,
+        format!(
+            "`{}` is metered and no workload tier is established yet to price that (line 1558 \
+             would once one is) — preferred less than a free candidate",
             destination.id()
         ),
     )
@@ -4211,6 +4270,11 @@ fn score(
     explanation.push(pressure::low_tier_spend(pressure));
     explanation.push(provider_health(destination, inputs.health, inputs.now));
     explanation.push(switching_and_bootstrap_cost(destination, current));
+    // Line 1538, pushed unconditionally (unlike `cost_preference` above) and
+    // reading the un-shadowed parameter so it sees `None` exactly when the
+    // block above did not run — see `expected_marginal_cost`'s own doc for
+    // why the two must never both price a candidate.
+    explanation.push(expected_marginal_cost(destination, movement));
     explanation
 }
 

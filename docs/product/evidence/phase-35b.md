@@ -500,3 +500,31 @@ Regression evidence:
 Recorded scope limits — stated by the worker, not discovered later:
 - same correction and same gap as 1533: the existing evidence entry covers the disposable scorer only
 
+
+# Lines 1537, 1538 — COMPLETE 2026-09-01; 1534 investigated and OPEN with its link named
+
+Package `GH-SCORE-TERMS-35B` (Sonnet, high, Amber; batch 73). Targeted gate
+green on the merged tree; both mutations KILLED in-worktree.
+
+- **1537 provider health**: a term over `RouterInputs.health`'s observed
+  state for the candidate's provider — degraded scores against, healthy
+  contributes nothing, the `why` line names the observation basis.
+- **1538 expected marginal cost**: fires ONLY where the existing free-pool
+  cost preference structurally cannot (`movement.is_none()`) — the
+  partition that makes double-counting impossible rather than avoided by
+  convention. **Orchestrator ruling on the worker's own flagged judgment
+  call: the partition is the right shape.** The cross-branch interaction
+  (a tier-movement decision plus the cost term in one scenario) deserves a
+  test when a package with tier-movement fixtures makes it cheap; noted,
+  not owed here.
+- **1534 stays OPEN — the constraint working as designed.** Every context
+  field reaching the scorer (`SessionContextFacts`: observed_compactions,
+  last_task, touched_files, task_named_paths) is already fully consumed by
+  Phase 36's affinity facets; a "context quality" term from the same fields
+  would be the identical signal scored twice under a new name. The genuine
+  missing link: a context-size producer (map line 1158 — behind the
+  body-parsing wall per the register) or an independent staleness signal.
+  No successor package until one of those exists; do not re-litigate this
+  by counting open lines.
+
+Packet error recorded: `cost_of` moved to `config/mod.rs:2870`.

@@ -19,7 +19,7 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`█████████████████████████████████░░░░░░░` 1118 / 1332 mandatory capabilities (83%)
+`█████████████████████████████████░░░░░░░` 1120 / 1332 mandatory capabilities (84%)
 
 <details>
 <summary>Per-phase breakdown (61 of 107 phases complete)</summary>
@@ -106,7 +106,7 @@ the authoritative specification and tracks what is done.
 | Phase 34F — Model capability and tier calibration | 11/11 ✅ |
 | Phase 35 — Lightweight task classification | 14/14 ✅ |
 | Phase 35A — Candidate generation | 1/11 |
-| Phase 35B — Candidate scoring | 14/25 |
+| Phase 35B — Candidate scoring | 16/25 |
 | Phase 35C — Capacity-aware tier escalation and downgrade | 9/9 ✅ |
 | Phase 35D — Routing under subscription pressure | 8/8 ✅ |
 | Phase 36 — Session affinity | 8/8 ✅ |

@@ -1534,8 +1534,8 @@ Fixed architectural requirements
 ☐ Include context quality in candidate scoring.
 ☐ Include prompt-cache temperature in candidate scoring.
 ☑ Include normalized remaining capacity in candidate scoring.
-☐ Include provider health in candidate scoring.
-☐ Include expected marginal cost in candidate scoring.
+☑ Include provider health in candidate scoring.
+☑ Include expected marginal cost in candidate scoring.
 ☐ Include expected latency in candidate scoring.
 ☐ Include harness-model pairing as an inspectable soft prior for fresh sessions with limited local evidence.
 ☑ Decay the pairing prior as reliable observations accumulate for the exact harness-profile-model-backend combination.
