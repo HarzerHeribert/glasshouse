@@ -3290,3 +3290,29 @@ production caller) → modes + Claude Code bridge behind the recon verdict
 evaluation, and status surfaces (2004–2006). Boxes stay open until their
 production reach exists — ten wrongly ticked boxes taught this project that
 rule, and this phase starts under it.
+
+### Phase 57 addendum — the hook-replacement premise VERIFIED, 2026-09-01
+
+Recon against the installed Claude Code (v2.1.252, official hooks reference):
+**`PostToolUse` supports `hookSpecificOutput.updatedToolOutput`**, replacing
+the tool output the model sees; `systemMessage` and `terminalSequence` are
+the only other documented PostToolUse output fields (`additionalContext`,
+`updatedInput`, `permissionDecision` are PreToolUse-only). Stdin carries
+`tool_name`, `tool_input`, `tool_response`, `tool_use_id`, `session_id`,
+`prompt_id`, `transcript_path`, `cwd`, `permission_mode`, `hook_event_name`,
+`effort`. Built-in tool responses are uniformly `{"type":"text","text":…}`;
+MCP/WebFetch may differ and stay pass-through until adapted.
+
+**Session-scoped registration lands on the `--settings '<json>'` launch
+flag** — highest precedence short of managed settings, no file touched, dies
+with the session — which is exactly Glasshouse's launch-profile injection
+point. `.claude/settings.local.json` is the fallback mechanism, not
+preferred: it persists beyond the session.
+
+**Line 1994's session-start verification stays mandatory anyway**: the
+introducing version could not be pinned from release notes, so older
+installations may lack the field — the bridge probes (a version floor plus a
+capability check) and falls back to shadow with a stated reason.
+`harness-hook-protocol.md`'s "no hook return field carries a substitute tool
+result" is corrected in place: true when written, false for ≥2.1.252, and
+its worker-bridge guidance is unaffected.

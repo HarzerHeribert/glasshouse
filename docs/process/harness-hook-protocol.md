@@ -29,6 +29,16 @@ A native harness hook is a **gate, not a proxy**. It can stop a tool call before
 it runs, and it can put text in front of the model. It cannot answer on the
 harness's behalf: no hook return field carries a substitute tool result.
 
+> **CORRECTED 2026-09-01.** The sentence above was true when verified
+> (2026-08-26) and is **false for current Claude Code**: v2.1.252's
+> `PostToolUse` supports `hookSpecificOutput.updatedToolOutput`, which
+> replaces the tool output the model sees (the introducing version could not
+> be pinned, so a version/capability probe is still required before relying
+> on it — capability map line 1994). This document's own worker-bridge
+> guidance is unaffected: the bridge protocol deliberately never substitutes
+> tool results. The product feature that DOES is Phase 57's context
+> firewall; its rules live in `design-decisions.md` §Phase 57, not here.
+
 Verified against the Claude Code hook reference (2026-08-26). A `PreToolUse`
 hook returns `permissionDecision` (`allow` / `deny` / `ask`) and
 `permissionDecisionReason`; every hook may additionally return `systemMessage`,
