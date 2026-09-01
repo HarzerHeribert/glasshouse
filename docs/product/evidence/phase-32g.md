@@ -156,3 +156,82 @@ green box. **1307 therefore joins 1298, 1299 and 1304 waiting on one thing:
 an input-size producer at the routing decision point.** That single producer
 unblocks four of this phase's ten lines. The register's Phase 32G census has
 been corrected accordingly.
+
+# Lines 1298, 1299, 1304 — COMPLETE 2026-09-01. **1307 HELD OPEN on a SURVIVED mutation.**
+
+Package `GH-INPUT-SIZE-PRODUCER` (Sonnet, high, Amber; batch 77). The
+producer this phase's census named as the single blocker behind four lines.
+
+**Where the code actually landed, because the commit message lies.** The
+implementation — 1005 insertions across `config/mod.rs`, `main.rs`,
+`routing/{evidence,mod,session}.rs` and two test files — is in **`645d6cf`**,
+whose message is entirely about correcting a measurements entry. The
+orchestrator integrated this package, was interrupted mid-review, and then
+ran `git add -A` for an unrelated docs commit, sweeping the whole worker
+diff in with it. The code is correct and was gated (`blast-radius.sh
+--targeted`, every traced target passed, 143+227+54+15+13 quoted); only the
+message is wrong, and history was already pushed, so it is corrected forward
+here rather than rewritten. **Anyone bisecting this phase should look at
+`645d6cf`, not at this commit.**
+
+**1304 — the estimate is measured, not modelled.** Project memory is counted
+by calling `memory::inject::briefing` with the real task and running
+`firewall::estimate::estimate_tokens` over the text it would actually
+inject — a measurement of the real briefing, not a constant. Checkpoints are
+measured from the real document via `checkpoint::store::latest_for`, never
+from `MAX_BYTES` (a ceiling is not a size). **"Likely repository reads" is
+deliberately OMITTED** and recorded as a limit: nothing in this build
+predicts which files an agent will open, and inventing a figure there would
+fabricate the largest component of the estimate. The line's own *"when
+possible"* is what permits the omission. Mutation
+*briefing-replaced-by-constant* — KILLED by
+`estimated_project_memory_tokens_measures_the_real_briefing_and_changes_with_it`.
+
+**1298 / 1299 — a cost only where both halves are known.** A metered
+destination with a known price and a known size is priced; **unknown size
+makes the cost unknown even when the price is known**, and free stays a
+known zero. 1299's cold resume estimates from that session's own latest
+checkpoint — the honest approximation the line's *"or approximated"* allows
+— and a session with no checkpoint is unknown, not zero. `WarmSession`'s
+standing refusal about accumulated context is untouched. Mutation
+*fake-zero-on-unknown-size* (`total_tokens()?` → `.unwrap_or(0)`) — KILLED
+by `routed_cost_is_none_when_size_is_unknown_even_with_a_known_price`,
+*"unknown size must record no cost row at all, never a fabricated zero"*.
+
+## 1307 — HELD OPEN, and the worker's own mutation is why
+
+The worker returned `verdict: closed` for 1307. **The orchestrator overrode
+it to OPEN**, on evidence the worker itself produced and reported honestly.
+
+Its third mutation — `main.rs`, `record_entitlement_fallback`:
+`.with_cost(cost)` → `.with_cost(None)` — **SURVIVED** against 130 tests
+(`routing_pricing` 63, `routing_evidence` 39, `entitlement_broker` 15,
+`--bin glasshouse` 13). Deleting the cost from the writer changes nothing
+any test observes.
+
+That writer matters more than the count suggests: `record_tier_movement`
+receives no `Destination` and nothing priceable, so
+**`record_entitlement_fallback` is the ONLY production path that can write a
+cost row**. A SURVIVED mutation there means the one link the line is about —
+*"record the estimated cost used in a routing decision"* — is unproven in
+production. The surrounding facts are all tested (unknown-size ⇒ no row,
+unknown-price ⇒ no row, free ⇒ known zero, a written cost survives its
+process, an absent cost leaves the column absent); the delivery is not.
+
+The worker named the reason precisely rather than dodging it:
+`EntitlementFallback` has private fields and no public constructor, built
+only inside `session.rs`'s fallback-decision logic, so proving the flow
+needs a genuine fallback driven through a shipped-binary launch — and it
+named the existing fixture shape that does exactly that,
+`tests/entitlement_broker.rs::a_launch_that_falls_back_records_the_fallback_with_its_reason`.
+
+**This is the same ruling 1305/1306 got hours earlier, applied to a package
+that reported itself complete.** A mechanism that is real but whose
+production reach is unproven does not tick here; that shape accounts for all
+ten of this project's historical un-ticks, and holding it costs one small
+follow-up. **Successor: one shipped-binary test on the `entitlement_broker`
+fixture that drives a real fallback and asserts a non-NULL `cost_micro_usd`
+with its confidence.** When that mutation is KILLED, 1307 closes.
+
+**Phase 32G now stands at 5/10** (1298, 1299, 1304, 1305, 1306), with 1307
+one test away and the remaining four blocked on signals the census names.

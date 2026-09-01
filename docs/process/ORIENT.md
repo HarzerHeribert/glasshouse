@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1146 / 1332 mandatory capabilities (86%)** — 186 open across 44 phases.
+**1149 / 1332 mandatory capabilities (86%)** — 183 open across 44 phases.
 
 ## Where the work is
 
@@ -52,6 +52,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 33C | Failure, quota, and route correlation | **4** | 11 | `1362` |
 | Phase 24 | Memory reranking | **5** | 1 | `1082` |
 | Phase 31 | Compaction-aware behavior | **5** | 2 | `1167` |
+| Phase 32G | Provider-aware request-cost estimation | **5** | 5 | `1296` |
 | Phase 33A | Routing evidence ledger | **5** | 10 | `1327` |
 | Phase 53 | Criteria before adding graph storage | **5** | 0 | `1872` |
 | Phase 21G | Memory revalidation | **6** | 3 | `941` |
@@ -60,7 +61,6 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 56 | Harness–subscription decoupling: choose the harness, route the subscription and model | **7** | 5 | `1941` |
 | Phase 9K | Harness-aware response profiles | **8** | 29 | `578` |
 | Phase 32A | Unified quota and capacity model | **8** | 13 | `1196` |
-| Phase 32G | Provider-aware request-cost estimation | **8** | 2 | `1296` |
 | Phase 35B | Candidate scoring | **9** | 16 | `1523` |
 | Phase 32E | Burn rate and exhaustion forecasting | **10** | 0 | `1272` |
 | Phase 35A | Candidate generation | **10** | 1 | `1504` |
@@ -73,7 +73,7 @@ closures are usually at the top. Open the map at the line number given.
 
 Every phase with **three or fewer** open lines, quoted verbatim. These are
 where a single package finishes a phase, so they are listed here and the
-other ~146 open lines are not.
+other ~143 open lines are not.
 
 For any other phase: `scripts/discover.py --phase <id>` prints its open
 lines and evidence together. **Do not open the 178 KB map to read them.**

@@ -1295,13 +1295,13 @@ Phase 32F — Protected quota reserve
 
 Phase 32G — Provider-aware request-cost estimation
 
-☐ Estimate the marginal input cost of starting a new session on a metered provider.
-☐ Estimate the marginal input cost of resuming a cold existing session when context size is known or approximated.
+☑ Estimate the marginal input cost of starting a new session on a metered provider.
+☑ Estimate the marginal input cost of resuming a cold existing session when context size is known or approximated.
 ☐ Estimate cached-input cost separately from uncached-input cost when provider pricing supports caching.
 ☐ Estimate expected output cost from task tier and recent comparable tasks when useful.
 ☐ Estimate request-pool cost for free providers whose scarce unit is requests rather than tokens.
 ☐ Estimate local compute cost qualitatively through latency and occupancy instead of pretending local tokens are financially free of all cost.
-☐ Include bootstrap context, project memory, checkpoints, and likely repository reads in fresh-session cost estimates when possible.
+☑ Include bootstrap context, project memory, checkpoints, and likely repository reads in fresh-session cost estimates when possible.
 ☑ Treat unknown pricing as unknown instead of assigning a fake zero cost.
 ☑ Allow provider price metadata to be updated independently from the router implementation.
 ☐ Record the estimated cost used in a routing decision so later evaluation can compare estimate against actual usage.
