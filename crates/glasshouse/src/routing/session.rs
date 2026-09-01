@@ -51,6 +51,7 @@ use crate::config::pairing::{ContinuitySource, WarmSession};
 use crate::harness::pairing::{self, ModelBehaviourFit, ProtocolFit};
 use crate::harness::{Capabilities as HarnessCapabilities, Declared, WireProtocol};
 use crate::integrations::IntegrationId;
+use crate::provider::pricing::PriceTable;
 use crate::provider::quota::{CapacityBand, RemainingCapacityScore};
 
 use super::capability::{self, ResourceFacts};
@@ -1220,10 +1221,21 @@ pub fn cost_preference(destination: &Destination) -> Contribution {
 /// Map line 1538: *"include expected marginal cost in candidate scoring."*
 ///
 /// `Cost` — [`super::Cost`]'s own doc calls it *"whether using a model costs
-/// the user anything at the margin"* — is the only marginal-cost reading
-/// that reaches this scorer; a numeric price is Phase 32G (0/10) and does not
-/// exist in this build, so this term prices the binary rather than inventing
-/// a figure map line 1305 forbids treating unknown pricing as.
+/// the user anything at the margin"* — is still the only reading that can
+/// ever make this term `0.0`: [`Cost::is_free`] returning `true` is a
+/// **known** zero, never an unknown, and stays priced exactly as it always
+/// was. Phase 32G's `PriceTable` (`crate::provider::pricing`) answers the
+/// other half for a metered destination — a known per-million price, or an
+/// honest unknown — but it changes only the **evidence**, never the
+/// magnitude: there is still no per-call token estimate at this call site
+/// (`SessionContextFacts` carries none), so a known price cannot yet be
+/// converted into an actual expected dollar figure without inventing one.
+/// Reporting the known rate is honest; reporting a dollar estimate from it
+/// is map line 1298's job, once a size producer exists. A destination whose
+/// price is unknown is priced identically to one whose price is known but
+/// unconvertible — both metered, neither free — and the difference between
+/// them is only ever textual, the same way [`AffinityFacet`]'s `known` and
+/// `unknown` constructors both start every unattached facet as `0.0`.
 ///
 /// **Pushed unconditionally**, unlike [`cost_preference`], because line 1538
 /// names no workload-tier precondition the way line 1558 does. That is also
@@ -1237,6 +1249,7 @@ pub fn cost_preference(destination: &Destination) -> Contribution {
 fn expected_marginal_cost(
     destination: &Destination,
     movement: Option<&TierMovement>,
+    prices: &PriceTable,
 ) -> Contribution {
     if movement.is_some() {
         return Contribution::new(
@@ -1257,15 +1270,42 @@ fn expected_marginal_cost(
             ),
         );
     }
-    Contribution::new(
-        "expected marginal cost",
-        EXPECTED_MARGINAL_COST_PENALTY,
-        format!(
-            "`{}` is metered and no workload tier is established yet to price that (line 1558 \
-             would once one is) — preferred less than a free candidate",
-            destination.id()
+    let known_price = destination
+        .backend()
+        .model()
+        .name()
+        .and_then(|model| prices.price_for(destination.backend().provider(), model));
+    let (magnitude, evidence) = match known_price {
+        Some(price) => (
+            EXPECTED_MARGINAL_COST_PENALTY,
+            format!(
+                "`{}` is metered; its price is known — ${:.2} per million input tokens, ${:.2} \
+                 per million output tokens — but no per-call token estimate exists yet at this \
+                 call site to convert that rate into an expected dollar figure (line 1298's job \
+                 once a size producer exists), so it is priced the same as an unpriced metered \
+                 destination and no workload tier is established yet to price it another way \
+                 (line 1558 would once one is)",
+                destination.id(),
+                price.input_per_million_usd,
+                price.output_per_million_usd,
+            ),
         ),
-    )
+        // The magnitude here must stay `EXPECTED_MARGINAL_COST_PENALTY`, not
+        // `0.0`: an unknown price is unknown, not free, and collapsing this
+        // branch to the free branch's zero is exactly the fake-zero map line
+        // 1305 forbids (see this module's own mutation coverage).
+        None => (
+            EXPECTED_MARGINAL_COST_PENALTY,
+            format!(
+                "`{}` is metered and its price is unknown — no provider price metadata names \
+                 this provider/model, and no workload tier is established yet to price it \
+                 another way (line 1558 would once one is); an unknown price is priced as \
+                 metered, never as free",
+                destination.id()
+            ),
+        ),
+    };
+    Contribution::new("expected marginal cost", magnitude, evidence)
 }
 
 /// The classification a decision acted on, as a zero-weight line in every
@@ -3758,6 +3798,13 @@ pub struct SessionRouter {
     /// *current* destination's backend recorded, when the caller looked one
     /// up — see [`Self::with_retry_after`].
     retry_after: Option<FailureClass>,
+    /// Lines 1305/1306: provider price metadata, as the caller resolved and
+    /// read it — see [`Self::with_price_table`]. Defaults to
+    /// [`PriceTable::empty`], which is what every candidate saw before this
+    /// package and what every candidate with no metadata file still sees:
+    /// [`expected_marginal_cost`] renders that as an honest unknown, never
+    /// as a free zero.
+    prices: PriceTable,
 }
 
 impl SessionRouter {
@@ -3810,6 +3857,20 @@ impl SessionRouter {
     #[must_use]
     pub fn with_retry_after(mut self, class: Option<FailureClass>) -> Self {
         self.retry_after = class;
+        self
+    }
+
+    /// Lines 1305/1306: the provider price metadata the caller resolved —
+    /// normally `PriceTable::load_from_dir(paths.config_dir())`, read once
+    /// per decision the same way every other caller-resolved fact on this
+    /// router is. Not calling this at all keeps `PriceTable::empty()`, which
+    /// reproduces this router's behaviour before this package existed
+    /// byte-for-byte: this is a builder rather than a required constructor
+    /// argument for exactly that reason, the same one [`Self::with_retry_after`]
+    /// gives for its own field.
+    #[must_use]
+    pub fn with_price_table(mut self, prices: PriceTable) -> Self {
+        self.prices = prices;
         self
     }
 
@@ -4048,6 +4109,7 @@ impl SessionRouter {
                     &pressure,
                     movement.as_ref(),
                     &pool,
+                    &self.prices,
                 );
                 (destination.clone(), explanation)
             })
@@ -4226,6 +4288,7 @@ fn score(
     pressure: &PressureInputs<'_>,
     movement: Option<&TierMovement>,
     pool: &EntitlementPoolView,
+    prices: &PriceTable,
 ) -> RoutingExplanation {
     let mut explanation = RoutingExplanation::new();
     if let Some(answer) = &inputs.requirements.classification {
@@ -4274,7 +4337,7 @@ fn score(
     // reading the un-shadowed parameter so it sees `None` exactly when the
     // block above did not run — see `expected_marginal_cost`'s own doc for
     // why the two must never both price a candidate.
-    explanation.push(expected_marginal_cost(destination, movement));
+    explanation.push(expected_marginal_cost(destination, movement, prices));
     explanation
 }
 

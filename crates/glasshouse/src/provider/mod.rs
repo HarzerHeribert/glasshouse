@@ -135,6 +135,7 @@ pub mod cache;
 pub mod discovery;
 #[cfg(test)]
 pub(crate) mod fixture;
+pub mod pricing;
 pub mod quota;
 pub mod registry;
 pub mod resources;

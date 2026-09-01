@@ -3526,12 +3526,22 @@ enum NoRoute {
 /// (`routing.reserve_override_sessions`) on every path that ranks, so the
 /// path that acts and the path that reports cannot disagree about either.
 fn session_router(
+    runtime: &Runtime,
     effective: &EffectiveConfig<'_>,
     user_override: glasshouse::routing::session::RoutingOverride,
 ) -> glasshouse::routing::session::SessionRouter {
     glasshouse::routing::session::SessionRouter::with_override(user_override)
         .with_reserve_policies(effective.reserve_policies())
         .with_reserve_override_sessions(effective.reserve_override_sessions().value)
+        // Map lines 1305/1306: the price metadata is read HERE, from the one
+        // function every ranking path already goes through, so a user's
+        // `pricing.toml` reaches the path that acts and the path that reports
+        // alike. An absent or malformed file yields `PriceTable::empty()` and
+        // routing behaves exactly as it did before the table existed — the
+        // state of every user who has not written one.
+        .with_price_table(glasshouse::provider::pricing::PriceTable::load_from_dir(
+            runtime.paths().config_dir(),
+        ))
 }
 
 /// `glasshouse route`'s decision, and the control door's — map lines 1601,
@@ -3683,7 +3693,7 @@ fn route_recommendation(
     let retry_after = current
         .as_ref()
         .and_then(|current| latest_failure_class(runtime, current));
-    let Some(routed) = session_router(effective, user_override)
+    let Some(routed) = session_router(runtime, effective, user_override)
         .with_retry_after(retry_after)
         .choose(moment, current.as_ref(), &destinations, &inputs)
     else {
@@ -4453,7 +4463,7 @@ fn launch_session(
         } else {
             glasshouse::routing::session::RoutingOverride::none()
         };
-        let router = session_router(&effective, user_override);
+        let router = session_router(runtime, &effective, user_override);
         let routed = router.choose(
             glasshouse::routing::session::RoutingMoment::SessionStart,
             None,
@@ -8988,12 +8998,14 @@ fn report_task_boundary_routing(runtime: &Runtime, session: &str) {
         now: std::time::Instant::now(),
         requirements: TaskRequirements::default(),
     };
-    let Some(routed) = session_router(&effective, RoutingOverride::to(id.as_str())).choose(
-        RoutingMoment::TaskBoundary,
-        current.as_ref(),
-        &destinations,
-        &inputs,
-    ) else {
+    let Some(routed) = session_router(runtime, &effective, RoutingOverride::to(id.as_str()))
+        .choose(
+            RoutingMoment::TaskBoundary,
+            current.as_ref(),
+            &destinations,
+            &inputs,
+        )
+    else {
         return;
     };
     // A ranking that agreed with the user says nothing worth a line on their
