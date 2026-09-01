@@ -4165,3 +4165,37 @@ coedit members finishing within minutes of each other still serialized ~40
 minutes of integration wall-clock. The two-lane blast radius attacks the
 other half of that cost; the fixture-reuse successor (Gatekeeper) is named
 and unbuilt.
+
+## Batch 72 (2026-09-01, evening) — the bridge lands, and the gate economics go from paper to plumbing
+
+Five Sonnet packages (bridge, v1_1907 race fix, argv-log hoist, entitlement
+tranche, score-terms in flight) plus the orchestrator's integrate.sh wiring.
+**Six map boxes closed** (57A complete: 1991–1996 — a Glasshouse session can
+now run Claude Code behind the context firewall in shadow mode). 1112→1118.
+
+**The measured before/after of the SDLC change:** the bridge paid the last
+~40-minute inline full sweep; the entitlement tranche, integrated an hour
+later under integrate.sh's new targeted default, paid **~6 seconds** (four
+distance-zero targets + rustdoc, 19 full-trace targets deferred to the
+wave's trailing background sweep). Worker spin-up: persistent caches held
+13.4s→1.3s on re-dispatch.
+
+**Empirics beat recon twice:** the bridge's live capture showed real Bash
+payloads carry no exit_code and failing Bash never reaches PostToolUse —
+correcting both the recon's "uniformly text" claim and the core's
+conservative-but-wrong Some(0) gate. And a one-settings-document collision
+(a second --settings silently discards the first) was avoided because a
+pre-existing verified doc comment recorded it — evidence written down once
+paying off months later.
+
+**Worker-question protocol worked:** the tranche worker hit the
+machine-busy rule mid-work and ASKED (picker prompt) instead of either
+waiting silently or violating it; the answer was policy, not judgment
+(worker full sweeps are the trailing gate's job now). One genuine mid-turn
+generation stall (tokens frozen 3+ min) was interrupted and resumed clean.
+
+**Flake ledger:** v1_1907's TCP race is FIXED (blocking accept, 20/20).
+settings_persistence and events_lifecycle remain the known in-lib/fixture
+families (each green twice alone today); session_supervision showed
+load-race failures on two trees — watch whether it recurs on a quiet
+machine before suspecting the fixture conversion.
