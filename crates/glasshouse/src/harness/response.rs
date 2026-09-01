@@ -430,6 +430,24 @@ pub fn harness_name(id: IntegrationId) -> &'static str {
     id.display_name()
 }
 
+/// Frame free text so a running session reads it as a one-turn instruction
+/// from its operator rather than as an ordinary line of conversation — line
+/// 620's override, delivered through the session's existing input path
+/// rather than through anything [`apply`] writes.
+///
+/// Says, in the instruction itself, exactly what line 620 promises: this
+/// turn only, and no rewrite of the system prompt or the stored response
+/// profile. The wording is deliberately plain prose rather than a control
+/// sequence — this module has no channel into a session but typed text, so
+/// the framing is the only thing that tells the harness what kind of line
+/// this is.
+pub fn one_turn_override(text: &str) -> String {
+    format!(
+        "[glasshouse] One-turn instruction from your operator, for this turn only. It does not \
+         change your system prompt or your stored response profile: {text}"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

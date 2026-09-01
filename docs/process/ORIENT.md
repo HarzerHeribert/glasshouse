@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1126 / 1332 mandatory capabilities (85%)** — 206 open across 46 phases.
+**1129 / 1332 mandatory capabilities (85%)** — 203 open across 46 phases.
 
 ## Where the work is
 
@@ -59,13 +59,13 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 52 | Criteria before adding semantic/vector retrieval | **6** | 0 | `1858` |
 | Phase 47 | Observability without spectacle | **7** | 8 | `1750` |
 | Phase 56 | Harness–subscription decoupling: choose the harness, route the subscription and model | **7** | 5 | `1941` |
+| Phase 9K | Harness-aware response profiles | **8** | 29 | `578` |
 | Phase 32A | Unified quota and capacity model | **8** | 13 | `1196` |
 | Phase 35B | Candidate scoring | **9** | 16 | `1523` |
 | Phase 32E | Burn rate and exhaustion forecasting | **10** | 0 | `1272` |
 | Phase 32G | Provider-aware request-cost estimation | **10** | 0 | `1296` |
 | Phase 35A | Candidate generation | **10** | 1 | `1504` |
 | Phase 57 | Context firewall: tool-output compaction between harness and model | **10** | 17 | `1976` |
-| Phase 9K | Harness-aware response profiles | **11** | 26 | `578` |
 | Phase 33B | Reliability-adjusted agent performance | **14** | 0 | `1345` |
 | Phase 51 | Evaluation hooks | **25** | 12 | `1818` |
 
@@ -75,7 +75,7 @@ closures are usually at the top. Open the map at the line number given.
 
 Every phase with **three or fewer** open lines, quoted verbatim. These are
 where a single package finishes a phase, so they are listed here and the
-other ~167 open lines are not.
+other ~164 open lines are not.
 
 For any other phase: `scripts/discover.py --phase <id>` prints its open
 lines and evidence together. **Do not open the 178 KB map to read them.**

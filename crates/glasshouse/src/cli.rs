@@ -1607,6 +1607,55 @@ pub enum SessionCommand {
         #[arg(long)]
         clear: bool,
     },
+
+    /// Warn before, then carry out, a profile change on a running session —
+    /// capability map line 619.
+    ///
+    /// Reads the harness's own communication-style declaration first. A
+    /// harness that can change style in place proceeds without ceremony; one
+    /// that would need a new native session is checked against this
+    /// session's warmth, and a warm session is never given up silently —
+    /// refusing the confirmation leaves the session, its settings and its
+    /// stored response profile untouched. The requested profile is delivered
+    /// as a one-turn instruction through the same input path `tell` uses; it
+    /// never rewrites the settings document, the system prefix, or the
+    /// stored profile.
+    Restyle {
+        /// The session, or the leading part of its identifier.
+        session: String,
+
+        /// The response preset to apply, by the name `glasshouse response
+        /// --session` accepts.
+        #[arg(long, value_name = "NAME")]
+        profile: String,
+
+        /// Proceed even though the harness's declaration says this would
+        /// clear or recreate a valuable warm session.
+        #[arg(long)]
+        accept_loss: bool,
+    },
+
+    /// Deliver one lightweight communication instruction into a running
+    /// session, for this turn only — capability map line 620.
+    ///
+    /// Framed so it reads as an instruction from the operator rather than as
+    /// the session's own words, and sent through the session's existing
+    /// input path — the same one a person's own typing uses. It never
+    /// touches the settings document, the system prefix, or the stored
+    /// response profile: an override for one turn, not a standing change.
+    /// Refused, by name, for a harness whose communication-style mechanism
+    /// nobody has read — typing an unframed instruction at a harness with no
+    /// verified way to receive one is a guess, not an override.
+    Tell {
+        /// The session, or the leading part of its identifier.
+        session: String,
+
+        /// The instruction. No line breaks or other control bytes: this
+        /// delivers exactly one line, and a payload that could smuggle a
+        /// second one is refused rather than sanitized — the same
+        /// conservatism `integrations::cmux`'s payload rule uses.
+        instruction: String,
+    },
 }
 
 #[derive(Debug, Subcommand)]

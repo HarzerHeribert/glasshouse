@@ -286,6 +286,25 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
                     }
                 }
             }
+            Some(SessionCommand::Restyle {
+                session,
+                profile,
+                accept_loss,
+            }) => {
+                if let Err(err) = restyle_session(&runtime, session, profile, *accept_loss) {
+                    eprintln!("glasshouse: {err:#}");
+                    return Ok(ExitCode::FAILURE);
+                }
+            }
+            Some(SessionCommand::Tell {
+                session,
+                instruction,
+            }) => {
+                if let Err(err) = tell_session(&runtime, session, instruction) {
+                    eprintln!("glasshouse: {err:#}");
+                    return Ok(ExitCode::FAILURE);
+                }
+            }
         },
         // `run` and `launch` dispatch through this one arm on purpose — see
         // `Command::Run`'s doc. A change to how a launch is assembled can
@@ -11677,6 +11696,193 @@ fn reserve_override_session(
              affected, and `glasshouse sessions reserve {short} --clear` withdraws it.\n"
         )
     })
+}
+
+/// The compiled-in adapter for a session's own recorded harness slug, or
+/// `None` when the record names an integration this build has no adapter for
+/// — a session recorded by a differently-built binary.
+fn harness_adapter_for(
+    harness_slug: &str,
+) -> Option<&'static dyn glasshouse::harness::HarnessAdapter> {
+    glasshouse::harness::all().find(|adapter| adapter.id().slug() == harness_slug)
+}
+
+/// This session's warmth for the restyle warning gate — line 619.
+///
+/// Deliberately simpler than `warm_session`, the router's own reader of the
+/// same fact: that one asks whether a *candidate* session is reachable from a
+/// routing decision being made about a different destination, which is why it
+/// takes a `DestinationScope`. Here there is no candidate set — the session
+/// named on the command line is the only session this question is ever about
+/// — so an `Active` session is always the relevant one.
+fn restyle_warmth(
+    record: &SessionRecord,
+    now_unix: i64,
+) -> Option<glasshouse::config::pairing::WarmSession> {
+    use glasshouse::config::pairing::{WarmSession, WarmSessionState};
+
+    let state = match record.disposition() {
+        SessionDisposition::Active => WarmSessionState::Live,
+        SessionDisposition::Resumable => WarmSessionState::Resumable,
+        SessionDisposition::Closed | SessionDisposition::Failed => return None,
+    };
+    Some(WarmSession {
+        state,
+        idle_seconds: (now_unix - record.last_activity_at).max(0),
+    })
+}
+
+/// Refuse instruction text that could smuggle more than the one line it
+/// promises, rather than trying to escape it.
+///
+/// The same conservatism `integrations::cmux`'s `PayloadHasBackslash` uses,
+/// for the same reason: [`SessionApi::send_text`](glasshouse::session) appends
+/// exactly one `\r` and writes the rest of the string as data, so a `\r` (or
+/// any other control byte) already inside the text would submit as more than
+/// one line once it reaches the pty. There is no correct way to transform
+/// that away, so it is refused instead.
+fn refuse_control_bytes(text: &str) -> anyhow::Result<()> {
+    if text.chars().any(char::is_control) {
+        anyhow::bail!(
+            "this instruction contains a control byte (a line break or similar); refusing to \
+             deliver it rather than trying to escape it, so it cannot submit as more than the \
+             one line this override promises"
+        );
+    }
+    Ok(())
+}
+
+/// Deliver one lightweight communication instruction into a running session,
+/// for this turn only — capability map line 620.
+///
+/// Refuses by name for a harness whose communication-style declaration is
+/// [`Declared::Unverified`](glasshouse::harness::Declared): typing an
+/// unframed instruction at a harness nobody has read a mechanism for is a
+/// guess, not an override, and 618's correction is explicit that inventing a
+/// declaration here would invert the policy rather than merely degrade it.
+/// Delivery itself goes through `crate::api::send_message` — the same input
+/// path `glasshouse api send` and a person's own typing use — so it is never
+/// a second copy of the write path, and it inherits that path's project scope
+/// and liveness checks rather than repeating them.
+fn tell_session(runtime: &Runtime, session: &str, instruction: &str) -> anyhow::Result<()> {
+    refuse_control_bytes(instruction)?;
+
+    let sessions = ProjectSessions::open(runtime)?;
+    let store = sessions.store();
+    let id = store.resolve_id(session)?;
+    let record = store
+        .get(&id)?
+        .ok_or_else(|| anyhow::anyhow!("session `{id}` is not in this project"))?;
+
+    let adapter = harness_adapter_for(&record.harness).ok_or_else(|| {
+        anyhow::anyhow!(
+            "no adapter registered for harness `{}` recorded on session {}",
+            record.harness,
+            short_id(&id)
+        )
+    })?;
+
+    if adapter.describe().communication_style.value().is_none() {
+        anyhow::bail!(
+            "{} declares no communication-style mechanism Glasshouse has read, so there is no \
+             verified way to frame a one-turn instruction for it; refusing rather than typing \
+             unframed text into session {}",
+            adapter.id().display_name(),
+            short_id(&id)
+        );
+    }
+
+    let framed = glasshouse::harness::response::one_turn_override(instruction);
+    api::send_message(runtime, id.as_str(), &framed)
+}
+
+/// Warn before, then carry out, a profile change on a running session —
+/// capability map line 619.
+///
+/// The warning fires only when the adapter's own
+/// [`StyleChange`](glasshouse::harness::StyleChange) declaration says the
+/// harness needs a new native session for this change **and** the session is
+/// genuinely warm ([`restyle_warmth`]); refusing it (no `--accept-loss`)
+/// returns before anything is read from the harness's own declarations beyond
+/// what decided the warning, so the session, its settings and its stored
+/// response profile are left exactly as they were. A cold session, or one
+/// whose harness can change style in place, proceeds straight to delivery.
+///
+/// Delivery reuses [`tell_session`]'s own mechanism — the resolved preset's
+/// instruction text, framed the same way, sent through the same input path —
+/// rather than writing a second copy of it: 619 asks for a warning in front
+/// of a change, not a second way of making one.
+fn restyle_session(
+    runtime: &Runtime,
+    session: &str,
+    profile: &str,
+    accept_loss: bool,
+) -> anyhow::Result<()> {
+    let preset = glasshouse::profile::response::presets()
+        .iter()
+        .find(|preset| preset.name == profile)
+        .ok_or_else(|| {
+            let names: Vec<&str> = glasshouse::profile::response::presets()
+                .iter()
+                .map(|preset| preset.name)
+                .collect();
+            anyhow::anyhow!(
+                "`{profile}` is not a response preset Glasshouse knows; the presets are: {}",
+                names.join(", ")
+            )
+        })?;
+
+    let sessions = ProjectSessions::open(runtime)?;
+    let store = sessions.store();
+    let id = store.resolve_id(session)?;
+    let record = store
+        .get(&id)?
+        .ok_or_else(|| anyhow::anyhow!("session `{id}` is not in this project"))?;
+
+    let adapter = harness_adapter_for(&record.harness).ok_or_else(|| {
+        anyhow::anyhow!(
+            "no adapter registered for harness `{}` recorded on session {}",
+            record.harness,
+            short_id(&id)
+        )
+    })?;
+
+    let described = adapter.describe();
+    let Some(style) = described.communication_style.value() else {
+        anyhow::bail!(
+            "{} declares no communication-style mechanism Glasshouse has read, so there is no \
+             verified way to restyle session {} without guessing; refusing rather than typing an \
+             unframed instruction into it",
+            adapter.id().display_name(),
+            short_id(&id)
+        );
+    };
+    let change = style.change;
+
+    let now_unix = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
+        .unwrap_or(0);
+    let warmth = restyle_warmth(&record, now_unix);
+
+    if change == glasshouse::harness::StyleChange::NewSession
+        && let Some(warm) = warmth
+        && !accept_loss
+    {
+        anyhow::bail!(
+            "restyling session {} to `{profile}` needs a new {} session — its communication-\
+             style mechanism cannot change in place, and this session is warm ({}, idle {}s). \
+             Refusing leaves the session, its settings and its stored response profile \
+             untouched; re-run with --accept-loss to give it up and restyle anyway.",
+            short_id(&id),
+            adapter.id().display_name(),
+            warm.state,
+            warm.idle_seconds
+        );
+    }
+
+    let framed = glasshouse::harness::response::one_turn_override(&preset.profile.instruction());
+    api::send_message(runtime, id.as_str(), &framed)
 }
 
 /// Retire Glasshouse's record of a session — line 654.

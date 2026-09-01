@@ -596,3 +596,26 @@ adapters. `doctor` renders measured and unknown distinctly. Mutation
 9K's remainder after this batch: 616/622 (Cluster Q, standing), 623 (a
 standalone surface), 627–630 (one missing measurement channel — attack the
 channel).
+
+# Lines 619, 620 — COMPLETE 2026-09-01; the shared in-session surface exists
+
+Package `GH-SESSION-STYLE-SURFACE` (Sonnet, high, Amber; batch 75). The
+register's "one missing in-session surface, shared" is now `glasshouse
+sessions restyle` and `glasshouse sessions tell`, under the existing
+plural-verb idiom, delivering through the EXISTING `api::send_message`
+channel — no new input path, `session/runtime.rs` untouched.
+
+- **619**: `restyle <id> --profile <p>` reads the adapter's `StyleChange`
+  declaration and the session's warmth; `NewSession` × warm × no
+  `--accept-loss` → a refusal naming the session, harness, and warmth
+  basis, with the session/settings/profile proven byte-identical after;
+  `InPlace`, cold, or accepted → the preset's instruction delivered.
+  An `Unverified` adapter gets a named refusal, never an attempt.
+- **620**: `tell <id> <instruction>` frames one instruction via
+  `harness::response::one_turn_override` and delivers it exactly once
+  (fixture-log proven); control bytes refused outright, matching the cmux
+  layer's refuse-don't-escape conservatism; settings document, system
+  prefix, and stored profile untouched.
+
+Both mutations KILLED (warmth condition inverted; double delivery).
+Targeted gate green on the merged tree over the declaration commit.
