@@ -3185,3 +3185,41 @@ never a filter* — recorded on the launch path with a new purpose constant besi
 `TIER_ESCALATION_PURPOSE`, exactly as `record_tier_movement` does.
 
 
+
+### Step 5's implementation rulings — accepted from GH-BROKER-FALLBACK-56A, 2026-09-01
+
+The three-step order of work above landed (batch 70). Two decisions made in
+the landing carry authority beyond it and are recorded here.
+
+**A spend ceiling is stated in tokens, and the broker enforces tokens only.**
+`[entitlements.<name>] spend_ceiling_tokens` refuses when the ceiling and an
+observed reading are both established. It is tokens because
+`routing_observations.cost_micro_usd` has no producer in this build and map
+line 1465's closed reader already ruled that tokens — input plus output as the
+provider reported them — are the only currency this ledger holds. A ceiling
+stated in money could never be reached, which would make line 1971's *"never
+let the broker exceed them"* vacuous. `[providers.<name>.quota] budget`
+(`MonetaryBudget`, line 1203) remains the money ceiling and remains, by its own
+documentation, uncounted. If money enforcement is ever wanted, it needs a
+cost producer first — not a silent reinterpretation of this field.
+
+**The tier axis plugs into the fallback through `Destination`, not through
+configuration reads inside `routing`.** `same_capability_tier` is a free
+function over two model names that deliberately reads no configuration
+(`routing` may not), answering `Same` only for the identity case and `Unknown`
+otherwise — so until Phase 34F's axis is wired, the fallback order collapses
+to its two same-model steps and never widens on `Unknown` (mutation-pinned).
+The accepted wiring shape, when 34F's consumer lands: attach the model's
+capability tier to `Destination` the way `tier_ceiling` already is — one
+field, one builder, populated where `destination_tier_ceiling` already calls
+`resolved_ceiling` in `main.rs` — and `same_capability_tier` becomes a
+comparison of two attached values. The alternative (threading a
+`&dyn ModelTierAxis` through `choose`) was considered and declined: it needs
+a `SessionRouter` builder change for no additional honesty.
+
+**One packet error worth keeping visible:** the dispatching packet asked for
+unknown-tier tasks to be *refused* against tier-restricted entitlements, which
+contradicts the COMPLETE contract of lines 1947/1954 (a tier rule fires only
+against an established tier). The worker implemented the packet's intent as
+the *fallback's* narrowing — unknown never widens the candidate a fallback may
+take — and left the closed gate contract intact. That reading stands.
