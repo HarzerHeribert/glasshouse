@@ -4511,3 +4511,97 @@ test on the `entitlement_broker` fixture driving a real fallback; KILLED →
 close), `map-index.py --check` red on HEAD (229 IDs shifted +68 from 1949 —
 inherited, older than this batch's eight map commits, and a reconciliation
 ruling, not a script run).
+
+---
+
+## Batch 78 (2026-09-01, late night) — two inherited workers unstalled, two boxes, one phase closed, and a package refused at Phase −1
+
+**Inherited hot**, per the handoff's own instruction: two Sonnet workers
+dispatched ~23:20, both blocked. Not on the work — on a **permission prompt**.
+Each had stopped at *"Allow reads outside the working directories?"* before
+reading its packet, because the packet lives in the main checkout and the
+worker's cwd is its worktree. `6e0850e` had fixed a **different** prompt (the
+project `permissions` block); this one is the user-level
+`blockReadsOutsideWorkingDirectories`, which a tracked project setting cannot
+answer. Both had burned ~5 minutes of wall-clock at 7% context doing nothing.
+One `send-key Enter` each and both ran to completion inside twenty minutes.
+
+**This is the failure mode the watches are blind to by construction.** A
+blocked worker's pane is *not* quiet — the prompt is on screen and the token
+counter is stopped, so `worker-watch.sh`'s liveness heuristics read it as
+alive. The orchestrator found it only by reading both panes on inherit.
+**Read the pane on inherit; a fresh worker at 7% with a clean worktree is
+blocked, not thinking.**
+
+| line | tier | result |
+|---|---|---|
+| 1239 | Sonnet low, Green | closed — **Phase 32B CLOSED 14/14** |
+| 1307 | Sonnet medium, Amber | closed — the held box, closed by its own named successor |
+
+Both tests-only, file-disjoint, **one** `integrate.sh` call, targeted gate
+green (entitlement_broker 40, session_router 19, rustdoc clean), committed by
+pathspec, pushed.
+
+**1307 is the hold rule paying off a second time.** Yesterday it was held on a
+SURVIVED mutation with its successor named exactly: *one shipped-binary test on
+the `entitlement_broker` fixture.* That is what landed, and it took the priced
+path rather than the free-model escape the packet permitted — so the limit the
+hold anticipated does not apply. The mutation that caused the hold is KILLED.
+**Naming the successor inside the hold is what made this cheap.**
+
+**1239 is the case for verifying the tick rather than the report.** All five
+artifacts were present and the report was accurate. But its third assertion,
+`unread >= empty`, is satisfied by **equality** — both price to exactly `0.0` —
+so it proves nothing, behind a failure message that reads as though it would
+catch the very case. The separation lives in a different mechanism (the
+line-1587 affinity facet), and the orchestrator **re-ran that mutation on the
+merged tree** rather than accepting the worker's KILLED, precisely because it
+was the half the new test does not watch. KILLED. The ledger entry is longer
+than the tick and says which assertion is load-bearing and which is decorative.
+
+**Two stale ledger claims corrected, both found while establishing Phase −1**
+— and both were blockers that would have stopped a future package:
+
+1. `phase-32b.md`'s 1239 paragraph said *"nothing asks a routing question of
+   capacity"*. True when written; false since 1598 closed.
+2. `phase-33c.md`'s *"a cadence signal deliberately not collected"* cited
+   `retry_after: None` at `gateway/session.rs:564`. Line 1319 wired it; the
+   signal now travels `stated_retry_after` → `RateLimited{retry_after}` →
+   `ResourceHealth::fail` → `FreePool::is_available`.
+
+**A ledger blocker is a claim with a date on it, not a fact.** Both were
+written by careful orchestrators and both rotted within days of the line that
+falsified them. Check the blocker before believing the phase is blocked.
+
+### The refusal that is the batch's real output: 1263
+
+`cluster-b.py` flagged `recent_credential_spend` (`routing/evidence.rs:1837`)
+— real, tested, **zero production callers**. The register's row for 1263 said
+it was blocked on *"Phase 32G, which is 10 open / 0 closed"*, and 32G is now
+6/10 with `cost_micro_usd` written and reading back. Every visible sign said
+*wire it up, close the box.*
+
+It is a trap, and Phase −1 caught it. `main.rs:8613` states in production that
+`gateway::ingress` **relays a body it is designed never to parse**, so the
+token columns have never been written on the relay path. The only writer is
+memory extraction, which produces no row at all under the default
+configuration. Wired today, the spend reader would sum memory-extraction calls
+and call the result the user's spend. **Refused before dispatch**; the register
+row now carries the live blocker instead of the stale one.
+
+Cost of the refusal: orchestrator reading. Cost had it been dispatched: a
+worker package plus the un-tick an audit would eventually have produced.
+**This is what the gate is for, and it is the third time a package has died at
+Phase −1 rather than after.**
+
+**Dispatched forward:** `paced-retry` (1368, Amber, Sonnet high) on the
+now-proven cadence chain — the gap is that `FreePool::is_available` has no
+caller anywhere in `src/gateway/`, so the accept loop forwards the next
+request to a credential its own previous exchange put in cooldown. Policy
+decided by the orchestrator in the packet, not left to the worker: refuse
+locally with the stated wait, never hold the accept loop.
+`audit-batch-78` (read-only) runs beside it against this batch's own ticks.
+
+**Open at close:** the wave's trailing full sweep is deliberately **not** run
+yet — one integration is not a wave, and two workers are compiling. It is owed
+once `paced-retry` integrates.
