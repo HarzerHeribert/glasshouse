@@ -416,6 +416,31 @@ cannot be audited, and an unauditable refusal is how a wrong reason survives
 long enough to send a worker at the wrong target.
 
 
+## Phase 33B — fourteen lines, four causes, censused 2026-09-02
+
+`GH-RECON-33B`. The phase had **no evidence-ledger entry at all** until that
+day; `docs/product/evidence/phase-33b.md` now carries the full account. Summary
+so nobody re-derives it:
+
+| lines | cause | verdict |
+|---|---|---|
+| 1347-1352, 1355, part of 1354 | **Cluster L / P1b** — the relay-path body-parsing wall. `gateway/ingress.rs:36`/`:647` and `main.rs:~8612` re-verified word-for-word as still true. TTFC/TTFT/decode-throughput/rounds-per-minute symbols **do not exist in the tree at all** — stronger than Cluster B's built-and-unwired shape, and `shell/state.rs:695` says so in production prose | **REFUSED — needs the `ingress` ruling** |
+| 1357 (weight clause), 1358 | routing score weights are compile-time `const`s with no config surface; nothing under `src/config` names one. 1357's *term-preservation* clause is already satisfied by `Contribution`/`RoutingExplanation` | **PACKAGEABLE** — successor named in `phase-33b.md` |
+| 1353, 1359 | **already implemented in production and never ticked** — `provider_health`'s additive floored penalty, and the coarse observation path that is the only path that has ever run | **PACKAGEABLE** — dispatched as `GH-COARSE-FALLBACK` |
+| 1356, 1360 | **Cluster P/Q** — vacuous restraints. Nothing anywhere parses terminal text for timing; nothing computes or compares TTFC | **REFUSED** |
+
+**1354 is half-built**: `FailureClass::EmptyCompletion` and `::StreamAbort` are
+production-constructed and consumed, classified from status and framing with no
+parsing wall. Only *"unusable tool calls"* and *"non-actionable turns"* need the
+body. Reuse those two variants when Cause A unblocks; do not rebuild them.
+
+**Do not let the 1152 restraint ruling be misapplied to 1356/1360.** That ruling
+(*restraint lines are mutation-proven by violating the restraint*) works because
+1152's two stores both exist. Cause D restrains a mechanism that does not, so
+the "violation" would mean building the forbidden feature in order to forbid it.
+**The test is whether the restrained thing exists**, and the two shapes are
+indistinguishable from the map line alone.
+
 ## Cluster Q — a negative requirement over a capability that does not exist
 
 **Added 2026-08-30, and it is a CLASS, not a list** (§83 — gather refusals by
