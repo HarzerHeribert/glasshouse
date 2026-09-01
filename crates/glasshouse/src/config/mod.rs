@@ -2805,7 +2805,8 @@ impl ProviderConfig {
     /// **This lookup is context-blind** — it knows only `model` and the
     /// provider `self` is — and only a record that states no
     /// harness/launch-profile/protocol narrowing at all
-    /// ([`capability::ModelCapabilityRecord::is_context_general`]) is
+    /// (`ModelCapabilityRecord::is_context_general`, which is deliberately
+    /// not public — this module is its only honest caller) is
     /// eligible here. A record that narrows to even one of those axes is
     /// filtered out rather than applied without checking them: this path
     /// has no harness, launch profile, or protocol in hand to check a
