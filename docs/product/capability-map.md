@@ -1149,7 +1149,7 @@ Phase 29 — Memory commits
 ☑ Allow a memory commit to be triggered after a successful Git commit.
 ☑ Allow a memory commit to be triggered after a task-completion event.
 ☑ Allow a memory commit to be triggered before an intentional native prompt compaction.
-☐ Separate durable project memories from transient session checkpoints during a memory commit.
+☑ Separate durable project memories from transient session checkpoints during a memory commit.
 ☑ Record the relevant Git commit with memories produced from a code-change boundary.
 ☑ Make memory commits idempotent enough that rerunning one does not create uncontrolled duplicate knowledge.
 

@@ -161,18 +161,47 @@ Recorded scope limits — stated by the worker, not discovered later:
 
 Contract: Given a project holding both, when a memory commit runs, Glasshouse writes to the memory store and not to the checkpoint store, and when a checkpoint is taken it writes to the checkpoint store and not to the memory store, while preserving that each remains reachable through its own command.
 
-State: NOT STARTED — worker reports the line still open
+State: **COMPLETE — ruled 2026-09-01.** The line was never missing code, a
+test, or reachability: all three existed and passed from 2026-08-31. It was
+open on **one missing mutation**, and on a rule about mutations that does not
+fit this kind of line.
 
 Production evidence:
-- `src/memory/store.rs` — `MemoryStore::record`
-- `src/checkpoint/store.rs` — `CheckpointStore::save`
-- `src/main.rs` — `memory_commit`
+- `src/memory/store.rs` — `MemoryStore::record` (writes `memories`, `database.rs:418`)
+- `src/checkpoint/store.rs` — `CheckpointStore::save` (writes `checkpoints`, `database.rs:657`)
+- `src/main.rs` — `memory_commit` (`:10931`, the `glasshouse memory commit` command)
 
 Regression evidence:
-- `memory_commits::memories_and_checkpoints_never_write_into_each_other`
+- `memory_commits::memories_and_checkpoints_never_write_into_each_other` — drives the **compiled binary** for both commands and counts rows in both tables, in both directions
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| insert `ProjectCheckpoints::open(runtime)?.store().save(Checkpoint{..})` into `memory_commit` before `let model = disposable_extraction_model(..)` | `memory-commit-also-writes-a-checkpoint` | **killed** | `memory_commits::memories_and_checkpoints_never_write_into_each_other` |
+
+> observed: ``assertion `left == right` failed: a memory commit must not write a checkpoint row`` (`memory_commits.rs:719`)
+
+**The ruling, because it generalises past this line.** The previous package
+held 1152 open and said why:
+
+> *"NO MUTATION … The claim is an absence — 'no row appeared in the other
+> table' — and a mutation that made a memory commit write a checkpoint would be
+> inventing a feature rather than removing one."*
+
+That is careful and it is wrong, in a way worth naming. A mutation's job is to
+introduce the defect a line forbids and check that a test screams. For a
+**restraint** line — one whose content is *"X must not do Y"* — the defect **is**
+the addition. Requiring mutations to only ever delete would make every
+restraint line in this map permanently unclosable, which is a rule about
+mutation vocabulary quietly deciding a capability question.
+
+**Restraint lines are mutation-proven by violating the restraint.** The
+violation here compiled, ran, and was killed by the assertion that names the
+restraint in its own message. Nothing was left changed: `mutate.sh` restored
+`main.rs` byte-identically and `git status` was clean before and after.
 
 Recorded scope limits — stated by the worker, not discovered later:
-- NO MUTATION, and this is the weakest line in the package. The claim is an absence — 'no row appeared in the other table' — and a mutation that made a memory commit write a checkpoint would be inventing a feature rather than removing one. The test counts rows in both tables in both directions through the built binary, which is evidence, but it is not mutation-proven and should not be read as if it were.
+- The mutation proves the **memory-commit → checkpoint-table** direction only. That is deliberate and sufficient: the line's own text is *"during a memory commit"*, so the mutated direction is the one the line names. The test's reverse assertion (`checkpoint save → memory table`) is asserted but not independently mutated.
+- It does not prove the two stores' **lifetimes** differ (the pruning code), which neither package touched.
 - It proves the two stores do not cross-write. It does not prove their lifetimes differ; that is a property of the pruning code, which this package did not touch.
 
 
