@@ -89,3 +89,23 @@ def test_a_team_lead_may_write_a_subpacket_to_the_main_checkout():
 def test_the_subpacket_exception_does_not_extend_to_the_leads_own_packet():
     """A worker must not rewrite its own instructions."""
     assert run("Write", f"{REPO}/.agent-runtime/packet-lead-capacity.md", WT) == 2
+
+
+if __name__ == "__main__":
+    # Every other file here self-runs under `python3 <file>`, which is how
+    # ci-local.sh's "script tests" step invokes them. This one was written in
+    # pytest style with no entry point, so the gate ran it, saw exit 0, and
+    # had executed nothing — found 2026-09-01 while adding a sibling. Ten
+    # tests, green for five days, never once run by the gate.
+    import sys
+
+    failed = 0
+    for name, fn in sorted(globals().items()):
+        if name.startswith("test_") and callable(fn):
+            try:
+                fn()
+                print(f"ok   {name}")
+            except AssertionError as e:
+                failed += 1
+                print(f"FAIL {name}: {e}")
+    sys.exit(1 if failed else 0)

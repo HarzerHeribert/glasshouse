@@ -307,6 +307,34 @@ class ValidateRoundChecksTests(unittest.TestCase):
         findings = vr.validate([str(path)], str(self.map_path))
         self.assertTrue(any(f.check == "yours-non-empty" for f in findings))
 
+    # gate-is-targeted: the packet's gate line must be --targeted. Two packets
+    # on 2026-09-01 carried the bare form and each worker ran the 25-minute
+    # full sweep the packet's own prose said was not owed. Non-vacuity is
+    # checked in both directions: the bare form is flagged, the targeted form
+    # and prose that merely names the script are not.
+    def _gate_findings(self, *extra_lines: str):
+        a = PacketFixture(self.tmp, "g.md", yours=["owned.rs"])
+        with open(a.path, "a") as fh:
+            fh.write("\n## VERIFICATION COMMANDS\n\n" + "\n".join(extra_lines) + "\n")
+        return [f for f in vr.validate([str(a.path)], str(self.map_path)) if f.check == "gate-is-targeted"]
+
+    def test_bare_blast_radius_in_the_commands_is_a_failure(self):
+        self.assertEqual(len(self._gate_findings("    scripts/blast-radius.sh")), 1)
+        self.assertEqual(len(self._gate_findings("    $ scripts/blast-radius.sh --serial")), 1)
+        self.assertEqual(len(self._gate_findings("- blast-radius.sh")), 1)
+
+    def test_targeted_blast_radius_passes(self):
+        self.assertEqual(self._gate_findings("    scripts/blast-radius.sh --targeted owned.rs"), [])
+        self.assertEqual(self._gate_findings("    scripts/blast-radius.sh --dry-run"), [])
+        self.assertEqual(self._gate_findings("    scripts/blast-radius.sh --status"), [])
+
+    def test_prose_naming_the_script_is_not_a_command(self):
+        self.assertEqual(self._gate_findings(
+            "A bare",
+            "`scripts/blast-radius.sh` on a package is the full sweep and is NOT your gate.",
+            "The orchestrator runs scripts/blast-radius.sh once per wave.",
+        ), [])
+
     def test_box_line_matching_the_map_verbatim_passes(self):
         a = PacketFixture(self.tmp, "a.md", yours=["owned.rs"], boxes=["☐ Do the thing exactly as described."])
         findings = vr.validate([str(a.path)], str(self.map_path))

@@ -4462,3 +4462,52 @@ each time and were disjoint every time — 47 lines apart at the closest in
 and nothing was invented. The barrier's value this session was **not**
 catching a collision; it was the Stop hook refusing to let the round end
 with the bookkeeping wrong.
+
+## Batch 77 (2026-09-01, night) — five packages, seven boxes, and the day's errors turned into four gates
+
+Packages: `pricing-recorded` (Sonnet, Amber; closed the held 1305/1306 on
+four shipped-binary tests), `firewall-observability` (Sonnet, Amber),
+`claude-compaction` (Sonnet, Amber; Phase −1 was **wrong** in the packet —
+it cited `precompact_memory.rs` as Claude coverage and every test there is
+`codex`; the worker filed `packet_errors` and settled it empirically on the
+2.1.257 binary), `input-size-producer` (Sonnet, Amber; 1298/1299/1304
+ticked, **1307 held on the worker's own SURVIVED mutation** — deleting
+`.with_cost(cost)` from the only production writer passes 130 tests), and
+`audit-batch-76-77` (recon; found the 2003 "enforced by shape" overclaim,
+which the implied mutation then KILLED and the evidence was corrected).
+
+Map **1142 → 1149** (+7 this batch, +2 more from 1305/1306 whose packages
+were batch 76's). Phases 57 and 7 closed. Phase 32G 2/10 → 5/10.
+
+**The error that mattered:** `645d6cf` — a measurements-correction commit —
+carries `input-size-producer`'s entire 1005-line implementation, because
+`git add -A` was typed after `integrate.sh` had applied the diff and before
+the ruling. Pushed. Corrected forward in `cd62e83`'s evidence and message.
+Six other orchestrator errors this batch, all the same shape (asserting
+from something adjacent rather than verifying): a "gate finished" from a
+wait loop matching the wrong process; a bare `blast-radius.sh` in two
+packets (25+ minutes, three load reds); a duplicate wave sweep started
+beside the predecessor's; a ledger entry that called a working mechanism
+broken because a grep filtered its output; a Phase −1 citing tests for the
+wrong harness; a permission prompt misread as a blanket grant.
+
+**What was done about it, in the same batch — user ruling "fix it all":**
+
+| gap | mechanism now | test |
+|---|---|---|
+| `git add -A` / `git commit -a` after an integration | `guard-destructive-git.sh` blocks every sweeping stage form; the message prints `git status --short` and the incident | `test_destructive_git_guard.py` (16 blocked forms, 17 allowed) |
+| two gates in one tree; "is a gate running?" unanswerable | `blast-radius.sh` takes a per-tree lock, refuses a second start with exit 3, releases on exit; `--status` answers the question | `test_blast_radius_lock.py` |
+| bare `blast-radius.sh` in a packet | `validate_round.py` `gate-is-targeted` refuses it; `new-packet.sh` pre-fills `--targeted` | `test_round_tools.py`, `test_new_packet.py` |
+| a declared co-edit that was never claimed | `coedit-claim-guard.sh` refuses the first edit until the claim exists | `test_coedit_claim_guard.py` |
+| `test_worktree_boundary.py` had no entry point — ten tests, five days green, never run by the gate | self-run block added | itself |
+
+Not mechanised, recorded as rules: two runs before attributing a red;
+read `integrate.sh`'s tail in full; quote the map line in a Phase −1, and
+name the harness the cited test actually runs.
+
+**Cost:** the fixes were the orchestrator's own context (~90k output
+tokens), no worker. **Open at close:** 1307 (successor: one shipped-binary
+test on the `entitlement_broker` fixture driving a real fallback; KILLED →
+close), `map-index.py --check` red on HEAD (229 IDs shifted +68 from 1949 —
+inherited, older than this batch's eight map commits, and a reconciliation
+ruling, not a script run).

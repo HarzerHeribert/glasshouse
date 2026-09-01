@@ -4282,3 +4282,33 @@ with **no effort flag**, so every worker inherits the session's global default
 regardless of the tier its packet was written at. Until that line takes the
 effort the tier names, the `effort` column is documentation and not a control —
 a rule that lives only as prose, which §86 and §87 both found does not bind.
+
+## §89 — stage by pathspec, always; the hook refuses the sweep
+
+**Stage by pathspec, always — and let the hook refuse the alternative.**
+
+`scripts/integrate.sh` applies a worker's diff into the main checkout and
+deliberately stops: the ruling, the evidence and the commit are yours. For
+the minutes between, the tree holds the worker's uncommitted implementation
+next to whatever else you are doing. On 2026-09-01 a one-paragraph
+measurements correction was committed with `git add -A` in that window;
+`645d6cf` is titled "correct my own diagnosis" and carries a 1005-line
+routing implementation, pushed. The diff had been read minutes earlier. The
+error is not in reading; it is in a staging form that never asks which files
+the commit is about.
+
+`scripts/hooks/guard-destructive-git.sh` now refuses `git add -A|--all|.|:/`,
+`git add -u` with no pathspec, and `git commit -a` in every form, and prints
+`git status --short` so the pathspec can be chosen on the spot. The replacement
+is `git add -- <files>`. A commit that cannot name its files is not ready.
+
+Three siblings landed the same night, each turning a rule that was broken
+under load into a gate: `blast-radius.sh --status` and a per-tree lock (two
+gates in one tree lie in both directions — §34's load reds, and a "passed"
+read against a tree the other run is still testing); `validate_round.py`'s
+`gate-is-targeted` (a bare `scripts/blast-radius.sh` in a packet is the full
+sweep, which is the orchestrator's and trails per wave — two workers ran it
+for 25 minutes because the packet said to); and `coedit-claim-guard.sh` (a
+declared co-edit is not editable until it is claimed). The pattern is §22's:
+every one of these was already written down, and every one was broken
+anyway.

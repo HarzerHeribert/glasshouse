@@ -47,6 +47,10 @@
 # Composes with nothing else that changes lane membership; see the refusal
 # above for --serial.
 #
+# `--status` prints whether a gate is running in THIS tree (pid, age, args)
+# and exits 0 if so, 1 if not. A second gate started in a tree that already
+# has one running refuses with exit 3 -- see "one gate per tree" below.
+#
 # TWO LANES
 # ---------
 # The blast radius is wall-clock-bound, not compute-bound: most traced targets
@@ -129,11 +133,13 @@ fi
 
 cd "$REPO" || exit 1
 
-DRY=0; LIST=0; SERIAL=0; TARGETED=0; JOBS=""; MODE="head"; SINCE=""; FILES=()
+ORIG_ARGS="$*"
+DRY=0; LIST=0; SERIAL=0; TARGETED=0; STATUS=0; JOBS=""; MODE="head"; SINCE=""; FILES=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --dry-run)   DRY=1 ;;
     --list)      LIST=1 ;;
+    --status)    STATUS=1 ;;
     --serial)    SERIAL=1 ;;
     --targeted)  TARGETED=1 ;;
     --jobs)      JOBS="${2:-}"; shift ;;
@@ -153,6 +159,55 @@ if [ "$TARGETED" -eq 1 ] && [ "$SERIAL" -eq 1 ]; then
   echo "blast-radius: --targeted and --serial are mutually exclusive -- --targeted already runs its small target set as a single lane" >&2
   exit 1
 fi
+
+# ---- one gate per tree at a time ------------------------------------------
+# Two blast radii in the SAME tree at once are never what anyone meant, and
+# they lie in both directions: each one's cargo load pushes the other's
+# wall-clock-bound PTY fixtures past their timeouts (four gates reported false
+# reds this way on 2026-08-31), and the second one's "every traced target
+# passed" is read as the verdict on a tree the first one is still mutating
+# test binaries under. 2026-09-01 the orchestrator started a wave sweep while
+# its predecessor's was 40 minutes into the same tree, because the checkpoint
+# named the sweep and nothing on the machine could answer "is one running
+# here?" in one command. Now `--status` answers it, and a second start in the
+# same tree refuses (exit 3) unless the holder is dead.
+#
+# Per TREE, deliberately: a worker's worktree gate and the main checkout's
+# gate are different trees, allowed to overlap, and their mutual load is the
+# known cost of parallel workers (practice §34 covers attributing it).
+LOCK="/tmp/blast-radius-$(printf '%s' "$REPO" | cksum | cut -d' ' -f1).lock"
+lock_holder() {                    # prints "pid started args" or nothing
+  [ -r "$LOCK" ] || return 1
+  local pid; pid="$(sed -n 's/^pid=//p' "$LOCK" | head -1)"
+  [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null || return 1
+  printf '%s %s %s\n' "$pid" "$(sed -n 's/^started=//p' "$LOCK" | head -1)" "$(sed -n 's/^args=//p' "$LOCK" | head -1)"
+}
+if [ "$STATUS" -eq 1 ]; then
+  if h="$(lock_holder)"; then
+    set -- $h
+    printf 'blast-radius: RUNNING in %s -- pid %s, started %s (%ss ago), args: %s\n' "$REPO" "$1" "$(date -r "$2" '+%H:%M:%S' 2>/dev/null || echo "$2")" "$(( $(date +%s) - $2 ))" "${*:3}"
+    exit 0
+  fi
+  echo "blast-radius: no gate running in $REPO"
+  exit 1
+fi
+take_lock() {
+  local attempt
+  for attempt in 1 2; do
+    if ( set -o noclobber; printf 'pid=%s\nstarted=%s\nargs=%s\ntree=%s\n' "$$" "$(date +%s)" "$*" "$REPO" > "$LOCK" ) 2>/dev/null; then
+      return 0
+    fi
+    if h="$(lock_holder)"; then
+      set -- $h
+      printf '\033[31mblast-radius: REFUSING -- another gate is already running in this tree: pid %s, started %ss ago, args: %s\033[0m\n' "$1" "$(( $(date +%s) - $2 ))" "${*:3}" >&2
+      echo "  wait for it (scripts/blast-radius.sh --status), or read its output -- a second run here would load-flake both." >&2
+      exit 3
+    fi
+    rm -f "$LOCK"                  # holder is dead: stale lock, take it
+  done
+  echo "blast-radius: could not take $LOCK" >&2; exit 3
+}
+release_lock() { [ "$(sed -n 's/^pid=//p' "$LOCK" 2>/dev/null | head -1)" = "$$" ] && rm -f "$LOCK"; }
 
 if [ ${#FILES[@]} -eq 0 ]; then
   case "$MODE" in
@@ -475,6 +530,9 @@ if [ "${#FILES[@]}" -gt 0 ]; then
 fi
 
 if [ "$DRY" -eq 1 ]; then echo; echo "blast-radius: --dry-run, nothing executed"; exit 0; fi
+
+take_lock "$ORIG_ARGS"
+trap 'rm -f "$SYMS_FILE" "${HITS_FILE:-}"; release_lock' EXIT
 
 # ---- 4. run ----------------------------------------------------------------
 # One cargo invocation where possible; test-name filters are applied per module

@@ -229,7 +229,17 @@ EOF
     printf '## SECURITY / ISOLATION INVARIANTS\n\nTODO\n\n'
     printf '## CROSS-PLATFORM REQUIREMENTS\n\nTODO\n\n'
     printf '## ACCEPTANCE TESTS\n\nTODO\n\n'
-    printf '## VERIFICATION COMMANDS\n\nTODO\n\n'
+    # The gate line is pre-filled with --targeted rather than left TODO: two
+    # packets on 2026-09-01 shipped the bare form, each worker ran the full
+    # two-lane sweep it names (25+ minutes, three load-flake reds to
+    # attribute), and the packet's own prose said the full sweep was not
+    # owed. The full sweep is the orchestrator's, trailing, once per wave.
+    # validate_round.py now refuses the bare form (gate-is-targeted).
+    printf '## VERIFICATION COMMANDS\n\n'
+    printf '    cargo test -p glasshouse --test TODO      # the box'"'"'s own test; quote its `test result:` line (§68)\n'
+    printf '    scripts/blast-radius.sh --targeted <every .rs file you changed>\n\n'
+    printf 'Never the bare `scripts/blast-radius.sh` here -- that is the full sweep, which is the\n'
+    printf 'orchestrator'"'"'s and trails per wave (CLAUDE.md). Your gate is the targeted one.\n\n'
   fi
 
   cat <<'EOF'

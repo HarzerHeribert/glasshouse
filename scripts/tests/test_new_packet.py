@@ -92,6 +92,18 @@ def main() -> int:
     check("default variant alone", [default_pkt])
     check("recon variant alone", [recon_pkt])
 
+    # 2b: the default skeleton's gate line is pre-filled --targeted. The
+    # validator refuses the bare form (gate-is-targeted), so drift would
+    # already fail check 1 -- this asserts the line is PRESENT, because a
+    # skeleton with no gate line at all would pass that check vacuously.
+    skeleton = default_pkt.read_text(encoding="utf-8")
+    if "scripts/blast-radius.sh --targeted" not in skeleton:
+        failures.append("default skeleton does not pre-fill `scripts/blast-radius.sh --targeted`")
+    elif "scripts/blast-radius.sh --targeted" in recon_pkt.read_text(encoding="utf-8"):
+        failures.append("recon skeleton names a gate; recon runs no build or test")
+    else:
+        print("PASSED — default skeleton pre-fills the targeted gate; recon does not")
+
     # 3: both together — must not collide on YOURS paths.
     check("default + recon together", [default_pkt, recon_pkt])
 

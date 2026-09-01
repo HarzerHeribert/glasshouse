@@ -533,6 +533,38 @@ def check_feasibility_block(packets: list[Packet], findings: list[Finding]) -> N
             )
 
 
+# A bare `scripts/blast-radius.sh` in a packet's commands is the FULL two-lane
+# sweep, which is the orchestrator's and trails once per wave (CLAUDE.md, user
+# ruling 2026-09-01). Two packets that same day carried the bare form; each
+# worker obediently ran it -- 25+ minutes, three load-flake reds to attribute
+# -- while the packet's own prose said the full sweep was not owed. The worker's
+# gate is `--targeted <its changed files>`. Only command lines count: a line
+# that STARTS with the script path (after `$`, `-` or indentation), so prose
+# that names the script -- even at the start of a wrapped line, in backticks
+# -- is not flagged. The first draft allowed a leading backtick and flagged
+# two packets' warnings AGAINST the bare form.
+_GATE_LINE = re.compile(r"^\s*(?:[-*]\s+)?(?:\$\s+)?(?:scripts/)?blast-radius\.sh\b(?P<rest>.*)")
+_GATE_READ_ONLY = ("--targeted", "--status", "--dry-run", "--list")
+
+
+def check_gate_is_targeted(packets: list[Packet], findings: list[Finding]) -> None:
+    for p in packets:
+        for idx, line in enumerate(p.lines, start=1):
+            m = _GATE_LINE.match(line)
+            if not m:
+                continue
+            if any(flag in m.group("rest") for flag in _GATE_READ_ONLY):
+                continue
+            findings.append(
+                Finding(
+                    "gate-is-targeted",
+                    f"{p.path}:{idx} runs the bare `scripts/blast-radius.sh` -- that is "
+                    f"the FULL sweep, which trails per wave and is the orchestrator's. "
+                    f"A worker's gate is `scripts/blast-radius.sh --targeted <its changed .rs files>`.",
+                )
+            )
+
+
 def check_yours_non_empty(packets: list[Packet], findings: list[Finding]) -> None:
     for p in packets:
         if not p.yours:
@@ -550,6 +582,7 @@ def validate(packet_paths: list[str], map_path: str,
     packets = [Packet(path) for path in packet_paths]
     findings: list[Finding] = []
     check_yours_non_empty(packets, findings)
+    check_gate_is_targeted(packets, findings)
     check_feasibility_block(packets, findings)
     check_cited_seams(packets, findings, src_root, strict_seams)
     check_partitions_disjoint(packets, findings)

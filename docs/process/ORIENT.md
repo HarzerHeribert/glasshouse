@@ -271,6 +271,7 @@ to do, and the orchestrator should follow its own rule.
 - **§86** — ceremony must scale to difficulty, and investigation must name its successor
 - **§87** — size the package by the mechanism, and the six token traps
 - **§88** — trust the process's artifacts, and spend verification on irreversibility
+- **§89** — stage by pathspec, always; the hook refuses the sweep
 
 ## Recent checkpoints
 
