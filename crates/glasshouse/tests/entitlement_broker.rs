@@ -29,7 +29,9 @@ use glasshouse::provider::quota::{CapacityBand, CapacityBandThresholds};
 use glasshouse::provider::telemetry::{GatewayQuotaCache, RateLimitHeaders};
 use glasshouse::routing::classify::WorkloadTier;
 use glasshouse::routing::disposable::JobKind;
-use glasshouse::routing::evidence::{EvidenceLedger, FailureClass, NewObservation, Outcome};
+use glasshouse::routing::evidence::{
+    CostConfidence, EvidenceLedger, FailureClass, NewObservation, ObservationQuery, Outcome,
+};
 use glasshouse::routing::free::FreePool;
 use glasshouse::routing::session::{
     CheckpointQuality, Destination, EntitlementPoolView, FallbackReason, FallbackStep, Routed,
@@ -2312,6 +2314,109 @@ fn a_launch_that_falls_back_records_the_fallback_with_its_reason() {
     assert_eq!(
         fallback_group.sample_count, 1,
         "and its purpose is the trigger, not the exhausted twin:\n{groups:?}"
+    );
+}
+
+/// **Line 1307 on the same fallback path.** The row the test above reads
+/// back also carries an estimated cost, computed at the moment of the
+/// decision (`estimated_cost` in `routing/session.rs`) and written through
+/// `record_entitlement_fallback`'s `with_cost(cost)` — priced, not the free
+/// zero, so the estimate this asserts is a real comparison point against
+/// actual usage, matching what the box promises.
+#[test]
+fn a_launch_that_falls_back_records_the_chosen_destinations_estimated_cost() {
+    let binary = Binary::with_config(&two_provider_config_on_one_model());
+
+    // A priced entry for the destination the fallback lands on, so the
+    // estimate is a real number rather than the free-model zero.
+    std::fs::write(
+        binary.base.join("config").join("pricing.toml"),
+        "[[prices]]\nprovider = \"prov-b\"\nmodel = \"shared-model\"\n\
+         input_per_million_usd = 3.0\noutput_per_million_usd = 9.0\n",
+    )
+    .expect("write pricing.toml");
+
+    let now = now_unix();
+    let quota = GatewayQuotaCache::at(binary.base.join("data").join("gateway-quota"));
+    quota.store("prov-a", &headers("300", "290", "345600"), now);
+    quota.store("prov-b", &headers("300", "75", "345600"), now);
+    {
+        let runtime = binary.runtime();
+
+        // A checkpoint, so `latest_checkpoint_tokens` is `Some` and the
+        // fresh destination's estimated input size is known — otherwise
+        // `estimated_cost` has a price but no size and returns `None`.
+        let checkpoint = glasshouse::checkpoint::Checkpoint {
+            session: glasshouse::session::SessionId::new("cost-recorded-session"),
+            harness: "claude-code".to_owned(),
+            reason: glasshouse::checkpoint::CheckpointReason::Manual,
+            created_at: now,
+            git: None,
+            working_tree: None,
+            handoff: glasshouse::checkpoint::Handoff {
+                objective: "close out line 1307".to_owned(),
+                implementation_state: "fallback recorded, cost not yet observed".to_owned(),
+                decisions: Vec::new(),
+                memory: Vec::new(),
+                failed_approaches: Vec::new(),
+                files: Vec::new(),
+                test_state: None,
+                next_actions: Vec::new(),
+            },
+            trimmed: false,
+        };
+        glasshouse::checkpoint::ProjectCheckpoints::open(&runtime)
+            .unwrap()
+            .store()
+            .save(checkpoint)
+            .unwrap();
+
+        let ledger = EvidenceLedger::open(&runtime).unwrap();
+        ledger
+            .record(
+                NewObservation::new("prov-a", "shared-model")
+                    .with_route(Some("anthropic-messages"))
+                    .with_harness(Some("claude-code"))
+                    .with_quota_context(Some(format!("prov-a/{VAR_A}")))
+                    .with_timing(Some(now - 300), Some(now - 295))
+                    .with_outcome(Outcome::Failed)
+                    .with_failure_class(Some(FailureClass::Throttle)),
+                now - 295,
+            )
+            .unwrap();
+    }
+
+    let out = binary.glasshouse(&["launch", "claude-code", "--headless"]);
+    let said = Binary::both_streams(&out);
+    assert!(out.status.success(), "{said}");
+
+    let runtime = binary.runtime();
+    let ledger = EvidenceLedger::open(&runtime).unwrap();
+    let rows = ledger
+        .recent(
+            ObservationQuery {
+                provider: "prov-b",
+                model: "shared-model",
+                route: None,
+                harness: Some("claude-code"),
+            },
+            10,
+        )
+        .unwrap();
+    let observation = rows
+        .first()
+        .unwrap_or_else(|| panic!("the fallback row exists:\n{said}"));
+    let cost = observation
+        .cost
+        .unwrap_or_else(|| panic!("the fallback row carries an estimated cost:\n{said}"));
+    assert!(
+        cost.micro_usd > 0,
+        "a priced destination's estimate is nonzero, not the free-model zero:\n{cost:?}"
+    );
+    assert_eq!(
+        cost.confidence,
+        CostConfidence::Estimated,
+        "every cost this function produces is an estimate, never an actual:\n{cost:?}"
     );
 }
 

@@ -104,12 +104,28 @@ Gates run by the integrator on the integrated tree, not taken from the report:
   overlapping failures between routes and attaches a sample size. Line 1378 —
   now closed — explicitly makes this optional for V1, which is why the round
   closed the fail-closed default first rather than the analysis.
-- **Needs a cadence signal that is deliberately not collected** — 1365, 1366,
-  1367, 1368. `WorkloadOutcome::RateLimited { retry_after }` is constructed with
-  `retry_after: None` at `gateway/session.rs:564`, with a comment saying the
-  headers *are* readable but wiring `retry-after` into a routing decision is
-  Phase 9H/9I's scope. Until something populates it there is no cadence to keep
-  separate from long-window quota.
+- **~~Needs a cadence signal that is deliberately not collected~~ — STALE as of
+  2026-09-01, corrected at integration.** This said
+  `WorkloadOutcome::RateLimited { retry_after }` is built with
+  `retry_after: None` at `gateway/session.rs:564`. **Line 1319 closed that.**
+  The signal now exists and travels the whole way:
+  `session::stated_retry_after` (`gateway/session.rs:775`) is called by the
+  accept loop (`gateway/mod.rs:632`), reaches
+  `WorkloadOutcome::RateLimited { retry_after }` (`gateway/session.rs:835`),
+  and `ResourceHealth::fail` turns a declared wait into
+  `cooling_down_until = now + declared` (`routing/free.rs:345`), which
+  `FreePool::is_available` (`routing/free.rs:495`) already reads.
+
+  **What this unblocks, and what it does not.** 1368 is packaged on this chain
+  (GH-PACED-RETRY): the gap is that `is_available` has **no caller anywhere in
+  `src/gateway/`**, so when `observe_exchange` finds no sibling to rotate to and
+  returns `Unchanged`, the accept loop forwards the *next* request to the same
+  cooling-down credential — retrying a paced route in place. 1366 and 1367 are
+  **not** unblocked by this: 1366 needs a cadence *learner* distinct from the
+  declared remainder, and 1367 needs a reservation model across concurrent
+  consumers — `routing/free.rs` has no reservation, lease or in-flight
+  machinery at all (verified, not assumed). Neither has an established Phase -1;
+  do not package either on the strength of this correction.
 - **Needs a probe budget model** — 1369.
 - **Needs the route-topology record** — 1377 is closed for the two categories
   this build can honestly produce; see the note below.

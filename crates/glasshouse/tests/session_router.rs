@@ -31,7 +31,7 @@ use glasshouse::routing::session::{
     TaskRequirements,
 };
 use glasshouse::routing::{
-    AssignedModel, Backend, Cost, CredentialId, HardConstraint, ToolSemantics,
+    AssignedModel, Backend, Contribution, Cost, CredentialId, HardConstraint, ToolSemantics,
 };
 use glasshouse::secret::SecretRef;
 
@@ -537,6 +537,100 @@ fn known_quota_pressure_decides_between_two_otherwise_identical_destinations() {
         )
         .expect("destinations were offered");
     assert_eq!(routed.chosen().id(), "roomy");
+}
+
+/// Line 1239. Three destinations differing only in what is known about
+/// their quota: fully known-full, completely unknown, and known-empty. A
+/// completely unknown quota must be scored as a routing uncertainty — not
+/// as though it were full (an unread resource would otherwise win by
+/// default) and not as though it were empty (an unread resource would
+/// otherwise be punished for something never observed).
+#[test]
+fn unknown_quota_is_scored_as_uncertain_not_full_or_empty() {
+    let fixture = Fixture::new();
+    let full = Destination::existing(
+        "full",
+        IntegrationId::ClaudeCode,
+        "default",
+        backend("anthropic", "claude-opus-4", "KEY_A"),
+        live(0),
+    )
+    .with_capacity(Some(capacity(100)));
+    let unread = Destination::existing(
+        "unread",
+        IntegrationId::ClaudeCode,
+        "default",
+        backend("anthropic", "claude-opus-4", "KEY_B"),
+        live(0),
+    );
+    let empty = Destination::existing(
+        "empty",
+        IntegrationId::ClaudeCode,
+        "default",
+        backend("anthropic", "claude-opus-4", "KEY_C"),
+        live(0),
+    )
+    .with_capacity(Some(capacity(0)));
+
+    let routed = SessionRouter::new()
+        .choose(
+            RoutingMoment::SessionStart,
+            None,
+            &[full.clone(), unread.clone(), empty.clone()],
+            &fixture.inputs(),
+        )
+        .expect("destinations were offered");
+
+    let pressure_for = |id: &str| -> Contribution {
+        routed
+            .considered()
+            .iter()
+            .find(|(destination, _)| destination.id() == id)
+            .expect("candidate was considered")
+            .1
+            .contributions()
+            .iter()
+            .find(|c| c.name() == "known quota pressure")
+            .expect("candidate has a known quota pressure contribution")
+            .clone()
+    };
+
+    let full_pressure = pressure_for("full");
+    let unread_pressure = pressure_for("unread");
+    let empty_pressure = pressure_for("empty");
+
+    assert_eq!(
+        unread_pressure.magnitude(),
+        0.0,
+        "an unread destination's quota pressure was not exactly 0.0"
+    );
+    assert!(
+        unread_pressure
+            .evidence()
+            .contains("nothing has been read about"),
+        "the unread destination's evidence did not say nothing was read: {}",
+        unread_pressure.evidence()
+    );
+
+    assert!(
+        full_pressure.magnitude() > unread_pressure.magnitude(),
+        "an unread quota was treated as though it were one hundred percent remaining: full \
+         {} vs unread {}",
+        full_pressure.magnitude(),
+        unread_pressure.magnitude()
+    );
+    assert!(
+        unread_pressure.magnitude() >= empty_pressure.magnitude(),
+        "an unread quota was treated as though it were zero remaining: unread {} vs empty {}",
+        unread_pressure.magnitude(),
+        empty_pressure.magnitude()
+    );
+
+    assert_eq!(
+        routed.chosen().id(),
+        "full",
+        "the fully-known, full-quota destination did not win"
+    );
 }
 
 /// Line 1599. Two destinations differing only in what a **real workload** has

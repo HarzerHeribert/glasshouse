@@ -235,3 +235,45 @@ with its confidence.** When that mutation is KILLED, 1307 closes.
 
 **Phase 32G now stands at 5/10** (1298, 1299, 1304, 1305, 1306), with 1307
 one test away and the remaining four blocked on signals the census names.
+
+---
+
+# Line 1307 — CLOSED 2026-09-01, by exactly the successor the hold named
+
+The hold above asked for *"one shipped-binary test on the `entitlement_broker`
+fixture that drives a real fallback and asserts a non-NULL `cost_micro_usd`
+with its confidence."* That is what landed, and it took the **priced** path
+rather than the free-model escape the packet permitted as a fallback — so the
+limit the hold anticipated ("the priced path is unwatched") **does not apply**
+and is not recorded.
+
+`entitlement_broker::a_launch_that_falls_back_records_the_chosen_destinations_estimated_cost`
+seeds a project checkpoint (so `latest_checkpoint_tokens` is `Some`), writes a
+`pricing.toml` for `prov-b`/`shared-model` into the binary's own config
+directory, records a throttled `prov-a` observation, then runs the **compiled
+binary** as a subprocess — `glasshouse launch claude-code --headless` — and
+reads the fallback row back out of `EvidenceLedger::recent`. It asserts
+`cost.micro_usd > 0` and `cost.confidence == CostConfidence::Estimated`.
+
+The production reach that was unproven at the hold is now proven by that
+subprocess: nothing in the test constructs the row itself.
+
+Mutation `drop-cost-from-fallback-row` (`.with_cost(cost);` -> `;` at
+`main.rs:1869`) — the very mutation that SURVIVED and caused the hold — is now
+**KILLED**, by that test:
+
+    thread '...records_the_chosen_destinations_estimated_cost' panicked at
+    crates/glasshouse/tests/entitlement_broker.rs:2411:28:
+    the fallback row carries an estimated cost:
+
+Recorded limits, stated rather than discovered later:
+
+- only the priced/estimated branch of `estimated_cost` is watched; the
+  free-model zero-cost branch (`micro_usd: 0`) is not asserted by this test;
+- the exact `micro_usd` value is not pinned, only `> 0` — the rendered token
+  count is an implementation detail of `Checkpoint::render()`, not a promise of
+  this line;
+- macOS only; the Linux and Windows legs were not run for this box.
+
+**Phase 32G now stands at 6/10** (1298, 1299, 1304, 1305, 1306, 1307). The
+remaining four are blocked on signals the census names.

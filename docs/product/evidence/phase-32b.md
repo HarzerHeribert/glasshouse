@@ -368,20 +368,44 @@ is none to propagate. A **stale reading is still reported**, not discarded
 (`a_stale_reading_is_still_reported_rather_than_discarded`).
 
 **1239 — Treat completely unknown quota as a routing uncertainty rather than as
-zero or one hundred percent remaining.** **OPEN. Nothing asks a routing
-question of capacity, verified rather than assumed.**
-`discover.py --seam CapacityState` finds no call site outside
-`provider/**`. `grep` over `crates/glasshouse/src/routing/` finds capacity and
-quota only in prose: `routing::free`'s `Health` cools a resource down after
-*failures* it observed, never after reading a capacity, and
-`PremiumReservePercent` is read only by `shell/state.rs` and `shell/view.rs`,
-displayed and edited, never compared against a measurement — which is what
-Phase 32A recorded and is still true. The consumer belongs to the routing
-phases (33–37), which the packet states are all at zero. Half the line is
-nonetheless already unbreakable here: `Capacity::reading()` answers `None` for
-every unknown state, so a router *cannot* read an unknown as `0` or `100`. What
-does not exist is anything that treats it **as uncertainty** in a decision. No
-consumer was invented to close it.
+zero or one hundred percent remaining.** **CLOSED**, and the paragraph this
+replaces was **stale, not wrong when written**. It said *"nothing asks a routing
+question of capacity"*; that ceased to be true when line 1598 closed
+(`phase-37.md:51`), and the consumer it said belonged to phases 33-37 now
+exists. Nothing was invented to close this line — the mechanism was already
+there and unwatched.
+
+Two mechanisms carry it, and they are **not** the same one:
+
+- `quota_pressure` (`routing/session.rs:2228`) prices an unread destination's
+  `known quota pressure` term at exactly `0.0`, with evidence reading *"nothing
+  has been read about ... neither preferred nor withheld"*.
+- the line-1587 affinity facet (`routing/session.rs:2062`) marks the same
+  destination `AffinityFacet::unknown` rather than applying a known band's
+  penalty.
+
+**The honest limit, and it is the reason this entry is longer than the tick.**
+The pressure term alone does **not** separate unknown from known-empty: a `0%`
+capacity gives `routing_fraction() * WEIGHT == 0.0`, numerically identical to
+the unread arm's `0.0`. The new test's third assertion
+(`unread >= empty`) is therefore satisfied by **equality** and proves nothing
+on its own, despite a failure message that reads as though it would catch the
+"treated as zero" case. That assertion is not the evidence for this line and
+must not be cited as such.
+
+What actually separates unknown from empty is the affinity facet, and that is
+mutation-proven: turning the `None` arm from `AffinityFacet::unknown` into a
+penalised `known` facet is KILLED by
+`session_affinity::the_reserve_band_costs_a_session_affinity_and_the_healthy_band_does_not`
+— **re-run by the integrator at integration**, independently of the worker, on
+the merged tree (`mutate.sh: mutation session.rs: KILLED`), precisely because
+this was the half the new test does not watch. The "not one hundred percent"
+half is watched by the new test
+(`session_router::unknown_quota_is_scored_as_uncertain_not_full_or_empty`,
+mutation `assume-full` KILLED).
+
+Scope limits: no claim is made about `None`-arm handling of any term other than
+these two.
 
 **1240 — Surface the telemetry source in debug and resource views.**
 **CLOSED.** Every row of `glasshouse resources` names its class, every reading

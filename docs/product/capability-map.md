@@ -1236,7 +1236,7 @@ Fixed architectural requirements
 ☑ Record the timestamp of the last successful quota observation.
 ☑ Mark quota telemetry stale after a provider-specific configurable age.
 ☑ Fall back from authoritative telemetry to observed estimates without failing the active coding session.
-☐ Treat completely unknown quota as a routing uncertainty rather than as zero or one hundred percent remaining.
+☑ Treat completely unknown quota as a routing uncertainty rather than as zero or one hundred percent remaining.
 ☑ Surface the telemetry source in debug and resource views.
 
 Phase 32C — Subscription capacity estimation
@@ -1304,7 +1304,7 @@ Phase 32G — Provider-aware request-cost estimation
 ☑ Include bootstrap context, project memory, checkpoints, and likely repository reads in fresh-session cost estimates when possible.
 ☑ Treat unknown pricing as unknown instead of assigning a fake zero cost.
 ☑ Allow provider price metadata to be updated independently from the router implementation.
-☐ Record the estimated cost used in a routing decision so later evaluation can compare estimate against actual usage.
+☑ Record the estimated cost used in a routing decision so later evaluation can compare estimate against actual usage.
 
 Phase 33 — Resource health
 
