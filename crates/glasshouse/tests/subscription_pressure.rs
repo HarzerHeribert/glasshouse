@@ -899,12 +899,14 @@ fn the_policy_names_no_provider_or_model() {
 /// re-open together; do not relax it.
 ///
 /// **The citation this pins MOVED on 2026-09-01, and the substance did not.**
-/// This test used to require the production source to name `line 1294` and
-/// `refusal-register`. `scripts/check-doc-boundary.sh` forbids a product
-/// source file from citing `docs/process/` at all — shipped code cannot act
-/// on how the project is run — so the two rules were in direct
-/// contradiction, and this file was one of three that had been shipping past
-/// the boundary gate. The refusal was promoted into `design-decisions.md` as
+/// This test used to require the production source to name the process
+/// document that recorded the refusal. `scripts/check-doc-boundary.sh`
+/// forbids a product source file from citing a process document at all —
+/// shipped code cannot act on how the project is run — so the two rules were
+/// in direct contradiction, and this file was one of three that had been
+/// shipping past the boundary gate. (This comment names no such path for the
+/// same reason: the gate matches the path literal, wherever it appears.)
+/// The refusal was promoted into `design-decisions.md` as
 /// a decision about behavior, which is what it always was, and the strings
 /// below follow it there. **Every substantive assertion is unchanged**: the
 /// input is still passed `false` exactly once and `true` nowhere. Only where
