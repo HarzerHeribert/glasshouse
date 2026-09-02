@@ -20,6 +20,20 @@ validated and waiting on the commit. Next action: `.agent-runtime/CONTINUATION.m
 
 Last updated: 2026-08-31 (Europe/Berlin)
 
+## Checkpoint — 2026-09-02, batch 86: 1201 / 1332 (90.2%) — the translation arc lands end to end, the Windows secret store opens, the outcome question answered
+
+Session `14f81d52` (Fable 5.1), continued. Seven more boxes: 441 (Credential
+Manager under an interactive logon, m1 KILLED on the VM), 1954 (the
+gateway-backed launch consults its serving provider's entitlement), 1948/1950/
+1956 (the launch path accepts translated pairings and the Gemini codec makes
+eight supported rows; ruled on the map's own list of harnesses), 1823/1825
+(`glasshouse memory rate`, the user's ruling on the parked outcome question).
+Open with named successors: 1821/1831/1824 (`GH-RETRIEVAL-ATTRIBUTION`), 1367
+(blocked behind `GH-ROUTED-EXTRACTION-CLIENT` — the disposable router chooses
+and calls nothing), 1369 (`GH-PROBE-BUDGET-1369`). One fix-forward worker
+live for wave 87's attributed flaky test. Exact next actions:
+`.agent-runtime/CONTINUATION.md`.
+
 ## Checkpoint — 2026-09-02, batch 85: 1194 / 1332 (89.6%) — 1908 and 1924 closed, Phases 54A and 55 complete
 
 Session `14f81d52` (Fable 5.1). 1908 ticked on a three-leg green run of

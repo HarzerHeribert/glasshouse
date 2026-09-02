@@ -4942,3 +4942,28 @@ since 2026-08-27. Two-day window (Sep 1–2): 16.2M over 1087 → 1194, about
    the two cargo workers were dispatched only once that leg finished and the
    Windows leg (remote) had started. Sequencing the local legs first kept
    the board non-empty through the whole gate.
+
+## Batch 86 (2026-09-02, midday) — seven more boxes: the translation arc lands end to end, the Windows secret store opens, and the parked outcome question is answered and implemented
+
+Same session as Batch 85. **Map 1194 → 1201** (441, 1954, 1948, 1950, 1956, 1823, 1825) across two integrations (`b87d38e`: three worktrees in one call; the wave-88 commit: two patches three-way applied because each shared one file with the batch before). Wave-85's trailing full sweep: 113/113 green.
+
+| package | tier | result |
+|---|---|---|
+| `gateway-translate-launch` | Sonnet high, Amber | `apply_gateway` consults the pair table before refusing; two launch-driven e2e tests; 3/3 KILLED; the packet's "only the tripwire moves" claim was wrong (two lib fixtures relied on the old refusal) |
+| `windows-secret-store` | Opus 5 high, Red | **441 closed** — the ssh session's S4U logon (1312 against `advapi32`); the runner now runs the batch under the CI user's interactive logon; 20/20 zero SKIPPED; m1 KILLED on the VM. **No facts block** — first report this project has accepted without one; every artifact was in the body |
+| `gateway-entitlement-1954` | Sonnet high, Amber | **1954 closed** — the consult lives at the launch site, where the serving provider is known; recon-56 had named `gateway/session.rs` and it needed no change there |
+| `gateway-translate-t3` | Opus 5 high, Red | Gemini codec, fourth protocol, eight supported rows; 5/5 KILLED; a relay defect caught by its own test; **1948/1950/1956 closed** on the map's words (Gemini is a subscription in the map, not a harness) |
+| `memory-rating` | Sonnet high, Amber | **1823, 1825 closed**; 1821/1831/1824 open: no row carries both a memory id and a session id, so the proxy is 0 of 0 in production — successor named |
+| `recon-reservation-1367` | Sonnet medium, read-only | 1367 blocked behind a routed extraction client (the disposable router chooses and calls nothing); 1369 packageable |
+| `failover-log-race` | Sonnet medium, Green | the one red in wave 87's blocking gate: `tracing`'s process-global callsite interest cache is frozen at `never` by whichever unguarded test hits the log line first with no subscriber; a `Once`-guarded global default subscriber in the test module fixes it — 16/20 before, 20/20 after; test module only |
+
+**Output per box.** Day total 9.58M at this checkpoint; this session ≈ 2.51M (from 7.07M at inherit) for **+9 net** (1908, 1924, 441, 1954, 1948, 1950, 1956, 1823, 1825) — about 279k this session (the two-day window, Sep 1–2: 17.9M over 1087 → 1201, about 157k) per net box, the Windows work and the recons carried by the seven that followed them. Two-day window well under the 250k trigger.
+
+**Findings worth carrying forward.**
+
+1. **A "supported harness" ruling has to quote the map's list, not the design doc's wish.** The 08-31 reading held three lines behind the Gemini CLI adapter; the map names Gemini only as a subscription. Read the quantifier in the line before naming a successor.
+2. **The disposable router chooses and then calls nothing.** Three Phase 9I lines were closed on that caller with the fact stated in the entry; the recon that went looking for 1367's reservation found that there is no spend to reserve. The register row names `GH-ROUTED-EXTRACTION-CLIENT` as what makes the mechanism real.
+3. **An accepted report without a facts block costs a hand-written entry.** It was the right call once (the body carried every artifact); the packet template should say the block is the price of `integrate.sh` doing the transcription.
+4. **A green platform leg can carry `SKIPPED` platform tests.** 441 closed only because the leg's log was grepped for the skip sentence.
+5. **A flaky test can be a library's global cache, not timing.** `tracing` caches callsite interest process-wide; the first unguarded hit decides for every later subscriber in the process. Any test that reads a log line through `with_default` is exposed until a global default exists.
+6. **Two patches that each share a file with the previous batch cannot be batched, and a three-way apply from main with named `git add` handles both in one gate** — the destructive-git hook refuses `git add -A`, and zsh does not word-split a `$LIST`; name the files.
