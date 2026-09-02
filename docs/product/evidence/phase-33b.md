@@ -155,3 +155,78 @@ D's lines restrain a mechanism that does not exist, so the "violation" would be
 building the forbidden feature in order to forbid it. **The distinction is
 whether the restrained thing exists**, and it is worth stating because the two
 shapes look identical from the map line alone.
+
+---
+
+# Cause B — lines 1357 and 1358 CLOSED 2026-09-02 (`GH-SCORE-WEIGHTS`)
+
+`routing.score_weights` now carries the four constants
+(`HEALTH_FAILURE_PENALTY`, `HEALTH_PENALTY_FLOOR`, `HEALTH_UNAVAILABLE_PENALTY`,
+`QUOTA_PRESSURE_WEIGHT`) through the same field/getter/setter/layered-resolver
+path `capacity_band_thresholds` already uses. An absent config resolves to
+today's constants, so a run with no configuration scores byte-identically —
+pinned by an acceptance test rather than asserted.
+
+| mutation | vocabulary | result | observed |
+|---|---|---|---|
+| scorer reads the module const instead of the resolved weight | `configured-weight-ignored` | **killed** | `left: -0.3, right: -0.5` — the configured value never reached the scorer |
+| alter one shipped default | `default-silently-changed` | **killed** | `left: -0.35, right: -0.3` — absent-config magnitude no longer matched the pinned constant |
+
+The first is the load-bearing one: it is exactly the defect where a config field
+exists, round-trips, and changes nothing.
+
+**1358 has no independent mutation, and that is recorded rather than papered
+over.** The line asks that the shipped weights be *"implementation evidence and
+a configurable starting policy rather than a universal Glasshouse constant"*.
+Its behavioural half — that they are overridable, therefore not universal
+constants — is exactly what 1357's mutations prove. Its remaining half is
+framing, and lives in the doc comments on `ScoreWeights` and
+`ScoreWeightsConfig`. **A future audit that judges a doc comment insufficient
+evidence for this line should un-tick it; the cost is one line and this
+paragraph is the pointer.**
+
+Recorded limits: the acceptance tests call `provider_health` and
+`quota_pressure` directly rather than driving a full `SessionRouter::choose`.
+`routing/disposable.rs`'s `CLASSIFICATION_PREFERENCE_WEIGHT` was deliberately
+left out of scope; the worker reports the surface extends to it without
+redesign, which is the next packet's Phase -1.
+
+**Phase 33B now stands at 4/14.** Cause A's eight remain with the `ingress`
+ruling; Cause D's two stay Cluster P.
+
+---
+
+# A gate gap this package exposed, and it is the orchestrator's error
+
+`GH-SCORE-WEIGHTS` could not run `cargo check --tests` at all when it started:
+`routing/session.rs:4916`, inside that file's own `#[cfg(test)]` module, called
+`FreePool::adopt_observed` with **four** arguments after `GH-CADENCE-CROSSING`
+made it take **five**. The worker fixed it with one added `None`, correctly
+filed it as `packet_errors` (pre-existing, not introduced by its own work), and
+confirmed it against `git show HEAD:`.
+
+**It was pushed to `main` in `9f513d9` and the gate did not catch it.** The
+mechanism matters:
+
+- `cadence-crossing` changed the signature and updated the **production** call
+  site (`main.rs:2747`) and every `GatewayHealthReading` literal it rippled
+  into — but not this one, which is a *different* function in a *different*
+  file's test module.
+- `coarse-fallback` was authored against a tree without the new signature, so
+  neither worktree was broken on its own. **The breakage exists only in the
+  merge** — precisely the cross-patch interaction batching into one
+  `integrate.sh` call is supposed to surface.
+- **The targeted gate ran integration-test binaries** (`--test routing_policy`
+  and friends). Those compile the library **without** `cfg(test)`, so a compile
+  error inside the lib's own test module is invisible to them. Nothing in that
+  gate compiled `--lib` with tests enabled.
+
+**The cheap fix is one command in the blocking gate**: `cargo check -p glasshouse
+--tests` before `integrate.sh` reports success. It is seconds when warm and it
+closes the whole class — any signature change whose stragglers live in a
+`#[cfg(test)]` module.
+
+Two rules already in this project would each have caught it independently and
+neither was applied: *"once a grep names a file, run its tests"* (§79), and the
+integrator's own obligation to read what `integrate.sh` prints. The gate is
+mechanisable and the discipline is not, so mechanise it.

@@ -1284,7 +1284,9 @@ mod cadence_availability_scoring {
     use glasshouse::integrations::IntegrationId;
     use glasshouse::provider::telemetry::GatewayHealthReading;
     use glasshouse::routing::free::CooldownCause;
-    use glasshouse::routing::session::{Destination, cadence_availability, provider_health};
+    use glasshouse::routing::session::{
+        Destination, ScoreWeights, cadence_availability, provider_health,
+    };
 
     fn destination(provider: &str, model: &str) -> Destination {
         Destination::fresh(
@@ -1362,7 +1364,7 @@ mod cadence_availability_scoring {
              not score as one"
         );
 
-        let health = provider_health(&dest, &pool, now);
+        let health = provider_health(&dest, &pool, now, &ScoreWeights::default());
         assert!(
             health.magnitude() < 0.0,
             "provider_health must still reflect the failures even though cadence reports \
@@ -1402,7 +1404,7 @@ mod cadence_availability_scoring {
             "Served must clear a declared wait outright, not leave it to expire on its own"
         );
 
-        let health = provider_health(&dest, &pool, now);
+        let health = provider_health(&dest, &pool, now, &ScoreWeights::default());
         assert_eq!(
             health.magnitude(),
             0.0,
@@ -1548,7 +1550,7 @@ mod cadence_availability_scoring {
             "an invented cooldown must cross the boundary as inert, never as a cadence claim"
         );
 
-        let provider = provider_health(&dest, &adopted, now);
+        let provider = provider_health(&dest, &adopted, now, &ScoreWeights::default());
         assert!(
             provider.magnitude() < 0.0,
             "provider_health must still reflect the failures after adoption: got {}",
@@ -1613,5 +1615,188 @@ mod cadence_availability_scoring {
             "an old cache file with no recorded cause must adopt as cause-unknown, scoring \
              cadence as inert — today's behaviour, preserved for existing caches"
         );
+    }
+}
+
+// =====================================================================
+// Map lines 1357/1358 — routing score weights are user-configurable.
+//
+// `provider_health` and `quota_pressure` are the two production scorers
+// [`glasshouse::config::EffectiveConfig::score_weights`] feeds — see
+// `docs/product/evidence/phase-33b.md`, Cause B. Every test here resolves a
+// real `[routing.score_weights]` value through the same config surface a
+// user writes to (`UserConfig` -> `EffectiveConfig`), then calls the same
+// production scoring function `SessionRouter::choose` calls, so the
+// assertion is on `Contribution::magnitude()` actually computed with the
+// resolved weight — not on the config field round-tripping.
+// =====================================================================
+mod score_weight_configuration {
+    use super::*;
+    use glasshouse::config::{EffectiveConfig, Layer, UserConfig};
+    use glasshouse::integrations::IntegrationId;
+    use glasshouse::provider::quota::{
+        Capacity, CapacityState, NativeAmount, Pool, Reading, ReadingSource, RemainingCapacityScore,
+    };
+    use glasshouse::routing::session::{
+        Destination, ScoreWeights, provider_health, quota_pressure,
+    };
+
+    fn destination(provider: &str, model: &str) -> Destination {
+        Destination::fresh(
+            format!("{provider}-{model}"),
+            IntegrationId::ClaudeCode,
+            "default",
+            backend(provider, model),
+            None,
+        )
+    }
+
+    /// A destination with a real, fully-measured remaining-capacity score at
+    /// `percent` — built the way `quota_pressure` expects a read resource to
+    /// look, matching `RemainingCapacityScore::routing_fraction`'s own
+    /// "exact reading, no confidence penalty" case.
+    fn destination_with_capacity(provider: &str, model: &str, percent: i64) -> Destination {
+        const OBSERVED: i64 = 1_800_000_000;
+        let measured = |value: i64| {
+            Capacity::Measured(Reading::new(
+                NativeAmount::whole(value, "tokens"),
+                OBSERVED,
+                ReadingSource::ResponseHeader("x-ratelimit".to_owned()),
+            ))
+        };
+        let score: RemainingCapacityScore = CapacityState::metered_balance()
+            .with_credits(
+                Pool::inapplicable()
+                    .with_remaining(measured(percent))
+                    .with_limit(measured(100)),
+            )
+            .remaining_capacity_score()
+            .expect("both halves of the credits pool are measured");
+        destination(provider, model).with_capacity(Some(score))
+    }
+
+    /// Acceptance test 1: a non-default `health_failure_penalty` set through
+    /// `[routing.score_weights]` reaches `provider_health` and changes its
+    /// `Contribution::magnitude()` from today's constant (-0.3) to the
+    /// configured value (-0.5) — not merely a config field that round-trips.
+    #[test]
+    fn a_configured_health_failure_penalty_reaches_provider_health() {
+        let mut user = UserConfig::default();
+        assert_eq!(
+            user.routing().score_weights(),
+            None,
+            "premise: nothing recorded yet"
+        );
+        let overridden = ScoreWeights {
+            health_failure_penalty: -0.5,
+            ..ScoreWeights::default()
+        };
+        user.routing_mut()
+            .set_score_weights(Some(overridden.into()));
+
+        let effective = EffectiveConfig::new(&user, None);
+        let resolved = effective.score_weights();
+        assert_eq!(resolved.layer, Layer::User);
+        assert_eq!(
+            resolved.value, overridden,
+            "the resolved value must be exactly what was recorded"
+        );
+
+        let now = Instant::now();
+        let dest = destination("openrouter", "free-model");
+        let resource = free_resource("openrouter", "free-model");
+        let mut pool = FreePool::new();
+        pool.adopt_observed(&resource, 1, None, None, false);
+
+        let today = provider_health(&dest, &pool, now, &ScoreWeights::default());
+        assert_eq!(
+            today.magnitude(),
+            -0.3,
+            "premise: one failure prices at today's constant, -0.3"
+        );
+
+        let configured = provider_health(&dest, &pool, now, &resolved.value);
+        assert_eq!(
+            configured.magnitude(),
+            -0.5,
+            "a configured health_failure_penalty must reach provider_health and change its \
+             magnitude from the constant's value to the configured one, not just round-trip a \
+             config field"
+        );
+        assert_ne!(configured.magnitude(), today.magnitude());
+    }
+
+    /// Acceptance test 2: with no `[routing.score_weights]` recorded at any
+    /// layer, resolution falls through to [`ScoreWeights::default`], and
+    /// `provider_health` produces exactly the magnitude it always has —
+    /// today's constants, byte-identical.
+    #[test]
+    fn absent_score_weights_configuration_reproduces_todays_behaviour() {
+        let empty = UserConfig::default();
+        let effective = EffectiveConfig::new(&empty, None);
+        let resolved = effective.score_weights();
+        assert_eq!(resolved.layer, Layer::Default);
+        assert_eq!(resolved.value, ScoreWeights::default());
+
+        let now = Instant::now();
+        let dest = destination("openrouter", "free-model");
+        let resource = free_resource("openrouter", "free-model");
+        let mut pool = FreePool::new();
+        pool.adopt_observed(&resource, 1, None, None, false);
+
+        let via_config = provider_health(&dest, &pool, now, &resolved.value);
+        let via_constant = provider_health(&dest, &pool, now, &ScoreWeights::default());
+        assert_eq!(
+            via_config.magnitude(),
+            via_constant.magnitude(),
+            "an absent configuration layer must score exactly as before this package existed"
+        );
+        assert_eq!(
+            via_config.magnitude(),
+            -0.3,
+            "one failure must still price at today's constant when nothing was configured"
+        );
+    }
+
+    /// Acceptance test 3: a second, independent weight —
+    /// `quota_pressure_weight`, read by [`quota_pressure`] rather than
+    /// [`provider_health`] — proves "weights" is plural, not one special
+    /// case wired through by hand.
+    #[test]
+    fn a_configured_quota_pressure_weight_reaches_quota_pressure() {
+        let mut user = UserConfig::default();
+        let overridden = ScoreWeights {
+            quota_pressure_weight: 0.3,
+            ..ScoreWeights::default()
+        };
+        user.routing_mut()
+            .set_score_weights(Some(overridden.into()));
+
+        let effective = EffectiveConfig::new(&user, None);
+        let resolved = effective.score_weights();
+        assert_eq!(resolved.layer, Layer::User);
+        assert_eq!(resolved.value, overridden);
+
+        let dest = destination_with_capacity("openrouter", "free-model", 50);
+        let fraction = dest
+            .capacity()
+            .expect("premise: this destination has a measured capacity reading")
+            .routing_fraction();
+
+        let today = quota_pressure(&dest, &ScoreWeights::default());
+        assert_eq!(
+            today.magnitude(),
+            fraction * 0.8,
+            "premise: today's constant weight is 0.8"
+        );
+
+        let configured = quota_pressure(&dest, &resolved.value);
+        assert_eq!(
+            configured.magnitude(),
+            fraction * 0.3,
+            "a configured quota_pressure_weight must reach quota_pressure and change its \
+             magnitude from the constant's value to the configured one"
+        );
+        assert_ne!(configured.magnitude(), today.magnitude());
     }
 }

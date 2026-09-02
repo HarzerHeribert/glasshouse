@@ -1220,6 +1220,125 @@ impl CapacityBandThresholdsConfig {
     }
 }
 
+/// A `[routing.score_weights]` value with a non-finite field — capability map
+/// lines 1357/1358's own "fail closed" requirement, stated in code rather
+/// than clamped around, the same shape
+/// [`crate::provider::quota::CapacityBandThresholdsError`] states for its
+/// four fields.
+#[derive(Debug, Clone, Copy, PartialEq, thiserror::Error)]
+#[error(
+    "routing score weights must be finite numbers (quota_pressure_weight {quota_pressure_weight}, \
+     health_failure_penalty {health_failure_penalty}, health_penalty_floor {health_penalty_floor}, \
+     health_unavailable_penalty {health_unavailable_penalty}); refusing rather than substituting a \
+     value nobody wrote"
+)]
+pub struct ScoreWeightsError {
+    pub quota_pressure_weight: f64,
+    pub health_failure_penalty: f64,
+    pub health_penalty_floor: f64,
+    pub health_unavailable_penalty: f64,
+}
+
+/// The raw, on-disk shape [`ScoreWeightsConfig`] validates itself out of. A
+/// private intermediate rather than a public one, for
+/// [`RawCapacityBandThresholds`]'s own reason: nothing outside `serde`'s
+/// `try_from` machinery should ever hold an unvalidated set of weights.
+#[derive(Debug, Clone, Copy, Deserialize)]
+struct RawScoreWeights {
+    quota_pressure_weight: f64,
+    health_failure_penalty: f64,
+    health_penalty_floor: f64,
+    health_unavailable_penalty: f64,
+}
+
+/// User-configurable routing score weights — capability map lines 1357/1358:
+/// the four weights [`crate::routing::session::ScoreWeights`]'s doc comment
+/// names are an observed starting policy, not a universal constant, and this
+/// is where a user overrides them.
+///
+/// Validated as one unit at deserialization time via
+/// `#[serde(try_from = "RawScoreWeights")]` — the same fail-closed idiom
+/// [`CapacityBandThresholdsConfig`] uses, refusing a non-finite field (`NaN`
+/// or infinite) outright rather than substituting a default silently, so a
+/// malformed config file is refused at `UserConfig::load` /
+/// `load_project_config` time rather than producing a routing decision
+/// nobody could predict. Unlike the capacity-band thresholds, there is no
+/// ordering between these four fields to enforce: each prices an independent
+/// term (line 1598's quota weight and the three line-1599 health terms), so
+/// finiteness is the whole of what "fail closed" means here.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[serde(try_from = "RawScoreWeights")]
+pub struct ScoreWeightsConfig {
+    quota_pressure_weight: f64,
+    health_failure_penalty: f64,
+    health_penalty_floor: f64,
+    health_unavailable_penalty: f64,
+}
+
+/// Sound because `TryFrom<RawScoreWeights>` is the only way to build one and
+/// refuses every non-finite field: `f64::eq`'s single deviation from an
+/// equivalence relation is `NaN != NaN`, and no `ScoreWeightsConfig` can ever
+/// hold one. `RoutingConfig` derives `Eq` across every field it carries,
+/// [`CapacityBandThresholdsConfig`] among them, and this is what lets a
+/// `[routing.score_weights]` value sit beside it rather than forcing that
+/// derive apart.
+impl Eq for ScoreWeightsConfig {}
+
+impl TryFrom<RawScoreWeights> for ScoreWeightsConfig {
+    type Error = ScoreWeightsError;
+
+    fn try_from(raw: RawScoreWeights) -> Result<Self, Self::Error> {
+        if raw.quota_pressure_weight.is_finite()
+            && raw.health_failure_penalty.is_finite()
+            && raw.health_penalty_floor.is_finite()
+            && raw.health_unavailable_penalty.is_finite()
+        {
+            Ok(Self {
+                quota_pressure_weight: raw.quota_pressure_weight,
+                health_failure_penalty: raw.health_failure_penalty,
+                health_penalty_floor: raw.health_penalty_floor,
+                health_unavailable_penalty: raw.health_unavailable_penalty,
+            })
+        } else {
+            Err(ScoreWeightsError {
+                quota_pressure_weight: raw.quota_pressure_weight,
+                health_failure_penalty: raw.health_failure_penalty,
+                health_penalty_floor: raw.health_penalty_floor,
+                health_unavailable_penalty: raw.health_unavailable_penalty,
+            })
+        }
+    }
+}
+
+impl From<crate::routing::session::ScoreWeights> for ScoreWeightsConfig {
+    /// A domain value is already known-finite by its own constructor (or is
+    /// [`crate::routing::session::ScoreWeights::default`], which is a
+    /// compile-time constant), so this is a plain field copy rather than a
+    /// second validation pass — the same reasoning
+    /// [`CapacityBandThresholdsConfig`]'s own `From` impl states.
+    fn from(domain: crate::routing::session::ScoreWeights) -> Self {
+        Self {
+            quota_pressure_weight: domain.quota_pressure_weight,
+            health_failure_penalty: domain.health_failure_penalty,
+            health_penalty_floor: domain.health_penalty_floor,
+            health_unavailable_penalty: domain.health_unavailable_penalty,
+        }
+    }
+}
+
+impl ScoreWeightsConfig {
+    /// The validated domain value — see
+    /// [`crate::routing::session::ScoreWeights`].
+    pub fn to_domain(self) -> crate::routing::session::ScoreWeights {
+        crate::routing::session::ScoreWeights {
+            quota_pressure_weight: self.quota_pressure_weight,
+            health_failure_penalty: self.health_failure_penalty,
+            health_penalty_floor: self.health_penalty_floor,
+            health_unavailable_penalty: self.health_unavailable_penalty,
+        }
+    }
+}
+
 /// `[routing.reserve]` — capability map line 1577: the reserve policy for
 /// interactive work and the one for background support jobs, recorded
 /// separately.
@@ -3775,6 +3894,11 @@ pub struct RoutingConfig {
     /// [`crate::provider::quota::CapacityBandThresholds::DEFAULT`] apply.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     capacity_band_thresholds: Option<CapacityBandThresholdsConfig>,
+    /// User-overridden routing score weights — capability map lines
+    /// 1357/1358. `None` means the defaults in
+    /// [`crate::routing::session::ScoreWeights::default`] apply.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    score_weights: Option<ScoreWeightsConfig>,
     /// The sessions whose work may spend protected quota reserve whatever the
     /// reserve policy would otherwise decide — capability map line 1290.
     ///
@@ -4002,6 +4126,17 @@ impl RoutingConfig {
         self
     }
 
+    /// This layer's recorded routing score weights, or `None` for "never
+    /// decided" — capability map lines 1357/1358.
+    pub fn score_weights(&self) -> Option<ScoreWeightsConfig> {
+        self.score_weights
+    }
+
+    pub fn set_score_weights(&mut self, value: Option<ScoreWeightsConfig>) -> &mut Self {
+        self.score_weights = value;
+        self
+    }
+
     /// This layer's three free-resource preferences, folded into the shape
     /// [`crate::routing::disposable::DisposableRouting`] actually consumes.
     /// A layer that recorded nothing produces
@@ -4035,6 +4170,7 @@ impl RoutingConfig {
             && self.free_resource_disabled.is_none()
             && self.free_resource_pin.is_none()
             && self.capacity_band_thresholds.is_none()
+            && self.score_weights.is_none()
             && self.reserve_override_sessions.is_none()
             && self.model_fallback.is_none()
             && self.classification_local_only.is_none()
@@ -5427,6 +5563,25 @@ impl<'a> EffectiveConfig<'a> {
         }
         Layered::new(
             crate::provider::quota::CapacityBandThresholds::DEFAULT,
+            Layer::Default,
+        )
+    }
+
+    /// Routing score weights, resolved per field — capability map lines
+    /// 1357/1358. [`crate::routing::session::ScoreWeights::default`] when
+    /// neither layer recorded any — today's compile-time constants,
+    /// unchanged — converted through [`ScoreWeightsConfig::to_domain`] rather
+    /// than re-validated here: it was already validated once, at
+    /// deserialization.
+    pub fn score_weights(&self) -> Layered<crate::routing::session::ScoreWeights> {
+        if let Some(value) = self.project.and_then(|p| p.routing().score_weights()) {
+            return Layered::new(value.to_domain(), Layer::Project);
+        }
+        if let Some(value) = self.user.routing().score_weights() {
+            return Layered::new(value.to_domain(), Layer::User);
+        }
+        Layered::new(
+            crate::routing::session::ScoreWeights::default(),
             Layer::Default,
         )
     }
@@ -8718,6 +8873,81 @@ mod tests {
             crate::provider::quota::CapacityBandThresholds::DEFAULT
         );
         assert_eq!(effective.capacity_band_thresholds().layer, Layer::Default);
+    }
+
+    /// Capability map lines 1357/1358: routing score weights are
+    /// user-configurable, round-trip through the loader, resolve project
+    /// over user over [`crate::routing::session::ScoreWeights::default`] —
+    /// the same layering [`CapacityBandThresholdsConfig`]'s own test proves
+    /// — and a non-finite field is refused at load time rather than
+    /// substituted silently.
+    #[test]
+    fn score_weights_round_trip_layer_project_over_user_and_reject_non_finite_fields() {
+        let tmp = tempfile::tempdir().unwrap();
+        let paths = RuntimePaths::new(tmp.path().join("data"), tmp.path().join("config"));
+
+        let mut user = UserConfig::default();
+        assert_eq!(user.routing().score_weights(), None);
+        let user_weights = crate::routing::session::ScoreWeights {
+            quota_pressure_weight: 0.4,
+            health_failure_penalty: -0.5,
+            health_penalty_floor: -1.2,
+            health_unavailable_penalty: -2.0,
+        };
+        user.routing_mut()
+            .set_score_weights(Some(user_weights.into()));
+        user.save(&paths).unwrap();
+        let loaded = UserConfig::load(&paths).unwrap();
+        assert_eq!(
+            loaded.routing().score_weights(),
+            user.routing().score_weights()
+        );
+
+        let effective = EffectiveConfig::new(&loaded, None);
+        let resolved = effective.score_weights();
+        assert_eq!(resolved.layer, Layer::User);
+        assert_eq!(resolved.value, user_weights);
+
+        let mut project = ProjectConfig::default();
+        let project_weights = crate::routing::session::ScoreWeights {
+            quota_pressure_weight: 0.1,
+            ..user_weights
+        };
+        project
+            .routing_mut()
+            .set_score_weights(Some(project_weights.into()));
+        let effective = EffectiveConfig::new(&loaded, Some(&project));
+        let resolved = effective.score_weights();
+        assert_eq!(resolved.layer, Layer::Project);
+        assert_eq!(resolved.value, project_weights);
+
+        // §35-adjacent: the loader itself is the fail-closed gate, not
+        // merely a hypothetical caller of `ScoreWeights` in isolation — this
+        // parses through the exact path `UserConfig::load` uses.
+        for invalid in [
+            "[routing.score_weights]\nquota_pressure_weight = nan\n\
+             health_failure_penalty = -0.3\nhealth_penalty_floor = -0.9\n\
+             health_unavailable_penalty = -1.5\n",
+            "[routing.score_weights]\nquota_pressure_weight = 0.8\n\
+             health_failure_penalty = -0.3\nhealth_penalty_floor = -0.9\n\
+             health_unavailable_penalty = inf\n",
+        ] {
+            let text = format!("version = 1\n{invalid}");
+            assert!(
+                toml::from_str::<UserConfig>(&text).is_err(),
+                "a non-finite score weight was accepted: {invalid}"
+            );
+        }
+
+        // With nothing recorded, the domain default applies — today's
+        // compile-time constants, unchanged.
+        let empty = UserConfig::default();
+        let effective = EffectiveConfig::new(&empty, None);
+        assert_eq!(
+            effective.score_weights().value,
+            crate::routing::session::ScoreWeights::default()
+        );
+        assert_eq!(effective.score_weights().layer, Layer::Default);
     }
 
     /// Capability map line 1577: `[routing.reserve]` carries two policies,

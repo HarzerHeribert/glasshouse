@@ -965,6 +965,39 @@ const HEALTH_PENALTY_FLOOR: f64 = -0.9;
 /// still choose one and say why.
 const HEALTH_UNAVAILABLE_PENALTY: f64 = -1.5;
 
+/// [`quota_pressure`] and [`provider_health`]'s four weights, resolved as one
+/// value — capability map lines 1357/1358: the four constants above are an
+/// observed starting policy, not a universal one, and this is what a user's
+/// `[routing.score_weights]` overrides.
+///
+/// [`Default`] reproduces `QUOTA_PRESSURE_WEIGHT`, `HEALTH_FAILURE_PENALTY`,
+/// `HEALTH_PENALTY_FLOOR` and `HEALTH_UNAVAILABLE_PENALTY` exactly, so a
+/// caller that never resolves configuration — every caller before this type
+/// existed, and every [`SessionRouter`] nobody calls
+/// [`SessionRouter::with_score_weights`] on — scores byte-identically to
+/// before this package. See `crate::config::ScoreWeightsConfig`, where a user
+/// overrides these, and `crate::config::EffectiveConfig::score_weights`,
+/// which resolves them the same project-over-user-over-default way as every
+/// other `[routing]` value.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ScoreWeights {
+    pub quota_pressure_weight: f64,
+    pub health_failure_penalty: f64,
+    pub health_penalty_floor: f64,
+    pub health_unavailable_penalty: f64,
+}
+
+impl Default for ScoreWeights {
+    fn default() -> Self {
+        Self {
+            quota_pressure_weight: QUOTA_PRESSURE_WEIGHT,
+            health_failure_penalty: HEALTH_FAILURE_PENALTY,
+            health_penalty_floor: HEALTH_PENALTY_FLOOR,
+            health_unavailable_penalty: HEALTH_UNAVAILABLE_PENALTY,
+        }
+    }
+}
+
 /// Line 1546. What being inside a wait a provider itself declared costs a
 /// destination — a fact [`provider_health`] does not price, because an
 /// invented cooldown scores there too and this term must not agree with that
@@ -2231,11 +2264,11 @@ pub fn prompt_cache_state(
 /// and not "assume empty": an unread resource is neither preferred nor
 /// withheld, which is the same stance `glasshouse resources` takes when it
 /// prints `unknown` rather than a number nobody read.
-pub fn quota_pressure(destination: &Destination) -> Contribution {
+pub fn quota_pressure(destination: &Destination, weights: &ScoreWeights) -> Contribution {
     match destination.capacity() {
         Some(score) => Contribution::new(
             "known quota pressure",
-            score.routing_fraction() * QUOTA_PRESSURE_WEIGHT,
+            score.routing_fraction() * weights.quota_pressure_weight,
             format!(
                 "{} remaining on `{}`, bound by {}",
                 score.percent().render(),
@@ -2264,7 +2297,12 @@ pub fn quota_pressure(destination: &Destination) -> Contribution {
 /// is a statement about price. `crate::gateway::session`'s `observe_exchange`
 /// is what puts real outcomes into it, from work that was going to happen
 /// anyway, which is line 534's constraint and the reason nothing here probes.
-pub fn provider_health(destination: &Destination, pool: &FreePool, now: Instant) -> Contribution {
+pub fn provider_health(
+    destination: &Destination,
+    pool: &FreePool,
+    now: Instant,
+    weights: &ScoreWeights,
+) -> Contribution {
     let resource = FreeResource::new(
         destination.backend().credential().clone(),
         destination.backend().model().label(),
@@ -2274,7 +2312,7 @@ pub fn provider_health(destination: &Destination, pool: &FreePool, now: Instant)
     if health.credential_was_rejected() {
         return Contribution::new(
             "provider health",
-            HEALTH_UNAVAILABLE_PENALTY,
+            weights.health_unavailable_penalty,
             format!(
                 "`{}` was refused by its provider — waiting does not fix a revoked key",
                 destination.backend().credential().label()
@@ -2284,7 +2322,7 @@ pub fn provider_health(destination: &Destination, pool: &FreePool, now: Instant)
     if !health.is_available(now) {
         return Contribution::new(
             "provider health",
-            HEALTH_UNAVAILABLE_PENALTY,
+            weights.health_unavailable_penalty,
             format!(
                 "`{}` is still cooling down after {} consecutive observed failures",
                 destination.backend().credential().label(),
@@ -2307,7 +2345,7 @@ pub fn provider_health(destination: &Destination, pool: &FreePool, now: Instant)
     }
     Contribution::new(
         "provider health",
-        (f64::from(failures) * HEALTH_FAILURE_PENALTY).max(HEALTH_PENALTY_FLOOR),
+        (f64::from(failures) * weights.health_failure_penalty).max(weights.health_penalty_floor),
         format!(
             "{failures} consecutive observed failures on `{}` that have not yet earned a \
              cooldown",
@@ -4099,6 +4137,12 @@ pub struct SessionRouter {
     /// [`expected_marginal_cost`] renders that as an honest unknown, never
     /// as a free zero.
     prices: PriceTable,
+    /// Capability map lines 1357/1358: the resolved score weights, as the
+    /// caller's configuration decided them — see [`Self::with_score_weights`].
+    /// `ScoreWeights::default()` reproduces today's compile-time constants,
+    /// so not calling this builder scores exactly as before this field
+    /// existed.
+    score_weights: ScoreWeights,
 }
 
 impl SessionRouter {
@@ -4165,6 +4209,19 @@ impl SessionRouter {
     #[must_use]
     pub fn with_price_table(mut self, prices: PriceTable) -> Self {
         self.prices = prices;
+        self
+    }
+
+    /// Capability map lines 1357/1358 — normally
+    /// `effective.score_weights().value`, read once per decision the same way
+    /// every other caller-resolved fact on this router is. Not calling this
+    /// at all keeps `ScoreWeights::default()`, which reproduces this router's
+    /// behaviour before this field existed byte-for-byte: this is a builder
+    /// rather than a required constructor argument for the same reason
+    /// [`Self::with_price_table`] is.
+    #[must_use]
+    pub fn with_score_weights(mut self, weights: ScoreWeights) -> Self {
+        self.score_weights = weights;
         self
     }
 
@@ -4408,6 +4465,7 @@ impl SessionRouter {
                     movement.as_ref(),
                     &pool,
                     &self.prices,
+                    &self.score_weights,
                 );
                 (destination.clone(), explanation)
             })
@@ -4581,6 +4639,7 @@ fn destination_answers_to(destination_id: &str, named: &str) -> bool {
 /// can do, what the session already holds, what the provider has cached, what
 /// is left of the quota, how the provider has behaved, and what the move
 /// costs.
+#[allow(clippy::too_many_arguments)]
 fn score(
     destination: &Destination,
     current: Option<&Destination>,
@@ -4589,6 +4648,7 @@ fn score(
     movement: Option<&TierMovement>,
     pool: &EntitlementPoolView,
     prices: &PriceTable,
+    weights: &ScoreWeights,
 ) -> RoutingExplanation {
     let mut explanation = RoutingExplanation::new();
     if let Some(answer) = &inputs.requirements.classification {
@@ -4624,14 +4684,19 @@ fn score(
     explanation.push(entitlement_throttling(destination, pool));
     explanation.push(entitlement_model_availability(destination, pool));
     explanation.push(prompt_cache_state(destination, current));
-    explanation.push(quota_pressure(destination));
+    explanation.push(quota_pressure(destination, weights));
     // Phase 35D, lines 1570–1577: the band the quota reading falls in, and
     // what the scope's reserve policy makes of it — placed right after the
     // reading it qualifies, so a reader sees the percentage and the band
     // together.
     explanation.push(pressure::capacity_band_pressure(pressure));
     explanation.push(pressure::low_tier_spend(pressure));
-    explanation.push(provider_health(destination, inputs.health, inputs.now));
+    explanation.push(provider_health(
+        destination,
+        inputs.health,
+        inputs.now,
+        weights,
+    ));
     explanation.push(cadence_availability(destination, inputs.health, inputs.now));
     explanation.push(switching_and_bootstrap_cost(destination, current));
     // Line 1538, pushed unconditionally (unlike `cost_preference` above) and
@@ -4913,7 +4978,7 @@ mod provider_health_tests {
             destination.backend().credential().clone(),
             destination.backend().model().label(),
         );
-        pool.adopt_observed(&resource, failures, None, false);
+        pool.adopt_observed(&resource, failures, None, None, false);
         pool
     }
 
@@ -4926,8 +4991,9 @@ mod provider_health_tests {
         let now = Instant::now();
         let dest = destination("PROVIDER_HEALTH_TEST_KEY");
 
-        let one = provider_health(&dest, &health_with_failures(&dest, 1), now);
-        let two = provider_health(&dest, &health_with_failures(&dest, 2), now);
+        let weights = ScoreWeights::default();
+        let one = provider_health(&dest, &health_with_failures(&dest, 1), now, &weights);
+        let two = provider_health(&dest, &health_with_failures(&dest, 2), now, &weights);
         assert!(
             two.magnitude() < one.magnitude(),
             "two consecutive failures ({}) must price worse than one ({}) — \
@@ -4936,7 +5002,7 @@ mod provider_health_tests {
             one.magnitude()
         );
 
-        let many = provider_health(&dest, &health_with_failures(&dest, 50), now);
+        let many = provider_health(&dest, &health_with_failures(&dest, 50), now, &weights);
         assert_eq!(
             many.magnitude(),
             HEALTH_PENALTY_FLOOR,
