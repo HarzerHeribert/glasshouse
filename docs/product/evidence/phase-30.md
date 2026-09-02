@@ -394,19 +394,7 @@ Recorded scope limits — stated by the worker, not discovered later:
 
 ---
 
-## REVIEW — the orchestrator owes an answer to each of these
-
-This section is the point of the generator. Everything above is the
-worker's facts, transcribed. Nothing below is decided.
-
-- **1158** — verdict `refused`. Confirm the worker's reason against current source before recording it.
-- **1159** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
-- **1160** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
-- **1161** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
-- **1162** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
-- **1163** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
-- **1164** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
-- **1165** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
+### Worker-reported packet errors and gates (transcribed at closure)
 
 **Packet errors the worker reported — read these BEFORE its results.**
 Thirteen consecutive rounds a worker corrected its packet and was right:

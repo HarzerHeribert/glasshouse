@@ -131,7 +131,6 @@ shell's routing-decisions view. A person reads that table today.
   (`main.rs`) computes the same `Routed` and still records nothing; that is a
   separate package, not a gap in these two lines.
 
-
 ---
 
 # `GH-ROUTING-OUTCOME` — 2026-08-31: a routing decision's outcome is the harness's own verdict
@@ -255,7 +254,6 @@ does.
   not win with it"* — one comparison inside `best()`/`on_provider_failure` plus
   one producer call from `gateway/session.rs`.
 
-
 ---
 
 ## From `GH-LAUNCH-CLASSIFIER` (2026-08-31)
@@ -266,17 +264,7 @@ The launch-path classifier package (router request schema, classification on the
 
 Package `GH-EVALUATION-PRODUCERS`, 2026-08-31, Opus at high. Six mutations, six killed. 1854 stays open by the worker's own reasoning: `PersistedGatewayHealth.observed_at_unix` has been written on every store since the format existed and `load`/`load_all` dropped it; copying it per entry would be a second source of truth, so `GatewayHealthCache::load_all_dated()` was added instead and `ObservedHealth` in `main.rs` now carries the dated readings the router's explanation reads. The routing-off branch yields an empty `ObservedHealth` rather than opening the three stores — the orchestrator's one edit at integration, where this package met the `--no-routing` restructure that landed after its base.
 
-
-## REVIEW — the orchestrator owes an answer to each of these
-
-This section is the point of the generator. Everything above is the
-worker's facts, transcribed. Nothing below is decided.
-
-- **1832** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
-- **1833** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
-- **1834** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
-- **1851** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
-- **1854** — verdict `open`. Confirm the worker's reason against current source before recording it.
+### Worker-reported packet errors and gates (transcribed at closure)
 
 **Packet errors the worker reported — read these BEFORE its results.**
 Thirteen consecutive rounds a worker corrected its packet and was right:
@@ -336,9 +324,7 @@ Recorded scope limits — stated by the worker, not discovered later:
 - It does not prove anything about extraction rows written by earlier builds beyond that they keep their NULL: their real purpose is unrecoverable and is not guessed at.
 - No Windows leg.
 
-
 ---
-
 
 ### Measure routing-model cost and request consumption separately from interactive coding cost. (line 1833)
 
@@ -368,9 +354,7 @@ Recorded scope limits — stated by the worker, not discovered later:
 - `RoutingOverhead::fraction()` still divides classification tokens by `task_*`, which today is dominated by extraction. Unchanged deliberately.
 - A `purpose` a later build writes and this one does not know lands in `unstamped_*`. Visible degradation, not a wrong attribution.
 
-
 ---
-
 
 ### Measure how often workload-tier classification predicts successful execution without escalation. (line 1834)
 
@@ -406,9 +390,7 @@ Recorded scope limits — stated by the worker, not discovered later:
 - `glasshouse resume` attributes no route, so it records no tier either. Only `launch` does.
 - `escalated` means the tier actually moved, not that the conservative rule fired — the two differ at `Frontier`, where `escalate` is a fixed point. Stated in the type's own doc comment.
 
-
 ---
-
 
 ### Measure how often failure-domain evidence prevents a failover onto the same unhealthy upstream. (line 1851)
 
@@ -447,7 +429,6 @@ Recorded scope limits — stated by the worker, not discovered later:
 
 Package `GH-ROUTE-CORRELATION`, 2026-08-31, Fable 5 at xhigh. The reader `phase-33c.md:101` said was missing now exists: `correlate_routes` over `RoutingObservation` rows joins routes by overlapping failure windows and matching class, and yields `RouteCorrelations` with a `CorrelationVerdict` per pair. `CORRELATION_OVERLAP_TOLERANCE_SECONDS = 60` is argued from the conservative side — a missed overlap lands on `InsufficientEvidence`, line 1378's safe side, while an invented one penalises a route that did nothing wrong. `MIN_CORRELATION_SAMPLE` is deliberately `MIN_SAMPLE_FOR_SUMMARY` (5): the ledger keeps one answer to *how many observations before a figure is trusted*. `CORRELATION_PURPOSE` rows are excluded from the reader's own input so it cannot read its consequence back as evidence. The production caller is `gateway/session.rs:604` (`observe_exchange`, the only caller of `on_provider_failure`), which the packet's EXPECTED FILES had omitted and the worker added with its reason. Eleven mutations, eleven killed; 61-target blast radius, exit 0.
 
-
 ### Measure how often nominally different routes provide separate quota capacity but not independent failure resilience. (line 1852)
 
 Contract: Given a gateway failover the correlation term changed the winner of, when the failover is taken, Glasshouse records one routing_observations row under CORRELATION_PURPOSE naming the route it steered off, and `glasshouse route` counts those rows back with an honest zero — while preserving that line 1851's count means what it prints, that the row is never read as an exchange or as spend, and that correlate_routes never reads it back as evidence.
@@ -485,7 +466,6 @@ Regression evidence:
 Recorded scope limits — stated by the worker, not discovered later:
 - The two-line call from the sink closure to record_correlation_steer is not under a test; deleting it would survive. The effect reaching a sink (mutation 9) and the write itself (mutations 10, 11) are proven; the closure is built only by launch_session/resume, which no test drives to a correlated failover — the same gap 1851 was ruled COMPLETE across
 - The row appears in observed_identities under route = None, as ROUTING_LATENCY rows already do
-
 
 ---
 

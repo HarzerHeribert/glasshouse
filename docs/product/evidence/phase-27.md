@@ -18,7 +18,8 @@ session permanently.** Measured against a real pty:
     1023 bytes -> nothing arrives, ever again on that terminal
 
 Not truncated — **discarded, and every subsequent byte written to that
-terminal discarded with it.** `SessionApi::send_text` appends `` and writes
+terminal discarded with it.** `SessionApi::send_text` appends `
+` and writes
 into a pty; any terminal left in canonical mode (every harness that has not put
 its tty into raw mode, and every shell) has `MAX_CANON` = 1024 bytes on
 macOS/BSD.
@@ -382,22 +383,7 @@ Recorded scope limits — stated by the worker, not discovered later:
 
 ---
 
-## REVIEW — the orchestrator owes an answer to each of these
-
-This section is the point of the generator. Everything above is the
-worker's facts, transcribed. Nothing below is decided.
-
-- **1125** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
-- **1126** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
-- **1127** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
-- **1128** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
-- **1129** — verdict `refused`. Confirm the worker's reason against current source before recording it.
-- **1130** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
-- **1131** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
-- **1132** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
-- **1133** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
-- **1134** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
-- **1135** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
+### Worker-reported packet errors and gates (transcribed at closure)
 
 **Packet errors the worker reported — read these BEFORE its results.**
 Thirteen consecutive rounds a worker corrected its packet and was right:

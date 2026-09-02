@@ -482,7 +482,6 @@ does not have.
 
 Missing evidence: CI run; no Windows claim is made.
 
-
 ---
 
 # Line 1681 — closed 2026-08-29. **Phase 42 is finished, 13 of 13.**
@@ -603,12 +602,7 @@ Recorded scope limits — stated by the worker, not discovered later:
 
 ---
 
-## REVIEW — the orchestrator owes an answer to each of these
-
-This section is the point of the generator. Everything above is the
-worker's facts, transcribed. Nothing below is decided.
-
-- **1681** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
+### Worker-reported packet errors and gates (transcribed at closure)
 
 Gates the worker ran (re-run the decisive ones yourself):
 - cargo build: ok

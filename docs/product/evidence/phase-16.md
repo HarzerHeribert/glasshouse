@@ -321,7 +321,6 @@ Limits: 745, 746 and 747 remain open on a separate unmade product decision
 (refusal register Cluster K) — a user still cannot *enter* an orchestrated
 worker. This line is about the record, not the access.
 
-
 ---
 
 # Lines 746, 747 closed; 745 refused — 2026-08-30
@@ -465,14 +464,7 @@ Recorded scope limits — stated by the worker, not discovered later:
 
 ---
 
-## REVIEW — the orchestrator owes an answer to each of these
-
-This section is the point of the generator. Everything above is the
-worker's facts, transcribed. Nothing below is decided.
-
-- **745** — verdict `refused`. Confirm the worker's reason against current source before recording it.
-- **746** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
-- **747** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
+### Worker-reported packet errors and gates (transcribed at closure)
 
 **Packet errors the worker reported — read these BEFORE its results.**
 Thirteen consecutive rounds a worker corrected its packet and was right:
@@ -494,8 +486,6 @@ Gates the worker ran (re-run the decisive ones yourself):
 - scripts/check-doc-boundary.sh: clean
 - scripts/blast-radius.sh: every traced target passed — 40 cargo targets (--lib, 38 integration tests, --bin glasshouse) plus rustdoc clean, exit 0
 - non-Unix path via §18 cfg flip across api/mod.rs and main.rs: cargo clippy --bin glasshouse -- -D warnings clean; both files restored byte-identical
-
-
 
 ---
 
@@ -604,12 +594,7 @@ Recorded scope limits — stated by the worker, not discovered later:
 
 ---
 
-## REVIEW — the orchestrator owes an answer to each of these
-
-This section is the point of the generator. Everything above is the
-worker's facts, transcribed. Nothing below is decided.
-
-- **745** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
+### Worker-reported packet errors and gates (transcribed at closure)
 
 **Packet errors the worker reported — read these BEFORE its results.**
 Thirteen consecutive rounds a worker corrected its packet and was right:

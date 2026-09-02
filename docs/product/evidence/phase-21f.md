@@ -155,7 +155,6 @@ existing work to Phase 1 line 110 (*"keep cross-project memory retrieval
 disabled by design rather than relying only on query filters"*), which remains
 unstarted and has no ledger entry.
 
-
 # Phase 21F — lines 930 and 934, closed behind Phase 27
 
 Package `GH-INJECTION-RECALL`, worktree `.worktrees/injection-recall`; report
@@ -306,13 +305,7 @@ Recorded scope limits — stated by the worker, not discovered later:
 
 ---
 
-## REVIEW — the orchestrator owes an answer to each of these
-
-This section is the point of the generator. Everything above is the
-worker's facts, transcribed. Nothing below is decided.
-
-- **930** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
-- **934** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
+### Worker-reported packet errors and gates (transcribed at closure)
 
 **Packet errors the worker reported — read these BEFORE its results.**
 Thirteen consecutive rounds a worker corrected its packet and was right:

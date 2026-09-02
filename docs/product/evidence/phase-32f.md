@@ -430,7 +430,6 @@ argument in one file exactly as `phase-33.md` described it; bundling it here
 made it no smaller. It was included because the partition was free, not because
 the framing helped.
 
-
 ---
 
 # Lines 1289, 1290 closed and 1294 refused — 2026-08-30
@@ -592,14 +591,7 @@ Recorded scope limits — stated by the worker, not discovered later:
 
 ---
 
-## REVIEW — the orchestrator owes an answer to each of these
-
-This section is the point of the generator. Everything above is the
-worker's facts, transcribed. Nothing below is decided.
-
-- **1289** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
-- **1290** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
-- **1294** — verdict `refused`. Confirm the worker's reason against current source before recording it.
+### Worker-reported packet errors and gates (transcribed at closure)
 
 **Packet errors the worker reported — read these BEFORE its results.**
 Thirteen consecutive rounds a worker corrected its packet and was right:

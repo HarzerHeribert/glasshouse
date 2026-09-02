@@ -467,7 +467,6 @@ observe. Flagging this as the honest gap: a stronger proof would be a
 compile-time check (e.g. `render` taking no `Runtime`/client argument),
 which already holds structurally but is not asserted anywhere.
 
-
 ---
 
 # Line 1661 — closed 2026-08-30. **Phase 41 is finished, 15 of 15.**
@@ -563,12 +562,7 @@ Recorded scope limits — stated by the worker, not discovered later:
 
 ---
 
-## REVIEW — the orchestrator owes an answer to each of these
-
-This section is the point of the generator. Everything above is the
-worker's facts, transcribed. Nothing below is decided.
-
-- **1661** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
+### Worker-reported packet errors and gates (transcribed at closure)
 
 **Packet errors the worker reported — read these BEFORE its results.**
 Thirteen consecutive rounds a worker corrected its packet and was right:

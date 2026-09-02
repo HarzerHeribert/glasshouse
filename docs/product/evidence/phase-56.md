@@ -148,7 +148,6 @@ Recorded scope limits — stated by the worker, not discovered later:
 
 ---
 
-
 ---
 
 ### Lines 1948, 1949, 1950, 1956 — translation T1: the canonical form, two codecs, the pair table, and the first pair end to end
@@ -263,7 +262,6 @@ Recorded scope limits — stated by the worker, not discovered later:
 
 ---
 
-
 ### Line 1951 — per-harness task efficiency, read from rows production already writes
 
 Package `GH-HARNESS-EFFICIENCY`, 2026-08-31, Sonnet at high (Amber). Two readers in the `outcomes_by_tier` shape: `outcomes_by_tier_and_harness` (outcome by task class per harness, same minimum-sample gate, `undecided` never counted as failed) and `request_stats_by_harness` (request count, wall-clock sum/median, tokens where present with `token_rows_present` beside them), rendered by `harness_efficiency_section` in `glasshouse route`'s report so a harness can be compared for a task class without knowing which vendor bills.
@@ -303,7 +301,6 @@ Recorded scope limits — stated by the worker, not discovered later:
 - wall-clock sum/median is not gated by MIN_SAMPLE_FOR_SUMMARY, per the packet's own wording
 
 ---
-
 
 ---
 
@@ -475,7 +472,6 @@ Recorded scope limits — stated by the worker, not discovered later:
 
 ---
 
-
 ---
 
 ### T2 addendum to lines 1948, 1950, 1956 — the OpenAI Responses codec and two more pairs
@@ -588,7 +584,6 @@ Package `GH-ENTITLEMENT-ENV-SCRUB`, 2026-08-31, Sonnet at high (Amber). `foreign
 #### T2b addendum: the chat<->responses pairs land, and the outbound gains its per-protocol header
 
 Package `GH-GATEWAY-TRANSLATE-T2B`, 2026-08-31, Sonnet at high (Amber — both codecs were settled). Five supported ordered pairs now — anthropic→chat, anthropic→responses, responses→anthropic, chat→responses, responses→chat — with `openai-chat -> anthropic-messages` the one refused row left. Each new pair behind its own e2e with ids preserved and streaming in the client protocol's order; `serve` gained the per-protocol outbound-header hook (T2 finding 2): `anthropic-version` added exactly when the outbound protocol is anthropic-messages, asserted present there and absent elsewhere. 3/3 mutations KILLED. Integrator's seam fixes, all five prescribed verbatim by the report and applied on the merged tree (the table flip re-keyed every fixture that used chat<->responses to witness `Incompatible`): the stale T2b-refusal sub-check deleted, the rungs and hard-constraint witnesses moved to OpenCode-on-anthropic-only (the one refused row), and the provider table pin extended to five pairs. Lines 1948/1950/1956 remain open pending T3 (Gemini).
-
 
 ---
 
@@ -965,13 +960,7 @@ Recorded scope limits — stated by the worker, not discovered later:
 
 ---
 
-## REVIEW — the orchestrator owes an answer to each of these
-
-This section is the point of the generator. Everything above is the
-worker's facts, transcribed. Nothing below is decided.
-
-- **1945** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
-- **1955** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
+### Worker-reported packet errors and gates (transcribed at closure)
 
 Gates the worker ran (re-run the decisive ones yourself):
 - cargo test -p glasshouse --test decoupled_profiles: test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
@@ -979,7 +968,6 @@ Gates the worker ran (re-run the decisive ones yourself):
 - cargo test -p glasshouse --lib config::: test result: ok. 96 passed; 0 failed; 0 ignored; 0 measured; 1811 filtered out
 - cargo clippy -p glasshouse --all-targets --all-features -- -D warnings: clean
 - scripts/blast-radius.sh --targeted (no path arg, both changed files traced): cargo check --tests clean; cargo test --test decoupled_profiles ok (2 passed); --targeted skipped 69 full-trace targets (expected, fast gate); cargo doc --no-deps clean; every traced target passed
-
 
 ---
 

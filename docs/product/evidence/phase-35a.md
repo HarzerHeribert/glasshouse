@@ -314,18 +314,7 @@ Recorded scope limits — stated by the worker, not discovered later:
 
 ---
 
-## REVIEW — the orchestrator owes an answer to each of these
-
-This section is the point of the generator. Everything above is the
-worker's facts, transcribed. Nothing below is decided.
-
-- **1511** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
-- **1512** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
-- **1513** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
-- **1514** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
-- **1515** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
-- **1520** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
-- **1521** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
+### Worker-reported packet errors and gates (transcribed at closure)
 
 Gates the worker ran (re-run the decisive ones yourself):
 - cargo test -p glasshouse --bin glasshouse routing_destinations: ok. 5 passed; 0 failed
@@ -413,13 +402,7 @@ Recorded scope limits — stated by the worker, not discovered later:
 
 ---
 
-## REVIEW — the orchestrator owes an answer to each of these
-
-This section is the point of the generator. Everything above is the
-worker's facts, transcribed. Nothing below is decided.
-
-- **1517** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
-- **1518** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
+### Worker-reported packet errors and gates (transcribed at closure)
 
 Gates the worker ran (re-run the decisive ones yourself):
 - cargo test -p glasshouse --lib routing::session: test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 1905 filtered out
@@ -430,7 +413,6 @@ Gates the worker ran (re-run the decisive ones yourself):
 - scripts/blast-radius.sh --targeted crates/glasshouse/src/routing/session.rs crates/glasshouse/src/routing/mod.rs: every traced target passed (rustdoc clean after fixing two link errors my own edits introduced); 33 full-trace targets skipped by design
 - known pre-existing red gateway::session::tests::observe_exchange_scores_a_real_failover_against_the_configured_preference: passed in every run here (only flakes under --targeted's concurrent plan)
 - cargo test -p glasshouse --lib --tests --no-fail-fast (full sweep, beyond what this packet requires): 120 of 122 targets green (lib: 1913 passed); tests/routing_capability.rs 3 passed/1 failed and tests/tier_escalation.rs 10 passed/3 failed, both explained above and both outside FORBIDDEN tests/**
-
 
 **1513 ticks here.** Its protocol/tool half: `tests/routing_candidates.rs` (the proofs package); its capability half: `routing::session::hard_constraint_tests::an_established_absent_hard_capability_excludes_and_an_unverified_one_passes`, whose excluded candidate is gateway-backed.
 

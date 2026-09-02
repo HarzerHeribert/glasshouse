@@ -501,7 +501,6 @@ Mutations, all killed:
 That third mutation is the important one: it proves Glasshouse does not
 substitute a default when the provider stated nothing. `None` stays a fact.
 
-
 ---
 
 # Line 1313 — closed 2026-08-30 by proof, with no production change
@@ -597,12 +596,7 @@ Recorded scope limits — stated by the worker, not discovered later:
 
 ---
 
-## REVIEW — the orchestrator owes an answer to each of these
-
-This section is the point of the generator. Everything above is the
-worker's facts, transcribed. Nothing below is decided.
-
-- **1313** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
+### Worker-reported packet errors and gates (transcribed at closure)
 
 Gates the worker ran (re-run the decisive ones yourself):
 - cargo build: clean
@@ -612,8 +606,6 @@ Gates the worker ran (re-run the decisive ones yourself):
 - cargo clippy --all-targets --all-features -D warnings: clean
 - cargo fmt --all -- --check: clean
 - scripts/blast-radius.sh: every traced target passed (lib 1548, events_log 6, memory_snapshot 8, routing_evidence 13, cargo doc clean)
-
-
 
 ---
 
