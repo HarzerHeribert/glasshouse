@@ -515,3 +515,56 @@ Gates the worker ran (re-run the decisive ones yourself):
 
 
 > **2026-09-02, late evening — a Windows gap on the local reducer seat, recorded rather than hidden.** The wave-100 Windows VM leg (the first VM run since this seat landed) failed to compile `tests/firewall_local_reducer.rs` on Windows: its fake tools are shebang scripts marked executable and spawned as bare argv, which Windows cannot execute. The file is now `#![cfg(unix)]` with the reason in its header. The seat (`firewall::reducer::LocalToolReducer`, `main.rs::disposable_reducer`'s `local:` branch) compiles on Windows and has **no Windows test**; a Windows-shaped fake tool (a `.exe`, or a `cmd` wrapper spawned as argv) is the successor `GH-LOCAL-REDUCER-WINDOWS-FIXTURE` (Green). 2028–2030 stay COMPLETE on their macOS/Linux evidence with this limit stated.
+
+## The bootstrap race, closed 2026-09-02 (`GH-BOOTSTRAP-RACE`, Red, Opus 5 high; independently verified)
+
+2039's entry above and its worker's report recorded
+`database::tests::concurrent_first_bootstraps_serialize_on_one_database` as a
+load-sensitive flake attributed to batch 87. It was a product race with a
+timer where a lock belonged: `check_existing` told a sibling's in-flight
+zero-byte file apart from a truncated one by *sleeping* up to 500 ms
+(50 × 10 ms), and once migration 25 made the creator's first migration
+outlast that under load, every module-level run failed (two trailing sweeps,
+three gates and an interleaved A/B/A/B on the unmodified base, all on
+2026-09-02) while the test passed alone every time. The straggler now waits
+on SQLite's own write lock (`BEGIN IMMEDIATE` on a `journal_mode = MEMORY`
+probe connection — the default journal creates a `-journal` sidecar on the
+refusal path, which the worker found by probing — under a 30 s busy timeout)
+inside a 40 × 10 ms grace for the creator's window between `create_new` and
+its own `BEGIN IMMEDIATE`; it refuses `EmptyExisting` only when the lock is
+free and the file is still empty after the grace, and reports a new
+`CreationWaitTimedOut` when it cannot acquire the lock within the wait. The
+worker found that the packet's design *without* the grace would refuse a
+healthy sibling inside that pre-lock window and proved it with the
+`grace-removed` mutation. Five mutations KILLED; `--lib database` green five
+times under load ~30; A/B/A/B base red twice, fix green twice; a 2 s
+deterministic stress test (§60) and a 64-caller variant added, the 16-caller
+original byte-identical. Named successors: a temp-file + `link(2)` creation
+that never exposes a zero-byte file (airtight; changes `prepare_file`), and
+`configure`'s 5 s busy timeout as the next edge for a `create_new` loser.
+
+**Independent verification (`GH-VERIFY-BOOTSTRAP-RACE`, Opus 5 high,
+read-only): ACCEPT.** The packet's decisive question — could WAL mode leave
+the main file at zero bytes after a healthy commit — was answered by
+measurement rather than argument: `configure` sets no journal mode, the
+database runs in SQLite's default rollback journal, and a commit grows the
+main file (0 → 16384 bytes); even the WAL counterfactual writes a 4096-byte
+header before any commit. Five residual findings, none a defect the diff
+introduces: the honest worst-case bound of the wait is 40 × 30 s, not 30 s
+(a waiter that acquires and finds the file ungrown loops); the `create_new`
+loser — the majority path in a burst — still bets on `configure`'s fixed 5 s
+busy timeout, confirmed with a shortened-timeout experiment (`database is
+locked`), and the one-line widening to `CREATION_LOCK_WAIT` would widen every
+open's timeout, so it is left to the successor
+`GH-BOOTSTRAP-CREATE-ATOMICALLY`; the refusal path's probe removes a
+pre-existing hot `-journal` (SQLite's own recovery — base never opened SQLite
+there); `CreationWaitTimedOut` is reached by no standing test; and the
+unwritable-file test pinned only that the message names the path, which
+`Sql`, `Open` and `EmptyExisting` all satisfy — the orchestrator added the
+`EmptyExisting` variant assertion at integration (the verifier established
+the outcome: `BEGIN IMMEDIATE` succeeds on a read-only empty database, so
+the loop exhausts and refuses in ~547 ms). The verifier's own A/B/A/B against
+a detached baseline: base red twice, fix green twice; four more fix runs at
+load 24.7 → 40.3, 51/51 each. macOS arm64 at acceptance; the Linux leg and
+the Windows VM run on the integration commit are recorded in the batch-94
+checkpoint.

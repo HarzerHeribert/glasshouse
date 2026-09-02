@@ -2639,6 +2639,16 @@ pub(crate) enum DatabaseError {
          start this project fresh"
     )]
     EmptyExisting { path: PathBuf },
+    #[error(
+        "project database `{path}` is empty (zero bytes) and another Glasshouse \
+         process is holding the write lock on it, but it did not finish creating \
+         the database within {waited:?}. Nothing here has been changed. Wait for \
+         that process to finish or stop it, then try again"
+    )]
+    CreationWaitTimedOut {
+        path: PathBuf,
+        waited: std::time::Duration,
+    },
 }
 
 /// Create or validate the project database of the given runtime's project.
@@ -2833,15 +2843,48 @@ fn inspect_existing(db_path: &Path) -> Result<Option<fs::Metadata>, DatabaseErro
     Ok(Some(metadata))
 }
 
-/// How long [`check_existing`] tolerates a zero-byte file before concluding
-/// it is genuinely empty rather than mid-creation by a concurrent process.
-/// SQLite grows a database file's page count as soon as its first `CREATE
-/// TABLE` executes, well before that transaction commits, so this only needs
-/// to cover "another process is a few instructions into `migrate`" — not a
-/// whole migration. Bounded well under [`configure`]'s 5-second
-/// `busy_timeout` so a genuinely empty file is still reported promptly.
-const EMPTY_FILE_RETRIES: u32 = 50;
-const EMPTY_FILE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(10);
+/// The statement that takes SQLite's write lock on the database file, and the
+/// one that gives it back. Both are single literals on purpose: this is the
+/// mechanism [`wait_out_a_concurrent_creation`] is built on, so a mutation of
+/// either has exactly one site.
+const TAKE_WRITE_LOCK: &str = "BEGIN IMMEDIATE";
+const RELEASE_WRITE_LOCK: &str = "ROLLBACK";
+
+/// How long a straggler waits for a creator that **already holds the write
+/// lock** to finish migrating and commit.
+///
+/// Deliberately not [`configure`]'s 5 seconds. That timeout covers one
+/// process's turn at a database whose schema is already current — a bounded
+/// handful of statements. This one covers a *first* creation: every migration
+/// this build has, applied in one transaction, on whatever machine and under
+/// whatever load the user's is under at that moment. The old timer here
+/// budgeted 500 ms for that and was overrun by 25 migrations under a loaded
+/// test run, which is the defect this constant's mechanism replaces. There is
+/// no number that is provably enough, so this is a generous outer bound whose
+/// only job is to fail loudly ([`DatabaseError::CreationWaitTimedOut`])
+/// instead of hanging: the *wait itself* is the lock, not this.
+const CREATION_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// The one thing the write lock cannot see: a sibling that has created the
+/// file and has not yet reached its own `BEGIN IMMEDIATE`.
+///
+/// A creator's file is visible to `stat` from the instant `create_new`
+/// returns, but its write lock is taken a connection-open and two identity
+/// queries later. A straggler that probes the lock inside that window finds it
+/// free and the file empty — indistinguishable, from the file alone, from a
+/// truncated database nobody is creating. So the probe is repeated: the window
+/// is a fixed, tiny stretch of straight-line code (measured in tens of
+/// microseconds), and 400 ms of grace is four orders of magnitude more than
+/// it needs while still refusing a genuinely truncated file promptly — sooner,
+/// in fact, than the 500 ms the timer this replaces spent on every one.
+///
+/// This is **not** the old budget under a new name. The old one had to cover
+/// the creator's whole migration — work that grows with every migration added
+/// and stretches under load, which is exactly why it broke. This one covers
+/// only the creator's next few instructions, and the migration is covered by
+/// [`CREATION_LOCK_WAIT`] on the lock itself.
+const CREATOR_LOCK_GRACE_ATTEMPTS: u32 = 40;
+const CREATOR_LOCK_GRACE_DELAY: std::time::Duration = std::time::Duration::from_millis(10);
 
 /// Inspect the final database path for the case where it is expected to
 /// predate this launch: refuses symlinks and non-regular entries (via
@@ -2849,8 +2892,8 @@ const EMPTY_FILE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_mi
 /// file, which is never what a genuinely new project looks like.
 ///
 /// Returns `Ok(false)` only when the path definitively does not exist (so the
-/// caller should create it), `Ok(true)` when an existing regular,
-/// nonempty file is ready to open.
+/// caller should create it), `Ok(true)` when an existing regular, nonempty
+/// file is ready to open.
 ///
 /// **Not** the right check for a file [`prepare_file`] just lost an
 /// `AlreadyExists` race to create — that file is legitimately zero bytes
@@ -2862,39 +2905,196 @@ const EMPTY_FILE_RETRY_DELAY: std::time::Duration = std::time::Duration::from_mi
 /// case, though: a straggler among several processes racing this exact
 /// function (see `concurrent_first_bootstraps_serialize_on_one_database`)
 /// can observe a sibling's just-created, not-yet-migrated file the same way.
-/// Retrying briefly before refusing tells the two apart: a fresh file grows
-/// past zero bytes within milliseconds once its creator's migration starts
-/// writing; a genuinely truncated one never does.
+/// [`wait_out_a_concurrent_creation`] tells the two apart by taking the same
+/// write lock the creator's migration holds, rather than by guessing how long
+/// a migration takes.
 fn check_existing(db_path: &Path) -> Result<bool, DatabaseError> {
-    let Some(mut metadata) = inspect_existing(db_path)? else {
+    let Some(metadata) = inspect_existing(db_path)? else {
         return Ok(false);
     };
-    if metadata.len() == 0 {
-        for _ in 0..EMPTY_FILE_RETRIES {
-            std::thread::sleep(EMPTY_FILE_RETRY_DELAY);
-            match inspect_existing(db_path)? {
-                Some(retried) if retried.len() > 0 => return Ok(true),
-                Some(retried) => metadata = retried,
-                // Vanished between retries: nothing left to refuse; the
-                // caller should create it.
-                None => return Ok(false),
+    if metadata.len() > 0 {
+        return Ok(true);
+    }
+    wait_out_a_concurrent_creation(db_path)
+}
+
+/// Decide what a zero-byte database file at `db_path` actually is, by
+/// contending for SQLite's own write lock on it.
+///
+/// A zero-byte file is a valid *empty* SQLite database by specification, so
+/// nothing downstream — not SQLite, not [`migrate`] — would ever notice that
+/// this one used to hold a project's sessions, memories and checkpoints. It
+/// has exactly two possible histories, and they need opposite answers:
+///
+/// * a **concurrent creator** made it moments ago and its migration is still
+///   running, in which case the only correct thing to do is wait and then open
+///   the database it commits;
+/// * a **truncated** database — a crashed copy, an interrupted restore, a
+///   disk-full write — in which case the only correct thing to do is refuse,
+///   because a fresh migration over it would silently replace the user's data
+///   with an empty project.
+///
+/// The file cannot tell them apart; the *lock* can. A creator runs its whole
+/// migration inside one `BEGIN IMMEDIATE` ([`open`]), so for as long as it is
+/// working, SQLite's write lock on that file is held and nobody else can take
+/// it. So: try to take it. Busy means somebody is creating — wait for them,
+/// then open what they committed. Free, with the file still empty, means
+/// nobody is creating and nobody has been, which is the truncated case, and it
+/// is refused. The grace loop covers the one gap in that argument, described
+/// on [`CREATOR_LOCK_GRACE_ATTEMPTS`].
+///
+/// **Nothing here writes to the database file**, which is the invariant the
+/// refusal path depends on: the lock is taken and released without dirtying a
+/// page, and the connection sets `journal_mode = MEMORY` so that not even a
+/// transient `-journal` sidecar is created beside a file we are about to
+/// refuse. Verified by `a_zero_byte_existing_database_is_refused_not_silently_reinitialized`,
+/// which asserts both the length and the absence of sidecars after the refusal.
+///
+/// Portable as written: `BEGIN IMMEDIATE` and `busy_timeout` are SQLite's own
+/// behaviour on every platform it supports. Windows takes the same lock
+/// through `LockFileEx` rather than `fcntl`, and neither this function nor its
+/// callers need a `#[cfg]` to say so.
+fn wait_out_a_concurrent_creation(db_path: &Path) -> Result<bool, DatabaseError> {
+    for _ in 0..CREATOR_LOCK_GRACE_ATTEMPTS {
+        // Cheapest question first, and the one that ends this in the common
+        // case: has the creator committed while we were getting here?
+        match inspect_existing(db_path)? {
+            // Vanished: nothing left to refuse; the caller should create it.
+            None => return Ok(false),
+            Some(metadata) if metadata.len() > 0 => return Ok(true),
+            Some(_) => {}
+        }
+
+        // A non-blocking probe, so that "somebody holds the write lock" is
+        // answered rather than waited on. A creator mid-migration and another
+        // straggler mid-probe both show up here as `SQLITE_BUSY`; they are
+        // told apart below by whether the wait ends with a migrated file.
+        let probe = lock_probe_connection(db_path, std::time::Duration::ZERO)?;
+        match probe.execute_batch(TAKE_WRITE_LOCK) {
+            Ok(()) => {
+                let grown = grew_while_locked(&probe, db_path)?;
+                drop(probe);
+                if grown {
+                    return Ok(true);
+                }
+                // Nobody holds the write lock and the file is still empty.
+                // Either it is truncated, or a creator is inside the window
+                // on `CREATOR_LOCK_GRACE_ATTEMPTS`. Give it that window.
+                std::thread::sleep(CREATOR_LOCK_GRACE_DELAY);
+            }
+            Err(err) if is_busy(&err) => {
+                drop(probe);
+                // Somebody is holding the write lock. Queue behind them on a
+                // connection whose timeout is long enough for a whole first
+                // migration, and read the file again once we are through.
+                let waiter = lock_probe_connection(db_path, CREATION_LOCK_WAIT)?;
+                match waiter.execute_batch(TAKE_WRITE_LOCK) {
+                    Ok(()) => {
+                        let grown = grew_while_locked(&waiter, db_path)?;
+                        drop(waiter);
+                        if grown {
+                            return Ok(true);
+                        }
+                        // The holder let go without committing anything: it
+                        // was another straggler's own probe, or a creator that
+                        // died mid-migration. Neither is evidence about this
+                        // file's history, so take another attempt rather than
+                        // refuse on one observation.
+                        std::thread::sleep(CREATOR_LOCK_GRACE_DELAY);
+                    }
+                    Err(err) if is_busy(&err) => {
+                        return Err(DatabaseError::CreationWaitTimedOut {
+                            path: db_path.to_path_buf(),
+                            waited: CREATION_LOCK_WAIT,
+                        });
+                    }
+                    Err(source) => {
+                        return Err(DatabaseError::Sql {
+                            path: db_path.to_path_buf(),
+                            source,
+                        });
+                    }
+                }
+            }
+            Err(source) => {
+                return Err(DatabaseError::Sql {
+                    path: db_path.to_path_buf(),
+                    source,
+                });
             }
         }
     }
-    if metadata.len() == 0 {
-        // A zero-byte file is a valid *empty* SQLite database by
-        // specification, so nothing downstream — not SQLite, not `migrate`
-        // — would ever notice this used to hold a project's sessions,
-        // memories, and checkpoints. A genuinely new project has no file
-        // here at all; an *existing* file of length zero that stayed zero
-        // through the retries above is never that, so this is the one case
-        // this function must refuse rather than let fall through to a
-        // silent fresh migration.
-        return Err(DatabaseError::EmptyExisting {
+
+    // Every attempt found the file empty and the write lock free, so no
+    // creator was ever here. A genuinely new project has no file at this path
+    // at all; this one exists and is empty, which is the case that must be
+    // refused rather than migrated over.
+    Err(DatabaseError::EmptyExisting {
+        path: db_path.to_path_buf(),
+    })
+}
+
+/// Re-read the file's length while `conn` holds the write lock, then give the
+/// lock back.
+///
+/// The release is unconditional and is a rollback, never a commit: this
+/// connection exists to *ask a question* about a file Glasshouse may be about
+/// to refuse, and a refusal that modified the file it refused would destroy
+/// the evidence the user needs to recover it.
+fn grew_while_locked(conn: &Connection, db_path: &Path) -> Result<bool, DatabaseError> {
+    let grown = matches!(inspect_existing(db_path)?, Some(metadata) if metadata.len() > 0);
+    conn.execute_batch(RELEASE_WRITE_LOCK)
+        .map_err(|source| DatabaseError::Sql {
             path: db_path.to_path_buf(),
-        });
-    }
-    Ok(true)
+            source,
+        })?;
+    Ok(grown)
+}
+
+/// A connection opened purely to contend for the write lock on an existing
+/// zero-byte database file.
+///
+/// Same flags as [`open`]'s — read/write, no `CREATE`, so a file that vanished
+/// since the inspection fails the open rather than being recreated here. Two
+/// differences from [`configure`], both deliberate: the busy timeout is the
+/// caller's (zero to probe, [`CREATION_LOCK_WAIT`] to wait) rather than the
+/// open path's five seconds, and `journal_mode = MEMORY` keeps SQLite from
+/// creating a `-journal` file beside a database this connection will never
+/// write to. The read-only check is [`configure`]'s and is not repeated: a
+/// database this connection cannot lock fails the lock, and the real open
+/// reports the read-only file itself.
+fn lock_probe_connection(
+    db_path: &Path,
+    busy_timeout: std::time::Duration,
+) -> Result<Connection, DatabaseError> {
+    let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_WRITE).map_err(
+        |source| DatabaseError::Open {
+            path: db_path.to_path_buf(),
+            source,
+        },
+    )?;
+    let sql_err = |source| DatabaseError::Sql {
+        path: db_path.to_path_buf(),
+        source,
+    };
+    conn.busy_timeout(busy_timeout).map_err(sql_err)?;
+    // The returned mode is whatever SQLite settled on; asking is the whole
+    // statement, and a database already in WAL mode (Glasshouse creates none)
+    // keeps its own mode without failing this.
+    let _mode: String = conn
+        .query_row("PRAGMA journal_mode = MEMORY", [], |row| row.get(0))
+        .map_err(sql_err)?;
+    Ok(conn)
+}
+
+/// Whether a failure is SQLite's "somebody else holds the lock", which is an
+/// answer here rather than an error.
+fn is_busy(err: &rusqlite::Error) -> bool {
+    matches!(
+        err,
+        rusqlite::Error::SqliteFailure(inner, _)
+            if inner.code == rusqlite::ErrorCode::DatabaseBusy
+    )
 }
 
 /// Human-readable kind of a final-path entry, for error messages.
@@ -5519,6 +5719,248 @@ mod tests {
         assert_eq!(bindings, 1);
     }
 
+    /// Everything `open` does to a brand-new database file, run by hand on a
+    /// thread that controls exactly when the write lock is taken and when the
+    /// migration commits.
+    ///
+    /// This is the creator half of the two straggler tests below. It is
+    /// deliberately built out of the production `migrate` and `bind_project`
+    /// rather than a fixture: what the straggler waits for has to be the real
+    /// migration, or the test proves nothing about how long a real one takes.
+    fn create_and_migrate_slowly(
+        db: &Path,
+        project_id: &str,
+        before_lock: std::time::Duration,
+        hold: std::time::Duration,
+        locked: std::sync::mpsc::Sender<()>,
+        created: std::sync::mpsc::Sender<()>,
+    ) {
+        let mut options = std::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        options
+            .open(db)
+            .expect("the creator must win the create race");
+        assert_eq!(std::fs::metadata(db).unwrap().len(), 0);
+        created.send(()).unwrap();
+
+        // The window between "the file exists" and "its creator holds the
+        // write lock": in production a connection open and two identity
+        // queries, here whatever the caller asks for.
+        std::thread::sleep(before_lock);
+
+        let mut conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
+        conn.busy_timeout(std::time::Duration::from_secs(30))
+            .unwrap();
+        let tx = conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+            .unwrap();
+        locked.send(()).unwrap();
+
+        // Stand in for a first migration that outlasts any fixed budget a
+        // straggler could have guessed at.
+        std::thread::sleep(hold);
+
+        migrate(&tx, db).unwrap();
+        bind_project(&tx, db, project_id).unwrap();
+        tx.commit().unwrap();
+    }
+
+    /// The defect this file's `wait_out_a_concurrent_creation` exists for: a
+    /// straggler that finds a sibling's zero-byte file must wait for that
+    /// sibling's migration however long it takes, not for a fixed budget.
+    ///
+    /// The creator holds the write lock for two seconds — four times the
+    /// 500 ms the old retry loop allowed — before its migration commits. On
+    /// the old code the straggler refused with `EmptyExisting` inside that
+    /// half second; here it blocks on the lock and opens the migrated
+    /// database the creator commits.
+    #[test]
+    fn a_straggler_waits_out_a_creators_whole_migration_instead_of_refusing() {
+        const HOLD: std::time::Duration = std::time::Duration::from_secs(2);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let db = fixture.runtime.database_path().to_path_buf();
+        let project_id = fixture.runtime.project().id().as_str().to_owned();
+
+        // Back to the state a first launch starts from.
+        std::fs::remove_file(&db).unwrap();
+
+        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
+        let (created_tx, _created_rx) = std::sync::mpsc::channel();
+        let creator = {
+            let db = db.clone();
+            std::thread::spawn(move || {
+                create_and_migrate_slowly(
+                    &db,
+                    &project_id,
+                    std::time::Duration::ZERO,
+                    HOLD,
+                    locked_tx,
+                    created_tx,
+                );
+            })
+        };
+
+        // Released once the creator holds the write lock, so what is measured
+        // below is the wait for the migration and nothing else.
+        locked_rx.recv().unwrap();
+        let started = std::time::Instant::now();
+        let migrated = fixture
+            .rebootstrap()
+            .expect("a straggler must wait for the creator, not refuse it");
+        let waited = started.elapsed();
+        creator.join().unwrap();
+
+        assert_eq!(migrated.database_path(), db);
+        assert_eq!(schema_version(&db), SUPPORTED_SCHEMA_VERSION);
+        assert_eq!(
+            stored_project_id(&db),
+            migrated.project().id().as_str(),
+            "the straggler must end up on the creator's database, bound to its own project"
+        );
+
+        // The straggler is released just after the lock is taken, so it sees
+        // very nearly the whole hold. The floor is well above the 500 ms the
+        // old timer budgeted: passing this by waiting *less* than the creator
+        // held would mean the straggler never blocked at all.
+        assert!(
+            waited >= HOLD - std::time::Duration::from_millis(250),
+            "the straggler returned after {waited:?}, which is less than the creator's {HOLD:?} \
+             hold — it cannot have waited on the creator's lock"
+        );
+    }
+
+    /// The one gap the write lock alone does not cover: a creator's file is
+    /// visible before its creator has taken the lock.
+    ///
+    /// A straggler probing inside that window finds the lock free and the file
+    /// empty — the same two facts a truncated database presents — and refusing
+    /// on that single observation would reintroduce the defect in a narrower
+    /// window. `CREATOR_LOCK_GRACE_ATTEMPTS` is what closes it, and this test
+    /// is what holds that constant to its job: the creator waits 100 ms
+    /// between creating the file and locking it, which is far wider than the
+    /// connection-open the real gap consists of and still well inside the
+    /// grace.
+    #[test]
+    fn a_straggler_released_inside_the_creators_unlocked_window_still_waits() {
+        const BEFORE_LOCK: std::time::Duration = std::time::Duration::from_millis(100);
+        const HOLD: std::time::Duration = std::time::Duration::from_millis(750);
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let db = fixture.runtime.database_path().to_path_buf();
+        let project_id = fixture.runtime.project().id().as_str().to_owned();
+        std::fs::remove_file(&db).unwrap();
+
+        let (locked_tx, _locked_rx) = std::sync::mpsc::channel();
+        let (created_tx, created_rx) = std::sync::mpsc::channel();
+        let creator = {
+            let db = db.clone();
+            std::thread::spawn(move || {
+                create_and_migrate_slowly(
+                    &db,
+                    &project_id,
+                    BEFORE_LOCK,
+                    HOLD,
+                    locked_tx,
+                    created_tx,
+                );
+            })
+        };
+
+        // Released the instant the file exists — before any lock is held.
+        created_rx.recv().unwrap();
+        assert_eq!(std::fs::metadata(&db).unwrap().len(), 0);
+        let started = std::time::Instant::now();
+        let migrated = fixture
+            .rebootstrap()
+            .expect("a straggler must not refuse a file whose creator has not locked it yet");
+        let waited = started.elapsed();
+        creator.join().unwrap();
+
+        assert_eq!(migrated.database_path(), db);
+        assert_eq!(schema_version(&db), SUPPORTED_SCHEMA_VERSION);
+        assert!(
+            waited >= BEFORE_LOCK + HOLD - std::time::Duration::from_millis(250),
+            "the straggler returned after {waited:?}; it cannot have waited out the creator's \
+             {BEFORE_LOCK:?} window plus its {HOLD:?} hold"
+        );
+    }
+
+    /// The same field reproduction, four times as contended.
+    ///
+    /// Sixteen callers is what the original defect was found at; the wait this
+    /// module now performs is a queue on one lock, so the interesting question
+    /// is whether it still holds when the queue is long enough that nearly
+    /// every caller is a straggler rather than the creator.
+    #[test]
+    fn concurrent_first_bootstraps_serialize_on_one_database_at_sixty_four_callers() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("workspace").join("solo");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        let root = std::fs::canonicalize(&root).unwrap();
+
+        const CALLERS: usize = 64;
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(CALLERS));
+        let mut handles = Vec::new();
+        for _ in 0..CALLERS {
+            let barrier = std::sync::Arc::clone(&barrier);
+            let root = root.clone();
+            let data = tmp.path().join("data");
+            let config = tmp.path().join("config");
+            handles.push(std::thread::spawn(move || {
+                // Release all callers at once so the very first creation of
+                // the database file and schema is genuinely contended.
+                barrier.wait();
+                let cli = Cli::try_parse_from([
+                    "glasshouse",
+                    "--data-dir",
+                    data.to_str().unwrap(),
+                    "--config-dir",
+                    config.to_str().unwrap(),
+                ])
+                .unwrap();
+                crate::bootstrap(&cli, &root)
+            }));
+        }
+
+        let mut results = Vec::new();
+        for handle in handles {
+            results.push(handle.join().expect("bootstrap thread panicked"));
+        }
+        for result in &results {
+            result
+                .as_ref()
+                .expect("a concurrent first bootstrap failed");
+        }
+
+        // All callers agree on one physical database with one binding.
+        let expected_db = results[0].as_ref().unwrap().database_path();
+        let expected_id = results[0].as_ref().unwrap().project().id().as_str();
+        for result in &results {
+            let runtime = result.as_ref().unwrap();
+            assert_eq!(runtime.database_path(), expected_db);
+        }
+        assert_eq!(schema_version(&expected_db), SUPPORTED_SCHEMA_VERSION);
+        assert_eq!(stored_project_id(&expected_db), expected_id);
+
+        let conn = Connection::open(&expected_db).unwrap();
+        let bindings: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM project_metadata WHERE key = 'project_id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(bindings, 1);
+    }
+
     #[test]
     fn mismatched_copied_database_is_rejected() {
         let tmp = tempfile::tempdir().unwrap();
@@ -5715,6 +6157,63 @@ mod tests {
         std::fs::set_permissions(&db, fs::Permissions::from_mode(0o600)).unwrap();
     }
 
+    /// A zero-byte database file that is also unwritable.
+    ///
+    /// Deciding what a zero-byte file is now means asking SQLite for the write
+    /// lock on it, and a file this process cannot write is a case that answer
+    /// has to survive: the refusal must still be a refusal that names the file,
+    /// and it must not hang waiting for a creator that cannot exist.
+    #[cfg(unix)]
+    #[test]
+    fn a_zero_byte_database_that_cannot_be_written_is_still_refused() {
+        use std::os::unix::fs::PermissionsExt;
+
+        // Root can write to 0400 files regardless; the scenario does not
+        // exist for that user, so the regression test says nothing there.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let db = fixture.runtime.database_path();
+
+        std::fs::write(&db, []).unwrap();
+        std::fs::set_permissions(&db, fs::Permissions::from_mode(0o400)).unwrap();
+
+        let started = std::time::Instant::now();
+        let err = fixture.rebootstrap().unwrap_err();
+        let waited = started.elapsed();
+        let msg = format!("{err:#}");
+
+        assert!(msg.contains(db.display().to_string().as_str()), "{msg}");
+        // The refusal is the same one a writable empty file gets: the lock
+        // probe finds the lock free and the file still empty, and nothing
+        // else -- not a `Sql` error from the read-only connection, not a
+        // `CreationWaitTimedOut` -- is allowed to stand in for it.
+        assert!(
+            err.chain().any(|cause| matches!(
+                cause.downcast_ref::<DatabaseError>(),
+                Some(DatabaseError::EmptyExisting { .. })
+            )),
+            "expected EmptyExisting, got: {msg}"
+        );
+        assert!(
+            waited < CREATION_LOCK_WAIT,
+            "refusing an unwritable empty file took {waited:?}; nothing can be \
+             creating a file this process cannot write, so nothing should be \
+             waited for"
+        );
+        assert_eq!(
+            std::fs::metadata(&db).unwrap().len(),
+            0,
+            "a refused open must leave the file byte-identical"
+        );
+
+        // Restore so the temp directory can be cleaned up.
+        std::fs::set_permissions(&db, fs::Permissions::from_mode(0o600)).unwrap();
+    }
+
     #[cfg(unix)]
     #[test]
     fn new_database_file_is_owner_only() {
@@ -5782,6 +6281,21 @@ mod tests {
             std::fs::metadata(&db).unwrap().len(),
             0,
             "a refused open must leave the file byte-identical"
+        );
+
+        // Nor may it have left anything beside the file. Deciding what a
+        // zero-byte file is now means taking SQLite's write lock on it, and a
+        // connection in the default journal mode creates a `-journal` sidecar
+        // to do that; `lock_probe_connection` asks for `journal_mode = MEMORY`
+        // precisely so that a refusal writes nothing anywhere.
+        let leftovers: Vec<String> = std::fs::read_dir(db.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|name| name.starts_with("glasshouse.db") && name != "glasshouse.db")
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "a refused open must leave no sidecar files behind; found {leftovers:?}"
         );
     }
 
