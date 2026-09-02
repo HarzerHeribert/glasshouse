@@ -180,3 +180,38 @@ Recorded scope limits — stated by the worker, not discovered later:
 ---
 
 ---
+
+---
+
+## 542 — audited 2026-09-02 on `cluster-b.py`'s census: it stays ticked, with the limit that was never written down
+
+`scripts/cluster-b.py` (its test boundary fixed the same morning, `b6b4d17`)
+lists `DisposableRouting::for_glasshouses_own_run` (`routing/disposable.rs:959`)
+and `MeteredUse::for_automated_run` (`:134`) — the two constructors the entry
+above closed *"line 539"* on (today's **542**) — with **no production caller**,
+the shape behind every wrongly ticked box this project has corrected. Checked
+before ruling, because the act is authority-carrying:
+
+- **The run the line names is the project's own test suite**, and that is
+  where the callers are: `tests/routing_live.rs:74` and `:164` build the
+  automated-run policy through exactly these two constructors, and
+  `a_free_model_answers_through_a_real_gateway` (`#[ignore]`d, credential-
+  gated) would make a real request to a real router — so the code path that
+  could do the forbidden thing exists (Cluster Q's own test), and the first,
+  never-ignored test in that file asserts the policy refuses a metered
+  resource and names `GLASSHOUSE_ALLOW_METERED_MODELS` as the switch.
+  `tests/routing_score.rs:103` is the second caller. A "no production caller"
+  finding is the *expected* shape for a line whose subject is the test runs.
+- **The evaluation half has no producer.** `JobKind::Evaluation` is
+  constructed only in `routing/disposable.rs`'s own tests (`:2093`, `:2120`);
+  nothing in the binary dispatches an evaluation job (`cli.rs` has `Doctor`
+  and no evaluation command; `evaluation/mod.rs` records observations from
+  `glasshouse hook` and runs nothing). Until Phase 51 gives Glasshouse an
+  automated evaluation run, that half of the line is satisfied by the same
+  policy with nobody to apply it.
+
+**Ruling: 542 stays COMPLETE**, on the test-run half, with the evaluation-run
+half recorded here as the limit. When Phase 51's first dispatching package
+lands, its packet owes this entry a production caller of
+`for_glasshouses_own_run` — that is the moment the census line above stops
+being expected and starts being the finding.

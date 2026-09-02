@@ -3398,3 +3398,58 @@ advisory precisely because a stale association is worse than none.
 can identify a reference reliably it will be needed. Until then, a test
 asserting a row says `observed` is also, structurally, asserting that no
 production path invented `referenced`.
+
+## SQLite write contention: short transactions, `BEGIN IMMEDIATE` where two processes meet, no WAL — decided 2026-09-02
+
+**The question.** The Windows flake family (`phase-54a.md`, 2026-09-02) had one
+member that was not a stub defect: `checkpoint_portability`'s two-writer race
+starved one thread past the five-second busy timeout on the loaded ARM64 VM.
+Every connection `database::open` hands out is rollback-journal with a
+five-second `busy_timeout` and SQLite's busy handler has no fairness. The
+test's workload was two threads writing a hundred rows each in a tight loop.
+Whether any *product* path produces contention of that shape was recon'd
+(`GH-SQLITE-CONTENTION-RECON`, read-only, 2026-09-02) before anything was
+changed.
+
+**What the census found.** Seven production constructors go through
+`database::open`. Every write transaction on a production path is a single
+autocommit `INSERT`/`UPDATE` or a small bounded batch: the checkpoint store's
+`save` (`checkpoint/store.rs:229-244`), the routing ledger's one row per
+forwarded exchange (`routing/evidence.rs:2680`), the event log's one row per
+lifecycle event drained by a dedicated writer thread and never per PTY byte
+(`events/log.rs:759-800`), the evaluation store's per-task batch
+(`evaluation/mod.rs:865-895`), and the session store's `in_a_write_transaction`
+(`session/store.rs:1901-1918`) — one `SELECT` plus one `UPDATE` under
+`BEGIN IMMEDIATE`. Nothing loops rows from one connection. The events that
+drive these writes — a completed turn, a forwarded exchange, a checkpoint —
+are paced by human and model turn time, seconds to minutes apart.
+
+**Two processes on one project database is real and already handled.** There
+is no single-instance guard anywhere; `glasshouse hook` is a separate
+short-lived OS process spawned by the harness beside the shell or `api serve`
+that supervises the session, and both write `sessions.lifecycle`. That race
+was found once (`session/store.rs:1745-1770` tells the story) and fixed by
+`BEGIN IMMEDIATE`, not by the busy timeout: the ordering is what protects
+correctness, the timeout only bounds the wait.
+
+**Decision.** No WAL, no longer timeout, no retry in the stores. WAL's
+sidecar files would touch `prepare_file`'s permission and symlink checks, the
+read-only detection, the copied-database scenarios `checkpoint_portability`
+proves, and Windows file locking — a Red package that buys nothing while no
+production transaction approaches the timeout. The test that starved was
+fixed as a test (retry on `DatabaseBusy` alone, within a deadline, panicking
+on anything else).
+
+**Validity condition, and what reopens this.** This holds while every
+production write stays a single statement or a small bounded batch. A future
+path that writes many rows in one transaction from one connection, or a
+`database is locked` observed in the field with two Glasshouse processes on
+one project, reopens it — and the first answer then is a bounded retry in the
+store that contends, WAL only if the retry is not enough. The recon flagged
+its own thin spot honestly: the "reachable overlap" claim rests on reading
+the transaction shapes, not on a measured exchange or hook rate, and nothing
+was run on Windows to confirm that the VM's slow rollback-journal fsync does
+not stretch even single-statement writes. A tripwire test over transaction
+shapes was considered and declined: a structural scan of `src/` for
+multi-row loops cannot fail for a real reason, and a test that cannot fail
+for a real reason is the shape §65 warns about.
