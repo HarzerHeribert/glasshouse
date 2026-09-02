@@ -56,7 +56,14 @@ for f in files:
     start = 10**9
     for i, l in enumerate(ls, 1):
         if l.strip().startswith("#[cfg(test)]"):
-            start = i; break
+            # The file's test MODULE, not an item-level `#[cfg(test)]` on one
+            # fn or const: config/mod.rs carries one on a helper at line 657
+            # of 9,800, and taking it as the boundary made every production
+            # caller after it -- recent_credential_spend's at :2565 among
+            # them -- count as a test call (found 2026-09-02).
+            following = next((x.strip() for x in ls[i:] if x.strip()), "")
+            if re.match(r"(pub(\([^)]*\))?\s+)?mod\s", following):
+                start = i; break
     test_start[f] = start
 
 defs = {}
