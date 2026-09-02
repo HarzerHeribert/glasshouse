@@ -435,6 +435,13 @@ pub struct Destination {
     /// score into a band are configuration this module does not read, and
     /// the reset is not in the score at all.
     capacity_facts: CapacityFacts,
+    /// Phase 32E line 1280: what `super::burn::forecast` made of this
+    /// destination's resource, resolved by the caller from the evidence
+    /// ledger's own rows and the same `CapacityState` `capacity_facts` came
+    /// from. `None` — the default, and the value on every build that reads
+    /// no ledger — makes `super::pressure::exhaustion_forecast_pressure`
+    /// inert.
+    burn_forecast: Option<super::burn::ExhaustionForecast>,
     /// Every wire protocol the serving provider offers, not only the one
     /// [`Backend::protocol`] names.
     ///
@@ -552,6 +559,7 @@ impl Destination {
             continuation,
             capacity: None,
             capacity_facts: CapacityFacts::UNREAD,
+            burn_forecast: None,
             provider_protocols: pairing::wire_protocol_from_slug(&protocol)
                 .into_iter()
                 .collect(),
@@ -599,6 +607,21 @@ impl Destination {
 
     pub fn capacity_facts(&self) -> CapacityFacts {
         self.capacity_facts
+    }
+
+    /// Attach the exhaustion forecast for this destination's resource — line
+    /// 1280. The caller resolves it from `super::burn::forecast` over the
+    /// rows `crate::routing::evidence::EvidenceLedger::consumption_in_window`
+    /// returned; this module reads no ledger of its own, exactly as it reads
+    /// no telemetry of its own for `capacity`.
+    #[must_use]
+    pub fn with_burn_forecast(mut self, forecast: Option<super::burn::ExhaustionForecast>) -> Self {
+        self.burn_forecast = forecast;
+        self
+    }
+
+    pub fn burn_forecast(&self) -> Option<super::burn::ExhaustionForecast> {
+        self.burn_forecast
     }
 
     /// Declare every protocol the serving provider offers — line 1595. The
@@ -4456,6 +4479,7 @@ impl SessionRouter {
                     policies: self.reserve_policies,
                     scope: ReserveScope::Interactive,
                     user_override: self.reserve_overridden(destination),
+                    forecast: destination.burn_forecast(),
                 };
                 let explanation = score(
                     destination,
@@ -4690,6 +4714,12 @@ fn score(
     // reading it qualifies, so a reader sees the percentage and the band
     // together.
     explanation.push(pressure::capacity_band_pressure(pressure));
+    // Phase 32E line 1280: the forecast, right after the band it
+    // strengthens — a reader sees "tight" and "and it may not reach its
+    // reset" together, in that order. Inert and saying so for every
+    // destination with no forecast, which is what keeps a ranking on a
+    // build that reads no ledger byte-for-byte what it was.
+    explanation.push(pressure::exhaustion_forecast_pressure(pressure));
     explanation.push(pressure::low_tier_spend(pressure));
     explanation.push(provider_health(
         destination,

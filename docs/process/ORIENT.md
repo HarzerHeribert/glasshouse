@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1159 / 1332 mandatory capabilities (87%)** — 173 open across 42 phases.
+**1167 / 1332 mandatory capabilities (88%)** — 165 open across 42 phases.
 
 ## Where the work is
 
@@ -41,6 +41,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 21F | Memory retrieval quality | **2** | 9 | `927` |
 | Phase 32C | Subscription capacity estimation | **2** | 10 | `1242` |
 | Phase 32D | Normalized remaining-capacity score | **2** | 10 | `1257` |
+| Phase 32E | Burn rate and exhaustion forecasting | **2** | 8 | `1272` |
 | Phase 33 | Resource health | **2** | 13 | `1309` |
 | Phase 38 | Quota-preserving routing | **2** | 5 | `1604` |
 | Phase 55 | V1 completion definition | **2** | 21 | `1910` |
@@ -60,7 +61,6 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 9K | Harness-aware response profiles | **8** | 29 | `578` |
 | Phase 32A | Unified quota and capacity model | **8** | 13 | `1196` |
 | Phase 35B | Candidate scoring | **8** | 17 | `1523` |
-| Phase 32E | Burn rate and exhaustion forecasting | **10** | 0 | `1272` |
 | Phase 33B | Reliability-adjusted agent performance | **10** | 4 | `1345` |
 | Phase 35A | Candidate generation | **10** | 1 | `1504` |
 | Phase 51 | Evaluation hooks | **25** | 12 | `1818` |
@@ -71,7 +71,7 @@ closures are usually at the top. Open the map at the line number given.
 
 Every phase with **three or fewer** open lines, quoted verbatim. These are
 where a single package finishes a phase, so they are listed here and the
-other ~132 open lines are not.
+other ~122 open lines are not.
 
 For any other phase: `scripts/discover.py --phase <id>` prints its open
 lines and evidence together. **Do not open the 178 KB map to read them.**
@@ -162,6 +162,11 @@ these unwrapped.
 
 - **1263** ☐ Lower the score when user-defined spending budget is close to exhaustion.
 - **1267** ☐ Treat unlimited local inference as high-capacity but still account for measured latency and concurrency.
+
+### Phase 32E — Burn rate and exhaustion forecasting  (2 open, 8 closed)
+
+- **1275** ☐ Maintain a short moving average of token consumption per task class.
+- **1276** ☐ Maintain a short moving average of requests consumed per task class.
 
 ### Phase 33 — Resource health  (2 open, 13 closed)
 

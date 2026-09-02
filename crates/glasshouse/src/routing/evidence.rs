@@ -729,6 +729,10 @@ pub struct NewObservation {
     pub outcome: Option<Outcome>,
     /// What kind of failure this was, when it was one — see [`FailureClass`].
     pub failure_class: Option<FailureClass>,
+    /// Which class of work this request was, when the producer classified one
+    /// — see [`super::request::TaskClass`] and `crate::database` migration
+    /// 23.
+    pub task_class: Option<super::request::TaskClass>,
 
     pub context_state: ContextState,
 }
@@ -759,6 +763,7 @@ impl NewObservation {
             failovers: None,
             outcome: None,
             failure_class: None,
+            task_class: None,
             context_state: ContextState::Unknown,
         }
     }
@@ -865,6 +870,21 @@ impl NewObservation {
         self
     }
 
+    /// Which class of work this request was — capability map line 1276, and
+    /// the missing link between `super::request::RouterAnswer::task_class`
+    /// (which has existed since Phase 34C) and any reader of history.
+    ///
+    /// `None` is "this producer did not classify", the same honest absence
+    /// every other nullable column carries, and it is what every gateway row
+    /// carries: the gateway relays a turn and never runs the classifier.
+    /// [`super::burn::task_class_request_rates`] counts only rows that name
+    /// a class, so an absent one lowers no average rather than joining a
+    /// bucket it did not earn.
+    pub fn with_task_class(mut self, task_class: Option<super::request::TaskClass>) -> Self {
+        self.task_class = task_class;
+        self
+    }
+
     /// How many times this exchange's own outcome moved the session to
     /// another backend — capability map line 1334's `failovers`, the one of
     /// its four counters a gateway exchange can honestly supply, because the
@@ -941,6 +961,11 @@ pub struct RoutingObservation {
     /// `None` for a served exchange, and for every row written before
     /// migration 18 — see [`FailureClass`].
     pub failure_class: Option<FailureClass>,
+    /// `None` for a row whose producer ran no classifier, for every row
+    /// written before migration 23, **and** for a row whose stored word this
+    /// build does not recognise — see migration 23's own doc comment for why
+    /// the third case is not an error the way an unknown `failure_class` is.
+    pub task_class: Option<super::request::TaskClass>,
 
     pub context_state: ContextState,
 }
@@ -2652,7 +2677,7 @@ impl EvidenceLedger {
                 input_tokens, output_tokens, cached_input_tokens,
                 cost_micro_usd, cost_confidence,
                 tool_rounds, retries, repairs, failovers, outcome,
-                context_state, failure_class
+                context_state, failure_class, task_class
             ) VALUES (
                 ?1, ?2,
                 ?3, ?4, ?5, ?6, ?7, ?8,
@@ -2660,7 +2685,7 @@ impl EvidenceLedger {
                 ?14, ?15, ?16,
                 ?17, ?18,
                 ?19, ?20, ?21, ?22, ?23,
-                ?24, ?25
+                ?24, ?25, ?26
             )",
             params![
                 self.project_id,
@@ -2688,6 +2713,7 @@ impl EvidenceLedger {
                 new.outcome.map(Outcome::as_str),
                 new.context_state.as_str(),
                 new.failure_class.map(FailureClass::as_str),
+                new.task_class.map(super::request::TaskClass::as_str),
             ],
         )
         .map_err(sql_err("record a routing observation"))?;
@@ -3074,6 +3100,59 @@ impl EvidenceLedger {
                 row_to_observation,
             )
             .map_err(sql_err("read routing observations in a window"))?;
+        let mut observations = Vec::new();
+        for row in rows {
+            observations.push(row.map_err(sql_err("read a routing observation"))??);
+        }
+        Ok(observations)
+    }
+
+    /// Every observation in the window ending at `now_unix`, **whether or
+    /// not it carries an outcome** — the row set a *consumption* reader
+    /// needs, and the one [`Self::observations_in_window`] deliberately
+    /// cannot serve.
+    ///
+    /// # Why this is not `observations_in_window` with a flag
+    ///
+    /// [`Self::observations_in_window`] filters `outcome IS NOT NULL`
+    /// because its callers classify *how exchanges went* — a throttle scope,
+    /// a route correlation, a failure-class census — and a row with no
+    /// recorded outcome is not evidence about that question.
+    ///
+    /// Capability map lines 1274 and 1276 ask a different question: how much
+    /// of a resource was **consumed**. A request whose outcome nobody wrote
+    /// down still consumed the request. And the one producer that carries a
+    /// task class today — `main.rs::record_routing_latency`, which is the
+    /// only caller holding a `super::request::RouterAnswer` — records no
+    /// outcome at all, so every row line 1276 is about is invisible to the
+    /// other read. Widening that read instead would silently change what
+    /// four existing classifiers count, which is the opposite of what a new
+    /// line is allowed to do.
+    ///
+    /// Ordered by `observed_at` ascending, like its sibling, because
+    /// [`super::burn`] buckets by time and an idle gap is a property of
+    /// consecutive rows.
+    pub fn consumption_in_window(
+        &self,
+        now_unix: i64,
+        window_seconds: i64,
+    ) -> Result<Vec<RoutingObservation>, EvidenceLedgerError> {
+        let earliest = now_unix.saturating_sub(window_seconds);
+        let conn = self.lock();
+        let mut statement = conn
+            .prepare(
+                "SELECT * FROM routing_observations
+                 WHERE project_id = ?1
+                   AND observed_at >= ?2 AND observed_at <= ?3
+                 ORDER BY observed_at ASC",
+            )
+            .map_err(sql_err("read routing consumption in a window"))?;
+        let rows = statement
+            .query_map(
+                params![self.project_id, earliest, now_unix],
+                row_to_observation,
+            )
+            .map_err(sql_err("read routing consumption in a window"))?;
         let mut observations = Vec::new();
         for row in rows {
             observations.push(row.map_err(sql_err("read a routing observation"))??);
@@ -3530,6 +3609,15 @@ fn row_to_observation(
         },
     };
 
+    // Migration 23, and deliberately not `failure_class`'s shape above: an
+    // unrecognised word is `None`, not an `UnknownValue`. See the migration's
+    // own doc comment -- a class is a bucketing input to an average, and a
+    // future build's sixth class must not break an older build's burn rate.
+    let task_class_text: Option<String> = row.get("task_class")?;
+    let task_class = task_class_text
+        .as_deref()
+        .and_then(super::request::TaskClass::from_stored);
+
     let context_text: String = row.get("context_state")?;
     let Some(context_state) = ContextState::from_stored(&context_text) else {
         return Ok(Err(EvidenceLedgerError::UnknownValue {
@@ -3594,6 +3682,7 @@ fn row_to_observation(
         failovers: row.get("failovers")?,
         outcome,
         failure_class,
+        task_class,
         context_state,
     }))
 }
@@ -4958,6 +5047,7 @@ mod correlation_tests {
                 Outcome::Succeeded
             }),
             failure_class: class,
+            task_class: None,
             context_state: ContextState::Unknown,
         }
     }
@@ -5280,6 +5370,7 @@ mod throttle_scope_tests {
                 Outcome::Succeeded
             }),
             failure_class: class,
+            task_class: None,
             context_state: ContextState::Unknown,
         }
     }
@@ -5605,6 +5696,7 @@ mod credential_throttle_tests {
                 Outcome::Succeeded
             }),
             failure_class: class,
+            task_class: None,
             context_state: ContextState::Unknown,
         }
     }
@@ -5714,6 +5806,7 @@ mod credential_spend_tests {
             failovers: None,
             outcome: Some(Outcome::Succeeded),
             failure_class: None,
+            task_class: None,
             context_state: ContextState::Unknown,
         }
     }

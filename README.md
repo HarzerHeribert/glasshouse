@@ -19,7 +19,7 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`██████████████████████████████████░░░░░░` 1159 / 1332 mandatory capabilities (87%)
+`███████████████████████████████████░░░░░` 1167 / 1332 mandatory capabilities (87%)
 
 <details>
 <summary>Per-phase breakdown (65 of 107 phases complete)</summary>
@@ -90,7 +90,7 @@ the authoritative specification and tracks what is done.
 | Phase 32B — Quota telemetry sources | 14/14 ✅ |
 | Phase 32C — Subscription capacity estimation | 10/12 |
 | Phase 32D — Normalized remaining-capacity score | 10/12 |
-| Phase 32E — Burn rate and exhaustion forecasting | 0/10 |
+| Phase 32E — Burn rate and exhaustion forecasting | 8/10 |
 | Phase 32F — Protected quota reserve | 7/8 |
 | Phase 32G — Provider-aware request-cost estimation | 6/10 |
 | Phase 33 — Resource health | 13/15 |

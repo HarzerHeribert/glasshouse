@@ -121,9 +121,16 @@ pub(crate) const DATABASE_FILE_NAME: &str = "glasshouse.db";
 /// migration's own doc comment for why `backend_resource` could not answer
 /// it, why the column holds a name and never a credential, and why it is
 /// nullable with no `CHECK`.
+/// Version 23 adds `routing_observations.task_class`, capability map line
+/// 1276's *"requests consumed per task class"* — one nullable `TEXT` column
+/// with no `CHECK`, migration 18's shape exactly. See the migration's own
+/// doc comment for why the class is persisted rather than recomputed, why an
+/// unrecognised stored word reads back as `None` rather than as an error
+/// (unlike `failure_class`), and
+/// [`crate::routing::burn`] for the only reader.
 /// Later migrations are appended to [`MIGRATIONS`], and this constant moves
 /// with them.
-const SUPPORTED_SCHEMA_VERSION: i64 = 22;
+const SUPPORTED_SCHEMA_VERSION: i64 = 23;
 
 /// The `lifecycle_events.kind` values migration 5's `CHECK` constraint allows.
 ///
@@ -207,6 +214,31 @@ const FAILURE_CLASSES: [&str; 9] = [
     "credential_failure",
     "request_incompatibility",
     "unknown",
+];
+
+/// The `routing_observations.task_class` values this build writes —
+/// capability map line 1276's vocabulary, migration 23.
+///
+/// **Deliberately not a SQL `CHECK`**, for [`FAILURE_CLASSES`]' reasons, and
+/// with one more of its own: the production reader
+/// (`crate::routing::request::TaskClass::from_stored`) answers `None` for an
+/// unrecognised word rather than failing the row, so a `CHECK` would be the
+/// *only* thing in the system that could refuse one — and it would refuse it
+/// at the writer, on a future build's own valid class.
+///
+/// Five entries, in [`crate::routing::request::TaskClass`]'s declaration
+/// order, pinned against it by
+/// `every_task_class_the_type_supports_is_one_the_schema_records`.
+///
+/// `#[cfg(test)]` for [`FAILURE_CLASSES`]' reason: the pinning test is this
+/// constant's only consumer.
+#[cfg(test)]
+const TASK_CLASSES: [&str; 5] = [
+    "question",
+    "investigation",
+    "code modification",
+    "shell work",
+    "browser work",
 ];
 
 /// The `memory_files.provenance` values this build writes.
@@ -2303,6 +2335,60 @@ const MIGRATIONS: [&str; SUPPORTED_SCHEMA_VERSION as usize] = [
     "
     ALTER TABLE sessions ADD COLUMN entitlement TEXT;
     ",
+    // 23: `routing_observations.task_class` — capability map line 1276's
+    // *"short moving average of requests consumed per task class"*, whose
+    // producer has existed since Phase 34C and whose row has never carried
+    // it.
+    //
+    // # Persisted, not recomputed
+    //
+    // `crate::routing::request::RouterAnswer::task_class` derives the class
+    // from a `TaskClassification` that lives only for the duration of one
+    // routing decision: the classification is not stored anywhere, so a
+    // reader looking at yesterday's rows has nothing to derive from. A
+    // moving average over task classes is a read of *history*, and history
+    // is exactly what is unavailable unless the class is written down at the
+    // moment it is known. `main.rs::record_routing_latency` already holds
+    // the `RouterAnswer` and already writes the row; this column is the one
+    // missing link between them.
+    //
+    // # `ADD COLUMN`, nullable, no `CHECK`, no index
+    //
+    // Migration 18's shape and its reasons, unchanged. `NULL` backfills every
+    // existing row, which is the honest reading for a row written before the
+    // class was recorded — "this build named no class here", never "no
+    // class". No `CHECK`, for `FAILURE_CLASSES`' reason: the vocabulary is
+    // `crate::routing::request::TaskClass`, five variants pinned in Rust by
+    // `every_task_class_the_type_supports_is_one_the_schema_records`, and a
+    // `CHECK` would cost a table rebuild the first time a sixth class is
+    // added. No index: the one reader
+    // (`crate::routing::burn::task_class_request_rates`) is a bounded pass
+    // over a window `routing_observations_by_route_time` already serves, and
+    // migration 15's closing note applies — measure before indexing.
+    //
+    // # An unrecognised word reads back as `None`, unlike `failure_class`
+    //
+    // `row_to_observation` reports an unrecognised `failure_class` as
+    // `EvidenceLedgerError::UnknownValue`, because a failure whose kind this
+    // build cannot name is a fact a reader must not silently lose. A task
+    // class is not that: it is a *bucketing* input to an average, and a row
+    // whose class this build does not recognise is exactly as informative as
+    // a row from before the column existed — one more request, of no class
+    // this build counts. Failing the whole row would make a future build's
+    // sixth class break an older build's burn rate, which is a worse outcome
+    // than the older build ignoring one bucket it never knew about.
+    //
+    // # What may write it
+    //
+    // `main.rs::record_routing_latency`, from
+    // `crate::routing::request::TaskClass::as_str`, which is
+    // `&'static str` precisely so no runtime string can reach this column.
+    // Nothing parses a relayed response body to fill it: the class comes
+    // from Glasshouse's own classification of the *request*, never from
+    // anything a provider said.
+    "
+    ALTER TABLE routing_observations ADD COLUMN task_class TEXT;
+    ",
 ];
 
 pub(crate) const PROJECT_ID_KEY: &str = "project_id";
@@ -2877,9 +2963,11 @@ mod tests {
     /// nothing indexes `presentation_ref` and it carries no `CHECK`.
     /// Migrations 21 and 22 are each one statement for the same reason —
     /// nothing indexes `last_seen_commit`, `extraction_trigger` or
-    /// `entitlement` and none of the three carries a `CHECK`. Newest first,
-    /// so 22 leads.
+    /// `entitlement` and none of the three carries a `CHECK`. Migration 23 is
+    /// one statement for the same reason — nothing indexes `task_class` and
+    /// it carries no `CHECK`. Newest first, so 23 leads.
     const UNDO_MIGRATIONS_ABOVE_THIRTEEN: &str = "
+        ALTER TABLE routing_observations DROP COLUMN task_class;
         ALTER TABLE sessions DROP COLUMN entitlement;
         ALTER TABLE memories DROP COLUMN extraction_trigger;
         ALTER TABLE sessions DROP COLUMN last_seen_commit;
@@ -3037,6 +3125,37 @@ mod tests {
         assert_eq!(FailureClass::from_stored(""), None);
     }
 
+    /// Migration 23's `task_class` carries **no** `CHECK`, so nothing in SQL
+    /// pins it — this test is the guarantee, exactly as
+    /// `every_failure_class_the_type_supports_is_one_the_schema_records` is
+    /// for migration 18.
+    ///
+    /// Two independently written spellings: [`TASK_CLASSES`], beside the
+    /// migration where a schema reader looks, and
+    /// [`crate::routing::request::TaskClass`], which the writer stores.
+    /// Neither is derived from the other.
+    #[test]
+    fn every_task_class_the_type_supports_is_one_the_schema_records() {
+        use crate::routing::request::TaskClass;
+
+        let declared: Vec<&str> = TaskClass::ALL.iter().map(|class| class.as_str()).collect();
+        assert_eq!(
+            declared,
+            TASK_CLASSES.to_vec(),
+            "a task class was added, renamed or reordered on one side only"
+        );
+        assert_eq!(TASK_CLASSES.len(), 5, "the type declares five");
+
+        for class in TaskClass::ALL {
+            assert_eq!(TaskClass::from_stored(class.as_str()), Some(class));
+        }
+        // An unrecognised word reads as no class — never an error, and never
+        // a class this build invented. Migration 23's own doc comment says
+        // why this differs from `failure_class`.
+        assert_eq!(TaskClass::from_stored("code_modification"), None);
+        assert_eq!(TaskClass::from_stored(""), None);
+    }
+
     /// The column names of `table`, in declaration order.
     fn columns_of(conn: &Connection, table: &str) -> Vec<String> {
         let mut statement = conn
@@ -3082,6 +3201,7 @@ mod tests {
         // `duplicate column name` — `UNDO_MIGRATIONS_ABOVE_THIRTEEN`'s own
         // lesson.
         const UNDO_18: &str = "
+            ALTER TABLE routing_observations DROP COLUMN task_class;
             ALTER TABLE sessions DROP COLUMN entitlement;
             ALTER TABLE memories DROP COLUMN extraction_trigger;
             ALTER TABLE sessions DROP COLUMN last_seen_commit;
@@ -3131,7 +3251,13 @@ mod tests {
             let columns = columns_of(&conn, "routing_observations");
             let mut expected = columns_at_17.clone();
             expected.push("failure_class".to_owned());
-            assert_eq!(columns, expected, "exactly one column, appended");
+            // Migration 23 appends `task_class` to the same table, so a
+            // forward run from 17 now lands two columns rather than one.
+            // Both are asserted by name and in order, which is the property
+            // this test was always about — migration 18 appended
+            // `failure_class` and rebuilt nothing.
+            expected.push("task_class".to_owned());
+            assert_eq!(columns, expected, "exactly two columns, both appended");
         }
 
         // The pre-migration row reads as *unknown kind*, never as a class,
@@ -3195,6 +3321,176 @@ mod tests {
         assert_eq!(schema_version(&db_path), 17);
     }
 
+    /// Migration proof for 23: a version-22 database that already holds a
+    /// routing observation opens, migrates to 23 adding exactly one column,
+    /// reads the old row's `task_class` as unnamed rather than as a class,
+    /// records a classified row through the real writer, reads an
+    /// unrecognised stored word back as `None` **rather than as an error**
+    /// (migration 18's one deliberate difference), and the undo takes the
+    /// whole schema back to exactly what it was — every table, index and
+    /// trigger, the two project-scope triggers included.
+    ///
+    /// One connection at a time throughout (practice §65): every handle is
+    /// dropped before the next is opened and before the re-bootstrap.
+    #[test]
+    fn migration_23_adds_task_class_and_undoes_cleanly() {
+        use crate::routing::evidence::{EvidenceLedger, NewObservation, ObservationQuery, Outcome};
+        use crate::routing::request::TaskClass;
+
+        const UNDO_23: &str = "
+            ALTER TABLE routing_observations DROP COLUMN task_class;
+            DELETE FROM schema_migrations WHERE version >= 23;
+        ";
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let db_path = fixture.runtime.database_path();
+        let project_id = stored_project_id(&db_path);
+
+        // Back to 22, with a row written the way a version-22 build wrote
+        // them — no `task_class` to name.
+        let (schema_at_22, columns_at_22) = {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(UNDO_23).unwrap();
+            conn.execute(
+                "INSERT INTO routing_observations (project_id, observed_at, provider, model, outcome)
+                 VALUES (?1, 1, 'pre-migration', 'm', 'succeeded')",
+                [&project_id],
+            )
+            .unwrap();
+            (
+                whole_schema(&conn),
+                columns_of(&conn, "routing_observations"),
+            )
+        };
+        assert_eq!(schema_version(&db_path), 22, "the rollback must land on 22");
+        assert!(
+            !columns_at_22.iter().any(|column| column == "task_class"),
+            "{columns_at_22:?}"
+        );
+
+        // Forward: an ordinary bootstrap, exactly as a real upgrade happens.
+        let migrated = fixture.rebootstrap().unwrap();
+        assert_eq!(
+            schema_version(&migrated.database_path()),
+            SUPPORTED_SCHEMA_VERSION,
+            "the launch must have applied migration 23"
+        );
+        assert_eq!(
+            SUPPORTED_SCHEMA_VERSION, 23,
+            "a fresh database reports the version this migration ships"
+        );
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            let columns = columns_of(&conn, "routing_observations");
+            let mut expected = columns_at_22.clone();
+            expected.push("task_class".to_owned());
+            assert_eq!(columns, expected, "exactly one column, appended");
+        }
+
+        // The pre-migration row names no class; a row written now carries
+        // the class it was given.
+        {
+            let ledger = EvidenceLedger::open(&migrated).unwrap();
+            let query = |provider| ObservationQuery {
+                provider,
+                model: "m",
+                route: None,
+                harness: None,
+            };
+            let pre = ledger.recent(query("pre-migration"), 1).unwrap();
+            assert_eq!(pre.len(), 1);
+            assert_eq!(
+                pre[0].task_class, None,
+                "a row from before the column existed names no class, not an `unknown` class"
+            );
+
+            ledger
+                .record(
+                    NewObservation::new("post-migration", "m")
+                        .with_outcome(Outcome::Succeeded)
+                        .with_task_class(Some(TaskClass::CodeModification)),
+                    2,
+                )
+                .unwrap();
+            let post = ledger.recent(query("post-migration"), 1).unwrap();
+            assert_eq!(post[0].task_class, Some(TaskClass::CodeModification));
+        }
+
+        // A word this build does not recognise reads back as *no class*, and
+        // — the property that separates this column from `failure_class` —
+        // the row itself still reads. An `UnknownValue` here would let a
+        // future build's sixth class break this build's burn rate.
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute(
+                "INSERT INTO routing_observations
+                     (project_id, observed_at, provider, model, outcome, task_class)
+                 VALUES (?1, 3, 'future-build', 'm', 'succeeded', 'quantum tinkering')",
+                [&project_id],
+            )
+            .unwrap();
+        }
+        {
+            let ledger = EvidenceLedger::open(&migrated).unwrap();
+            let future = ledger
+                .recent(
+                    ObservationQuery {
+                        provider: "future-build",
+                        model: "m",
+                        route: None,
+                        harness: None,
+                    },
+                    1,
+                )
+                .unwrap();
+            assert_eq!(future.len(), 1, "the row reads, it does not error");
+            assert_eq!(future[0].task_class, None);
+            assert_eq!(future[0].outcome, Some(Outcome::Succeeded));
+        }
+
+        // Project isolation survives 23 → 22 → 23: `ADD COLUMN` does not
+        // drop a trigger, and neither does `DROP COLUMN`, but the schema
+        // comparison below is what proves it rather than the claim.
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            let refused = conn.execute(
+                "INSERT INTO routing_observations (project_id, observed_at, provider, model)
+                 VALUES ('another-project', 4, 'p', 'm')",
+                [],
+            );
+            assert!(
+                refused.is_err(),
+                "the foreign-project trigger must still refuse after 22 → 23"
+            );
+        }
+
+        // Back again: the whole schema is what it was at 22, byte for byte,
+        // and the rows are still there.
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(UNDO_23).unwrap();
+            assert_eq!(whole_schema(&conn), schema_at_22);
+            assert_eq!(columns_of(&conn, "routing_observations"), columns_at_22);
+            let rows: i64 = conn
+                .query_row("SELECT COUNT(*) FROM routing_observations", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(rows, 3, "dropping the column drops no rows");
+            let refused = conn.execute(
+                "INSERT INTO routing_observations (project_id, observed_at, provider, model)
+                 VALUES ('another-project', 5, 'p', 'm')",
+                [],
+            );
+            assert!(
+                refused.is_err(),
+                "the foreign-project trigger must still refuse after 23 → 22"
+            );
+        }
+        assert_eq!(schema_version(&db_path), 22);
+    }
+
     /// Migration proof for 19: a version-18 database opens, migrates to 19
     /// adding exactly two tables with their indexes and triggers, accepts an
     /// assumption and a transition through the real writer, refuses an edit
@@ -3222,6 +3518,7 @@ mod tests {
         // fails with `duplicate column name` instead of proving anything about
         // 19. A migration 21 owes this constant its own line.
         const UNDO_19: &str = "
+            ALTER TABLE routing_observations DROP COLUMN task_class;
             ALTER TABLE sessions DROP COLUMN entitlement;
             ALTER TABLE memories DROP COLUMN extraction_trigger;
             ALTER TABLE sessions DROP COLUMN last_seen_commit;
@@ -3402,6 +3699,7 @@ mod tests {
         use crate::session::{NewSession, ProjectSessions, SessionId, SessionPresentation};
 
         const UNDO_20: &str = "
+            ALTER TABLE routing_observations DROP COLUMN task_class;
             ALTER TABLE sessions DROP COLUMN entitlement;
             ALTER TABLE memories DROP COLUMN extraction_trigger;
             ALTER TABLE sessions DROP COLUMN last_seen_commit;
@@ -3521,6 +3819,7 @@ mod tests {
         use crate::session::{NewSession, ProjectSessions};
 
         const UNDO: &str = "
+            ALTER TABLE routing_observations DROP COLUMN task_class;
             ALTER TABLE sessions DROP COLUMN entitlement;
             ALTER TABLE memories DROP COLUMN extraction_trigger;
             ALTER TABLE sessions DROP COLUMN last_seen_commit;
@@ -3696,6 +3995,7 @@ mod tests {
         use crate::session::{NewSession, ProjectSessions};
 
         const UNDO: &str = "
+            ALTER TABLE routing_observations DROP COLUMN task_class;
             ALTER TABLE sessions DROP COLUMN entitlement;
             DELETE FROM schema_migrations WHERE version >= 22;
         ";
@@ -3736,7 +4036,7 @@ mod tests {
             "the launch must have applied the entitlement migration"
         );
         assert_eq!(
-            SUPPORTED_SCHEMA_VERSION, 22,
+            SUPPORTED_SCHEMA_VERSION, 23,
             "a fresh database reports the version this migration ships"
         );
         {
@@ -3842,7 +4142,8 @@ mod tests {
             // **every** migration above the version it claims, or the
             // re-run fails — `UNDO_MIGRATIONS_ABOVE_THIRTEEN`'s own lesson.
             conn.execute_batch(
-                "ALTER TABLE sessions DROP COLUMN entitlement;
+                "ALTER TABLE routing_observations DROP COLUMN task_class;
+                 ALTER TABLE sessions DROP COLUMN entitlement;
                 ALTER TABLE memories DROP COLUMN extraction_trigger;
                  ALTER TABLE sessions DROP COLUMN last_seen_commit;
                 ALTER TABLE sessions DROP COLUMN presentation_ref;

@@ -2935,6 +2935,7 @@ mod tests {
     /// `entitlement`, and none of the three carries a `CHECK`. Migration 22's
     /// column is the newest of all, so it leads.
     const UNDO_MIGRATIONS_ABOVE_THIRTEEN: &str = "
+        ALTER TABLE routing_observations DROP COLUMN task_class;
         ALTER TABLE sessions DROP COLUMN entitlement;
         ALTER TABLE memories DROP COLUMN extraction_trigger;
         ALTER TABLE sessions DROP COLUMN last_seen_commit;
@@ -4102,6 +4103,15 @@ mod tests {
                 "routing_observations.outcome",
                 "routing_observations.context_state",
                 "routing_observations.failure_class",
+                // Migration 23 (Phase 32E line 1276). A fixed vocabulary
+                // that lives in Rust — `routing::request::TaskClass`, five
+                // variants — written only from `TaskClass::as_str`, which is
+                // `&'static str` precisely so that no runtime string can
+                // reach this column. It is Glasshouse's own classification
+                // of a *request*, never text from a provider response, and
+                // the one writer (`main.rs::record_routing_latency`) holds
+                // no credential in scope. Nowhere to put one.
+                "routing_observations.task_class",
                 "schema_migrations.version",
                 "sessions.id",
                 "sessions.project_id",
@@ -4312,7 +4322,8 @@ mod tests {
         fixture
             .conn
             .execute_batch(
-                "ALTER TABLE sessions DROP COLUMN entitlement;
+                "ALTER TABLE routing_observations DROP COLUMN task_class;
+                 ALTER TABLE sessions DROP COLUMN entitlement;
                  ALTER TABLE sessions DROP COLUMN last_seen_commit;
                 ALTER TABLE sessions DROP COLUMN presentation_ref;
                  ALTER TABLE sessions DROP COLUMN observed_compactions;
@@ -4351,7 +4362,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            version, 22,
+            version, 23,
             "the launch must have applied migrations 3 through 22"
         );
 
@@ -4543,7 +4554,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            version, 22,
+            version, 23,
             "the launch must have applied migrations 2 through 22"
         );
 
@@ -5567,7 +5578,7 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(
-                version, 22,
+                version, 23,
                 "the launch must have applied migrations 8 through 22"
             );
 
@@ -5696,7 +5707,7 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(
-                version, 22,
+                version, 23,
                 "the reopen must have applied migrations 12 through 22"
             );
 

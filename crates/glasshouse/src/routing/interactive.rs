@@ -2402,6 +2402,7 @@ mod tests {
             failovers: None,
             outcome: Some(Outcome::Failed),
             failure_class: Some(FailureClass::Upstream5xx),
+            task_class: None,
             context_state: ContextState::Unknown,
         };
         let mut rows = Vec::new();

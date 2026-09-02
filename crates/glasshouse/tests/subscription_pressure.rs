@@ -645,6 +645,7 @@ fn interactive_and_background_reserve_policies_are_independent() {
         },
         scope: ReserveScope::Background,
         user_override: false,
+        forecast: None,
     };
     let background = pressure::capacity_band_pressure(&inputs);
     assert_eq!(background.magnitude(), RESERVE_DENIED_PENALTY);

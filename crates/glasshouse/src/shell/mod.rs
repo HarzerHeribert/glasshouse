@@ -1506,6 +1506,27 @@ fn build_project_overview_capacity(runtime: &Runtime) -> Vec<String> {
         GatheredTelemetry::new().gather_gateway_quota(&GatewayQuotaCache::new(runtime.paths()));
     let base_thresholds = effective.capacity_band_thresholds().value;
 
+    // **Line 1283's producer.** The rows a burn rate counts, read once for
+    // every provider below and dropped before anything else opens the
+    // database (practice §65). Fail-soft in this function's own established
+    // way: a ledger that cannot be opened or read leaves the forecast
+    // honestly absent, and every line below then prints exactly what it
+    // printed before Phase 32E — never an error, never a guess.
+    let consumption = crate::routing::evidence::EvidenceLedger::open(runtime)
+        .and_then(|ledger| {
+            Ok(ledger.consumption_in_window(
+                now_unix,
+                crate::routing::evidence::CLASSIFICATION_EVIDENCE_WINDOW_SECONDS,
+            )?)
+        })
+        .map_err(|err| {
+            tracing::debug!(
+                error = %err,
+                "could not read the routing evidence ledger for the capacity overview's forecasts"
+            );
+        })
+        .ok();
+
     providers
         .into_iter()
         .map(|provider| {
@@ -1513,12 +1534,30 @@ fn build_project_overview_capacity(runtime: &Runtime) -> Vec<String> {
             let state = observed_capacity(&kind, &effective, &telemetry, now_unix);
             let reserve_percent = effective.reserve_percent(&provider).value.get();
             let thresholds = base_thresholds.with_resource_reserve(reserve_percent);
+            let seconds_until_reset = state.seconds_until_reset(now_unix);
+            // Keyed provider-wide (`quota_context: None`) for
+            // `destination_capacity`'s reason: this overview is per
+            // configured provider, and no line of it names one of that
+            // provider's credentials.
+            let forecast = consumption.as_ref().and_then(|rows| {
+                crate::routing::burn::forecast(
+                    rows,
+                    crate::routing::burn::ResourceKey {
+                        provider: &provider,
+                        quota_context: None,
+                    },
+                    state.requests().remaining(),
+                    now_unix,
+                    seconds_until_reset,
+                )
+            });
             resource_capacity_line(
                 &kind.label(),
                 &state,
                 &thresholds,
                 reserve_percent,
                 now_unix,
+                forecast,
             )
         })
         .collect()
@@ -1688,6 +1727,7 @@ fn resource_capacity_line(
     thresholds: &crate::provider::quota::CapacityBandThresholds,
     reserve_percent: u8,
     now_unix: i64,
+    forecast: Option<crate::routing::burn::ExhaustionForecast>,
 ) -> String {
     use crate::provider::quota::{CapacityBand, TelemetryClass};
 
@@ -1695,6 +1735,7 @@ fn resource_capacity_line(
         Some(seconds) => format!(", reset in {seconds}s"),
         None => String::new(),
     };
+    let forecast_note = forecast_note(forecast);
 
     let Some(score) = state.remaining_capacity_score() else {
         // No pool normalized to a percentage, but the resource's own plan or
@@ -1707,7 +1748,7 @@ fn resource_capacity_line(
             Some(TelemetryClass::Estimated) => "estimated",
             Some(TelemetryClass::Manual) => "manual",
         };
-        return format!("  {label}  capacity {class_word}{reset_note}");
+        return format!("  {label}  capacity {class_word}{reset_note}{forecast_note}");
     };
 
     let band = score.band(thresholds);
@@ -1736,7 +1777,53 @@ fn resource_capacity_line(
         String::new()
     };
 
-    format!("  {label}  {band} {digits}% [{class_word}]{reset_note}{reserve_note}")
+    format!("  {label}  {band} {digits}% [{class_word}]{reset_note}{reserve_note}{forecast_note}")
+}
+
+/// **Line 1283**: an exhaustion forecast rendered as an *estimate*, never as
+/// a promise.
+///
+/// # The wording is the capability, and it is load-bearing
+///
+/// The line's own words are *"surface exhaustion forecasts as estimates
+/// rather than promises"*. What this function computes is one division of a
+/// measured remaining count by a median of bucket counts — a figure with
+/// real error bars that a reader will act on. So every sentence it can
+/// produce is hedged in the text itself rather than by a disclaimer
+/// somewhere else:
+///
+/// - **"estimated to last about …"**, never *"will last"*. `about` because
+///   the rate is a median over five-minute buckets, and `estimated` because
+///   `crate::routing::burn::forecast`'s inputs are the ledger's own history
+///   rather than anything a provider promised.
+/// - **"may not reach its reset at the current rate"**, never *"will run
+///   out"* and never *"guaranteed"*. `may` because the forecast holds only
+///   while the rate does, and `at the current rate` says exactly which
+///   assumption it rests on.
+///
+/// `""` when there is no forecast, which makes every line this build printed
+/// before Phase 32E byte-identical — the property
+/// `a_resource_with_no_forecast_prints_exactly_what_it_printed_before`
+/// pins.
+///
+/// The hours are rendered to one decimal rather than as a timestamp on
+/// purpose: a clock time reads as a commitment about a moment, and this is
+/// not one.
+fn forecast_note(forecast: Option<crate::routing::burn::ExhaustionForecast>) -> String {
+    let Some(forecast) = forecast else {
+        return String::new();
+    };
+    let hours = forecast.seconds_to_exhaustion as f64 / 3600.0;
+    let reach = match forecast.survives_until_reset {
+        Some(false) => ", and may not reach its reset at the current rate",
+        Some(true) => ", which at the current rate would carry it past its reset",
+        None => "",
+    };
+    format!(
+        "; estimated to last about {hours:.1}h at the current rate \
+         ({:.1} requests/hour over {} observations){reach}",
+        forecast.requests_per_hour, forecast.rows
+    )
 }
 
 /// One display line: the memory's kind, and its subject if it has one or its
@@ -4104,6 +4191,83 @@ mod project_overview_capacity_tests {
         state.with_windows(windows)
     }
 
+    /// **Line 1283's killer.** A surfaced forecast is an *estimate*, and the
+    /// exact words are the capability.
+    ///
+    /// This asserts the hedges positively and the promise words negatively,
+    /// because those are two different failures: dropping `about` weakens
+    /// the hedge, and adding `will` replaces it with a commitment. Either
+    /// one is the mutation this test exists to catch.
+    #[test]
+    fn a_surfaced_forecast_is_hedged_and_never_promises() {
+        let state = CapacityState::metered_balance().with_requests(measured_requests_pool(12, 100));
+        let forecast = crate::routing::burn::ExhaustionForecast {
+            requests_per_hour: 30.0,
+            seconds_to_exhaustion: 5_400,
+            survives_until_reset: Some(false),
+            seconds_until_reset: Some(28_800),
+            rows: 42,
+        };
+        let line = resource_capacity_line(
+            "openrouter (remote)",
+            &state,
+            &CapacityBandThresholds::DEFAULT,
+            20,
+            NOW,
+            Some(forecast),
+        );
+
+        assert!(
+            line.contains("estimated to last about 1.5h at the current rate"),
+            "the forecast must be surfaced as an estimate: {line}"
+        );
+        assert!(
+            line.contains("may not reach its reset at the current rate"),
+            "the verdict must be hedged and must name its assumption: {line}"
+        );
+        assert!(
+            line.contains("over 42 observations"),
+            "a reader must be able to see how much history the estimate rests on: {line}"
+        );
+
+        for promise in [
+            "will last",
+            "will run out",
+            "will not reach",
+            "guaranteed",
+            "certainly",
+            "exhausts at",
+        ] {
+            assert!(
+                !line.contains(promise),
+                "a forecast must never promise; found `{promise}` in: {line}"
+            );
+        }
+    }
+
+    /// The inert case, and it is the one that keeps this build honest: with
+    /// no forecast the line is **byte-identical** to what it was before
+    /// Phase 32E. Asserted as an exact string rather than an absence of
+    /// words, because an absence assertion cannot catch a stray separator.
+    #[test]
+    fn a_resource_with_no_forecast_prints_exactly_what_it_printed_before() {
+        let state = CapacityState::metered_balance().with_requests(measured_requests_pool(82, 100));
+        let line = resource_capacity_line(
+            "openrouter (remote)",
+            &state,
+            &CapacityBandThresholds::DEFAULT,
+            20,
+            NOW,
+            None,
+        );
+        assert_eq!(line, "  openrouter (remote)  plenty 82% [measured]");
+        assert_eq!(
+            crate::shell::forecast_note(None),
+            "",
+            "no forecast contributes no characters at all"
+        );
+    }
+
     /// Map lines 1658 and 1659: a measured reading renders its band and the
     /// literal word `"measured"`.
     #[test]
@@ -4115,6 +4279,7 @@ mod project_overview_capacity_tests {
             &CapacityBandThresholds::DEFAULT,
             20,
             NOW,
+            None,
         );
         assert!(line.contains("82%"), "{line}");
         assert!(line.contains("[measured]"), "{line}");
@@ -4134,9 +4299,15 @@ mod project_overview_capacity_tests {
             CapacityState::metered_balance().with_requests(estimated_requests_pool(82, 100));
 
         let measured_line =
-            resource_capacity_line("openrouter (remote)", &measured, &thresholds, 20, NOW);
-        let estimated_line =
-            resource_capacity_line("openrouter (remote)", &estimated, &thresholds, 20, NOW);
+            resource_capacity_line("openrouter (remote)", &measured, &thresholds, 20, NOW, None);
+        let estimated_line = resource_capacity_line(
+            "openrouter (remote)",
+            &estimated,
+            &thresholds,
+            20,
+            NOW,
+            None,
+        );
 
         assert!(measured_line.contains("[measured]"), "{measured_line}");
         assert!(estimated_line.contains("[estimated]"), "{estimated_line}");
@@ -4155,6 +4326,7 @@ mod project_overview_capacity_tests {
             &CapacityBandThresholds::DEFAULT,
             20,
             NOW,
+            None,
         );
         assert!(line.contains("unknown"), "{line}");
         assert!(
@@ -4177,6 +4349,7 @@ mod project_overview_capacity_tests {
             &CapacityBandThresholds::DEFAULT,
             20,
             NOW,
+            None,
         );
         assert!(line.contains("reset in 3600s"), "{line}");
     }
@@ -4192,6 +4365,7 @@ mod project_overview_capacity_tests {
             &CapacityBandThresholds::DEFAULT,
             20,
             NOW,
+            None,
         );
         assert!(!line.contains("reset"), "{line}");
     }
@@ -4212,6 +4386,7 @@ mod project_overview_capacity_tests {
             &CapacityBandThresholds::DEFAULT,
             20,
             NOW,
+            None,
         );
         assert!(line.contains("protected reserve 20%"), "{line}");
         assert!(line.contains("limiting routing"), "{line}");
@@ -4230,6 +4405,7 @@ mod project_overview_capacity_tests {
             &CapacityBandThresholds::DEFAULT,
             20,
             NOW,
+            None,
         );
         assert!(!line.contains("reserve"), "{line}");
     }

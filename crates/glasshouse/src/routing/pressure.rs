@@ -135,6 +135,25 @@ pub const RESET_RELIEF_HORIZON_SECONDS: i64 = RESET_IMMINENT_SECONDS;
 /// crossing either boundary does not jump.
 pub const RESET_RELIEF_FADE_SECONDS: i64 = RESET_DISTANT_SECONDS;
 
+/// Line 1280. What a destination forecast to exhaust **well before** its
+/// next reset costs.
+///
+/// Twice [`TIGHT_BAND_PENALTY`], and deliberately below a live warm
+/// session's worth (`1.5` in `super::session`) for that constant's own
+/// stated reason: a forecast is an estimate over a median of bucket counts,
+/// and an estimate must not be able to throw away warm context on its own.
+/// Above tightness because it is a strictly stronger statement — the band
+/// says *this resource is low*, the forecast says *this resource is low and
+/// is being spent fast enough to run out before it is given back*, which is
+/// the fact line 1280 asks the ranking to react to.
+///
+/// It does not stack surprisingly: a destination that earns this has almost
+/// always earned [`TIGHT_BAND_PENALTY`] too, and the two together
+/// (`-1.05`) still sit below warmth, so the pair moves cold work and leaves
+/// warm work where it is. That is the same ordering line 1572 fixed for the
+/// band alone.
+pub const EXHAUSTION_FORECAST_PENALTY: f64 = 2.0 * TIGHT_BAND_PENALTY;
+
 /// Line 1575's "low tier": at or below this tier. [`WorkloadTier::Leaf`]'s
 /// own doc — *"a disposable, free, or local model is expected to be
 /// sufficient"* — is the definition, read rather than restated;
@@ -368,6 +387,16 @@ pub struct PressureInputs<'a> {
     /// [`super::disposable::ReserveOverride`]: true only for an existing
     /// session the user named.
     pub user_override: bool,
+    /// Phase 32E line 1280: what [`super::burn::forecast`] made of this
+    /// destination's resource, when it could make anything of it at all.
+    ///
+    /// `None` is *insufficiently known* and it is the value every caller
+    /// that reads no ledger carries — [`exhaustion_forecast_pressure`] is
+    /// inert on it and says so, which is what keeps a ranking with no
+    /// forecast byte-for-byte what it was. See
+    /// [`super::burn::forecast`]'s own doc for the four ways it answers
+    /// `None`, none of which is a number.
+    pub forecast: Option<super::burn::ExhaustionForecast>,
 }
 
 // ---------------------------------------------------------------------------
@@ -376,6 +405,7 @@ pub struct PressureInputs<'a> {
 
 const BAND_TERM: &str = "capacity band";
 const LOW_TIER_TERM: &str = "low-tier spend";
+const FORECAST_TERM: &str = "exhaustion forecast";
 
 /// Lines 1570, 1571, 1573, 1574 and 1577: what this destination's capacity
 /// band, its reset, and the scope's reserve policy contribute.
@@ -412,6 +442,77 @@ pub fn capacity_band_pressure(inputs: &PressureInputs<'_>) -> Contribution {
         CapacityBand::Tight => tight_penalty(inputs, band, None),
         CapacityBand::Reserve | CapacityBand::Exhausted => reserve_band(inputs, band),
     }
+}
+
+/// Line 1280: what a forecast of exhaustion before the next reset
+/// contributes.
+///
+/// # It is inert unless a forecast exists, and it says so
+///
+/// `super::burn::forecast` answers `None` for a resource with too few rows,
+/// no measured request-unit remaining amount, no known reset, or a zero burn
+/// rate — the four ways line 1278's *"sufficiently known"* is not met. Every
+/// one of them reaches this term as `inputs.forecast == None`, and every one
+/// of them contributes exactly `0.0`. That is what keeps a ranking on a
+/// build with no forecast identical to what it was before this module
+/// existed, which is a property with its own test
+/// (`a_destination_with_no_forecast_ranks_exactly_as_it_did`).
+///
+/// # "Well before", and why it is not "before"
+///
+/// [`super::burn::WELL_BEFORE_RESET_FRACTION`] carries the reasoning: a
+/// forecast landing just short of the reset is inside the estimator's own
+/// tolerance, and reacting to it would be line 1281's overreaction wearing a
+/// different hat. A resource forecast to exhaust *after* the reset, or in
+/// the last half of the window before it, contributes `0.0` and names the
+/// figures it was comparing — an informational line, not a silent one.
+///
+/// # The words are hedged here too
+///
+/// The evidence text says *estimated* and *at the current rate*, never
+/// *will*. The explanation this contributes to is read by a person through
+/// `glasshouse route`, so line 1283's restraint applies to it exactly as it
+/// applies to `crate::shell`'s capacity line.
+pub fn exhaustion_forecast_pressure(inputs: &PressureInputs<'_>) -> Contribution {
+    let Some(forecast) = inputs.forecast else {
+        return Contribution::new(
+            FORECAST_TERM,
+            0.0,
+            "inert: no exhaustion forecast is sufficiently known for this resource",
+        );
+    };
+    let hours = forecast.seconds_to_exhaustion as f64 / 3600.0;
+    if !forecast.exhausts_well_before_reset() {
+        let reset_note = match forecast.seconds_until_reset {
+            Some(reset) => format!(", and its reset is {:.1}h away", reset as f64 / 3600.0),
+            None => String::new(),
+        };
+        return Contribution::new(
+            FORECAST_TERM,
+            0.0,
+            format!(
+                "inert: estimated to last about {hours:.1}h at the current rate of \
+                 {:.1} requests/hour{reset_note} — not forecast to exhaust well before \
+                 its reset",
+                forecast.requests_per_hour
+            ),
+        );
+    }
+    let reset = forecast
+        .seconds_until_reset
+        .expect("`exhausts_well_before_reset` is false without a reset");
+    Contribution::new(
+        FORECAST_TERM,
+        EXHAUSTION_FORECAST_PENALTY,
+        format!(
+            "estimated to last about {hours:.1}h at the current rate of {:.1} requests/hour \
+             over {} observations, and its reset is {:.1}h away — it may not reach that \
+             reset, so this resource is preferred less",
+            forecast.requests_per_hour,
+            forecast.rows,
+            reset as f64 / 3600.0
+        ),
+    )
 }
 
 /// Line 1575: what spending this destination on low-tier work contributes
@@ -737,6 +838,7 @@ mod tests {
             policies: ReservePolicies::default(),
             scope: ReserveScope::Interactive,
             user_override: false,
+            forecast: None,
         }
     }
 

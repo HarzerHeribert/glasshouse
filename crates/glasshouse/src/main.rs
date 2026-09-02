@@ -1054,12 +1054,22 @@ fn routing_destinations(
     // per-destination lookup it replaces did — but a provider several
     // entries back is not a contradiction any more: it is line 1953's axis.
     let model_cache = glasshouse::provider::cache::ModelCache::new(runtime.paths());
-    let observations = glasshouse::routing::evidence::EvidenceLedger::open(runtime)
+    // Two reads from one handle, opened and dropped here (practice §65).
+    // `observations_in_window` is the outcome-carrying set 56A's facets
+    // classify; `consumption_in_window` is every row, which is what a burn
+    // rate counts — see that method's own doc for why the two cannot be one
+    // read. A ledger that cannot be opened leaves both honestly unknown.
+    let (observations, consumption) = glasshouse::routing::evidence::EvidenceLedger::open(runtime)
         .and_then(|ledger| {
-            Ok(ledger.observations_in_window(
+            let observations = ledger.observations_in_window(
                 now_unix,
                 glasshouse::routing::evidence::CLASSIFICATION_EVIDENCE_WINDOW_SECONDS,
-            )?)
+            )?;
+            let consumption = ledger.consumption_in_window(
+                now_unix,
+                glasshouse::routing::evidence::CLASSIFICATION_EVIDENCE_WINDOW_SECONDS,
+            )?;
+            Ok((observations, consumption))
         })
         .map_err(|err| {
             tracing::debug!(
@@ -1067,7 +1077,11 @@ fn routing_destinations(
                 "could not read the routing evidence ledger for the entitlement pool's facets"
             );
         })
-        .ok();
+        .ok()
+        .map_or((None, None), |(observations, consumption)| {
+            (Some(observations), Some(consumption))
+        });
+    let consumption = consumption.as_deref();
     let mut entitlement_telemetry = glasshouse::config::EntitlementTelemetry::new(now_unix)
         .with_gateway_quota(&quota_cache)
         .with_model_catalogues(&model_cache);
@@ -1184,7 +1198,7 @@ fn routing_destinations(
                     ),
                     protocols,
                 ),
-                destination_capacity(&profile, effective, &telemetry, now_unix),
+                destination_capacity(&profile, effective, &telemetry, now_unix, consumption),
             )
             .with_tier_ceiling(ceiling)
             .with_capability_tier(ceiling)
@@ -1244,7 +1258,7 @@ fn routing_destinations(
         let profile = profile.value;
         let (backend, protocols, wire_protocol) = destination_backend(effective, &profile, None);
         let query = destination_capability_query(harness, &profile.name, wire_protocol);
-        let capacity = destination_capacity(&profile, effective, &telemetry, now_unix);
+        let capacity = destination_capacity(&profile, effective, &telemetry, now_unix, consumption);
         // 56A line 1953 — the entitlement axis. One entry backing this
         // profile's resource (or none) keeps exactly the single candidate,
         // and the id, this function has always built. Several entries
@@ -2439,9 +2453,11 @@ fn destination_capacity(
     effective: &EffectiveConfig<'_>,
     telemetry: &glasshouse::provider::resources::GatheredTelemetry,
     now_unix: i64,
+    consumption: Option<&[glasshouse::routing::evidence::RoutingObservation]>,
 ) -> (
     Option<glasshouse::provider::quota::RemainingCapacityScore>,
     glasshouse::routing::pressure::CapacityFacts,
+    Option<glasshouse::routing::burn::ExhaustionForecast>,
 ) {
     use glasshouse::profile::BackendResource;
     use glasshouse::provider::registry::ResourceKind;
@@ -2467,8 +2483,44 @@ fn destination_capacity(
         _ => thresholds,
     };
     let band = score.as_ref().map(|score| score.band(&thresholds));
-    let facts = CapacityFacts::new(band, state.seconds_until_reset(now_unix));
-    (score, facts)
+    let seconds_until_reset = state.seconds_until_reset(now_unix);
+    let facts = CapacityFacts::new(band, seconds_until_reset);
+    // **Line 1280's producer.** The forecast is resolved from the same
+    // `CapacityState` the band and reset came from — its own remaining
+    // *request* pool, never the percentage — and from the ledger rows the
+    // caller already read. `None` at every step that is not established, and
+    // there are four of them:
+    //
+    // - the caller read no ledger (`consumption` is `None`);
+    // - this resource is not a `[providers.*]` key, so no row's `provider`
+    //   column names it. A native subscription and the gateway both reach
+    //   this arm: rows say `glasshouse` or the upstream provider, and
+    //   inventing a join from a harness name to a provider name is exactly
+    //   the mismatch this package was told to stop at rather than paper over;
+    // - `glasshouse::routing::burn::forecast` itself answers `None` — too
+    //   few rows, no measured request-unit remaining amount, a zero rate.
+    //
+    // `quota_context` is `None` here on purpose: a launch profile names a
+    // resource, not one of that resource's credentials, so the honest key is
+    // the provider-wide one. `burn_rate` reports that choice back as
+    // `account_narrowed: false` rather than letting a caller mistake a
+    // provider total for one account's.
+    let forecast = match (&kind, consumption) {
+        (ResourceKind::DirectProvider { provider, .. }, Some(rows)) => {
+            glasshouse::routing::burn::forecast(
+                rows,
+                glasshouse::routing::burn::ResourceKey {
+                    provider,
+                    quota_context: None,
+                },
+                state.requests().remaining(),
+                now_unix,
+                seconds_until_reset,
+            )
+        }
+        _ => None,
+    };
+    (score, facts, forecast)
 }
 
 /// Map line 1482's own context, built from exactly what `routing_destinations`
@@ -2531,15 +2583,19 @@ fn destination_tier_ceiling(
     })
 }
 
-/// Attach [`destination_capacity`]'s two halves to a destination.
+/// Attach [`destination_capacity`]'s three halves to a destination.
 fn with_capacity(
     destination: glasshouse::routing::session::Destination,
-    (score, facts): (
+    (score, facts, forecast): (
         Option<glasshouse::provider::quota::RemainingCapacityScore>,
         glasshouse::routing::pressure::CapacityFacts,
+        Option<glasshouse::routing::burn::ExhaustionForecast>,
     ),
 ) -> glasshouse::routing::session::Destination {
-    destination.with_capacity(score).with_capacity_facts(facts)
+    destination
+        .with_capacity(score)
+        .with_capacity_facts(facts)
+        .with_burn_forecast(forecast)
 }
 
 /// **Line 1599's bridge**: what a gateway has actually observed about these
@@ -4488,6 +4544,12 @@ fn record_routing_latency(
         glasshouse::routing::evidence::NewObservation::new("glasshouse", "session-router")
             .with_harness(Some(harness.slug()))
             .with_purpose(Some(ROUTING_LATENCY_PURPOSE))
+            // Map line 1276's missing link, and the reason migration 23
+            // exists: `answer` has carried a `TaskClass` since Phase 34C and
+            // this row — the one row every routed request produces — has
+            // never written it down. `glasshouse::routing::burn` reads it
+            // back.
+            .with_task_class(Some(answer.task_class()))
             .with_timing(Some(started_at_unix), Some(completed_at_unix));
     if let Err(err) = ledger.record(observation, completed_at_unix) {
         tracing::warn!(error = %err, "could not record routing latency");

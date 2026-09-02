@@ -1271,16 +1271,16 @@ Phase 32D — Normalized remaining-capacity score
 
 Phase 32E — Burn rate and exhaustion forecasting
 
-☐ Record capacity consumption per completed request or observed harness turn when measurable.
+☑ Record capacity consumption per completed request or observed harness turn when measurable.
 ☐ Maintain a short moving average of token consumption per task class.
 ☐ Maintain a short moving average of requests consumed per task class.
-☐ Estimate current burn rate for each constrained resource.
-☐ Estimate time-to-exhaustion when the remaining capacity and burn rate are sufficiently known.
-☐ Estimate whether the resource is likely to survive until its next reset at the current burn rate.
-☐ Reduce routing preference for a resource that is forecast to exhaust well before its next reset.
-☐ Avoid overreacting to one unusually large request by using robust rolling statistics.
-☐ Reset or decay stale burn-rate history after long idle periods or quota resets.
-☐ Surface exhaustion forecasts as estimates rather than promises.
+☑ Estimate current burn rate for each constrained resource.
+☑ Estimate time-to-exhaustion when the remaining capacity and burn rate are sufficiently known.
+☑ Estimate whether the resource is likely to survive until its next reset at the current burn rate.
+☑ Reduce routing preference for a resource that is forecast to exhaust well before its next reset.
+☑ Avoid overreacting to one unusually large request by using robust rolling statistics.
+☑ Reset or decay stale burn-rate history after long idle periods or quota resets.
+☑ Surface exhaustion forecasts as estimates rather than promises.
 
 Phase 32F — Protected quota reserve
 

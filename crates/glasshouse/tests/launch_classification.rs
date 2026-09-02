@@ -35,6 +35,7 @@ use glasshouse::routing::classify::{
 };
 use glasshouse::routing::evidence::{EvidenceLedger, ObservationQuery};
 use glasshouse::routing::free::FreePool;
+use glasshouse::routing::request::TaskClass;
 use glasshouse::routing::session::{
     Destination, RouterInputs, RoutingMoment, SessionRouter, TaskRequirements,
 };
@@ -368,6 +369,30 @@ impl Fixture {
         ])
         .unwrap();
         glasshouse::bootstrap(&cli, &self.root).unwrap()
+    }
+
+    /// The `task_class` on every `routing-latency` row, oldest first — map
+    /// line 1276's own record, read through the same ledger the binary
+    /// wrote. `None` where the binary named no class.
+    fn routing_latency_task_classes(&self) -> Vec<Option<TaskClass>> {
+        let runtime = self.runtime();
+        let ledger = EvidenceLedger::open(&runtime).expect("open the evidence ledger");
+        let mut rows: Vec<_> = ledger
+            .recent(
+                ObservationQuery {
+                    provider: "glasshouse",
+                    model: "session-router",
+                    route: None,
+                    harness: Some("claude-code"),
+                },
+                64,
+            )
+            .expect("read routing observations")
+            .into_iter()
+            .filter(|row| row.purpose.as_deref() == Some("routing-latency"))
+            .collect();
+        rows.sort_by_key(|row| row.seq);
+        rows.into_iter().map(|row| row.task_class).collect()
     }
 
     /// How many `routing-latency` rows the evidence ledger holds — map line
@@ -1057,7 +1082,6 @@ fn routing_latency_is_recorded_only_when_classification_ran() {
         1,
         "a launch that did not classify must not add a row"
     );
-
     // The row carries both ends of the measurement, so `duration_ms` is a
     // figure and not an absence.
     let runtime = fixture.runtime();
@@ -1079,6 +1103,47 @@ fn routing_latency_is_recorded_only_when_classification_ran() {
     assert!(
         row.duration_ms().is_some(),
         "both timing columns must be written: {row:?}"
+    );
+}
+
+/// **Map line 1276, on the shipped path.** The row a real launch writes
+/// carries the decision's own `TaskClass`.
+///
+/// This is the test the `routing::burn` unit tests cannot be: `task_class()`
+/// has existed on `RouterAnswer` since Phase 34C, and until migration 23 the
+/// one caller holding it -- `main.rs::record_routing_latency` -- dropped it
+/// on the floor. Nothing short of running the binary and reading the ledger
+/// it wrote can tell a build that persists the class from one that
+/// recomputes it and throws it away, which is precisely the state this phase
+/// found.
+///
+/// **Two fixtures, because two classifications.** The class is derived from
+/// the classification, and asserting it on one launch alone would pass on a
+/// build that recorded a constant. These are the two canned answers this
+/// file already has: one that needs nothing, and one that needs code
+/// modification.
+#[test]
+fn a_launch_that_classified_records_the_task_class_it_decided() {
+    let asking = FakeModel::answering(LOW_RISK_ANSWER);
+    let asking_fixture = Fixture::new(Some(&asking.base_url()));
+    let (out, said) = asking_fixture.launch(&["--task", "what is a mutex"]);
+    assert!(out.status.success(), "{said}");
+
+    let editing = FakeModel::answering(LOW_CONFIDENCE_ANSWER);
+    let editing_fixture = Fixture::new(Some(&editing.base_url()));
+    let (out, said) = editing_fixture.launch(&["--task", "rename the widget struct"]);
+    assert!(out.status.success(), "{said}");
+
+    assert_eq!(
+        asking_fixture.routing_latency_task_classes(),
+        vec![Some(TaskClass::Question)],
+        "a launch whose classification needs nothing records `question`"
+    );
+    assert_eq!(
+        editing_fixture.routing_latency_task_classes(),
+        vec![Some(TaskClass::CodeModification)],
+        "a launch whose classification needs code modification records that, and not a \
+         constant -- this is the assertion a build that dropped `with_task_class` fails"
     );
 }
 
