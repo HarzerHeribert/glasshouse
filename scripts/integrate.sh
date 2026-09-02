@@ -152,6 +152,36 @@ echo "  cargo fmt --all: done"
 #         full two-lane sweep per wave in the background, spawning a
 #         fix-forward worker on any trailing red. FULL_GATE=1 restores the
 #         old inline full sweep when a wave's sweep should run right here.
+# ---- 4b. compile the LIBRARY'S OWN test module, which no other gate does.
+#
+# 2026-09-02: `9f513d9` reached main with `cargo check --tests` broken.
+# `GH-CADENCE-CROSSING` widened `FreePool::adopt_observed` to five arguments
+# and updated the production call site; a four-argument straggler survived
+# inside `routing/session.rs`'s own `#[cfg(test)]` module. Neither worktree
+# was broken alone -- the other package was authored before the signature
+# changed -- so the breakage existed only in the merge, which is precisely
+# what batching worktrees into one integrate call exists to surface.
+#
+# It survived the targeted gate for a specific reason: that gate runs
+# INTEGRATION-test binaries, and those compile the library WITHOUT
+# `cfg(test)`. Nothing in it ever compiles `--lib` with tests enabled, so a
+# compile error inside the lib's own test module is invisible to every
+# target it runs. This one command closes the whole class -- any signature
+# change whose stragglers live in a `#[cfg(test)]` block -- and it is
+# seconds against a warm target directory.
+echo
+echo "=== cargo check --tests (the lib's own test module; no other gate compiles it) ==="
+if ! cargo check -p glasshouse --tests --quiet; then
+  echo
+  echo "integrate: the library's own test module does not compile."
+  echo "  This is usually a signature change with a straggler in a #[cfg(test)]"
+  echo "  block -- no integration-test binary compiles that code, so only this"
+  echo "  check sees it. Fix it before the targeted gate; a green gate below"
+  echo "  would not have meant anything."
+  exit 1
+fi
+echo "  cargo check --tests: clean"
+
 echo
 if [ "${FULL_GATE:-0}" = "1" ]; then
   scripts/blast-radius.sh
