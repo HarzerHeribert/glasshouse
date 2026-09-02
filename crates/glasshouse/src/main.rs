@@ -615,6 +615,16 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
                     memory_export_tracked(&runtime, *tracked, *include_findings, *dry_run)?
                 );
             }
+            MemoryCommand::ExportLocal {
+                harness,
+                limit,
+                no_exclude,
+            } => {
+                print!(
+                    "{}",
+                    memory_export_local(&runtime, harness.as_deref(), *limit, !*no_exclude)?
+                );
+            }
             MemoryCommand::Rate {
                 id,
                 verdict,
@@ -12529,6 +12539,61 @@ fn memory_export_tracked(
     }
 
     Ok(out)
+}
+
+/// `glasshouse memory export-local` — map line 2040, Phase 58 item 6.
+///
+/// A sibling of [`memory_export_tracked`] above, not a variant of it:
+/// [`MemoryCommand::Export`] projects tracked knowledge into
+/// `.glasshouse/knowledge/`; this writes a gitignored harness file instead,
+/// and is opt-in the same way — nothing here runs unless this subcommand is
+/// typed.
+///
+/// `harness` defaults to
+/// [`glasshouse::memory::export_local::LocalHarness::DEFAULT_SLUG`]
+/// (`claude-code`), the only harness this build knows a native local
+/// instruction file for.
+fn memory_export_local(
+    runtime: &Runtime,
+    harness: Option<&str>,
+    limit: usize,
+    exclude: bool,
+) -> anyhow::Result<String> {
+    use glasshouse::memory::export_local::{self, LocalHarness};
+    use glasshouse::memory::{MemoryKind, ProjectMemory};
+
+    let harness_slug = harness.unwrap_or(LocalHarness::DEFAULT_SLUG);
+
+    let memory = ProjectMemory::open(runtime)?;
+    let store = memory.store();
+    let mut records = store.binding(limit)?;
+    records.extend(store.current_of_kind(MemoryKind::FailedAttempt, limit)?);
+
+    let outcome = export_local::export(
+        runtime.project().root(),
+        harness_slug,
+        &records,
+        glasshouse::evaluation::now_unix(),
+        exclude,
+    )?;
+
+    let exclude_note = match outcome.exclude {
+        export_local::ExcludeAction::Added => "added to .git/info/exclude",
+        export_local::ExcludeAction::AlreadyExcluded => "already gitignored",
+        export_local::ExcludeAction::Skipped => "--no-exclude: left untouched",
+        export_local::ExcludeAction::NotGitRepo => "no .git directory: nothing to exclude",
+    };
+
+    Ok(format!(
+        "{harness_slug}: {} {} written to {} ({exclude_note})\n",
+        outcome.exported,
+        if outcome.block_present {
+            "memories"
+        } else {
+            "memories (block removed)"
+        },
+        outcome.path.display(),
+    ))
 }
 
 /// The pairing this session's launch profile answers to — Phase 9J's

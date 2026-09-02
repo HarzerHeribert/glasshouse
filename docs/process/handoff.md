@@ -22,7 +22,7 @@ validated and waiting on the commit. Next action: `.agent-runtime/CONTINUATION.m
 
 Last updated: 2026-09-02 (Europe/Berlin)
 
-## Checkpoint — 2026-09-02, batch 87: 1212 / 1347 (90.0%) — Phase 58's first four packages land, the disposable router calls what it chooses, six worktrees in one gate
+## Checkpoint — 2026-09-02, batch 87: 1213 / 1347 (90.1%) — Phase 58's first five packages land, the disposable router calls what it chooses, seven worktrees in one gate and an eighth right behind
 
 Session `56821d4d` (Fable 5.1), inherited hot from `14f81d52`. Eleven boxes in
 one integration commit of six co-editing worktrees: 1369 (a probe asks the
@@ -30,7 +30,7 @@ pool before it spends), 1824 (a revalidation row as its own denominator),
 2014–2018 (cache-stable translation: a default Claude Code launch serves on
 every translated pair), 2023/2024 (the firewall's policy keyed on the serving
 entitlement's kind), 2034/2035 (a savings readout over recorded rows, a seeded
-ladder fixture). The routed extraction client (Red) closes no box and makes
+ladder fixture), 2040 (`memory export-local`, the wave-91 commit right behind). The routed extraction client (Red) closes no box and makes
 1367 closable. Open with named successors: 1821/1831
 (`GH-TURN-OUTCOME-FOR-BRIEFED-SESSIONS`, ruling first), 2019 (a session column,
 Cluster G), 1367 (`GH-DISPATCH-RESERVATION-ROW`), the fixed-temp-name race

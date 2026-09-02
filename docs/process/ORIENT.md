@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1212 / 1347 mandatory capabilities (90%)** — 135 open across 37 phases.
+**1213 / 1347 mandatory capabilities (90%)** — 134 open across 37 phases.
 
 ## Where the work is
 
@@ -51,8 +51,8 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 24 | Memory reranking | **5** | 1 | `1082` |
 | Phase 31 | Compaction-aware behavior | **5** | 2 | `1167` |
 | Phase 52 | Criteria before adding semantic/vector retrieval | **5** | 1 | `1858` |
+| Phase 58 | Context economy: cache-stable translation, entitlement-aware reduction, and a measured token budget | **5** | 10 | `2008` |
 | Phase 21G | Memory revalidation | **6** | 3 | `941` |
-| Phase 58 | Context economy: cache-stable translation, entitlement-aware reduction, and a measured token budget | **6** | 9 | `2008` |
 | Phase 35B | Candidate scoring | **7** | 18 | `1523` |
 | Phase 47 | Observability without spectacle | **7** | 8 | `1750` |
 | Phase 9K | Harness-aware response profiles | **8** | 29 | `578` |
@@ -66,7 +66,7 @@ closures are usually at the top. Open the map at the line number given.
 
 Every phase with **three or fewer** open lines, quoted verbatim. These are
 where a single package finishes a phase, so they are listed here and the
-other ~93 open lines are not.
+other ~92 open lines are not.
 
 For any other phase: `scripts/discover.py --phase <id>` prints its open
 lines and evidence together. **Do not open the 178 KB map to read them.**
@@ -272,7 +272,7 @@ to do, and the orchestrator should follow its own rule.
 Newest first, from `docs/process/handoff.md`. Read the top one in full;
 the rest are context you probably do not need.
 
-- Checkpoint — 2026-09-02, batch 87: 1212 / 1347 (90.0%) — Phase 58's first four packages land, the disposable router calls what it chooses, six worktrees in one gate
+- Checkpoint — 2026-09-02, batch 87: 1213 / 1347 (90.1%) — Phase 58's first five packages land, the disposable router calls what it chooses, seven worktrees in one gate and an eighth right behind
 - Checkpoint — 2026-09-02, batch 86: 1201 / 1332 (90.2%) — the translation arc lands end to end, the Windows secret store opens, the outcome question answered
 - Checkpoint — 2026-09-02, batch 85: 1194 / 1332 (89.6%) — 1908 and 1924 closed, Phases 54A and 55 complete
 - Checkpoint — 2026-09-02, the Fable 5.1 → Fable 5.1 hand-off at 1192 / 1332 (89.5%)

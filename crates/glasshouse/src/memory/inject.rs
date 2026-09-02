@@ -552,7 +552,7 @@ fn file_observed_heading(count: usize) -> String {
 /// selected, which carries no association at all. Both cases share this
 /// function so the two kinds of entry are indistinguishable in every field
 /// except the one that differs.
-fn render_entry(
+pub(crate) fn render_entry(
     position: usize,
     total: usize,
     record: &MemoryRecord,
@@ -681,7 +681,7 @@ fn may_constrain(record: &MemoryRecord) -> bool {
 /// which demotes exactly that in the ranking this selection inherits. Applying
 /// it a second time here would be inventing a rule, not using what is
 /// recorded.
-fn standing(record: &MemoryRecord) -> &'static str {
+pub(crate) fn standing(record: &MemoryRecord) -> &'static str {
     if !may_constrain(record) {
         return "context";
     }
@@ -714,7 +714,7 @@ fn standing(record: &MemoryRecord) -> &'static str {
 /// The cut is by `char`, never by byte, so a multi-byte character is never
 /// split; a cut string ends in `…` so a truncated body is visibly truncated
 /// rather than silently a different sentence.
-fn quote(text: &str, budget: usize) -> String {
+pub(crate) fn quote(text: &str, budget: usize) -> String {
     let mut out = String::with_capacity(text.len().min(budget * 4));
     let mut pending_space = false;
     let mut taken = 0usize;

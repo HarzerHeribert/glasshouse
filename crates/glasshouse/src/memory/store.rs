@@ -1886,6 +1886,50 @@ impl<'a> MemoryStore<'a> {
         Ok(kept)
     }
 
+    /// Every current memory of one kind — the by-kind counterpart to
+    /// [`MemoryStore::binding`], for `GH-MEMORY-EXPORT`'s
+    /// [`MemoryKind::FailedAttempt`], which carries no authority column to
+    /// filter on the way `binding` filters invariants and constraints.
+    ///
+    /// Filters in SQL rather than in Rust, unlike `binding`: `kind` has no
+    /// analogue of `authority`'s `None`-means-unclassified case, so there is
+    /// no reason to read every status-active row and discard client-side —
+    /// `LIMIT` does the truncation the same way [`MemoryStore::with_status`]
+    /// already does it.
+    pub fn current_of_kind(
+        &self,
+        kind: MemoryKind,
+        limit: usize,
+    ) -> Result<Vec<MemoryRecord>, MemoryStoreError> {
+        let mut statement = self
+            .conn
+            .prepare(&format!(
+                "SELECT {ALL_COLUMNS} FROM memories \
+                 WHERE project_id = ?1 AND status = ?2 AND kind = ?3 \
+                 ORDER BY updated_at DESC, id ASC LIMIT ?4"
+            ))
+            .map_err(|source| MemoryStoreError::Sql {
+                action: "prepare the by-kind memory listing",
+                source,
+            })?;
+        let rows = statement
+            .query_map(
+                rusqlite::params![
+                    &self.project_id,
+                    MemoryStatus::Active.as_str(),
+                    kind.as_str(),
+                    i64::try_from(limit).unwrap_or(i64::MAX),
+                ],
+                row_to_record,
+            )
+            .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
+            .map_err(|source| MemoryStoreError::Sql {
+                action: "list memories by kind",
+                source,
+            })?;
+        rows.into_iter().collect()
+    }
+
     /// How many memories this project holds, by status.
     ///
     /// Scoped in the `WHERE` clause for the reason

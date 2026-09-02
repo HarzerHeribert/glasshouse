@@ -193,3 +193,35 @@ The recon read every codec in full. `canonical::Request` carries no effort or re
 **Ruling.** *Clamp-only, never raising* is not yet well-defined against current code: there is no harness-stated level to clamp from and no encoder mapping to clamp within. Neither `GH-EFFORT-CLAMP-SHADOW` nor `GH-EFFORT-CLAMP` passes Phase −1. The successor is a **design note before a packet** (the local reducer's shape): an effort-shaped field on the canonical form carried the way `cache_requested` is, a decode-side carry of `thinking` instead of a refusal (its own scope: it changes today's all-or-nothing answer for every Claude Code request that sets `thinking`), a researched per-target mapping — and only then the shadow measurement joined to `TurnEnded`. Register: *Phase 58, after its first four packages*. The stale reason text is a Green residue.
 
 ---
+
+## Line 2040 CLOSED — 2026-09-02 (`GH-MEMORY-EXPORT`, Amber-light, Sonnet medium): remembered constraints and failed approaches, on request, into the harness's local file
+
+`glasshouse memory export-local [--harness claude-code] [--limit N] [--no-exclude]` — a sibling verb to Phase 50's `memory export --tracked` (the worker's first report blocked on the name collision, correctly; the orchestrator ruled the sibling verb). It lists current binding memories (`MemoryStore::binding`) and current failed attempts (the one new reader, `MemoryStore::current_of_kind`, modelled on `binding`), renders each with the injection path's own `render_entry` (widened to crate scope, a visibility change only), and splices the block between `<!-- glasshouse:memory:begin -->` / `<!-- glasshouse:memory:end -->` in `CLAUDE.local.md` at the project root — replacing only its own block, appending when absent, removing it when nothing is left, never creating the file for nothing. The file is excluded through `.git/info/exclude` by default (never the user's `.gitignore`), with the same bounded line match Phase 50 uses because the fixtures' bare `.git` directories cannot answer `git check-ignore`. Codex and Gemini CLI are refused by name: their instruction files are tracked, not local. 3/3 mutations KILLED; `memory_export` 7/7, `--lib memory` 140/140, `tracked_knowledge` 5/5 (Phase 50 untouched), targeted blast green, rustdoc clean.
+
+**Packet errors, the orchestrator's:** the packet named `MemoryCommand::Export` and `memory/export.rs` as new; both were Phase 50's. Grep `cli.rs` and `src/` for a verb and a module before naming them.
+
+### Offer an opt-in export of remembered constraints and failed approaches into a marker-delimited block of the harness's native local instruction file, gitignored by default, replacing only its own block on re-export. (line 2040)
+
+Contract: Given a project with durable memory, when the user runs `memory export-local`, Glasshouse writes the current constraints, invariants and failed approaches as a marker-delimited block into `CLAUDE.local.md`, replacing only its own block and excluding the file from git by default, while preserving that nothing runs automatically, that bytes outside the block are never changed, that a harness without a local instruction file is refused by name, and that only this project's memory can appear.
+
+State: **COMPLETE** — ruled 2026-09-02.
+
+Production evidence: `memory/export_local.rs` — `export`, `LocalHarness::parse`, `splice`, `ensure_excluded`; `memory/store.rs` — `MemoryStore::current_of_kind`; `main.rs` — `memory_export_local`; `cli.rs` — `MemoryCommand::ExportLocal`.
+
+Regression evidence (`tests/memory_export.rs`, through the shipped binary): `exports_only_binding_memories_and_failed_attempts_never_decisions`, `reexport_replaces_only_the_block_leaving_surrounding_bytes_identical`, `superseding_the_only_constraint_removes_it_from_the_block`, `exporting_with_nothing_left_removes_the_block_and_keeps_user_text`, `the_exclude_file_gains_the_pattern_once_and_git_status_sees_nothing` (a real `git init`), `no_exclude_leaves_the_exclude_file_untouched`, `an_unsupported_harness_is_refused_by_name_and_nothing_is_written`.
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| `splice`'s replace branch returns the block alone | `clobber-the-file` | **killed** | `reexport_replaces_only_the_block_leaving_surrounding_bytes_identical` |
+| `current_of_kind(FailedAttempt)` → every active memory | `export-everything` | **killed** | `exports_only_binding_memories_and_failed_attempts_never_decisions` |
+| `binding`'s `status = ?2` → `status != ?2` | `ignore-supersession` | **killed** | `superseding_the_only_constraint_removes_it_from_the_block` |
+
+> clobber-the-file observed: panicked at tests/memory_export.rs:234:5 (text above the block did not survive)
+
+> export-everything observed: panicked at tests/memory_export.rs:191:5 (content.contains("kind=decision"))
+
+> ignore-supersession observed: assertion failed: first_content.contains("kind=constraint")
+
+Recorded limits, the worker's: the exclude match is exact-line, not a glob engine (Phase 50's own limit); the export's temporary file name carries the pid but no random part (no production caller runs two exports at once); macOS only; the header's timestamp is a Unix second.
+
+---

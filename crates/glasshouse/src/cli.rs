@@ -1969,6 +1969,38 @@ pub enum MemoryCommand {
         dry_run: bool,
     },
 
+    /// Export current binding memory into the harness's native **local**
+    /// instruction file — map line 2040, Phase 58 item 6: *"An opt-in
+    /// export of remembered constraints and failed approaches into a
+    /// marker-delimited block of the harness's native local instruction
+    /// file, gitignored by default, replacing only its own block on
+    /// re-export."*
+    ///
+    /// A **sibling verb, not `export`**: [`MemoryCommand::Export`] above is
+    /// Phase 50's *tracked* projection into `.glasshouse/knowledge/`,
+    /// reviewed through an ordinary Git workflow, and is unchanged by this
+    /// command. This one writes a different, **gitignored** file — the
+    /// harness's own local instruction file, read at launch rather than
+    /// reviewed in a diff — and shares neither flags nor destination with
+    /// `export`. Never merge the two.
+    ExportLocal {
+        /// The harness whose local instruction file receives the block.
+        /// Only `claude-code` has a native *local* instruction file
+        /// (`CLAUDE.local.md`); every other name is refused by name, with
+        /// the reason. Defaults to `claude-code`.
+        #[arg(long, value_name = "HARNESS")]
+        harness: Option<String>,
+
+        /// Most memories of each kind (binding, and failed attempts) to
+        /// include.
+        #[arg(long, value_name = "N", default_value_t = 20)]
+        limit: usize,
+
+        /// Do not add the target file to `.git/info/exclude`.
+        #[arg(long)]
+        no_exclude: bool,
+    },
+
     /// Record whether a retrieved memory helped — a person's or an agent's
     /// own verdict, never inferred. "Phase 51, the memory half of RC-B: an
     /// explicit rating when given, a labelled proxy otherwise", user ruling

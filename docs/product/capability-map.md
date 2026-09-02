@@ -2037,7 +2037,7 @@ A savings readout that is a query, not an estimate.
 Effort and learning — evaluate before offering, and export what memory already knows.
 
 ☐ Evaluate a clamp-only per-turn effort reduction on translated pairings for turns that only resume after a tool result, never raising effort and never touching the byte-for-byte relay, before offering it.
-☐ Offer an opt-in export of remembered constraints and failed approaches into a marker-delimited block of the harness's native local instruction file, gitignored by default, replacing only its own block on re-export.
+☑ Offer an opt-in export of remembered constraints and failed approaches into a marker-delimited block of the harness's native local instruction file, gitignored by default, replacing only its own block on re-export.
 
 
 
