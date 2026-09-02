@@ -66,11 +66,12 @@ use std::collections::HashSet;
 
 use super::extract::ExtractionModel;
 use super::rerank::{self, RetrievalTrace};
-use super::search::SearchScope;
+use super::search::{RetrievalIntent, SearchScope};
 use super::store::{
     FileAssociation, MemoryAuthority, MemoryId, MemoryKind, MemoryRecord, MemoryStore,
     MemoryStoreError,
 };
+use crate::checkpoint::git::Freshness;
 
 /// What a caller supplies to have [`briefing`] (through [`briefing_traced`])
 /// or [`select_briefing`] (through [`select_briefing_traced`]) record its own
@@ -317,13 +318,21 @@ impl BriefingOutcome {
 /// subset it can prove: a search that matches nothing injects nothing. That
 /// is an empty result, not a confidence threshold, and it is not claimed as
 /// one.
+///
+/// `project_root` is where map line 1142's freshness is answered, and `None`
+/// is a supported answer rather than a degraded one: every file-aware row
+/// then reads `freshness=unknown` and the section is otherwise identical. A
+/// caller with a [`crate::Runtime`] has it (`runtime.project().root()`); one
+/// testing the rendering does not need it.
 pub fn briefing(
     store: &MemoryStore<'_>,
     task: &str,
     already_injected: &HashSet<MemoryId>,
     model: Option<&dyn ExtractionModel>,
+    project_root: Option<&std::path::Path>,
 ) -> Result<BriefingOutcome, MemoryStoreError> {
-    briefing_traced(store, task, already_injected, model, None).map(|(outcome, _)| outcome)
+    briefing_traced(store, task, already_injected, model, None, project_root)
+        .map(|(outcome, _)| outcome)
 }
 
 /// [`briefing`], additionally returning the [`RetrievalTrace`] map line 1094
@@ -345,6 +354,7 @@ pub fn briefing_traced(
     already_injected: &HashSet<MemoryId>,
     model: Option<&dyn ExtractionModel>,
     diagnostics: Option<DiagnosticsRequest<'_>>,
+    project_root: Option<&std::path::Path>,
 ) -> Result<(BriefingOutcome, RetrievalTrace), MemoryStoreError> {
     let query: String = task.chars().take(MAX_QUERY_CHARS).collect();
     let grouped =
@@ -392,7 +402,8 @@ pub fn briefing_traced(
         .take(MAX_INJECTED_MEMORIES)
         .collect();
 
-    let file_observed = file_observed_memories(store, task, already_injected, &selected)?;
+    let file_observed =
+        file_observed_memories(store, task, already_injected, &selected, project_root)?;
 
     let trace = RetrievalTrace::new(
         crate::evaluation::now_unix(),
@@ -436,9 +447,10 @@ pub fn select_briefing(
     query: Option<&str>,
     already_injected: &HashSet<MemoryId>,
     model: Option<&dyn ExtractionModel>,
+    project_root: Option<&std::path::Path>,
 ) -> Result<BriefingOutcome, MemoryStoreError> {
     match query {
-        Some(task) => briefing(store, task, already_injected, model),
+        Some(task) => briefing(store, task, already_injected, model, project_root),
         None => standing_set(store, already_injected),
     }
 }
@@ -453,10 +465,22 @@ pub fn select_briefing_traced(
     already_injected: &HashSet<MemoryId>,
     model: Option<&dyn ExtractionModel>,
     diagnostics: Option<DiagnosticsRequest<'_>>,
+    project_root: Option<&std::path::Path>,
 ) -> Result<(BriefingOutcome, Option<RetrievalTrace>), MemoryStoreError> {
     match query {
-        Some(task) => briefing_traced(store, task, already_injected, model, diagnostics)
-            .map(|(outcome, trace)| (outcome, Some(trace))),
+        // `project_root` reaches only this half. The standing set is not a
+        // file-aware retrieval — it asks for binding memories and failed
+        // attempts by authority, naming no file — so there is nothing for a
+        // freshness to be about.
+        Some(task) => briefing_traced(
+            store,
+            task,
+            already_injected,
+            model,
+            diagnostics,
+            project_root,
+        )
+        .map(|(outcome, trace)| (outcome, Some(trace))),
         None => standing_set(store, already_injected).map(|outcome| (outcome, None)),
     }
 }
@@ -497,6 +521,26 @@ fn standing_set(
     })
 }
 
+/// One row of the briefing's file-aware section: the memory, how it is
+/// associated with the file that retrieved it, and how its age compares to
+/// the file's — map lines 1140, 1139 and 1142's three answers about one
+/// memory, kept together from the lookup to the rendered line.
+///
+/// A struct rather than three parallel vectors because the three are only
+/// ever read together and a mismatch between them would be invisible: a row
+/// labelled with another row's freshness reads exactly like a correct one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileAwareMemory {
+    pub record: MemoryRecord,
+    /// `observed`, `referenced`, or `None` for a row whose stored provenance
+    /// this build does not recognise — see
+    /// [`super::search::RetrievalResult::association`].
+    pub association: Option<FileAssociation>,
+    /// Map line 1142's label. Never affects whether or where this row
+    /// appears.
+    pub freshness: Freshness,
+}
+
 /// Line 1140: memories this project learned while a task's own named files
 /// were being worked on — [`MemoryStore::for_path`] over every path
 /// [`crate::routing::session::paths_named_in`] finds in `task`, reusing
@@ -507,12 +551,31 @@ fn standing_set(
 /// of [`briefing`] already returns for an unmatched query, and [`render`]
 /// treats the two identically.
 ///
-/// Every row [`MemoryStore::for_path`] can return today carries
-/// [`FileAssociation::Observed`] — that method's own doc comment says why it
-/// does not narrow by association, and [`FileAssociation`] has exactly one
-/// variant — so this section always labels its rows `observed`, never
-/// `referenced`: the file changed during the session that produced the
-/// memory, which is a correlation and not a claim the memory refers to it.
+/// # Three things every row carries, and one it does not
+///
+/// **The association is read per row**, not assumed. Migration 26 gave
+/// `memory_files` a second provenance, so a row may be `observed` (the file
+/// changed during the session that produced the memory — a correlation) or
+/// `referenced` (an extraction model named the path, and the session
+/// demonstrably edited it — a claim about the memory). Labelling both
+/// `observed`, which this function did while `observed` was the only value a
+/// writer could produce, would now understate half the rows.
+///
+/// **The freshness is a label and never a filter.** Map line 1142: a stale
+/// row is returned, in its rank, marked. Nothing here drops, reorders or
+/// rescores on it — see [`Freshness`], and note that `project_root` reaching
+/// this function is the *only* way git is consulted at all, so a caller that
+/// passes `None` gets [`Freshness::Unknown`] on every row and an otherwise
+/// identical section.
+///
+/// **The intent is [`RetrievalIntent::CodeEdit`]** — map line 1141. This
+/// section is built for the files the task *named*, which is the intended
+/// edit the line is about; the socket door, which was asked what a file is
+/// associated with, stays [`RetrievalIntent::Lookup`].
+///
+/// What it does not carry is which file each row came back for. That was
+/// kept out to save budget when the section was built and stays out: a
+/// reader gets the file back only if the memory's own body mentions it.
 ///
 /// A memory already selected by the search half, or already sent to this
 /// session, is excluded rather than shown twice.
@@ -521,7 +584,8 @@ fn file_observed_memories(
     task: &str,
     already_injected: &HashSet<MemoryId>,
     already_selected: &[MemoryRecord],
-) -> Result<Vec<MemoryRecord>, MemoryStoreError> {
+    project_root: Option<&std::path::Path>,
+) -> Result<Vec<FileAwareMemory>, MemoryStoreError> {
     let paths = crate::routing::session::paths_named_in(task);
     if paths.is_empty() {
         return Ok(Vec::new());
@@ -530,16 +594,28 @@ fn file_observed_memories(
     let mut excluded: HashSet<MemoryId> = already_injected.clone();
     excluded.extend(already_selected.iter().map(|record| record.id.clone()));
 
-    let mut observed: Vec<MemoryRecord> = Vec::new();
+    let mut observed: Vec<FileAwareMemory> = Vec::new();
     for path in paths.iter().take(MAX_OBSERVED_PATHS) {
         if observed.len() >= MAX_FILE_OBSERVED_MEMORIES {
             break;
         }
-        let grouped = store.for_path(path, SearchScope::Current, CANDIDATE_LIMIT)?;
+        let grouped = store.for_path(
+            path,
+            SearchScope::Current,
+            CANDIDATE_LIMIT,
+            RetrievalIntent::CodeEdit,
+        )?;
+        // Map line 1142's cost bound: **one** `git log` per path, taken here
+        // rather than inside the row loop, because every row below is about
+        // this same file. `None` when there is no project root to ask in, no
+        // repository, or git has never tracked the path — all three render as
+        // `unknown` and none of them withholds a row.
+        let last_change =
+            project_root.and_then(|root| crate::checkpoint::git::last_change_commit(root, path));
         for record in grouped
             .invariants_and_constraints
-            .into_iter()
-            .chain(grouped.other)
+            .iter()
+            .chain(grouped.other.iter())
         {
             if observed.len() >= MAX_FILE_OBSERVED_MEMORIES {
                 break;
@@ -551,8 +627,20 @@ fn file_observed_memories(
             // Filtered here rather than after the loop so the early exit
             // above keeps exactly the records the old `retain` + `truncate`
             // kept: same order, same predicate, same first three.
-            if record.is_current() && !is_unreaffirmed_idea(&record) {
-                observed.push(record);
+            if record.is_current() && !is_unreaffirmed_idea(record) {
+                let freshness = match project_root {
+                    Some(root) => Freshness::compare(
+                        root,
+                        last_change.as_deref(),
+                        record.source_commit.as_deref(),
+                    ),
+                    None => Freshness::Unknown,
+                };
+                observed.push(FileAwareMemory {
+                    association: grouped.association(&record.id),
+                    record: record.clone(),
+                    freshness,
+                });
             }
         }
     }
@@ -576,7 +664,7 @@ fn file_observed_memories(
 /// than were actually observed would misstate what this project remembers
 /// about them, which cutting whole entries elsewhere in this module already
 /// takes care not to do.
-fn render(selected: &[MemoryRecord], file_observed: &[MemoryRecord]) -> Option<Injection> {
+fn render(selected: &[MemoryRecord], file_observed: &[FileAwareMemory]) -> Option<Injection> {
     if selected.is_empty() && file_observed.is_empty() {
         return None;
     }
@@ -590,7 +678,7 @@ fn render(selected: &[MemoryRecord], file_observed: &[MemoryRecord]) -> Option<I
     let mut used = MEMORY_MARKER.len() + MEMORY_MARKER_END.len() + 2 + header_reservation();
 
     for (index, record) in selected.iter().enumerate() {
-        let entry = render_entry(index + 1, selected.len(), record, None);
+        let entry = render_entry(index + 1, selected.len(), record, None, None);
         let cost = entry.len() + 1;
         if used + cost > MAX_INJECTED_BYTES {
             // `continue`, not `break`. The per-field budgets are counted in
@@ -611,21 +699,22 @@ fn render(selected: &[MemoryRecord], file_observed: &[MemoryRecord]) -> Option<I
         let heading = file_observed_heading(file_observed.len());
         let mut section_entries: Vec<String> = Vec::with_capacity(file_observed.len());
         let mut section_bytes = heading.len() + 1;
-        for (index, record) in file_observed.iter().enumerate() {
+        for (index, row) in file_observed.iter().enumerate() {
             let entry = render_entry(
                 index + 1,
                 file_observed.len(),
-                record,
-                Some(FileAssociation::Observed),
+                &row.record,
+                row.association,
+                Some(row.freshness),
             );
             section_bytes += entry.len() + 1;
             section_entries.push(entry);
         }
         if used + section_bytes <= MAX_INJECTED_BYTES {
             entries.push(heading);
-            for (entry, record) in section_entries.into_iter().zip(file_observed) {
+            for (entry, row) in section_entries.into_iter().zip(file_observed) {
                 entries.push(entry);
-                memories.push(record.id.clone());
+                memories.push(row.record.id.clone());
             }
         }
     }
@@ -685,15 +774,30 @@ fn header_reservation() -> usize {
 /// after `file_observed_memories` has already returned, so [`render`] has the
 /// real length to test the byte ceiling against and no reservation is needed.
 ///
-/// States the same caveat [`FileAssociation::Observed`] documents — an
-/// observed correlation, not a claim the memory refers to the file — because
-/// a reader seeing "beside the files you named" without it would reasonably
-/// take the stronger reading.
+/// # What this heading lost, what it gained, and why the budget decided
+///
+/// It used to spend a full sentence asserting that every row was a
+/// correlation, which was true while `observed` was the only association a
+/// writer could produce. Migration 26 landed the second, so that sentence
+/// would now misstate half the rows — and each row already carries its own
+/// `assoc=` and `freshness=` tokens, which is where a reader who quotes one
+/// entry out of the block will look anyway.
+///
+/// What replaces it is map line 1142's own caveat — *never treat stale
+/// memory as stronger evidence than the current source code* — stated where
+/// a reader cannot skip it and naming what the evidence actually is.
+///
+/// **The trade was forced, not stylistic.** [`MAX_INJECTED_BYTES`] is 900,
+/// this heading plus three entries is most of it, and every entry grew by a
+/// `freshness=` token. A heading that explained both vocabularies as well
+/// would have pushed the whole section past the ceiling and
+/// [`render`] would have dropped it — a section explaining itself at length
+/// to nobody. The shorter sentence buys back slightly more than the tokens
+/// cost.
 fn file_observed_heading(count: usize) -> String {
     format!(
-        "{count} more, observed beside the files you named: the file changed during the \
-         session that produced the memory — a correlation, not a claim the memory refers to \
-         this file."
+        "{count} more, observed beside the files you named. Advisory: the source at that \
+         path is the evidence, this is not."
     )
 }
 
@@ -702,27 +806,36 @@ fn file_observed_heading(count: usize) -> String {
 /// The head is the only place structure lives, and every token in it comes
 /// from a fixed enum or an integer. Everything after it is [`quote`]d.
 ///
-/// `association` is `Some(FileAssociation::Observed)` for an entry line 1140
-/// added from [`MemoryStore::for_path`] rather than from the routed query —
-/// see [`file_observed_memories`] for why that is the only value this build
-/// can pass — and `None` for every entry the search half of [`briefing`]
-/// selected, which carries no association at all. Both cases share this
-/// function so the two kinds of entry are indistinguishable in every field
-/// except the one that differs.
+/// `association` and `freshness` are `Some` only for an entry line 1140 added
+/// from [`MemoryStore::for_path`]; both are `None` for every entry the search
+/// half of [`briefing`] selected, which was retrieved by no file and so has
+/// neither an association to report nor a file to be stale against. The two
+/// kinds of entry share this function so they are indistinguishable in every
+/// field except the ones that genuinely differ.
+///
+/// `association` is `Some(None)`-shaped in one further case worth naming: a
+/// file-aware row whose stored provenance this build does not recognise
+/// prints no `assoc=` token rather than a guessed one, exactly as
+/// [`super::search::RetrievalResult::association`] returns `None` rather than
+/// defaulting.
 pub(crate) fn render_entry(
     position: usize,
     total: usize,
     record: &MemoryRecord,
     association: Option<FileAssociation>,
+    freshness: Option<Freshness>,
 ) -> String {
-    // Line 1140: an entry `for_path` produced says so in its own head rather
-    // than only in the section heading above it, so the association survives
-    // a reader who quotes one entry out of the block.
+    // Lines 1140 and 1142: an entry `for_path` produced says both things in
+    // its own head rather than only in the section heading above it, so they
+    // survive a reader who quotes one entry out of the block.
     let assoc = association
         .map(|association| format!(" assoc={}", association.as_str()))
         .unwrap_or_default();
+    let fresh = freshness
+        .map(|freshness| format!(" freshness={}", freshness.as_str()))
+        .unwrap_or_default();
     let mut entry = format!(
-        "[{position}/{total} {standing} kind={kind} authority={authority} id={id}{assoc}]",
+        "[{position}/{total} {standing} kind={kind} authority={authority} id={id}{assoc}{fresh}]",
         standing = standing(record),
         kind = record.kind.as_str(),
         authority = record

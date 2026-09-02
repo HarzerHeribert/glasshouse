@@ -85,6 +85,10 @@ pub struct ExtractionDiagnostics {
     pub activity_dropped: usize,
     pub activity_truncated: usize,
     pub redactions: usize,
+    /// Map line 1139's guard, as a count — see
+    /// [`ExtractionOutcome::paths_dropped`] for why the dropped paths
+    /// themselves never appear here.
+    pub paths_dropped: usize,
     pub speculative: usize,
     pub duplicates: usize,
     pub recorded: Vec<DiagnosticsRecorded>,
@@ -201,6 +205,7 @@ fn build(runtime: &crate::Runtime, outcome: &ExtractionOutcome) -> ExtractionDia
         activity_dropped: outcome.activity_dropped,
         activity_truncated: outcome.activity_truncated,
         redactions: outcome.redactions,
+        paths_dropped: outcome.paths_dropped,
         speculative: outcome.speculative,
         duplicates: outcome.duplicates,
         recorded,

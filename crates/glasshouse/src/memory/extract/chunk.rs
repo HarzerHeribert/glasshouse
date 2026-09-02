@@ -78,6 +78,7 @@ pub struct SessionChunk {
     dropped: usize,
     truncated: usize,
     redactions: usize,
+    touched: Vec<String>,
 }
 
 impl SessionChunk {
@@ -159,6 +160,7 @@ impl SessionChunk {
             dropped,
             truncated,
             redactions,
+            touched: Vec::new(),
         }
     }
 
@@ -193,6 +195,41 @@ impl SessionChunk {
     /// Becomes [`crate::memory::MemoryRecord::source_events`].
     pub fn source_events(&self) -> Option<SourceEvents> {
         self.events
+    }
+
+    /// Record which files this activity shows the session **editing** — map
+    /// line 1139's reliability guard, one half of it.
+    ///
+    /// Set by [`crate::memory::extract::lifecycle::chunk_for_session`] from
+    /// the `file_touched` events in the window that survived the budget, and
+    /// empty for every other constructor: activity read out of a file — what
+    /// `glasshouse memory extract --activity` supplies — has no events to
+    /// derive it from, and an empty set there is the honest answer rather
+    /// than a missing one. The consequence is deliberate and worth stating:
+    /// a hand-fed extraction can produce **no** `referenced` association at
+    /// all, because nothing proves the session edited anything.
+    ///
+    /// Separate from [`SessionChunk::build`] for [`SessionChunk::with_source_events`]'s
+    /// own reason, and paths are stored exactly as the events carry them —
+    /// unnormalised, unscrubbed, un-prettified — because
+    /// [`SessionChunk::touched_paths`]'s only job is byte-equality against
+    /// what the model was shown.
+    #[must_use]
+    pub fn with_touched_paths(mut self, paths: Vec<String>) -> Self {
+        self.touched = paths;
+        self
+    }
+
+    /// The files this activity shows the session editing, in the order the
+    /// events recorded them and possibly with repeats.
+    ///
+    /// The **only** paths a memory extracted from this chunk may be
+    /// associated with as [`crate::memory::FileAssociation::Referenced`]. A
+    /// model returning anything else is returning a path the session did not
+    /// demonstrably edit, which is the fabrication the guard exists to
+    /// refuse.
+    pub fn touched_paths(&self) -> &[String] {
+        &self.touched
     }
 
     /// The scrubbed entries, oldest first.

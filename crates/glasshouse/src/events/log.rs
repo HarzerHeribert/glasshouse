@@ -262,6 +262,7 @@ impl EventLog {
             gateway_provider,
             gateway_model,
             gateway_cause,
+            path,
         ) = payload_columns(event);
 
         self.conn
@@ -270,9 +271,10 @@ impl EventLog {
                      project_id, session_id, at, kind,
                      turn_outcome, origin, bytes, exit_code, exit_signal,
                      resource, gateway_reason,
-                     gateway_provider, gateway_model, gateway_cause,
+                     gateway_provider, gateway_model, gateway_cause, path,
                      observed_harness, observed_event
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, \
+                 ?16, ?17)",
                 rusqlite::params![
                     &self.project_id,
                     recorded.session().as_str(),
@@ -288,6 +290,7 @@ impl EventLog {
                     gateway_provider,
                     gateway_model,
                     gateway_cause,
+                    path,
                     observed.map(|o| o.harness.as_str()),
                     observed.map(|o| o.event.as_str()),
                 ],
@@ -490,7 +493,7 @@ impl EventLog {
 
 const ALL_COLUMNS: &str = "seq, session_id, at, kind, turn_outcome, origin, bytes, \
                            exit_code, exit_signal, resource, gateway_reason, \
-                           gateway_provider, gateway_model, gateway_cause, \
+                           gateway_provider, gateway_model, gateway_cause, path, \
                            observed_harness, observed_event";
 
 /// One event's variant payload, spread across the columns that hold it.
@@ -511,10 +514,13 @@ type PayloadColumns = (
     Option<String>,
     Option<String>,
     Option<String>,
+    Option<String>,
 );
 
 fn payload_columns(event: &LifecycleEvent) -> PayloadColumns {
-    let mut columns: PayloadColumns = (None, None, None, None, None, None, None, None, None, None);
+    let mut columns: PayloadColumns = (
+        None, None, None, None, None, None, None, None, None, None, None,
+    );
     match event {
         LifecycleEvent::TurnEnded { outcome } => columns.0 = Some(outcome_sql(*outcome)),
         LifecycleEvent::TextDelivered { origin, bytes } => {
@@ -539,6 +545,10 @@ fn payload_columns(event: &LifecycleEvent) -> PayloadColumns {
             columns.8 = Some(model.clone());
             columns.9 = Some(cause.clone());
         }
+        // Migration 26's `CHECK ((kind = 'file_touched') = (path IS NOT
+        // NULL))` is the other half of this line: the only kind that sets
+        // this column, and the only column that kind sets.
+        LifecycleEvent::FileTouched { path } => columns.10 = Some(path.clone()),
         LifecycleEvent::SessionStarted
         | LifecycleEvent::SessionResumed
         | LifecycleEvent::TurnStarted
@@ -647,8 +657,9 @@ fn read_row(row: &rusqlite::Row<'_>) -> Result<LoggedEvent, EventLogError> {
     let gateway_provider: Option<String> = col(row, 11)?;
     let gateway_model: Option<String> = col(row, 12)?;
     let gateway_cause: Option<String> = col(row, 13)?;
-    let observed_harness: Option<String> = col(row, 14)?;
-    let observed_event: Option<String> = col(row, 15)?;
+    let path: Option<String> = col(row, 14)?;
+    let observed_harness: Option<String> = col(row, 15)?;
+    let observed_event: Option<String> = col(row, 16)?;
 
     let missing = |column: &'static str| EventLogError::MissingValue {
         seq,
@@ -704,6 +715,9 @@ fn read_row(row: &rusqlite::Row<'_>) -> Result<LoggedEvent, EventLogError> {
             provider: gateway_provider.ok_or_else(|| missing("gateway_provider"))?,
             model: gateway_model.ok_or_else(|| missing("gateway_model"))?,
             cause: gateway_cause.ok_or_else(|| missing("gateway_cause"))?,
+        },
+        "file_touched" => LifecycleEvent::FileTouched {
+            path: path.ok_or_else(|| missing("path"))?,
         },
         // Named separately from the payload columns because the answer a
         // reader needs is different: an unknown *kind* is a row written by a
@@ -920,8 +934,19 @@ mod tests {
     #[test]
     fn each_kind_fills_exactly_its_own_columns() {
         let filled = |event: &LifecycleEvent| {
-            let (outcome, origin, bytes, code, signal, resource, reason, provider, model, cause) =
-                payload_columns(event);
+            let (
+                outcome,
+                origin,
+                bytes,
+                code,
+                signal,
+                resource,
+                reason,
+                provider,
+                model,
+                cause,
+                path,
+            ) = payload_columns(event);
             (
                 outcome.is_some(),
                 origin.is_some(),
@@ -933,13 +958,14 @@ mod tests {
                 provider.is_some(),
                 model.is_some(),
                 cause.is_some(),
+                path.is_some(),
             )
         };
 
         assert_eq!(
             filled(&LifecycleEvent::SessionStarted),
             (
-                false, false, false, false, false, false, false, false, false, false
+                false, false, false, false, false, false, false, false, false, false, false
             )
         );
         assert_eq!(
@@ -947,7 +973,7 @@ mod tests {
                 outcome: TurnOutcome::Failed
             }),
             (
-                true, false, false, false, false, false, false, false, false, false
+                true, false, false, false, false, false, false, false, false, false, false
             )
         );
         assert_eq!(
@@ -956,7 +982,7 @@ mod tests {
                 bytes: 7
             }),
             (
-                false, true, true, false, false, false, false, false, false, false
+                false, true, true, false, false, false, false, false, false, false, false
             )
         );
         assert_eq!(
@@ -964,7 +990,7 @@ mod tests {
                 origin: MessageOrigin::UserKeystroke
             }),
             (
-                false, true, false, false, false, false, false, false, false, false
+                false, true, false, false, false, false, false, false, false, false, false
             )
         );
         assert_eq!(
@@ -972,7 +998,7 @@ mod tests {
                 exit: ProcessExit::from_parts(0, None)
             }),
             (
-                false, false, false, true, false, false, false, false, false, false
+                false, false, false, true, false, false, false, false, false, false, false
             )
         );
         assert_eq!(
@@ -981,7 +1007,7 @@ mod tests {
                 reason: GatewayFailure::Rejected
             }),
             (
-                false, false, false, false, false, true, true, false, false, false
+                false, false, false, false, false, true, true, false, false, false, false
             )
         );
         assert_eq!(
@@ -991,7 +1017,17 @@ mod tests {
                 cause: "failover".to_owned(),
             }),
             (
-                false, false, false, false, false, false, false, true, true, true
+                false, false, false, false, false, false, false, true, true, true, false
+            )
+        );
+        // Migration 26's biconditional `CHECK`, asserted on the writer's side:
+        // the only kind that sets `path`, and the only column it sets.
+        assert_eq!(
+            filled(&LifecycleEvent::FileTouched {
+                path: "crates/x.rs".to_owned(),
+            }),
+            (
+                false, false, false, false, false, false, false, false, false, false, true
             )
         );
     }
@@ -1035,6 +1071,10 @@ mod tests {
                 provider: String::new(),
                 model: String::new(),
                 cause: String::new(),
+            }
+            .kind(),
+            LifecycleEvent::FileTouched {
+                path: String::new(),
             }
             .kind(),
         ];
@@ -1135,7 +1175,8 @@ mod tests {
                  kind TEXT, turn_outcome TEXT, origin TEXT, bytes INTEGER,
                  exit_code INTEGER, exit_signal TEXT, resource TEXT,
                  gateway_reason TEXT, gateway_provider TEXT, gateway_model TEXT,
-                 gateway_cause TEXT, observed_harness TEXT, observed_event TEXT);
+                 gateway_cause TEXT, path TEXT, observed_harness TEXT,
+                 observed_event TEXT);
              INSERT INTO lifecycle_events (session_id, at, kind)
              VALUES ('s', 1, 'turn_ended');",
         )
@@ -1172,7 +1213,8 @@ mod tests {
                  kind TEXT, turn_outcome TEXT, origin TEXT, bytes INTEGER,
                  exit_code INTEGER, exit_signal TEXT, resource TEXT,
                  gateway_reason TEXT, gateway_provider TEXT, gateway_model TEXT,
-                 gateway_cause TEXT, observed_harness TEXT, observed_event TEXT);
+                 gateway_cause TEXT, path TEXT, observed_harness TEXT,
+                 observed_event TEXT);
              INSERT INTO lifecycle_events (session_id, at, kind, observed_harness)
              VALUES ('s', 1, 'turn_started', 'some-harness');",
         )
@@ -1211,7 +1253,8 @@ mod tests {
                  kind TEXT, turn_outcome TEXT, origin TEXT, bytes INTEGER,
                  exit_code INTEGER, exit_signal TEXT, resource TEXT,
                  gateway_reason TEXT, gateway_provider TEXT, gateway_model TEXT,
-                 gateway_cause TEXT, observed_harness TEXT, observed_event TEXT);
+                 gateway_cause TEXT, path TEXT, observed_harness TEXT,
+                 observed_event TEXT);
              INSERT INTO lifecycle_events (session_id, at, kind)
              VALUES (CAST(x'7b22ff7d' AS TEXT), 1, 'session_started');",
         )

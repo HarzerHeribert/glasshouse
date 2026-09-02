@@ -19,6 +19,28 @@
 //! - a subprocess inherits an environment, and `GIT_DIR` in that environment
 //!   would silently point this at another repository.
 //!
+//! # The one deliberate exception, and what it is scoped to
+//!
+//! [`last_change_commit`] and [`is_ancestor`] **do** run `git`, and the
+//! objections above are answered rather than waived. They are not on the
+//! checkpoint path: nothing takes a checkpoint through them, and no thread
+//! serving a terminal calls them — their caller is memory retrieval
+//! (`crate::memory::inject`'s file section and `glasshouse memory search
+//! --path`), which is already several database reads deep and is bounded at
+//! one `git log` per path and one `merge-base` per memory. A machine with no
+//! `git`, or a project that is no repository, makes both answer `None`,
+//! which their one consumer renders as *unknown* freshness and shows the
+//! memory anyway. And the environment objection is met head-on: both clear
+//! `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE` and `GIT_COMMON_DIR` from
+//! the child rather than trusting the caller's, so an inherited `GIT_DIR`
+//! cannot silently point them at another repository.
+//!
+//! There is no file-reading version of *"which commit last changed this
+//! path"*: answering it means walking the commit graph and diffing trees out
+//! of packfiles, which is a decompressor and a delta resolver, not two small
+//! files. Map line 1142's freshness is worth one bounded subprocess and is
+//! not worth that.
+//!
 //! # Worktrees, which is the case that actually bites
 //!
 //! In a linked worktree `.git` is a **file** holding `gitdir: <path>`, that
@@ -373,6 +395,208 @@ fn read_trimmed(path: &Path) -> Option<String> {
 /// are accepted, because a repository may be either.
 fn is_object_name(value: &str) -> bool {
     matches!(value.len(), 40 | 64) && value.chars().all(|c| c.is_ascii_hexdigit())
+}
+
+/// Run one `git` subcommand in `root` and return its trimmed stdout, or
+/// `None`.
+///
+/// The single place this module spawns a process, so the environment scrub
+/// the module documentation promises is made once rather than remembered
+/// twice.
+///
+/// - **`current_dir(root)` and no `-C`, no `--git-dir`.** The repository is
+///   named by the working directory and by nothing a caller can smuggle in.
+/// - **Four variables removed.** `GIT_DIR`, `GIT_WORK_TREE`,
+///   `GIT_COMMON_DIR` and `GIT_INDEX_FILE` each override the working
+///   directory, and Glasshouse's own development runs inside linked
+///   worktrees where at least one of them is routinely set. Inheriting them
+///   would answer about whichever repository the parent happened to be
+///   pointed at — silently, and with a real commit.
+/// - **No shell, ever.** `args` are argv elements, so a path is a literal
+///   however it is spelled; the caller puts a `--` in the list before any
+///   path so a file named `-n` cannot become a flag.
+/// - **`stdin(null)`.** `git` must never block waiting for input on a path
+///   whose whole purpose is to answer a label quickly.
+///
+/// `None` for every way of not getting an answer — `git` absent, not a
+/// repository, a nonzero exit, output that is not UTF-8, an empty answer —
+/// because the one consumer renders all of them as *unknown* and a caller
+/// that could tell them apart would still do nothing different.
+fn git_output(root: &Path, args: &[&str]) -> Option<String> {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_INDEX_FILE")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        None
+    } else {
+        Some(trimmed.to_owned())
+    }
+}
+
+/// Whether a memory is older than the file it is about — map line 1142's
+/// *"never treat stale memory as stronger evidence than the current source
+/// code"*, done the one way the refusal register's rulings allow.
+///
+/// # A fact about commits, and deliberately not a claim about conflict
+///
+/// Nothing here reads a line of source or compares a memory's statement to
+/// anything. Reading the source and deciding whether a memory still holds was
+/// refused four times over (register lines 828, 829, 862, 932) as a judgement
+/// this project has no honest producer for, and this does not attempt it. It
+/// answers one question — *did the file change after the memory was recorded?*
+/// — and hands the reader the answer.
+///
+/// # It is a label, and it never withholds
+///
+/// [`Self::Stale`] does not drop a memory, move it, or lower its score. The
+/// comparator in `crate::memory::search` never sees this type; it is computed
+/// after ranking, per row, purely to be printed. A stale memory may still be
+/// the most important thing a session is told — it just says which of the two
+/// is older, and that the source decides.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Freshness {
+    /// The file has not changed since the memory was recorded: its last
+    /// change is the memory's own commit, or an ancestor of it.
+    Current,
+    /// The file changed **after** the memory was recorded — the memory's
+    /// commit is a strict ancestor of the file's last change.
+    Stale,
+    /// Not answerable. Either side missing (a memory recorded with no commit,
+    /// a path git has never tracked), no repository, no `git`, or two commits
+    /// on histories that do not contain one another.
+    ///
+    /// Distinct from [`Self::Current`] on purpose: *"nothing changed"* and
+    /// *"nobody could check"* are different things to tell a reader, and
+    /// collapsing the second into the first is the one direction map line
+    /// 1142 forbids.
+    Unknown,
+}
+
+impl Freshness {
+    /// The word printed on a file-aware row.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Current => "current",
+            Self::Stale => "stale",
+            Self::Unknown => "unknown",
+        }
+    }
+
+    /// Compare a memory's `source_commit` against the commit that last
+    /// changed the file, which the caller reads once per path with
+    /// [`last_change_commit`].
+    ///
+    /// Split from that read rather than folded into it because the two have
+    /// different arities: a briefing asks about a handful of memories per
+    /// path, so the `git log` is paid once and this is paid per memory.
+    ///
+    /// # How many subprocesses this costs
+    ///
+    /// **None** when the two commits are equal, which is the ordinary case —
+    /// a memory extracted at the commit that last touched its file. **One**
+    /// `merge-base` when they differ and the answer is `Current`, which is
+    /// the next most common: the memory was extracted later than the file's
+    /// last change. **Two** only to distinguish `Stale` from `Unknown`, and
+    /// the second call is what stops two divergent branches being reported as
+    /// staleness they are not.
+    pub fn compare(root: &Path, last_change: Option<&str>, source_commit: Option<&str>) -> Self {
+        let (Some(last_change), Some(source)) = (last_change, source_commit) else {
+            return Self::Unknown;
+        };
+        if last_change == source {
+            return Self::Current;
+        }
+        // Asked in this order because it is the cheaper of the two to be
+        // right about: the file's last change being an ancestor of the
+        // memory's commit is exactly "the memory is at least as new", and it
+        // settles `Current` in one call.
+        match is_ancestor(root, last_change, source) {
+            Some(true) => Self::Current,
+            Some(false) => match is_ancestor(root, source, last_change) {
+                // Strict, because equality was handled above.
+                Some(true) => Self::Stale,
+                // Neither contains the other: two branches, and neither is
+                // older than the other in any sense a reader could act on.
+                _ => Self::Unknown,
+            },
+            None => Self::Unknown,
+        }
+    }
+}
+
+impl std::fmt::Display for Freshness {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.pad(self.as_str())
+    }
+}
+
+/// The commit that last changed `path`, as an object name — map line 1142's
+/// first question.
+///
+/// `path` is repo-relative, `/`-separated — `memory_files.path`'s own
+/// spelling, which is what every caller has. It goes after `--` so a name
+/// that begins with `-` is a path and not a flag, and a path git has never
+/// tracked answers `None` (`git log` prints nothing and exits zero, which
+/// `git_output`'s empty-output rule turns into `None`).
+///
+/// The answer is validated as an object name before it is returned. `git`
+/// with `--format=%H` cannot print anything else, so this is not defensive
+/// about `git` — it is the same check [`GitPosition::detect`] applies to a
+/// ref file, kept here so that every commit this module hands out has passed
+/// the same test whatever produced it.
+pub fn last_change_commit(root: &Path, path: &str) -> Option<String> {
+    let commit = git_output(root, &["log", "-1", "--format=%H", "--", path])?;
+    is_object_name(&commit).then_some(commit)
+}
+
+/// Whether `ancestor` is an ancestor of `descendant` — map line 1142's
+/// second question, and the one that makes *stale* a fact about commits
+/// rather than a judgement about content.
+///
+/// `Some(true)`, `Some(false)`, and `None` are three different answers and
+/// the third is the one worth being careful about. `git merge-base
+/// --is-ancestor` exits 0 for yes and 1 for no; **every other exit code is a
+/// refusal to answer**, not a no — an unknown revision, unrelated histories,
+/// a corrupt object, no repository, no `git`. Collapsing that into `false`
+/// would report *current* for a memory nothing could be checked against,
+/// which is the one direction map line 1142 forbids getting wrong.
+///
+/// A commit is its own ancestor by this definition, as `git` defines it, and
+/// the caller relies on that: a file whose last change **is** the commit a
+/// memory was extracted at is current, not stale.
+pub fn is_ancestor(root: &Path, ancestor: &str, descendant: &str) -> Option<bool> {
+    // Not through `git_output`: that helper reads stdout and treats a nonzero
+    // exit as no answer, and this question's whole answer *is* the exit code
+    // — `--is-ancestor` prints nothing at all in either direction.
+    let status = std::process::Command::new("git")
+        .args(["merge-base", "--is-ancestor", ancestor, descendant])
+        .current_dir(root)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_INDEX_FILE")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .ok()?;
+    match status.code() {
+        Some(0) => Some(true),
+        Some(1) => Some(false),
+        _ => None,
+    }
 }
 
 #[cfg(test)]

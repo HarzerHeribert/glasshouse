@@ -186,6 +186,18 @@ pub struct ExtractedMemory {
     /// without its reasoning, and the reasoning can be revised without
     /// rewriting the decision.
     pub provenance: DecisionProvenance,
+    /// Map line 1139: the files this memory is *about*, as the model named
+    /// them.
+    ///
+    /// **Unvalidated here, on purpose.** [`judge`] trims and de-duplicates
+    /// and does nothing else — it has no way to know which files the session
+    /// touched, and a bound or a shape check applied here would read as a
+    /// reliability guarantee this layer cannot give. The real guard is
+    /// [`super::Extractor::run`]'s: a path survives only when it is
+    /// byte-equal to a member of the chunk's own `file_touched` set, so the
+    /// model chooses among files the session demonstrably edited and cannot
+    /// introduce one. Empty is the common and correct answer.
+    pub paths: Vec<String>,
 }
 
 /// Why an emitted memory was not accepted.
@@ -329,6 +341,11 @@ struct RawMemory {
     evidence: Option<String>,
     #[serde(default)]
     source_excerpt: Option<String>,
+    /// Map line 1139. `#[serde(default)]` like everything else here, so a
+    /// model that never learned about this field emits a memory with no
+    /// paths rather than a refused one.
+    #[serde(default)]
+    paths: Option<Vec<String>>,
 }
 
 /// Read a model's whole reply into elements, or fail.
@@ -508,6 +525,17 @@ pub fn judge(element: &serde_json::Value) -> Result<Verdict, Refusal> {
         });
     }
 
+    // Map line 1139. Trimmed and de-duplicated, order preserved; nothing
+    // else. See `ExtractedMemory::paths` for why the checking happens one
+    // layer out instead of here.
+    let mut paths: Vec<String> = Vec::new();
+    for path in raw.paths.unwrap_or_default() {
+        let path = path.trim().to_owned();
+        if !path.is_empty() && !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+
     Ok(Verdict::Keep(ExtractedMemory {
         kind,
         declared_authority,
@@ -516,6 +544,7 @@ pub fn judge(element: &serde_json::Value) -> Result<Verdict, Refusal> {
         subject: subject.map(|s| s.trim().to_owned()),
         body: body.trim().to_owned(),
         provenance,
+        paths,
     }))
 }
 
@@ -627,7 +656,12 @@ pub const RESPONSE_SCHEMA: &str = r#"{
           "compatibility_assumptions": { "type": "string", "maxLength": 300 },
           "operational_assumptions":   { "type": "string", "maxLength": 300 },
           "evidence":                  { "type": "string", "maxLength": 300 },
-          "source_excerpt":            { "type": "string", "maxLength": 500 }
+          "source_excerpt":            { "type": "string", "maxLength": 500 },
+
+          "paths": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
         }
       }
     }
@@ -707,6 +741,12 @@ Rules, in order of importance:
 13. A decision that records neither a rationale nor any assumption is \
     treated as lower-confidence than one that does. That is not a reason to \
     invent either.
+14. `paths` is the repo-relative file paths that appear **verbatim** in the \
+    activity above and that this memory is specifically about. Copy a path \
+    exactly as it is written there — a path you rephrase, complete, correct \
+    or infer is discarded. A memory that is not about any particular file \
+    has an empty list, and that is the ordinary case; listing every file the \
+    session happened to edit is worse than listing none.
 
 Reply with one JSON object matching this schema and nothing else:
 ";

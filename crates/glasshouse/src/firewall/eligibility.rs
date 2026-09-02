@@ -22,6 +22,32 @@ pub fn is_eligible(tool_name: &str, configured: &[String]) -> bool {
     configured.iter().any(|t| t.eq_ignore_ascii_case(tool_name))
 }
 
+/// Whether `tool_name` is a tool that **changes a file** — the four
+/// `HARD_BLOCKED_TOOLS` name, and map line 1139's producer gate.
+///
+/// # Why this reads the block list rather than a list of its own
+///
+/// The two questions have different words and one answer. Reduction refuses
+/// these tools because their results are not the kind of output a reducer may
+/// touch; recording refuses everything *else* because *touched* has to mean
+/// the session changed the file. A second list would be a second place to
+/// remember a fifth editing tool, and the failure mode of forgetting is
+/// silent in both directions — a reduction that mangles an edit's result, or
+/// a `referenced` association earned by a tool nobody meant to count.
+///
+/// Note what this deliberately does **not** inherit from
+/// `is_hard_blocked`: the `permission`/`security` substring rule. A tool
+/// named `SecurityScan` must never be reduced and does not edit anything, so
+/// folding that rule in here would record a file it merely read.
+///
+/// Case-insensitive, exactly as [`is_eligible`] is, because the harness's
+/// spelling of a tool name is not something this build should depend on.
+pub fn is_writing_tool(tool_name: &str) -> bool {
+    HARD_BLOCKED_TOOLS
+        .iter()
+        .any(|t| t.eq_ignore_ascii_case(tool_name))
+}
+
 /// A block no `--tools` flag can lift: the tool's own name says edit/write,
 /// or names permission/security explicitly. This is a name-based guard, not
 /// a content inspection — the response-shape check in
@@ -73,5 +99,32 @@ mod tests {
     fn an_unnamed_tool_is_ineligible_under_a_narrowed_list() {
         let configured = vec!["Grep".to_string()];
         assert!(!is_eligible("Read", &configured));
+    }
+
+    #[test]
+    fn every_hard_blocked_editing_tool_is_a_writing_tool_whatever_its_case() {
+        for tool in HARD_BLOCKED_TOOLS {
+            assert!(is_writing_tool(tool), "{tool}");
+            assert!(is_writing_tool(&tool.to_ascii_lowercase()), "{tool}");
+            assert!(is_writing_tool(&tool.to_ascii_uppercase()), "{tool}");
+        }
+    }
+
+    /// The distinction map line 1139 rests on: *touched* means the session
+    /// changed the file. A tool that reads one is not a producer of that
+    /// fact, and neither is a tool blocked from reduction for the unrelated
+    /// `permission`/`security` reason.
+    #[test]
+    fn a_read_shaped_or_security_shaped_tool_is_not_a_writing_tool() {
+        for tool in [
+            "Read",
+            "Grep",
+            "Glob",
+            "Bash",
+            "SecurityScan",
+            "PermissionPrompt",
+        ] {
+            assert!(!is_writing_tool(tool), "{tool}");
+        }
     }
 }

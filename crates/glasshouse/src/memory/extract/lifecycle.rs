@@ -88,6 +88,13 @@ pub fn describe(event: &LoggedEvent) -> String {
             model,
             cause,
         } => format!("the gateway backend changed to {provider}/{model} ({cause})"),
+        // Migration 26. The path is repo-relative by the writer's own
+        // contract, and it is rendered **verbatim** because that is what
+        // makes the reliability guard in `super::Extractor::run` mechanical:
+        // a path the model returns is kept only when it is byte-equal to one
+        // of these, so any prettifying here would silently make every
+        // returned path unmatchable.
+        LifecycleEvent::FileTouched { path } => format!("edited {path}"),
     };
 
     match &event.observed {
@@ -133,7 +140,23 @@ pub fn chunk_for_session(
         _ => None,
     };
 
-    chunk.with_source_events(range)
+    // Map line 1139's reliability guard, one half of it. The set is derived
+    // from the **events** in the surviving window, never re-parsed out of the
+    // rendered text: `describe` writes `edited <path>` and a reader that
+    // recovered the path by stripping that prefix would be one prose change
+    // away from silently admitting every path the model returns. The window
+    // is the same one the range above is computed from, so a path whose entry
+    // the budget dropped is not in the set — the model never saw it, and a
+    // memory cannot reference what was not shown.
+    let touched: Vec<String> = window
+        .iter()
+        .filter_map(|event| match &event.event {
+            LifecycleEvent::FileTouched { path } => Some(path.clone()),
+            _ => None,
+        })
+        .collect();
+
+    chunk.with_source_events(range).with_touched_paths(touched)
 }
 
 #[cfg(test)]

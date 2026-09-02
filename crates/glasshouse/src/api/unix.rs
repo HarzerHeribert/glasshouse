@@ -1568,6 +1568,7 @@ fn select_memory(
         &already,
         rerank_model.as_deref(),
         diagnostics,
+        Some(runtime.project().root()),
     ) {
         Ok((outcome, _trace)) => Some(outcome),
         Err(err) => {
@@ -2407,6 +2408,13 @@ fn event_json(logged: &LoggedEvent) -> serde_json::Value {
             fields.insert("provider".to_owned(), serde_json::json!(provider));
             fields.insert("model".to_owned(), serde_json::json!(model));
             fields.insert("cause".to_owned(), serde_json::json!(cause));
+        }
+        // Migration 26. The path is already repo-relative — the writer put
+        // it through `normalize_observed_path` before the event existed — so
+        // this puts a file name on the wire and never the project's absolute
+        // location.
+        LifecycleEvent::FileTouched { path } => {
+            fields.insert("path".to_owned(), serde_json::json!(path));
         }
         LifecycleEvent::SessionStarted
         | LifecycleEvent::SessionResumed
@@ -3255,10 +3263,14 @@ fn query_memory(
 /// that helper is `main.rs`'s text-search core and records every retrieval
 /// through it as a *search* (`evaluation::record_memory_retrieval`); a path
 /// lookup runs no query and recording it as one would misreport what was
-/// asked. `main.rs`/`cli.rs` are held by a live worker on this round in any
-/// case (this door's own CLI flag is a later Green, not this package).
+/// asked. `glasshouse memory search --path` is the same reader again, so the
+/// CLI and this door cannot disagree about what a file is associated with.
+///
+/// One `git log` for the whole answer and at most two `merge-base` per row:
+/// every row is about the same file, so the last-change commit is read once.
 fn query_memory_for_path(runtime: &Runtime, path: &str, history: bool, limit: usize) -> Response {
-    use glasshouse::memory::search::SearchScope;
+    use glasshouse::checkpoint::git::{Freshness, last_change_commit};
+    use glasshouse::memory::search::{RetrievalIntent, SearchScope};
 
     let project = match ProjectMemory::open(runtime) {
         Ok(project) => project,
@@ -3269,25 +3281,57 @@ fn query_memory_for_path(runtime: &Runtime, path: &str, history: bool, limit: us
     } else {
         SearchScope::Current
     };
-    let grouped = match project.store().for_path(path, scope, limit) {
+    let grouped = match project
+        .store()
+        .for_path(path, scope, limit, RetrievalIntent::Lookup)
+    {
         Ok(grouped) => grouped,
         Err(err) => return Response::err(err),
+    };
+
+    let root = runtime.project().root();
+    let last_change = last_change_commit(root, path);
+    let row = |record: &glasshouse::memory::MemoryRecord| {
+        file_observed_memory_json(
+            record,
+            grouped.association(&record.id),
+            Freshness::compare(
+                root,
+                last_change.as_deref(),
+                record.source_commit.as_deref(),
+            ),
+        )
     };
 
     Response::ok(serde_json::json!({
         "invariants_and_constraints": grouped
             .invariants_and_constraints
             .iter()
-            .map(file_observed_memory_json)
+            .map(&row)
             .collect::<Vec<_>>(),
-        "other": grouped.other.iter().map(file_observed_memory_json).collect::<Vec<_>>(),
+        "other": grouped.other.iter().map(&row).collect::<Vec<_>>(),
         "path": path,
     }))
 }
 
-/// [`memory_result_json`] plus the one field [`query_memory_for_path`] adds
-/// — see that function for why `association` is always `"observed"`.
-fn file_observed_memory_json(record: &glasshouse::memory::MemoryRecord) -> serde_json::Value {
+/// [`memory_result_json`] plus the three fields [`query_memory_for_path`]
+/// adds — see that function for what each means.
+///
+/// `association` is `null` for a row whose stored provenance this build does
+/// not recognise, which is
+/// [`glasshouse::memory::search::RetrievalResult::association`]'s own answer
+/// carried through rather than defaulted to the weaker of the two words this
+/// build knows.
+///
+/// `advisory` is the constant `true`, and that is the point: it is not a
+/// property of the row that could ever be `false`, it is map line 1142's
+/// statement about this whole door, put where a machine reading one row
+/// cannot miss it.
+fn file_observed_memory_json(
+    record: &glasshouse::memory::MemoryRecord,
+    association: Option<FileAssociation>,
+    freshness: glasshouse::checkpoint::git::Freshness,
+) -> serde_json::Value {
     let serde_json::Value::Object(mut fields) = memory_result_json(record) else {
         // Unreachable: `memory_result_json` is a `json!({...})` object
         // literal, the same guarantee `memory_full_json` relies on above.
@@ -3295,7 +3339,15 @@ fn file_observed_memory_json(record: &glasshouse::memory::MemoryRecord) -> serde
     };
     fields.insert(
         "association".to_owned(),
-        serde_json::json!(FileAssociation::Observed.as_str()),
+        match association {
+            Some(association) => serde_json::json!(association.as_str()),
+            None => serde_json::Value::Null,
+        },
+    );
+    fields.insert("advisory".to_owned(), serde_json::json!(true));
+    fields.insert(
+        "freshness".to_owned(),
+        serde_json::json!(freshness.as_str()),
     );
     serde_json::Value::Object(fields)
 }

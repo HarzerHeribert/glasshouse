@@ -365,6 +365,26 @@ pub enum FileAssociation {
     /// asks no model — and it is deliberately **not**
     /// *"explicitly referenced"*.
     Observed,
+    /// The memory is *about* this file: an extraction model named the path,
+    /// and the path is one the session demonstrably edited.
+    ///
+    /// Map line 1139's own word, and what makes it earnable is the second
+    /// half rather than the first. The context firewall's `PostToolUse` hook
+    /// records a [`crate::events::LifecycleEvent::FileTouched`] for every
+    /// `Edit`/`Write`/`MultiEdit`/`NotebookEdit` path (migration 26), those
+    /// render into the extraction chunk as `edited <path>`, and
+    /// `crate::memory::extract::Extractor::run` keeps a returned path only
+    /// when it is **byte-equal** to one of them. So the model chooses among
+    /// files the session changed and cannot introduce one — *"when extraction
+    /// can identify them reliably"* satisfied mechanically rather than by the
+    /// model's word.
+    ///
+    /// A property of the *memory*, unlike [`Self::Observed`], which is a
+    /// property of the session. One memory may carry both for one path: the
+    /// automatic path writes the dirty set as observed and the model's
+    /// guarded choice as referenced, and neither is a weaker version of the
+    /// other.
+    Referenced,
 }
 
 impl FileAssociation {
@@ -374,6 +394,22 @@ impl FileAssociation {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Observed => "observed",
+            Self::Referenced => "referenced",
+        }
+    }
+
+    /// Which of two associations for the same memory and file says more.
+    ///
+    /// [`Self::Referenced`] over [`Self::Observed`], and it is a fixed order
+    /// rather than a score: *the memory is about this file* strictly contains
+    /// *this file changed while the memory was learned*, so a reader shown
+    /// the weaker of the two would be told less than the rows hold. Not
+    /// derived from [`Ord`], which orders by declaration position and would
+    /// silently reverse if a variant were inserted above another.
+    pub fn strongest(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Referenced, _) | (_, Self::Referenced) => Self::Referenced,
+            _ => Self::Observed,
         }
     }
 
@@ -383,12 +419,13 @@ impl FileAssociation {
     pub fn from_stored(value: &str) -> Option<Self> {
         match value {
             "observed" => Some(Self::Observed),
+            "referenced" => Some(Self::Referenced),
             _ => None,
         }
     }
 
     /// Every variant, for the pinning test.
-    pub const ALL: &'static [Self] = &[Self::Observed];
+    pub const ALL: &'static [Self] = &[Self::Observed, Self::Referenced];
 }
 
 impl fmt::Display for FileAssociation {
@@ -1990,6 +2027,50 @@ impl<'a> MemoryStore<'a> {
         memories: &[MemoryId],
         paths: &[String],
     ) -> Result<usize, MemoryStoreError> {
+        self.record_file_associations(memories, paths, FileAssociation::Observed)
+    }
+
+    /// Associate every memory in `memories` with every path in `paths` as
+    /// [`FileAssociation::Referenced`] — map line 1139's writer.
+    ///
+    /// # Why the same cross-product shape means something different here
+    ///
+    /// [`Self::record_observed_files`]'s cross product is the honest one for
+    /// a fact about the *session*: three memories and twenty dirty files are
+    /// sixty true rows. This one is called with **one** memory at a time, by
+    /// `crate::memory::extract::Extractor::run`, carrying the paths that
+    /// memory's own `paths` field named and survived the byte-equality guard.
+    /// The slice is a slice because the signature mirrors its neighbour, not
+    /// because a caller should batch unrelated memories into it: doing so
+    /// would claim every memory is about every path, which is exactly the
+    /// weaker fact `observed` already records honestly.
+    ///
+    /// Everything else is its neighbour's: [`normalize_observed_path`] is the
+    /// one spelling, an unnormalisable path is dropped rather than guessed
+    /// at, an empty answer writes nothing at all, and a failure is the
+    /// caller's to log rather than to fail a turn over.
+    pub fn record_referenced_files(
+        &self,
+        memories: &[MemoryId],
+        paths: &[String],
+    ) -> Result<usize, MemoryStoreError> {
+        self.record_file_associations(memories, paths, FileAssociation::Referenced)
+    }
+
+    /// The one writer behind [`Self::record_observed_files`] and
+    /// [`Self::record_referenced_files`].
+    ///
+    /// Shared rather than duplicated because the *provenance word is the only
+    /// difference*, and a second copy is how the two would drift about
+    /// normalisation, about what an empty set means, or about the project
+    /// scoping — each of which is a silent wrong association rather than a
+    /// failure.
+    fn record_file_associations(
+        &self,
+        memories: &[MemoryId],
+        paths: &[String],
+        association: FileAssociation,
+    ) -> Result<usize, MemoryStoreError> {
         if memories.is_empty() || paths.is_empty() {
             return Ok(0);
         }
@@ -2023,7 +2104,7 @@ impl<'a> MemoryStore<'a> {
                         &self.project_id,
                         memory.as_str(),
                         path,
-                        FileAssociation::Observed.as_str(),
+                        association.as_str(),
                         now,
                     ])
                     .map_err(|source| MemoryStoreError::Sql {

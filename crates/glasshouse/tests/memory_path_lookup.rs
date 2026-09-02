@@ -27,7 +27,7 @@ use std::path::{Path, PathBuf};
 use clap::Parser;
 use rusqlite::Connection;
 
-use glasshouse::memory::search::{RetrievalResult, SearchScope};
+use glasshouse::memory::search::{RetrievalIntent, RetrievalResult, SearchScope};
 use glasshouse::memory::{
     DecisionProvenance, MemoryAuthority, MemoryId, MemoryKind, MemoryRecord, MemoryStore,
     NewMemory, ProjectMemory,
@@ -245,7 +245,12 @@ fn a_path_returns_the_memories_observed_against_it_and_only_those() {
         .unwrap();
 
     let hit = store
-        .for_path("src/parser.rs", SearchScope::Current, 10)
+        .for_path(
+            "src/parser.rs",
+            SearchScope::Current,
+            10,
+            RetrievalIntent::Lookup,
+        )
         .unwrap();
     let mut ids: Vec<&MemoryId> = returned(&hit)
         .into_iter()
@@ -260,7 +265,12 @@ fn a_path_returns_the_memories_observed_against_it_and_only_those() {
     );
 
     let other = store
-        .for_path("docs/release.md", SearchScope::Current, 10)
+        .for_path(
+            "docs/release.md",
+            SearchScope::Current,
+            10,
+            RetrievalIntent::Lookup,
+        )
         .unwrap();
     assert_eq!(
         returned(&other)
@@ -273,7 +283,12 @@ fn a_path_returns_the_memories_observed_against_it_and_only_those() {
     );
 
     let absent = store
-        .for_path("src/never-touched.rs", SearchScope::Current, 10)
+        .for_path(
+            "src/never-touched.rs",
+            SearchScope::Current,
+            10,
+            RetrievalIntent::Lookup,
+        )
         .unwrap();
     assert!(
         returned(&absent).is_empty(),
@@ -303,7 +318,12 @@ fn a_path_lookup_reports_no_relevance_rather_than_a_zero() {
         .unwrap();
 
     let hit = store
-        .for_path("src/marmot.rs", SearchScope::Current, 10)
+        .for_path(
+            "src/marmot.rs",
+            SearchScope::Current,
+            10,
+            RetrievalIntent::Lookup,
+        )
         .unwrap();
     assert_eq!(
         returned(&hit).len(),
@@ -358,7 +378,9 @@ fn a_lookup_and_a_write_agree_on_how_a_path_is_spelled() {
         "src\\index\\loader.rs",
         "  src/index//loader.rs  ",
     ] {
-        let hit = store.for_path(spelling, SearchScope::Current, 10).unwrap();
+        let hit = store
+            .for_path(spelling, SearchScope::Current, 10, RetrievalIntent::Lookup)
+            .unwrap();
         assert_eq!(
             returned(&hit)
                 .into_iter()
@@ -371,7 +393,12 @@ fn a_lookup_and_a_write_agree_on_how_a_path_is_spelled() {
     }
 
     let refused = store
-        .for_path("../outside/loader.rs", SearchScope::Current, 10)
+        .for_path(
+            "../outside/loader.rs",
+            SearchScope::Current,
+            10,
+            RetrievalIntent::Lookup,
+        )
         .unwrap();
     assert!(
         returned(&refused).is_empty(),
@@ -430,7 +457,12 @@ fn a_memory_planted_from_another_project_is_never_returned_by_a_path_lookup() {
     );
 
     let hit = store
-        .for_path("src/shared.rs", SearchScope::Current, 10)
+        .for_path(
+            "src/shared.rs",
+            SearchScope::Current,
+            10,
+            RetrievalIntent::Lookup,
+        )
         .unwrap();
     assert_eq!(
         returned(&hit)
@@ -462,7 +494,12 @@ fn a_path_lookup_ranks_through_the_same_ladder_a_query_does() {
         .unwrap();
 
     let hit = store
-        .for_path("src/marmot.rs", SearchScope::Current, 10)
+        .for_path(
+            "src/marmot.rs",
+            SearchScope::Current,
+            10,
+            RetrievalIntent::Lookup,
+        )
         .unwrap();
 
     let mut invariants = subjects(&hit.invariants_and_constraints);
@@ -521,7 +558,12 @@ fn a_path_lookup_shows_history_only_when_history_is_asked_for() {
     store.supersede(&old, &new).unwrap();
 
     let current = store
-        .for_path("src/cache.rs", SearchScope::Current, 10)
+        .for_path(
+            "src/cache.rs",
+            SearchScope::Current,
+            10,
+            RetrievalIntent::Lookup,
+        )
         .unwrap();
     assert_eq!(
         returned(&current)
@@ -534,7 +576,12 @@ fn a_path_lookup_shows_history_only_when_history_is_asked_for() {
     );
 
     let historical = store
-        .for_path("src/cache.rs", SearchScope::Historical, 10)
+        .for_path(
+            "src/cache.rs",
+            SearchScope::Historical,
+            10,
+            RetrievalIntent::Lookup,
+        )
         .unwrap();
     let mut ids: Vec<String> = returned(&historical)
         .into_iter()

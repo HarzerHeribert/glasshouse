@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1264 / 1355 mandatory capabilities (93%)** — 91 open across 29 phases.
+**1267 / 1355 mandatory capabilities (94%)** — 88 open across 28 phases.
 
 ## Where the work is
 
@@ -40,7 +40,6 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 33 | Resource health | **2** | 13 | `1309` |
 | Phase 38 | Quota-preserving routing | **2** | 5 | `1604` |
 | Phase 53 | Criteria before adding graph storage | **2** | 3 | `1872` |
-| Phase 28 | File-aware memory lookup | **3** | 2 | `1137` |
 | Phase 33B | Reliability-adjusted agent performance | **3** | 11 | `1345` |
 | Phase 35B | Candidate scoring | **3** | 22 | `1523` |
 | Phase 21E | Decision ladder and conflict handling | **4** | 8 | `907` |
@@ -52,7 +51,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 59 | Decompression: the code's physical shape catches up with its architecture | **8** | 0 | `2043` |
 | Phase 51 | Evaluation hooks | **15** | 22 | `1818` |
 
-**Fully closed (80):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 7, Phase 8, Phase 9A, Phase 9B, Phase 9C, Phase 9D, Phase 9F, Phase 9G, Phase 9I, Phase 9J, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 16, Phase 17, Phase 18, Phase 19, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 21H, Phase 21I, Phase 21J, Phase 22, Phase 23, Phase 24, Phase 25, Phase 26, Phase 29, Phase 32, Phase 32B, Phase 32E, Phase 33A, Phase 33C, Phase 34, Phase 34A, Phase 34B, Phase 34D, Phase 34E, Phase 34F, Phase 35, Phase 35A, Phase 35C, Phase 35D, Phase 36, Phase 39, Phase 40, Phase 41, Phase 42, Phase 43, Phase 44, Phase 45, Phase 46, Phase 47, Phase 48, Phase 49, Phase 50, Phase 54, Phase 54A, Phase 55, Phase 56, Phase 56A, Phase 57, Phase 58.
+**Fully closed (81):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 7, Phase 8, Phase 9A, Phase 9B, Phase 9C, Phase 9D, Phase 9F, Phase 9G, Phase 9I, Phase 9J, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 16, Phase 17, Phase 18, Phase 19, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 21H, Phase 21I, Phase 21J, Phase 22, Phase 23, Phase 24, Phase 25, Phase 26, Phase 28, Phase 29, Phase 32, Phase 32B, Phase 32E, Phase 33A, Phase 33C, Phase 34, Phase 34A, Phase 34B, Phase 34D, Phase 34E, Phase 34F, Phase 35, Phase 35A, Phase 35C, Phase 35D, Phase 36, Phase 39, Phase 40, Phase 41, Phase 42, Phase 43, Phase 44, Phase 45, Phase 46, Phase 47, Phase 48, Phase 49, Phase 50, Phase 54, Phase 54A, Phase 55, Phase 56, Phase 56A, Phase 57, Phase 58.
 
 ## The nearly-finished phases, in full
 
@@ -144,12 +143,6 @@ these unwrapped.
 
 - **1879** ☐ Do not add a graph database solely to visualize project memory.
 - **1882** ☐ Evaluate whether SQLite relations are insufficient before adopting a dedicated graph database.
-
-### Phase 28 — File-aware memory lookup  (3 open, 2 closed)
-
-- **1139** ☐ Track file paths explicitly referenced by durable memories when extraction can identify them reliably.
-- **1141** ☐ Prefer constraints, decisions, and failed approaches when retrieving memory for an intended code edit.
-- **1142** ☐ Keep file-aware retrieval advisory and never treat stale memory as stronger evidence than the current source code.
 
 ### Phase 33B — Reliability-adjusted agent performance  (3 open, 11 closed)
 

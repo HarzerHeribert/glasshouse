@@ -1136,10 +1136,10 @@ Fixed architectural requirements
 
 Phase 28 — File-aware memory lookup
 
-☐ Track file paths explicitly referenced by durable memories when extraction can identify them reliably.
+☑ Track file paths explicitly referenced by durable memories when extraction can identify them reliably.
 ☑ Allow Glasshouse to retrieve memories associated with a file before a new session begins work on that file.
-☐ Prefer constraints, decisions, and failed approaches when retrieving memory for an intended code edit.
-☐ Keep file-aware retrieval advisory and never treat stale memory as stronger evidence than the current source code.
+☑ Prefer constraints, decisions, and failed approaches when retrieving memory for an intended code edit.
+☑ Keep file-aware retrieval advisory and never treat stale memory as stronger evidence than the current source code.
 ☑ Allow an agent to request the rationale behind a file-related constraint through memory search.
 
 Phase 29 — Memory commits

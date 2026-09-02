@@ -629,6 +629,20 @@ pub struct ExtractionOutcome {
     pub activity_truncated: usize,
     /// Credentials the scrubber removed on the way in.
     pub redactions: usize,
+    /// Map line 1139's guard, counted: how many paths the model returned that
+    /// were **not** byte-equal to a file the chunk shows the session editing,
+    /// summed over every memory this run stored.
+    ///
+    /// A count and never the text. A dropped path is a path this build has
+    /// decided it cannot vouch for, and copying it into a diagnostics line
+    /// would put an unvouched-for file name into a file whose whole
+    /// discipline is ids and counts — see [`diagnostics`]'s own header.
+    ///
+    /// Non-zero is not a defect on its own: a model naming a file it read but
+    /// did not edit lands here, and so does one inventing a path. It is worth
+    /// watching because the two are indistinguishable from outside, and a
+    /// number that climbs says the contract text is not landing.
+    pub paths_dropped: usize,
     /// Set when the whole extraction failed. Never an error a caller must
     /// handle.
     pub failure: Option<ExtractionFailure>,
@@ -658,6 +672,7 @@ impl ExtractionOutcome {
             activity_dropped: chunk.dropped(),
             activity_truncated: chunk.truncated(),
             redactions: chunk.redactions(),
+            paths_dropped: 0,
             failure: None,
             call: None,
         }
@@ -874,9 +889,64 @@ impl<'a> Extractor<'a> {
                         .lowered
                         .push((record.id.clone(), classification.clone()));
                 }
+                self.record_referenced_paths(&record.id, &memory.paths, chunk, outcome);
                 outcome.recorded.push(record.id);
             }
             Err(err) => outcome.rejected.push(Rejection::Store(err.to_string())),
+        }
+    }
+
+    /// Map line 1139's reliability guard, and the writer behind it.
+    ///
+    /// **The check is byte-equality against the chunk's own `file_touched`
+    /// set, and nothing else.** Not a prefix match, not a normalised
+    /// comparison, not a "does this look like a path" test — the model was
+    /// shown `edited <path>` for each of those paths verbatim
+    /// (`lifecycle::describe`), so a returned path either is one of them or
+    /// is something the model produced rather than copied. Anything softer
+    /// would let a plausible near-miss earn
+    /// [`crate::memory::FileAssociation::Referenced`], which is precisely the
+    /// fabricated producer the refusal register refused for this line.
+    ///
+    /// Normalisation happens **after** the check, inside
+    /// [`crate::memory::MemoryStore::record_referenced_files`], for the same
+    /// reason: normalising first would make two spellings of one file compare
+    /// equal and quietly widen what counts as copied.
+    ///
+    /// A store failure is a `tracing::warn!` and nothing more. The memory is
+    /// already recorded, and losing its file association is strictly better
+    /// than losing it — the posture `main.rs::record_observed_files`
+    /// documents for the other writer.
+    fn record_referenced_paths(
+        &self,
+        memory: &MemoryId,
+        claimed: &[String],
+        chunk: &SessionChunk,
+        outcome: &mut ExtractionOutcome,
+    ) {
+        if claimed.is_empty() {
+            return;
+        }
+        let touched = chunk.touched_paths();
+        let mut kept: Vec<String> = Vec::new();
+        for path in claimed {
+            if touched.iter().any(|seen| seen == path) {
+                kept.push(path.clone());
+            } else {
+                outcome.paths_dropped += 1;
+            }
+        }
+        if kept.is_empty() {
+            return;
+        }
+        if let Err(err) = self
+            .store
+            .record_referenced_files(std::slice::from_ref(memory), &kept)
+        {
+            tracing::warn!(
+                error = %err,
+                "could not record which files a memory refers to"
+            );
         }
     }
 

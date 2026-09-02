@@ -974,6 +974,12 @@ pub(crate) fn describe_event(event: &LifecycleEvent) -> String {
             model,
             cause,
         } => format!("gateway backend changed to {provider}/{model} ({cause})"),
+        // Migration 26. The path is already repo-relative — the writer
+        // applies `crate::memory::store::normalize_observed_path` before the
+        // event exists — so this row names a file the user recognises without
+        // spilling their absolute directory layout into a view that is often
+        // on screen while someone else is looking.
+        LifecycleEvent::FileTouched { path } => format!("edited {path}"),
     }
 }
 
@@ -7941,6 +7947,9 @@ mod activity_tests {
                 provider: "anthropic".to_owned(),
                 model: "claude".to_owned(),
                 cause: "failover".to_owned(),
+            },
+            LifecycleEvent::FileTouched {
+                path: "crates/glasshouse/src/a.rs".to_owned(),
             },
         ]
     }

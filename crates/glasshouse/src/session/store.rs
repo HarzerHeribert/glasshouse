@@ -4004,6 +4004,11 @@ mod tests {
                 "lifecycle_events.gateway_provider",
                 "lifecycle_events.gateway_model",
                 "lifecycle_events.gateway_cause",
+                // Migration 26. A repo-relative path a session edited, as
+                // `crate::memory::store::normalize_observed_path` spells it —
+                // the user's own file names, and never anything a provider
+                // issued.
+                "lifecycle_events.path",
                 "lifecycle_events.observed_harness",
                 "lifecycle_events.observed_event",
                 "memories.id",
@@ -4412,7 +4417,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            version, 25,
+            version, 26,
             "the launch must have applied migrations 3 through 22"
         );
 
@@ -4604,7 +4609,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            version, 25,
+            version, 26,
             "the launch must have applied migrations 2 through 22"
         );
 
@@ -5628,7 +5633,7 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(
-                version, 25,
+                version, 26,
                 "the launch must have applied migrations 8 through 22"
             );
 
@@ -5757,7 +5762,7 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(
-                version, 25,
+                version, 26,
                 "the reopen must have applied migrations 12 through 22"
             );
 

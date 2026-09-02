@@ -114,6 +114,36 @@ pub enum LifecycleEvent {
         model: String,
         cause: String,
     },
+    /// A session **changed** a file, as the context firewall's `PostToolUse`
+    /// hook saw it — one event per distinct path an `Edit`, `Write`,
+    /// `MultiEdit` or `NotebookEdit` named.
+    ///
+    /// # Touched means changed, and read-shaped tools are deliberately absent
+    ///
+    /// `Read`, `Grep` and `Glob` carry paths too and none of them is recorded.
+    /// A memory can honestly reference a file the session *changed*; that the
+    /// session looked at a file is a much weaker fact wearing the same shape,
+    /// and admitting it here would let map line 1139's `referenced`
+    /// association be earned by a glance.
+    ///
+    /// # The path, and what it is not
+    ///
+    /// Repo-relative and `/`-separated —
+    /// [`crate::memory::normalize_observed_path`]'s spelling, applied
+    /// by the writer, so a path outside the project root is dropped before it
+    /// ever reaches an event rather than stored and filtered later. It is the
+    /// user's own file name and nothing else: no content, no diff, no tool
+    /// output.
+    ///
+    /// # Not a state transition
+    ///
+    /// [`LifecycleEvent::implied_state`] answers `None`. A session editing a
+    /// file says nothing about whether it is running, idle or waiting — the
+    /// hook that records this fires while the harness is mid-turn, and
+    /// promoting that to `Running` would let a `PostToolUse` payload reach the
+    /// session state machine, which is exactly what `REPORTED_EVENTS` keeps
+    /// out.
+    FileTouched { path: String },
 }
 
 impl LifecycleEvent {
@@ -148,6 +178,7 @@ impl LifecycleEvent {
             Self::OutputEnded => "output_ended",
             Self::GatewayUnhealthy { .. } => "gateway_unhealthy",
             Self::GatewayBackendChanged { .. } => "gateway_backend_changed",
+            Self::FileTouched { .. } => "file_touched",
         }
     }
 
@@ -169,7 +200,14 @@ impl LifecycleEvent {
             // A backend moving says nothing about whether the session
             // itself is running: the harness is still alive on screen
             // either side of a failover.
-            | Self::GatewayBackendChanged { .. } => None,
+            | Self::GatewayBackendChanged { .. }
+            // Migration 26. A file being edited is not a transition: the
+            // hook that records it fires *during* a turn the state machine
+            // already has a `TurnStarted` for, so answering `Running` here
+            // would be a second, later source for a fact `crate::session::
+            // lifecycle` already established from a harness report — and a
+            // source whose input is a `PostToolUse` payload.
+            | Self::FileTouched { .. } => None,
         }
     }
 }

@@ -180,7 +180,16 @@ pub fn export(
         let mut lines = Vec::with_capacity(total + 1);
         lines.push(header_line(now, total));
         for (index, record) in selected.iter().enumerate() {
-            lines.push(super::inject::render_entry(index + 1, total, record, None));
+            // No association and no freshness: an export is not a
+            // file-aware retrieval — it names no file — so both fields would
+            // be claims about a relationship this caller never established.
+            lines.push(super::inject::render_entry(
+                index + 1,
+                total,
+                record,
+                None,
+                None,
+            ));
         }
         Some(lines.join("\n"))
     };

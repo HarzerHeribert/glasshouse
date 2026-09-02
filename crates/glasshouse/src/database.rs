@@ -148,9 +148,18 @@ pub(crate) const DATABASE_FILE_NAME: &str = "glasshouse.db";
 /// instants, why their zero is not `dispatched_at`, and
 /// `docs/product/design-decisions.md`'s *Millisecond offsets on the routing
 /// row — Cluster G's second column set* for the design.
+/// Version 26 admits the twelfth `lifecycle_events.kind`, `file_touched`,
+/// and gives it the one payload column it carries — `path` — for capability
+/// map line 1139, *"track file paths explicitly referenced by durable
+/// memories"*. Migration 5's `kind` is a `CHECK` and SQLite cannot alter
+/// one, so this is a table rebuild in migration 7's exact shape, `seq`
+/// named explicitly so a memory's provenance range keeps pointing at the
+/// same events. See the migration's own doc comment, and
+/// `docs/product/design-decisions.md`'s *File paths a memory explicitly
+/// references* for why the record is an event rather than a table.
 /// Later migrations are appended to [`MIGRATIONS`], and this constant moves
 /// with them.
-const SUPPORTED_SCHEMA_VERSION: i64 = 25;
+const SUPPORTED_SCHEMA_VERSION: i64 = 26;
 
 /// The `lifecycle_events.kind` values migration 5's `CHECK` constraint allows.
 ///
@@ -159,7 +168,7 @@ const SUPPORTED_SCHEMA_VERSION: i64 = 25;
 /// A renamed variant otherwise compiles perfectly and then fails as a
 /// constraint violation on a background writer thread, where nobody is
 /// looking.
-pub(crate) const LIFECYCLE_EVENT_KINDS: [&str; 11] = [
+pub(crate) const LIFECYCLE_EVENT_KINDS: [&str; 12] = [
     "session_started",
     "session_resumed",
     "turn_started",
@@ -171,6 +180,7 @@ pub(crate) const LIFECYCLE_EVENT_KINDS: [&str; 11] = [
     "output_ended",
     "gateway_unhealthy",
     "gateway_backend_changed",
+    "file_touched",
 ];
 
 /// The `evaluation_observations.kind` values this build writes.
@@ -287,19 +297,31 @@ const TASK_CLASSES: [&str; 5] = [
 /// is what stops a later, narrower producer from being silently averaged
 /// together with this one.
 ///
-/// # `#[cfg(test)]`, and exactly when that stops being right
+/// # Two values now, and why the second one is not a wider version of the
+/// first
+///
+/// `referenced` is what map line 1139 asked for and what nothing could
+/// honestly produce until the context firewall's `PostToolUse` hook started
+/// keeping the paths it already saw (`file_touched`, migration 26). It is a
+/// **different producer**, not a better one: `observed` is the dirty index at
+/// extraction time, `referenced` is a path the extraction model chose out of
+/// the set of files the session demonstrably edited. A row says which, so a
+/// reader can weigh them apart rather than averaging a correlation with a
+/// claim.
+///
+/// # Still `#[cfg(test)]`
 ///
 /// [`EVALUATION_KINDS`] is not gated because it reaches production through an
 /// error message: something *reads* that table and has to say what it could
-/// not interpret. Nothing reads `memory_files` yet — this package lands the
-/// producer and no consumer — so the only consumer of this constant is the
-/// test that pins it against [`crate::memory::FileAssociation`], and an
-/// ungated constant with a `#[cfg(test)]`-only consumer is dead code that
-/// `-D warnings` refuses. Gating it is the honest shape until a reader lands;
-/// the moment one does, it un-gates and grows the same "which values this
-/// build knows" error [`EVALUATION_KINDS`] already has.
+/// not interpret. `memory_files` is read by
+/// [`crate::memory::MemoryStore::for_path`], but a provenance this build does
+/// not know is dropped by [`crate::memory::FileAssociation::from_stored`]
+/// rather than reported, so no production caller needs the list. The only
+/// consumer of this constant is the test that pins it against
+/// [`crate::memory::FileAssociation`], and an ungated constant with a
+/// `#[cfg(test)]`-only consumer is dead code that `-D warnings` refuses.
 #[cfg(test)]
-pub(crate) const MEMORY_FILE_PROVENANCE: [&str; 1] = ["observed"];
+pub(crate) const MEMORY_FILE_PROVENANCE: [&str; 2] = ["observed", "referenced"];
 
 /// The largest checkpoint the project database will store, in bytes.
 ///
@@ -2554,6 +2576,146 @@ const MIGRATIONS: [&str; SUPPORTED_SCHEMA_VERSION as usize] = [
     ALTER TABLE routing_observations ADD COLUMN completed_ms INTEGER
         CHECK (completed_ms IS NULL OR completed_ms >= 0);
     ",
+    // 26: `file_touched` — capability map line 1139's producer. The context
+    // firewall's `PostToolUse` hook already sees the `file_path` of every
+    // `Edit`, `Write`, `MultiEdit` and `NotebookEdit` a Claude Code session
+    // makes; this is where it keeps one.
+    //
+    // # Migration 7's shape, for migration 7's reason
+    //
+    // SQLite cannot add or drop a `CHECK`, and migration 5's `kind` column
+    // is one. Admitting a twelfth value is therefore rename, recreate, copy,
+    // drop, then recreate the index and all three triggers — exactly what
+    // migration 7 paid to admit the eleventh, and the comment there is the
+    // one to read for why the alternative does not exist.
+    //
+    // **`seq` is named explicitly in both the column list and the `SELECT`,
+    // and that is load-bearing rather than tidy.** `memories.source_event_
+    // first` and `.source_event_last` reference it, so a rebuild that let
+    // `AUTOINCREMENT` assign fresh values would silently re-point every
+    // extracted memory's provenance at different events — nothing would
+    // fail, the data would just be wrong.
+    // `a_memorys_provenance_survives_the_seq_rebuild` in
+    // `tests/events_lifecycle.rs` was written against a deliberately naive
+    // rebuild and covers this one too.
+    //
+    // # `path`, and its two `CHECK`s
+    //
+    // Repo-relative, `/`-separated, never absolute — `crate::memory::store::
+    // normalize_observed_path`'s contract, applied by the writer, for the
+    // reasons migration 17 gives about `memory_files.path`: the schema can
+    // refuse an empty string and nothing more, because `CHECK (path NOT LIKE
+    // '/%')` would miss `C:\...` and a `CHECK` forbidding `\` or `:` would
+    // reject file names that are legal on Unix.
+    //
+    // The second `CHECK` is the biconditional the other payload columns do
+    // not have and this one can: `file_touched` is the only kind that
+    // carries a path, and a path is the only thing that kind carries. So
+    // `(kind = 'file_touched') = (path IS NOT NULL)` refuses both a
+    // `file_touched` with nothing to point at and a `turn_ended` that
+    // somehow acquired a path. `crate::events::log::read_row` would report
+    // the first as `MissingValue`; the schema is where it is cheaper to
+    // refuse it than to read it back.
+    //
+    // # Why an event, and not a table of its own
+    //
+    // `crate::memory::extract::lifecycle::chunk_for_session` already reads a
+    // session's events in order, renders each with `describe`, and derives
+    // every memory's provenance range from the tail that survived the
+    // budget. A second source would need a second ordering and a second
+    // range; an event slots into the reader that exists.
+    //
+    // This is not the noise `REPORTED_EVENTS` refuses. That list keeps
+    // `PostToolUse` out of the *lifecycle state machine*: `file_touched` is
+    // appended by the firewall subprocess that already runs on every tool
+    // call, `crate::events::LifecycleEvent::implied_state` answers `None`
+    // for it, and every `match` on that enum in this crate is exhaustive, so
+    // the compiler names each consumer that has to say so.
+    "
+    CREATE TABLE lifecycle_events_new (
+        seq              INTEGER PRIMARY KEY AUTOINCREMENT,
+        project_id       TEXT    NOT NULL,
+        session_id       TEXT    NOT NULL,
+        at               INTEGER NOT NULL,
+        kind             TEXT    NOT NULL
+            CHECK (kind IN ('session_started', 'session_resumed',
+                            'turn_started', 'turn_ended',
+                            'waiting_for_user', 'text_delivered',
+                            'interrupt_delivered', 'process_exited',
+                            'output_ended', 'gateway_unhealthy',
+                            'gateway_backend_changed', 'file_touched')),
+
+        -- Variant payloads, each NULL for the kinds that do not carry them.
+        turn_outcome     TEXT
+            CHECK (turn_outcome IS NULL OR
+                   turn_outcome IN ('completed', 'failed')),
+        origin           TEXT
+            CHECK (origin IS NULL OR
+                   origin IN ('user_keystroke', 'machine')),
+        bytes            INTEGER,
+        exit_code        INTEGER,
+        exit_signal      TEXT,
+        resource         TEXT,
+        gateway_reason   TEXT
+            CHECK (gateway_reason IS NULL OR
+                   gateway_reason IN ('unreachable', 'timed_out', 'rejected')),
+        gateway_provider TEXT,
+        gateway_model    TEXT,
+        gateway_cause    TEXT,
+        path             TEXT
+            CHECK (path IS NULL OR path <> ''),
+
+        -- The harness report this was translated from, when it was translated
+        -- from one. Both or neither.
+        observed_harness TEXT,
+        observed_event   TEXT,
+        CHECK ((observed_harness IS NULL) = (observed_event IS NULL)),
+        CHECK ((kind = 'file_touched') = (path IS NOT NULL))
+    );
+
+    INSERT INTO lifecycle_events_new (
+        seq, project_id, session_id, at, kind,
+        turn_outcome, origin, bytes, exit_code, exit_signal,
+        resource, gateway_reason, gateway_provider, gateway_model,
+        gateway_cause, observed_harness, observed_event
+    )
+    SELECT
+        seq, project_id, session_id, at, kind,
+        turn_outcome, origin, bytes, exit_code, exit_signal,
+        resource, gateway_reason, gateway_provider, gateway_model,
+        gateway_cause, observed_harness, observed_event
+    FROM lifecycle_events;
+
+    DROP TABLE lifecycle_events;
+    ALTER TABLE lifecycle_events_new RENAME TO lifecycle_events;
+
+    CREATE INDEX lifecycle_events_by_session
+        ON lifecycle_events (session_id, seq);
+
+    CREATE TRIGGER lifecycle_events_reject_foreign_project_insert
+    BEFORE INSERT ON lifecycle_events
+    FOR EACH ROW
+    WHEN NEW.project_id IS NOT (
+        SELECT value FROM project_metadata WHERE key = 'project_id'
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'event belongs to a different project');
+    END;
+
+    CREATE TRIGGER lifecycle_events_are_append_only_update
+    BEFORE UPDATE ON lifecycle_events
+    FOR EACH ROW
+    BEGIN
+        SELECT RAISE(ABORT, 'the project event log is append-only');
+    END;
+
+    CREATE TRIGGER lifecycle_events_are_append_only_delete
+    BEFORE DELETE ON lifecycle_events
+    FOR EACH ROW
+    BEGIN
+        SELECT RAISE(ABORT, 'the project event log is append-only');
+    END;
+    ",
 ];
 
 pub(crate) const PROJECT_ID_KEY: &str = "project_id";
@@ -3489,7 +3651,88 @@ mod tests {
     /// the column it is written on. Newest first, so 25's four lead and
     /// 24's three follow, each set in the reverse of the order it was
     /// added.
+    ///
+    /// Migration 26 is the only one here that is none of those shapes, and it
+    /// leads because it is the newest. It rebuilt `lifecycle_events`, so
+    /// undoing it is a rebuild back to migration 7's exact table — an
+    /// `ALTER TABLE ... DROP COLUMN` cannot do it, because `path` is named in
+    /// a **table**-scoped `CHECK` and SQLite refuses to drop a column a table
+    /// constraint mentions, and dropping the column alone would leave `kind`'s
+    /// own `CHECK` still admitting `file_touched`. `seq` is named explicitly
+    /// on the way back for exactly the reason migration 26 names it on the way
+    /// out: `memories.source_event_first`/`.source_event_last` point at it.
     const UNDO_MIGRATIONS_ABOVE_THIRTEEN: &str = "
+        CREATE TABLE lifecycle_events_pre26 (
+            seq              INTEGER PRIMARY KEY AUTOINCREMENT,
+            project_id       TEXT    NOT NULL,
+            session_id       TEXT    NOT NULL,
+            at               INTEGER NOT NULL,
+            kind             TEXT    NOT NULL
+                CHECK (kind IN ('session_started', 'session_resumed',
+                                'turn_started', 'turn_ended',
+                                'waiting_for_user', 'text_delivered',
+                                'interrupt_delivered', 'process_exited',
+                                'output_ended', 'gateway_unhealthy',
+                                'gateway_backend_changed')),
+            turn_outcome     TEXT
+                CHECK (turn_outcome IS NULL OR
+                       turn_outcome IN ('completed', 'failed')),
+            origin           TEXT
+                CHECK (origin IS NULL OR
+                       origin IN ('user_keystroke', 'machine')),
+            bytes            INTEGER,
+            exit_code        INTEGER,
+            exit_signal      TEXT,
+            resource         TEXT,
+            gateway_reason   TEXT
+                CHECK (gateway_reason IS NULL OR
+                       gateway_reason IN ('unreachable', 'timed_out', 'rejected')),
+            gateway_provider TEXT,
+            gateway_model    TEXT,
+            gateway_cause    TEXT,
+            observed_harness TEXT,
+            observed_event   TEXT,
+            CHECK ((observed_harness IS NULL) = (observed_event IS NULL))
+        );
+        INSERT INTO lifecycle_events_pre26 (
+            seq, project_id, session_id, at, kind,
+            turn_outcome, origin, bytes, exit_code, exit_signal,
+            resource, gateway_reason, gateway_provider, gateway_model,
+            gateway_cause, observed_harness, observed_event
+        )
+        SELECT
+            seq, project_id, session_id, at, kind,
+            turn_outcome, origin, bytes, exit_code, exit_signal,
+            resource, gateway_reason, gateway_provider, gateway_model,
+            gateway_cause, observed_harness, observed_event
+        FROM lifecycle_events
+        WHERE kind <> 'file_touched';
+        DROP TABLE lifecycle_events;
+        ALTER TABLE lifecycle_events_pre26 RENAME TO lifecycle_events;
+        CREATE INDEX lifecycle_events_by_session
+            ON lifecycle_events (session_id, seq);
+        CREATE TRIGGER lifecycle_events_reject_foreign_project_insert
+        BEFORE INSERT ON lifecycle_events
+        FOR EACH ROW
+        WHEN NEW.project_id IS NOT (
+            SELECT value FROM project_metadata WHERE key = 'project_id'
+        )
+        BEGIN
+            SELECT RAISE(ABORT, 'event belongs to a different project');
+        END;
+        CREATE TRIGGER lifecycle_events_are_append_only_update
+        BEFORE UPDATE ON lifecycle_events
+        FOR EACH ROW
+        BEGIN
+            SELECT RAISE(ABORT, 'the project event log is append-only');
+        END;
+        CREATE TRIGGER lifecycle_events_are_append_only_delete
+        BEFORE DELETE ON lifecycle_events
+        FOR EACH ROW
+        BEGIN
+            SELECT RAISE(ABORT, 'the project event log is append-only');
+        END;
+
         ALTER TABLE routing_observations DROP COLUMN completed_ms;
         ALTER TABLE routing_observations DROP COLUMN first_tool_call_ms;
         ALTER TABLE routing_observations DROP COLUMN first_token_ms;
@@ -3619,8 +3862,25 @@ mod tests {
                 Some(*association)
             );
         }
-        assert_eq!(FileAssociation::from_stored("referenced"), None);
+        // A word no build has ever written. `referenced` used to stand here
+        // for exactly that reason and stopped being the right example when
+        // migration 26 gave it a producer — which is the whole content of
+        // this assertion: `from_stored` drops what it does not know rather
+        // than defaulting, so a row from a later build reads as no
+        // association instead of as the weaker of the two this one has.
+        assert_eq!(FileAssociation::from_stored("mentioned"), None);
         assert_eq!(FileAssociation::from_stored(""), None);
+
+        // Map line 1139's ordering, pinned where the vocabulary is: a memory
+        // carrying both rows for one file reports the claim, not the
+        // correlation. `FileAssociation::strongest` is what
+        // `MemoryStore::for_path` folds its `group_concat` with, and getting
+        // this backwards would label every referenced row `observed`.
+        use FileAssociation::{Observed, Referenced};
+        assert_eq!(Observed.strongest(Referenced), Referenced);
+        assert_eq!(Referenced.strongest(Observed), Referenced);
+        assert_eq!(Observed.strongest(Observed), Observed);
+        assert_eq!(Referenced.strongest(Referenced), Referenced);
     }
 
     /// Migration 18's `failure_class` carries **no** `CHECK`, so nothing in
@@ -3928,7 +4188,7 @@ mod tests {
             "the launch must have applied migration 23"
         );
         assert_eq!(
-            SUPPORTED_SCHEMA_VERSION, 25,
+            SUPPORTED_SCHEMA_VERSION, 26,
             "a fresh database reports the version the newest migration ships"
         );
         {
@@ -4120,7 +4380,7 @@ mod tests {
             "the launch must have applied migration 24"
         );
         assert_eq!(
-            SUPPORTED_SCHEMA_VERSION, 25,
+            SUPPORTED_SCHEMA_VERSION, 26,
             "a fresh database reports the version the newest migration ships"
         );
         {
@@ -4334,8 +4594,8 @@ mod tests {
             "the launch must have applied migration 25"
         );
         assert_eq!(
-            SUPPORTED_SCHEMA_VERSION, 25,
-            "a fresh database reports the version this migration ships"
+            SUPPORTED_SCHEMA_VERSION, 26,
+            "a fresh database reports the version the newest migration ships"
         );
         {
             let conn = Connection::open(&db_path).unwrap();
@@ -5034,7 +5294,7 @@ mod tests {
             "the launch must have applied the entitlement migration"
         );
         assert_eq!(
-            SUPPORTED_SCHEMA_VERSION, 25,
+            SUPPORTED_SCHEMA_VERSION, 26,
             "a fresh database reports the version the newest migration ships"
         );
         {

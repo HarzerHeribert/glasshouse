@@ -263,6 +263,7 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
         },
         Some(Command::ContextFirewall { command }) => match command {
             ContextFirewallCommand::Hook {
+                session,
                 passthrough_tokens,
                 min_semantic_tokens,
                 task,
@@ -290,6 +291,7 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
                     tools,
                     *emit_updated_output,
                     mode,
+                    session.as_deref(),
                 )?;
             }
             ContextFirewallCommand::Show {
@@ -547,17 +549,35 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
         Some(Command::Memory { command }) => match command {
             MemoryCommand::Search {
                 query,
+                path,
+                for_edit,
                 history,
                 limit,
                 explain,
             } => {
-                if *explain {
-                    print!("{}", memory_search_explain(&runtime, &query.join(" "))?);
-                } else {
-                    print!(
+                // `--for-edit` changes only how a `--path` answer is ordered,
+                // so without one there is nothing for it to mean. An error
+                // rather than a silent no-op: a caller that passed it
+                // believes it asked for something.
+                if *for_edit && path.is_none() {
+                    eprintln!(
+                        "glasshouse: --for-edit orders a file's memories for an intended edit \
+                         of that file, so it needs --path"
+                    );
+                    return Ok(ExitCode::FAILURE);
+                }
+                match path.as_deref() {
+                    Some(path) => print!(
+                        "{}",
+                        memory_path_report(&runtime, path, *for_edit, *history, *limit)?
+                    ),
+                    None if *explain => {
+                        print!("{}", memory_search_explain(&runtime, &query.join(" "))?)
+                    }
+                    None => print!(
                         "{}",
                         memory_report(&runtime, &query.join(" "), *history, *limit)?
-                    );
+                    ),
                 }
             }
             MemoryCommand::Promote { id, authority } => {
@@ -1754,6 +1774,11 @@ fn estimated_project_memory_tokens(runtime: &Runtime, task: &str) -> Option<u64>
         task,
         &std::collections::HashSet::new(),
         None,
+        // The project root, so the estimate measures the block a real
+        // briefing would deliver rather than one missing every
+        // `freshness=` token — a token per file-aware row is real bytes,
+        // and this function's whole job is to count them.
+        Some(runtime.project().root()),
     )
     .ok();
     // The memory connection is dropped before the evaluation ledger opens —
@@ -2179,6 +2204,11 @@ fn record_entitlement_fallback(
 /// all end in the same no-op response a passthrough result gets, never a
 /// nonzero exit — `docs/product/evidence/phase-57.md`'s "fail open, never
 /// empty" applies to the hook process itself, not only to the reduction.
+// One argument over the threshold, and it is `--session`. Grouping the
+// hook's flags into a struct to get under it would put a type between the
+// CLI and this function whose only job is to be counted, which is the shape
+// `install_context_firewall_hook` below already declined for the same reason.
+#[allow(clippy::too_many_arguments)]
 fn context_firewall_hook(
     runtime: &Runtime,
     passthrough_tokens: u64,
@@ -2187,6 +2217,7 @@ fn context_firewall_hook(
     tools: &[String],
     emit_updated_output: bool,
     mode: glasshouse::config::firewall::FirewallMode,
+    session: Option<&str>,
 ) -> anyhow::Result<()> {
     use anyhow::Context as _;
     use std::io::Read;
@@ -2207,6 +2238,13 @@ fn context_firewall_hook(
             return print_context_firewall_response(None);
         }
     };
+
+    // Map line 1139's producer, and it runs **before** the reduction on
+    // purpose: everything below can fail open, and this must not be able to
+    // change what any of it decides. It reads the event and writes elsewhere;
+    // nothing it does is visible to `process`, and `record_file_touches`
+    // returns nothing for the caller to branch on.
+    record_file_touches(runtime, session, &event);
 
     let normalized = glasshouse::firewall::adapter::normalize(&event);
     let config = glasshouse::firewall::FirewallConfig::new(passthrough_tokens, tools.to_vec());
@@ -2271,6 +2309,155 @@ fn context_firewall_hook(
         _ => None,
     };
     print_context_firewall_response(updated_output)
+}
+
+/// Map line 1139's producer: one `file_touched` lifecycle event per distinct
+/// path a **writing** tool named, for the Glasshouse session this hook was
+/// registered for.
+///
+/// # Why the hook's response can never depend on this
+///
+/// It returns `()`. There is no error for the caller to see, no value for it
+/// to branch on, and every failure below ends in a `tracing::warn!` and a
+/// `return`. That is not caution about a rare case — the whole tool call is
+/// downstream of this function, and a bookkeeping write that could fail a
+/// user's `Edit` would be a far worse defect than never learning which file
+/// it touched. `the_hook_response_is_identical_whether_or_not_recording_works`
+/// is the proof rather than this paragraph.
+///
+/// # The four gates a path passes, in order
+///
+/// 1. **A session**, or nothing is recorded. See
+///    `cli::ContextFirewallCommand::Hook`'s `--session` for why absent is a
+///    supported state and why the payload's own `session_id` is not a
+///    substitute.
+/// 2. **A writing tool** — `firewall::eligibility::is_writing_tool`, which is
+///    the block list read the other way round. `Read`, `Grep` and `Glob`
+///    carry paths and are deliberately not recorded: *touched* means the
+///    session changed the file.
+/// 3. **Under the project root.** An absolute path inside the root is made
+///    relative to it; a path outside it is **dropped and never stored**, which
+///    is the isolation invariant rather than a tidiness rule — a memory must
+///    not be able to name a file in another project, or in the user's home.
+/// 4. **Normalisable**, through the one function `memory_files.path` already
+///    goes through, so the two producers spell a path identically or the
+///    association never matches.
+///
+/// Distinct paths only: `MultiEdit` names the same file once per edit, and
+/// sixty rows saying one file was edited is sixty times the storage for the
+/// same fact.
+fn record_file_touches(
+    runtime: &Runtime,
+    session: Option<&str>,
+    event: &glasshouse::firewall::adapter::PostToolUseEvent,
+) {
+    use glasshouse::events::{EventBus, EventLog, LifecycleEvent};
+    use glasshouse::session::SessionId;
+
+    let Some(session) = session else {
+        tracing::debug!(
+            "context firewall: no --session on this hook's command line, so which files \
+             the session edits is not recorded; relaunch the session to register a hook \
+             that carries one"
+        );
+        return;
+    };
+    if !glasshouse::firewall::eligibility::is_writing_tool(&event.tool_name) {
+        return;
+    }
+
+    let root = runtime.project().root();
+    let mut paths: Vec<String> = Vec::new();
+    for raw in glasshouse::firewall::adapter::tool_input_paths(&event.tool_input) {
+        let Some(path) = project_relative_path(root, &raw) else {
+            continue;
+        };
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    if paths.is_empty() {
+        return;
+    }
+
+    let log = match EventLog::open(runtime) {
+        Ok(log) => log,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "context firewall: the project event log is unavailable; which files this \
+                 tool call edited is not recorded"
+            );
+            return;
+        }
+    };
+    let session = SessionId::new(session);
+    // A bus with no history, purely to mint a `RecordedEvent` with the
+    // timestamp its own clock takes — the same shape `LifecycleRecorder`
+    // uses, and the only constructor there is. Nothing subscribes to it: this
+    // process is a hook, it lives for one tool call, and the durable log is
+    // the only consumer that matters.
+    let bus = EventBus::with_history(0);
+    for path in paths {
+        let recorded = bus.publish(&session, LifecycleEvent::FileTouched { path });
+        // Per path rather than per batch: one unwritable row must not take
+        // the others with it, and there is no transaction here to be
+        // half-applied — the log is append-only by trigger.
+        //
+        // `None` for the observation: this is not a translated harness
+        // report. Claude Code said a tool ran; Glasshouse decided that means
+        // a file changed, and attributing that reading to the harness would
+        // be a claim it never made.
+        if let Err(err) = log.append(&recorded, None) {
+            tracing::warn!(
+                error = %err,
+                "context firewall: could not record an edited file"
+            );
+        }
+    }
+}
+
+/// `raw` as a path under `root`, in `memory_files.path`'s spelling, or
+/// `None`.
+///
+/// Claude Code hands the hook an **absolute** path, and on Windows it hands
+/// one with `\` separators. So: fold the separators first — before any
+/// prefix test, because `C:\proj\src\a.rs` does not start with
+/// `C:/proj/src` until it has been folded — then strip the root, then put
+/// what is left through
+/// [`glasshouse::memory::store::normalize_observed_path`], which is the
+/// function the other writer of this column uses and the only definition of
+/// the spelling.
+///
+/// `None` for a path outside the root, and that is the isolation invariant:
+/// nothing outside the project is stored, not even to be filtered out later.
+/// A relative path is accepted as already being relative to the root, which
+/// is what a relative path in a tool input means.
+fn project_relative_path(root: &std::path::Path, raw: &str) -> Option<String> {
+    let folded = raw.replace('\\', "/");
+    let root_folded = root.display().to_string().replace('\\', "/");
+    let root_folded = root_folded.trim_end_matches('/');
+
+    let relative = if let Some(rest) = folded.strip_prefix(root_folded) {
+        // The prefix must end at a separator, or `/proj-other/a.rs` would
+        // pass as a file inside `/proj`.
+        match rest.strip_prefix('/') {
+            Some(rest) => rest,
+            // The path *is* the root: a directory, not a file anything
+            // edited.
+            None if rest.is_empty() => return None,
+            None => return None,
+        }
+    } else if folded.starts_with('/') || folded.chars().nth(1) == Some(':') {
+        // Absolute, and not under this project. Dropped here rather than
+        // normalised, because `normalize_observed_path` would refuse it too
+        // and this says why in one place.
+        return None;
+    } else {
+        folded.as_str()
+    };
+
+    glasshouse::memory::normalize_observed_path(relative)
 }
 
 /// Write the `PostToolUse` hook response JSON to stdout — the protocol
@@ -7094,6 +7281,7 @@ fn launch_session(
         entitlement.as_ref(),
         &launch_profile.backend,
         &launch_profile.name,
+        &record.id,
     );
     let mut launch = HarnessLaunch::new(selection.into_executable(), runtime.project()).args(args);
     // Map line 1973: the child inherits this process's environment, so
@@ -7294,6 +7482,7 @@ fn brief_launch_session(
         &std::collections::HashSet::new(),
         rerank_model.as_deref(),
         diagnostics,
+        Some(runtime.project().root()),
     ) {
         Ok((outcome, _trace)) => Some(outcome),
         Err(err) => {
@@ -8096,6 +8285,7 @@ fn install_session_document(
 /// into the registered command line themselves. The firewall core and the
 /// hook subprocess this command line invokes stay entitlement-blind, exactly
 /// as before this package: only numbers and a mode word ever reach them.
+#[allow(clippy::too_many_arguments)]
 fn install_context_firewall_hook(
     runtime: &Runtime,
     selection: &session::HarnessSelection,
@@ -8104,6 +8294,7 @@ fn install_context_firewall_hook(
     entitlement: Option<&glasshouse::config::ResolvedEntitlement>,
     backend: &glasshouse::profile::BackendResource,
     profile_name: &str,
+    session: &SessionId,
 ) {
     use glasshouse::config::firewall::{FirewallMode, ReductionPolicyKind};
     use glasshouse::config::{EntitlementBacking, EntitlementKind};
@@ -8225,12 +8416,20 @@ fn install_context_firewall_hook(
     // there is no flag here that could carry one, which is the guard by
     // construction the box asks for.
     let emit_updated_output = effective_mode != FirewallMode::Shadow;
+    // Map line 1139's producer needs the *Glasshouse* session, and this is
+    // the only place that knows it: a `PostToolUse` payload carries Claude
+    // Code's own identifier, which no table here has ever seen. Baked into
+    // the command line exactly as the lifecycle hook's `--session` is
+    // (`harness::HookCommand::shell_command`), for that function's stated
+    // reason — a hook is a fresh process and must not discover anything from
+    // its surroundings.
     let command_line = claude_code::context_firewall_command_line(
         &program,
         effective_mode,
         passthrough_tokens,
         emit_updated_output,
         min_semantic_tokens,
+        session.as_str(),
     );
     let hook_entry = claude_code::context_firewall_hook_entry(&command_line);
 
@@ -13206,6 +13405,121 @@ fn memory_report(
     render_memory_report(&grouped, query, history)
 }
 
+/// `glasshouse memory search --path <p> [--for-edit]` — the CLI half of
+/// capability map lines 1143, 1141 and 1142, and the flag the 1143 evidence
+/// entry recorded as missing.
+///
+/// Answers from [`glasshouse::memory::MemoryStore::for_path`], the same
+/// reader the socket door and the briefing's file section use, so the three
+/// surfaces cannot disagree about what a file is associated with. Not through
+/// [`memory_search_grouped`]: that helper records every retrieval through it
+/// as a *search* in the evaluation ledger, and a path lookup runs no query —
+/// recording it as one would misreport what was asked, which is the same
+/// reasoning `api::unix::query_memory_for_path` gives for opening the store
+/// directly.
+///
+/// # What each row says beyond the memory itself
+///
+/// `assoc=` is read per row (line 1139's second provenance), `freshness=` is
+/// line 1142's commit-order label, and the advisory line above the results is
+/// line 1142's own sentence: **the source at the path is the evidence**. A
+/// `stale` row is printed in its rank like any other — the label never
+/// withholds, reorders or rescores.
+///
+/// `for_edit` is line 1141: within each authority rung, constraints,
+/// decisions and failed approaches sort ahead of features, findings and
+/// todos. Off, the order is byte-for-byte what a `Lookup` gives.
+///
+/// One `git log` for the whole report, since every row is about one file.
+fn memory_path_report(
+    runtime: &Runtime,
+    path: &str,
+    for_edit: bool,
+    history: bool,
+    limit: usize,
+) -> anyhow::Result<String> {
+    use glasshouse::checkpoint::git::{Freshness, last_change_commit};
+    use glasshouse::memory::ProjectMemory;
+    use glasshouse::memory::search::{RetrievalIntent, SearchScope};
+    use std::fmt::Write as _;
+
+    let scope = if history {
+        SearchScope::Historical
+    } else {
+        SearchScope::Current
+    };
+    let intent = if for_edit {
+        RetrievalIntent::CodeEdit
+    } else {
+        RetrievalIntent::Lookup
+    };
+
+    let project = ProjectMemory::open(runtime)?;
+    let grouped = project.store().for_path(path, scope, limit, intent)?;
+    drop(project);
+
+    let mut out = String::new();
+    if grouped.invariants_and_constraints.is_empty() && grouped.other.is_empty() {
+        // Which of the two questions was asked, exactly as
+        // `render_memory_report` distinguishes them: "nothing" after a
+        // current-only lookup must not read as "this project remembers
+        // nothing about this file".
+        if history {
+            writeln!(
+                out,
+                "No memories are associated with {path:?}, including history."
+            )?;
+        } else {
+            writeln!(
+                out,
+                "No current memories are associated with {path:?}. Use --history to include \
+                 superseded and resolved ones."
+            )?;
+        }
+        return Ok(out);
+    }
+
+    let last_change = last_change_commit(runtime.project().root(), path);
+    writeln!(
+        out,
+        "-- memories associated with {path} — advisory: the source at {path} is the evidence, \
+         this is not --"
+    )?;
+
+    let write_row =
+        |out: &mut String, record: &glasshouse::memory::MemoryRecord| -> anyhow::Result<()> {
+            let association = grouped
+                .association(&record.id)
+                .map_or("unrecognised", |association| association.as_str());
+            let freshness = Freshness::compare(
+                runtime.project().root(),
+                last_change.as_deref(),
+                record.source_commit.as_deref(),
+            );
+            // Above the record rather than folded into it, so
+            // `write_memory_record` stays the one renderer every memory surface
+            // shares and this door adds a line instead of a dialect.
+            writeln!(out, "   assoc={association} freshness={freshness}")?;
+            write_memory_record(out, record)
+        };
+
+    if !grouped.invariants_and_constraints.is_empty() {
+        writeln!(out, "-- current invariants & constraints --")?;
+        for record in &grouped.invariants_and_constraints {
+            write_row(&mut out, record)?;
+        }
+    }
+    if !grouped.other.is_empty() {
+        if !grouped.invariants_and_constraints.is_empty() {
+            writeln!(out, "-- other results --")?;
+        }
+        for record in &grouped.other {
+            write_row(&mut out, record)?;
+        }
+    }
+    Ok(out)
+}
+
 /// `glasshouse memory search --explain` — map line 1094's other reader. Runs
 /// the exact selection [`brief_launch_session`] and `api::unix::select_memory`
 /// would run for `query` (`glasshouse::memory::inject::briefing_traced`, the
@@ -13226,6 +13540,9 @@ fn memory_search_explain(runtime: &Runtime, query: &str) -> anyhow::Result<Strin
         &std::collections::HashSet::new(),
         model.as_deref(),
         None,
+        // The same root the real briefing runs with, so `--explain`
+        // describes the selection a session would actually get.
+        Some(runtime.project().root()),
     )?;
     drop(project);
     Ok(format!("{}\n", explain_line(&trace)))
@@ -17214,6 +17531,7 @@ mod tests {
             activity_dropped: 0,
             activity_truncated: 0,
             redactions: 0,
+            paths_dropped: 0,
             failure: None,
             call: None,
         }
@@ -17506,6 +17824,74 @@ mod tests {
                 runtime,
             }
         }
+    }
+
+    /// Map line 1139's safety property, at the one branch a black-box test
+    /// cannot reach.
+    ///
+    /// `tests/file_aware_memory.rs` proves the hook's response is identical
+    /// across every recording outcome a real invocation can reach — recorded,
+    /// no session, not a writing tool, outside the root. It cannot reach a
+    /// *failed append*, because this binary's own bootstrap opens the project
+    /// database before any subcommand runs and refuses to start if it cannot,
+    /// so a database made unwritable never gets as far as the hook.
+    ///
+    /// In process the branch is reachable, and this is what it must do:
+    /// return, having logged, propagating nothing. The type system carries
+    /// the rest — `record_file_touches` returns `()`, so the response written
+    /// afterwards cannot read anything from it.
+    ///
+    /// Unix only, and the reason is the injection rather than the behaviour:
+    /// making a write fail means taking write permission away, and Windows'
+    /// ACLs do not honour a mode bit. The code under test has no `#[cfg]`.
+    #[cfg(unix)]
+    #[test]
+    fn record_file_touches_never_propagates_a_failure() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let fixture = CliFixture::new();
+        let root = fixture.runtime.project().root().to_path_buf();
+        let event = glasshouse::firewall::adapter::PostToolUseEvent {
+            tool_name: "Edit".to_owned(),
+            tool_input: serde_json::json!({ "file_path": root.join("a.rs") }),
+            tool_response: serde_json::json!({ "type": "text", "text": "done" }),
+            tool_use_id: "tu".to_owned(),
+            session_id: "cc".to_owned(),
+        };
+
+        // First, the healthy case, so a later `is_empty` cannot pass because
+        // the event was never recordable in the first place.
+        record_file_touches(&fixture.runtime, Some("s-1"), &event);
+        let log = glasshouse::events::EventLog::open(&fixture.runtime).unwrap();
+        assert_eq!(
+            log.all().unwrap().len(),
+            1,
+            "the healthy case must record, or the failure below proves nothing"
+        );
+        drop(log);
+
+        let state = fixture.runtime.state_dir().to_path_buf();
+        let original = std::fs::metadata(&state).unwrap().permissions();
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o555)).unwrap();
+        let database = fixture.runtime.database_path();
+        let mut readonly = std::fs::metadata(&database).unwrap().permissions();
+        readonly.set_mode(0o444);
+        std::fs::set_permissions(&database, readonly).unwrap();
+
+        // The whole assertion: this returns. It does not panic, and there is
+        // no error for a caller to have to handle.
+        record_file_touches(&fixture.runtime, Some("s-1"), &event);
+
+        std::fs::set_permissions(&state, original).unwrap();
+        let mut writable = std::fs::metadata(&database).unwrap().permissions();
+        writable.set_mode(0o644);
+        std::fs::set_permissions(&database, writable).unwrap();
+        let log = glasshouse::events::EventLog::open(&fixture.runtime).unwrap();
+        assert_eq!(
+            log.all().unwrap().len(),
+            1,
+            "the second call really must have failed to write, or this proves nothing"
+        );
     }
 
     /// Phase 21A's fixed architectural requirement, at the only surface a

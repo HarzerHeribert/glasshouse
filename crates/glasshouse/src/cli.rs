@@ -912,6 +912,22 @@ pub enum ContextFirewallCommand {
     /// the default response is a no-op so these boxes close honestly ahead
     /// of that verification.
     Hook {
+        /// The Glasshouse session this hook is registered for — capability
+        /// map line 1139's producer.
+        ///
+        /// **Optional at the CLI on purpose.** A settings document written
+        /// before this flag existed still names a `context-firewall hook`
+        /// command line without it, and that hook must keep running the
+        /// reduction rather than exiting on an unknown argument. Absent, the
+        /// hook records no `file_touched` event and says so once at `debug`
+        /// level; everything else it does is unchanged.
+        ///
+        /// It cannot be inferred from the payload: a `PostToolUse` event
+        /// carries *Claude Code's* `session_id`, which is not an identifier
+        /// any Glasshouse table knows.
+        #[arg(long, value_name = "ID")]
+        session: Option<String>,
+
         /// Below this many estimated tokens, a result passes through
         /// untouched. Units match this build's own chars/4 estimator.
         #[arg(long, value_name = "TOKENS", default_value_t = 4000)]
@@ -1786,8 +1802,33 @@ pub enum MemoryCommand {
     /// The text is not a query language: it is matched against every
     /// memory's subject and body, best match first.
     Search {
-        /// Free-form text to look for.
+        /// Free-form text to look for. Ignored when `--path` is given: a
+        /// path lookup is an exact match on a file association and runs no
+        /// text search at all.
         query: Vec<String>,
+
+        /// Answer by file instead: every memory associated with this
+        /// repo-relative path, with how it is associated and how its age
+        /// compares to the file's. Capability map lines 1143 and 1142.
+        ///
+        /// Spelled the way `memory_files.path` stores it — repo-relative and
+        /// `/`-separated — though `./a//b.rs` and `a\b.rs` normalise to the
+        /// same thing. A path that cannot be brought to that spelling, or one
+        /// nothing is associated with, prints an empty result rather than an
+        /// error.
+        #[arg(long, value_name = "PATH")]
+        path: Option<String>,
+
+        /// Order the `--path` answer for an intended **edit** of that file —
+        /// capability map line 1141: within each authority rung, constraints,
+        /// decisions and failed approaches come before features, findings and
+        /// todos.
+        ///
+        /// An error without `--path`, rather than a silent no-op: the flag
+        /// changes only the path lookup's order, and accepting it on a text
+        /// search would let a caller believe it had asked for something.
+        #[arg(long)]
+        for_edit: bool,
 
         /// Include superseded, rejected, resolved, invalidated,
         /// needs-review and conflicted memories.

@@ -661,6 +661,18 @@ pub fn supports_updated_tool_output(version: (u32, u32, u32)) -> bool {
 /// carrying no reducer name because no flag here could name one (map line
 /// 1992).
 ///
+/// `session` is the **Glasshouse** session identifier, baked in exactly as
+/// the lifecycle hook's own `--session` is
+/// ([`crate::harness::HookCommand::shell_command`]) and for the same reason:
+/// a hook runs as a fresh process with whatever environment the harness gives
+/// it, and the `session_id` in a `PostToolUse` payload is *Claude Code's*
+/// identifier, not one this project's tables know. Migration 26's
+/// `file_touched` rows have to name a Glasshouse session, so the id is
+/// carried on the command line at registration or it is not available at all.
+/// It is hexadecimal and cannot carry a space, so it is not quoted — the same
+/// judgement [`crate::harness::HookCommand::shell_command`] states for its
+/// own.
+///
 /// `min_semantic_tokens` is `None` for a session no layer of map lines
 /// 2023/2024's policy resolution set one for — the flag is then omitted
 /// entirely, matching this builder's behaviour before that resolver existed,
@@ -676,10 +688,11 @@ pub fn context_firewall_command_line(
     passthrough_tokens: u64,
     emit_updated_output: bool,
     min_semantic_tokens: Option<u64>,
+    session: &str,
 ) -> String {
     let mut command = format!(
-        "{program} context-firewall hook --passthrough-tokens {passthrough_tokens} --mode \
-         {mode}",
+        "{program} context-firewall hook --session {session} --passthrough-tokens \
+         {passthrough_tokens} --mode {mode}",
         program = super::quote(&program.display().to_string()),
         mode = mode.as_str(),
     );
@@ -932,7 +945,7 @@ mod tests {
         let program = std::path::Path::new("/usr/local/bin/glasshouse");
         for mode in crate::config::firewall::FirewallMode::ALL {
             for emit in [false, true] {
-                let line = context_firewall_command_line(program, *mode, 4000, emit, None);
+                let line = context_firewall_command_line(program, *mode, 4000, emit, None, "s-1");
                 assert!(
                     !line.contains("reducer") && !line.contains("provider"),
                     "mode {mode} emit {emit}: {line}"
@@ -956,6 +969,7 @@ mod tests {
             4000,
             false,
             None,
+            "s-1",
         );
         assert!(!line.contains("--emit-updated-output"));
         assert!(line.contains("--mode shadow"));
@@ -970,6 +984,7 @@ mod tests {
             1500,
             true,
             None,
+            "s-1",
         );
         assert!(line.contains("--mode aggressive"));
         assert!(line.contains("--passthrough-tokens 1500"));
@@ -987,6 +1002,7 @@ mod tests {
             4000,
             true,
             Some(1200),
+            "s-1",
         );
         assert!(
             with_value.contains("--min-semantic-tokens 1200"),
@@ -999,11 +1015,24 @@ mod tests {
             4000,
             true,
             None,
+            "s-1",
         );
         assert!(
             !without_value.contains("--min-semantic-tokens"),
             "{without_value}"
         );
+    }
+
+    /// Migration 26's producer cannot record anything without this: a
+    /// `PostToolUse` payload names *Claude Code's* session, and the hook has
+    /// no other way to learn the Glasshouse one.
+    #[test]
+    fn the_command_line_carries_the_glasshouse_session_in_every_mode() {
+        let program = std::path::Path::new("/usr/local/bin/glasshouse");
+        for mode in crate::config::firewall::FirewallMode::ALL {
+            let line = context_firewall_command_line(program, *mode, 4000, true, None, "abc123");
+            assert!(line.contains("--session abc123"), "mode {mode}: {line}");
+        }
     }
 
     #[test]

@@ -39,8 +39,8 @@ use std::collections::HashMap;
 use super::policy::retrieval_weight;
 pub use super::policy::{LadderRung, ladder_rung};
 use super::store::{
-    MemoryAuthority, MemoryId, MemoryKind, MemoryRecord, MemoryStatus, MemoryStore,
-    MemoryStoreError, normalize_observed_path, row_to_record,
+    FileAssociation, MemoryAuthority, MemoryId, MemoryKind, MemoryRecord, MemoryStatus,
+    MemoryStore, MemoryStoreError, normalize_observed_path, row_to_record,
 };
 
 /// How much of a project's memory a search is allowed to see.
@@ -66,6 +66,64 @@ pub enum SearchScope {
 /// mind. Never used implicitly — every call to [`MemoryStore::search`] states
 /// its own limit — but it exists so no caller has to invent a number.
 pub const DEFAULT_SEARCH_LIMIT: usize = 20;
+
+/// What a file-path retrieval is *for* — map line 1141.
+///
+/// The map asks Glasshouse to *"prefer constraints, decisions, and failed
+/// approaches when retrieving memory for an intended code edit"*, and the
+/// operative words are **for an intended code edit**: the same file, asked
+/// about for two different reasons, should not come back in two different
+/// orders unless the caller said which reason it had. So this is an argument
+/// to [`MemoryStore::for_path`] rather than a mode the store guesses from
+/// context.
+///
+/// # Where the preference is allowed to act, and where it is not
+///
+/// Inside a [`LadderRung`] and nowhere else. Phase 21E's rule — an idea never
+/// outranks an invariant, however well it matched — is the rung ordering, and
+/// it stays the primary key under both intents. A `CodeEdit` retrieval
+/// reorders *within* a rung and cannot promote anything across one; a
+/// constraint-shaped memory that is not current is still below a current
+/// decision afterwards.
+///
+/// # A fixed kind class, never a number
+///
+/// The preference is expressed as [`MemoryKind`] membership, not as a weight
+/// added to `retrieval_weight`. A number would have to be calibrated against
+/// BM25 relevance and against decay — neither of which is on a scale anything
+/// here can compare a kind to — and would silently change how far the
+/// preference reaches as either of those moved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum RetrievalIntent {
+    /// *"What is this file associated with?"* — today's order, byte for
+    /// byte, and the default so that a caller which does not know it has a
+    /// choice gets the behaviour that predates the choice existing.
+    #[default]
+    Lookup,
+    /// *"What should I know before editing this file?"* — map line 1141's
+    /// preference applies within each rung.
+    CodeEdit,
+}
+
+impl RetrievalIntent {
+    /// Whether `kind` is one of the three map line 1141 names —
+    /// [`MemoryKind::Constraint`], [`MemoryKind::Decision`] and
+    /// [`MemoryKind::FailedAttempt`].
+    ///
+    /// The three are what an editor of the file can *violate*: a limit to
+    /// work within, a choice already made, and an approach already tried and
+    /// abandoned. The other three — a feature, a finding, a todo — describe
+    /// the project rather than constrain the edit.
+    fn prefers(self, kind: MemoryKind) -> bool {
+        match self {
+            Self::Lookup => false,
+            Self::CodeEdit => matches!(
+                kind,
+                MemoryKind::Constraint | MemoryKind::Decision | MemoryKind::FailedAttempt
+            ),
+        }
+    }
+}
 
 /// A memory search's matches, split by whether they are currently active
 /// invariants and constraints or not — Phase 21F line 929's *"retrieve
@@ -114,6 +172,16 @@ pub struct RetrievalResult {
     /// why the absence is carried as an `Option` rather than filled in with
     /// a zero.
     relevances: HashMap<MemoryId, f64>,
+    /// How each returned memory is associated with the file that retrieved it
+    /// — see [`RetrievalResult::association`], the only way to read it.
+    ///
+    /// Private for [`Self::relevances`]'s reason, one step weaker: an entry
+    /// here is a `memory_files` row that actually exists, and a caller able to
+    /// insert could claim a memory refers to a file nothing ever recorded.
+    /// Empty for every result [`MemoryStore::search`] produced — a text search
+    /// retrieves by no file at all, so there is no association to report and
+    /// none is invented.
+    associations: HashMap<MemoryId, FileAssociation>,
 }
 
 impl RetrievalResult {
@@ -185,6 +253,30 @@ impl RetrievalResult {
     pub fn relevance(&self, id: &MemoryId) -> Option<f64> {
         self.relevances.get(id).copied()
     }
+
+    /// How `id` is associated with the file this result was retrieved by, or
+    /// `None`.
+    ///
+    /// `None` is a real answer in three distinct situations, and none of them
+    /// is an omission:
+    ///
+    /// - the result came from [`MemoryStore::search`], which retrieved by
+    ///   text and by no file, so there is no association to report;
+    /// - `id` was not one of the memories this result returned;
+    /// - every `memory_files` row joining `id` to that path stored a
+    ///   provenance this build does not know — see
+    ///   [`FileAssociation::from_stored`], which drops rather than defaults,
+    ///   because guessing `observed` for an unrecognised word would report a
+    ///   weaker claim as fact.
+    ///
+    /// **The strongest of the rows, not the first.** One memory may carry both
+    /// an `observed` and a `referenced` row for one file — the automatic
+    /// extraction path writes both — and reporting whichever SQLite happened
+    /// to return would make the answer depend on row order. See
+    /// [`FileAssociation::strongest`].
+    pub fn association(&self, id: &MemoryId) -> Option<FileAssociation> {
+        self.associations.get(id).copied()
+    }
 }
 
 /// One retrieval hit and the BM25 relevance the query gave it, kept together
@@ -218,6 +310,11 @@ struct Scored {
     /// The BM25 score this hit earned, or `None` for a retrieval that asked
     /// no question. Never `Some(0.0)` standing in for the absence.
     relevance: Option<f64>,
+    /// How this hit is associated with the file that retrieved it, for a
+    /// retrieval that used one. `None` for a text search, which used none —
+    /// the same *"was not asked about"* the relevance carries in the opposite
+    /// direction.
+    association: Option<FileAssociation>,
 }
 
 /// Whether a memory is a *currently binding* invariant or constraint — see
@@ -229,6 +326,29 @@ fn is_current_invariant_or_constraint(record: &MemoryRecord) -> bool {
             record.authority,
             Some(MemoryAuthority::Invariant) | Some(MemoryAuthority::Constraint)
         )
+}
+
+/// The strongest association among the provenance words `group_concat`
+/// returned for one memory, or `None`.
+///
+/// `words` is a comma-separated list SQLite built from the `memory_files`
+/// rows joining one memory to one path — `"observed"`, `"referenced"`, or
+/// `"observed,referenced"` in whichever order the aggregate happened to
+/// produce. A comma cannot appear inside one of these words:
+/// [`FileAssociation::as_str`] is the only writer's vocabulary and neither
+/// value contains one, so splitting on `,` cannot split a word in half.
+///
+/// A word this build does not know is **dropped**, not defaulted — the
+/// reason [`FileAssociation::from_stored`] returns an `Option` at all — so a
+/// row written by a later build reports as no association rather than as the
+/// weaker of the two this one knows. `None` when every word was unknown, or
+/// when the aggregate was `NULL`, which the `JOIN` makes unreachable and this
+/// handles anyway rather than unwrapping.
+fn strongest_association(words: Option<&str>) -> Option<FileAssociation> {
+    words?
+        .split(',')
+        .filter_map(|word| FileAssociation::from_stored(word.trim()))
+        .reduce(FileAssociation::strongest)
 }
 
 /// Split one ranked result list the way [`RetrievalResult`] describes. A
@@ -246,9 +366,21 @@ fn is_current_invariant_or_constraint(record: &MemoryRecord) -> bool {
 /// is where it is kept.
 fn group(hits: Vec<Scored>) -> RetrievalResult {
     let mut grouped = RetrievalResult::default();
-    for Scored { record, relevance } in hits {
+    for Scored {
+        record,
+        relevance,
+        association,
+    } in hits
+    {
         if let Some(relevance) = relevance {
             grouped.relevances.insert(record.id.clone(), relevance);
+        }
+        // Same rule as the relevance above and for the same reason: an
+        // absence contributes no entry rather than a default one, so
+        // `RetrievalResult::association` answers `None` truthfully instead of
+        // reporting a claim no row makes.
+        if let Some(association) = association {
+            grouped.associations.insert(record.id.clone(), association);
         }
         if is_current_invariant_or_constraint(&record) {
             grouped.invariants_and_constraints.push(record);
@@ -289,7 +421,19 @@ fn group(hits: Vec<Scored>) -> RetrievalResult {
 /// The mixed case cannot arise: a retrieval either ran a `MATCH` or did not,
 /// and both doors build every one of their hits the same way. [`Ordering::Equal`]
 /// is the answer that adds no claim if it ever does.
-fn rank(hits: &mut [Scored], now: i64) {
+///
+/// # Map line 1141, and where it sits in the comparison
+///
+/// `intent` inserts **one** key, between the rung and the weight: under
+/// [`RetrievalIntent::CodeEdit`], a constraint, decision or failed attempt
+/// sorts ahead of a feature, finding or todo *in the same rung*. Above the
+/// weight so the preference is not something a large enough
+/// `retrieval_weight` can outvote — a kind preference that a number can
+/// overturn is not a preference — and below the rung so Phase 21E's rule
+/// still decides first. Under [`RetrievalIntent::Lookup`] the key is constant
+/// across every hit, so the comparison is byte-for-byte the one this function
+/// made before the argument existed.
+fn rank(hits: &mut [Scored], now: i64, intent: RetrievalIntent) {
     let weight = |record: &MemoryRecord| {
         retrieval_weight(
             record.authority,
@@ -303,17 +447,25 @@ fn rank(hits: &mut [Scored], now: i64) {
     hits.sort_by(|a, b| {
         let a_rung = ladder_rung(&a.record);
         let b_rung = ladder_rung(&b.record);
-        b_rung.cmp(&a_rung).then_with(|| {
-            let a_weight = weight(&a.record);
-            let b_weight = weight(&b.record);
-            match (a.relevance, b.relevance) {
-                (Some(a_relevance), Some(b_relevance)) => (a_relevance * a_weight)
-                    .partial_cmp(&(b_relevance * b_weight))
-                    .unwrap_or(Ordering::Equal),
-                (None, None) => b_weight.partial_cmp(&a_weight).unwrap_or(Ordering::Equal),
-                (Some(_), None) | (None, Some(_)) => Ordering::Equal,
-            }
-        })
+        // `true` sorts after `false`, so the preferred class is compared as
+        // "is *not* preferred" and ascending puts it first — the same
+        // direction `demote_thin_decisions` sorts its own flag in.
+        let a_preferred = !intent.prefers(a.record.kind);
+        let b_preferred = !intent.prefers(b.record.kind);
+        b_rung
+            .cmp(&a_rung)
+            .then(a_preferred.cmp(&b_preferred))
+            .then_with(|| {
+                let a_weight = weight(&a.record);
+                let b_weight = weight(&b.record);
+                match (a.relevance, b.relevance) {
+                    (Some(a_relevance), Some(b_relevance)) => (a_relevance * a_weight)
+                        .partial_cmp(&(b_relevance * b_weight))
+                        .unwrap_or(Ordering::Equal),
+                    (None, None) => b_weight.partial_cmp(&a_weight).unwrap_or(Ordering::Equal),
+                    (Some(_), None) | (None, Some(_)) => Ordering::Equal,
+                }
+            })
     });
 }
 
@@ -683,11 +835,15 @@ impl<'a> MemoryStore<'a> {
             .map(|(record, relevance)| Scored {
                 record,
                 relevance: Some(relevance),
+                // A text search retrieved by no file, so there is no
+                // association to report. `None` is that fact, exactly as it
+                // is for the relevance of a path lookup one field up.
+                association: None,
             })
             .collect();
 
         self.flag_contradictions(&mut hits)?;
-        rank(&mut hits, self.now());
+        rank(&mut hits, self.now(), RetrievalIntent::Lookup);
         demote_thin_decisions(&mut hits);
         hits.truncate(limit);
         Ok(hits)
@@ -777,15 +933,30 @@ impl<'a> MemoryStore<'a> {
     /// conflict flagging should say so, and the argument belongs where that
     /// consumer is built.
     ///
-    /// It also does not narrow by [`super::store::FileAssociation`]. Every
-    /// row this build can write is `observed`; a door that filtered on the
-    /// one existing value would have to be revisited by the producer that
-    /// adds the second, and would read as a promise this build cannot keep.
+    /// It also does not **narrow** by [`super::store::FileAssociation`], and
+    /// that is now a choice rather than the absence of one. There are two
+    /// associations to narrow by since migration 26 — `observed` and
+    /// `referenced` — and a door that returned only the stronger would hide
+    /// every memory learned beside a file from a caller that asked what the
+    /// file is associated with. So both come back, and each row **reports**
+    /// which it is through [`RetrievalResult::association`], which is the
+    /// answer a caller can act on without this function deciding for it. A
+    /// consumer that genuinely wants only referenced rows filters on that;
+    /// none does today.
+    ///
+    /// # `intent`, map line 1141
+    ///
+    /// [`RetrievalIntent::Lookup`] is this function's original order, byte
+    /// for byte. [`RetrievalIntent::CodeEdit`] prefers constraints, decisions
+    /// and failed attempts *within* each ladder rung — see
+    /// [`RetrievalIntent`] for why the rung stays primary and why the
+    /// preference is a kind class rather than a weight.
     pub fn for_path(
         &self,
         path: &str,
         scope: SearchScope,
         limit: usize,
+        intent: RetrievalIntent,
     ) -> Result<RetrievalResult, MemoryStoreError> {
         if limit == 0 {
             return Ok(RetrievalResult::default());
@@ -808,14 +979,32 @@ impl<'a> MemoryStore<'a> {
         // reads the wall clock and a per-authority policy, neither of which
         // SQLite has. Newest memory first is the honest candidate rule when
         // there is no relevance to rank candidates by.
+        // `GROUP BY memories.id` rather than migration 17's original
+        // `DISTINCT`, and the reason is the second provenance value. A memory
+        // may now hold both an `observed` and a `referenced` row for one path,
+        // and `DISTINCT` over a column set that includes the provenance would
+        // return that memory **twice** — once under each word — spending the
+        // caller's `LIMIT` on one memory and leaving the fold below to decide
+        // which duplicate to keep. Grouping returns it once; every selected
+        // `memories` column is functionally dependent on the grouped primary
+        // key, which is exactly the case SQLite defines bare columns for.
+        //
+        // `group_concat(DISTINCT ...)` rather than an aggregate that knows the
+        // vocabulary (`MAX(provenance = 'referenced')`, say): the column
+        // deliberately carries no `CHECK` — migration 17's own argument — so
+        // which words exist is Rust's to say, through
+        // `FileAssociation::from_stored`. A word this build does not know is
+        // dropped there rather than compared here.
         let sql = format!(
-            "SELECT DISTINCT {QUALIFIED_COLUMNS} \
+            "SELECT {QUALIFIED_COLUMNS}, \
+                    group_concat(DISTINCT memory_files.provenance) AS provenance_words \
              FROM memories \
              JOIN memory_files ON memory_files.memory_id = memories.id \
              WHERE memories.project_id = ?1 \
                AND memory_files.project_id = ?1 \
                AND memory_files.path = ?2 \
                AND (?3 OR memories.status = ?4) \
+             GROUP BY memories.id \
              ORDER BY memories.created_at DESC, memories.id ASC \
              LIMIT ?5"
         );
@@ -839,7 +1028,10 @@ impl<'a> MemoryStore<'a> {
                     MemoryStatus::Active.as_str(),
                     i64::try_from(fetch_limit).unwrap_or(i64::MAX),
                 ],
-                row_to_record,
+                |row| {
+                    let words: Option<String> = row.get("provenance_words")?;
+                    Ok((row_to_record(row)?, words))
+                },
             )
             .and_then(|rows| rows.collect::<Result<Vec<_>, _>>())
             .map_err(|source| MemoryStoreError::Sql {
@@ -849,15 +1041,16 @@ impl<'a> MemoryStore<'a> {
 
         let mut hits: Vec<Scored> = rows
             .into_iter()
-            .map(|record| {
+            .map(|(record, words)| {
                 record.map(|record| Scored {
                     record,
                     relevance: None,
+                    association: strongest_association(words.as_deref()),
                 })
             })
             .collect::<Result<_, _>>()?;
 
-        rank(&mut hits, self.now());
+        rank(&mut hits, self.now(), intent);
         demote_thin_decisions(&mut hits);
         hits.truncate(limit);
         Ok(group(hits))
