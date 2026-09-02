@@ -54,6 +54,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
 
 use crate::config::pairing::{ContinuitySource, WarmSession};
+use crate::evaluation::{HarnessTierOutcome, RoutingTier, TierOutcomeVerdict};
 use crate::harness::pairing::{self, ModelBehaviourFit, ProtocolFit};
 use crate::harness::{Capabilities as HarnessCapabilities, Declared, WireProtocol};
 use crate::integrations::IntegrationId;
@@ -62,7 +63,7 @@ use crate::provider::quota::{CapacityBand, RemainingCapacityScore};
 
 use super::capability::{self, ResourceFacts};
 use super::classify::{DurationClass, HardCapability, TaskClassification, WorkloadTier};
-use super::evidence::{CostConfidence, FailureClass, ObservedCost};
+use super::evidence::{CostConfidence, FailureClass, MIN_SAMPLE_FOR_SUMMARY, ObservedCost};
 use super::free::{FreePool, FreeResource};
 use super::pressure::{
     self, Alternatives, CapacityFacts, PressureInputs, ReservePolicies, ReserveScope,
@@ -4289,6 +4290,11 @@ pub struct SessionRouter {
     /// so not calling this builder scores exactly as before this field
     /// existed.
     score_weights: ScoreWeights,
+    /// Map line 1951's producer, as the caller resolved it — see
+    /// [`Self::with_harness_efficiency`]. `HarnessEfficiencySummary::empty()`
+    /// is what every candidate scored before this field existed, and is what
+    /// `harness_efficiency` reads as inert.
+    harness_efficiency: HarnessEfficiencySummary,
 }
 
 impl SessionRouter {
@@ -4368,6 +4374,24 @@ impl SessionRouter {
     #[must_use]
     pub fn with_score_weights(mut self, weights: ScoreWeights) -> Self {
         self.score_weights = weights;
+        self
+    }
+
+    /// Map line 1952: the per-(harness, task class) efficiency summary, as
+    /// the caller resolved it — normally
+    /// `EvaluationObservations::outcomes_by_tier_and_harness` over the same
+    /// window `glasshouse route`'s report reads (map line 1951), reduced
+    /// with [`HarnessEfficiencySummary::from_outcomes`]. Not calling this at
+    /// all keeps [`HarnessEfficiencySummary::empty()`], which reproduces
+    /// this router's behaviour before this field existed byte-for-byte —
+    /// the same reason [`Self::with_retry_after`] gives for its own field: a
+    /// per-decision fact the caller may not have looked up belongs beside
+    /// the other caller-resolved state this router carries, not folded into
+    /// [`RouterInputs`], which is written as a literal at every caller in
+    /// and out of this crate.
+    #[must_use]
+    pub fn with_harness_efficiency(mut self, summary: HarnessEfficiencySummary) -> Self {
+        self.harness_efficiency = summary;
         self
     }
 
@@ -4583,6 +4607,16 @@ impl SessionRouter {
         // computed once like the alternatives below: a candidate a hard
         // constraint removed is not a pool member anything can be spread to.
         let pool = EntitlementPoolView::of(&candidates);
+        // Map line 1952's own axis: which harnesses this decision is
+        // actually choosing among. A set `launch_session` already scoped to
+        // one assigned harness collapses this to a single entry, which is
+        // what makes `harness_efficiency`'s "no other harness to compare
+        // against" case the assertion the packet asks for, rather than code
+        // that rebuilds the scoping `launch_session` already did.
+        let candidate_harnesses: BTreeSet<&str> = candidates
+            .iter()
+            .map(|destination| destination.harness().slug())
+            .collect();
         let mut scored: Vec<(Destination, RoutingExplanation)> = candidates
             .iter()
             .enumerate()
@@ -4611,6 +4645,8 @@ impl SessionRouter {
                     &pressure,
                     movement.as_ref(),
                     &pool,
+                    &self.harness_efficiency,
+                    &candidate_harnesses,
                     &self.prices,
                     &self.score_weights,
                 );
@@ -4782,6 +4818,166 @@ fn destination_answers_to(destination_id: &str, named: &str) -> bool {
             && destination_id.as_bytes()[named.len()] == b'@')
 }
 
+/// Map line 1951's producer, reduced to what map line 1952's term needs: a
+/// success rate per (harness, task class), read once per decision the way
+/// [`SessionRouter::with_price_table`] reads `pricing.toml` once per
+/// decision — see [`SessionRouter::with_harness_efficiency`] for why this is
+/// a builder on the router and not a field on [`RouterInputs`].
+///
+/// `InsufficientEvidence` rows carry nothing `harness_efficiency` can use
+/// and are dropped rather than stored as a zero — the same rule
+/// `TierOutcome::from_counts` applies to its own gate.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct HarnessEfficiencySummary {
+    entries: Vec<HarnessClassEfficiency>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct HarnessClassEfficiency {
+    harness: String,
+    task_class: String,
+    successful: i64,
+    sample_size: i64,
+}
+
+impl HarnessEfficiencySummary {
+    /// The honest shape for a caller with no ledger open, and for every
+    /// caller before this field existed — `harness_efficiency` reads it as
+    /// inert.
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// Built from [`crate::evaluation::EvaluationObservations::outcomes_by_tier_and_harness`]'s
+    /// own rows.
+    pub fn from_outcomes(rows: &[HarnessTierOutcome]) -> Self {
+        let entries = rows
+            .iter()
+            .filter_map(|row| match row.outcome.verdict {
+                TierOutcomeVerdict::Measured {
+                    successful,
+                    sample_size,
+                    ..
+                } => Some(HarnessClassEfficiency {
+                    harness: row.harness.clone(),
+                    task_class: row.outcome.bucket.clone(),
+                    successful,
+                    sample_size,
+                }),
+                TierOutcomeVerdict::InsufficientEvidence { .. } => None,
+            })
+            .collect();
+        Self { entries }
+    }
+
+    /// `(successful, sample_size)` for one harness and task class, gated at
+    /// [`MIN_SAMPLE_FOR_SUMMARY`] — the same floor
+    /// `TierOutcome::from_counts` gated the row at before this summary was
+    /// built, restated here because a caller comparing two rates must not
+    /// trust one that never cleared it.
+    fn measured(&self, harness: &str, task_class: &str) -> Option<(i64, i64)> {
+        self.entries
+            .iter()
+            .find(|entry| entry.harness == harness && entry.task_class == task_class)
+            .filter(|entry| entry.sample_size >= MIN_SAMPLE_FOR_SUMMARY as i64)
+            .map(|entry| (entry.successful, entry.sample_size))
+    }
+}
+
+/// The bucket [`crate::evaluation::EvaluationObservations::outcomes_by_tier_and_harness`]
+/// stores for a classified task — [`RoutingTier::as_str`]'s own vocabulary,
+/// rebuilt here from [`TaskRequirements::classification`] the way
+/// `main.rs::routed_tier` rebuilds it from a `ClassifiedRouting` this module
+/// never holds. `None` for a launch that stated no task — line 1952's own
+/// precondition, and `harness_efficiency`'s first inert case.
+fn task_class_bucket(requirements: &TaskRequirements) -> Option<String> {
+    let answer = requirements.classification.as_ref()?;
+    let tier = answer.required_tier();
+    let escalated = tier != answer.stated_tier();
+    Some(
+        RoutingTier::Classified { tier, escalated }
+            .as_str()
+            .to_owned(),
+    )
+}
+
+/// Map line 1952: prefer, for a stated task the user has not assigned a
+/// harness to, the harness with the better observed efficiency for that
+/// task class, and say why.
+///
+/// Inert (`0.0`, naming why) in every case preservation needs:
+/// - no task classified — nothing to compare a rate within;
+/// - fewer than [`MIN_SAMPLE_FOR_SUMMARY`] recorded outcomes for THIS
+///   destination's harness and class;
+/// - no OTHER candidate harness clears the same gate for this class —
+///   which is what keeps this term from ever moving work off a harness the
+///   user assigned: `launch_session`'s candidate set is already scoped to
+///   one harness when the user named one, so there is no "other" to prefer
+///   over it, and nothing here rebuilds that scoping.
+///
+/// Otherwise the magnitude is this destination's success rate minus the mean
+/// success rate of the other candidate harnesses that also clear the gate
+/// for this class — positive exactly for the harness with the better
+/// observed rate, and clamped to `[-1.0, 1.0]`, strictly below a warm
+/// session's `1.5` (line 1588): this is a preference among fresh starts, not
+/// a reason to abandon a warm one.
+fn harness_efficiency(
+    destination: &Destination,
+    summary: &HarnessEfficiencySummary,
+    requirements: &TaskRequirements,
+    candidate_harnesses: &BTreeSet<&str>,
+) -> Contribution {
+    const TERM: &str = "harness efficiency";
+    let Some(task_class) = task_class_bucket(requirements) else {
+        return Contribution::new(
+            TERM,
+            0.0,
+            "no task was classified; nothing to compare a harness's observed rate within",
+        );
+    };
+    let harness = destination.harness().slug();
+    let Some((successful, sample_size)) = summary.measured(harness, &task_class) else {
+        return Contribution::new(
+            TERM,
+            0.0,
+            format!(
+                "inert: fewer than {MIN_SAMPLE_FOR_SUMMARY} recorded outcomes for `{harness}` on \
+                 `{task_class}` tasks"
+            ),
+        );
+    };
+    let own_rate = successful as f64 / sample_size as f64;
+
+    let other_rates: Vec<f64> = candidate_harnesses
+        .iter()
+        .filter(|&&other| other != harness)
+        .filter_map(|&other| summary.measured(other, &task_class))
+        .map(|(other_successful, other_sample)| other_successful as f64 / other_sample as f64)
+        .collect();
+    if other_rates.is_empty() {
+        return Contribution::new(
+            TERM,
+            0.0,
+            format!(
+                "inert: no other harness offered here has {MIN_SAMPLE_FOR_SUMMARY} or more recorded \
+                 outcomes on `{task_class}` tasks to compare `{harness}` against"
+            ),
+        );
+    }
+    let other_mean = other_rates.iter().sum::<f64>() / other_rates.len() as f64;
+    let magnitude = (own_rate - other_mean).clamp(-1.0, 1.0);
+    Contribution::new(
+        TERM,
+        magnitude,
+        format!(
+            "`{harness}` succeeded {successful} of {sample_size} recorded `{task_class}` tasks \
+             ({:.0}% success), against {:.0}% for the other harness(es) considered here",
+            own_rate * 100.0,
+            other_mean * 100.0,
+        ),
+    )
+}
+
 /// Lines 1595 to 1600, in the order a reader compares them: what the harness
 /// can do, what the session already holds, what the provider has cached, what
 /// is left of the quota, how the provider has behaved, and what the move
@@ -4794,6 +4990,8 @@ fn score(
     pressure: &PressureInputs<'_>,
     movement: Option<&TierMovement>,
     pool: &EntitlementPoolView,
+    efficiency: &HarnessEfficiencySummary,
+    candidate_harnesses: &BTreeSet<&str>,
     prices: &PriceTable,
     weights: &ScoreWeights,
 ) -> RoutingExplanation {
@@ -4831,6 +5029,17 @@ fn score(
     explanation.push(entitlement_reset_boundary(destination, pool));
     explanation.push(entitlement_throttling(destination, pool));
     explanation.push(entitlement_model_availability(destination, pool));
+    // Map line 1952, right after the pool's own terms: both read the
+    // candidate set beside the destination, and this term shares the pool
+    // axis's own preservation clause — inert for a set this term finds
+    // nothing to compare, byte-for-byte what the ranking was before it
+    // existed.
+    explanation.push(harness_efficiency(
+        destination,
+        efficiency,
+        &inputs.requirements,
+        candidate_harnesses,
+    ));
     explanation.push(prompt_cache_state(destination, current));
     explanation.push(quota_pressure(destination, weights));
     // Phase 35D, lines 1570–1577: the band the quota reading falls in, and
@@ -5150,6 +5359,208 @@ mod burn_urgency_tests {
             burn_urgency(-345_600),
             0.0,
             "days past — the stale-cache case"
+        );
+    }
+}
+
+#[cfg(test)]
+mod harness_efficiency_tests {
+    use super::*;
+    use crate::routing::classify::{
+        ClassificationSource, Complexity, Confidence, WarmContextValue,
+    };
+    use crate::routing::request::{AnswerProvenance, RouterAnswer};
+
+    fn destination(id: &str, harness: IntegrationId) -> Destination {
+        Destination::fresh(
+            id,
+            harness,
+            "profile",
+            Backend::new(
+                "provider",
+                "anthropic-messages",
+                crate::routing::AssignedModel::named("a-model"),
+                crate::routing::CredentialId::new(
+                    "provider",
+                    crate::secret::SecretRef::Environment {
+                        var: "TEST_KEY".to_owned(),
+                    },
+                ),
+                crate::routing::Cost::Metered,
+                ToolSemantics::Verified,
+            ),
+            None,
+        )
+    }
+
+    /// A stated task classified `Standard` at `Confidence::High` — not
+    /// conservative, so `required_tier() == stated_tier()` and
+    /// `task_class_bucket` reads the un-escalated bucket `"standard"`,
+    /// [`RoutingTier::as_str`]'s own vocabulary for the row this summary
+    /// looks up.
+    fn standard_task() -> TaskRequirements {
+        let classification = TaskClassification::new(
+            false,
+            true,
+            false,
+            false,
+            Complexity::Moderate,
+            false,
+            WorkloadTier::Standard,
+            false,
+            WarmContextValue::PreferStrongerCold,
+            Confidence::High,
+            ClassificationSource::Model {
+                label: "the-routing-model".to_owned(),
+            },
+        );
+        RouterAnswer::new(
+            classification,
+            AnswerProvenance::Model {
+                label: "the-routing-model".to_owned(),
+            },
+        )
+        .requirements()
+    }
+
+    fn measured(
+        harness: &str,
+        task_class: &str,
+        successful: i64,
+        sample_size: i64,
+    ) -> HarnessTierOutcome {
+        HarnessTierOutcome {
+            harness: harness.to_owned(),
+            outcome: crate::evaluation::TierOutcome {
+                bucket: task_class.to_owned(),
+                undecided: 0,
+                verdict: TierOutcomeVerdict::Measured {
+                    successful,
+                    failed: sample_size - successful,
+                    sample_size,
+                },
+            },
+        }
+    }
+
+    /// Map line 1952's own case: two harnesses in the candidate set, one
+    /// with a clearly better recorded rate on the classified task's class —
+    /// the better harness gets the positive term and names the harness, the
+    /// class, the sample count and the rate.
+    #[test]
+    fn the_harness_with_the_better_recorded_rate_gets_the_positive_term() {
+        let summary = HarnessEfficiencySummary::from_outcomes(&[
+            measured("claude-code", "standard", 9, 10),
+            measured("codex", "standard", 5, 10),
+        ]);
+        let requirements = standard_task();
+        let candidates: BTreeSet<&str> = ["claude-code", "codex"].into_iter().collect();
+
+        let better = destination("better", IntegrationId::ClaudeCode);
+        let worse = destination("worse", IntegrationId::Codex);
+
+        let better_term = harness_efficiency(&better, &summary, &requirements, &candidates);
+        let worse_term = harness_efficiency(&worse, &summary, &requirements, &candidates);
+
+        assert!(
+            better_term.magnitude() > 0.0,
+            "the better-observed harness must get a positive term: {better_term:?}"
+        );
+        assert!(
+            worse_term.magnitude() < 0.0,
+            "the worse-observed harness must get a negative term: {worse_term:?}"
+        );
+        assert!(
+            better_term.magnitude() < 1.5,
+            "must stay below warm affinity"
+        );
+        assert!(
+            better_term.evidence().contains("claude-code")
+                && better_term.evidence().contains("standard")
+                && better_term.evidence().contains('9')
+                && better_term.evidence().contains("10"),
+            "the explanation must name the harness, the class, the sample count and the rate: {}",
+            better_term.evidence()
+        );
+    }
+
+    /// Below `MIN_SAMPLE_FOR_SUMMARY` for this destination's own harness and
+    /// class: `0.0`, and the text says so, regardless of what other
+    /// harnesses recorded.
+    #[test]
+    fn below_the_sample_gate_the_term_is_inert() {
+        let summary = HarnessEfficiencySummary::from_outcomes(&[
+            measured("claude-code", "standard", 2, 3),
+            measured("codex", "standard", 5, 10),
+        ]);
+        let requirements = standard_task();
+        let candidates: BTreeSet<&str> = ["claude-code", "codex"].into_iter().collect();
+        let destination = destination("thin-evidence", IntegrationId::ClaudeCode);
+
+        let term = harness_efficiency(&destination, &summary, &requirements, &candidates);
+        assert_eq!(term.magnitude(), 0.0);
+        assert!(term.evidence().contains("inert"), "{}", term.evidence());
+    }
+
+    /// An empty summary — the caller-with-no-ledger case — is inert exactly
+    /// the same way, so a build that never wires a ledger in scores exactly
+    /// as it did before this term existed.
+    #[test]
+    fn an_empty_summary_is_inert() {
+        let requirements = standard_task();
+        let candidates: BTreeSet<&str> = ["claude-code", "codex"].into_iter().collect();
+        let destination = destination("no-ledger", IntegrationId::ClaudeCode);
+
+        let term = harness_efficiency(
+            &destination,
+            &HarnessEfficiencySummary::empty(),
+            &requirements,
+            &candidates,
+        );
+        assert_eq!(term.magnitude(), 0.0);
+    }
+
+    /// No task classified: nothing to compare a rate within, whatever the
+    /// summary holds.
+    #[test]
+    fn with_no_task_classified_the_term_is_inert() {
+        let summary = HarnessEfficiencySummary::from_outcomes(&[
+            measured("claude-code", "standard", 9, 10),
+            measured("codex", "standard", 5, 10),
+        ]);
+        let candidates: BTreeSet<&str> = ["claude-code", "codex"].into_iter().collect();
+        let destination = destination("no-task", IntegrationId::ClaudeCode);
+
+        let term = harness_efficiency(
+            &destination,
+            &summary,
+            &TaskRequirements::default(),
+            &candidates,
+        );
+        assert_eq!(term.magnitude(), 0.0);
+    }
+
+    /// Map line 1952's own assignment clause: a candidate set already scoped
+    /// to one harness — exactly what `launch_session` builds when the user
+    /// named a harness — has no "other" harness to compare against, so the
+    /// term is inert and the assigned harness is never moved off, whatever
+    /// the ledger says about other harnesses entirely outside this set.
+    #[test]
+    fn a_single_harness_candidate_set_cannot_be_re_ranked_across_harnesses() {
+        let summary = HarnessEfficiencySummary::from_outcomes(&[
+            measured("claude-code", "standard", 9, 10),
+            measured("codex", "standard", 1, 10),
+        ]);
+        let requirements = standard_task();
+        // Only `claude-code` is offered — the user assigned it.
+        let candidates: BTreeSet<&str> = ["claude-code"].into_iter().collect();
+        let destination = destination("assigned", IntegrationId::ClaudeCode);
+
+        let term = harness_efficiency(&destination, &summary, &requirements, &candidates);
+        assert_eq!(
+            term.magnitude(),
+            0.0,
+            "one harness offered is nothing to prefer among"
         );
     }
 }

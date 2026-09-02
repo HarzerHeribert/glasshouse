@@ -3993,6 +3993,36 @@ fn session_router(
         .with_price_table(glasshouse::provider::pricing::PriceTable::load_from_dir(
             runtime.paths().config_dir(),
         ))
+        // Map line 1952: the harness-efficiency summary is read HERE too, in
+        // the same one constructor, so `route_recommendation` and
+        // `launch_session` — and every other caller of this function — see
+        // the same evidence `harness_efficiency_section` prints in
+        // `glasshouse route`'s report. A ledger this build cannot open, or
+        // one with no rows, yields an empty summary, which the router treats
+        // as inert — the ranking every caller saw before this term existed.
+        .with_harness_efficiency(harness_efficiency_summary(runtime))
+}
+
+/// Map line 1952's reader — the same producer and window
+/// `harness_efficiency_section` prints (map line 1951), reduced to what a
+/// routing decision needs: per-(harness, task class) success counts, not the
+/// token or wall-clock figures that section also renders for a person.
+fn harness_efficiency_summary(
+    runtime: &Runtime,
+) -> glasshouse::routing::session::HarnessEfficiencySummary {
+    use glasshouse::evaluation::EvaluationObservations;
+    use glasshouse::routing::session::HarnessEfficiencySummary;
+
+    let to = glasshouse::evaluation::now_unix();
+    let from = to - ROUTE_OUTCOME_WINDOW_DAYS * 24 * 60 * 60;
+
+    let Ok(ledger) = EvaluationObservations::open(runtime) else {
+        return HarnessEfficiencySummary::empty();
+    };
+    let Ok(outcomes) = ledger.outcomes_by_tier_and_harness(from, to) else {
+        return HarnessEfficiencySummary::empty();
+    };
+    HarnessEfficiencySummary::from_outcomes(&outcomes)
 }
 
 /// `glasshouse route`'s decision, and the control door's — map lines 1601,

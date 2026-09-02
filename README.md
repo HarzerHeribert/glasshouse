@@ -19,7 +19,7 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`███████████████████████████████████░░░░░` 1182 / 1332 mandatory capabilities (88%)
+`███████████████████████████████████░░░░░` 1183 / 1332 mandatory capabilities (88%)
 
 <details>
 <summary>Per-phase breakdown (66 of 107 phases complete)</summary>
@@ -130,7 +130,7 @@ the authoritative specification and tracks what is done.
 | Phase 54 — Criteria before deeper cmux coupling | 4/4 ✅ |
 | Phase 54A — Setup and portability completion criteria | 9/10 |
 | Phase 55 — V1 completion definition | 21/23 |
-| Phase 56 — Harness–subscription decoupling: choose the harness, route the subscription and model | 7/12 |
+| Phase 56 — Harness–subscription decoupling: choose the harness, route the subscription and model | 8/12 |
 | Phase 56A — Entitlement pool and subscription broker: several accounts, one scheduler | 13/13 ✅ |
 | Phase 57 — Context firewall: tool-output compaction between harness and model | 27/27 ✅ |
 

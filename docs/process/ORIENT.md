@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1182 / 1332 mandatory capabilities (89%)** — 150 open across 41 phases.
+**1183 / 1332 mandatory capabilities (89%)** — 149 open across 41 phases.
 
 ## Where the work is
 
@@ -52,9 +52,9 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 35A | Candidate generation | **3** | 8 | `1504` |
 | Phase 21E | Decision ladder and conflict handling | **4** | 8 | `907` |
 | Phase 32G | Provider-aware request-cost estimation | **4** | 6 | `1296` |
+| Phase 56 | Harness–subscription decoupling: choose the harness, route the subscription and model | **4** | 8 | `1941` |
 | Phase 24 | Memory reranking | **5** | 1 | `1082` |
 | Phase 31 | Compaction-aware behavior | **5** | 2 | `1167` |
-| Phase 56 | Harness–subscription decoupling: choose the harness, route the subscription and model | **5** | 7 | `1941` |
 | Phase 21G | Memory revalidation | **6** | 3 | `941` |
 | Phase 52 | Criteria before adding semantic/vector retrieval | **6** | 0 | `1858` |
 | Phase 35B | Candidate scoring | **7** | 18 | `1523` |
@@ -70,7 +70,7 @@ closures are usually at the top. Open the map at the line number given.
 
 Every phase with **three or fewer** open lines, quoted verbatim. These are
 where a single package finishes a phase, so they are listed here and the
-other ~102 open lines are not.
+other ~101 open lines are not.
 
 For any other phase: `scripts/discover.py --phase <id>` prints its open
 lines and evidence together. **Do not open the 178 KB map to read them.**

@@ -980,3 +980,66 @@ Gates the worker ran (re-run the decisive ones yourself):
 - cargo clippy -p glasshouse --all-targets --all-features -- -D warnings: clean
 - scripts/blast-radius.sh --targeted (no path arg, both changed files traced): cargo check --tests clean; cargo test --test decoupled_profiles ok (2 passed); --targeted skipped 69 full-trace targets (expected, fast gate); cargo doc --no-deps clean; every traced target passed
 
+
+---
+
+## Line 1952 — CLOSED 2026-09-02 (`GH-HARNESS-PREFERENCE`, Amber, Sonnet high) — Cause 4 above, closed
+
+Cause 4 said the per-harness efficiency rows (line 1951) had one production
+reader, the `glasshouse route` report, and never reached the router. They
+reach it now: `main.rs::harness_efficiency_summary` reduces
+`outcomes_by_tier_and_harness` over the report's own window into a
+`HarnessEfficiencySummary`, and `main.rs::session_router` hands it to
+`SessionRouter::with_harness_efficiency` for both `route_recommendation` and
+`launch_session`. `score()` pushes one `harness efficiency` term: this
+destination's success rate for the classified task class minus the mean rate
+of the *other* candidate harnesses that also clear `MIN_SAMPLE_FOR_SUMMARY`,
+clamped to `[-1.0, 1.0]` — strictly below a warm session's `1.5`. It is inert
+and says why when no task was classified, when this harness is below the
+sample gate, or when no other candidate harness clears it; that last case is
+what keeps a user-assigned harness untouched, because `launch_session`'s
+candidate set is already scoped to one harness when the user named one.
+
+### Prefer, for a stated task the user has not assigned a harness to, the harness with the better observed efficiency for that task class, and say why. (line 1952)
+
+Contract: Given a stated task the user has not assigned a harness to, when Glasshouse ranks candidates across every enabled harness, it prefers the harness with the better observed outcome for that task's class and says why, while contributing nothing (and saying so) below the sample gate, and while a harness the user did assign is never overridden by it.
+
+State: **COMPLETE** — ruled 2026-09-02, after reading the term's decision hunk and the merged-tree re-run of the eight named tests at integration. Both mutations are on the decision the line names (the magnitude, and the sample gate) and both are KILLED by the socket-level `harness_preference` tests, not by a same-module mirror. The third `session_router()` caller (the resume report) is inert by construction and is left as the worker recorded it.
+
+Production evidence:
+- `crates/glasshouse/src/routing/session.rs` — `HarnessEfficiencySummary::from_outcomes`
+- `crates/glasshouse/src/routing/session.rs` — `harness_efficiency`
+- `crates/glasshouse/src/routing/session.rs` — `SessionRouter::with_harness_efficiency`
+- `crates/glasshouse/src/routing/session.rs` — `score (pushes the term)`
+- `crates/glasshouse/src/main.rs` — `session_router (wires both route_recommendation and launch_session)`
+- `crates/glasshouse/src/main.rs` — `harness_efficiency_summary`
+
+Regression evidence:
+- `routing::session::harness_efficiency_tests::the_harness_with_the_better_recorded_rate_gets_the_positive_term`
+- `routing::session::harness_efficiency_tests::below_the_sample_gate_the_term_is_inert`
+- `routing::session::harness_efficiency_tests::an_empty_summary_is_inert`
+- `routing::session::harness_efficiency_tests::with_no_task_classified_the_term_is_inert`
+- `routing::session::harness_efficiency_tests::a_single_harness_candidate_set_cannot_be_re_ranked_across_harnesses`
+- `harness_preference::the_harness_with_the_better_recorded_rate_is_chosen`
+- `harness_preference::below_the_sample_gate_the_ranking_is_unaffected`
+- `harness_preference::a_candidate_set_scoped_to_one_harness_is_never_re_ranked_across_harnesses`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| let magnitude = (own_rate - other_mean).clamp(-1.0, 1.0); -> let magnitude = 0.0; | `null-harness-efficiency-magnitude` | **killed** | `harness_preference::the_harness_with_the_better_recorded_rate_is_chosen` |
+| .filter(|entry| entry.sample_size >= MIN_SAMPLE_FOR_SUMMARY as i64) -> .filter(|entry| entry.sample_size >= 0) | `remove-sample-gate` | **killed** | `harness_preference::below_the_sample_gate_the_ranking_is_unaffected` |
+
+> null-harness-efficiency-magnitude observed: panicked at crates/glasshouse/tests/harness_preference.rs:167:5: Contribution { name: "harness efficiency", magnitude: 0.0, evidence: "`claude-code` succeeded 9 of 10 recorded `standard` tasks (90% success), against 20% for the other harness(es) considered here" }
+
+> remove-sample-gate observed: panicked at crates/glasshouse/tests/harness_preference.rs:238:5: assertion `left == right` failed: fewer than MIN_SAMPLE_FOR_SUMMARY observations must score exactly like no summary at all
+  left: [0.33333333333333326, -0.33333333333333326]
+ right: [0.0, 0.0]
+
+Recorded scope limits — stated by the worker, not discovered later:
+- No Windows leg run; main.rs is platform-conditional elsewhere in the file but this package adds no new cfg(unix/windows) code
+- The full (non-targeted) blast-radius sweep (77 further targets) was not run — trailing per CLAUDE.md's WAVE process, not owed by this packet
+- The third session_router() caller (main.rs:9642, the resume report path) is inert by construction (TaskRequirements::default()) but has no dedicated end-to-end test in this package
+
+---
+
+---
