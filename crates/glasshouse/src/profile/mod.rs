@@ -66,7 +66,7 @@ use crate::secret::{SecretRef, SecretStore};
 
 /// The protocols the local gateway's ingress knows how to serve.
 ///
-/// All three, and the list is here rather than in [`mod@crate::gateway`]
+/// All four, and the list is here rather than in [`mod@crate::gateway`]
 /// because that module is structurally forbidden from naming
 /// [`crate::harness`] — see its own header — and a protocol enum lives
 /// there.
@@ -85,6 +85,14 @@ pub const GATEWAY_INGRESS_PROTOCOLS: &[WireProtocol] = &[
     WireProtocol::AnthropicMessages,
     WireProtocol::OpenAiResponses,
     WireProtocol::OpenAiChat,
+    // Phase 56 T3. Present for the *destination* half of this list's two
+    // jobs: a protocol here is one `gateway_routes` will build a route for,
+    // and without a route the pair table could name a Gemini provider that
+    // nothing could ever forward to. No installed harness speaks it at the
+    // ingress — every `gemini-generate-content -> …` row in the gateway's
+    // pair table is refused by name — so its *ingress* half is a `404` that
+    // names the missing adapter rather than a `404` that says nothing.
+    WireProtocol::GeminiGenerateContent,
 ];
 
 /// The request-target path prefixes that belong to each ingress protocol.
@@ -112,6 +120,14 @@ const fn ingress_targets(protocol: WireProtocol) -> &'static [&'static str] {
         WireProtocol::AnthropicMessages => &["/messages"],
         WireProtocol::OpenAiResponses => &["/responses"],
         WireProtocol::OpenAiChat => &["/chat/completions"],
+        // Two spellings, because Google's version segment is `v1beta` and
+        // `VERSION_SEGMENT` — the `/v1` the gateway strips before matching —
+        // does not cover it. `/models` catches the un-versioned and `/v1`
+        // forms; the explicit `/v1beta/models` catches what every current
+        // Gemini client actually sends. Read off Google's published
+        // `POST https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent`,
+        // the same standing as the OpenAI-Chat entry above.
+        WireProtocol::GeminiGenerateContent => &["/models", "/v1beta/models"],
     }
 }
 
@@ -3051,8 +3067,13 @@ mod tests {
         let gateway = gateway_serving(GATEWAY_INGRESS_PROTOCOLS);
         assert_eq!(
             gateway.served_protocols(),
-            vec!["anthropic-messages", "openai-responses", "openai-chat"],
-            "this test proves nothing unless the gateway really serves all three"
+            vec![
+                "anthropic-messages",
+                "openai-responses",
+                "openai-chat",
+                "gemini-generate-content",
+            ],
+            "this test proves nothing unless the gateway really serves all four"
         );
 
         for (harness, expected) in [
@@ -3115,7 +3136,7 @@ mod tests {
                 seen.push(target);
             }
         }
-        assert_eq!(GATEWAY_INGRESS_PROTOCOLS.len(), 3);
+        assert_eq!(GATEWAY_INGRESS_PROTOCOLS.len(), 4);
     }
 
     /// Phase 9G's line 1 for Claude Code, end to end at the resolution

@@ -50,6 +50,7 @@ pub mod canonical;
 pub mod stream;
 
 mod anthropic;
+mod gemini;
 mod openai_chat;
 mod openai_responses;
 
@@ -76,8 +77,13 @@ pub use openai_chat::TOOL_ERROR_MARKER;
 /// request limit.
 pub const MAX_BODY_BYTES: u64 = 32 * 1024 * 1024;
 
-/// The three wire protocols, by slug, in the gateway's own order.
-pub const PROTOCOLS: [&str; 3] = ["anthropic-messages", "openai-responses", "openai-chat"];
+/// The four wire protocols, by slug, in the gateway's own order.
+pub const PROTOCOLS: [&str; 4] = [
+    "anthropic-messages",
+    "openai-responses",
+    "openai-chat",
+    "gemini-generate-content",
+];
 
 /// Whether an ordered pair is offered, and if not, why not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,6 +129,17 @@ const NOT_YET_REVERSE: &str = "not yet: both codecs exist, but the pair has no e
      binary against a fixture upstream, and no pair is offered before its test (1956)";
 const SAME_PROTOCOL: &str =
     "same protocol: the relay carries it byte for byte and no codec is entered";
+/// Why every row **out of** Gemini is refused, and it is not "untested".
+///
+/// The gateway translates a harness's protocol into the provider's. Nothing
+/// installed speaks Gemini at the ingress — the Gemini CLI adapter is T3b,
+/// a separate package — so a `gemini-generate-content -> …` row would
+/// describe a request no harness here can make. It is refused for the thing
+/// that is actually missing rather than parked behind an end-to-end test
+/// nobody could write yet.
+const NO_GEMINI_HARNESS: &str = "not offered: no installed harness speaks gemini-generate-content at the ingress, so no \
+     request of this shape can arrive; the Gemini CLI adapter is a separate package (T3b) and \
+     these rows are decided when it lands";
 
 /// The API version header `api.anthropic.com` requires on every request —
 /// the same value real clients send and the relay path already forwards
@@ -131,11 +148,41 @@ const SAME_PROTOCOL: &str =
 /// and only toward an Anthropic-serving outbound protocol (T2 finding 2).
 const ANTHROPIC_VERSION: &str = "2023-06-01";
 
+/// The header Google's Generative Language API takes its API key in.
+const GOOGLE_API_KEY_HEADER: &str = "x-goog-api-key";
+
+/// The provider credential as the bare key `x-goog-api-key` carries, taken
+/// from the one door `super::upstream` opens onto it.
+///
+/// [`UpstreamBackend`] deliberately exposes **no** getter for its credential
+/// — only [`UpstreamBackend::authorization`], the header the gateway
+/// attaches — so this un-prefixes that header rather than asking for a
+/// second door. `bearer` builds the value as `Bearer {key}` and the backend
+/// refuses at construction any credential that is not header-safe, so the
+/// strip is total; a value that somehow is not gets attached unchanged,
+/// which fails at the provider rather than silently sending a wrong key.
+///
+/// The right long-term home is an `UpstreamBackend::api_key` beside
+/// `authorization`, in `upstream.rs`. That file was outside this package's
+/// expected files, and one accessor's worth of tidiness is not worth an
+/// unannounced edit to a module every other worker also builds on.
+fn api_key(serving: &UpstreamBackend) -> HeaderValue {
+    let attached = serving.authorization();
+    let mut value = attached
+        .to_str()
+        .ok()
+        .and_then(|text| text.strip_prefix("Bearer "))
+        .and_then(|key| HeaderValue::from_str(key).ok())
+        .unwrap_or(attached);
+    value.set_sensitive(true);
+    value
+}
+
 /// The pair table. Every ordered pair of [`PROTOCOLS`], including each
 /// protocol with itself, exactly once — `every_ordered_pair_appears_exactly_once`
 /// holds it to that, and `crate::provider`'s own test holds it against
 /// `WireProtocol`, which this file may not name.
-const TABLE: [Pair; 9] = [
+const TABLE: [Pair; 16] = [
     Pair {
         from: "anthropic-messages",
         to: "anthropic-messages",
@@ -199,6 +246,54 @@ const TABLE: [Pair; 9] = [
     Pair {
         from: "openai-responses",
         to: "openai-responses",
+        status: PairStatus::Refused(SAME_PROTOCOL),
+    },
+    // T3: Claude Code served by a Google AI Studio entitlement. Supported
+    // only because its own end-to-end test exists:
+    // `tests/gateway_translate_gemini.rs`,
+    // `a_claude_code_request_is_translated_to_generate_content_and_the_answer_back_with_tool_calls_matched_by_name`.
+    Pair {
+        from: "anthropic-messages",
+        to: "gemini-generate-content",
+        status: PairStatus::Supported,
+    },
+    // T3: a Codex-shaped client served by the same. Supported only because
+    // its own end-to-end test exists: `tests/gateway_translate_gemini.rs`,
+    // `a_codex_shaped_request_is_translated_to_generate_content_and_back`.
+    Pair {
+        from: "openai-responses",
+        to: "gemini-generate-content",
+        status: PairStatus::Supported,
+    },
+    // T3: an OpenCode-shaped client served by the same. Supported only
+    // because its own end-to-end test exists:
+    // `tests/gateway_translate_gemini.rs`,
+    // `an_opencode_request_is_translated_to_generate_content_and_streamed_back_in_chats_order`.
+    Pair {
+        from: "openai-chat",
+        to: "gemini-generate-content",
+        status: PairStatus::Supported,
+    },
+    // Every row OUT of Gemini: refused for the reason that is true, which is
+    // not "no test yet" — see `NO_GEMINI_HARNESS`.
+    Pair {
+        from: "gemini-generate-content",
+        to: "anthropic-messages",
+        status: PairStatus::Refused(NO_GEMINI_HARNESS),
+    },
+    Pair {
+        from: "gemini-generate-content",
+        to: "openai-responses",
+        status: PairStatus::Refused(NO_GEMINI_HARNESS),
+    },
+    Pair {
+        from: "gemini-generate-content",
+        to: "openai-chat",
+        status: PairStatus::Refused(NO_GEMINI_HARNESS),
+    },
+    Pair {
+        from: "gemini-generate-content",
+        to: "gemini-generate-content",
         status: PairStatus::Refused(SAME_PROTOCOL),
     },
 ];
@@ -276,7 +371,42 @@ pub(super) trait Codec: Sync {
     /// The one request target this codec translates, version segment
     /// stripped — the path a client of this protocol posts an inference
     /// request to, and the path the gateway posts to a provider of it.
+    ///
+    /// For three of the four wires this is a literal path. Gemini addresses
+    /// its model in the path, so its answer here is a **shape** a refusal
+    /// can name, and its own [`Codec::claim`] and
+    /// [`Codec::outbound_endpoint`] are what actually decide and build.
     fn endpoint(&self) -> &'static str;
+    /// Whether `path` — a request target's path, query already removed —
+    /// belongs to this codec's protocol, and whether it is the endpoint the
+    /// codec translates.
+    ///
+    /// The default is the fixed-path rule the Anthropic and OpenAI wires
+    /// share: an optional `/v1`, then exactly [`Codec::endpoint`], with
+    /// anything below it a sub-target of the same protocol. A wire whose
+    /// path is not fixed overrides this.
+    fn claim(&self, path: &str) -> Claim {
+        let path = match path.strip_prefix(VERSION_SEGMENT) {
+            Some(rest) if rest.is_empty() || rest.starts_with('/') => rest,
+            _ => path,
+        };
+        let endpoint = self.endpoint();
+        if path == endpoint {
+            Claim::Endpoint
+        } else if path.starts_with(endpoint) && path[endpoint.len()..].starts_with('/') {
+            Claim::Other
+        } else {
+            Claim::None
+        }
+    }
+    /// The path a translated request is posted to at a provider of this
+    /// protocol, before [`outbound_target`] adds any version segment.
+    ///
+    /// The request is an argument for the one wire that needs it: Gemini's
+    /// path carries the model and says whether the answer is streamed.
+    fn outbound_endpoint(&self, _request: &Request) -> String {
+        self.endpoint().to_owned()
+    }
     /// What this codec cannot encode out of the canonical form, refused by
     /// name before anything is opened upstream.
     ///
@@ -319,10 +449,23 @@ pub(super) trait StreamEncoder {
     fn encode(&mut self, event: &StreamEvent) -> Vec<u8>;
 }
 
-const CODECS: [&dyn Codec; 3] = [
+/// How a codec claims a request path — the answer [`place`] turns into a
+/// [`Placement`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Claim {
+    /// The one endpoint this codec translates.
+    Endpoint,
+    /// This codec's protocol, but not the endpoint it translates.
+    Other,
+    /// Not this codec's path at all.
+    None,
+}
+
+const CODECS: [&dyn Codec; 4] = [
     &anthropic::Anthropic,
     &openai_chat::OpenAiChat,
     &openai_responses::OpenAiResponses,
+    &gemini::Gemini,
 ];
 
 fn codec_for(protocol: &str) -> Option<&'static dyn Codec> {
@@ -343,11 +486,16 @@ fn codec_for(protocol: &str) -> Option<&'static dyn Codec> {
 /// request lines). Composing `base + endpoint()` alone would mis-address an
 /// Anthropic-serving provider — `…/api/messages` instead of
 /// `…/api/v1/messages` — which the T2 mirror pair was the first to reach.
-fn outbound_target(codec: &dyn Codec) -> String {
+///
+/// Gemini's answer comes whole from [`Codec::outbound_endpoint`], version
+/// segment included, and nothing is prefixed here: its provider template's
+/// base URL is the bare host precisely so that a **relayed** Gemini target —
+/// which carries `/v1beta` itself — is not composed into `/v1beta/v1beta/…`.
+fn outbound_target(codec: &dyn Codec, request: &Request) -> String {
     if codec.protocol() == anthropic::PROTOCOL {
-        format!("{VERSION_SEGMENT}{}", codec.endpoint())
+        format!("{VERSION_SEGMENT}{}", codec.outbound_endpoint(request))
     } else {
-        codec.endpoint().to_owned()
+        codec.outbound_endpoint(request)
     }
 }
 
@@ -379,22 +527,21 @@ pub(super) enum Placement {
 /// lock on the byte-for-byte rule.
 pub(super) fn place(target: &str, served: &[&str]) -> Placement {
     let path = path_of(target);
-    let path = match path.strip_prefix(VERSION_SEGMENT) {
-        Some(rest) if rest.is_empty() || rest.starts_with('/') => rest,
-        _ => path,
-    };
-    let Some(codec) = CODECS.iter().copied().find(|codec| {
-        path == codec.endpoint()
-            || (path.starts_with(codec.endpoint())
-                && path[codec.endpoint().len()..].starts_with('/'))
-    }) else {
+    let Some((codec, claim)) = CODECS
+        .iter()
+        .copied()
+        .find_map(|codec| match codec.claim(path) {
+            Claim::None => None,
+            claim => Some((codec, claim)),
+        })
+    else {
         return Placement::Unplaceable;
     };
     let from = codec.protocol();
     if served.contains(&from) {
         return Placement::Unplaceable;
     }
-    if path != codec.endpoint() {
+    if claim == Claim::Other {
         return Placement::TargetRefused { from };
     }
     let mut refused = Vec::new();
@@ -546,7 +693,7 @@ pub(super) fn serve(
     };
     let translated = to.encode_request(&request);
 
-    let Some(uri) = route.uri_for(&outbound_target(to)) else {
+    let Some(uri) = route.uri_for(&outbound_target(to, &request)) else {
         refuse(
             out,
             StatusCode::BAD_REQUEST,
@@ -573,8 +720,20 @@ pub(super) fn serve(
     if let Some(agent_name) = head.headers.get(header::USER_AGENT) {
         outbound = outbound.header(header::USER_AGENT, agent_name.clone());
     }
-    // The one credential, attached exactly where the relay attaches it.
-    outbound = outbound.header(header::AUTHORIZATION, serving.authorization());
+    // The one credential, in the one place the outbound protocol reads it.
+    //
+    // Google's Generative Language API takes its key in `x-goog-api-key` and
+    // reads `authorization` as an OAuth bearer token — sending the API key
+    // there too would present it as a token it is not, and the request would
+    // be rejected for the wrong reason. So this is exclusive, not additive:
+    // one credential, one header, chosen by the outbound protocol. Every
+    // other protocol keeps the `authorization` the relay attaches, byte for
+    // byte.
+    if to.protocol() == gemini::PROTOCOL {
+        outbound = outbound.header(GOOGLE_API_KEY_HEADER, api_key(serving));
+    } else {
+        outbound = outbound.header(header::AUTHORIZATION, serving.authorization());
+    }
     // api.anthropic.com requires this header; no client header exists to
     // relay it from on a translated request, so it is stated here, and only
     // toward an Anthropic-serving outbound protocol (T2 finding 2).
@@ -1277,6 +1436,9 @@ mod tests {
                 "openai-chat->openai-responses".to_owned(),
                 "openai-responses->anthropic-messages".to_owned(),
                 "openai-responses->openai-chat".to_owned(),
+                "anthropic-messages->gemini-generate-content".to_owned(),
+                "openai-responses->gemini-generate-content".to_owned(),
+                "openai-chat->gemini-generate-content".to_owned(),
             ]
         );
         for pair in TABLE.iter().filter(|pair| !pair.is_supported()) {
@@ -1294,9 +1456,27 @@ mod tests {
         assert!(is_supported("openai-responses", "anthropic-messages"));
         assert!(is_supported("openai-responses", "openai-chat"));
         assert!(is_supported("openai-chat", "openai-responses"));
+        assert!(is_supported(
+            "anthropic-messages",
+            "gemini-generate-content"
+        ));
+        assert!(is_supported("openai-responses", "gemini-generate-content"));
+        assert!(is_supported("openai-chat", "gemini-generate-content"));
         assert!(!is_supported("openai-chat", "anthropic-messages"));
         assert!(!is_supported("anthropic-messages", "anthropic-messages"));
         assert!(!is_supported("anthropic-messages", "gemini"));
+        // Every row OUT of Gemini is refused for the reason that is true:
+        // nothing installed speaks it at the ingress (T3b).
+        for to in PROTOCOLS {
+            let pair = lookup("gemini-generate-content", to).expect("a row exists");
+            assert!(!pair.is_supported(), "{}", pair.slug());
+            let refusal = pair.refusal().expect("a refused pair has a reason");
+            if to == "gemini-generate-content" {
+                assert_eq!(refusal, SAME_PROTOCOL);
+            } else {
+                assert!(refusal.contains("T3b"), "{}: {refusal}", pair.slug());
+            }
+        }
     }
 
     #[test]
@@ -1406,7 +1586,35 @@ mod tests {
                 .any(|(field, _)| *field == "previous_response_id")
         );
         assert!(rows.ignored.contains(&"output[].id"));
+        let rows = field_rows("gemini-generate-content").unwrap();
+        assert!(
+            rows.refused
+                .iter()
+                .any(|(field, _)| *field == "safetySettings")
+        );
+        assert!(
+            rows.ignored.contains(&"user"),
+            "the one request field this gateway drops is named in the table it drops it from"
+        );
+        // ... and `gemini` alone is not a protocol slug.
         assert!(field_rows("gemini").is_none());
+    }
+
+    fn request_for(model: &str, stream: bool) -> Request {
+        Request {
+            model: model.to_owned(),
+            max_tokens: None,
+            system: None,
+            messages: Vec::new(),
+            tools: Vec::new(),
+            tool_choice: None,
+            parallel_tool_calls: None,
+            temperature: None,
+            top_p: None,
+            stop: Vec::new(),
+            stream,
+            user: None,
+        }
     }
 
     #[test]
@@ -1416,18 +1624,93 @@ mod tests {
         // version segment because Claude Code sends it and the Anthropic
         // base URLs omit it; the OpenAI paths omit it because their clients
         // do and their base URLs carry it.
+        let plain = request_for("m", false);
         assert_eq!(
-            outbound_target(codec_for("anthropic-messages").unwrap()),
+            outbound_target(codec_for("anthropic-messages").unwrap(), &plain),
             "/v1/messages"
         );
         assert_eq!(
-            outbound_target(codec_for("openai-chat").unwrap()),
+            outbound_target(codec_for("openai-chat").unwrap(), &plain),
             "/chat/completions"
         );
         assert_eq!(
-            outbound_target(codec_for("openai-responses").unwrap()),
+            outbound_target(codec_for("openai-responses").unwrap(), &plain),
             "/responses"
         );
+        // Gemini's is the one that is built rather than looked up: the model
+        // is a path segment and a streamed request is a different method.
+        // Its version segment comes from the codec and NOT from
+        // `VERSION_SEGMENT`, because the provider's base URL is the bare
+        // host — a relayed Gemini target carries `/v1beta` itself.
+        let gemini = codec_for("gemini-generate-content").unwrap();
+        assert_eq!(
+            outbound_target(gemini, &request_for("gemini-2.5-pro", false)),
+            "/v1beta/models/gemini-2.5-pro:generateContent"
+        );
+        assert_eq!(
+            outbound_target(gemini, &request_for("gemini-2.5-pro", true)),
+            "/v1beta/models/gemini-2.5-pro:streamGenerateContent?alt=sse"
+        );
+    }
+
+    /// The fourth protocol places from its own path shape, and — because no
+    /// harness speaks it — is refused by name at the ingress rather than
+    /// translated, with nothing about the request read.
+    #[test]
+    fn a_gemini_target_places_to_a_refusal_and_a_gemini_provider_is_a_destination() {
+        // Claude Code at a Gemini-only provider: the pair T3 supports.
+        assert!(matches!(
+            place("/v1/messages", &["gemini-generate-content"]),
+            Placement::Translate(pair)
+                if pair.slug() == "anthropic-messages->gemini-generate-content"
+        ));
+        assert!(matches!(
+            place("/responses", &["gemini-generate-content"]),
+            Placement::Translate(pair)
+                if pair.slug() == "openai-responses->gemini-generate-content"
+        ));
+        assert!(matches!(
+            place("/v1/chat/completions", &["gemini-generate-content"]),
+            Placement::Translate(pair)
+                if pair.slug() == "openai-chat->gemini-generate-content"
+        ));
+        // A Gemini-shaped request at an Anthropic-only provider: refused by
+        // name, and the reason is the one that is true.
+        match place(
+            "/v1beta/models/gemini-2.5-pro:generateContent",
+            &["anthropic-messages"],
+        ) {
+            Placement::PairRefused { from, refused } => {
+                assert_eq!(from, "gemini-generate-content");
+                assert!(refused[0].refusal().unwrap().contains("T3b"));
+            }
+            other => panic!("expected a refused pair, got {other:?}"),
+        }
+        // Its siblings under the same protocol are refused for the endpoint
+        // rule, not for the pair.
+        assert!(matches!(
+            place(
+                "/v1beta/models/gemini-2.5-pro:countTokens",
+                &["openai-chat"]
+            ),
+            Placement::TargetRefused {
+                from: "gemini-generate-content"
+            }
+        ));
+        // A served Gemini target never enters a codec — the second lock on
+        // the byte-for-byte rule, for the new protocol too.
+        assert!(matches!(
+            place(
+                "/v1beta/models/gemini-2.5-pro:generateContent",
+                &["gemini-generate-content"]
+            ),
+            Placement::Unplaceable
+        ));
+        // ... and a model listing is still nobody's endpoint.
+        assert!(matches!(
+            place("/v1beta/models", &["anthropic-messages"]),
+            Placement::Unplaceable
+        ));
     }
 
     #[test]

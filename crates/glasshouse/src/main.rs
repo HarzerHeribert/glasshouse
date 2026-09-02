@@ -614,6 +614,17 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
                     memory_export_tracked(&runtime, *tracked, *include_findings, *dry_run)?
                 );
             }
+            MemoryCommand::Rate {
+                id,
+                verdict,
+                session,
+                note,
+            } => {
+                print!(
+                    "{}",
+                    memory_rate(&runtime, id, *verdict, session.as_deref(), note.as_deref())?
+                );
+            }
             MemoryCommand::Retrievals { hours } => {
                 print!("{}", memory_retrievals_report(&runtime, *hours)?);
             }
@@ -11041,11 +11052,21 @@ fn memory_retrievals_report(runtime: &Runtime, hours: u32) -> anyhow::Result<Str
     let from = to - i64::from(hours) * 3600;
     let counts = ledger.stale_retrievals(from, to)?;
     let missed = ledger.count(EvaluationKind::MemoryRetrievalMiss, from, to)?;
+    let usefulness = ledger.usefulness(from, to)?;
+    let prevented_repetition = ledger.prevented_repetition(from, to)?;
+    let caused_complexity = ledger.caused_complexity(from, to)?;
+    let revalidation_accuracy = ledger.revalidation_accuracy(from, to)?;
+    let challenge_accuracy = ledger.challenge_accuracy(from, to)?;
     Ok(render_memory_retrievals(
         runtime.project().id().as_str(),
         hours,
         &counts,
         missed,
+        &usefulness,
+        &prevented_repetition,
+        &caused_complexity,
+        &revalidation_accuracy,
+        &challenge_accuracy,
     ))
 }
 
@@ -11060,11 +11081,17 @@ fn memory_retrievals_report(runtime: &Runtime, hours: u32) -> anyhow::Result<Str
 /// `--history` explicitly asked for it is the tool doing what it was told,
 /// not a defect, so it is printed once, under `stale-under-history`, and
 /// subtracted out of `stale` rather than counted under both.
+#[allow(clippy::too_many_arguments)]
 fn render_memory_retrievals(
     project_id: &str,
     hours: u32,
     counts: &glasshouse::evaluation::StaleRetrievalCounts,
     missed: i64,
+    usefulness: &glasshouse::evaluation::UsefulnessCounts,
+    prevented_repetition: &glasshouse::evaluation::PreventedRepetitionCounts,
+    caused_complexity: &glasshouse::evaluation::CausedComplexityCounts,
+    revalidation_accuracy: &glasshouse::evaluation::RevalidationAccuracyCounts,
+    challenge_accuracy: &glasshouse::evaluation::ChallengeAccuracyCounts,
 ) -> String {
     use std::fmt::Write as _;
 
@@ -11079,6 +11106,109 @@ fn render_memory_retrievals(
     );
     let _ = writeln!(out, "  {:<20}{}", "unresolved", counts.unresolved);
     let _ = writeln!(out, "  {:<20}{}", "missed", missed);
+
+    let _ = write!(
+        out,
+        "\n{}",
+        render_memory_quality(
+            usefulness,
+            prevented_repetition,
+            caused_complexity,
+            revalidation_accuracy,
+            challenge_accuracy
+        )
+    );
+    out
+}
+
+/// Memory quality for the same window `render_memory_retrievals` prints —
+/// "Phase 51, the memory half of RC-B", user ruling 2026-09-02: an explicit
+/// rating when given, a labelled `proxy` where the design decision defines
+/// one, and `unknown`, always with its own denominator.
+fn render_memory_quality(
+    usefulness: &glasshouse::evaluation::UsefulnessCounts,
+    prevented_repetition: &glasshouse::evaluation::PreventedRepetitionCounts,
+    caused_complexity: &glasshouse::evaluation::CausedComplexityCounts,
+    revalidation_accuracy: &glasshouse::evaluation::RevalidationAccuracyCounts,
+    challenge_accuracy: &glasshouse::evaluation::ChallengeAccuracyCounts,
+) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::from("Memory quality\n\n");
+
+    let rated = usefulness.explicit_useful + usefulness.explicit_not_useful;
+    let _ = writeln!(out, "useful (1821):");
+    let _ = writeln!(
+        out,
+        "  explicit useful {} / not-useful {} of {rated} rated",
+        usefulness.explicit_useful, usefulness.explicit_not_useful
+    );
+    let _ = writeln!(
+        out,
+        "  proxy useful {} of {} retrieved-into-completed-turns",
+        usefulness.proxy_useful, usefulness.proxy_denominator
+    );
+    let _ = writeln!(
+        out,
+        "  unknown {} of {} retrieved",
+        usefulness.unknown, usefulness.retrieved
+    );
+
+    let _ = writeln!(out, "\nprevented-repetition (1831):");
+    let _ = writeln!(
+        out,
+        "  explicit prevented-repetition {} of {} retrieved-failed-approach-memories",
+        prevented_repetition.explicit, prevented_repetition.retrieved
+    );
+    let _ = writeln!(
+        out,
+        "  proxy prevented-repetition {} of {} retrieved-into-completed-turns",
+        prevented_repetition.proxy, prevented_repetition.proxy_denominator
+    );
+    let _ = writeln!(
+        out,
+        "  unknown {} of {} retrieved-failed-approach-memories",
+        prevented_repetition.unknown, prevented_repetition.retrieved
+    );
+
+    let _ = writeln!(out, "\ncaused-complexity (1823):");
+    let _ = writeln!(
+        out,
+        "  explicit caused-complexity {} of {} retrieved-decision-memories",
+        caused_complexity.explicit, caused_complexity.retrieved
+    );
+    let _ = writeln!(
+        out,
+        "  unknown {} of {} retrieved-decision-memories",
+        caused_complexity.unknown, caused_complexity.retrieved
+    );
+    let _ = writeln!(out, "  no proxy: nothing observed bears on this");
+
+    let _ = writeln!(out, "\nrevalidation-accuracy (1824):");
+    let _ = writeln!(
+        out,
+        "  explicit revalidation-correct {} / revalidation-wrong {}",
+        revalidation_accuracy.correct, revalidation_accuracy.wrong
+    );
+    let _ = writeln!(
+        out,
+        "  no denominator: revalidate's four outcomes share no single production column"
+    );
+    let _ = writeln!(out, "  no proxy: nothing observed bears on this");
+
+    let _ = writeln!(out, "\nchallenge-accuracy (1825):");
+    let _ = writeln!(
+        out,
+        "  explicit challenge-justified {} / challenge-unjustified {} of {} challenges",
+        challenge_accuracy.justified, challenge_accuracy.unjustified, challenge_accuracy.challenges
+    );
+    let _ = writeln!(
+        out,
+        "  unknown {} of {} challenges",
+        challenge_accuracy.unknown, challenge_accuracy.challenges
+    );
+    let _ = writeln!(out, "  no proxy: nothing observed bears on this");
+
     out
 }
 
@@ -11282,6 +11412,45 @@ fn memory_promote(runtime: &Runtime, id: &str, authority: &str) -> anyhow::Resul
             record.authority.map_or("unclassified", |a| a.as_str())
         ),
     })
+}
+
+/// `glasshouse memory rate <id> <verdict> [--session <id>] [--note <text>]`
+/// — "Phase 51, the memory half of RC-B", user ruling 2026-09-02: *"Both:
+/// explicit rating when given, the labelled proxy otherwise."* This is the
+/// explicit half — one new [`glasshouse::evaluation::EvaluationKind::MemoryRated`]
+/// observation, never an edit of the retrieval it judges.
+///
+/// Project isolation the same way [`memory_challenge`] and
+/// [`memory_resolve_conflict`] get it: [`glasshouse::memory::MemoryStore::resolve_id`]
+/// refuses an id from another project by name before this ever opens the
+/// evaluation ledger, so a rating can never be recorded against a memory
+/// this project cannot see.
+fn memory_rate(
+    runtime: &Runtime,
+    id: &str,
+    verdict: glasshouse::evaluation::EvaluationOutcome,
+    session: Option<&str>,
+    note: Option<&str>,
+) -> anyhow::Result<String> {
+    use glasshouse::memory::ProjectMemory;
+
+    let memory = ProjectMemory::open(runtime)?;
+    let resolved = memory.store().resolve_id(id)?;
+
+    glasshouse::evaluation::record_memory_rating(
+        runtime,
+        resolved.as_str(),
+        verdict,
+        session,
+        note,
+        glasshouse::evaluation::now_unix(),
+    )?;
+
+    Ok(format!(
+        "{} rated {}\n",
+        resolved.as_str(),
+        verdict.as_str()
+    ))
 }
 
 /// `glasshouse memory challenge <id> <reason>` — Phase 21F lines 937/938:

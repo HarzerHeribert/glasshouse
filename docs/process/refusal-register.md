@@ -1340,3 +1340,11 @@ day's `cluster-b.py` reading re-opened **1822** and **1826** (`phase-51.md`):
 readout), respectively. Twelve wrongly-ticked boxes had this shape before
 today; **all sixteen were found by an audit or a script, none by the diff
 read that preceded the tick.**
+
+
+## 1367 and 1369 — censused 2026-09-02, and the finding underneath both
+
+| line | missing link |
+|---|---|
+| 1367 | *"Reserve known paced capacity at dispatch so concurrent workers do not all consume the same apparent allowance."* Overlap is real and supported (two hook processes, or a hook racing `memory commit`), but the apparent allowance lives nowhere a second dispatch could see: `RoutedNoModel::new` builds an empty `FreePool` per call and drops it, and — the finding — **chooses and then calls no model at all** (`memory/extract/disposable.rs:1-30`, its own words), while a configured extraction model bypasses the disposable router entirely (`main.rs::disposable_extraction_model`). A reservation protects capacity a dispatch does not spend. Successor `GH-DISPATCH-RESERVATION-ROW` (Red) is **blocked behind `GH-ROUTED-EXTRACTION-CLIENT`** (Red): the routed choice must drive the real extraction request, record it, and feed `FreePool::observe`, before a reservation means anything. Full census: `phase-33c.md` 2026-09-02. |
+| 1369 | *"Reduce or suppress active probes when probing would consume a material fraction of a scarce request pool."* **Packageable** — `probe_provider` (`provider/resources.rs:1287`) spends against a paced credential unconditionally from `glasshouse resources --probe`, and nothing checks the cached allowance before it fires. `GH-PROBE-BUDGET-1369` (Amber). |

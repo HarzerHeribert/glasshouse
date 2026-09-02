@@ -547,3 +547,36 @@ Recorded scope limits — stated by the worker, not discovered later:
 ---
 
 ---
+
+---
+
+## Lines 1823 and 1825 CLOSED, 1821, 1824 and 1831 OPEN — 2026-09-02 (`GH-MEMORY-RATING`, Amber, Sonnet high): the memory half of RC-B gets its explicit signal, and the proxy finds no row to join
+
+Implements the user's ruling of 2026-09-02 (`design-decisions.md`, *an explicit rating when given, a labelled proxy otherwise*). `glasshouse memory rate <memory-id> <verdict> [--session <id>] [--note <text>]` (`cli.rs` `MemoryCommand::Rate`, a `value_parser` over the one list `MEMORY_RATING_VERDICTS` that refuses an unknown word and `unknown` itself by name), resolved through `MemoryStore::resolve_id` — the same project-isolation gate `memory challenge` uses — and recorded by `evaluation::record_memory_rating` as one `EvaluationKind::MemoryRated` observation whose outcome is the verdict (`EvaluationOutcome` gained the design's eight words, spelled once, round-trip pinned); no retrieval or memory row is ever edited. `glasshouse memory retrievals` prints a *Memory quality* section: explicit / proxy / unknown with denominators for 1821 and 1831, explicit-only with the words *no proxy: nothing observed bears on this* for 1823, 1824 and 1825. Eight shipped-binary tests (`tests/memory_rating.rs`), 4/4 mutations KILLED with output quoted (`drop-the-proxy-label`, `merge-proxy-into-explicit`, `silence-is-success`, `rate-writes-unknown`), `evaluation_observations` 26/26 unchanged, targeted blast green, rustdoc clean.
+
+**The finding that decides the verdicts.** The proxy the design defines joins a `MemoryRetrieved` row to its session's `RoutingOutcomeObserved` row — and **no row this build writes carries both a `memory_id` and a `session_id`**: `record_memory_retrieval`'s only caller, `memory_search_grouped`, has no session parameter; the launch-time briefing door (`api/unix.rs::select_memory` / `deliver_memory`), which does hold a `SessionId`, records only misses and tracks injections in an in-memory set. The query is right and is exercised by tests that plant the join's rows directly (disclosed in the test file's header), and in production it is `0 of 0` today. Of the design's four negative signals only *override* has a row shape with a session id; `FailoverPrevented` carries none, nothing records a retry, and `TurnOutcome` has two values so *early abandonment* is not distinguishable from silence — all three omitted from the join by name, none invented.
+
+### Measure how often an old decision causes an agent to add unnecessary implementation complexity. (line 1823)
+
+Contract: Given memories of kind `decision` retrieved in the window, when a person or agent rates one `caused-complexity`, Glasshouse counts explicit ratings over the number of retrieved decision memories and prints both, while preserving that no proxy is offered for a judgement nothing in the build observes.
+
+State: **COMPLETE** — ruled 2026-09-02. The explicit signal is the user's ruling; the denominator is real (`MemoryRetrieved` rows joined to `memories.kind = 'decision'`), the readout prints `explicit caused-complexity c of D retrieved-decision-memories` and says in words that there is no proxy; proven through the shipped binary (`caused_complexity_counts_over_retrieved_decision_memories`) with `rate-writes-unknown` KILLED on the recorder every reader depends on.
+
+### Measure how often agents challenge a remembered decision and whether the challenge was justified. (line 1825)
+
+Contract: Given memories marked for review in the window, when a person or agent rates a challenge `challenge-justified` or `challenge-unjustified`, Glasshouse counts both over the number of challenges and prints them, while preserving that an unrated challenge stays unknown.
+
+State: **COMPLETE** — ruled 2026-09-02. Denominator `memories.review_marked_at` in the window (the column `memory challenge` writes); explicit counts printed over it; proven through the shipped binary (`challenge_accuracy_counts_over_memories_marked_for_review`). Recorded limit, the worker's: `memory revalidate … needs-review` writes the same column, so a revalidation that re-flags an already-challenged memory is indistinguishable from a fresh challenge — the same shape as 1822's recorded limit.
+
+Production evidence (both lines):
+- `crates/glasshouse/src/cli.rs` — `MemoryCommand::Rate`, `MEMORY_RATING_VERDICTS`
+- `crates/glasshouse/src/main.rs` — `memory_rate`, `memory_retrievals_report` (the *Memory quality* section)
+- `crates/glasshouse/src/evaluation/mod.rs` — `EvaluationKind::MemoryRated`, the eight `EvaluationOutcome` verdicts, `record_memory_rating`, the quality readers
+
+Regression evidence (both lines):
+- `memory_rating::a_rated_memory_appears_as_explicit_in_the_retrievals_readout`, `memory_rating::caused_complexity_counts_over_retrieved_decision_memories`, `memory_rating::challenge_accuracy_counts_over_memories_marked_for_review`, `memory_rating::an_unknown_verdict_is_refused_by_name`, `memory_rating::a_memory_from_another_project_is_refused`
+- `evaluation::tests` round-trip of the verdict vocabulary
+
+**1821 and 1831 — OPEN.** The explicit halves are real and proven (rate → readout; 1831's own denominator, retrievals of `memories.kind = 'failed_attempt'`, is real and tested); the proxy halves have the query and no producer for their denominator. **1824 — OPEN**: `memory revalidate`'s four outcomes share no column meaning *a revalidation happened*, so there is no honest denominator; the explicit counts print with the readout saying so. **Successor, named: `GH-RETRIEVAL-ATTRIBUTION` (Amber)** — thread the session id into `record_memory_retrieval` from `memory_search_grouped` and its two callers, record a successful injection at `deliver_memory` as a `MemoryRetrieved` row with the session, and record `memory revalidate` as its own evaluation row (`MemoryRevalidated`, no migration) so 1824 has a denominator; 1821, 1831 and 1824 tick on its landing with the readers already written.
+
+---

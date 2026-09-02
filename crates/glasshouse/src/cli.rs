@@ -70,6 +70,29 @@ fn parse_log_file(value: &str) -> Result<PathBuf, String> {
         .map_err(|err| err.to_string())
 }
 
+/// clap value parser for `glasshouse memory rate`'s `<VERDICT>`: refuses an
+/// unknown word by name against
+/// [`crate::evaluation::MEMORY_RATING_VERDICTS`] — the same list
+/// [`crate::evaluation::EvaluationOutcome`]'s round-trip test pins — rather
+/// than a second spelling kept here. `unknown` is refused too: it is the
+/// sentinel every other kind in the evaluation ledger writes for "not yet
+/// known", never a verdict a person types.
+fn parse_rating_verdict(value: &str) -> Result<crate::evaluation::EvaluationOutcome, String> {
+    use crate::evaluation::{EvaluationOutcome, MEMORY_RATING_VERDICTS};
+
+    match EvaluationOutcome::from_stored(value) {
+        Some(outcome) if MEMORY_RATING_VERDICTS.contains(&outcome) => Ok(outcome),
+        _ => Err(format!(
+            "`{value}` is not a rating verdict; use one of {}",
+            MEMORY_RATING_VERDICTS
+                .iter()
+                .map(|verdict| verdict.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
 /// Non-interactive commands.
 ///
 /// Every one of these is project scoped: it operates on the project resolved
@@ -1939,8 +1962,44 @@ pub enum MemoryCommand {
         dry_run: bool,
     },
 
+    /// Record whether a retrieved memory helped — a person's or an agent's
+    /// own verdict, never inferred. "Phase 51, the memory half of RC-B: an
+    /// explicit rating when given, a labelled proxy otherwise", user ruling
+    /// 2026-09-02 — map lines 1821, 1823, 1824, 1825 and 1831's explicit
+    /// half.
+    ///
+    /// `<VERDICT>` is one of a closed eight-word vocabulary, each word one
+    /// map line's own quantity: `useful` / `not-useful` (1821),
+    /// `prevented-repetition` (1831), `caused-complexity` (1823),
+    /// `revalidation-correct` / `revalidation-wrong` (1824),
+    /// `challenge-justified` / `challenge-unjustified` (1825). An unknown
+    /// word is refused by name.
+    ///
+    /// This records a new observation against the memory; it is never an
+    /// edit of the retrieval it judges, and an unrated memory stays unrated.
+    /// A harness can issue this as a tool call at the end of a task; a
+    /// person can issue it afterwards.
+    Rate {
+        /// The memory, or the leading part of its identifier.
+        id: String,
+
+        /// One of the eight closed verdict words above.
+        #[arg(value_name = "VERDICT", value_parser = parse_rating_verdict)]
+        verdict: crate::evaluation::EvaluationOutcome,
+
+        /// The session this rating is about, when there is one.
+        #[arg(long, value_name = "ID")]
+        session: Option<String>,
+
+        /// A short note, printed back in this project's own readout. Your
+        /// own text; never a memory's body.
+        #[arg(long, value_name = "TEXT")]
+        note: Option<String>,
+    },
+
     /// How retrieval has been doing over a window — map lines 1822, 1826 and
-    /// 1865's first production reader.
+    /// 1865's first production reader, and the five readers `glasshouse
+    /// memory rate` feeds (1821, 1823, 1824, 1825, 1831).
     ///
     /// Prints, for the window: how many memories were returned, how many of
     /// those are stale now (superseded or flagged for review — map line
@@ -1951,6 +2010,12 @@ pub enum MemoryCommand {
     /// any production door matched nothing at all (map line 1865). A window
     /// with no recorded activity prints zeros for every figure, never an
     /// error.
+    ///
+    /// Then, memory quality: explicit ratings, a labelled `proxy` where the
+    /// design decision defines one, and `unknown`, each with its own
+    /// denominator, for usefulness (1821), prevented repetition (1831),
+    /// caused complexity (1823), revalidation accuracy (1824) and challenge
+    /// accuracy (1825).
     Retrievals {
         /// How far back to look, in hours.
         #[arg(long, value_name = "N", default_value_t = 24)]

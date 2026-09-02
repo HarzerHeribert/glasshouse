@@ -240,6 +240,26 @@ pub enum EvaluationKind {
     /// attribution would be worse than a count that honestly has none. The
     /// rendered figure is a ratio over failovers, which needs no session.
     FailoverPrevented,
+    /// A person's or an agent's own verdict on a memory Glasshouse retrieved
+    /// — `glasshouse memory rate <memory-id> <verdict>` — map lines 1821,
+    /// 1823, 1824, 1825 and 1831's explicit half. `subject` is unused;
+    /// `outcome` carries the verdict word itself
+    /// ([`EvaluationOutcome`]'s eight non-[`EvaluationOutcome::Unknown`]
+    /// values), `memory_id` is the rated memory, `session_id` is the
+    /// session the rating is about when one was given, and `detail` is the
+    /// operator's own note, never parsed.
+    ///
+    /// Design decision, "Phase 51, the memory half of RC-B: an explicit
+    /// rating when given, a labelled proxy otherwise — user ruling
+    /// 2026-09-02": *"Both: explicit rating when given, the labelled proxy
+    /// otherwise."* This is the explicit half; every reader here labels the
+    /// other half `proxy` and never folds the two together.
+    ///
+    /// **A rating is a new row, never an edit.** It judges a
+    /// [`Self::MemoryRetrieved`] row (or, for 1823/1824/1825, a memory that
+    /// was never retrieved in this exact window at all) without touching it
+    /// — the same append-only shape every kind in this ledger keeps.
+    MemoryRated,
 }
 
 /// The `subject` this ledger writes for a destination whose cost class no
@@ -454,6 +474,7 @@ impl EvaluationKind {
             Self::RoutingOutcomeObserved => "routing_outcome_observed",
             Self::RoutingTierObserved => "routing_tier_observed",
             Self::FailoverPrevented => "failover_prevented",
+            Self::MemoryRated => "memory_rated",
         }
     }
 
@@ -475,6 +496,7 @@ impl EvaluationKind {
             "routing_outcome_observed" => Some(Self::RoutingOutcomeObserved),
             "routing_tier_observed" => Some(Self::RoutingTierObserved),
             "failover_prevented" => Some(Self::FailoverPrevented),
+            "memory_rated" => Some(Self::MemoryRated),
             _ => None,
         }
     }
@@ -497,22 +519,69 @@ impl EvaluationKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum EvaluationOutcome {
     Unknown,
+    /// [`EvaluationKind::MemoryRated`]'s eight verdict words, `useful`
+    /// through `challenge-unjustified` below — map lines 1821, 1823, 1824,
+    /// 1825 and 1831's closed vocabulary, decided in "Phase 51, the memory
+    /// half of RC-B" and spelled once here for [`Self::as_str`] and
+    /// [`Self::from_stored`] to round-trip.
+    Useful,
+    NotUseful,
+    PreventedRepetition,
+    CausedComplexity,
+    RevalidationCorrect,
+    RevalidationWrong,
+    ChallengeJustified,
+    ChallengeUnjustified,
 }
 
 impl EvaluationOutcome {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Unknown => "unknown",
+            Self::Useful => "useful",
+            Self::NotUseful => "not-useful",
+            Self::PreventedRepetition => "prevented-repetition",
+            Self::CausedComplexity => "caused-complexity",
+            Self::RevalidationCorrect => "revalidation-correct",
+            Self::RevalidationWrong => "revalidation-wrong",
+            Self::ChallengeJustified => "challenge-justified",
+            Self::ChallengeUnjustified => "challenge-unjustified",
         }
     }
 
     pub fn from_stored(value: &str) -> Option<Self> {
         match value {
             "unknown" => Some(Self::Unknown),
+            "useful" => Some(Self::Useful),
+            "not-useful" => Some(Self::NotUseful),
+            "prevented-repetition" => Some(Self::PreventedRepetition),
+            "caused-complexity" => Some(Self::CausedComplexity),
+            "revalidation-correct" => Some(Self::RevalidationCorrect),
+            "revalidation-wrong" => Some(Self::RevalidationWrong),
+            "challenge-justified" => Some(Self::ChallengeJustified),
+            "challenge-unjustified" => Some(Self::ChallengeUnjustified),
             _ => None,
         }
     }
 }
+
+/// [`EvaluationOutcome`]'s eight rating-verdict values — every variant except
+/// [`EvaluationOutcome::Unknown`], which a person never types: it is the
+/// sentinel every other kind in this ledger writes for "not yet known", and
+/// `glasshouse memory rate`'s CLI parser refuses it by name rather than
+/// accepting it as a ninth verdict. Used by that parser's error message and
+/// by [`EvaluationOutcome`]'s own round-trip test, so the CLI's vocabulary
+/// and the type's can never carry two different spellings.
+pub const MEMORY_RATING_VERDICTS: [EvaluationOutcome; 8] = [
+    EvaluationOutcome::Useful,
+    EvaluationOutcome::NotUseful,
+    EvaluationOutcome::PreventedRepetition,
+    EvaluationOutcome::CausedComplexity,
+    EvaluationOutcome::RevalidationCorrect,
+    EvaluationOutcome::RevalidationWrong,
+    EvaluationOutcome::ChallengeJustified,
+    EvaluationOutcome::ChallengeUnjustified,
+];
 
 /// The `subject` vocabulary for [`EvaluationKind::MemoryRetrieved`] and
 /// [`EvaluationKind::MemoryRetrievalMiss`]: which of the questions the search
@@ -610,6 +679,16 @@ impl NewObservation {
 
     pub fn with_subject(mut self, subject: impl Into<String>) -> Self {
         self.subject = Some(subject.into());
+        self
+    }
+
+    /// Set the outcome explicitly. Every other producer in this module
+    /// leaves [`NewObservation::new`]'s honest `Unknown` in place — see this
+    /// module's own header — so this exists for
+    /// [`EvaluationKind::MemoryRated`] alone, whose whole point is that an
+    /// outcome *is* known: the rater said so.
+    pub fn with_outcome(mut self, outcome: EvaluationOutcome) -> Self {
+        self.outcome = outcome;
         self
     }
 
@@ -1126,6 +1205,367 @@ impl EvaluationObservations {
             }
         }
     }
+}
+
+/// The five readers for "Phase 51, the memory half of RC-B" — map lines
+/// 1821, 1823, 1824, 1825 and 1831 — kept in their own block for practice
+/// §77's reason: a second worker's reader and this one must not be able to
+/// land on the same lines.
+///
+/// # The proxy's join key has no producer yet, and every proxy figure below
+/// says so honestly rather than hiding it
+///
+/// The design decision's proxy for 1821/1831 is *"the retrieving session's
+/// turn ended `Completed` … with no failover, retry, override or early
+/// abandonment recorded against it."* That needs a
+/// [`EvaluationKind::MemoryRetrieved`] row's `session_id` to find "the
+/// retrieving session" at all, and **no production caller sets one**:
+/// `main.rs::memory_search_grouped` (the CLI and machine-door search core)
+/// and the launch-time briefing door (`api/unix.rs::select_memory`,
+/// `deliver_memory`) never pass a session id into
+/// [`record_memory_retrieval`]. The queries below join on `session_id`
+/// correctly and will count a real proxy hit the day a producer attaches
+/// one — nothing here fabricates an attribution — but today every such join
+/// legitimately matches zero rows. This is disclosed once here rather than
+/// on every field, and again in this package's own report.
+///
+/// Of the four negative signals the design names — failover, retry,
+/// override, early abandonment — only **override**
+/// ([`EvaluationKind::RoutingOverrideDecided`], `subject = "overridden"`)
+/// has a row shape this ledger can join on a session id at all:
+/// [`EvaluationKind::FailoverPrevented`] carries no `session_id` by its own
+/// design (see that variant's doc comment), no evaluation kind here
+/// observes a "retry", and [`crate::events::TurnOutcome`] has exactly two
+/// values — `Completed` and `Failed` — so "early abandonment" is not a
+/// state this ledger can tell apart from ordinary silence. Those three are
+/// therefore omitted from the join by name, not invented.
+impl EvaluationObservations {
+    /// **Map line 1821**: *"Measure how often retrieved memory is actually
+    /// useful to the receiving agent."*
+    pub fn usefulness(&self, from: i64, to: i64) -> Result<UsefulnessCounts, EvaluationError> {
+        self.refuse_unretained_window(from)?;
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT
+                 (SELECT COUNT(*) FROM evaluation_observations
+                    WHERE kind = ?1 AND outcome = ?2
+                      AND observed_at >= ?4 AND observed_at <= ?5),
+                 (SELECT COUNT(*) FROM evaluation_observations
+                    WHERE kind = ?1 AND outcome = ?3
+                      AND observed_at >= ?4 AND observed_at <= ?5),
+                 (SELECT COUNT(*) FROM evaluation_observations
+                    WHERE kind = ?6 AND observed_at >= ?4 AND observed_at <= ?5),
+                 (SELECT COUNT(*) FROM evaluation_observations AS r
+                    WHERE r.kind = ?6 AND r.session_id IS NOT NULL
+                      AND r.observed_at >= ?4 AND r.observed_at <= ?5
+                      AND EXISTS (
+                          SELECT 1 FROM evaluation_observations AS c
+                           WHERE c.kind = ?7 AND c.subject = ?8
+                             AND c.session_id = r.session_id
+                      )
+                      AND NOT EXISTS (
+                          SELECT 1 FROM evaluation_observations AS o
+                           WHERE o.kind = ?9 AND o.subject = ?10
+                             AND o.session_id = r.session_id
+                      ))",
+            params![
+                EvaluationKind::MemoryRated.as_str(),
+                EvaluationOutcome::Useful.as_str(),
+                EvaluationOutcome::NotUseful.as_str(),
+                from,
+                to,
+                EvaluationKind::MemoryRetrieved.as_str(),
+                EvaluationKind::RoutingOutcomeObserved.as_str(),
+                TURN_COMPLETED,
+                EvaluationKind::RoutingOverrideDecided.as_str(),
+                "overridden",
+            ],
+            |row| {
+                let explicit_useful: i64 = row.get(0)?;
+                let explicit_not_useful: i64 = row.get(1)?;
+                let retrieved: i64 = row.get(2)?;
+                let proxy: i64 = row.get(3)?;
+                Ok(UsefulnessCounts {
+                    explicit_useful,
+                    explicit_not_useful,
+                    proxy_useful: proxy,
+                    proxy_denominator: proxy,
+                    unknown: (retrieved - proxy).max(0),
+                    retrieved,
+                })
+            },
+        )
+        .map_err(sql_err("count memory usefulness ratings"))
+    }
+
+    /// **Map line 1831**: *"Measure how often memory prevents repetition of
+    /// a recorded failed approach."* Scoped to retrievals of
+    /// `memories.kind = 'failed_attempt'` — the memory's own class, not a
+    /// judgement made here.
+    pub fn prevented_repetition(
+        &self,
+        from: i64,
+        to: i64,
+    ) -> Result<PreventedRepetitionCounts, EvaluationError> {
+        self.refuse_unretained_window(from)?;
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT
+                 (SELECT COUNT(*) FROM evaluation_observations
+                    WHERE kind = ?1 AND outcome = ?2
+                      AND observed_at >= ?3 AND observed_at <= ?4),
+                 (SELECT COUNT(*) FROM evaluation_observations AS r
+                    JOIN memories AS m
+                      ON m.id = r.memory_id AND m.project_id = r.project_id
+                   WHERE r.kind = ?5 AND m.kind = 'failed_attempt'
+                     AND r.observed_at >= ?3 AND r.observed_at <= ?4),
+                 (SELECT COUNT(*) FROM evaluation_observations AS r
+                    JOIN memories AS m
+                      ON m.id = r.memory_id AND m.project_id = r.project_id
+                   WHERE r.kind = ?5 AND m.kind = 'failed_attempt'
+                     AND r.session_id IS NOT NULL
+                     AND r.observed_at >= ?3 AND r.observed_at <= ?4
+                     AND EXISTS (
+                         SELECT 1 FROM evaluation_observations AS c
+                          WHERE c.kind = ?6 AND c.subject = ?7
+                            AND c.session_id = r.session_id
+                     )
+                     AND NOT EXISTS (
+                         SELECT 1 FROM evaluation_observations AS o
+                          WHERE o.kind = ?8 AND o.subject = ?9
+                            AND o.session_id = r.session_id
+                     ))",
+            params![
+                EvaluationKind::MemoryRated.as_str(),
+                EvaluationOutcome::PreventedRepetition.as_str(),
+                from,
+                to,
+                EvaluationKind::MemoryRetrieved.as_str(),
+                EvaluationKind::RoutingOutcomeObserved.as_str(),
+                TURN_COMPLETED,
+                EvaluationKind::RoutingOverrideDecided.as_str(),
+                "overridden",
+            ],
+            |row| {
+                let explicit: i64 = row.get(0)?;
+                let retrieved: i64 = row.get(1)?;
+                let proxy: i64 = row.get(2)?;
+                Ok(PreventedRepetitionCounts {
+                    explicit,
+                    proxy,
+                    proxy_denominator: proxy,
+                    unknown: (retrieved - proxy).max(0),
+                    retrieved,
+                })
+            },
+        )
+        .map_err(sql_err("count prevented-repetition ratings"))
+    }
+
+    /// **Map line 1823**: *"Measure how often an old decision causes an
+    /// agent to add unnecessary implementation complexity."* Explicit only
+    /// — no observation in this build bears on whether a decision *caused*
+    /// complexity, so there is no proxy. Scoped to retrievals of
+    /// `memories.kind = 'decision'`.
+    pub fn caused_complexity(
+        &self,
+        from: i64,
+        to: i64,
+    ) -> Result<CausedComplexityCounts, EvaluationError> {
+        self.refuse_unretained_window(from)?;
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT
+                 (SELECT COUNT(*) FROM evaluation_observations
+                    WHERE kind = ?1 AND outcome = ?2
+                      AND observed_at >= ?3 AND observed_at <= ?4),
+                 (SELECT COUNT(*) FROM evaluation_observations AS r
+                    JOIN memories AS m
+                      ON m.id = r.memory_id AND m.project_id = r.project_id
+                   WHERE r.kind = ?5 AND m.kind = 'decision'
+                     AND r.observed_at >= ?3 AND r.observed_at <= ?4)",
+            params![
+                EvaluationKind::MemoryRated.as_str(),
+                EvaluationOutcome::CausedComplexity.as_str(),
+                from,
+                to,
+                EvaluationKind::MemoryRetrieved.as_str(),
+            ],
+            |row| {
+                let explicit: i64 = row.get(0)?;
+                let retrieved: i64 = row.get(1)?;
+                Ok(CausedComplexityCounts {
+                    explicit,
+                    unknown: (retrieved - explicit).max(0),
+                    retrieved,
+                })
+            },
+        )
+        .map_err(sql_err("count caused-complexity ratings"))
+    }
+
+    /// **Map line 1824**: *"Measure how often revalidation correctly
+    /// identifies a decision whose original assumptions no longer hold."*
+    /// Explicit only, and **no denominator**: `glasshouse memory
+    /// revalidate`'s four outcomes share no single production column that
+    /// means "a revalidation happened" — `reaffirmed` writes
+    /// `last_validated_at`, `needs-review` reuses `mark_for_review`'s
+    /// `review_marked_at` (the same column [`Self::challenge_accuracy`]
+    /// reads, so it cannot serve as *this* line's own denominator without
+    /// double meaning), and `superseded`/`invalidated` write no
+    /// distinguishing column at all. Rather than undercount by picking one
+    /// of the four, this returns the real explicit tally and no
+    /// denominator; the reader prints that plainly instead of a fabricated
+    /// ratio.
+    pub fn revalidation_accuracy(
+        &self,
+        from: i64,
+        to: i64,
+    ) -> Result<RevalidationAccuracyCounts, EvaluationError> {
+        self.refuse_unretained_window(from)?;
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT
+                 (SELECT COUNT(*) FROM evaluation_observations
+                    WHERE kind = ?1 AND outcome = ?2
+                      AND observed_at >= ?4 AND observed_at <= ?5),
+                 (SELECT COUNT(*) FROM evaluation_observations
+                    WHERE kind = ?1 AND outcome = ?3
+                      AND observed_at >= ?4 AND observed_at <= ?5)",
+            params![
+                EvaluationKind::MemoryRated.as_str(),
+                EvaluationOutcome::RevalidationCorrect.as_str(),
+                EvaluationOutcome::RevalidationWrong.as_str(),
+                from,
+                to,
+            ],
+            |row| {
+                Ok(RevalidationAccuracyCounts {
+                    correct: row.get(0)?,
+                    wrong: row.get(1)?,
+                })
+            },
+        )
+        .map_err(sql_err("count revalidation-accuracy ratings"))
+    }
+
+    /// **Map line 1825**: *"Measure how often agents challenge a remembered
+    /// decision and whether the challenge was justified."* Explicit only.
+    /// The denominator is `memories.review_marked_at` in the window —
+    /// `MemoryStore::mark_for_review`'s own column, which is what both
+    /// `glasshouse memory challenge` and a `glasshouse memory revalidate …
+    /// needs-review` outcome write. **Recorded limit, not a blocker**: the
+    /// two are indistinguishable in this column, so a revalidation that
+    /// re-flags an already-challenged memory counts here as a second
+    /// challenge.
+    pub fn challenge_accuracy(
+        &self,
+        from: i64,
+        to: i64,
+    ) -> Result<ChallengeAccuracyCounts, EvaluationError> {
+        self.refuse_unretained_window(from)?;
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT
+                 (SELECT COUNT(*) FROM evaluation_observations
+                    WHERE kind = ?1 AND outcome = ?2
+                      AND observed_at >= ?4 AND observed_at <= ?5),
+                 (SELECT COUNT(*) FROM evaluation_observations
+                    WHERE kind = ?1 AND outcome = ?3
+                      AND observed_at >= ?4 AND observed_at <= ?5),
+                 (SELECT COUNT(*) FROM memories
+                    WHERE project_id = ?6
+                      AND review_marked_at >= ?4 AND review_marked_at <= ?5)",
+            params![
+                EvaluationKind::MemoryRated.as_str(),
+                EvaluationOutcome::ChallengeJustified.as_str(),
+                EvaluationOutcome::ChallengeUnjustified.as_str(),
+                from,
+                to,
+                self.project_id,
+            ],
+            |row| {
+                let justified: i64 = row.get(0)?;
+                let unjustified: i64 = row.get(1)?;
+                let challenges: i64 = row.get(2)?;
+                Ok(ChallengeAccuracyCounts {
+                    justified,
+                    unjustified,
+                    unknown: (challenges - justified - unjustified).max(0),
+                    challenges,
+                })
+            },
+        )
+        .map_err(sql_err("count challenge-accuracy ratings"))
+    }
+}
+
+/// **Map line 1821**'s counts: explicit ratings, the labelled proxy, and
+/// unknown — see this block's own header for why the proxy is always zero
+/// until a producer attaches `session_id` to a retrieval.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct UsefulnessCounts {
+    /// `glasshouse memory rate <id> useful` calls in the window.
+    pub explicit_useful: i64,
+    /// `glasshouse memory rate <id> not-useful` calls in the window.
+    pub explicit_not_useful: i64,
+    /// Retrievals whose session's own verdict qualifies for the proxy.
+    /// Equal to [`Self::proxy_denominator`]: nothing here yet distinguishes
+    /// a qualifying session that *was* useful from one that was not, so
+    /// every retrieval the proxy can attribute at all counts toward this.
+    pub proxy_useful: i64,
+    /// The proxy's own denominator: retrievals joined to a session whose
+    /// turn ended `Completed` with no override recorded.
+    pub proxy_denominator: i64,
+    /// `retrieved` minus the proxy denominator — retrievals this ledger
+    /// cannot attribute to a qualifying session at all.
+    pub unknown: i64,
+    /// Every memory returned in the window — the denominator for
+    /// [`Self::unknown`].
+    pub retrieved: i64,
+}
+
+/// **Map line 1831**'s counts, the same shape as [`UsefulnessCounts`] but
+/// with one explicit verdict word instead of two.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PreventedRepetitionCounts {
+    pub explicit: i64,
+    pub proxy: i64,
+    pub proxy_denominator: i64,
+    pub unknown: i64,
+    /// Retrievals of `memories.kind = 'failed_attempt'` in the window.
+    pub retrieved: i64,
+}
+
+/// **Map line 1823**'s counts: explicit only, no proxy.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CausedComplexityCounts {
+    pub explicit: i64,
+    pub unknown: i64,
+    /// Retrievals of `memories.kind = 'decision'` in the window.
+    pub retrieved: i64,
+}
+
+/// **Map line 1824**'s counts: explicit only, and no denominator at all —
+/// see [`EvaluationObservations::revalidation_accuracy`]'s own doc comment
+/// for why.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct RevalidationAccuracyCounts {
+    pub correct: i64,
+    pub wrong: i64,
+}
+
+/// **Map line 1825**'s counts: explicit only, denominator from
+/// `memories.review_marked_at`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ChallengeAccuracyCounts {
+    pub justified: i64,
+    pub unjustified: i64,
+    pub unknown: i64,
+    /// Memories marked for review (challenged, or re-flagged by a
+    /// `needs-review` revalidation — see the reader's own doc comment) in
+    /// the window.
+    pub challenges: i64,
 }
 
 /// One bucket of routed sessions, and what their harnesses said about their
@@ -2263,6 +2703,45 @@ pub fn record_failover_prevention(
     }
 }
 
+/// Record a person's or an agent's own verdict on a memory Glasshouse
+/// retrieved — the producer for [`EvaluationKind::MemoryRated`], and
+/// `glasshouse memory rate`'s one write. Returns the appended `seq`.
+///
+/// # This is allowed to fail loudly, unlike every producer above
+///
+/// [`record_memory_retrieval`] and its neighbours never fail a search or a
+/// launch, because bookkeeping must not break the door it is counting. This
+/// producer has no door to protect: it *is* the command, typed by a person
+/// or issued by an agent as its own last act, and a rating that silently
+/// failed to record would tell its caller their verdict was kept when it
+/// was not. Its caller (`main.rs::memory_rate`) propagates this with `?` and
+/// prints nothing but a failure.
+///
+/// `memory_id` is trusted to have already been resolved against this
+/// project's own store — `glasshouse memory rate`'s project-isolation check
+/// runs before this is ever called, the same way `memory_challenge` and
+/// `memory_resolve_conflict` resolve an id before acting on it.
+pub fn record_memory_rating(
+    runtime: &Runtime,
+    memory_id: &str,
+    verdict: EvaluationOutcome,
+    session_id: Option<&str>,
+    note: Option<&str>,
+    observed_at_unix: i64,
+) -> anyhow::Result<i64> {
+    let mut observation = NewObservation::new(EvaluationKind::MemoryRated)
+        .with_memory_id(memory_id)
+        .with_outcome(verdict);
+    if let Some(session_id) = session_id {
+        observation = observation.with_session_id(session_id);
+    }
+    if let Some(note) = note {
+        observation = observation.with_detail(note);
+    }
+    let ledger = EvaluationObservations::open(runtime)?;
+    Ok(ledger.record(observation, observed_at_unix)?)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2307,6 +2786,29 @@ mod tests {
     fn an_unrecognized_stored_value_decodes_to_nothing_rather_than_a_neighbour() {
         assert!(EvaluationKind::from_stored("route_preferred").is_none());
         assert!(EvaluationOutcome::from_stored("helped").is_none());
+    }
+
+    /// `glasshouse memory rate`'s vocabulary, spelled once — [`EvaluationKind::MemoryRated`]
+    /// and [`MEMORY_RATING_VERDICTS`]' eight words round-trip through
+    /// `as_str`/`from_stored`, and `Unknown` is not one of them: it is the
+    /// sentinel every other kind writes for "not yet known", never a verdict
+    /// a person types.
+    #[test]
+    fn memory_rated_and_its_verdict_vocabulary_round_trip() {
+        assert_eq!(
+            EvaluationKind::from_stored(EvaluationKind::MemoryRated.as_str()),
+            Some(EvaluationKind::MemoryRated)
+        );
+        for verdict in MEMORY_RATING_VERDICTS {
+            assert_eq!(
+                EvaluationOutcome::from_stored(verdict.as_str()),
+                Some(verdict),
+                "`{}` must round-trip",
+                verdict.as_str()
+            );
+            assert_ne!(verdict, EvaluationOutcome::Unknown);
+        }
+        assert_eq!(MEMORY_RATING_VERDICTS.len(), 8);
     }
 
     #[test]

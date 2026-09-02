@@ -25,8 +25,8 @@ use glasshouse::provider::templates;
 /// Built from what the code declares today:
 /// - 6 templates offer model discovery (OpenRouter, UnoRouter, AnyRouter,
 ///   Kilo, Nous, LiteLLM).
-/// - 7 templates do not offer model discovery (z.ai, opencode-zen, ollama,
-///   llama-cpp, nvidia, openai-compatible, anthropic-compatible).
+/// - 8 templates do not offer model discovery (z.ai, opencode-zen, ollama,
+///   llama-cpp, nvidia, openai-compatible, anthropic-compatible, gemini).
 ///
 /// **z.ai is `false` here for a reason worth reading**, because it is the one
 /// entry whose state was changed after the batch that wrote this table. It
@@ -48,6 +48,10 @@ const EXPECTED_DISCOVERY_MATRIX: &[(&str, bool)] = &[
     ("litellm", true),
     ("openai-compatible", false),
     ("anthropic-compatible", false),
+    // T3 (2026-09-02): Google AI Studio, declared through the unverified
+    // generic shape -- no model-list endpoint is claimed until a live probe
+    // establishes one, so it offers no discovery.
+    ("gemini", false),
 ];
 
 // --- A. The discovery-availability matrix, across every shipped template ---
@@ -173,8 +177,8 @@ fn the_number_of_built_in_templates_offering_model_discovery_is_exactly_seven() 
 
     assert_eq!(
         all_templates.len(),
-        14,
-        "total built-in templates count changed from 14 to {}; update EXPECTED_DISCOVERY_MATRIX intentionally",
+        15,
+        "total built-in templates count changed from 15 to {}; update EXPECTED_DISCOVERY_MATRIX intentionally",
         all_templates.len()
     );
 

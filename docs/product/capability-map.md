@@ -1820,9 +1820,9 @@ Phase 51 — Evaluation hooks
 ☐ Measure how many repository exploration operations occur before and after relevant project memory exists.
 ☐ Measure how often retrieved memory is actually useful to the receiving agent.
 ☑ Measure how often stale or incorrect memory is retrieved.
-☐ Measure how often an old decision causes an agent to add unnecessary implementation complexity.
+☑ Measure how often an old decision causes an agent to add unnecessary implementation complexity.
 ☐ Measure how often revalidation correctly identifies a decision whose original assumptions no longer hold.
-☐ Measure how often agents challenge a remembered decision and whether the challenge was justified.
+☑ Measure how often agents challenge a remembered decision and whether the challenge was justified.
 ☑ Measure how often superseded memories are incorrectly resurfaced as current guidance.
 ☐ Measure whether production-aware checks catch expensive query patterns or scaling assumptions before deployment.
 ☐ Measure how often one harness successfully continues work from another harness’s checkpoint.
@@ -1945,15 +1945,15 @@ Recorded 2026-08-31 from the user's instruction of record: *"I want to be able t
 ☑ Allow a user to choose the coding harness for a task independently of which provider, subscription, or model serves it.
 ☑ Treat a subscription — a Claude, ChatGPT/Codex, or Gemini plan, or an API key — as a routing resource with its own rules, separate from any harness that consumes it.
 ☑ Allow a subscription rule to state which harnesses, workload tiers, and job kinds the subscription may serve, and which it must never serve.
-☐ Serve any supported harness through Glasshouse's bundled API gateway from any subscription or model whose wire protocol the gateway can translate to the harness's native protocol.
+☑ Serve any supported harness through Glasshouse's bundled API gateway from any subscription or model whose wire protocol the gateway can translate to the harness's native protocol.
 ☑ Translate between wire protocols at the gateway for concrete harness/provider pairs as each is required, recording every supported pairing and every refused one by name.
-☐ Keep a harness's native tooling — editing, shell, repository, and tool-call behaviour — intact when it is served by a non-native provider, and refuse the pairing by name when it cannot be kept.
+☑ Keep a harness's native tooling — editing, shell, repository, and tool-call behaviour — intact when it is served by a non-native provider, and refuse the pairing by name when it cannot be kept.
 ☑ Record per-harness task efficiency — tokens, wall-clock, request count, and outcome by task class — so that harness choice can rest on evidence rather than on which vendor bills for it.
 ☑ Prefer, for a stated task the user has not assigned a harness to, the harness with the better observed efficiency for that task class, and say why.
 ☑ Give the routing candidate set a subscription and model axis, so the same harness is ranked across every subscription allowed to serve it.
 ☑ Never charge a task to a subscription the user's rules did not allow for that harness or tier, and announce which subscription served each session.
 ☑ Keep the decoupling opt-in per launch profile, so an existing profile keeps its native pairing until the user changes it.
-☐ Cover each supported harness/provider/protocol pairing with an end-to-end test through the shipped binary against a fixture upstream before offering it.
+☑ Cover each supported harness/provider/protocol pairing with an end-to-end test through the shipped binary against a fixture upstream before offering it.
 
 Phase 56A — Entitlement pool and subscription broker: several accounts, one scheduler
 

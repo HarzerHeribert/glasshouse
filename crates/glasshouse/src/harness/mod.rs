@@ -156,6 +156,16 @@ pub enum WireProtocol {
     AnthropicMessages,
     OpenAiResponses,
     OpenAiChat,
+    /// Google's Generative Language API — `generateContent` and
+    /// `streamGenerateContent` under `…/v1beta/models/<model>:<method>`,
+    /// credentialled with `x-goog-api-key`.
+    ///
+    /// Added by Phase 56's T3 package for the *provider* side: the gateway
+    /// translates a harness protocol **to** it. No installed harness speaks
+    /// it at the ingress yet — the Gemini CLI adapter is T3b — so every
+    /// `gemini-generate-content -> …` row in the gateway's pair table is
+    /// refused by name rather than merely untested.
+    GeminiGenerateContent,
 }
 
 impl WireProtocol {
@@ -164,6 +174,7 @@ impl WireProtocol {
             WireProtocol::AnthropicMessages => "anthropic-messages",
             WireProtocol::OpenAiResponses => "openai-responses",
             WireProtocol::OpenAiChat => "openai-chat",
+            WireProtocol::GeminiGenerateContent => "gemini-generate-content",
         }
     }
 }

@@ -394,7 +394,7 @@ pub struct ServingRoute {
 /// that already depends on this module and needs a [`ServingRoute::protocol`]
 /// to classify a candidate.
 ///
-/// `None` for a slug none of the three known variants produced — a
+/// `None` for a slug none of the four known variants produced — a
 /// [`Pairing`]'s vendor-native status never depends on it (see
 /// [`crate::config::pairing::native_pairing_prior_contribution`]'s own doc),
 /// so this only ever weakens [`Pairing::protocol_fit`], never invents one.
@@ -403,6 +403,7 @@ pub fn wire_protocol_from_slug(slug: &str) -> Option<WireProtocol> {
         WireProtocol::AnthropicMessages,
         WireProtocol::OpenAiResponses,
         WireProtocol::OpenAiChat,
+        WireProtocol::GeminiGenerateContent,
     ]
     .into_iter()
     .find(|protocol| protocol.slug() == slug)
@@ -1125,6 +1126,7 @@ mod tests {
             WireProtocol::AnthropicMessages,
             WireProtocol::OpenAiResponses,
             WireProtocol::OpenAiChat,
+            WireProtocol::GeminiGenerateContent,
         ] {
             assert_eq!(wire_protocol_from_slug(protocol.slug()), Some(protocol));
         }
@@ -1373,16 +1375,34 @@ mod tests {
             ),
             (WireProtocol::OpenAiChat, WireProtocol::OpenAiResponses),
             (WireProtocol::OpenAiResponses, WireProtocol::OpenAiChat),
+            // T3 (2026-09-02), each behind its own end-to-end test in
+            // `tests/gateway_translate_gemini.rs`. Nothing translates OUT of
+            // Gemini: no installed harness speaks it at the ingress, which
+            // is what those rows are refused for.
+            (
+                WireProtocol::AnthropicMessages,
+                WireProtocol::GeminiGenerateContent,
+            ),
+            (
+                WireProtocol::OpenAiResponses,
+                WireProtocol::GeminiGenerateContent,
+            ),
+            (
+                WireProtocol::OpenAiChat,
+                WireProtocol::GeminiGenerateContent,
+            ),
         ];
         for from in [
             WireProtocol::AnthropicMessages,
             WireProtocol::OpenAiResponses,
             WireProtocol::OpenAiChat,
+            WireProtocol::GeminiGenerateContent,
         ] {
             for to in [
                 WireProtocol::AnthropicMessages,
                 WireProtocol::OpenAiResponses,
                 WireProtocol::OpenAiChat,
+                WireProtocol::GeminiGenerateContent,
             ] {
                 assert_eq!(
                     crate::provider::translation_available(from, to),

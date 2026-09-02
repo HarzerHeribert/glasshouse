@@ -559,6 +559,14 @@ fn send(
             WireProtocol::OpenAiChat | WireProtocol::OpenAiResponses => {
                 builder.header("authorization", format!("Bearer {}", credential.expose()))
             }
+            // Google's Generative Language API takes its key here and reads
+            // `authorization` as an OAuth bearer token, so a probe that sent
+            // the key there would be rejected for the wrong reason and the
+            // provider would read as unreachable rather than as reachable
+            // and un-probed.
+            WireProtocol::GeminiGenerateContent => {
+                builder.header("x-goog-api-key", credential.expose())
+            }
         };
     }
     builder.call()

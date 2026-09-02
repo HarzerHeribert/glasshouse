@@ -104,6 +104,23 @@ pub fn session_protocol(protocol: Option<WireProtocol>) -> SessionProtocol {
         Some(WireProtocol::AnthropicMessages) => SessionProtocol::AnthropicMessages,
         Some(WireProtocol::OpenAiResponses) => SessionProtocol::OpenAiResponses,
         Some(WireProtocol::OpenAiChat) => SessionProtocol::OpenAiChat,
+        // Phase 56 T3, and a recorded LIMIT rather than a mapping.
+        //
+        // The stored vocabulary is fixed by migration 8's
+        // `CHECK (protocol IN (…))`, and widening a `CHECK` in SQLite means
+        // rebuilding the table — which that migration's own comment refuses
+        // without a migration written for it. So a session served through a
+        // Gemini-serving entitlement records `unknown`, which is a recorded
+        // answer ("nothing was established") and not the truth here.
+        //
+        // Reachable today: a `DirectProvider` profile on a provider that
+        // declares only `gemini-generate-content` takes that as its route
+        // protocol (`config::pairing`). Nothing downstream reads the column
+        // to make a decision — `glasshouse sessions show` renders it — so
+        // the cost is a wrong word in a listing rather than a wrong route.
+        // Successor: the migration that adds `gemini-generate-content` to
+        // the column's vocabulary, with `SessionProtocol`'s own variant.
+        Some(WireProtocol::GeminiGenerateContent) => SessionProtocol::Unknown,
         None => SessionProtocol::Unknown,
     }
 }

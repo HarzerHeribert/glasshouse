@@ -603,6 +603,7 @@ fn wire_protocol_from_slug(slug: &str) -> Option<crate::harness::WireProtocol> {
         "anthropic-messages" => Some(WireProtocol::AnthropicMessages),
         "openai-responses" => Some(WireProtocol::OpenAiResponses),
         "openai-chat" => Some(WireProtocol::OpenAiChat),
+        "gemini-generate-content" => Some(WireProtocol::GeminiGenerateContent),
         _ => None,
     }
 }

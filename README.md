@@ -19,10 +19,10 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`███████████████████████████████████░░░░░` 1196 / 1332 mandatory capabilities (89%)
+`████████████████████████████████████░░░░` 1201 / 1332 mandatory capabilities (90%)
 
 <details>
-<summary>Per-phase breakdown (70 of 107 phases complete)</summary>
+<summary>Per-phase breakdown (71 of 107 phases complete)</summary>
 
 | Phase | Done |
 |---|---|
@@ -124,13 +124,13 @@ the authoritative specification and tracks what is done.
 | Phase 48 — CLI ergonomics | 8/8 ✅ |
 | Phase 49 — Configuration | 16/16 ✅ |
 | Phase 50 — Tracked project knowledge as an optional feature | 7/7 ✅ |
-| Phase 51 — Evaluation hooks | 12/37 |
+| Phase 51 — Evaluation hooks | 14/37 |
 | Phase 52 — Criteria before adding semantic/vector retrieval | 1/6 |
 | Phase 53 — Criteria before adding graph storage | 3/5 |
 | Phase 54 — Criteria before deeper cmux coupling | 4/4 ✅ |
 | Phase 54A — Setup and portability completion criteria | 10/10 ✅ |
 | Phase 55 — V1 completion definition | 23/23 ✅ |
-| Phase 56 — Harness–subscription decoupling: choose the harness, route the subscription and model | 9/12 |
+| Phase 56 — Harness–subscription decoupling: choose the harness, route the subscription and model | 12/12 ✅ |
 | Phase 56A — Entitlement pool and subscription broker: several accounts, one scheduler | 13/13 ✅ |
 | Phase 57 — Context firewall: tool-output compaction between harness and model | 27/27 ✅ |
 

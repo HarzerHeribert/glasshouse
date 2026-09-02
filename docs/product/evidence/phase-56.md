@@ -1132,3 +1132,63 @@ Recorded scope limits — stated by the worker, not discovered later:
 - the resume-path fix (item 4) has no dedicated binary test; none of the required regression suites covers a gateway-backed resume
 
 ---
+
+---
+
+### T3 — the Gemini codec, the fourth wire protocol, three more supported pairs — 2026-09-02 (`GH-GATEWAY-TRANSLATE-T3`, Opus 5 high, Red)
+
+`WireProtocol::GeminiGenerateContent` (slug `gemini-generate-content`), a
+`gemini` provider template (Google AI Studio, bare host, the codec states
+`/v1beta` itself, credential in `x-goog-api-key`), `gateway/translate/gemini.rs`
+against `generateContent` / `streamGenerateContent`, and a sixteen-row table:
+**eight supported ordered pairs now** — the five of T1/T2/T2b plus
+`anthropic-messages -> gemini-generate-content`, `openai-responses ->
+gemini-generate-content` and `openai-chat -> gemini-generate-content`, each
+behind its own document and stream test through the shipped binary's door in
+`tests/gateway_translate_gemini.rs` (10/10). Nothing translates *out* of Gemini:
+no installed harness speaks it at the ingress, so the four `gemini-generate-content
+-> *` rows are `Refused` naming that reason and T3b, not "no test yet".
+
+Five decisions, each written in the codec's module doc and four of them
+mutation-pinned: a Gemini function call has no id, so a tool result is matched
+to the tool-use block by **name** within the same request and refused by name
+where that cannot be kept; `STOP` with a function call in the candidate is
+`ToolUse`, not `EndTurn`; Gemini streams whole candidate chunks, so the
+harness-side events are synthesised in the client protocol's own order with
+every block stopped before the next starts; the model is addressed in the
+path, so `Codec` gained `claim(path)` and `outbound_endpoint(&Request)` with
+defaults that reproduce the three existing codecs byte for byte; the outbound
+header hook in `translate::serve` (T2b's, not `ingress.rs` as the packet said)
+adds `x-goog-api-key` exactly on the Gemini target. A relay defect was caught
+by the package's own relay test before it could ship: a base URL carrying
+`/v1beta` doubled the segment on a relayed Gemini target (`Route::uri_for`
+appends the client's own target byte for byte); the base URL is the bare host
+now and the codec supplies the version, the same convention OpenRouter's
+Anthropic entry already used.
+
+Five mutations, five KILLED with output quoted: `refused-pair-marked-supported`
+(the refused-pair test and the pairing table pin), `drop-the-tool-call`,
+`wrong-stream-order`, `lose-the-api-key-header`,
+`stop-is-end-turn-even-with-a-function-call`. Gates: `gateway_translate_gemini`
+10/10; `gateway_translate` 8/8, `gateway_translate_responses` 7/7,
+`gateway_translate_t2b` 3/3 all unchanged; `gateway::translate` lib 71/71,
+`harness::pairing` 27/27; the default blast sweep's one red
+(`session_supervision::a_session_that_keeps_crashing_is_restarted_a_bounded_number_of_times`,
+a 20 s bounded wait) reproduced on a pristine `90e8dc4` worktree in three runs
+with two different tests of that family and is the load-flaky supervision
+family, not this package's. The compiler named four exhaustive matches, not
+twelve; `GATEWAY_INGRESS_PROTOCOLS` and config's `wire_protocol_from_slug` also
+needed the variant (disclosed as scope overflow, one line each), and the
+templates snapshot gained its entry in place.
+
+**Recorded limits, the worker's:** a session served through a Gemini
+entitlement records protocol `unknown`, because migration 8's `CHECK` on
+`sessions.protocol` lists three slugs and widening a `CHECK` in SQLite is a
+table rebuild — a migration this package was forbidden and Cluster G refuses
+casually; no live probe was made against `generativelanguage.googleapis.com`
+(`model_list_endpoint` and `usage_telemetry` stay `Declared::Unverified`);
+Gemini's tool-schema dialect is a subset of JSON Schema and a keyword Google
+rejects comes back as the provider's own `400` in the harness's error shape;
+the Gemini CLI adapter (T3b) is not built.
+
+**Ruling on lines 1948, 1950 and 1956 — CLOSED 2026-09-02**, with the launch link (`GH-GATEWAY-TRANSLATE-LAUNCH`, `b87d38e`) and this codec both on the tree, and the reading written down so it is not re-derived. The map's *supported harnesses* are the four with adapters (Claude Code, Codex, OpenCode, Antigravity); the map names Gemini only as a *subscription* (line 1946), never as a harness, so the Gemini CLI adapter (T3b) is `design-decisions.md`'s future work and not a clause of these lines. On the map's own words: (1948) every supported harness whose native protocol the gateway can translate from a subscription's protocol is served — Claude Code, Codex and OpenCode each from every other protocol the table carries, including a Gemini plan — and `glasshouse launch` now takes that path; Antigravity, whose protocol is `Declared::Unverified`, is refused by name, which is (1950)'s own clause; (1950) tool definitions, calls, results, ids, stop reasons and streaming order are kept through every supported row, with what a wire cannot carry refused per request by field name, never degraded; (1956) each of the eight supported rows is behind its own end-to-end test through the shipped binary's door against a fixture upstream, and no row was made `Supported` without one. Recorded limits, carried from the three entries: `openai-chat -> anthropic-messages` (OpenCode on a Claude plan) is the one refused row among the four protocols and stays refused by name until its codec direction is built; the launch-driven test covers the T1 pair, the other seven have their wire-level end-to-end tests; a session served through a Gemini plan records protocol `unknown` until a migration widens `sessions.protocol`'s CHECK; the Gemini CLI adapter (T3b) is not built. The 2026-08-31 reading — *every supported pair, and exactly one exists* — counted pairs the table could carry; eight exist now, the launch link is closed, and the quantifier in the map's sentence is the supported harnesses, not every protocol the world has.

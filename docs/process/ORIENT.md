@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1196 / 1332 mandatory capabilities (90%)** — 136 open across 37 phases.
+**1201 / 1332 mandatory capabilities (90%)** — 131 open across 36 phases.
 
 ## Where the work is
 
@@ -47,7 +47,6 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 33A | Routing evidence ledger | **3** | 12 | `1327` |
 | Phase 33C | Failure, quota, and route correlation | **3** | 12 | `1362` |
 | Phase 34C | Automatic routing-model selection | **3** | 10 | `1429` |
-| Phase 56 | Harness–subscription decoupling: choose the harness, route the subscription and model | **3** | 9 | `1941` |
 | Phase 21E | Decision ladder and conflict handling | **4** | 8 | `907` |
 | Phase 24 | Memory reranking | **5** | 1 | `1082` |
 | Phase 31 | Compaction-aware behavior | **5** | 2 | `1167` |
@@ -58,15 +57,15 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 9K | Harness-aware response profiles | **8** | 29 | `578` |
 | Phase 32A | Unified quota and capacity model | **8** | 13 | `1196` |
 | Phase 33B | Reliability-adjusted agent performance | **10** | 4 | `1345` |
-| Phase 51 | Evaluation hooks | **25** | 12 | `1818` |
+| Phase 51 | Evaluation hooks | **23** | 14 | `1818` |
 
-**Fully closed (70):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 7, Phase 8, Phase 9A, Phase 9B, Phase 9C, Phase 9D, Phase 9F, Phase 9G, Phase 9I, Phase 9J, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 16, Phase 17, Phase 18, Phase 19, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 21H, Phase 21I, Phase 21J, Phase 22, Phase 23, Phase 25, Phase 26, Phase 29, Phase 32, Phase 32B, Phase 34, Phase 34A, Phase 34D, Phase 34E, Phase 34F, Phase 35, Phase 35C, Phase 35D, Phase 36, Phase 40, Phase 41, Phase 42, Phase 43, Phase 44, Phase 45, Phase 46, Phase 48, Phase 49, Phase 50, Phase 54, Phase 54A, Phase 55, Phase 56A, Phase 57.
+**Fully closed (71):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 7, Phase 8, Phase 9A, Phase 9B, Phase 9C, Phase 9D, Phase 9F, Phase 9G, Phase 9I, Phase 9J, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 16, Phase 17, Phase 18, Phase 19, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 21H, Phase 21I, Phase 21J, Phase 22, Phase 23, Phase 25, Phase 26, Phase 29, Phase 32, Phase 32B, Phase 34, Phase 34A, Phase 34D, Phase 34E, Phase 34F, Phase 35, Phase 35C, Phase 35D, Phase 36, Phase 40, Phase 41, Phase 42, Phase 43, Phase 44, Phase 45, Phase 46, Phase 48, Phase 49, Phase 50, Phase 54, Phase 54A, Phase 55, Phase 56, Phase 56A, Phase 57.
 
 ## The nearly-finished phases, in full
 
 Every phase with **three or fewer** open lines, quoted verbatim. These are
 where a single package finishes a phase, so they are listed here and the
-other ~90 open lines are not.
+other ~88 open lines are not.
 
 For any other phase: `scripts/discover.py --phase <id>` prints its open
 lines and evidence together. **Do not open the 178 KB map to read them.**
@@ -192,12 +191,6 @@ these unwrapped.
 - **1436** ☐ Filter automatic candidates by maximum marginal routing cost.
 - **1439** ☐ Prefer a cheap metered model over an unreliable free model when failed routing attempts would cost more time than the price difference.
 - **1440** ☐ Avoid using a scarce premium subscription session as the classifier when a cheaper adequate routing resource exists.
-
-### Phase 56 — Harness–subscription decoupling: choose the harness, route the subscription and model  (3 open, 9 closed)
-
-- **1948** ☐ Serve any supported harness through Glasshouse's bundled API gateway from any subscription or model whose wire protocol the gateway can translate to the harness's native protocol.
-- **1950** ☐ Keep a harness's native tooling — editing, shell, repository, and tool-call behaviour — intact when it is served by a non-native provider, and refuse the pairing by name when it cannot be kept.
-- **1956** ☐ Cover each supported harness/provider/protocol pairing with an end-to-end test through the shipped binary against a fixture upstream before offering it.
 
 ## Practice sections, by number
 
