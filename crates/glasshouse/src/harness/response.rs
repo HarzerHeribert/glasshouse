@@ -265,6 +265,36 @@ impl Application {
         &self.notes
     }
 
+    /// Append a second additive instruction beside whatever [`apply`] already
+    /// produced, riding `adapter`'s own additive mechanism — `GH-LAUNCH-BRIEFING`'s
+    /// project-memory block, delivered inside the one `Application`
+    /// [`crate::session::select::HarnessSelection::install_session_document`]
+    /// receives, beside the response profile's own additive text rather than
+    /// through a second flag scheme of its own.
+    ///
+    /// Never touches [`Self::mechanism`]: that field answers what the
+    /// *response profile* used, and this text is a different concern riding
+    /// the same rail, not a second profile application. It is still subject
+    /// to the same never-replaces-the-system-prompt property, because it can
+    /// only ever push the adapter's own declared [`AdditiveInjection`]
+    /// arguments, exactly as [`apply`] itself does — never `--system-prompt`.
+    ///
+    /// Returns `true` when `adapter` declares an additive mechanism and the
+    /// text was appended, `false` when it declares none — the caller's signal
+    /// to fall to the next rung of its own delivery ladder.
+    pub fn append_additive_text(
+        &mut self,
+        adapter: &dyn super::HarnessAdapter,
+        text: &str,
+    ) -> bool {
+        let Some(injection) = adapter.additive_response_injection() else {
+            return false;
+        };
+        self.args.push(OsString::from(injection.flag));
+        self.args.push(OsString::from(text));
+        true
+    }
+
     /// Every piece of instruction *text* this application sends to the child.
     ///
     /// A settings key's value and an argument that follows a flag both count;
@@ -593,6 +623,45 @@ mod tests {
                     assert_ne!(arg, "--system-prompt-file");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn append_additive_text_rides_the_adapters_own_mechanism_and_never_a_system_prompt_flag() {
+        let resolved = resolve(&PrecedenceStack::empty());
+        let claude = super::super::adapter_for(IntegrationId::ClaudeCode).unwrap();
+        let mut application = apply(claude, &resolved);
+        assert!(!application.mechanism().was_applied());
+
+        let appended = application.append_additive_text(claude, "[glasshouse:project-memory] ...");
+        assert!(appended);
+        assert!(
+            application
+                .args()
+                .windows(2)
+                .any(|pair| pair[0] == "--append-system-prompt"
+                    && pair[1] == "[glasshouse:project-memory] ..."),
+            "the text must follow the adapter's own additive flag: {:?}",
+            application.args()
+        );
+        assert!(
+            application
+                .args()
+                .iter()
+                .all(|arg| arg != "--system-prompt")
+        );
+    }
+
+    #[test]
+    fn append_additive_text_reports_false_for_an_adapter_with_no_additive_mechanism() {
+        let resolved = resolve(&PrecedenceStack::empty());
+        for adapter in super::super::all() {
+            if adapter.additive_response_injection().is_some() {
+                continue;
+            }
+            let mut application = apply(adapter, &resolved);
+            assert!(!application.append_additive_text(adapter, "text"));
+            assert!(application.args().is_empty());
         }
     }
 

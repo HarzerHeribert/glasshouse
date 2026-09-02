@@ -510,6 +510,20 @@ pub enum Command {
         #[arg(long)]
         headless: bool,
 
+        /// Start this session with no project-memory briefing, whatever
+        /// `[memory] inject_at_launch` says — `GH-LAUNCH-BRIEFING`.
+        ///
+        /// A launch normally briefs a new session with this project's
+        /// current binding memories and recent failed attempts (or, resuming
+        /// from a checkpoint, whatever is relevant to it), through the
+        /// harness's own additive mechanism — the same thing a door-spawned
+        /// session already gets. This turns that off for one launch, without
+        /// changing the standing configuration: the arguments Glasshouse
+        /// assembles are byte-identical to a launch with no memory feature at
+        /// all, and no retrieval is recorded.
+        #[arg(long)]
+        no_memory: bool,
+
         /// Describe the work, so the destination is chosen for what it
         /// actually needs.
         ///
@@ -690,6 +704,20 @@ pub enum Command {
         /// would lose the pseudo-terminal it is reading from.
         #[arg(long)]
         headless: bool,
+
+        /// Start this session with no project-memory briefing, whatever
+        /// `[memory] inject_at_launch` says — `GH-LAUNCH-BRIEFING`.
+        ///
+        /// A launch normally briefs a new session with this project's
+        /// current binding memories and recent failed attempts (or, resuming
+        /// from a checkpoint, whatever is relevant to it), through the
+        /// harness's own additive mechanism — the same thing a door-spawned
+        /// session already gets. This turns that off for one launch, without
+        /// changing the standing configuration: the arguments Glasshouse
+        /// assembles are byte-identical to a launch with no memory feature at
+        /// all, and no retrieval is recorded.
+        #[arg(long)]
+        no_memory: bool,
 
         /// Describe the work, so the destination is chosen for what it
         /// actually needs.
@@ -1177,6 +1205,7 @@ mod tests {
             no_routing,
             checkpoint_first,
             headless,
+            no_memory,
             task,
             guardrail,
             presentation,
@@ -1219,6 +1248,9 @@ mod tests {
         // the flag is opt-in, so a launch that does not name it is the
         // attached one it has always been.
         assert!(!headless);
+        // Opt-in, like `--headless`: a launch that does not pass `--no-memory`
+        // still gets briefed, exactly as before this flag existed.
+        assert!(!no_memory);
         // Hyphenated arguments after `--` reach the harness untouched rather
         // than being parsed as Glasshouse options.
         assert_eq!(harness_args, vec!["--resume", "--model=x"]);

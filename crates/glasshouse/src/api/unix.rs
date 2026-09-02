@@ -1514,12 +1514,16 @@ fn unmute_session(
 /// Choose the project memory a session about to be given `task` should have —
 /// capability map lines 1125-1127 and 1131-1134.
 ///
-/// The whole selection lives in [`glasshouse::memory::inject::briefing`],
-/// which is cross-platform and knows nothing about this door; what belongs
-/// here is only the two things this door owns: which project's memory is
-/// being read (the runtime this socket was opened for — there is no request
-/// field naming a project, see `super`'s module doc comment), and what this
-/// session has already been sent.
+/// The whole selection lives in
+/// [`glasshouse::memory::inject::select_briefing`] (this door always supplies
+/// `Some(task)`, so behaviour here is unchanged from when this called
+/// [`inject::briefing`] directly — `GH-LAUNCH-BRIEFING` is the `None` caller,
+/// for a launch with no task to query on), which is cross-platform and knows
+/// nothing about this door; what belongs here is only the two things this
+/// door owns: which project's memory is being read (the runtime this socket
+/// was opened for — there is no request field naming a project, see
+/// `super`'s module doc comment), and what this session has already been
+/// sent.
 ///
 /// # Never a reason to fail a delivery
 ///
@@ -1552,7 +1556,7 @@ fn select_memory(
             return None;
         }
     };
-    let outcome = match inject::briefing(&project.store(), task, &already) {
+    let outcome = match inject::select_briefing(&project.store(), Some(task), &already) {
         Ok(outcome) => Some(outcome),
         Err(err) => {
             tracing::warn!(

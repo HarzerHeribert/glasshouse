@@ -676,3 +676,10 @@ Regression evidence: `memory_rating::prevented_repetition_counts_over_retrieved_
 Recorded limit: macOS only.
 
 ---
+
+
+---
+
+## Lines 1821 and 1831 — the proxy's producer now covers manual launches (2026-09-02, `GH-LAUNCH-BRIEFING`)
+
+Not a state change. `GH-TURN-OUTCOME-ROW` closed both lines above with the verdict row; this package widens the *retrieval* side: `glasshouse launch` and `run` now brief a session and record `MemoryRetrieved` with its id (`main.rs::brief_launch_session`, `phase-27.md`'s last entry), where before only a door-spawned session produced that row. The join in `EvaluationObservations::usefulness` is unchanged and now finds both rows on a manually launched session too; `every_delivered_memory_records_a_memory_retrieved_row_with_the_new_sessions_id` pins the producer. What a real reading needs is still real use.

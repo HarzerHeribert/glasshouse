@@ -417,6 +417,7 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
             no_routing,
             checkpoint_first,
             headless,
+            no_memory,
             task,
             guardrail,
             presentation,
@@ -434,6 +435,7 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
             no_routing,
             checkpoint_first,
             headless,
+            no_memory,
             task,
             guardrail,
             presentation,
@@ -504,6 +506,7 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
                 },
                 &response,
                 *headless,
+                *no_memory,
                 external,
                 harness_args,
                 guardrail,
@@ -4930,9 +4933,7 @@ impl ClassificationStickyCache {
             let encoded = record
                 .to_json()
                 .map_err(|err| std::io::Error::other(err.to_string()))?;
-            let temporary = self.path.with_extension("json.writing");
-            std::fs::write(&temporary, encoded)?;
-            std::fs::rename(&temporary, &self.path)
+            glasshouse::provider::cache::write_json_atomically(&self.path, &encoded)
         })();
         if let Err(err) = attempt {
             tracing::debug!(error = %err, "could not persist the routing classification");
@@ -5001,9 +5002,7 @@ impl ClassificationTextCache {
             }
             let encoded = serde_json::to_vec_pretty(&entries)
                 .map_err(|err| std::io::Error::other(err.to_string()))?;
-            let temporary = self.path.with_extension("json.writing");
-            std::fs::write(&temporary, encoded)?;
-            std::fs::rename(&temporary, &self.path)
+            glasshouse::provider::cache::write_json_atomically(&self.path, &encoded)
         })();
         if let Err(err) = attempt {
             tracing::debug!(error = %err, "could not persist the classification text cache");
@@ -5181,6 +5180,7 @@ fn launch_session(
     destination: LaunchDestination<'_>,
     response: &ResponseRequest,
     headless: bool,
+    no_memory: bool,
     external: ExternalPresentation,
     harness_args: &[String],
     guardrail: Option<GuardrailOverride>,
@@ -5838,7 +5838,10 @@ fn launch_session(
     // Line 605: a session's response profile is always explicit. A worker
     // does not inherit a communication style from whatever started it; the
     // role was resolved above and the mechanism is recorded below.
-    let response_application =
+    //
+    // `mut`: `GH-LAUNCH-BRIEFING`'s rung one appends a second additive block
+    // onto this same `Application`, below, once the session id exists.
+    let mut response_application =
         glasshouse::harness::response::apply(selection.adapter(), response_profile.resolved());
     tracing::info!(
         harness = selection.id().slug(),
@@ -6128,6 +6131,32 @@ fn launch_session(
     // next low-risk turn will be in.
     remember_classification(&sticky_cache, classified.as_ref(), record.id.as_str());
 
+    // `GH-LAUNCH-BRIEFING`: this project's memory, briefed to this session the
+    // same way a door-spawned one already is — map lines 1125-1135, applied
+    // to the CLI launch path. After `store.create` (the session id this
+    // records against exists) and before `install_session_document` below
+    // (rung one still needs to append to `response_application`'s
+    // arguments). Rung two (headless, no adapter additive mechanism) cannot
+    // be delivered yet — no session runtime exists — so it rides forward as
+    // `deferred_briefing` into `run_headless`.
+    let launch_briefing = brief_launch_session(
+        runtime,
+        &record.id,
+        selection.adapter(),
+        headless,
+        no_memory,
+        effective.inject_memory_at_launch().value,
+        bootstrap.as_ref().map(|(text, _)| text.as_str()),
+        &mut response_application,
+    );
+    let mut deferred_briefing = None;
+    match launch_briefing {
+        LaunchBriefing::Delivered(line) => eprintln!("glasshouse: {line}"),
+        LaunchBriefing::Deferred(briefing) => deferred_briefing = Some(briefing),
+        LaunchBriefing::NotBriefed(reason) => eprintln!("glasshouse: not briefed: {reason}"),
+        LaunchBriefing::Nothing => {}
+    }
+
     // Phase 21K line 1008: the person's per-task guardrail override,
     // recorded before the harness starts so that no preflight the agent runs
     // in this session answers without it. Best effort, like the hook
@@ -6299,7 +6328,7 @@ fn launch_session(
     degrade_relay.install(Arc::clone(&events), vec![record.clone()]);
 
     let session = if headless {
-        run_headless(&record.id, launch)
+        run_headless(runtime, &store, &record.id, launch, deferred_briefing)
     } else {
         session::attach(launch)
     };
@@ -6334,6 +6363,197 @@ fn launch_session(
         eprintln!("glasshouse: the harness {status}");
     }
     Ok(exit_code_for(&status))
+}
+
+/// A briefing selected for a launch but not yet delivered — `GH-LAUNCH-BRIEFING`'s
+/// rung two, handed from [`brief_launch_session`] to [`run_headless`] because
+/// nothing can deliver it until a session runtime holds the PTY.
+#[derive(Debug)]
+struct DeferredBriefing {
+    injection: glasshouse::memory::inject::Injection,
+    binding: usize,
+    failed_attempts: usize,
+}
+
+impl DeferredBriefing {
+    /// The line printed once this briefing is actually delivered — shared
+    /// between the rung-one and rung-two paths so the two report identically.
+    fn announcement(&self) -> String {
+        briefing_announcement(
+            self.injection.memories().len(),
+            self.binding,
+            self.failed_attempts,
+        )
+    }
+}
+
+/// The `briefed with ...` line both delivery rungs print, once, on a
+/// successful delivery — never composed twice so the wording cannot drift
+/// between rungs.
+fn briefing_announcement(memories: usize, binding: usize, failed_attempts: usize) -> String {
+    format!(
+        "briefed with {memories} memories ({binding} binding, {failed_attempts} failed approaches)"
+    )
+}
+
+/// What `GH-LAUNCH-BRIEFING`'s delivery ladder decided for one launch — map
+/// lines 1125-1135's briefing, applied to `glasshouse launch` itself rather
+/// than only to a door-spawned session (`docs/product/design-decisions.md`,
+/// *Memory is the project's, not the launch path's*).
+///
+/// Every variant except [`Self::Deferred`] is a launch that already knows its
+/// final outcome; [`Self::Deferred`] is the one rung whose delivery depends on
+/// a session runtime that does not exist yet.
+#[derive(Debug)]
+enum LaunchBriefing {
+    /// Rung one: delivered by riding the adapter's own additive mechanism,
+    /// already appended to the response application's arguments.
+    Delivered(String),
+    /// Rung two: no additive mechanism, but this launch is headless, so a
+    /// session runtime will hold the PTY and can carry the door's own
+    /// labelled machine message once it starts — see [`run_headless`].
+    Deferred(DeferredBriefing),
+    /// Rung three: neither exists for this launch.
+    NotBriefed(String),
+    /// The opt-out fired, or there was nothing this project's memory had to
+    /// say. Not an error and not announced as one — a launch with memory
+    /// disabled or empty must read exactly as it did before this feature
+    /// existed.
+    Nothing,
+}
+
+/// `GH-LAUNCH-BRIEFING`: select and, where a rung can deliver it immediately,
+/// deliver this project's memory to a session `glasshouse launch` is about to
+/// start — the same briefing a door-spawned session already gets (map lines
+/// 1125-1135), applied to the CLI launch path the design ruling found never
+/// called it at all.
+///
+/// Called in `launch_session` between `store.create` (`session` exists) and
+/// `install_session_document` (`response_application`'s arguments are read),
+/// so a rung-one delivery can still ride `response_application`.
+///
+/// `query` is the checkpoint's bootstrap text when this launch resumes one —
+/// [`glasshouse::memory::inject::select_briefing`]'s `Some` case — and `None`
+/// otherwise, which selects the standing set instead of running no search at
+/// all.
+#[allow(clippy::too_many_arguments)]
+fn brief_launch_session(
+    runtime: &Runtime,
+    session: &SessionId,
+    adapter: &dyn glasshouse::harness::HarnessAdapter,
+    headless: bool,
+    no_memory: bool,
+    inject_at_launch: bool,
+    query: Option<&str>,
+    response_application: &mut glasshouse::harness::response::Application,
+) -> LaunchBriefing {
+    use glasshouse::memory::inject::{self, BriefingOutcome};
+    use glasshouse::memory::{MemoryAuthority, MemoryKind, ProjectMemory};
+
+    // Opt-out, not opt-in (the design ruling's own wording): neither the
+    // store nor anything else on this path is even touched, so a launch with
+    // memory disabled is byte-identical to one built before this feature
+    // existed.
+    if no_memory || !inject_at_launch {
+        return LaunchBriefing::Nothing;
+    }
+
+    let project = match ProjectMemory::open(runtime) {
+        Ok(project) => project,
+        Err(err) => {
+            tracing::warn!(
+                session = %session,
+                error = %format!("{err:#}"),
+                "could not open this project's memory to brief a launch"
+            );
+            return LaunchBriefing::Nothing;
+        }
+    };
+    let outcome =
+        match inject::select_briefing(&project.store(), query, &std::collections::HashSet::new()) {
+            Ok(outcome) => Some(outcome),
+            Err(err) => {
+                tracing::warn!(
+                    session = %session,
+                    error = %err,
+                    "could not select project memory to brief a launch"
+                );
+                None
+            }
+        };
+
+    let (injection, binding, failed_attempts) = match outcome {
+        Some(BriefingOutcome::Injected(injection)) => {
+            // Counted while the connection is still open, using the ids the
+            // selection just chose — cheap (at most `MAX_INJECTED_MEMORIES`
+            // lookups) and avoids a second retrieval implementation ranking
+            // candidates a second way.
+            let mut binding = 0usize;
+            let mut failed_attempts = 0usize;
+            for id in injection.memories() {
+                if let Ok(Some(record)) = project.store().get(id) {
+                    if record.authority.is_some_and(MemoryAuthority::is_binding) {
+                        binding += 1;
+                    }
+                    if record.kind == MemoryKind::FailedAttempt {
+                        failed_attempts += 1;
+                    }
+                }
+            }
+            (injection, binding, failed_attempts)
+        }
+        Some(BriefingOutcome::NothingMatched) => {
+            // Map line 1865: this launch is a briefing door too, so a search
+            // that matched nothing is a retrieval miss exactly as it is for
+            // the machine door.
+            glasshouse::evaluation::record_memory_retrieval_miss(
+                runtime,
+                glasshouse::evaluation::RetrievalScope::Injection,
+                glasshouse::evaluation::now_unix(),
+            );
+            drop(project);
+            return LaunchBriefing::Nothing;
+        }
+        Some(BriefingOutcome::NothingNew) | None => {
+            drop(project);
+            return LaunchBriefing::Nothing;
+        }
+    };
+    // Practice §65: the memory connection is dropped before the evaluation
+    // ledger below opens, the same shape `select_memory`'s own caller uses.
+    drop(project);
+
+    if response_application.append_additive_text(adapter, injection.text()) {
+        glasshouse::evaluation::record_memory_retrieval(
+            runtime,
+            glasshouse::evaluation::RetrievalScope::Injection,
+            injection
+                .memories()
+                .iter()
+                .map(glasshouse::memory::MemoryId::as_str),
+            Some(session.as_str()),
+            glasshouse::evaluation::now_unix(),
+        );
+        return LaunchBriefing::Delivered(briefing_announcement(
+            injection.memories().len(),
+            binding,
+            failed_attempts,
+        ));
+    }
+
+    if headless {
+        return LaunchBriefing::Deferred(DeferredBriefing {
+            injection,
+            binding,
+            failed_attempts,
+        });
+    }
+
+    LaunchBriefing::NotBriefed(format!(
+        "{} declares no mechanism for adding an instruction beside its own system prompt, and \
+         this launch has no session runtime to deliver a machine message through",
+        glasshouse::harness::response::harness_name(adapter.id())
+    ))
 }
 
 /// Where a launch is presented, beyond this terminal — Phase 17 lines 757
@@ -6587,12 +6807,56 @@ fn presented_cell(record: &SessionRecord) -> String {
 /// means "raw mode and the alternate screen are on", and `restore_terminal`
 /// acts on it — setting it here would write escape sequences to a terminal
 /// Glasshouse never touched.
-fn run_headless(id: &SessionId, launch: HarnessLaunch<'_>) -> anyhow::Result<ExitStatus> {
+fn run_headless(
+    runtime: &Runtime,
+    store: &glasshouse::session::SessionStore<'_>,
+    id: &SessionId,
+    launch: HarnessLaunch<'_>,
+    deferred_briefing: Option<DeferredBriefing>,
+) -> anyhow::Result<ExitStatus> {
     /// How often the loop wakes to answer queries and check on the child.
     const POLL: std::time::Duration = std::time::Duration::from_millis(20);
 
     let live = Arc::new(Mutex::new(SessionRuntime::new()));
     lock(&live).start(id.clone(), SessionPresentation::Headless, &launch)?;
+
+    // `GH-LAUNCH-BRIEFING`'s rung two: no adapter additive mechanism existed
+    // to ride at `install_session_document` time, but this session runtime
+    // now holds the PTY — the exact condition the design ruling names for
+    // falling back to the door's own labelled-message delivery. Delivered
+    // here, immediately after `start` registers the session as live and
+    // before this loop's first poll, so it is the first thing the harness
+    // reads after its own startup.
+    if let Some(briefing) = deferred_briefing {
+        let mut guard = lock(&live);
+        let mut api = glasshouse::session::api::SessionApi::new(store, &mut guard);
+        let delivered = api.send_text(
+            id,
+            briefing.injection.text(),
+            glasshouse::events::MessageOrigin::Machine,
+        );
+        drop(guard);
+        match delivered {
+            Ok(()) => {
+                glasshouse::evaluation::record_memory_retrieval(
+                    runtime,
+                    glasshouse::evaluation::RetrievalScope::Injection,
+                    briefing
+                        .injection
+                        .memories()
+                        .iter()
+                        .map(glasshouse::memory::MemoryId::as_str),
+                    Some(id.as_str()),
+                    glasshouse::evaluation::now_unix(),
+                );
+                eprintln!("glasshouse: {}", briefing.announcement());
+            }
+            Err(err) => eprintln!(
+                "glasshouse: warning: could not deliver this project's memory to session {id}; \
+                 its task is being sent without it ({err:#})"
+            ),
+        }
+    }
 
     // Best effort by construction, exactly as `session::attach`'s is:
     // `try_lock` gives up rather than risk blocking the one path whose whole
@@ -10977,7 +11241,7 @@ fn resume_session(
     // --headless` must not quietly take over the terminal because the best
     // destination happened to be a session that already existed.
     let attached = if headless {
-        run_headless(&resumable.id, launch)
+        run_headless(runtime, &store, &resumable.id, launch, None)
     } else {
         session::attach(launch)
     };
@@ -14595,6 +14859,78 @@ mod tests {
         runtime
     }
 
+    /// `GH-LAUNCH-BRIEFING`'s test (e): the delivery ladder's third rung —
+    /// no adapter additive mechanism and no session runtime to fall back to
+    /// (this launch is not headless). Every adapter this build ships except
+    /// Claude Code declares no additive mechanism (`response.rs`'s own
+    /// `an_adapter_that_declares_nothing_says_so_rather_than_inventing_a_mechanism`),
+    /// so Codex stands in for "the harness whose adapter declares none".
+    ///
+    /// A unit test on `brief_launch_session` itself rather than a
+    /// shipped-binary test, per the packet's own escape hatch: reaching rung
+    /// three through the real binary needs an *embedded* (non-headless)
+    /// launch, and `session::attach` refuses to run at all without a real
+    /// terminal on both ends — which a `cargo test` process never has. That
+    /// makes the harness never spawn, so there is no argv to read back and
+    /// nothing to assert `"not briefed"` against other than a vacuous
+    /// absence (§17). This test asserts the ladder's own decision directly
+    /// instead.
+    #[test]
+    fn rung_three_fires_with_no_additive_mechanism_and_no_session_runtime() {
+        use glasshouse::integrations::IntegrationId;
+        use glasshouse::memory::{MemoryAuthority, MemoryKind, NewMemory, ProjectMemory};
+
+        let codex = glasshouse::harness::adapter_for(IntegrationId::Codex).unwrap();
+        assert!(
+            codex.additive_response_injection().is_none(),
+            "this test is vacuous unless Codex declares no additive mechanism"
+        );
+
+        let tmp = tempfile::tempdir().unwrap();
+        let runtime = fixture_with_enabled_claude_code(tmp.path());
+        let project = ProjectMemory::open(&runtime).unwrap();
+        project
+            .store()
+            .record(
+                NewMemory::new(MemoryKind::Constraint, "Some current binding memory.")
+                    .with_authority(Some(MemoryAuthority::Constraint)),
+            )
+            .unwrap();
+        drop(project);
+
+        let mut response_application = glasshouse::harness::response::Application::none(
+            "no response profile is under test here",
+        );
+        let session = SessionId::new("rung-three-test-session");
+        let briefing = brief_launch_session(
+            &runtime,
+            &session,
+            codex,
+            false, // headless: false, so there is no session runtime to fall back to
+            false, // no_memory
+            true,  // inject_at_launch
+            None,
+            &mut response_application,
+        );
+
+        match briefing {
+            LaunchBriefing::NotBriefed(reason) => {
+                assert!(
+                    reason.contains("no mechanism"),
+                    "the reason must name why: {reason}"
+                );
+            }
+            other => panic!(
+                "expected rung three (`NotBriefed`) with no additive mechanism and headless \
+                 false; got {other:?}"
+            ),
+        }
+        assert!(
+            response_application.args().is_empty(),
+            "rung three must never touch the response application's arguments"
+        );
+    }
+
     #[test]
     fn a_refused_profile_starts_no_process_and_records_no_session() {
         let tmp = tempfile::tempdir().unwrap();
@@ -14620,6 +14956,7 @@ mod tests {
                 ..LaunchDestination::default()
             },
             &ResponseRequest::default(),
+            false,
             false,
             ExternalPresentation::Embedded,
             &[],
@@ -14656,6 +14993,7 @@ mod tests {
                 ..LaunchDestination::default()
             },
             &ResponseRequest::default(),
+            false,
             false,
             ExternalPresentation::Embedded,
             &[],
@@ -14751,6 +15089,7 @@ mod tests {
             LaunchDestination::default(),
             &ResponseRequest::default(),
             false,
+            false,
             ExternalPresentation::Embedded,
             &[],
             None,
@@ -14799,6 +15138,7 @@ mod tests {
             },
             &ResponseRequest::default(),
             false,
+            false,
             ExternalPresentation::Embedded,
             &[],
             None,
@@ -14836,6 +15176,7 @@ mod tests {
                 ..LaunchDestination::default()
             },
             &ResponseRequest::default(),
+            false,
             false,
             ExternalPresentation::Embedded,
             &[],
@@ -18157,5 +18498,181 @@ mod tests {
         .unwrap();
         assert!(cache.load().is_empty());
         assert!(cache.lookup("anything").is_none());
+    }
+
+    /// A [`tracing::Subscriber`] that records only whether *any* event fired
+    /// while it was the active dispatcher — enough to catch `store()`'s own
+    /// `tracing::debug!("could not persist ...")`, which is the only tracing
+    /// call either store makes and which fires exactly when its write
+    /// attempt returned `Err` (a collided fixed temporary's rename failing
+    /// against the other writer's, per the primitive's own
+    /// `write_json_atomically_cannot_succeed_by_writing_the_target_directly`
+    /// class of failure). `store()` deliberately swallows that error rather
+    /// than propagating it — the write is best-effort — so a test that only
+    /// inspects the final file on disk cannot see a write that silently lost
+    /// the race; this dispatcher is what makes that silent loss observable.
+    struct EventFired(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+    impl tracing::Subscriber for EventFired {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+        fn event(&self, _event: &tracing::Event<'_>) {
+            self.0.store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+        fn enter(&self, _span: &tracing::span::Id) {}
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    /// `GH-ATOMIC-WRITE-MAIN-COPIES`: both stores now write through
+    /// [`glasshouse::provider::cache::write_json_atomically`] instead of
+    /// reimplementing it with a single fixed `.json.writing` name. Two
+    /// threads storing to the same sticky-classification path concurrently
+    /// must never leave a mixed or truncated file, and — since a fixed
+    /// shared temporary makes one writer's rename collide with the other's
+    /// and fail — neither write may be silently lost either. The same
+    /// property the helper's own
+    /// `concurrent_writers_to_one_path_never_produce_a_mixed_file` proves for
+    /// the primitive, exercised here through the store itself and repeated
+    /// over many rounds because the collision is a race.
+    #[test]
+    fn concurrent_sticky_classification_writes_never_produce_a_mixed_file() {
+        use glasshouse::routing::request::{RoutingFingerprint, StickyClassification};
+
+        let fixture = CliFixture::new();
+        let paths = fixture.runtime.paths().clone();
+        let project_id = fixture.runtime.project().id().as_str().to_owned();
+        let classification = glasshouse::routing::classify::classify_heuristically(
+            "what is a mutex? (bin-test fixture)",
+        );
+        let fingerprint = RoutingFingerprint::new(None, &[], std::iter::empty::<String>());
+        let saw_write_error = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        for round in 0..30 {
+            let session_a = "a".repeat(200_000);
+            let session_b = "b".repeat(200_000);
+            let record_a = StickyClassification::new(
+                session_a.clone(),
+                fingerprint.clone(),
+                &classification,
+                round,
+            );
+            let record_b = StickyClassification::new(
+                session_b.clone(),
+                fingerprint.clone(),
+                &classification,
+                round + 1,
+            );
+
+            let (paths_a, paths_b) = (paths.clone(), paths.clone());
+            let (project_a, project_b) = (project_id.clone(), project_id.clone());
+            let (dispatch_a, dispatch_b) = (
+                tracing::Dispatch::new(EventFired(saw_write_error.clone())),
+                tracing::Dispatch::new(EventFired(saw_write_error.clone())),
+            );
+            let handle_a = std::thread::spawn(move || {
+                tracing::dispatcher::with_default(&dispatch_a, || {
+                    ClassificationStickyCache::new(&paths_a, &project_a).store(&record_a)
+                })
+            });
+            let handle_b = std::thread::spawn(move || {
+                tracing::dispatcher::with_default(&dispatch_b, || {
+                    ClassificationStickyCache::new(&paths_b, &project_b).store(&record_b)
+                })
+            });
+            handle_a.join().expect("thread a");
+            handle_b.join().expect("thread b");
+
+            let cache = ClassificationStickyCache::new(&paths, &project_id);
+            let loaded = cache.load().unwrap_or_else(|| {
+                panic!(
+                    "round {round}: the file must parse as one writer's whole record, never a mix"
+                )
+            });
+            assert!(
+                loaded.session() == session_a || loaded.session() == session_b,
+                "round {round}: the final record must be exactly one writer's session, never a mix"
+            );
+        }
+
+        assert!(
+            !saw_write_error.load(std::sync::atomic::Ordering::SeqCst),
+            "neither writer's attempt may fail: a fixed shared temporary makes one \
+             writer's rename collide with and lose to the other's"
+        );
+    }
+
+    /// The same property as
+    /// [`concurrent_sticky_classification_writes_never_produce_a_mixed_file`],
+    /// for [`ClassificationTextCache`].
+    #[test]
+    fn concurrent_classification_text_cache_writes_never_produce_a_mixed_file() {
+        use glasshouse::routing::request::{CachedClassification, RoutingFingerprint};
+
+        let fixture = CliFixture::new();
+        let paths = fixture.runtime.paths().clone();
+        let project_id = fixture.runtime.project().id().as_str().to_owned();
+        let classification = glasshouse::routing::classify::classify_heuristically(
+            "what is a mutex? (bin-test fixture)",
+        );
+        let fingerprint = RoutingFingerprint::new(None, &[], std::iter::empty::<String>());
+        let saw_write_error = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+        for round in 0..30 {
+            let resolution_a = "a".repeat(200_000);
+            let resolution_b = "b".repeat(200_000);
+            let record_a = CachedClassification::new(
+                "shared-key",
+                fingerprint.clone(),
+                resolution_a,
+                &classification,
+                round,
+            );
+            let record_b = CachedClassification::new(
+                "shared-key",
+                fingerprint.clone(),
+                resolution_b,
+                &classification,
+                round + 1,
+            );
+
+            let (paths_a, paths_b) = (paths.clone(), paths.clone());
+            let (project_a, project_b) = (project_id.clone(), project_id.clone());
+            let (dispatch_a, dispatch_b) = (
+                tracing::Dispatch::new(EventFired(saw_write_error.clone())),
+                tracing::Dispatch::new(EventFired(saw_write_error.clone())),
+            );
+            let handle_a = std::thread::spawn(move || {
+                tracing::dispatcher::with_default(&dispatch_a, || {
+                    ClassificationTextCache::new(&paths_a, &project_a).store(record_a)
+                })
+            });
+            let handle_b = std::thread::spawn(move || {
+                tracing::dispatcher::with_default(&dispatch_b, || {
+                    ClassificationTextCache::new(&paths_b, &project_b).store(record_b)
+                })
+            });
+            handle_a.join().expect("thread a");
+            handle_b.join().expect("thread b");
+
+            let cache = ClassificationTextCache::new(&paths, &project_id);
+            let entries = cache.load();
+            assert!(
+                entries.len() == 1,
+                "round {round}: the file must parse as one writer's whole map, never a mix: got {} entries",
+                entries.len()
+            );
+        }
+
+        assert!(
+            !saw_write_error.load(std::sync::atomic::Ordering::SeqCst),
+            "neither writer's attempt may fail: a fixed shared temporary makes one \
+             writer's rename collide with and lose to the other's"
+        );
     }
 }

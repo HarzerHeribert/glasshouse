@@ -4467,6 +4467,45 @@ impl GuardrailsConfig {
     }
 }
 
+/// The `[memory]` table — `GH-LAUNCH-BRIEFING`, the launch-path opt-out named
+/// by the design ruling *"Memory is the project's, not the launch path's"*
+/// (`docs/product/design-decisions.md`).
+///
+/// One field today, kept in its own table rather than as a bare top-level key
+/// like [`UserConfig::memory_extraction`]: unlike that flag, this is a
+/// user-facing product setting a person is expected to reach for by name
+/// (`[memory] inject_at_launch = false`), not an internal automatic-behaviour
+/// toggle.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MemoryConfig {
+    /// Whether `glasshouse launch` briefs a new session with this project's
+    /// memory through the harness's own additive mechanism. `None` means
+    /// "never decided" and resolves to enabled — see
+    /// [`EffectiveConfig::inject_memory_at_launch`]. Opt-out, not opt-in: the
+    /// ruling is that a plain launch briefs by default, the same way a
+    /// door-spawned session already does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    inject_at_launch: Option<bool>,
+}
+
+impl MemoryConfig {
+    /// Whether this layer recorded nothing at all — the `skip_serializing_if`
+    /// predicate, so a user who never touched this has no `[memory]` table in
+    /// their file.
+    pub fn is_unset(&self) -> bool {
+        self.inject_at_launch.is_none()
+    }
+
+    pub fn inject_at_launch(&self) -> Option<bool> {
+        self.inject_at_launch
+    }
+
+    pub fn set_inject_at_launch(&mut self, enabled: Option<bool>) -> &mut Self {
+        self.inject_at_launch = enabled;
+        self
+    }
+}
+
 /// User-level Glasshouse configuration: `<config_dir>/config.toml`.
 ///
 /// Unknown top-level keys and unknown fields inside known tables are
@@ -4579,6 +4618,10 @@ pub struct UserConfig {
         skip_serializing_if = "firewall::ContextFirewallConfig::is_unset"
     )]
     context_firewall: firewall::ContextFirewallConfig,
+    /// The `[memory]` table — see [`MemoryConfig`] and
+    /// [`EffectiveConfig::inject_memory_at_launch`].
+    #[serde(default, skip_serializing_if = "MemoryConfig::is_unset")]
+    memory: MemoryConfig,
 }
 
 impl Default for UserConfig {
@@ -4597,6 +4640,7 @@ impl Default for UserConfig {
             automatic_checkpoint: None,
             implementation_policy: None,
             memory_extraction_model: None,
+            memory: MemoryConfig::default(),
             guardrails: GuardrailsConfig::default(),
             context_firewall: firewall::ContextFirewallConfig::default(),
         }
@@ -4723,6 +4767,15 @@ impl UserConfig {
         &mut self.context_firewall
     }
 
+    /// This layer's `[memory]` table — see [`MemoryConfig`].
+    pub fn memory(&self) -> &MemoryConfig {
+        &self.memory
+    }
+
+    pub fn memory_mut(&mut self) -> &mut MemoryConfig {
+        &mut self.memory
+    }
+
     /// This layer's recorded decision on automatic task-boundary
     /// checkpoints, or `None` for "never decided". See the field's own doc.
     pub fn automatic_checkpoint(&self) -> Option<bool> {
@@ -4840,6 +4893,12 @@ pub struct ProjectConfig {
         skip_serializing_if = "firewall::ContextFirewallConfig::is_unset"
     )]
     context_firewall: firewall::ContextFirewallConfig,
+    /// A project may override the user's decision on briefing a launch with
+    /// this project's memory — see [`UserConfig::memory`] for the table this
+    /// mirrors and [`EffectiveConfig::inject_memory_at_launch`] for how the
+    /// two layer.
+    #[serde(default, skip_serializing_if = "MemoryConfig::is_unset")]
+    memory: MemoryConfig,
 }
 
 impl Default for ProjectConfig {
@@ -4859,6 +4918,7 @@ impl Default for ProjectConfig {
             memory_extraction_model: None,
             guardrails: GuardrailsConfig::default(),
             context_firewall: firewall::ContextFirewallConfig::default(),
+            memory: MemoryConfig::default(),
         }
     }
 }
@@ -4974,6 +5034,16 @@ impl ProjectConfig {
 
     pub fn context_firewall_mut(&mut self) -> &mut firewall::ContextFirewallConfig {
         &mut self.context_firewall
+    }
+
+    /// This layer's `[memory]` table — see [`UserConfig::memory`] for the
+    /// table this mirrors.
+    pub fn memory(&self) -> &MemoryConfig {
+        &self.memory
+    }
+
+    pub fn memory_mut(&mut self) -> &mut MemoryConfig {
+        &mut self.memory
     }
 
     /// This layer's recorded decision on automatic task-boundary
@@ -5447,6 +5517,24 @@ impl<'a> EffectiveConfig<'a> {
             return Layered::new(value, Layer::Project);
         }
         if let Some(value) = self.user.automatic_checkpoint() {
+            return Layered::new(value, Layer::User);
+        }
+        Layered::new(true, Layer::Default)
+    }
+
+    /// Whether `glasshouse launch` briefs a new session with this project's
+    /// memory (`GH-LAUNCH-BRIEFING`), reporting which layer decided it.
+    /// Project first, then user, then [`Layer::Default`] carrying `true` —
+    /// opt-out, not opt-in, matching the design ruling's own wording.
+    ///
+    /// Deliberately independent of every other automatic behaviour: it reads
+    /// its own table, so turning this off never turns off memory extraction,
+    /// checkpoints or the implementation policy, and vice versa.
+    pub fn inject_memory_at_launch(&self) -> Layered<bool> {
+        if let Some(value) = self.project.and_then(|p| p.memory().inject_at_launch()) {
+            return Layered::new(value, Layer::Project);
+        }
+        if let Some(value) = self.user.memory().inject_at_launch() {
             return Layered::new(value, Layer::User);
         }
         Layered::new(true, Layer::Default)
@@ -8916,6 +9004,45 @@ mod tests {
         let effective = EffectiveConfig::new(&user, Some(&silent_project));
         assert_eq!(
             effective.memory_extraction_enabled(),
+            Layered::new(false, Layer::User),
+            "a project that recorded nothing must fall through to the user layer"
+        );
+    }
+
+    /// `GH-LAUNCH-BRIEFING`'s opt-out — the ruling is opt-out, not opt-in, so
+    /// nothing recorded anywhere must resolve to `true`, and a project's
+    /// explicit choice must win over the user's.
+    #[test]
+    fn inject_memory_at_launch_layers_project_over_user_over_default() {
+        let user = UserConfig::default();
+        let effective = EffectiveConfig::new(&user, None);
+        assert_eq!(
+            effective.inject_memory_at_launch(),
+            Layered::new(true, Layer::Default),
+            "nothing recorded anywhere must resolve to enabled"
+        );
+
+        let mut user = UserConfig::default();
+        user.memory_mut().set_inject_at_launch(Some(false));
+        let effective = EffectiveConfig::new(&user, None);
+        assert_eq!(
+            effective.inject_memory_at_launch(),
+            Layered::new(false, Layer::User)
+        );
+
+        let mut project = ProjectConfig::default();
+        project.memory_mut().set_inject_at_launch(Some(true));
+        let effective = EffectiveConfig::new(&user, Some(&project));
+        assert_eq!(
+            effective.inject_memory_at_launch(),
+            Layered::new(true, Layer::Project),
+            "a project's explicit re-enable must win over the user's disable"
+        );
+
+        let silent_project = ProjectConfig::default();
+        let effective = EffectiveConfig::new(&user, Some(&silent_project));
+        assert_eq!(
+            effective.inject_memory_at_launch(),
             Layered::new(false, Layer::User),
             "a project that recorded nothing must fall through to the user layer"
         );

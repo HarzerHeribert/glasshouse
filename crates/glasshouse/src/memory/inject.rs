@@ -340,6 +340,69 @@ pub fn briefing(
     })
 }
 
+/// The shared selection `GH-LAUNCH-BRIEFING` reuses: the door's own
+/// [`briefing`] when `query` is `Some` (a routed task, or a launch resuming
+/// from a checkpoint, whose text is capped exactly as `briefing` caps a
+/// task), and the **standing set** otherwise — current binding memories, then
+/// recent failed attempts, the same pair [`super::export_local::export`]
+/// already writes into a harness's local instruction file.
+///
+/// # Why `None` means the standing set rather than nothing
+///
+/// A launch with no checkpoint to resume from has no relevance query to run,
+/// and line 1134's *"a small number of current high-authority memories over a
+/// larger collection"* is the honest answer to give it — not silence. A
+/// session briefed at launch and a file exported by hand should agree on what
+/// "this project's standing memory" means, which is why this reads the same
+/// two [`MemoryStore`] methods [`super::export_local::export`]'s caller does
+/// rather than inventing a third notion of "current".
+pub fn select_briefing(
+    store: &MemoryStore<'_>,
+    query: Option<&str>,
+    already_injected: &HashSet<MemoryId>,
+) -> Result<BriefingOutcome, MemoryStoreError> {
+    match query {
+        Some(task) => briefing(store, task, already_injected),
+        None => standing_set(store, already_injected),
+    }
+}
+
+/// The `query: None` half of [`select_briefing`] — see its documentation.
+///
+/// Not a search, so there is no BM25 relevance to partition by: the
+/// preference order is simply binding memories (line 1131's *active
+/// constraints*) before failed attempts, each group in the store's own
+/// `updated_at DESC` order, exactly as [`MemoryStore::binding`] and
+/// [`MemoryStore::current_of_kind`] already return them.
+fn standing_set(
+    store: &MemoryStore<'_>,
+    already_injected: &HashSet<MemoryId>,
+) -> Result<BriefingOutcome, MemoryStoreError> {
+    let mut candidates = store.binding(MAX_INJECTED_MEMORIES)?;
+    candidates.extend(store.current_of_kind(MemoryKind::FailedAttempt, MAX_INJECTED_MEMORIES)?);
+
+    // The retrieval-miss test, made exactly as `briefing` makes it: captured
+    // before anything is filtered, so a project with no binding memory and no
+    // failed attempt at all is a miss, and a project that has some but
+    // excludes every one of them below (already sent to this session, not
+    // current, an unreaffirmed idea) is `NothingNew` — the read worked.
+    let matched_nothing = candidates.is_empty();
+
+    let selected: Vec<MemoryRecord> = candidates
+        .into_iter()
+        .filter(MemoryRecord::is_current)
+        .filter(|record| !is_unreaffirmed_idea(record))
+        .filter(|record| !already_injected.contains(&record.id))
+        .take(MAX_INJECTED_MEMORIES)
+        .collect();
+
+    Ok(match render(&selected, &[]) {
+        Some(injection) => BriefingOutcome::Injected(injection),
+        None if matched_nothing => BriefingOutcome::NothingMatched,
+        None => BriefingOutcome::NothingNew,
+    })
+}
+
 /// Line 1140: memories this project learned while a task's own named files
 /// were being worked on — [`MemoryStore::for_path`] over every path
 /// [`crate::routing::session::paths_named_in`] finds in `task`, reusing

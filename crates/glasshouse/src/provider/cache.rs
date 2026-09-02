@@ -332,7 +332,10 @@ static ATOMIC_WRITE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::A
 /// `telemetry::GatewayQuotaCache::try_store`,
 /// `telemetry::GatewayHealthCache::try_store` and
 /// `telemetry::RoutingStickyCache::try_store` used to reimplement separately.
-pub(crate) fn write_json_atomically(path: &Path, encoded: &[u8]) -> std::io::Result<()> {
+/// `pub`, not `pub(crate)`: the bin crate's `ClassificationStickyCache` and
+/// `ClassificationTextCache` stores in `main.rs` call this directly rather
+/// than reimplementing the same fixed-temporary-name write.
+pub fn write_json_atomically(path: &Path, encoded: &[u8]) -> std::io::Result<()> {
     let n = ATOMIC_WRITE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let temporary = path.with_extension(format!("{}-{n}.writing", std::process::id()));
     std::fs::write(&temporary, encoded)?;

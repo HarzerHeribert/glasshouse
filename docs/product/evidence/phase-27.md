@@ -405,3 +405,31 @@ Gates the worker ran (re-run the decisive ones yourself):
 - scripts/blast-radius.sh: every traced target passed — 25 integration targets, --lib 1528 passed, --bin glasshouse 42 passed
 - Windows: NOT RUN. `cargo check --target aarch64-pc-windows-msvc` fails with `can't find crate for std` (target listed, std not installed for the active toolchain). src/memory/inject.rs has no cfg, no std::path, no OS string handling, no process/terminal API and no line-ending-dependent logic; src/memory/mod.rs gains one `pub mod` line. `ci-local.sh --windows-vm` at integration is the remaining evidence.
 
+
+
+---
+
+## The launch path briefs — 2026-09-02 (`GH-LAUNCH-BRIEFING`, Amber, Sonnet high): lines 1125–1135's briefing reaches `glasshouse launch` the door's way
+
+Implements the user's ruling of 2026-09-02 (`design-decisions.md`, *Memory is the project's, not the launch path's*): a plain `glasshouse launch` (and `run`, which shares its arm) now briefs the new session with this project's memory, opt-out rather than opt-in. No box changes state here — every line in this phase already closed on the machine door, and 1129 stays refused in the source — but the phase's contract now holds on both doors, which is what the ruling asked.
+
+**Selection** is the door's own: `memory::inject::select_briefing(store, query, already)` dispatches to `briefing` when the launch resumes from a checkpoint (the checkpoint's bootstrap text is the query, capped as a routed task is) and to a new `standing_set` otherwise — the current binding memories, then recent failed attempts, the pair `memory export-local` already writes (1134's *small number of current high-authority memories*). `api/unix.rs::select_memory` now calls the same function; `context_injection` 15/15 unchanged.
+
+**Delivery** is a three-rung ladder in `main.rs::brief_launch_session`, called between `store.create` and `install_session_document`: (1) the adapter's own additive mechanism — `harness::response::Application::append_additive_text` pushes the labelled block beside the response profile's own text onto the arguments `install_session_document` already reads, so Claude Code's `--append-system-prompt` carries it and the harness's own system prompt survives (1127, 1128, 1130); (2) no additive mechanism but a headless launch — a `DeferredBriefing` handed to `run_headless`, delivered through `SessionApi::send_text` as the door's labelled machine message once the runtime holds the session; (3) neither — `glasshouse: not briefed: <reason>` naming the adapter. Every delivery records `MemoryRetrieved` with the new session's id (`evaluation::record_memory_retrieval`), so Phase 51's proxy covers manual sessions; a search that matched nothing records the retrieval miss (1865) as the door does. Opt-out: `[memory] inject_at_launch = false` (project over user, default true) and `--no-memory`; either skips the store entirely and leaves argv's flag sequence identical to a launch with no memory.
+
+**Worker corrections, accepted:** `session/select.rs` needed no change (its argument extension is generic); `Application` needed a method, not a field; rung three is a `main.rs` unit test (`rung_three_fires_with_no_additive_mechanism_and_no_session_runtime`) because `session::attach` refuses a process with no terminal, so a fifth binary test would have asserted a vacuous absence; `Command::Run` gained the flag with `Launch` because the shared or-pattern must bind the same fields.
+
+Production evidence: `src/memory/inject.rs` — `select_briefing`, `standing_set`; `src/harness/response.rs` — `Application::append_additive_text`; `src/main.rs` — `LaunchBriefing`, `DeferredBriefing`, `brief_launch_session`, `briefing_announcement`, `run_headless` (rung two), `launch_session` (the call); `src/config/mod.rs` — `MemoryConfig`, `EffectiveConfig::inject_memory_at_launch`; `src/cli.rs` — `--no-memory`.
+
+Regression evidence (`tests/launch_briefing.rs`, shipped binary): `a_plain_launch_briefs_with_the_standing_set_and_the_harnesss_own_prompt_survives`, `the_opt_out_leaves_argv_unchanged_and_records_no_row_proven_against_a_briefing_control`, `every_delivered_memory_records_a_memory_retrieved_row_with_the_new_sessions_id`, and a fourth on the checkpoint-resume query; unit: `main.rs::tests::rung_three_fires_with_no_additive_mechanism_and_no_session_runtime`, two in `harness::response`, one in `config`.
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| `response.rs`: `push(injection.flag)` → `push("--system-prompt")` | `replace-the-system-prompt` | **killed** | `a_plain_launch_briefs_with_the_standing_set_and_the_harnesss_own_prompt_survives` |
+| `inject.rs`: `standing_set` also extends with ordinary decisions | `brief-everything` | **killed** | the same test (`!block.contains("runs hourly")`) |
+| `main.rs`: the opt-out condition made false | `ignore-the-opt-out` | **killed** | `the_opt_out_leaves_argv_unchanged_and_records_no_row_proven_against_a_briefing_control` |
+| `main.rs`: the row's session id → `None` | `forget-the-session` | **killed** | `every_delivered_memory_records_a_memory_retrieved_row_with_the_new_sessions_id` |
+
+Gates: fmt clean; clippy clean; `launch_briefing` 4/4; `--bin glasshouse` 80/80; `context_injection`+`firewall_bridge`+`memory_rating` 41/41; `--lib memory` 144; `--lib config` 157; `--lib cli` 31; `--lib session` 305 with one pre-existing PTY flake (`shell/mod.rs`, untouched, green on two solo re-runs); targeted blast over seven files green; rustdoc clean.
+
+Recorded scope limits — stated by the worker: rung two (headless, no additive mechanism) has no end-to-end test — no installed adapter pairs those two today; the opt-out's *byte-identical* is proven as identical flag-name sequences plus zero additive text and zero rows, the `firewall_bridge` pin's own shape; the standing set's candidates are bounded per source by `MAX_INJECTED_MEMORIES` before the final cap, so a project with more than three current binding memories relies on `binding()`'s recency order.
