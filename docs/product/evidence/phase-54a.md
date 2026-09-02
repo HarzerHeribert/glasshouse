@@ -454,3 +454,54 @@ build caches, since reclaimed and now removed by `close-worker.sh`
 clippy and MSRV all PASS. So on `785a47f` two legs are fully green and the
 Windows leg is 126/128 three times with rotating non-PTY flakes;
 `GH-WINDOWS-FLAKES` is dispatched and 1908 ticks on its green leg.
+
+---
+
+## The Windows flake family closed — 2026-09-02 (`GH-WINDOWS-FLAKES`, Opus 5 high, Red; `GH-WINDOWS-STUB-DRAIN`, Green)
+
+Five flakes were **two causes, neither the product's**, read first from the
+three gate logs' inline panics: three of five were literally
+`HTTP/1.1 502 Bad Gateway`, and the fourth was the same event from the other
+side (a fake model that never delivered its `200`, so `classify` fell back to
+the heuristic the assertion forbids).
+
+- **Cause D — a stub HTTP server that answered after one `read`.** Four test
+  files carried the same stub; the gateway sends its relayed request as a head
+  and a streamed body (`gateway/ingress.rs:595-604`), and when the two did not
+  coalesce the stub answered with the body still queued and dropped the stream
+  — an abortive close (RST on Winsock, which discards what it had buffered for
+  the peer; Unix hands the buffered bytes back first), so the gateway's read of
+  the already-written response failed and `ingress::serve` answered its own
+  `502` (`:619-636`). The corroboration sat in the same file as one flake:
+  `evaluation_producers::serve_json` reads the head and exactly
+  `content-length` bytes and has never flaked; `stub_500_server`, forty lines
+  below, read once and did. Fix: `read_whole_request` (headers to the blank
+  line, `read_exact` the declared body) in all six copies — four by the Red
+  package, `routing_cost.rs` and `gateway_retry_after.rs` by the Green one,
+  which also adds `scripts/tests/test_no_single_read_stubs.py` so the shape
+  cannot return.
+- **Cause E — the two-writer checkpoint race.** Two threads each writing a
+  hundred rows in a tight loop into one SQLite database with a rollback
+  journal and a five-second busy timeout (`database.rs:2572`): SQLite's busy
+  handler polls on a back-off with no fairness, and on the loaded VM the loser
+  starved past its timeout (the failing run took 10.76 s against 2.3–2.4 s
+  green). The test's `.expect` was scaffolding; it becomes a retry **only on
+  `DatabaseBusy`** within sixty seconds, asserting on anything else, and every
+  counter assertion (`rows == 200`, distinct and max `seq`) runs unchanged.
+
+**Measured on the VM, before and after, same machine, same harness:** at gate
+load 33/40 → **40/40**; at six-times overload 51/119 → **120/120**; on the
+unfixed tree every one of sixty overloaded `gateway_failure_taxonomy` runs
+failed and every failure was the `502` — one mode, not seven. Two consecutive
+full Windows `test` legs of the fixed tree: **green, every target**
+(`Windows ARM64 CI passed`, lib 1957/1957), the first fully green Windows legs
+this project has had; the post-hoc revert of the stub fix alone brought the
+`502`s back. No assertion weakened (checked mechanically), no `cfg(windows)`.
+
+**A product question, recorded and not touched:** every connection is
+rollback-journal with a five-second busy timeout and no fairness, so two
+Glasshouse processes writing one project database under sustained contention
+could see `database is locked`. The workload that showed it is the test's;
+whether any production path writes one project database from two processes at
+once is a recon (`GH-SQLITE-CONTENTION-RECON`), and WAL, a longer timeout, or a
+bounded retry in `CheckpointStore::save` are product decisions after it.

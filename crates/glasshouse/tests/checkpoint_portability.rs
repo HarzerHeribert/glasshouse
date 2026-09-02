@@ -1461,6 +1461,66 @@ fn one_projects_counter_never_reaches_another_projects_checkpoints() {
     );
 }
 
+/// One `save`, retried for as long as SQLite is still saying the database is
+/// locked.
+///
+/// `database::open` gives every connection a five-second busy timeout, and on
+/// macOS and Linux that is far more than two threads writing a hundred rows
+/// each ever need — this target's nineteen tests finish in 2.8 seconds
+/// there, all told. It is
+/// not always enough on the Windows ARM64 CI VM. A rollback-journal
+/// transaction creates, fsyncs and deletes a journal file per row, which on
+/// that filesystem is slow enough that SQLite's busy handler — which polls on
+/// a back-off rather than queueing, so it has no fairness at all — can be
+/// starved past its five seconds by a peer that re-takes the write lock the
+/// instant it drops it. The loser then gets `SQLITE_BUSY` and the writer
+/// thread panicked with `a racing save must not fail: ... SqliteFailure(...,
+/// Some("database is locked"))`, once in ten runs of this target on the VM
+/// and once in the three-leg gate runs of `785a47f`. The failing run took
+/// 10.8 seconds against the 2.4 a passing one takes, which is the two
+/// five-second timeouts expiring.
+///
+/// **Retrying does not weaken this test.** What it measures is the counter:
+/// that `MAX(seq) + 1` is evaluated inside the `INSERT`, under the write lock
+/// that will do the write, so two writers can never stamp the same `seq`.
+/// Every assertion below still runs over 200 rows written by two genuinely
+/// interleaved threads, and none of them moved: a counter read outside the
+/// lock still produces duplicate `seq` values however often a save is
+/// retried, and a save that never landed at all still fails `rows ==
+/// expected`. What the retry drops is the incidental assumption that five
+/// seconds of busy-waiting is enough on every filesystem this suite runs on —
+/// which is not a claim this test was written to make, and is not one the
+/// product makes either.
+///
+/// The bound is a deadline rather than an attempt count, and exhausting it is
+/// still a panic naming the error, so a genuine deadlock is not retried into
+/// silence.
+fn save_through_contention(
+    store: &glasshouse::checkpoint::CheckpointStore<'_>,
+    session: &SessionId,
+) {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    loop {
+        match store.save(checkpoint_before_the_crash(session, store.now())) {
+            Ok(_) => return,
+            Err(error) => {
+                let busy = matches!(
+                    &error,
+                    glasshouse::checkpoint::StoreError::Sql {
+                        source: rusqlite::Error::SqliteFailure(inner, _),
+                        ..
+                    } if inner.code == rusqlite::ErrorCode::DatabaseBusy
+                );
+                assert!(
+                    busy && Instant::now() < deadline,
+                    "a racing save must not fail: {error:?}"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+    }
+}
+
 /// Two processes writing checkpoints at once never get the same number.
 ///
 /// The counter is `MAX(seq) + 1`, and read-then-write is the classic shape of
@@ -1503,9 +1563,7 @@ fn two_writers_racing_never_stamp_the_same_write_order() {
                 let session = SessionId::new(name);
                 start.wait();
                 for _ in 0..PER_WRITER {
-                    store
-                        .save(checkpoint_before_the_crash(&session, store.now()))
-                        .expect("a racing save must not fail");
+                    save_through_contention(&store, &session);
                 }
             })
         })

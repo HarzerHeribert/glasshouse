@@ -26,7 +26,7 @@
 //! after a single failure at all, so any cooldown this file observes after
 //! exactly one exchange must have come from the provider's own header.
 
-use std::io::{Read, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -94,6 +94,57 @@ fn credential_id(var: &str) -> CredentialId {
 /// the counter distinguish "the gateway refused the second request in
 /// place" from "the gateway forwarded it and got a second 429" — a test that
 /// only checked the response code cannot tell those apart.
+/// Read the request whole — its head, then exactly the body its
+/// `Content-Length` declares — before the caller answers it.
+///
+/// This used to be a single `read` into a 4 KiB buffer, on the reasoning
+/// that a stub which never parses the request need not read it. That is a
+/// race with any client that writes its head and its body separately, and
+/// the gateway is one: `ureq` sends the head, then streams the relayed body
+/// from the client socket (`gateway::ingress`'s
+/// `SendBody::from_owned_reader`). When the stub's single read lands
+/// between those two writes it takes the head alone, and the body is still
+/// in the socket's receive queue when the stub answers and drops the
+/// stream.
+///
+/// Closing a socket that still holds unread data is an *abortive* close:
+/// the stack sends RST instead of FIN. Winsock then discards whatever it
+/// had already buffered for the peer, so the gateway's read of the response
+/// this stub had just written failed with a connection reset, `agent.run`
+/// returned `Err`, and the gateway answered its own `502 Bad Gateway`
+/// (`ingress::serve`'s `Outcome::Unreachable`) rather than relaying the
+/// scripted status. Unix hands the buffered bytes back first and only
+/// reports the reset once they are drained, which is why the same stub was
+/// reliable on macOS and Linux and flaked on the Windows ARM64 CI VM.
+///
+/// Nothing here is conditional on the platform, and no assertion moves:
+/// reading a request before answering it is what any HTTP server does, and
+/// it is already what `evaluation_producers.rs`'s `serve_json` does in this
+/// same suite. On Unix it only reads bytes that were arriving anyway.
+fn read_whole_request(stream: &mut TcpStream) {
+    let mut reader = BufReader::new(stream);
+    let mut declared = 0usize;
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line) {
+            Ok(0) | Err(_) => return,
+            Ok(_) => {}
+        }
+        let line = line.trim_end_matches(['\r', '\n']);
+        if line.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':')
+            && name.trim().eq_ignore_ascii_case("content-length")
+        {
+            declared = value.trim().parse().unwrap_or(0);
+        }
+    }
+    let mut body = vec![0u8; declared];
+    let _ = reader.read_exact(&mut body);
+}
+
 fn stub_429_server(retry_after_seconds: Option<u64>) -> (SocketAddr, Arc<AtomicUsize>) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("loopback is bindable");
     let address = listener
@@ -131,11 +182,7 @@ fn stub_429_server(retry_after_seconds: Option<u64>) -> (SocketAddr, Arc<AtomicU
                 let _ = stream.set_nonblocking(false);
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
 
-                // The request head is drained but not parsed: this stub
-                // answers the same fixed response regardless of what the
-                // gateway sent.
-                let mut buf = [0u8; 4096];
-                let _ = stream.read(&mut buf);
+                read_whole_request(&mut stream);
 
                 let response = match retry_after_seconds {
                     Some(seconds) => format!(
