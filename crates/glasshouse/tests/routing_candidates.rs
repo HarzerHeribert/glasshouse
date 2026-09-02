@@ -455,6 +455,20 @@ mod shipped_binary {
             "the exclusion must be attributed to the tool-semantics constraint specifically, \
              not merely rejected for some other reason:\n{rejected}"
         );
+        // GH-TOOL-SEMANTICS-EVIDENCE: the rejection now names the declared
+        // fact and where it was declared, the same as the capability axis
+        // does — `declared_from_config(Layer::User, DeclaredIn::ProviderToolCalls)`
+        // (`config/mod.rs`), reached because this fixture's `tool_calls =
+        // false` lives in the single `--config-dir` file `EffectiveConfig`
+        // treats as the user layer (no project config exists here).
+        assert!(
+            rejected.contains(
+                "the provider declared no tool-call support — declared as tool_calls in the \
+                 user config's [providers] table"
+            ),
+            "the rejected line must quote the declared fact and its layer, not just the \
+             constraint's name:\n{rejected}"
+        );
     }
 
     /// REQUIRED BEHAVIOR bullet 1's other half: the identical fixture with
@@ -579,17 +593,17 @@ mod shipped_binary {
         );
     }
 
-    /// `GH-CONSTRAINT-REASONS` REQUIRED BEHAVIOR bullet 2: with a declared
-    /// `tool_calls = false`, the rejected line names tool semantics. The
-    /// `Declared` evidence behind `Backend::tools() == KnownAbsent` cannot
-    /// reach this line yet — it is dropped one step earlier, in the
-    /// read-only `config::pairing::tool_semantics` this package may not
-    /// change (see `HardConstraint::ToolSemantics`'s own doc comment and
-    /// this report's `packet_errors`/limits) — so no evidence is quoted, and
-    /// the constraint's name is the whole line, exactly as before this
-    /// package.
+    /// `GH-CONSTRAINT-REASONS` REQUIRED BEHAVIOR bullet 2, updated by
+    /// `GH-TOOL-SEMANTICS-EVIDENCE`: with a declared `tool_calls = false`,
+    /// the rejected line names tool semantics — and now quotes the
+    /// `Declared` evidence behind `Backend::tools() == KnownAbsent`, the
+    /// same as the capability axis test above does. The evidence no longer
+    /// stops at `harness::pairing::classify`: `Pairing::tool_evidence`
+    /// carries it to `main.rs::destination_backend`'s
+    /// `Backend::with_tools_evidence`, and `session::hard_constraint` reads
+    /// it back.
     #[test]
-    fn a_declared_tool_calls_false_names_tool_semantics_with_no_evidence_in_the_rejected_line() {
+    fn a_declared_tool_calls_false_names_tool_semantics_with_its_evidence_in_the_rejected_line() {
         let fixture = Fixture::new(
             "version = 1\n\n\
              [integrations.claude-code]\nenabled = true\nexecutable = \"{harness}\"\n\n\
@@ -604,9 +618,12 @@ mod shipped_binary {
 
         let rejected = fixture.rejected(SHELL_TASK);
         assert!(
-            rejected.contains("hard tool semantics constraint\n"),
-            "with no evidence able to reach this line, the rejected line must still name \
-             tool semantics and nothing more:\n{rejected}"
+            rejected.contains(
+                "hard tool semantics constraint — the provider declared no tool-call support — \
+                 declared as tool_calls in the user config's [providers] table\n"
+            ),
+            "the rejected line must name tool semantics and quote the declared fact behind it:\n\
+             {rejected}"
         );
     }
 }

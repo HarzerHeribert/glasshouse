@@ -195,6 +195,11 @@ pub struct Backend {
     credential: CredentialId,
     cost: Cost,
     tools: ToolSemantics,
+    /// The `Declared` evidence behind [`Backend::tools`]'s `KnownAbsent`
+    /// verdict, when it can reach here — see [`Backend::with_tools_evidence`].
+    /// `None` by default, for every one of [`Backend::new`]'s existing
+    /// callers.
+    tools_evidence: Option<&'static str>,
 }
 
 impl Backend {
@@ -213,7 +218,23 @@ impl Backend {
             credential,
             cost,
             tools,
+            tools_evidence: None,
         }
+    }
+
+    /// Carry the `Declared` evidence behind [`Backend::tools`]'s verdict —
+    /// the tool-semantics half of the 1517/1513 recorded limit
+    /// (`docs/product/evidence/phase-35a.md`). Inert unless `tools() ==
+    /// ToolSemantics::KnownAbsent`; the caller supplies `None` for every
+    /// other verdict.
+    #[must_use]
+    pub fn with_tools_evidence(mut self, evidence: Option<&'static str>) -> Self {
+        self.tools_evidence = evidence;
+        self
+    }
+
+    pub fn tools_evidence(&self) -> Option<&'static str> {
+        self.tools_evidence
     }
 
     pub fn provider(&self) -> &str {
@@ -544,12 +565,11 @@ pub enum HardConstraint {
     Protocol,
     /// Line 1517/1513's tool-semantics half: `Backend::tools() ==
     /// KnownAbsent`. `evidence` is the `Declared` string behind that
-    /// verdict, when it can reach here — `Backend::tools()` is a bare
-    /// verdict by construction (see its own doc comment, and
-    /// `session::classify_destination`'s), so this is `None` until
-    /// something on that call path is widened to carry a `Declared`
-    /// through; `session::hard_constraint` fills whichever this build can
-    /// produce.
+    /// verdict, carried from `harness::pairing::classify` through
+    /// `Backend::with_tools_evidence` and read back by
+    /// `session::hard_constraint`; `Some` exactly when the verdict is
+    /// `KnownAbsent`, `None` for `Verified` and `Unverified`, where the
+    /// evidence would be inert.
     ToolSemantics {
         evidence: Option<&'static str>,
     },

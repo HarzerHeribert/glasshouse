@@ -1921,7 +1921,7 @@ Fixed architectural requirements
 ☑ Consider V1 usable when one session can be designated as orchestrator and spawn at least one visible worker session.
 ☑ Consider V1 usable when every interactive native, direct-provider, or gateway-backed session records a real owning harness and launch profile.
 ☑ Consider V1 usable when a compatible vendor-native pairing receives an inspectable initial prior without overriding stronger observed evidence or user choice.
-☐ Consider V1 usable when a response profile can control user-facing communication without reducing verification or replacing native harness coding instructions.
+☑ Consider V1 usable when a response profile can control user-facing communication without reducing verification or replacing native harness coding instructions.
 ☑ Consider V1 usable when a worker completion event can reliably wake or notify the orchestrator.
 ☑ Consider V1 usable when the user can enter and directly control any orchestrated worker.
 ☑ Consider V1 usable when project-specific durable memory can store the six initial memory kinds.

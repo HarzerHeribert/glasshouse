@@ -27,6 +27,7 @@ use clap::Parser;
 use glasshouse::config::{ProviderConfig, RoutingModelChoice, UserConfig};
 use glasshouse::gateway::{Route, Upstream, UpstreamBackend};
 use glasshouse::integrations::IntegrationId;
+use glasshouse::profile::response::floor_directive;
 use glasshouse::profile::{BackendResource, LaunchProfile};
 use glasshouse::routing::{Cost, CredentialId};
 use glasshouse::secret::{EnvironmentSecretStore, Secret, SecretRef, SecretStore};
@@ -837,6 +838,160 @@ fn v1_1904_a_launched_harness_receives_the_response_profile_through_its_native_s
     assert!(
         settings.contains("outputStyle"),
         "the settings document must carry the resolved profile: {settings}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 1924 — a response profile controls communication without reducing
+// verification or replacing native harness coding instructions
+// ---------------------------------------------------------------------------
+
+/// **1924** — "Consider V1 usable when a response profile can control
+/// user-facing communication without reducing verification or replacing
+/// native harness coding instructions."
+///
+/// 1904's line restated as a V1 completion criterion with two extra clauses
+/// this test proves against the same launch shape: (1) the selected preset's
+/// native style actually reaches the settings document the `--settings` flag
+/// names, (2) the floor sentence — [`floor_directive`], `REQUIRED_REPORTS` —
+/// rides along unconditionally through `--append-system-prompt`, and (3)
+/// neither the project's own coding-instructions file nor a stand-in for the
+/// harness's own user-level config is touched by the launch.
+///
+/// Entry: `docs/product/evidence/phase-54a.md`'s 1904 entry — same production
+/// seams, `src/harness/claude_code.rs` (`native_response_style`,
+/// `additive_response_injection`, `closest_output_style`) and
+/// `src/harness/response.rs::apply` (325–380).
+///
+/// Mutations:
+/// - M1 (`src/harness/claude_code.rs`, `OUTPUT_STYLE_KEY`): rename the key
+///   away from `"outputStyle"` — the composed settings document no longer
+///   carries the key clause 1 reads.
+/// - M2 (`src/harness/response.rs:369`): drop
+///   `push(OsString::from(floor_directive()))` — clause 2's floor sentence
+///   never reaches argv.
+/// - M3 (`src/harness/claude_code.rs:305`): `"--append-system-prompt"` ->
+///   `"--system-prompt"` — the profile would replace, not append.
+#[test]
+fn v1_1924_a_response_profile_controls_communication_without_reducing_verification_or_replacing_coding_instructions()
+ {
+    let tmp = tempdir();
+    let base = tmp.path();
+    let project = git_project(base, "proj");
+    let data_dir = base.join("data");
+    let config_dir = base.join("config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    let bin_dir = base.join("bin");
+    std::fs::create_dir_all(&bin_dir).unwrap();
+
+    let harness = install_dumping_harness(&bin_dir, "dumping-claude-code");
+    std::fs::write(
+        config_dir.join("config.toml"),
+        format!(
+            "version = 1\n\n\
+             [integrations.claude-code]\nenabled = true\nexecutable = \"{}\"\n\n\
+             [response]\npreset = \"concise-technical\"\n",
+            toml_path(&harness)
+        ),
+    )
+    .unwrap();
+
+    // The project's own coding-instructions file, and a directory standing in
+    // for the harness's own user-level config — neither is a Glasshouse path,
+    // and clause 3 ("... or replacing native harness coding instructions")
+    // requires the launch to leave both alone.
+    let coding_instructions = project.join("CLAUDE.md");
+    std::fs::write(
+        &coding_instructions,
+        "these are the project's own coding instructions\n",
+    )
+    .unwrap();
+    let harness_home = base.join("harness-home");
+    std::fs::create_dir_all(&harness_home).unwrap();
+    let harness_home_marker = harness_home.join("settings.json");
+    std::fs::write(
+        &harness_home_marker,
+        "{\"outputStyle\":\"whatever-the-user-set\"}\n",
+    )
+    .unwrap();
+
+    let before_instructions = std::fs::read(&coding_instructions).unwrap();
+    let before_harness_home = std::fs::read(&harness_home_marker).unwrap();
+
+    let output = run(
+        &data_dir,
+        &config_dir,
+        &project,
+        &["launch", "claude-code", "--headless"],
+    );
+    assert!(
+        output.status.success(),
+        "launch failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // Clause 3, half one: the project's coding instructions are
+    // byte-identical before and after the launch.
+    let after_instructions = std::fs::read(&coding_instructions).unwrap();
+    assert_eq!(
+        before_instructions, after_instructions,
+        "a response profile must never touch the project's own coding instructions"
+    );
+    // Clause 3, half two: the harness's own user-level config is untouched —
+    // Glasshouse's own settings document lives under its own data dir, never
+    // here.
+    let after_harness_home = std::fs::read(&harness_home_marker).unwrap();
+    assert_eq!(
+        before_harness_home, after_harness_home,
+        "a response profile must never touch the harness's own user-level config"
+    );
+
+    let dump = std::fs::read_to_string(project.join("dump.txt"))
+        .expect("the harness must have run and left its dump");
+    let argv_line = dump
+        .lines()
+        .next()
+        .unwrap_or_else(|| panic!("no ARGV line in dump:\n{dump}"));
+
+    // Clause 3, half three: no bare `--system-prompt` in argv — that would
+    // replace the coding system prompt rather than append beside it.
+    assert!(
+        !argv_line.contains("--system-prompt"),
+        "a response profile must never replace the coding system prompt outright: {argv_line}"
+    );
+
+    // Clause 1: "a response profile can control user-facing communication" —
+    // the settings document at the `--settings` path names the style
+    // `concise-technical` maps to (`closest_output_style`: Concise verbosity
+    // + Silent narration -> "Concise").
+    let settings_path = argv_line
+        .split("--settings")
+        .nth(1)
+        .and_then(|rest| rest.split_whitespace().next())
+        .unwrap_or_else(|| panic!("--settings carried no path: {argv_line}"));
+    let settings = std::fs::read_to_string(settings_path.trim_matches('"'))
+        .unwrap_or_else(|err| panic!("could not read {settings_path}: {err}"));
+    let settings_json: serde_json::Value =
+        serde_json::from_str(&settings).expect("the settings document is valid JSON");
+    assert_eq!(
+        settings_json["outputStyle"], "Concise",
+        "the composed settings document must carry the resolved profile's native style: \
+         {settings}"
+    );
+
+    // Clause 2: "without reducing verification" — exactly one
+    // `--append-system-prompt` in argv, carrying the floor sentence
+    // verbatim.
+    assert_eq!(
+        argv_line.matches("--append-system-prompt").count(),
+        1,
+        "the floor sentence must ride along through exactly one --append-system-prompt: \
+         {argv_line}"
+    );
+    assert!(
+        argv_line.contains(&floor_directive()),
+        "the floor sentence — the reports a response profile may never reduce — must reach \
+         argv verbatim: {argv_line}"
     );
 }
 

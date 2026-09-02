@@ -571,6 +571,7 @@ pub struct Pairing {
     class: PairingClass,
     protocol_fit: ProtocolFit,
     tool_semantics: ToolSemantics,
+    tool_evidence: Option<&'static str>,
     reason: String,
 }
 
@@ -625,6 +626,13 @@ impl Pairing {
     /// The tool-semantics axis, on its own.
     pub fn tool_semantics(&self) -> ToolSemantics {
         self.tool_semantics
+    }
+
+    /// The `Declared` evidence behind [`Pairing::tool_semantics`]'s
+    /// `KnownAbsent` verdict — `None` for `Verified` and `Unverified`, since
+    /// the evidence is inert without that verdict.
+    pub fn tool_evidence(&self) -> Option<&'static str> {
+        self.tool_evidence
     }
 
     /// Why the class is what it is, in one sentence.
@@ -810,6 +818,20 @@ fn tool_semantics(declared: Declared<bool>) -> ToolSemantics {
     }
 }
 
+/// The `Declared` evidence string behind [`tool_semantics`]'s `KnownAbsent`
+/// verdict, kept alongside it rather than folded in: `Verified { value: true,
+/// .. }` and `Unverified` carry no evidence a rejection could cite, so this
+/// is `None` for both and `Some` only for the one case a router ever prints.
+fn tool_evidence(declared: Declared<bool>) -> Option<&'static str> {
+    match declared {
+        Declared::Verified {
+            value: false,
+            evidence,
+        } => Some(evidence),
+        Declared::Verified { value: true, .. } | Declared::Unverified => None,
+    }
+}
+
 /// The wire-protocol axis, alone.
 fn protocol_fit(
     spoken: Declared<&'static [WireProtocol]>,
@@ -961,6 +983,7 @@ pub fn classify(query: &PairingQuery, overrides: &PairingOverrides) -> Pairing {
             class: PairingClass::Unknown,
             protocol_fit: fit,
             tool_semantics: tool_semantics(query.tool_calls),
+            tool_evidence: tool_evidence(query.tool_calls),
             reason: "the launch profile names no model, so the harness's own default serves \
                      the session and Glasshouse assigned none — which model that is was not \
                      established, and the harness's publisher is not evidence of it"
@@ -1070,6 +1093,7 @@ pub fn classify(query: &PairingQuery, overrides: &PairingOverrides) -> Pairing {
         class,
         protocol_fit: fit,
         tool_semantics: tool_semantics(query.tool_calls),
+        tool_evidence: tool_evidence(query.tool_calls),
         reason,
     }
 }

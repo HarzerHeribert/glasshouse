@@ -5363,12 +5363,16 @@ fn hard_constraint(
     if inputs.requirements.needs_tool_calls
         && destination.backend().tools() == ToolSemantics::KnownAbsent
     {
-        // `Backend::tools()` is a bare verdict by construction (see its own
-        // doc comment) — the `Declared` evidence behind `KnownAbsent` is
-        // dropped one step earlier, in the read-only `config::pairing::tool_semantics`
-        // this package may not change. `evidence` is `None` until that
-        // conversion is widened to carry it through.
-        return Err(HardConstraint::ToolSemantics { evidence: None });
+        // The `Declared` evidence behind `KnownAbsent` now arrives here:
+        // `harness::pairing::classify` keeps it beside the bare verdict
+        // (`Pairing::tool_evidence`), `main.rs::destination_backend` carries
+        // it onto the `Backend` it builds (`Backend::with_tools_evidence`),
+        // and `Backend::tools_evidence()` reads it back — `Some` exactly
+        // when `tools()` is `KnownAbsent`, by construction on the producer
+        // side.
+        return Err(HardConstraint::ToolSemantics {
+            evidence: destination.backend().tools_evidence(),
+        });
     }
     if classify_destination(destination, inputs.overrides).protocol_fit()
         == ProtocolFit::Incompatible
@@ -5460,6 +5464,66 @@ struct OneWarmSession(WarmSession);
 impl ContinuitySource for OneWarmSession {
     fn warm_session(&self, _key: &pairing::EvidenceKey) -> Option<WarmSession> {
         Some(self.0)
+    }
+}
+
+#[cfg(test)]
+mod tool_evidence_tests {
+    use super::*;
+    use crate::routing::{AssignedModel, Cost, CredentialId};
+    use crate::secret::SecretRef;
+
+    fn backend(tools: ToolSemantics, evidence: Option<&'static str>) -> Backend {
+        Backend::new(
+            "anthropic",
+            "anthropic-messages",
+            AssignedModel::named("claude-opus-4"),
+            CredentialId::new(
+                "anthropic",
+                SecretRef::Environment {
+                    var: "TOOL_EVIDENCE_TEST_KEY".to_owned(),
+                },
+            ),
+            Cost::Metered,
+            tools,
+        )
+        .with_tools_evidence(evidence)
+    }
+
+    /// GH-TOOL-SEMANTICS-EVIDENCE's own inert-evidence guarantee: evidence
+    /// is only meaningful beside `ToolSemantics::KnownAbsent`, so a `Backend`
+    /// carrying it beside `Verified` (which no honest producer builds, but
+    /// which `hard_constraint` must not be fooled by) is never rejected on
+    /// tool semantics.
+    #[test]
+    fn verified_tools_with_stray_evidence_never_raises_a_tool_semantics_constraint() {
+        let now = Instant::now();
+        let overrides = pairing::PairingOverrides::default();
+        let health = FreePool::new();
+        let inputs = RouterInputs {
+            overrides: &overrides,
+            health: &health,
+            now,
+            requirements: TaskRequirements {
+                needs_tool_calls: true,
+                ..TaskRequirements::default()
+            },
+        };
+        let destination = Destination::fresh(
+            "verified-with-evidence",
+            IntegrationId::ClaudeCode,
+            "profile",
+            backend(ToolSemantics::Verified, Some("stray evidence")),
+            None,
+        );
+
+        let result = hard_constraint(&destination, &inputs, None, false);
+
+        assert!(
+            result.is_ok(),
+            "evidence beside a Verified verdict must not raise a tool-semantics constraint: \
+             {result:?}"
+        );
     }
 }
 

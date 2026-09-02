@@ -604,3 +604,45 @@ ever sees it. Carrying it through means widening `Backend` and
 (`config/pairing.rs`, `routing/mod.rs`), not opened today because no map
 line waits on it; the exclusion itself is proven and the capability clause
 now says which fact. No box moves on this entry.
+
+---
+
+## The 1517/1513 recorded limit, other half removed — 2026-09-02 (`GH-TOOL-SEMANTICS-EVIDENCE`, Amber, Sonnet high)
+
+The tool-semantics rejection now names the declared fact and where it was
+declared. `harness::pairing::classify` keeps the `Declared` string beside the
+bare verdict (`Pairing::tool_evidence`, a sibling of the free
+`tool_semantics(declared)` — `Some` exactly when the verdict is `KnownAbsent`),
+`main.rs::destination_backend` carries it onto the `Backend`
+(`Backend::with_tools_evidence`, `Backend::new`'s signature untouched and its
+twenty callers with it), `backend_for_entitlement` threads it through the
+multi-entitlement copy, and `routing::session::hard_constraint`'s arm fills
+`HardConstraint::ToolSemantics { evidence }` from `Backend::tools_evidence()`.
+Which destinations are excluded is unchanged; `glasshouse route`'s rejected
+line for a `tool_calls = false` provider now quotes the declared fact and its
+config layer instead of the constraint's name alone.
+
+Three mutations, three KILLED: `drop-the-evidence` (the `with_tools_evidence`
+call removed in `destination_backend`) and `restore-none` (the arm back to
+`evidence: None`) both by
+`routing_candidates::shipped_binary::a_declared_tool_calls_false_excludes_the_destination_1517`
+— *the rejected line must quote the declared fact and its layer, not just the
+constraint's name* — and `evidence-without-verdict` (the arm widened to fire on
+stray evidence) by
+`routing::session::tool_evidence_tests::verified_tools_with_stray_evidence_never_raises_a_tool_semantics_constraint`.
+Gates: `routing_candidates` 10/10, `routing::` lib 225/225, `session_router`
+19 + `routing_capability` 4, `blast-radius.sh --targeted` exit 0.
+
+**Two corrections to this ledger's own record.** The previous entry (and the
+arm's comment) said the `Declared` was dropped in
+`config/pairing.rs::tool_semantics`; that function does not exist — the drop
+was `harness::pairing::tool_semantics`, and the comment is rewritten. And
+`GH-CONSTRAINT-REASONS`'s
+`a_declared_tool_calls_false_names_tool_semantics_with_no_evidence_in_the_rejected_line`
+asserted the very absence this package removes; it is renamed and rewritten
+to assert the presence, recorded here as the one assertion that changed.
+
+**Recorded limit, the worker's:** the multi-entitlement + `KnownAbsent`
+intersection is handled by construction and has no end-to-end test. No box
+moves on this entry; 1517 and 1513 stay COMPLETE with their limit now fully
+discharged.

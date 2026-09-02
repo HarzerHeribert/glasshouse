@@ -945,6 +945,7 @@ fn backend_for_entitlement(
         backend.cost(),
         backend.tools(),
     )
+    .with_tools_evidence(backend.tools_evidence())
 }
 
 /// 56A line 1969's binding half, beside line 1973's child-env scrub: the
@@ -1783,7 +1784,8 @@ fn destination_backend(
             credential,
             cost,
             pairing.tool_semantics(),
-        ),
+        )
+        .with_tools_evidence(pairing.tool_evidence()),
         protocols,
         wire_protocol,
     )

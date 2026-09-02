@@ -620,3 +620,43 @@ Recorded scope limits — stated by the worker, not discovered later:
 ---
 
 ---
+
+---
+
+## Line 1924 — CLOSED 2026-09-02 (`GH-PROVE-IT-1924`, Green, Sonnet medium) — Phase 55 complete
+
+The one Phase 55 line no ledger had ruled on. It is 54A's 1904 restated as a V1 criterion with two extra clauses, and the package proved each clause against what the launched harness actually received rather than against the composer's return value. No production change; 155 lines of test beside the 1904 test, its fixtures reused.
+
+### Consider V1 usable when a response profile can control user-facing communication without reducing verification or replacing native harness coding instructions. (line 1924)
+
+Contract: Given at least one configured response profile with a preset selected, when a supported harness (Claude Code) is launched headless, Glasshouse's native settings document names the mapped output style and the argv carries exactly one --append-system-prompt with the floor sentence verbatim and no bare --system-prompt, while preserving the project's own coding-instructions file and the harness's own user-level config untouched.
+
+State: **COMPLETE** — ruled 2026-09-02. A Phase 55 line is a completion CRITERION over phases already ruled COMPLETE in their own entries (Phase 9K's profile model, Phase 54A's 1904); this test is the criterion's tripwire through the shipped binary, one clause per seam: the native settings document carries the mapped `outputStyle` (control), the argv carries the floor sentence through exactly one `--append-system-prompt` (verification not reduced), and no `--system-prompt` reaches the child while the project's coding-instructions file and the harness's own user-level config are byte-identical before and after (native instructions not replaced). Three seams, three KILLED mutations with the failure text quoted. Artifacts: `validate_round.py` passed before dispatch, the facts block, real `test result:` lines with counts (11/11 and 19/19), `blast-radius.sh --targeted` exit 0. The limits are the worker's and stand: only Claude Code's native mechanism, and a fake harness that records argv rather than a real `claude` parsing the document — which is the same limit 1904 carries.
+
+Production evidence:
+- `src/harness/claude_code.rs` — `native_response_style, additive_response_injection, closest_output_style, OUTPUT_STYLE_KEY`
+- `src/harness/response.rs` — `apply`
+- `src/session/select.rs` — `HarnessSelection::install_session_document, merge_settings`
+
+Regression evidence:
+- `v1_criteria_setup::v1_1924_a_response_profile_controls_communication_without_reducing_verification_or_replacing_coding_instructions`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| claude_code.rs: const OUTPUT_STYLE_KEY: &str = "outputStyle"; -> = "outputStyleX"; | `drop-output-style-key` | **killed** | `v1_criteria_setup::v1_1924_a_response_profile_controls_communication_without_reducing_verification_or_replacing_coding_instructions` |
+| response.rs:369: removed application.args.push(OsString::from(floor_directive())); | `drop-floor-directive` | **killed** | `v1_criteria_setup::v1_1924_a_response_profile_controls_communication_without_reducing_verification_or_replacing_coding_instructions` |
+| claude_code.rs:305: flag: "--append-system-prompt", -> flag: "--system-prompt", | `rename-append-system-prompt-flag` | **killed** | `v1_criteria_setup::v1_1924_a_response_profile_controls_communication_without_reducing_verification_or_replacing_coding_instructions` |
+
+> drop-output-style-key observed: panicked at crates/glasshouse/tests/v1_criteria_setup.rs:976:5: assertion `left == right` failed: the composed settings document must carry the resolved profile's native style: { ... (outputStyle missing/null)
+
+> drop-floor-directive observed: panicked at crates/glasshouse/tests/v1_criteria_setup.rs:991:5 (argv_line.contains(&floor_directive()) failed)
+
+> rename-append-system-prompt-flag observed: panicked at crates/glasshouse/tests/v1_criteria_setup.rs:958:5 (!argv_line.contains("--system-prompt") failed)
+
+Recorded scope limits — stated by the worker, not discovered later:
+- only Claude Code's native mechanism is exercised, not other harnesses
+- the harness's own user-level config check uses a test-created stand-in directory the launch never receives a path to, not a probed real ~/.claude
+- the project's CLAUDE.md sentinel is test-created, not a real Claude Code coding-instructions file format
+- fake harness dumps argv/env only; no real claude binary parses the settings document
+
+---
