@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1218 / 1347 mandatory capabilities (90%)** — 129 open across 37 phases.
+**1219 / 1347 mandatory capabilities (90%)** — 128 open across 37 phases.
 
 ## Where the work is
 
@@ -30,6 +30,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 30 | Session context metadata | **1** | 7 | `1156` |
 | Phase 32E | Burn rate and exhaustion forecasting | **1** | 9 | `1272` |
 | Phase 32F | Protected quota reserve | **1** | 7 | `1285` |
+| Phase 33C | Failure, quota, and route correlation | **1** | 14 | `1362` |
 | Phase 34B | Routing-model role | **1** | 14 | `1406` |
 | Phase 35A | Candidate generation | **1** | 10 | `1504` |
 | Phase 37 | Basic session-aware router | **1** | 10 | `1590` |
@@ -40,7 +41,6 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 32C | Subscription capacity estimation | **2** | 10 | `1242` |
 | Phase 32D | Normalized remaining-capacity score | **2** | 10 | `1257` |
 | Phase 33 | Resource health | **2** | 13 | `1309` |
-| Phase 33C | Failure, quota, and route correlation | **2** | 13 | `1362` |
 | Phase 38 | Quota-preserving routing | **2** | 5 | `1604` |
 | Phase 53 | Criteria before adding graph storage | **2** | 3 | `1872` |
 | Phase 58 | Context economy: cache-stable translation, entitlement-aware reduction, and a measured token budget | **2** | 13 | `2008` |
@@ -107,6 +107,10 @@ these unwrapped.
 
 - **1294** ☐ Avoid moving an almost-complete high-value task to another session solely because a reserve threshold was crossed.
 
+### Phase 33C — Failure, quota, and route correlation  (1 open, 14 closed)
+
+- **1366** ☐ Learn or parse provider cadence separately from Retry-After remainder values when evidence permits.
+
 ### Phase 34B — Routing-model role  (1 open, 14 closed)
 
 - **1419** ☐ Prefer a routing model whose marginal decision cost is materially lower than the premium capacity it protects.
@@ -152,11 +156,6 @@ these unwrapped.
 
 - **1323** ☐ Avoid background probing at an aggressive rate that wastes free-request pools.
 - **1325** ☐ Record whether a health observation came from a real task, a retry, a repair attempt, or an explicit probe.
-
-### Phase 33C — Failure, quota, and route correlation  (2 open, 13 closed)
-
-- **1366** ☐ Learn or parse provider cadence separately from Retry-After remainder values when evidence permits.
-- **1367** ☐ Reserve known paced capacity at dispatch so concurrent workers do not all consume the same apparent allowance.
 
 ### Phase 38 — Quota-preserving routing  (2 open, 5 closed)
 

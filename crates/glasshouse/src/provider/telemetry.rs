@@ -132,7 +132,7 @@
 //! this module's allowlist — headers only, never a byte of the body — from
 //! every response it forwards. See that module for where.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::provider::quota::{
@@ -3011,6 +3011,642 @@ mod tests {
             read.read_from(),
             &[] as &[&str],
             "a name off the allowlist must not reach read_from even once the number beside it did"
+        );
+    }
+}
+
+// --- a dispatch's in-flight claim on a paced pool -------------------------
+//
+// Capability map line 1367. [`GatewayQuotaCache`] and [`GatewayHealthCache`]
+// above carry what a request **already spent** across a process boundary;
+// this carries what a request is **about to spend**, which is the fact two
+// concurrent short-lived dispatchers need from each other and the one no
+// cache in this build held. `glasshouse hook` and `glasshouse memory commit`
+// are separate processes that overlap in supported use, and until this
+// existed each read the same remaining-request count off disk and each spent
+// it.
+
+/// The on-disk format's version — [`GATEWAY_QUOTA_FORMAT_VERSION`]'s own
+/// pattern and the identical reason: a shape change is a cache miss, never a
+/// misread.
+const DISPATCH_RESERVATION_FORMAT_VERSION: u32 = 1;
+
+/// How long a reservation stands before a reader is entitled to ignore it.
+///
+/// # Why an expiry exists at all
+///
+/// The reserving process may not be alive to release. A `glasshouse hook`
+/// runs inside the user's turn and can be killed with the harness at any
+/// moment, and a row with no deadline left behind by one would take a
+/// request out of the pool for ever. So the record's authority is bounded by
+/// its own field, and a reader compares that field against its own
+/// wall-clock second — never against a process id, which recycles and whose
+/// liveness has no portable answer.
+///
+/// # Why ten seconds
+///
+/// Twice `main.rs`'s `EXTRACTION_BOUND`, which is the bound on the work a
+/// reservation covers: the extraction thread is abandoned five seconds after
+/// it starts, so no dispatch this record protects can still be spending
+/// after that. Doubling it is the margin for the two things either side of
+/// the call — resolving the credential before it and writing the health back
+/// after — so a live dispatch is never evicted while its request is
+/// genuinely in flight, and a killed one frees the slot within seconds
+/// rather than within a rate-limit window.
+///
+/// `main.rs`'s `the_reservation_lease_outlives_the_extraction_it_covers`
+/// pins the relationship between the two constants so they cannot drift
+/// apart in separate edits.
+pub const DISPATCH_RESERVATION_LEASE: Duration = Duration::from_secs(10);
+
+/// How many concurrent reservations one credential's pool is tracked at.
+///
+/// A dispatcher claims the first free slot below this, so the walk costs one
+/// `open` per live reservation and the number only matters when that many
+/// support jobs are in flight against one credential at once. Sixty-four is
+/// far past anything this build can produce — a hook and a commit is two —
+/// and a pool that genuinely has more than sixty-four requests left is not
+/// the scarce thing capability map line 1367 is about.
+const MAX_TRACKED_RESERVATIONS: u32 = 64;
+
+/// One dispatch's claim on one request of a credential's paced pool.
+///
+/// # Names, never a value
+///
+/// `credential_label` is [`crate::routing::CredentialId::label`] — a
+/// provider and a variable *name* — for the reason that method's own doc
+/// gives, and it is the same field [`GatewayHealthReading`] persists beside
+/// it. Nothing here resolves a secret and nothing here has one to write.
+///
+/// # `process_id` is a diagnostic, not a liveness test
+///
+/// It says who wrote the row, which is what a person debugging a pool that
+/// will not free wants to know. It is deliberately **not** consulted when
+/// deciding whether a row still counts: pids recycle, and asking the
+/// operating system whether one is alive has no answer that is the same on
+/// Unix and on Windows. [`Self::is_live`] reads `expires_at_unix` and
+/// nothing else.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct DispatchReservation {
+    pub credential_label: String,
+    pub model: String,
+    /// One request. A job needing several would claim several slots; memory
+    /// extraction is one `ExtractionModel::complete` per dispatch
+    /// (`main.rs::run_extraction` calls the model once, inside one bound),
+    /// so today this is always one and the field is what says so.
+    pub requests: u32,
+    pub process_id: u32,
+    pub reserved_at_unix: i64,
+    pub expires_at_unix: i64,
+}
+
+impl DispatchReservation {
+    /// Whether this row still speaks for a request that may yet be spent.
+    ///
+    /// The whole of the expiry rule, in one place, so the reader and the
+    /// slot-takeover path cannot disagree about it.
+    pub fn is_live(&self, now_unix: i64) -> bool {
+        self.expires_at_unix > now_unix
+    }
+}
+
+/// The row as it survives a round trip, with the version every other cache
+/// in this module carries and for the same reason.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+struct PersistedDispatchReservation {
+    version: u32,
+    #[serde(flatten)]
+    reservation: DispatchReservation,
+}
+
+/// A claim held by this process, released when the work it covers is done.
+///
+/// Deliberately not `Drop`: the release has to happen at a point the caller
+/// chooses — after the exchange, whether it succeeded or failed — and a type
+/// that released itself when it went out of scope would release at whichever
+/// frame happened to own it last. [`crate::memory::RoutedModel`] is what
+/// holds the release for the extraction path, and that type *does* have the
+/// drop guard, because there the last frame is exactly the right moment.
+#[derive(Debug, Clone)]
+pub struct DispatchReservationLease {
+    path: PathBuf,
+}
+
+impl DispatchReservationLease {
+    /// Give the request back to the pool.
+    ///
+    /// Best-effort and idempotent: a file already gone — released twice, or
+    /// taken over by a dispatcher that judged it expired — is the same
+    /// outcome as one removed here, and neither is worth a diagnostic on a
+    /// path that runs inside somebody's coding session.
+    pub fn release(&self) {
+        if let Err(err) = std::fs::remove_file(&self.path)
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::debug!(
+                error = %err,
+                "could not release a dispatch reservation; it expires on its own"
+            );
+        }
+    }
+
+    /// Where the row is, for a diagnostic and for this module's own tests.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+/// Which requests of a paced pool are already spoken for by dispatches that
+/// have not finished — capability map line 1367's cross-process channel.
+///
+/// # Why this one is not read-modify-write
+///
+/// [`GatewayHealthCache`] has one file per provider, and a writer reads it,
+/// replaces one entry and writes the whole file back. Two writers racing
+/// there lose an entry, which is a recorded limit of that cache and
+/// tolerable because the entry is *history*: the next observation restores
+/// it.
+///
+/// A reservation cannot tolerate it. The lost update **is** the double spend
+/// the line is about — two dispatchers that each read "nothing reserved" and
+/// each write their own row over the other's have exactly reproduced the
+/// defect. So a reservation is not an entry in a shared file. It is a file
+/// of its own, at a path derived from the credential and a slot number,
+/// claimed with `create_new`: one `O_EXCL`/`CREATE_NEW` open, atomic on
+/// every platform this ships to, which exactly one of two racing processes
+/// can win.
+///
+/// # The slot's key is the credential, and the row names the model
+///
+/// [`crate::routing::free::Allowance`] is *"what a provider is limiting, for
+/// one credential"* and [`crate::routing::free::FreePool`] holds one
+/// allowance per [`crate::routing::CredentialId`], so what two dispatches
+/// contend for is a credential's pool, not a model's. Two models behind one
+/// key draw down the same requests, and giving each its own slots would let
+/// two dispatches spend one remaining request between them — the same defect
+/// wearing a different key. The model is therefore a *field* of the row
+/// rather than part of its path: it says what the reserved request is for,
+/// so a person can see which model is holding a pool open.
+#[derive(Debug, Clone)]
+pub struct DispatchReservationCache {
+    root: PathBuf,
+}
+
+impl DispatchReservationCache {
+    /// The cache under this installation's data directory — exactly
+    /// [`GatewayQuotaCache::new`]'s own shape, and user-scoped for the same
+    /// reason: a credential's request pool belongs to the account the
+    /// credential names, not to whichever project a dispatch happened to run
+    /// in.
+    pub fn new(paths: &crate::paths::RuntimePaths) -> Self {
+        Self {
+            root: paths.data_dir().join("dispatch-reservations"),
+        }
+    }
+
+    /// A cache rooted at an explicit directory. For tests, exactly like
+    /// [`GatewayQuotaCache::at`].
+    pub fn at(root: impl Into<PathBuf>) -> Self {
+        Self { root: root.into() }
+    }
+
+    /// The directory the rows live in, so a caller can say whether anything
+    /// was ever reserved at all.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
+    fn path_for(&self, credential_label: &str, slot: u32) -> PathBuf {
+        self.root.join(format!(
+            "{}.slot{slot}.json",
+            crate::provider::cache::file_stem(credential_label)
+        ))
+    }
+
+    /// How many of `credential_label`'s requests are currently spoken for.
+    ///
+    /// This is the number a dispatcher subtracts from what the quota cache
+    /// says is left, before it asks the router to choose.
+    ///
+    /// **Returns no error, ever, and reads no network** —
+    /// [`GatewayQuotaCache::load`]'s own contract. An absent directory, an
+    /// unreadable file and another format version all mean "nothing reserved
+    /// here", never a reason to fail a dispatch.
+    ///
+    /// The credential is matched by the row's **path**, not by the label
+    /// inside it: a slot file that cannot be read still has to count against
+    /// the credential whose slot it occupies, and its name is the only thing
+    /// about it that is still legible.
+    pub fn reserved(&self, credential_label: &str, now_unix: i64) -> u32 {
+        (0..MAX_TRACKED_RESERVATIONS)
+            .filter(|slot| self.is_held(&self.path_for(credential_label, *slot), now_unix))
+            .count() as u32
+    }
+
+    /// Every reservation this cache holds and can read, live at `now_unix` —
+    /// for a diagnostic and for the tests that assert what a dispatch wrote.
+    pub fn live(&self, now_unix: i64) -> Vec<DispatchReservation> {
+        let Ok(entries) = std::fs::read_dir(&self.root) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for entry in entries.flatten() {
+            let path = entry.path();
+            // Skip a `<stem>.slot<n>.<pid>-<n>.writing` temporary from a
+            // write that crashed before its rename — [`GatewayQuotaCache`]'s
+            // own guard, and this cache has as many concurrent writers as
+            // there are dispatchers.
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            if let Some(reservation) = Self::read(&path).filter(|row| row.is_live(now_unix)) {
+                out.push(reservation);
+            }
+        }
+        out
+    }
+
+    /// Claim one of `capacity`'s requests for `credential_label`, or answer
+    /// [`None`] because every one of them is already claimed.
+    ///
+    /// `capacity` is what the pool is known to hold — the remainder a real
+    /// response stated, read back through
+    /// [`crate::provider::resources::observed_capacity`]. A caller that does
+    /// not know it must not call this at all: a claim against a ceiling
+    /// nobody measured would refuse a dispatch on an invented number.
+    ///
+    /// # Why the claim is trustworthy under a race, and the read is not
+    ///
+    /// [`Self::reserved`] can be read by two processes before either writes,
+    /// so netting alone is a check with no lock. This is the lock: the claim
+    /// is an exclusive create, so two dispatchers that both believed a
+    /// request was free find out here and exactly one of them is right. A
+    /// caller whose claim is refused knows the pool is spoken for **now**,
+    /// which is the moment that matters, and goes on to the next candidate.
+    ///
+    /// # An expired slot is taken over, not overwritten
+    ///
+    /// A row past its deadline is removed and the slot is then claimed the
+    /// same exclusive way, so two dispatchers that both notice one dead row
+    /// still produce exactly one holder rather than two that each renamed a
+    /// file over the other's.
+    ///
+    /// Best-effort in the same sense every other writer in this module is:
+    /// an I/O failure answers [`None`], and the caller's own documentation
+    /// says what it does with that — never a failed dispatch over a full
+    /// disk.
+    pub fn claim(
+        &self,
+        credential_label: &str,
+        model: &str,
+        capacity: u32,
+        now_unix: i64,
+    ) -> Option<DispatchReservationLease> {
+        if capacity == 0 || std::fs::create_dir_all(&self.root).is_err() {
+            return None;
+        }
+        let reservation = DispatchReservation {
+            credential_label: credential_label.to_owned(),
+            model: model.to_owned(),
+            requests: 1,
+            process_id: std::process::id(),
+            reserved_at_unix: now_unix,
+            expires_at_unix: now_unix + DISPATCH_RESERVATION_LEASE.as_secs() as i64,
+        };
+        for slot in 0..capacity.min(MAX_TRACKED_RESERVATIONS) {
+            let path = self.path_for(credential_label, slot);
+            if !self.take(&path, &reservation, now_unix) {
+                continue;
+            }
+            return Some(DispatchReservationLease { path });
+        }
+        None
+    }
+
+    /// Take `path` for `reservation`, or answer `false` because somebody
+    /// else holds it.
+    ///
+    /// The exclusive create is the whole of the mutual exclusion; the write
+    /// after it only fills in a file this process already owns.
+    fn take(&self, path: &Path, reservation: &DispatchReservation, now_unix: i64) -> bool {
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(path)
+        {
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                if self.is_held(path, now_unix) {
+                    return false;
+                }
+                // Past its deadline: remove it and let a second exclusive
+                // create decide who gets the empty slot, rather than
+                // renaming over a file another dispatcher may be claiming at
+                // this instant.
+                let _ = std::fs::remove_file(path);
+                if std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .open(path)
+                    .is_err()
+                {
+                    return false;
+                }
+            }
+            Err(err) => {
+                tracing::debug!(
+                    error = %err,
+                    "could not claim a dispatch reservation; this dispatch reserves nothing"
+                );
+                return false;
+            }
+        }
+        let Ok(encoded) = serde_json::to_vec_pretty(&PersistedDispatchReservation {
+            version: DISPATCH_RESERVATION_FORMAT_VERSION,
+            reservation: reservation.clone(),
+        }) else {
+            return true;
+        };
+        if let Err(err) = crate::provider::cache::write_json_atomically(path, &encoded) {
+            // The claim stands — this process holds the slot and will
+            // release it — but nobody else can read what it is for. The
+            // empty file's own age is what bounds it, which is
+            // [`Self::is_held`]'s second arm.
+            tracing::debug!(
+                error = %err,
+                "a dispatch reservation was claimed but could not be described"
+            );
+        }
+        true
+    }
+
+    /// Whether the slot at `path` is claimed by a dispatch that has not
+    /// finished.
+    ///
+    /// # A row being written counts as held
+    ///
+    /// A slot file is created empty and filled a moment later, so a reader
+    /// can catch one with no content in it. That file is a claim somebody
+    /// currently holds, and treating it as free would hand out the very
+    /// request it is claiming. It therefore counts, and its deadline is the
+    /// file's own modification time plus [`DISPATCH_RESERVATION_LEASE`] —
+    /// the same bound the row would have carried — so an unreadable claim
+    /// cannot hold a pool open any longer than a readable one.
+    ///
+    /// A file whose modification time cannot be read at all is treated as
+    /// **not** held. That is the one place where refusing to invent a
+    /// deadline is the safer direction, because a row with no deadline is
+    /// the single thing this mechanism must never produce.
+    fn is_held(&self, path: &Path, now_unix: i64) -> bool {
+        match Self::read(path) {
+            Some(reservation) => reservation.is_live(now_unix),
+            None => Self::written_at(path)
+                .is_some_and(|written_at| written_at + Self::lease_seconds() > now_unix),
+        }
+    }
+
+    /// The row at `path`, or [`None`] for every way a read can fail — which
+    /// all mean the same thing to a caller and none of which is an error.
+    fn read(path: &Path) -> Option<DispatchReservation> {
+        let bytes = std::fs::read(path).ok()?;
+        let stored: PersistedDispatchReservation = serde_json::from_slice(&bytes).ok()?;
+        (stored.version == DISPATCH_RESERVATION_FORMAT_VERSION).then_some(stored.reservation)
+    }
+
+    /// When the file at `path` was last written, as a unix second, or
+    /// [`None`] when it does not exist or the filesystem cannot say.
+    fn written_at(path: &Path) -> Option<i64> {
+        let modified = std::fs::metadata(path).ok()?.modified().ok()?;
+        Some(
+            modified
+                .duration_since(std::time::SystemTime::UNIX_EPOCH)
+                .ok()?
+                .as_secs() as i64,
+        )
+    }
+
+    fn lease_seconds() -> i64 {
+        DISPATCH_RESERVATION_LEASE.as_secs() as i64
+    }
+
+    /// Write `reservation` into `slot` regardless of who holds it.
+    ///
+    /// **Not the production path** — [`Self::claim`] is, and it is
+    /// exclusive. This exists for a test that has to plant a row a live
+    /// dispatcher would never write: one whose deadline has already passed,
+    /// or one belonging to a process that is not running. Both are states
+    /// the readers above have rules for, and neither can be produced by
+    /// asking this cache for a claim.
+    pub fn plant(&self, slot: u32, reservation: &DispatchReservation) -> std::io::Result<()> {
+        std::fs::create_dir_all(&self.root)?;
+        let encoded = serde_json::to_vec_pretty(&PersistedDispatchReservation {
+            version: DISPATCH_RESERVATION_FORMAT_VERSION,
+            reservation: reservation.clone(),
+        })
+        .map_err(|err| std::io::Error::other(err.to_string()))?;
+        crate::provider::cache::write_json_atomically(
+            &self.path_for(&reservation.credential_label, slot),
+            &encoded,
+        )
+    }
+}
+
+#[cfg(test)]
+mod dispatch_reservation_cache_tests {
+    use super::*;
+
+    const NOW: i64 = 1_787_900_000;
+    const LABEL: &str = "free-runner/FREE_RUNNER_API_KEY";
+
+    fn cache() -> (tempfile::TempDir, DispatchReservationCache) {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let cache = DispatchReservationCache::at(dir.path().join("dispatch-reservations"));
+        (dir, cache)
+    }
+
+    /// Nothing claimed is nothing reserved, and an absent directory is not an
+    /// error — [`GatewayQuotaCache`]'s own fail-soft contract.
+    #[test]
+    fn a_cache_nothing_has_claimed_reserves_nothing() {
+        let (_dir, cache) = cache();
+        assert_eq!(cache.reserved(LABEL, NOW), 0);
+        assert_eq!(cache.live(NOW), Vec::new());
+        assert!(!cache.root().exists(), "a read must not create the cache");
+    }
+
+    /// The mutual exclusion, at the type that owns it: a pool of one serves
+    /// one claim, and the second dispatcher is told so rather than being
+    /// handed the same request.
+    #[test]
+    fn a_pool_of_one_request_is_claimed_once() {
+        let (_dir, cache) = cache();
+        let first = cache
+            .claim(LABEL, "a-free-model", 1, NOW)
+            .expect("the only request must be claimable");
+        assert_eq!(cache.reserved(LABEL, NOW), 1);
+        assert!(
+            cache.claim(LABEL, "a-free-model", 1, NOW).is_none(),
+            "a request already spoken for must not be handed out twice"
+        );
+
+        first.release();
+        assert_eq!(cache.reserved(LABEL, NOW), 0);
+        assert!(
+            cache.claim(LABEL, "a-free-model", 1, NOW).is_some(),
+            "a released request is back in the pool"
+        );
+    }
+
+    /// A pool of two serves two, which is what makes the refusal above a
+    /// statement about the remainder rather than about claiming at all.
+    #[test]
+    fn a_pool_of_two_requests_serves_two_dispatches_and_no_more() {
+        let (_dir, cache) = cache();
+        assert!(cache.claim(LABEL, "a-free-model", 2, NOW).is_some());
+        assert!(cache.claim(LABEL, "another-model", 2, NOW).is_some());
+        assert_eq!(
+            cache.reserved(LABEL, NOW),
+            2,
+            "two models behind one credential draw down one pool"
+        );
+        assert!(cache.claim(LABEL, "a-free-model", 2, NOW).is_none());
+    }
+
+    /// Capability map line 1367's *never blocks a pool for ever*: a row a
+    /// killed process left behind stops counting at its deadline, and the
+    /// slot is taken over rather than left occupied.
+    #[test]
+    fn an_expired_row_stops_counting_and_its_slot_is_taken_over() {
+        let (_dir, cache) = cache();
+        cache
+            .plant(
+                0,
+                &DispatchReservation {
+                    credential_label: LABEL.to_owned(),
+                    model: "a-free-model".to_owned(),
+                    requests: 1,
+                    process_id: 999_999,
+                    reserved_at_unix: NOW - 600,
+                    expires_at_unix: NOW - 60,
+                },
+            )
+            .expect("the row must be plantable");
+
+        assert_eq!(
+            cache.reserved(LABEL, NOW),
+            0,
+            "a deadline that has passed reserves nothing"
+        );
+        let lease = cache
+            .claim(LABEL, "a-free-model", 1, NOW)
+            .expect("the dead row's slot must be claimable");
+        assert_eq!(cache.reserved(LABEL, NOW), 1);
+        assert_eq!(
+            cache.live(NOW).len(),
+            1,
+            "the takeover replaces the dead row rather than adding to it"
+        );
+        lease.release();
+    }
+
+    /// The row carries two names and a model, and the reader gets them back.
+    #[test]
+    fn a_claim_records_the_label_and_the_model_and_expires_on_its_own_schedule() {
+        let (_dir, cache) = cache();
+        let _lease = cache
+            .claim(LABEL, "a-free-model", 4, NOW)
+            .expect("a pool of four serves this claim");
+
+        let live = cache.live(NOW);
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0].credential_label, LABEL);
+        assert_eq!(live[0].model, "a-free-model");
+        assert_eq!(live[0].requests, 1);
+        assert_eq!(live[0].process_id, std::process::id());
+        assert_eq!(
+            live[0].expires_at_unix,
+            NOW + DISPATCH_RESERVATION_LEASE.as_secs() as i64
+        );
+        assert_eq!(
+            cache.reserved(LABEL, NOW + DISPATCH_RESERVATION_LEASE.as_secs() as i64),
+            0,
+            "the lease is what bounds the row, and it is absolute"
+        );
+    }
+
+    /// Two credentials are two pools — line 538's per-credential quota state,
+    /// applied to what is in flight rather than to what was spent.
+    #[test]
+    fn one_credentials_reservation_says_nothing_about_another() {
+        let (_dir, cache) = cache();
+        let _lease = cache
+            .claim(LABEL, "a-free-model", 1, NOW)
+            .expect("a pool of one serves the first claim");
+        assert_eq!(cache.reserved("other-runner/OTHER_KEY", NOW), 0);
+        assert!(
+            cache
+                .claim("other-runner/OTHER_KEY", "a-free-model", 1, NOW)
+                .is_some(),
+            "one credential being spoken for must not take another out of service"
+        );
+    }
+
+    /// A claim caught between its exclusive create and its description still
+    /// holds the request — the state a reader can genuinely observe, and the
+    /// one where treating "unreadable" as "free" would double-spend.
+    #[test]
+    fn a_slot_claimed_but_not_yet_described_still_holds_its_request() {
+        let (_dir, cache) = cache();
+        std::fs::create_dir_all(cache.root()).unwrap();
+        let path = cache.path_for(LABEL, 0);
+        std::fs::write(&path, b"").unwrap();
+
+        assert_eq!(
+            cache.reserved(LABEL, now_unix_for_test()),
+            1,
+            "an empty slot file is a claim in progress, not a free request"
+        );
+        assert!(
+            cache
+                .claim(LABEL, "a-free-model", 1, now_unix_for_test())
+                .is_none()
+        );
+    }
+
+    /// The same file, once its own age is past the lease: a claim nobody
+    /// could describe expires on the same schedule as one that was.
+    #[test]
+    fn a_slot_that_was_never_described_expires_like_any_other() {
+        let (_dir, cache) = cache();
+        std::fs::create_dir_all(cache.root()).unwrap();
+        std::fs::write(cache.path_for(LABEL, 0), b"").unwrap();
+
+        let later = now_unix_for_test() + DISPATCH_RESERVATION_LEASE.as_secs() as i64 + 1;
+        assert_eq!(cache.reserved(LABEL, later), 0);
+        assert!(cache.claim(LABEL, "a-free-model", 1, later).is_some());
+    }
+
+    /// `written_at` is read from the filesystem, so the two tests above need
+    /// the real clock rather than the fixed second the others use.
+    fn now_unix_for_test() -> i64 {
+        crate::provider::cache::now_unix_seconds()
+    }
+
+    /// The credential label is a provider and a variable name, and the file
+    /// on disk carries exactly that and no value — the invariant line 1367
+    /// inherits from every other cache in this module.
+    #[test]
+    fn no_credential_value_can_reach_the_row() {
+        let (_dir, cache) = cache();
+        let lease = cache
+            .claim(LABEL, "a-free-model", 1, NOW)
+            .expect("a pool of one serves this claim");
+        let text = std::fs::read_to_string(lease.path()).expect("the row must be readable");
+        assert!(text.contains(LABEL));
+        assert!(text.contains("a-free-model"));
+        assert!(
+            !text.contains("sk-"),
+            "a reservation carries names, never a credential value: {text}"
         );
     }
 }

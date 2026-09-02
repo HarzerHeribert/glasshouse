@@ -535,6 +535,49 @@ impl FreePool {
         self.allowance_entry(credential).record(reading, now);
     }
 
+    /// Net the requests other dispatches already hold out of what this
+    /// credential's pool is known to have left — capability map line 1367,
+    /// on the reading side.
+    ///
+    /// `known_remaining` is what a real response actually stated is left, as
+    /// a caller read it back off disk; `in_flight` is how many of those a
+    /// concurrent process has already claimed and has not yet spent. The
+    /// difference is what a dispatcher deciding *now* may actually use, and
+    /// it is that difference this records, so
+    /// [`Allowance::is_exhausted`] — and therefore
+    /// [`FreePool::is_available`], which is the one gate
+    /// `crate::routing::disposable::DisposableRouting::choose` puts every
+    /// free candidate through — sees a pool that is empty when every
+    /// remaining request is spoken for.
+    ///
+    /// # Why this is not [`FreePool::record_pool`]
+    ///
+    /// `record_pool` carries *"what the provider claims is left"*, and no
+    /// provider claimed this. The subtraction is Glasshouse's own bookkeeping
+    /// about work it is itself about to do, and giving it its own name keeps
+    /// a reader of the allowance from mistaking a local claim for a
+    /// statement on the wire. It also keeps the two mutable in different
+    /// ways: a later real reading overwrites `remaining` outright, which is
+    /// correct, because a response is authoritative about the pool and a
+    /// reservation never was.
+    ///
+    /// A credential this pool has been told is [`Allowance::TokenPriced`] is
+    /// left exactly as it is: there is no request count to net anything out
+    /// of, and inventing one would be the conflation line 528 forbids.
+    /// Nothing here is a rule change — the rule that a pool with no requests
+    /// left cannot serve is [`Allowance::is_exhausted`]'s, unchanged, and
+    /// this only feeds it a truthful number.
+    pub fn withhold_in_flight(
+        &mut self,
+        credential: &CredentialId,
+        known_remaining: u32,
+        in_flight: u32,
+    ) {
+        if let Allowance::RequestPool { remaining, .. } = self.allowance_entry(credential) {
+            *remaining = Some(known_remaining.saturating_sub(in_flight));
+        }
+    }
+
     /// Declare that this credential is priced per token rather than pooled.
     ///
     /// Explicit rather than inferred: line 528's whole content is that the
@@ -927,6 +970,61 @@ mod tests {
                 .is_exhausted(now + Duration::from_secs(61)),
             "past the provider's own reset instant, what is left is unknown again, not zero"
         );
+    }
+
+    /// Line 1367, at the pool: a remainder every concurrent dispatch has
+    /// already claimed is a pool that cannot serve, and it reaches the
+    /// router through the same gate a cooldown does.
+    #[test]
+    fn requests_already_claimed_by_another_dispatch_leave_the_pool_unable_to_serve() {
+        let id = credential("free-runner", "FREE_RUNNER_API_KEY");
+        let free = resource("free-runner", "FREE_RUNNER_API_KEY", "a-free-model");
+        let now = Instant::now();
+        let mut pool = FreePool::new();
+
+        pool.withhold_in_flight(&id, 3, 1);
+        assert!(
+            pool.is_available(&free, now),
+            "two of three requests are still free to spend"
+        );
+        assert_eq!(
+            pool.allowance(&id),
+            Allowance::RequestPool {
+                limit: None,
+                remaining: Some(2),
+                resets_at: None,
+            }
+        );
+
+        pool.withhold_in_flight(&id, 1, 1);
+        assert!(pool.allowance(&id).is_exhausted(now));
+        assert!(
+            !pool.is_available(&free, now),
+            "the one remaining request is spoken for, so this resource cannot serve"
+        );
+        assert_eq!(
+            pool.health(&free).consecutive_failures(),
+            0,
+            "a reservation is not a failure: nothing here may put the resource in cooldown"
+        );
+
+        // More claimed than the provider said was left is still zero, never
+        // an underflow.
+        pool.withhold_in_flight(&id, 1, 4);
+        assert!(pool.allowance(&id).is_exhausted(now));
+    }
+
+    /// A credential priced per token has no request count to net anything
+    /// out of — line 528's conflation, refused here as everywhere else.
+    #[test]
+    fn a_token_priced_credential_is_untouched_by_what_is_in_flight() {
+        let id = credential("metered-runner", "METERED_RUNNER_API_KEY");
+        let mut pool = FreePool::new();
+        pool.declare_token_priced(&id);
+
+        pool.withhold_in_flight(&id, 1, 1);
+        assert_eq!(pool.allowance(&id), Allowance::TokenPriced);
+        assert!(!pool.allowance(&id).is_exhausted(Instant::now()));
     }
 
     /// Line 536, the ordering half.

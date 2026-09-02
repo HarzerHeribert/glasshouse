@@ -1364,7 +1364,7 @@ Phase 33C — Failure, quota, and route correlation
 ☑ Classify failures at least as throttle, exhausted quota, upstream 5xx, timeout, stream abort, empty completion, credential failure, request incompatibility, or unknown.
 ☑ Keep temporary cadence throttling separate from exhausted long-window quota and from provider health failures.
 ☐ Learn or parse provider cadence separately from Retry-After remainder values when evidence permits.
-☐ Reserve known paced capacity at dispatch so concurrent workers do not all consume the same apparent allowance.
+☑ Reserve known paced capacity at dispatch so concurrent workers do not all consume the same apparent allowance.
 ☑ Avoid retrying a paced route in place when the current cadence makes the retry predictably unavailable.
 ☑ Reduce or suppress active probes when probing would consume a material fraction of a scarce request pool.
 ☑ Measure temporally overlapping failures between routes rather than assuming different front doors are independent providers.

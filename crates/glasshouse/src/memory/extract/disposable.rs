@@ -72,6 +72,14 @@ use super::{ExtractionModel, ModelError, ModelReply, Prompt};
 /// afterwards. `Send + Sync` for the same reason [`ExtractionModel`] is.
 type ObserveOutcome = Box<dyn Fn(&FreeResource, WorkloadOutcome) + Send + Sync>;
 
+/// How this dispatch gives back the request it reserved.
+///
+/// A boxed closure for [`ObserveOutcome`]'s own reason, and because the
+/// thing being released is a file under the runtime paths — which this
+/// module may no more name than it may name a cache. `main.rs` holds the
+/// lease and hands over the one call that ends it.
+type ReleaseReservation = Box<dyn Fn() + Send + Sync>;
+
 /// Routes a disposable job through [`DisposableRouting`] and performs it
 /// through the client its caller resolved for the resource that won.
 ///
@@ -94,6 +102,23 @@ pub struct RoutedModel {
     /// The resource health is keyed by, when there is a call to learn from.
     resource: Option<FreeResource>,
     observe: Option<ObserveOutcome>,
+    /// Give back the request this dispatch reserved out of a paced pool —
+    /// capability map line 1367's release half. [`None`] whenever nothing
+    /// was reserved, which is every unpaced pool and every run with no
+    /// client.
+    release: Option<ReleaseReservation>,
+    /// Whether [`Self::release_reservation`] has already run. The release is
+    /// idempotent at the cache too, but a flag here keeps a completed call
+    /// from racing this type's own drop guard for a file another dispatcher
+    /// may by then have claimed.
+    released: std::sync::atomic::AtomicBool,
+    /// What the caller wants said about this decision that the routing
+    /// policy itself could not know — today, that a resource's whole
+    /// remaining allowance is spoken for by another dispatch. Rendered by
+    /// [`ExtractionModel::describe`], so it reaches the ledger row and the
+    /// command's own output through the one string production already
+    /// prints.
+    note: Option<String>,
 }
 
 impl RoutedModel {
@@ -184,6 +209,9 @@ impl RoutedModel {
             credential_label: None,
             resource: None,
             observe: None,
+            release: None,
+            released: std::sync::atomic::AtomicBool::new(false),
+            note: None,
         }
     }
 
@@ -237,6 +265,67 @@ impl RoutedModel {
         self
     }
 
+    /// How the request this dispatch reserved is given back — capability
+    /// map line 1367's release half, and the mirror of [`Self::observing`].
+    ///
+    /// Called once, from whichever comes first: the end of
+    /// [`ExtractionModel::complete_observed`], where the exchange has
+    /// finished and the pool is genuinely free again — success or failure
+    /// alike, because a call that failed spent the request just the same —
+    /// or this type's drop, which covers a model that was built and never
+    /// asked anything.
+    ///
+    /// # Both, and neither is the belt to the other's braces
+    ///
+    /// Releasing at the end of the call is what makes the pool usable again
+    /// *while this process is still finishing*, which is the whole point of
+    /// a reservation being narrower than a process. Releasing on drop is
+    /// what covers the run that never called: `main.rs` builds the model
+    /// before it knows whether there is anything to extract, and a chunk
+    /// with nothing in it must not hold a request until the deadline.
+    ///
+    /// Neither covers a process killed mid-call, and neither is meant to:
+    /// that is what the record's own expiry is for.
+    pub fn releasing(mut self, release: impl Fn() + Send + Sync + 'static) -> Self {
+        self.release = Some(Box::new(release));
+        self
+    }
+
+    /// Say something about this decision the routing policy could not know:
+    /// today, that a resource's whole remaining allowance is already spoken
+    /// for by another dispatch.
+    ///
+    /// Additive to the explanation and never a substitute for it: the policy
+    /// still says what it chose and why, and this says what the caller
+    /// observed about the resources it did not choose.
+    pub fn noting(mut self, note: impl Into<String>) -> Self {
+        self.note = Some(note.into());
+        self
+    }
+
+    /// Give the reserved request back, at most once.
+    fn release_reservation(&self) {
+        if let Some(release) = &self.release
+            && !self
+                .released
+                .swap(true, std::sync::atomic::Ordering::SeqCst)
+        {
+            release();
+        }
+    }
+
+    /// Whether this model has a client it can actually call.
+    ///
+    /// For a caller holding something that must be given back when nothing
+    /// will be called after all — capability map line 1367's reservation.
+    /// The three no-call states below are one answer to that question, and
+    /// asking it here rather than re-deriving it from
+    /// [`Self::choice`] and the client the caller just supplied is what
+    /// keeps the two from disagreeing.
+    pub fn can_call(&self) -> bool {
+        self.callable().is_ok()
+    }
+
     /// The client to call, or the [`ModelError`] that stands in for it.
     ///
     /// Three no-call states, kept apart because they are three different
@@ -282,9 +371,18 @@ fn workload_outcome(result: &Result<ModelReply, ModelError>) -> WorkloadOutcome 
     }
 }
 
+/// The reservation outlives every path out of [`ExtractionModel`], and this
+/// is the one that covers a model that was never asked anything — see
+/// [`RoutedModel::releasing`].
+impl Drop for RoutedModel {
+    fn drop(&mut self) {
+        self.release_reservation();
+    }
+}
+
 impl ExtractionModel for RoutedModel {
     fn describe(&self) -> String {
-        match (&self.outcome, &self.client) {
+        let described = match (&self.outcome, &self.client) {
             (Ok(choice), Some(Ok(client))) => {
                 format!("{} — asked as {}", choice.describe(), client.describe())
             }
@@ -296,6 +394,10 @@ impl ExtractionModel for RoutedModel {
                 "none configured (Phase 39 supplies the provider): {reason} — no model was \
                  called"
             ),
+        };
+        match &self.note {
+            Some(note) => format!("{described} ({note})"),
+            None => described,
         }
     }
 
@@ -326,6 +428,12 @@ impl ExtractionModel for RoutedModel {
         if let (Some(resource), Some(observe)) = (&self.resource, &self.observe) {
             observe(resource, workload_outcome(&result));
         }
+
+        // Line 1367's release half, and after the observation on purpose:
+        // what this call cost the pool is folded in first, so the next
+        // dispatcher that reads the pool back cannot see the request freed
+        // while the rate limit it produced is still unwritten.
+        self.release_reservation();
 
         result
     }

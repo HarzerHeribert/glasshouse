@@ -683,3 +683,106 @@ Recorded scope limits — stated by the worker, not discovered later:
 The census above found nothing to reserve because the disposable router chose and called nothing. That is no longer true: a dispatch resolves a credential and makes a real request against it, and pool health crosses processes through `GatewayHealthCache` (write side `main.rs::persist_support_work_health`, read side `observed_health_of`). **1367 stays open** — this package supplies the spend, not the reservation — and `GH-DISPATCH-RESERVATION-ROW` (Red) can now build on named facts: the `CredentialId` and model that will be spent are known at `RoutedModel::choice()`, before the call, which is the moment a lease has to be taken; the two dispatchers (`report_hook`, `memory_commit`) are still separate processes and both reach `disposable_extraction_model`, so a row is written at one site; the cross-process channel is the on-disk cache the health already uses, so a reservation row keyed by credential and model with an expiry (a hook process can be killed before it clears its row) is the same shape with a deadline — and the packet must decide what a dispatcher does when the row says the allowance is spoken for (wait, choose another, or proceed and say so), which is the ruling that packet carries.
 
 ---
+
+
+---
+
+## 1367 CLOSED — 2026-09-02 (`GH-DISPATCH-RESERVATION-ROW`, Red, Opus 5 high): a dispatch reserves the request it is about to spend, in a file only one process can create
+
+The design, written in the report before the diff and accepted as written. **A record is a file** under `data_dir()/dispatch-reservations`, `<credential>.slot<k>.json`, carrying the credential label, the model, `requests` (1), the writing pid, `reserved_at` and `expires_at` — one file per row because the health cache's read-modify-write lost update *is* the double spend here, so the claim is an `OpenOptions::create_new` (one exclusive create, atomic on every platform this ships to) and `write_json_atomically` only fills a file the process already owns. **The slot namespace is the credential alone** — `FreePool` holds one `Allowance` per `CredentialId`, so two models behind one key draw down one pool and per-model slots would have let two dispatches spend one remaining request; the model is a field of the row. **The lease is ten seconds**, `2 × EXTRACTION_BOUND`, pinned by `the_reservation_lease_outlives_the_extraction_it_covers`; the deadline is the whole liveness rule and the pid is never consulted (pids recycle, and "is this pid alive" has no portable answer). **Taken** in `disposable_extraction_model` after `RoutedModel::choice()` resolves and before the client is built, behind two gates: consent (no `[memory] extraction_model`, no claim) and a measured pool (`paced_request_remainder` answers `None` for an unmeasured or token-priced resource and nothing is written). **Released** through `RoutedModel::releasing`'s closure at the end of `complete_observed` — success or failure — or on `Drop`, at most once. **Read** before `choose`: `withhold_reserved_requests` nets the live rows out of the pool through the one new `FreePool::withhold_in_flight`, and the exclusion is `Allowance::is_exhausted` reached through `FreePool::is_available` — the identical gate a cooling-down resource fails — so `choose` falls to the next candidate or to `NoResource` in today's words, and `RoutedModel::noting` puts the reason in `describe()`: *`<model> (<label>): its N remaining request(s) are reserved by another dispatch`*. The netting is a lockless read and the claim is the lock: a dispatcher whose claim is refused withholds that credential's whole remainder and asks the policy again, bounded by the candidate count; **no dispatcher waits**. A metered candidate is not withdrawn by an empty request pool (the router's own rule, not this caller's), so a refused claim there proceeds with the note — stated, not hidden. `routing/disposable.rs` is untouched and `the_two_policy_classes_do_not_name_each_other` is green.
+
+Four packet corrections, all accepted from the code: the slot key (above); `write_json_atomically` cannot be the claim because a rename overwrites; the netting counts every live row rather than "other processes'" rows, which is identical at netting time and keeps a pid check out of the reader; and the remainder it reads is provider-wide (`GatewayQuotaCache`'s key), 1369's own recorded limit, carried forward as a limit.
+
+### Reserve known paced capacity at dispatch so concurrent workers do not all consume the same apparent allowance. (line 1367)
+
+Contract: Given two or more Glasshouse processes dispatching support work against one credential whose request pool is paced and known, when each resolves its choice, Glasshouse reserves the requests it is about to spend in a record the other process reads before choosing, so the second dispatcher sees the remainder net of in-flight reservations and, when nothing is left, chooses another resource or fails in today's words rather than both spending the same apparent allowance -- while preserving that a reservation left by a killed process expires and never blocks a pool forever, that a completed call releases its reservation, that an unknown or unpaced pool reserves nothing and dispatches exactly as today, that the two policy classes still do not name each other, and that no credential value enters the record.
+
+State: **COMPLETE** — ruled 2026-09-02 by the orchestrator after reading the three decisive seams in the worktree (the exclusive-create claim and its expired-slot re-decision in `DispatchReservationCache::take`; the netting in `main.rs::withhold_reserved_requests`, which only feeds `FreePool::withhold_in_flight` and lets `Allowance::is_exhausted` decide through the gate a cooldown already takes; the once-only release in `RoutedModel::release_reservation`, on `complete_observed` and on `Drop`). Red tier: full relevant regression run with counts, the semantic mutation suite 4/4 KILLED with output, the platform leg is macOS with the portability argument stated in the code (`create_new` and a wall-clock deadline; the pid is a diagnostic and never a liveness test); the independent read was the orchestrator's own of those seams rather than a second Opus run, given the report's artifacts (§88).
+
+Production evidence:
+- `src/provider/telemetry.rs` — `DispatchReservationCache::claim`
+- `src/provider/telemetry.rs` — `DispatchReservationCache::reserved`
+- `src/provider/telemetry.rs` — `DispatchReservation::is_live`
+- `src/provider/telemetry.rs` — `DispatchReservationLease::release`
+- `src/routing/free.rs` — `FreePool::withhold_in_flight`
+- `src/memory/extract/disposable.rs` — `RoutedModel::releasing`
+- `src/memory/extract/disposable.rs` — `RoutedModel::noting`
+- `src/main.rs` — `withhold_reserved_requests`
+- `src/main.rs` — `paced_request_remainder`
+- `src/main.rs` — `disposable_extraction_model`
+
+Regression evidence:
+- `dispatch_reservation::two_dispatches_racing_one_remaining_request_spend_it_once`
+- `dispatch_reservation::a_reservation_from_a_killed_process_expires_and_the_dispatch_proceeds`
+- `dispatch_reservation::a_live_reservation_takes_the_last_request_out_of_the_pool`
+- `dispatch_reservation::a_completed_call_leaves_no_reservation_behind`
+- `dispatch_reservation::an_unmeasured_pool_reserves_nothing_and_dispatches_as_before`
+- `dispatch_reservation::the_row_a_dispatch_writes_names_the_allowance_and_never_its_value`
+- `provider::telemetry::dispatch_reservation_cache_tests::a_pool_of_one_request_is_claimed_once`
+- `provider::telemetry::dispatch_reservation_cache_tests::an_expired_row_stops_counting_and_its_slot_is_taken_over`
+- `provider::telemetry::dispatch_reservation_cache_tests::a_slot_claimed_but_not_yet_described_still_holds_its_request`
+- `routing::free::tests::requests_already_claimed_by_another_dispatch_leave_the_pool_unable_to_serve`
+- `routing::free::tests::a_token_priced_credential_is_untouched_by_what_is_in_flight`
+- `tests::a_free_resource_whose_remaining_requests_are_all_reserved_is_not_chosen`
+- `tests::the_reservation_lease_outlives_the_extraction_it_covers`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| src/provider/telemetry.rs: `if !self.take(&path, &reservation, now_unix) {` -> `if false {` | `never-reserve` | **killed** | `dispatch_reservation::two_dispatches_racing_one_remaining_request_spend_it_once` |
+| src/provider/telemetry.rs: `self.expires_at_unix > now_unix` -> `true` | `never-expire` | **killed** | `dispatch_reservation::a_reservation_from_a_killed_process_expires_and_the_dispatch_proceeds` |
+| src/memory/extract/disposable.rs: `            release();` -> `            let _ = release;` | `never-release` | **killed** | `dispatch_reservation::a_completed_call_leaves_no_reservation_behind` |
+| src/main.rs: `paced_request_remainder(&provider, &effective, &telemetry, now_unix)` -> `Some(1u32)` | `reserve-the-unknown` | **killed** | `dispatch_reservation::an_unmeasured_pool_reserves_nothing_and_dispatches_as_before` |
+
+> never-reserve observed: assertion `left == right` failed: one remaining request is one request spent, however many dispatches want it: trigger manual, model a-free-model on free-runner — free, used by user preference
+
+> never-expire observed: assertion `left == right` failed: a row past its deadline reserves nothing: trigger manual, model a-named-model on named-runner — metered, used by fallback
+
+> never-release observed: assertion `left == right` failed: a finished call holds nothing: trigger manual, model a-free-model on free-runner — free, used by user preference
+
+> reserve-the-unknown observed: panicked at crates/glasshouse/tests/dispatch_reservation.rs:690:5 -- the reservation directory was created for a pool nothing had measured
+
+Recorded scope limits — stated by the worker, not discovered later:
+- The remainder read as the ceiling is PROVIDER-wide (GatewayQuotaCache's own key); the claim is per credential. A provider with several credentials may have each of them in flight up to the provider's whole remainder.
+- MAX_TRACKED_RESERVATIONS is 64: a pool with more than 64 requests left whose first 64 slots are all live reads as spoken for.
+- A metered candidate is not withdrawn by an empty request pool -- choose's metered path does not consult FreePool::is_available -- so a refused claim there dispatches as today, with the note. Changing that is a routing rule.
+- A process killed between the claim and the call holds the request for the ten-second lease.
+- Nothing here writes GatewayQuotaCache, so the measured remainder does not fall as requests are spent (GH-ROUTED-EXTRACTION-CLIENT's recorded limit: ConfiguredModel reads no response headers). This paces concurrent dispatches against each other, it does not refresh a stale reading.
+- Allowance::TokenPriced is untouched: there is no request count to net anything out of.
+- The six binary tests drive `memory commit`; the hook dispatcher shares disposable_extraction_model and is covered by its unchanged suites.
+- macOS only. The claim primitive (create_new) and the wall-clock expiry were chosen so nothing here is Unix-only, but the Windows leg was not run.
+
+---
+
+## REVIEW — the orchestrator owes an answer to each of these
+
+This section is the point of the generator. Everything above is the
+worker's facts, transcribed. Nothing below is decided.
+
+- **1367** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
+
+**Packet errors the worker reported — read these BEFORE its results.**
+Thirteen consecutive rounds a worker corrected its packet and was right:
+- the packet said the record is keyed by credential label AND model; the slot namespace is the credential alone, because routing::free::FreePool holds one Allowance per CredentialId (src/routing/free.rs:437) -- two models behind one key draw down one pool, so per-model slots would let two dispatches spend one remaining request. The model is a field of the row.
+- the packet said the record is written 'through write_json_atomically'; it is, but that cannot be the claim -- its rename OVERWRITES, which is exactly the lost update this mechanism exists to prevent (src/provider/cache.rs:335). The claim is an exclusive create_new open; write_json_atomically fills a file this process already owns.
+- the packet said the remainder is reduced by reservations 'of other processes'; the netting counts every live row for the credential and does not filter by process id. At netting time this process holds none, so the number is identical, and not filtering keeps the reader off a pid check with no portable meaning (the packet's own cross-platform requirement).
+- the packet's FEASIBILITY named Allowance::RequestPool.remaining as read from GatewayQuotaCache per credential; that cache is keyed by PROVIDER (telemetry.rs path_for) and nothing in this build measures a per-credential remainder -- the same correction GH-PROBE-BUDGET-1369 recorded for line 1369. Carried as a recorded limit.
+
+Gates the worker ran (re-run the decisive ones yourself):
+- cargo fmt --all -- --check: clean
+- cargo clippy -p glasshouse --all-targets --all-features -D warnings: clean
+- cargo doc -p glasshouse --no-deps (rustdoc): clean
+- scripts/blast-radius.sh --targeted (5 files): exit 0, every traced target passed
+- cargo test -p glasshouse --test dispatch_reservation: test result: ok. 6 passed; 0 failed
+- cargo test -p glasshouse --test routed_extraction: test result: ok. 4 passed; 0 failed
+- cargo test -p glasshouse --test routing_disposable_tier: test result: ok. 5 passed; 0 failed
+- cargo test -p glasshouse --test reserve_inputs: test result: ok. 6 passed; 0 failed
+- cargo test -p glasshouse --test disposable_interface: test result: ok. 15 passed; 0 failed
+- cargo test -p glasshouse --test disposable_route_sink: test result: ok. 7 passed; 0 failed
+- cargo test -p glasshouse --test memory_commits: test result: ok. 7 passed; 0 failed
+- cargo test -p glasshouse --lib routing::free: test result: ok. 11 passed; 0 failed
+- cargo test -p glasshouse --lib memory::extract: test result: ok. 85 passed; 0 failed
+- cargo test -p glasshouse --lib provider::telemetry: test result: ok. 66 passed; 0 failed
+- cargo test -p glasshouse --lib routing::: test result: ok. 227 passed; 0 failed (includes the_two_policy_classes_do_not_name_each_other)
+- cargo test -p glasshouse --bin glasshouse: test result: ok. 81 passed; 0 failed
+- adjacent suites, all green: classification_call 10, support_work_debug 9, support_work_economy 33, firewall_reducer 3, memory_extract 4, precompact_memory 15, routing_evidence 2, provider_resources_probe 13
+

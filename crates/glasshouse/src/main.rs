@@ -8106,8 +8106,97 @@ fn disposable_extraction_model(
             .for_scope(glasshouse::routing::pressure::ReserveScope::Background),
     );
     let job = glasshouse::routing::disposable::JobKind::MemoryExtraction;
-    let mut routed =
-        glasshouse::memory::RoutedModel::new(job, &candidates, &routing, health.pool());
+
+    // Line 1367, read side: what the *other* short-lived dispatchers are
+    // already about to spend. Health says which resources have been failing;
+    // this says which of the requests that are left have been claimed but
+    // not yet paid, which no cache in this build carried until now and which
+    // is the whole difference between two processes pacing one allowance and
+    // two processes spending it twice.
+    let reservations =
+        glasshouse::provider::telemetry::DispatchReservationCache::new(runtime.paths());
+    let mut pool = health.pool().clone();
+    let mut notes = Vec::new();
+    withhold_reserved_requests(
+        &reservations,
+        &mut pool,
+        &candidates,
+        &effective,
+        &telemetry,
+        now_unix,
+        &mut notes,
+    );
+
+    let mut routed = glasshouse::memory::RoutedModel::new(job, &candidates, &routing, &pool);
+
+    // Line 1367, write side. Only with consent — a run that will call
+    // nothing must not hold a request out of a pool somebody else could
+    // spend — and only for a resource whose pool has a *measured* remainder,
+    // because a claim against a ceiling nobody stated would refuse dispatches
+    // on an invented number.
+    //
+    // The netting above is a read with no lock, so two dispatchers can both
+    // pass it. This is the lock: `claim` is an exclusive create, exactly one
+    // of them wins it, and the loser learns here rather than at the
+    // provider's rate limiter. It then withholds that credential's whole
+    // remainder and asks the policy again — which is a *different* decision
+    // with a changed input, not the second ask this function's own header
+    // refuses to make for the ledger's benefit. Bounded by the candidate
+    // count, so a pool that keeps losing races ends in `NoResource` rather
+    // than in a loop, and **nothing waits**: a hook process is a guest in
+    // the harness's turn.
+    //
+    // # When the policy stands by a candidate the pool cannot withdraw
+    //
+    // `FreePool::is_available` is the gate every **free** candidate passes
+    // through, so withholding a credential's whole remainder removes it. A
+    // **metered** candidate is ranked by the protected-reserve policy
+    // instead and is not withdrawn by an empty request pool — that is
+    // `routing::disposable`'s own rule and not this caller's to change. So a
+    // credential whose claim was refused is remembered, and a policy that
+    // chooses it again ends the loop: the dispatch proceeds exactly as it
+    // did before this line had a producer, and the explanation says the
+    // allowance was spoken for rather than letting it pass in silence.
+    let mut lease = None;
+    if consented.is_some() {
+        let mut refused: Vec<String> = Vec::new();
+        for _ in 0..=candidates.len() {
+            let Some((provider, model, credential)) = routed.choice().ok().map(|choice| {
+                (
+                    choice.provider().to_owned(),
+                    choice.model().to_owned(),
+                    choice.credential().clone(),
+                )
+            }) else {
+                break;
+            };
+            let label = credential.label();
+            if refused.contains(&label) {
+                break;
+            }
+            let Some(remaining) =
+                paced_request_remainder(&provider, &effective, &telemetry, now_unix)
+            else {
+                // An unknown or token-priced pool reserves nothing and
+                // dispatches exactly as it did before this line had a
+                // producer.
+                break;
+            };
+            match reservations.claim(&label, &model, remaining, now_unix) {
+                Some(claimed) => {
+                    lease = Some(claimed);
+                    break;
+                }
+                None => {
+                    pool.withhold_in_flight(&credential, remaining, remaining);
+                    notes.push(reserved_elsewhere_note(&label, &model, remaining));
+                    refused.push(label);
+                    routed =
+                        glasshouse::memory::RoutedModel::new(job, &candidates, &routing, &pool);
+                }
+            }
+        }
+    }
 
     // Step 4. Only with consent, and only for a resource the policy actually
     // chose: a client built for a candidate the router refused would be a
@@ -8135,6 +8224,21 @@ fn disposable_extraction_model(
                 .observing(move |resource, outcome| {
                     persist_support_work_health(&paths, resource, outcome)
                 });
+    }
+
+    // The reservation is given back when the exchange finishes, and by the
+    // model's own drop when there was no exchange — see
+    // `RoutedModel::releasing`. A lease held for a client that could not be
+    // built is released here instead: nothing will be called, and the
+    // request belongs to whoever asks next.
+    if let Some(claimed) = lease {
+        match routed.can_call() {
+            true => routed = routed.releasing(move || claimed.release()),
+            false => claimed.release(),
+        }
+    }
+    if !notes.is_empty() {
+        routed = routed.noting(notes.join("; "));
     }
 
     // The decision is made above and, until this line existed, died in a
@@ -8175,6 +8279,82 @@ fn disposable_extraction_model(
     );
 
     Box::new(routed)
+}
+
+/// Take the requests other dispatches have already claimed out of what each
+/// candidate's pool is known to have left, so the policy ranks what is
+/// actually spendable — capability map line 1367's read side.
+///
+/// # Where the exclusion happens, and why it is not a new rule
+///
+/// Nowhere here. This only writes a truthful remainder into the pool through
+/// [`glasshouse::routing::free::FreePool::withhold_in_flight`]; the
+/// *decision* is
+/// [`glasshouse::routing::free::Allowance::is_exhausted`]'s, reached through
+/// `FreePool::is_available` — the identical gate a cooling-down resource
+/// fails, and the only one `DisposableRouting::choose` puts a free candidate
+/// through. So a resource whose every remaining request is spoken for
+/// becomes unavailable by exactly the path a cooldown takes, `choose` falls
+/// to the next candidate or to `NoResource` in today's words, and
+/// `routing::disposable` neither gains a rule nor learns that a cache
+/// exists.
+///
+/// One credential is asked once however many models it serves: an allowance
+/// is per credential (line 538), and two models behind one key draw down one
+/// pool.
+///
+/// `notes` collects the sentence a person needs to understand a fallback
+/// they did not expect — the policy can say *"this resource cannot serve"*
+/// but not *"because another dispatch is already spending its last
+/// request"*.
+fn withhold_reserved_requests(
+    reservations: &glasshouse::provider::telemetry::DispatchReservationCache,
+    pool: &mut glasshouse::routing::free::FreePool,
+    candidates: &[glasshouse::routing::disposable::DisposableCandidate],
+    effective: &EffectiveConfig<'_>,
+    telemetry: &glasshouse::provider::resources::GatheredTelemetry,
+    now_unix: i64,
+    notes: &mut Vec<String>,
+) {
+    let mut asked: Vec<String> = Vec::new();
+    for candidate in candidates {
+        let label = candidate.credential().label();
+        if asked.contains(&label) {
+            continue;
+        }
+        asked.push(label.clone());
+        let Some(remaining) =
+            paced_request_remainder(candidate.provider(), effective, telemetry, now_unix)
+        else {
+            continue;
+        };
+        let in_flight = reservations.reserved(&label, now_unix);
+        if in_flight == 0 {
+            continue;
+        }
+        pool.withhold_in_flight(candidate.credential(), remaining, in_flight);
+        if in_flight >= remaining {
+            notes.push(reserved_elsewhere_note(
+                &label,
+                candidate.model(),
+                remaining,
+            ));
+        }
+    }
+}
+
+/// Why a resource that looked usable is not being used, in one clause a
+/// person can act on.
+///
+/// Two names and a model — [`glasshouse::routing::CredentialId::label`]'s
+/// own guarantee — and never a value, because this is rendered by
+/// `ExtractionModel::describe` into the command's output and into the
+/// routing ledger's rationale.
+fn reserved_elsewhere_note(credential_label: &str, model: &str, remaining: u32) -> String {
+    format!(
+        "{model} ({credential_label}): its {remaining} remaining request(s) are reserved by \
+         another dispatch"
+    )
 }
 
 /// Every resource Glasshouse's disposable-job routing may choose from — free
@@ -9218,6 +9398,46 @@ fn attach_classification_records(
 /// through a harness's own native subscription — which
 /// `routing::disposable::DisposableRouting::score` renders as an honest
 /// `0.0` contribution rather than a guess.
+/// What a real response last stated is left in `provider`'s request pool, or
+/// [`None`] because nothing has measured one — capability map line 1367's
+/// ceiling.
+///
+/// # The same reading `--probe`'s own budget asks for, and the same key
+///
+/// [`glasshouse::provider::resources::observed_capacity`] over this
+/// provider's [`glasshouse::provider::registry::ResourceKind`], whose
+/// `requests().remaining()` is `Some` only when a rate-limit header actually
+/// said so — the identical path
+/// [`glasshouse::provider::resources::authorize_probe`] reads for line 1369,
+/// and identically **provider-wide**, because
+/// `glasshouse::provider::telemetry::GatewayQuotaCache` is keyed by provider
+/// name and nothing in this build measures a remainder per credential.
+///
+/// A credential is still the right key for the *reservation* — see
+/// `glasshouse::provider::telemetry::DispatchReservationCache` — and this is
+/// the one place the two granularities meet: a provider's stated remainder is
+/// read as the ceiling on what one of its credentials may have in flight.
+/// Where a provider has several credentials that is conservative in the
+/// direction that spends more, not less, and it is recorded as a limit rather
+/// than hidden.
+///
+/// [`None`] is *"nothing is known"*, never *"nothing is left"*: an unmeasured
+/// pool and a token-priced resource both answer it, and both mean this
+/// dispatch reserves nothing and behaves exactly as it did before line 1367
+/// had a producer.
+fn paced_request_remainder(
+    provider: &str,
+    effective: &EffectiveConfig<'_>,
+    telemetry: &glasshouse::provider::resources::GatheredTelemetry,
+    now_unix: i64,
+) -> Option<u32> {
+    let kind = glasshouse::provider::registry::ResourceKind::from_direct_provider(provider);
+    let state =
+        glasshouse::provider::resources::observed_capacity(&kind, effective, telemetry, now_unix);
+    let reading = state.requests().remaining().reading()?;
+    u32::try_from(reading.value().value()).ok()
+}
+
 fn disposable_candidate_capacity(
     provider: &str,
     effective: &EffectiveConfig<'_>,
@@ -16604,6 +16824,92 @@ mod tests {
         assert!(
             !described.contains("no reset time known"),
             "a real cached reading carries a reset time too: {described}"
+        );
+    }
+
+    /// Capability map line 1367, at the production entry point: a free
+    /// resource whose entire measured remainder is already claimed by
+    /// another dispatch is not chosen, and the explanation says why rather
+    /// than only that.
+    ///
+    /// The reservation is planted rather than claimed, because a claim taken
+    /// by *this* process would be this process's own — the fact under test
+    /// is what one dispatcher does about another's, and there is only one
+    /// process in a unit test.
+    #[test]
+    fn a_free_resource_whose_remaining_requests_are_all_reserved_is_not_chosen() {
+        const VAR: &str = "GLASSHOUSE_TEST_ONLY_WIRE_DISPOSABLE_RESERVED_KEY";
+        const PROVIDER: &str = "wire-disposable-reserved-test-provider";
+        // SAFETY: `VAR` is unique to this test and removed again below.
+        unsafe {
+            std::env::set_var(VAR, "sk-fabricated-test-value-not-a-real-credential");
+        }
+
+        let fixture = CliFixture::new();
+        let mut user = UserConfig::load(fixture.runtime.paths()).unwrap();
+        let mut provider = glasshouse::config::ProviderConfig::new("openai-compatible");
+        provider.set_credential_env(vec![VAR.to_owned()]);
+        provider.set_free_models(vec!["a-free-model".to_owned()]);
+        user.providers_mut().set(PROVIDER, provider);
+        user.save(fixture.runtime.paths()).unwrap();
+
+        let now_unix = glasshouse::provider::cache::now_unix_seconds();
+        glasshouse::provider::telemetry::GatewayQuotaCache::new(fixture.runtime.paths()).store(
+            PROVIDER,
+            &glasshouse::provider::telemetry::RateLimitHeaders::read(vec![
+                ("x-ratelimit-limit-requests", "10"),
+                ("x-ratelimit-remaining-requests", "1"),
+            ]),
+            now_unix,
+        );
+        let label = format!("{PROVIDER}/{VAR}");
+        glasshouse::provider::telemetry::DispatchReservationCache::new(fixture.runtime.paths())
+            .plant(
+                0,
+                &glasshouse::provider::telemetry::DispatchReservation {
+                    credential_label: label.clone(),
+                    model: "a-free-model".to_owned(),
+                    requests: 1,
+                    process_id: 999_999,
+                    reserved_at_unix: now_unix,
+                    expires_at_unix: now_unix + 60,
+                },
+            )
+            .unwrap();
+
+        let model = disposable_extraction_model(&fixture.runtime, &a_session_not_overridden());
+        let described = model.describe();
+
+        unsafe {
+            std::env::remove_var(VAR);
+        }
+
+        assert!(
+            described.contains("reserved by another dispatch"),
+            "the explanation must say why the free resource was passed over: {described}"
+        );
+        assert!(
+            described.contains(&label),
+            "and which allowance it was: {described}"
+        );
+        assert!(
+            described.contains("no model was called"),
+            "nothing else is configured, so the refusal is today's: {described}"
+        );
+    }
+
+    /// The lease in `provider::telemetry` and the bound in this file are two
+    /// constants that only mean anything in relation to each other: the
+    /// reservation exists to cover the extraction, so it has to outlive it.
+    /// Nothing else would fail if one of them were edited alone — the
+    /// reservation would simply start expiring under live calls — which is
+    /// exactly the kind of drift a test is for.
+    #[test]
+    fn the_reservation_lease_outlives_the_extraction_it_covers() {
+        assert_eq!(
+            glasshouse::provider::telemetry::DISPATCH_RESERVATION_LEASE,
+            EXTRACTION_BOUND * 2,
+            "the lease is twice the bound on the work it covers; see its own doc for why"
         );
     }
 
