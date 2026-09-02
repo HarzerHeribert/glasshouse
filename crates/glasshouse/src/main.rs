@@ -4149,6 +4149,14 @@ fn routing_cost_report(runtime: &Runtime, hours: u32) -> anyhow::Result<String> 
 /// `crate::gateway::translate` decodes every provider event anyway, so the
 /// instant a qualifying one passes is a clock reading, same as the byte
 /// above; a relayed exchange leaves both `NULL`.
+///
+/// `GH-TOOL-ROUNDS-ON-TRANSLATED` (1334's last two quantities and 1350) adds
+/// one more line, `tool rounds`, through [`render_tool_rounds`]: rounds
+/// begun, repairs, and rounds per minute of the group's summed serving time
+/// — *not recorded*, never `0`, for a group that never counted a round. It is
+/// printed as an outcome-adjacent measure and never folded into a score, the
+/// same restraint `render_savings_section` and this function's own token
+/// figures already keep.
 #[allow(clippy::too_many_arguments)]
 fn render_routing_cost(
     project_id: &str,
@@ -4206,6 +4214,10 @@ fn render_routing_cost(
             out.push_str(&format!(
                 "    time to first tool call : {}\n",
                 render_time_to_first_byte(group.mean_time_to_first_tool_call_ms)
+            ));
+            out.push_str(&format!(
+                "    tool rounds         : {}\n",
+                render_tool_rounds(group)
             ));
         }
     }
@@ -4438,6 +4450,29 @@ fn render_time_to_first_byte(mean_ms: Option<f64>) -> String {
         Some(ms) => format!("{}ms (mean)", ms.round() as i64),
         None => "not recorded".to_owned(),
     }
+}
+
+/// Line 1334's last two quantities and line 1350, rendered — the group's
+/// rounds begun, its repairs, and rounds per minute of summed serving time.
+/// `render_token_count`'s own rule again: a group with no counted
+/// `tool_rounds` prints *not recorded*, never `0`, because "nobody read a
+/// count" and "the count was zero" are different facts.
+///
+/// Gated on [`glasshouse::routing::evidence::PurposeConsumption::tool_rounds`]
+/// alone, matching the OBJECTIVE's own rule — a real gateway group that
+/// carries rounds always carries repairs and serving time too, since all
+/// three are read off the same decoded translated exchanges.
+fn render_tool_rounds(group: &glasshouse::routing::evidence::PurposeConsumption) -> String {
+    let (Some(rounds), Some(repairs), Some(serving_seconds)) =
+        (group.tool_rounds, group.repairs, group.serving_seconds)
+    else {
+        return "not recorded".to_owned();
+    };
+    let per_minute = group
+        .tool_rounds_per_minute()
+        .map(|rate| format!("{rate:.2}/min"))
+        .unwrap_or_else(|| "not recorded".to_owned());
+    format!("{rounds} begun, {repairs} repairs, {per_minute} over {serving_seconds}s served")
 }
 
 /// The three spellings `glasshouse route --moment` accepts and the control

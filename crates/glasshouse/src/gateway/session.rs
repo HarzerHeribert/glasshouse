@@ -563,6 +563,12 @@ impl SessionRouting {
         // exactly like `first_byte_at` above.
         .with_first_token_at(exchange.first_token_at)
         .with_first_tool_call_at(exchange.first_tool_call_at)
+        // Line 1334's last two quantities: `translate::serve` derives both
+        // from the request and response it already had to decode, and
+        // `None` on a relayed exchange (this method's own caller never
+        // gives it one), exactly like the pair above.
+        .with_tool_rounds(exchange.tool_rounds)
+        .with_repairs(exchange.repairs)
         .with_outcome(outcome)
         .with_failure_class(failure_class)
         .with_failovers(Some(reading.effect.failovers()))
@@ -1184,6 +1190,8 @@ mod tests {
             tokens: None,
             effort: None,
             turn_shape: None,
+            tool_rounds: None,
+            repairs: None,
         }
     }
 
@@ -1242,6 +1250,8 @@ mod tests {
             tokens: None,
             effort: None,
             turn_shape: None,
+            tool_rounds: None,
+            repairs: None,
         }
     }
 

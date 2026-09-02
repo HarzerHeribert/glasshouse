@@ -61,13 +61,23 @@
 //!   to that module) is still "structurally incapable of carrying a body,"
 //!   and this producer still cannot get the value wrong because it never
 //!   attempts to find one on that path.
-//! - **`tool_rounds`, `repairs`: not supplied.** The gateway serves one HTTP
-//!   request per connection (`crate::gateway::ingress::serve`'s own "why one
-//!   request per connection") and has no notion of a *turn* spanning several
-//!   of them; a harness may make several exchanges for what a user
-//!   experiences as one turn, and only something above the gateway — the
-//!   harness, or the session it belongs to — can count rounds across that
-//!   boundary. A *repair* is a concept nothing in this tree holds at all.
+//! - **`tool_rounds`, `repairs`: supplied by this producer only for a
+//!   *translated* exchange — `GH-TOOL-ROUNDS-ON-TRANSLATED`, closing 1334's
+//!   last two quantities and 1350 for the translated path.** `tool_rounds` is
+//!   not a turn spanning several gateway connections — the gateway still has
+//!   no notion of that, and still serves one HTTP request per connection
+//!   (`crate::gateway::ingress::serve`'s own "why one request per
+//!   connection") — it is the number of tool-use blocks *this one exchange's
+//!   response* requested, which `crate::gateway::translate` already counts
+//!   while decoding that response to re-encode it. `repairs` is the number
+//!   of `is_error: true` tool-result blocks *this one exchange's request*
+//!   carried, counted from the same decoded request `turn_shape` already
+//!   walks. Neither is a judgement of success; both are counts of blocks the
+//!   protocol names as such. A **relayed** exchange still leaves both `NULL`
+//!   (this producer never decodes one), and a translated exchange whose
+//!   request decoded but found no error result, or whose response carried no
+//!   tool-use block, writes `0` rather than `NULL` — the seam looked and
+//!   found none, a different fact from not looking.
 //! - **`retries`: `0`, and it is a count, not a default.** The gateway
 //!   forwards each request exactly once — `crate::gateway::ingress::forward`
 //!   calls `Agent::run` once, and `ureq` 3 performs no transparent retry —
@@ -1079,6 +1089,30 @@ impl NewObservation {
     /// took, not a count it declined to take.
     pub fn with_retries(mut self, retries: Option<u32>) -> Self {
         self.retries = retries.map(i64::from);
+        self
+    }
+
+    /// Line 1334's last two quantities. How many tool-use blocks this
+    /// exchange's response requested — the rounds this exchange *began* —
+    /// supplied only by a **translated** exchange, whose seam already
+    /// decodes the response to re-encode it. `None` is "this producer never
+    /// decoded a response to count from," as for every other nullable
+    /// column; `Some(0)` is "it counted and found none," which is not the
+    /// same fact and must not be confused with it. See
+    /// `docs/product/design-decisions.md`'s *"Tool rounds and repairs on the
+    /// translated path"*.
+    pub fn with_tool_rounds(mut self, tool_rounds: Option<u32>) -> Self {
+        self.tool_rounds = tool_rounds.map(i64::from);
+        self
+    }
+
+    /// [`Self::with_tool_rounds`]'s sibling: how many `is_error: true`
+    /// tool-result blocks this exchange's request carried — the harness's
+    /// own report that a previous round failed. Supplied only by a
+    /// **translated** exchange whose request decoded, under the same
+    /// `None`-vs-`Some(0)` rule.
+    pub fn with_repairs(mut self, repairs: Option<u32>) -> Self {
+        self.repairs = repairs.map(i64::from);
         self
     }
 
@@ -2662,6 +2696,38 @@ pub struct PurposeConsumption {
     /// the rows counted in [`Self::first_tool_call_sample_count`] — `None`
     /// when that count is `0`.
     pub mean_time_to_first_tool_call_ms: Option<f64>,
+    /// How many tool-use rounds the responses in this group began —
+    /// `SUM(tool_rounds)`, `None` when no row in the group ever counted one
+    /// (`SUM` over an all-`NULL` column is already `NULL`, so there is no
+    /// manual zero-guard here either, unlike the `AVG(CASE …)` pairs above).
+    /// Line 1334's last two quantities, `GH-TOOL-ROUNDS-ON-TRANSLATED`.
+    pub tool_rounds: Option<i64>,
+    /// [`Self::tool_rounds`]'s sibling: `SUM(repairs)`, the harness's own
+    /// report of a previous round's failure, under the same `None` rule.
+    pub repairs: Option<i64>,
+    /// The group's summed exchange duration, in seconds —
+    /// `SUM(completed_at - dispatched_at)` over the rows that carried both,
+    /// `None` when none did. Line 1350's denominator for
+    /// [`Self::tool_rounds_per_minute`], independent of whether those same
+    /// rows counted a tool round.
+    pub serving_seconds: Option<i64>,
+}
+
+impl PurposeConsumption {
+    /// Line 1350: tool rounds per minute of serving time, an outcome-adjacent
+    /// measure — never folded into a quality score, this module's own header
+    /// and `docs/product/design-decisions.md`'s *"Tool rounds and repairs on
+    /// the translated path"* both keep that rule. `None` when either half is
+    /// unrecorded or the group's summed serving time is `0`, never a
+    /// fabricated rate.
+    pub fn tool_rounds_per_minute(&self) -> Option<f64> {
+        let rounds = self.tool_rounds?;
+        let serving_seconds = self.serving_seconds?;
+        if serving_seconds == 0 {
+            return None;
+        }
+        Some(rounds as f64 * 60.0 / serving_seconds as f64)
+    }
 }
 
 /// [`EvidenceLedger::translation_cache_savings`]'s result — map line 2034's
@@ -3942,7 +4008,15 @@ impl EvidenceLedger {
                                 WHEN first_tool_call_at IS NOT NULL AND dispatched_at IS NOT NULL
                                 THEN CAST(first_tool_call_at - dispatched_at AS REAL) * 1000
                             END
-                        ) AS mean_time_to_first_tool_call_ms
+                        ) AS mean_time_to_first_tool_call_ms,
+                        SUM(tool_rounds) AS tool_rounds,
+                        SUM(repairs) AS repairs,
+                        SUM(
+                            CASE
+                                WHEN completed_at IS NOT NULL AND dispatched_at IS NOT NULL
+                                THEN completed_at - dispatched_at
+                            END
+                        ) AS serving_seconds
                  FROM routing_observations
                  WHERE project_id = ?1 AND observed_at >= ?2 AND observed_at <= ?3
                  GROUP BY purpose, harness_recorded
@@ -4561,6 +4635,9 @@ fn row_to_purpose_consumption(row: &Row<'_>) -> rusqlite::Result<PurposeConsumpt
         mean_time_to_first_token_ms: row.get("mean_time_to_first_token_ms")?,
         first_tool_call_sample_count: first_tool_call_sample_count as usize,
         mean_time_to_first_tool_call_ms: row.get("mean_time_to_first_tool_call_ms")?,
+        tool_rounds: row.get("tool_rounds")?,
+        repairs: row.get("repairs")?,
+        serving_seconds: row.get("serving_seconds")?,
     })
 }
 
@@ -6133,6 +6210,9 @@ mod correlation_tests {
                 mean_time_to_first_token_ms: None,
                 first_tool_call_sample_count: 0,
                 mean_time_to_first_tool_call_ms: None,
+                tool_rounds: None,
+                repairs: None,
+                serving_seconds: None,
             },
             PurposeConsumption {
                 purpose: Some("a-purpose-this-build-does-not-know".to_owned()),
@@ -6147,6 +6227,9 @@ mod correlation_tests {
                 mean_time_to_first_token_ms: None,
                 first_tool_call_sample_count: 0,
                 mean_time_to_first_tool_call_ms: None,
+                tool_rounds: None,
+                repairs: None,
+                serving_seconds: None,
             },
         ];
         let overhead = RoutingOverhead::from_consumption(&groups);
@@ -6178,6 +6261,9 @@ mod correlation_tests {
                 mean_time_to_first_token_ms: None,
                 first_tool_call_sample_count: 0,
                 mean_time_to_first_tool_call_ms: None,
+                tool_rounds: None,
+                repairs: None,
+                serving_seconds: None,
             },
             PurposeConsumption {
                 purpose: None,
@@ -6192,6 +6278,9 @@ mod correlation_tests {
                 mean_time_to_first_token_ms: None,
                 first_tool_call_sample_count: 0,
                 mean_time_to_first_tool_call_ms: None,
+                tool_rounds: None,
+                repairs: None,
+                serving_seconds: None,
             },
             PurposeConsumption {
                 purpose: Some("a-purpose-this-build-does-not-know".to_owned()),
@@ -6206,6 +6295,9 @@ mod correlation_tests {
                 mean_time_to_first_token_ms: None,
                 first_tool_call_sample_count: 0,
                 mean_time_to_first_tool_call_ms: None,
+                tool_rounds: None,
+                repairs: None,
+                serving_seconds: None,
             },
         ];
         let overhead = RoutingOverhead::from_consumption(&groups);

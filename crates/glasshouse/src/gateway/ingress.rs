@@ -107,6 +107,21 @@
 //! never enters a codec, so it writes `None` for both, the same restraint
 //! `Tokens` already keeps.
 //!
+//! # A sixth thing may now be recorded: tool rounds and repairs
+//!
+//! Capability map line 1334's last two quantities and line 1350, under the
+//! ruling recorded in `docs/product/design-decisions.md` as *"tool rounds
+//! and repairs on the translated path."* [`super::translate`] already
+//! decodes the request into canonical blocks and the response into
+//! canonical events in order to translate both; `tool_rounds` counts the
+//! response's tool-use block starts and `repairs` counts the request's
+//! `is_error: true` tool-result blocks — two more integers derived from
+//! decoding this module still never does itself. `None` on every relayed
+//! exchange (this module never decodes one) and on a translated exchange
+//! whose request never decoded; `Some(0)` is the seam's own honest reading
+//! of "looked and found none," a different fact from not looking, which is
+//! why it is never conflated with `None` here.
+//!
 //! # The relay rule, narrowed and not repealed (Phase 56)
 //!
 //! Capability map lines 1948–1950, under the ruling recorded in
@@ -241,6 +256,18 @@ pub(super) struct Exchange {
     /// `None`. A name from a two-word vocabulary; see
     /// `translate::canonical::Request::turn_shape`.
     pub(super) turn_shape: Option<TurnShape>,
+    /// How many tool-use blocks the response requested, on a **translated**
+    /// exchange that reached a response — line 1334's `tool_rounds`. See
+    /// this module's own "a sixth thing may now be recorded". `None` on
+    /// every relayed exchange and on a translated exchange that never
+    /// reached a response; `Some(0)` when the seam looked and found none.
+    pub(super) tool_rounds: Option<u32>,
+    /// How many `is_error: true` tool-result blocks the request carried, on
+    /// a **translated** exchange whose request decoded — line 1334's
+    /// `repairs`. [`Self::tool_rounds`]'s sibling and the same `None`-vs-
+    /// `Some(0)` rule, decided one step earlier: a decoded request always
+    /// answers this, whether or not a response ever arrived.
+    pub(super) repairs: Option<u32>,
 }
 
 /// Token counts the provider stated for a translated exchange — Phase 56's
@@ -1109,6 +1136,13 @@ fn exchange(outcome: Outcome, status: u16, upstream: &Upstream, route: Option<&R
         // on any of its returns.
         effort: None,
         turn_shape: None,
+        // Line 1334's pair: the relay never decodes a request or a
+        // response, so it has nothing to count either from — `NULL` for
+        // both, unread rather than absent, exactly like `effort` and
+        // `turn_shape` above. `translate::serve` fills them; nothing on this
+        // path does, on any of its returns.
+        tool_rounds: None,
+        repairs: None,
     }
 }
 
@@ -1280,6 +1314,8 @@ mod tests {
                 }),
                 effort: Some(EffortLevel::Medium),
                 turn_shape: Some(TurnShape::ToolResume),
+                tool_rounds: Some(2),
+                repairs: Some(1),
             };
             let line = recorded(&exchange);
 

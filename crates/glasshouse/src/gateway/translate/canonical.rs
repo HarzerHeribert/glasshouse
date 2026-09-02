@@ -245,6 +245,26 @@ impl Request {
             _ => TurnShape::Prompt,
         }
     }
+
+    /// Line 1334's `repairs`: how many [`Block::ToolResult`] blocks across
+    /// every message carried `is_error: true` — the harness's own report
+    /// that a previous tool call failed and this exchange is the model
+    /// repairing it. Counted once at the seam that already walks these
+    /// blocks for [`Self::turn_shape`], across the whole request rather than
+    /// only the last user message: a repair can be handed back alongside
+    /// other turns in a longer conversation, not only as the very next
+    /// message.
+    ///
+    /// A pure function of the decoded request, with no reference to the
+    /// target protocol — see [`Self::turn_shape`]'s own doc comment for why
+    /// that is the shape every derivation here takes.
+    pub fn error_tool_results(&self) -> u32 {
+        self.messages
+            .iter()
+            .flat_map(|message| &message.blocks)
+            .filter(|block| matches!(block, Block::ToolResult { is_error: true, .. }))
+            .count() as u32
+    }
 }
 
 impl From<EffortLevel> for crate::routing::evidence::EffortLevel {

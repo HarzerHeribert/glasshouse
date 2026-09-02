@@ -22,6 +22,17 @@ validated and waiting on the commit. Next action: `.agent-runtime/CONTINUATION.m
 
 Last updated: 2026-09-02 (Europe/Berlin)
 
+## Checkpoint — 2026-09-02, batch 92 (interim): 1241 / 1347 (92.1%) — Phase 39 complete, Cluster H down to three, wave 104 staged, handed off at 75 % context
+
+Session `0c56372c` (Fable 5.1), continued. Wave 102 landed 1331/1332; a
+tripwire in the trailing sweep fired as designed and 1625 closed on the four
+disposable seats (Phase 39 complete); wave 103 landed 1759 and 1757/1766 (the
+session router's rationale on the durable sink). Wave 104 (1334, 1350) is
+staged behind its gate; a Red packet for migration 25's millisecond offsets is
+written. The Windows VM leg's fifth run — the first on a clean disk after the
+stack-reserve fix — is in flight. Live: `estimator-reset` (1247). Exact next
+actions: `.agent-runtime/CONTINUATION.md`.
+
 ## Checkpoint — 2026-09-02, batch 91: 1235 / 1347 (91.7%) — Phase 24 complete, expected latency scored, and the Windows leg found the binary could not start
 
 Session `0c56372c` (Fable 5.1), continued. Wave 101: `memory-reranker`

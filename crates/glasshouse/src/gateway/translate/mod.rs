@@ -766,6 +766,11 @@ pub(super) fn serve(
         .effort
         .map(|effort| crate::routing::evidence::EffortLevel::from(effort.level()));
     let turn_shape = Some(request.turn_shape());
+    // Line 1334's `repairs`, the other quantity a decoded request answers
+    // outright: how many tool-result blocks the harness marked as errors,
+    // regardless of where in the conversation they sit. `Some` the moment
+    // the request has decoded, same as `effort` and `turn_shape` above.
+    let repairs = Some(request.error_tool_results());
     // Every `Exchange` this function returns from here on carries them —
     // the refusals below included, because a request that decoded and was
     // then refused downstream is still a request whose effort and shape were
@@ -774,6 +779,7 @@ pub(super) fn serve(
     let decoded = |outcome: Outcome, status: u16| Exchange {
         effort,
         turn_shape,
+        repairs,
         ..exchange(outcome, status, upstream, pair, route)
     };
 
@@ -890,6 +896,13 @@ pub(super) fn serve(
                 tokens,
                 first_token_at: first.first_token_at,
                 first_tool_call_at: first.first_tool_call_at,
+                // Line 1334's `tool_rounds`: `Some` the moment a response
+                // arrived — `finish` is only ever reached after one did —
+                // `first.tool_uses` honestly `0` for a response the seam
+                // looked at and found no tool-use block in, same rule as
+                // `first_tool_call_at`'s own `None`-vs-`Some(0)` split one
+                // level up.
+                tool_rounds: Some(first.tool_uses),
                 ..decoded(outcome, status)
             },
             quota.clone(),
@@ -1104,28 +1117,45 @@ pub(super) fn serve(
 type Finish<'a> =
     &'a dyn Fn(Outcome, u16, Framing, Option<Tokens>, FirstEvents) -> (Exchange, RateLimitHeaders);
 
-/// The 1331/1332 ruling's two clock readings, noted as canonical
-/// [`StreamEvent`]s pass through the seam that already decoded them.
+/// The 1331/1332 ruling's two clock readings, plus 1334/1350's tool-round
+/// count, noted as canonical [`StreamEvent`]s pass through the seam that
+/// already decoded them.
 ///
-/// Each field is stamped once and never overwritten, and [`Self::note`]
+/// Kept as one name rather than split or renamed to something like
+/// `ResponseFacts`: every field here is still a fact [`Self::note`] reads off
+/// a canonical event as it passes, the same shape the original two clock
+/// readings were, and `tool_uses` is a count of the very block start that
+/// already stamps `first_tool_call_at` — a sibling, not a new concern.
+///
+/// The two clock-reading fields are stamped once and never overwritten;
+/// `tool_uses` counts every qualifying event rather than stopping at the
+/// first, which is why it cannot share their `is_none()` guard. [`Self::note`]
 /// retains no response text — only whatever instant its `now` closure
-/// returns at the moment a qualifying event is seen. A document delivery (the
-/// provider never streamed, or a stream was gathered into one before
-/// delivery) has no finer boundary to observe than its own `first_byte_at`
-/// — see [`Self::of_document`] — so the streamed path is the only caller that
-/// passes a real wall clock.
+/// returns at the moment a qualifying event is seen, and an integer count. A
+/// document delivery (the provider never streamed, or a stream was gathered
+/// into one before delivery) has no finer boundary to observe than its own
+/// `first_byte_at` — see [`Self::of_document`] — so the streamed path is the
+/// only caller that passes a real wall clock; `tool_uses` counts the same
+/// either way, because it never reads the clock at all.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct FirstEvents {
     first_token_at: Option<i64>,
     first_tool_call_at: Option<i64>,
+    /// Line 1334's `tool_rounds`: how many [`BlockStart::ToolUse`] events
+    /// this response's canonical events carried — the rounds this exchange
+    /// *began*. Never stamped, always incremented; `0` is `serve`'s own
+    /// honest reading of a response with no tool-use block at all.
+    tool_uses: u32,
 }
 
 impl FirstEvents {
     /// The rule, stated once: the first real token is the first
     /// [`Delta::Text`] carrying a non-whitespace character, and the first
-    /// tool call is the first [`BlockStart::ToolUse`]. Everything else —
+    /// tool call is the first [`BlockStart::ToolUse`] — which also counts
+    /// toward `tool_uses` every time, not only the first. Everything else —
     /// `Delta::InputJson`, `BlockStart::Text`, a whitespace-only text delta —
-    /// leaves both untouched, and a field already stamped is never restamped.
+    /// leaves all three untouched, and `first_token_at`/`first_tool_call_at`,
+    /// once stamped, are never restamped.
     fn note(&mut self, event: &StreamEvent, now: &dyn Fn() -> i64) {
         match event {
             StreamEvent::BlockDelta {
@@ -1137,8 +1167,11 @@ impl FirstEvents {
             StreamEvent::BlockStart {
                 block: BlockStart::ToolUse { .. },
                 ..
-            } if self.first_tool_call_at.is_none() => {
-                self.first_tool_call_at = Some(now());
+            } => {
+                self.tool_uses += 1;
+                if self.first_tool_call_at.is_none() {
+                    self.first_tool_call_at = Some(now());
+                }
             }
             _ => {}
         }
@@ -1455,6 +1488,13 @@ fn exchange(
         // overrides both on every return after the decode.
         effort: None,
         turn_shape: None,
+        // Line 1334's pair: `None` for the same reason as `effort` and
+        // `turn_shape` above — a request that never decoded has no tool-use
+        // count and no error tool-result count to derive. `decoded` sets
+        // `repairs` on every return past the decode, and `finish` sets
+        // `tool_rounds` on every return past a response arriving.
+        tool_rounds: None,
+        repairs: None,
     }
 }
 
@@ -2207,6 +2247,8 @@ mod tests {
                 tokens,
                 effort: None,
                 turn_shape: None,
+                tool_rounds: Some(first.tool_uses),
+                repairs: None,
             },
             RateLimitHeaders::default(),
         )

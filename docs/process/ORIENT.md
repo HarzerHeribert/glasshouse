@@ -254,10 +254,10 @@ to do, and the orchestrator should follow its own rule.
 Newest first, from `docs/process/handoff.md`. Read the top one in full;
 the rest are context you probably do not need.
 
+- Checkpoint — 2026-09-02, batch 92 (interim): 1241 / 1347 (92.1%) — Phase 39 complete, Cluster H down to three, wave 104 staged, handed off at 75 % context
 - Checkpoint — 2026-09-02, batch 91: 1235 / 1347 (91.7%) — Phase 24 complete, expected latency scored, and the Windows leg found the binary could not start
 - Checkpoint — 2026-09-02, batch 90: 1229 / 1347 (91.2%) — money is counted against the budget, Phase 35A complete, and a refusal that outlived its blocker
 - Checkpoint — 2026-09-02, batch 89: 1223 / 1347 (90.8%) — the launch path briefs, a dispatch reserves what it spends, Cluster G's first column, the classifier learns its price
-- Checkpoint — 2026-09-02, batch 88: 1218 / 1347 (90.4%) — Phase 58's producers land, the memory proxy is real, memory is the project's
 
 ## Evidence ledger files
 

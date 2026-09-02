@@ -676,6 +676,9 @@ fn consumption(
         mean_time_to_first_token_ms: None,
         first_tool_call_sample_count: 0,
         mean_time_to_first_tool_call_ms: None,
+        tool_rounds: None,
+        repairs: None,
+        serving_seconds: None,
     }
 }
 

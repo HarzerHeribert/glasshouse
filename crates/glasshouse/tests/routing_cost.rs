@@ -215,6 +215,7 @@ const FIRST_TOKEN_SAMPLES: &str = "    first-token samples : ";
 const TIME_TO_FIRST_TOKEN: &str = "    time to first token : ";
 const FIRST_TOOL_CALL_SAMPLES: &str = "    first-tool-call samples : ";
 const TIME_TO_FIRST_TOOL_CALL: &str = "    time to first tool call : ";
+const TOOL_ROUNDS: &str = "    tool rounds         : ";
 
 // ---------------------------------------------------------------------------
 // 1. Attribution: the routing model's own spend, apart from every other row.
@@ -894,5 +895,62 @@ fn a_row_carrying_first_token_and_first_tool_call_prints_real_figures_and_an_unt
     assert_eq!(
         value_after(&coding_agent, TIME_TO_FIRST_TOOL_CALL),
         "not recorded"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 7. GH-TOOL-ROUNDS-ON-TRANSLATED (1334's last two quantities and 1350): the
+//    tool-rounds readout line beside the first-tool-call pair above.
+// ---------------------------------------------------------------------------
+
+/// Two seeded rows — rounds 2 and 1, repairs 1 and 0, each a 60s exchange —
+/// sum to one line: 3 rounds begun, 1 repair, and a real rounds-per-minute
+/// rate over the group's 120s of summed serving time. A group with no
+/// counted row (the coding-agent shape, exactly like every relayed exchange)
+/// prints "not recorded", never a fabricated `0`.
+///
+/// Mutation target `per-second-not-minute`: dropping the `× 60` in
+/// `PurposeConsumption::tool_rounds_per_minute` must turn this test's
+/// "1.50/min" into a different figure.
+#[test]
+fn two_seeded_rows_print_summed_rounds_repairs_and_a_real_per_minute_rate() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+    let at = now() - 60;
+
+    let first = NewObservation::new("timed-provider", "timed-model")
+        .with_purpose(Some("classification"))
+        .with_timing(Some(at - 60), Some(at))
+        .with_tool_rounds(Some(2))
+        .with_repairs(Some(1));
+    fixture.ledger().record(first, at).unwrap();
+
+    let second = NewObservation::new("timed-provider", "timed-model")
+        .with_purpose(Some("classification"))
+        .with_timing(Some(at - 60), Some(at))
+        .with_tool_rounds(Some(1))
+        .with_repairs(Some(0));
+    fixture.ledger().record(second, at).unwrap();
+
+    // A real gateway-shaped row: harness-recorded, no purpose, and — like
+    // every relayed exchange, which this build never decodes — no
+    // tool_rounds or repairs count at all.
+    fixture.record_gateway_exchange("gateway-provider", "gateway-model", "claude-code", at);
+
+    let run = fixture.routing_cost(None);
+    assert!(run.status.success(), "stderr: {}", run.stderr);
+
+    let classification = section(&run.stdout, "classification");
+    assert_eq!(
+        value_after(&classification, TOOL_ROUNDS),
+        "3 begun, 1 repairs, 1.50/min over 120s served"
+    );
+
+    let coding_agent = section(&run.stdout, "coding-agent (gateway relay)");
+    assert_eq!(
+        value_after(&coding_agent, TOOL_ROUNDS),
+        "not recorded",
+        "a group with no counted row must say so, never a fabricated 0: {}",
+        run.stdout
     );
 }
