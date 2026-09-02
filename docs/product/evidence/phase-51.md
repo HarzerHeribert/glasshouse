@@ -699,3 +699,5 @@ Not a state change. `GH-TURN-OUTCOME-ROW` closed both lines above with the verdi
 **Recorded limits** (the worker's): the replay narrows to no credential and no live `seconds_until_reset`/session count, which the historical record never held; the median is computed in integer thousandths to reuse the module's `median`; macOS only.
 
 State: **COMPLETE** for 1836, 1855 (token half) and 1854 (sparse and stale). Phase 51 stands at 20 of 37.
+
+> **2026-09-03, the wave-107 trailing sweep:** `tests/entitlement_broker.rs`'s two view tests read each account's block by position — name, facets, `served:` — and the 1836 line, joined into the facets string with a newline, had landed between them. The targeted gate never traced that file. Fixed forward in `main.rs`: `headroom_replay_facet` is its own line, printed after `served:` by `entitlements` and as the facets line's continuation by `status`; `phase51_joins`'s own assertions are `contains` and stand. The 1836 evidence above is unchanged.

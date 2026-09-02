@@ -14323,9 +14323,10 @@ fn status_report(runtime: &Runtime) -> anyhow::Result<String> {
                 let replay = headroom_replay_for(evidence_ledger.as_ref(), now_unix, entry);
                 let _ = writeln!(
                     out,
-                    "  `{}`  {}",
+                    "  `{}`  {}\n  {}",
                     entry.name(),
-                    entitlement_facets(entry, &thresholds, replay)
+                    entitlement_facets(entry, &thresholds),
+                    headroom_replay_facet(&replay)
                 );
             }
         }
@@ -14683,8 +14684,9 @@ fn entitlements_report(runtime: &Runtime) -> anyhow::Result<String> {
             // The same renderer `glasshouse status` uses, deliberately: the
             // two commands describing one account differently would be a
             // defect nobody could act on.
-            let _ = writeln!(out, "  {}", entitlement_facets(entry, &thresholds, replay));
+            let _ = writeln!(out, "  {}", entitlement_facets(entry, &thresholds));
             let _ = writeln!(out, "  served: {}", served_phrase(served.get(entry.name())));
+            let _ = writeln!(out, "  {}", headroom_replay_facet(&replay));
             let _ = writeln!(out);
         }
     }
@@ -14759,11 +14761,10 @@ fn headroom_replay_for(
 fn entitlement_facets(
     entry: &glasshouse::config::ResolvedEntitlement,
     thresholds: &glasshouse::provider::quota::CapacityBandThresholds,
-    replay: glasshouse::routing::evidence::HeadroomReplayCounts,
 ) -> String {
     use glasshouse::config::{EntitlementModels, TelemetryScope};
     use glasshouse::routing::evidence::{
-        HeadroomBand, HeadroomBasis, LongWindowPressure, MIN_SAMPLE_FOR_SUMMARY, ResetBasis,
+        HeadroomBand, HeadroomBasis, LongWindowPressure, ResetBasis,
     };
 
     fn band_str(band: HeadroomBand) -> &'static str {
@@ -14889,11 +14890,18 @@ fn entitlement_facets(
         (None, None) => "headroom estimate: unknown".to_owned(),
     };
 
-    // Map line 1836, on its own physical line — never folded into the
-    // ` · `-joined facets above, so an existing reader that pulls exactly
-    // the next line after an entitlement's header (this function's own
-    // regression fixture, `facets_line`) keeps seeing byte-identical text.
-    let headroom_replay = if replay.throttles() < MIN_SAMPLE_FOR_SUMMARY {
+    format!("{capacity} · {reset} · {throttling} · {models} · {headroom_estimate}")
+}
+
+/// Map line 1836's own line, kept apart from [`entitlement_facets`]'s so the
+/// two callers can place it: `glasshouse entitlements` prints it *after* the
+/// `served:` line, because the per-account block there is name, facets,
+/// served — three lines that `tests/entitlement_broker.rs` reads by position
+/// and that the wave-107 trailing sweep found this line had pushed apart;
+/// `glasshouse status` prints it as the facets line's continuation.
+fn headroom_replay_facet(replay: &glasshouse::routing::evidence::HeadroomReplayCounts) -> String {
+    use glasshouse::routing::evidence::MIN_SAMPLE_FOR_SUMMARY;
+    if replay.throttles() < MIN_SAMPLE_FOR_SUMMARY {
         "headroom estimate vs throttles (1836): not enough throttles to score".to_owned()
     } else {
         let reset_clause = match replay.observed_reset_lag_median_seconds {
@@ -14911,12 +14919,7 @@ fn entitlement_facets(
             replay.unestimable,
             replay.throttles()
         )
-    };
-
-    format!(
-        "{capacity} · {reset} · {throttling} · {models} · {headroom_estimate}\n  \
-         {headroom_replay}"
-    )
+    }
 }
 
 /// One line of the session listing, header included.
