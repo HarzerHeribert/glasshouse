@@ -730,6 +730,15 @@ else
 fi
 rm -f "$doc_out"
 
+# Phase 59's size ratchet: a production file over the ceiling may only shrink.
+# It is here rather than only in ci-local.sh because this is the gate every
+# worker runs; a package that grows main.rs learns it before it reports.
+echo
+printf '\033[1m=== file-size ratchet (Phase 59) ===\033[0m\n'
+if ! python3 scripts/check-file-sizes.py; then
+  rc=1
+fi
+
 echo
 if [ "$rc" -eq 0 ]; then
   printf '\033[32mblast-radius: every traced target passed\033[0m\n'

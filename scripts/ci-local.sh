@@ -129,6 +129,7 @@ if [ "$DO_MAC" -eq 1 ]; then
   step "lint / clippy" env RUSTFLAGS= cargo clippy --locked --workspace --all-targets -- -D warnings
   step "lint / rustdoc" env RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
   step "lint / README progress" python3 scripts/progress.py --check
+  step "lint / file sizes"      python3 scripts/check-file-sizes.py
   # Free-because-local checks. These never ran on GitHub Actions; they exist
   # because a local gate can afford questions a metered one could not.
   step "lint / doc boundary" scripts/check-doc-boundary.sh

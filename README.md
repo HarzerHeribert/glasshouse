@@ -19,10 +19,10 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`█████████████████████████████████████░░░` 1264 / 1347 mandatory capabilities (93%)
+`█████████████████████████████████████░░░` 1264 / 1355 mandatory capabilities (93%)
 
 <details>
-<summary>Per-phase breakdown (80 of 108 phases complete)</summary>
+<summary>Per-phase breakdown (80 of 109 phases complete)</summary>
 
 | Phase | Done |
 |---|---|
@@ -134,6 +134,7 @@ the authoritative specification and tracks what is done.
 | Phase 56A — Entitlement pool and subscription broker: several accounts, one scheduler | 13/13 ✅ |
 | Phase 57 — Context firewall: tool-output compaction between harness and model | 27/27 ✅ |
 | Phase 58 — Context economy: cache-stable translation, entitlement-aware reduction, and a measured token budget | 15/15 ✅ |
+| Phase 59 — Decompression: the code's physical shape catches up with its architecture | 0/8 |
 
 </details>
 <!-- progress:end -->

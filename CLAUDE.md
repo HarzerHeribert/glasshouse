@@ -2,6 +2,58 @@
 
 Glasshouse uses a spec-to-evidence, multi-harness development process.
 
+## Decompression — user ruling 2026-09-03, and the process changes it makes
+
+**The ruling** (design-decisions, *Decompression*; map **Phase 59**, lines 2043–2054):
+*Glasshouse is not sloppy; it is extraordinarily conscientious — in places too
+conscientious. The biggest risk is now complexity through over-assurance: files too
+large, too much historical documentation, a process whose evidence system itself
+needs maintaining. Before a broader release: no further large features; a hardening
+and simplification phase — split modules, cut redundant explanation, run real long
+sessions, close the open items by risk rather than by checkbox count. Keep what was
+good; changing the process is explicitly allowed.* **Phase 59 outranks every feature
+package until its lines are closed.** What stays: Phase −1, the targeted gate and the
+trailing sweep, a mutation on every decision an Amber or Red package makes, the
+register, visible workers in worktrees, the co-edit protocol, an independent verifier
+for Red. What changes:
+
+1. **A size ratchet runs in every gate.** `scripts/check-file-sizes.py` ends
+   `blast-radius.sh` and sits in `ci-local.sh`'s lint lane: a file over 2,500
+   production lines may only shrink, per `scripts/file-size-baseline.txt`. A
+   decomposition package ends with `--update`; the reviewer diffs the baseline.
+2. **A pure move is Green and owes no mutation.** It is verified by the full targeted
+   gate (for `config` or `main.rs` that is most of the crate), a moved-lines
+   accounting (`git diff --color-moved=zebra --stat`; the worker reports how many
+   lines are not moves and what they are), every existing import path kept valid by
+   `pub use` re-exports, and the ratchet. **Trimming comments is a separate package**,
+   reviewed by reading, never mixed into a move.
+3. **A doc comment states the invariant and why it holds now.** How a decision was
+   reached goes to `design-decisions.md` or the measurements behind a one-line
+   pointer. No new comment block over 20 lines in production code unless its first
+   sentence is the invariant.
+4. **A flake costs one rerun, not a ceremony.** A red target in a known load-sensitive
+   family (`terminal_loss`, `session_supervision`, the pty fixtures) is re-run alone
+   once by the gate and reported `flaky-pass`, which is not red and gets no attribution
+   write-up; three flaky-passes in a week buy a determinism packet for that test.
+   Until `GH-GATE-RERUN-ALONE` lands, do the one rerun by hand and stop there.
+5. **Evidence entries and checkpoints are bounded.** An evidence entry is the
+   contract, the tests by name, the mutation table (Amber/Red) and the limits — the
+   worker's report is the record, linked by path. A checkpoint is under 150 lines. A
+   new practice section is a rule under 20 lines; the file is closed to stories.
+6. **Dogfooding is a lane.** One real session per working day — the shipped binary
+   driving a real harness on a real project for at least an hour, the orchestrator
+   watching memory extraction, routing, the firewall and the shell — with findings in
+   `docs/process/dogfooding.md` and packets by risk.
+7. **Open lines are worked by risk, not count.** The user named 1534, 1535, 1545,
+   1129, 1044, 1294 and 1610 as product-relevant; their refusals are superseded by
+   *design it* (map line 2054). Everything else open stays refused unless a producer
+   lands.
+
+Order of the splits: `config`, `routing/evidence`, `shell` first (no live worker
+touches them), then `routing/session`, then `main.rs → commands/` once the package
+holding `main.rs` integrates; a trim package follows each split; dogfooding runs
+beside all of it.
+
 ## The orchestrator's reading, and why it is no longer eleven documents
 
 **Start here, in this order:**
@@ -258,7 +310,7 @@ in `worker-capabilities.md`; do not invent a second one.
 
 | tier | model | effort | entry criterion | it owes | it **skips** |
 |---|---|---|---|---|---|
-| **Green** | Sonnet | low–medium | adds no new decision — wires an existing value to an existing consumer, a `Display`/serde impl, a flag forwarding to a settled function, tests only, docs or config literals | the box's own targeted test, plus one assertion that the production caller runs it | mutation, independent reviewer, orchestrator diff read, and any blast radius beyond the named target |
+| **Green** | Sonnet | low–medium | adds no new decision — wires an existing value to an existing consumer, a `Display`/serde impl, a flag forwarding to a settled function, tests only, docs or config literals, **a pure move (Phase 59 decomposition)** | the box's own targeted test, plus one assertion that the production caller runs it | mutation, independent reviewer, orchestrator diff read, and any blast radius beyond the named target |
 | **Amber** | Sonnet | medium–high | adds or changes a decision — a branch, threshold, ordering, ranking, persisted field, or public API shape | targeted tests, blast radius, **one** mutation on the decision the box names | the independent reviewer, unless the worker flags a decisive claim; and you read the diff of the decision, not of the whole package |
 | **Red** | Opus specialist | high–xhigh | PTY/process lifecycle, signals, shutdown, migrations, session identity or resume, project isolation, secrets, `#[cfg(...)]` platform code — or a disputed architecture | full relevant regression, platform legs, the semantic mutation suite, an independent verifier | nothing |
 

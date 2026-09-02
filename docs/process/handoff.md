@@ -1,3 +1,5 @@
+**2026-09-03 (new requirement, and a process ruling):** Phase 59 — Decompression (map lines 2043–2054, eight lines) — recorded from the user's ruling that the biggest risk is now complexity through over-assurance, not missing quality: split the monoliths, trim narrative comments, run real long sessions, close open lines by risk. `CLAUDE.md` (*Decompression*) carries the seven process changes; `scripts/check-file-sizes.py` is the ratchet in every gate. Denominator now 1355. Phase 59 outranks every feature package.
+
 **2026-09-02 (new requirement):** Phase 58 — context economy learned from a side-by-side comparison with Headroom (map lines 2014–2040, 15 lines) — recorded from the user's instruction (*"take everything which would benefit us in a meaningful way and ingest it … make sure this is documented going forward"*); `design-decisions.md` (*Headroom, compared*) has the comparison, the refusals by name and the order of work. Denominator now 1347.
 
 **2026-08-31 (requirement refined):** Phase 56A — entitlement pool and subscription broker (map 1962–1974, thirteen lines) — recorded from the user; it is the core of Phase 56. Denominator now 1305.

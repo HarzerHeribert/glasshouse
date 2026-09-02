@@ -1,5 +1,10 @@
 # Refusal register — every line refused, and whether its cause is ours
 
+## User ruling 2026-09-03 — seven refusals superseded by *design it*
+
+The user weighted the open map at roughly 85 % of product readiness and named the lines whose refusal by checkbox economics does not hold: **1534** (context quality in scoring), **1535** and **1545** (prompt-cache temperature; cache affinity and warm/cold/unknown), **1129** (no injection at low retrieval confidence), **1044** (preserving user and unrelated worker changes on rollback), **1294** and **1610** (a nearly complete task is not moved for a reserve or quota threshold). Map line 2054 (Phase 59) records the ruling; each of these now gets a design note and a package sized by its mechanism, or a design note that says honestly why it cannot be built yet. The rows below stay as the history of *why* they were refused; they no longer say *do not package*.
+
+
 > **This is not an archive. It is the input to the next package.** Practice §83.
 >
 > A line refused at Phase −1 is a correct outcome and a recorded one. What went

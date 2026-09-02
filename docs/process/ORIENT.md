@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1264 / 1347 mandatory capabilities (94%)** — 83 open across 28 phases.
+**1264 / 1355 mandatory capabilities (93%)** — 91 open across 29 phases.
 
 ## Where the work is
 
@@ -49,6 +49,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 21G | Memory revalidation | **6** | 3 | `941` |
 | Phase 32A | Unified quota and capacity model | **7** | 14 | `1196` |
 | Phase 9K | Harness-aware response profiles | **8** | 29 | `578` |
+| Phase 59 | Decompression: the code's physical shape catches up with its architecture | **8** | 0 | `2043` |
 | Phase 51 | Evaluation hooks | **15** | 22 | `1818` |
 
 **Fully closed (80):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 7, Phase 8, Phase 9A, Phase 9B, Phase 9C, Phase 9D, Phase 9F, Phase 9G, Phase 9I, Phase 9J, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 16, Phase 17, Phase 18, Phase 19, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 21H, Phase 21I, Phase 21J, Phase 22, Phase 23, Phase 24, Phase 25, Phase 26, Phase 29, Phase 32, Phase 32B, Phase 32E, Phase 33A, Phase 33C, Phase 34, Phase 34A, Phase 34B, Phase 34D, Phase 34E, Phase 34F, Phase 35, Phase 35A, Phase 35C, Phase 35D, Phase 36, Phase 39, Phase 40, Phase 41, Phase 42, Phase 43, Phase 44, Phase 45, Phase 46, Phase 47, Phase 48, Phase 49, Phase 50, Phase 54, Phase 54A, Phase 55, Phase 56, Phase 56A, Phase 57, Phase 58.
@@ -57,7 +58,7 @@ closures are usually at the top. Open the map at the line number given.
 
 Every phase with **three or fewer** open lines, quoted verbatim. These are
 where a single package finishes a phase, so they are listed here and the
-other ~50 open lines are not.
+other ~58 open lines are not.
 
 For any other phase: `scripts/discover.py --phase <id>` prints its open
 lines and evidence together. **Do not open the 178 KB map to read them.**

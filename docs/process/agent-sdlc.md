@@ -172,6 +172,13 @@ the change (seven jobs, macOS billed 10×, an allowance gone in ~10 runs)
 returns in full for every manual dispatch. Pushing at all remains the
 orchestrator's job and nobody else's.
 
+**Bounded records (user ruling 2026-09-03, *Decompression*).** An evidence entry
+is the contract, the tests by name, the mutation table for Amber and Red work, and
+the limits; the worker's report is the record and is linked by path rather than
+paraphrased. A checkpoint stays under 150 lines. A pure move (Phase 59) is verified
+by the full targeted gate, a moved-lines accounting and the size ratchet, and owes
+no mutation; a comment trim is its own package, reviewed by reading.
+
 ### 9. Continue or checkpoint
 
 Proceed checkbox-by-checkbox while safe work remains. Stop only for a genuine
