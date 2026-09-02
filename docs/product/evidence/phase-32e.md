@@ -515,3 +515,9 @@ correct; the boundary is unwatched — §90's *one line of an otherwise-proven
 join* case, not a re-open. Owed: one test seeding exactly
 `MIN_ROWS_FOR_BURN_RATE` rows (prints) and one fewer (does not), folded into
 the next Green package that touches `shell/mod.rs`'s capacity tests.
+
+**1276, boundary pinned — 2026-09-02, later (`GH-BURN-RATE-BOUNDARY`, Green).**
+Two tests in `shell::project_overview_capacity_tests` seed exactly
+`MIN_ROWS_FOR_BURN_RATE` rows (the class prints) and one fewer (it does
+not); the audit's `off-by-one-boundary` mutation is now KILLED
+(`panicked at shell/mod.rs:4690`). Tests only; the tick above stands.

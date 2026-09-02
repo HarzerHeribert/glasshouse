@@ -4652,6 +4652,85 @@ mod project_overview_capacity_tests {
             "no ledger rows means no task-class line, unchanged from before: {lines:?}"
         );
     }
+
+    /// The boundary itself: exactly `MIN_ROWS_FOR_BURN_RATE` live rows is
+    /// enough for the class to print. Pins the low edge of the audit's
+    /// `>=` → `>` off-by-one mutation (`docs/product/evidence/phase-32e.md`,
+    /// *1276, audit note 2026-09-02*).
+    #[test]
+    fn a_class_with_exactly_the_minimum_row_count_prints() {
+        use crate::routing::evidence::{EvidenceLedger, NewObservation};
+        use crate::routing::request::TaskClass;
+
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+
+        let mut user = UserConfig::load(runtime.paths()).unwrap();
+        let provider = crate::config::ProviderConfig::new("openai-compatible");
+        user.providers_mut()
+            .set("overview-capacity-test-provider", provider);
+        user.save(runtime.paths()).unwrap();
+
+        let now_unix = crate::provider::cache::now_unix_seconds();
+        let ledger = EvidenceLedger::open(&runtime).unwrap();
+        for i in 0..crate::routing::burn::MIN_ROWS_FOR_BURN_RATE {
+            ledger
+                .record(
+                    NewObservation::new("glasshouse", "session-router")
+                        .with_harness(Some("claude-code"))
+                        .with_task_class(Some(TaskClass::CodeModification)),
+                    now_unix - 3600 + (i as i64) * 60,
+                )
+                .unwrap();
+        }
+
+        let lines = build_project_overview_capacity(&runtime);
+        let class_line = lines
+            .iter()
+            .find(|line| line.contains("requests by task class"))
+            .unwrap_or_else(|| panic!("no task-class line in {lines:?}"));
+        assert!(
+            class_line.contains("code modification"),
+            "exactly MIN_ROWS_FOR_BURN_RATE rows must be enough to print: {class_line}"
+        );
+    }
+
+    /// The other edge: one row short of `MIN_ROWS_FOR_BURN_RATE` and the
+    /// class must not print. Pins the high edge of the same off-by-one.
+    #[test]
+    fn a_class_with_one_fewer_than_the_minimum_row_count_does_not_print() {
+        use crate::routing::evidence::{EvidenceLedger, NewObservation};
+        use crate::routing::request::TaskClass;
+
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+
+        let mut user = UserConfig::load(runtime.paths()).unwrap();
+        let provider = crate::config::ProviderConfig::new("openai-compatible");
+        user.providers_mut()
+            .set("overview-capacity-test-provider", provider);
+        user.save(runtime.paths()).unwrap();
+
+        let now_unix = crate::provider::cache::now_unix_seconds();
+        let ledger = EvidenceLedger::open(&runtime).unwrap();
+        for i in 0..(crate::routing::burn::MIN_ROWS_FOR_BURN_RATE - 1) {
+            ledger
+                .record(
+                    NewObservation::new("glasshouse", "session-router")
+                        .with_harness(Some("claude-code"))
+                        .with_task_class(Some(TaskClass::CodeModification)),
+                    now_unix - 3600 + (i as i64) * 60,
+                )
+                .unwrap();
+        }
+
+        let lines = build_project_overview_capacity(&runtime);
+        let has_class_line = lines
+            .iter()
+            .any(|line| line.contains("requests by task class"));
+        assert!(
+            !has_class_line,
+            "MIN_ROWS_FOR_BURN_RATE - 1 rows must not be enough to print: {lines:?}"
+        );
+    }
 }
 
 /// Map line 1661: [`build_project_overview_routing`] reached through its
