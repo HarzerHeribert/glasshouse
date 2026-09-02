@@ -3,12 +3,10 @@
 # ceiling 2500
  16564 crates/glasshouse/src/main.rs
   7213 crates/glasshouse/src/routing/session.rs
-  7048 crates/glasshouse/src/config/mod.rs
   4973 crates/glasshouse/src/shell/state.rs
   4135 crates/glasshouse/src/api/unix.rs
   3795 crates/glasshouse/src/evaluation/mod.rs
   3563 crates/glasshouse/src/database.rs
   2941 crates/glasshouse/src/shell/mod.rs
   2898 crates/glasshouse/src/session/store.rs
-  2774 crates/glasshouse/src/gateway/conformance.rs
   2532 crates/glasshouse/src/routing/disposable.rs

@@ -40,12 +40,35 @@ def production_lines(path):
         return sum(1 for _ in fh)
 
 
+def is_test_file(path):
+    """A test module that lives in its own file is not production.
+
+    Phase 59's line 2049 moves inline `mod tests` out beside the module —
+    `<module>/tests.rs` or `<module>/tests/<part>.rs` — and those files hold
+    nothing but tests. Counting them as production would make the ratchet
+    punish exactly the move it exists to reward (GH-DECOMP-DATABASE found it:
+    `database/tests.rs` at 3,379 lines was read as a production file).
+    """
+    rel = os.path.relpath(path, SRC).split(os.sep)
+    if rel[-1] == "tests.rs" or "tests" in rel[:-1]:
+        return True
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            stripped = line.strip()
+            if not stripped or stripped.startswith("//"):
+                continue
+            return stripped.startswith("#![cfg(test)]")
+    return False
+
+
 def measure():
     sizes = {}
     for root, _, files in os.walk(SRC):
         for name in files:
             if name.endswith(".rs"):
                 path = os.path.join(root, name)
+                if is_test_file(path):
+                    continue
                 sizes[os.path.relpath(path, REPO)] = production_lines(path)
     return sizes
 
