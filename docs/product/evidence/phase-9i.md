@@ -215,3 +215,50 @@ half recorded here as the limit. When Phase 51's first dispatching package
 lands, its packet owes this entry a production caller of
 `for_glasshouses_own_run` — that is the moment the census line above stops
 being expected and starts being the finding.
+
+### Phase 9I — the disposable policy's caller now calls (lines 530, 531, 540; `GH-ROUTED-EXTRACTION-CLIENT`, Red, Opus 5 high, 2026-09-02)
+
+The entry above closed 530/531/532/540 on a caller that consulted the policy and then dialled nobody — `RoutedNoModel`'s own module doc said so, and `phase-33c.md`'s census of 1367 recorded that `disposable_extraction_model` returned a configured extraction model *before* the router was consulted. This package makes both true in the other direction, and the boxes stay ticked on a stronger fact.
+
+**The design, ruled by the worker and accepted by the orchestrator.** Four steps in `main.rs::disposable_extraction_model`: *consent* — `[memory] extraction_model` set means a model may be called at all, and its absence still means route, explain, record, call nothing (the doc comment on `configured_extraction_model` is a recorded decision that a free-model list is a statement about cost, not consent for a hook to dial out; kept); *local bypass* — a provider naming no credential variable cannot be a `DisposableCandidate` (a `CredentialId` carries a `SecretRef`), so the loopback runner is built directly, and nothing is lost because a free local model satisfies 530 trivially; *the choice* — `DisposableRouting::choose` over every configured candidate **plus** the configured extraction model, which is now one candidate among the user's free ones rather than a bypass (free first when adequate, the named model as `UseReason::Fallback`, metered only as `MeteredUse` and the protected reserve permit); *the client* — `extraction_client_for`, `classification_model`'s exact shape, resolving the exact `SecretRef` the winning candidate named through `PreferNativeSecretStore` into `ConfiguredModel::new`, whose one read of the value is the `authorization` header. The label (a provider and a variable *name*) travels as `ModelCall::credential_label` into `routing_observations.quota_context`, the column `gateway::session` already uses for the same fact. Health is durable: `persist_support_work_health` adopts this resource's `GatewayHealthCache` entry into a `FreePool`, observes the `WorkloadOutcome`, and writes it back, so `consecutive_failures` accumulates across the one-second processes that dispatch; `observed_health_of` (unchanged) is the read side. The two policy classes still do not name each other — the cache reader and writer live in `main.rs`.
+
+**The precedence change is the one behaviour a user could notice**, and it is pinned: a user with a configured extraction model *and* a configured free model now gets the free one when it is adequate (`the_routed_free_model_receives_the_request_and_the_named_one_does_not`). A user who wants exactly one model has `routing.free_resource_pin`, whose refusal is the codebase's own statement that a pin that fell back would not be a pin.
+
+Production evidence:
+- `crates/glasshouse/src/memory/extract/disposable.rs` — `RoutedModel` (`choice`, `with_client`, `observing`, `complete_observed`, `workload_outcome`)
+- `crates/glasshouse/src/main.rs` — `disposable_extraction_model`, `configured_extraction_candidate`, `extraction_client_for`, `persist_support_work_health`
+- `crates/glasshouse/src/memory/extract/mod.rs` — `ModelCall::credential_label` → `NewObservation::quota_context`; `memory/extract/model.rs` — `RATE_LIMITED` (the one phrase a 429 produces, so an exchange translates to `WorkloadOutcome::RateLimited` without a new `ModelError` variant)
+
+Regression evidence (`tests/routed_extraction.rs`, through the shipped binary against fixture upstreams):
+- `the_routed_free_model_receives_the_request_and_the_named_one_does_not` — free chosen, one request at the free fixture, none at the named one, the ledger row names it
+- `health_learned_in_two_processes_moves_the_third_to_the_configured_model` — two 429s in two processes; the third process chooses the configured model
+- `no_adequate_resource_fails_in_words_and_dials_nothing`
+- `the_credential_value_reaches_the_request_and_neither_the_ledger_nor_the_output`
+- unit: `a_chosen_resource_with_no_usable_client_says_which_and_why`, `a_run_that_calls_nothing_reports_no_outcome`, `an_exchange_translates_to_exactly_one_workload_outcome`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| `RoutedModel::callable`: `Some(Ok(client)) => Ok(client)` → `Some(Ok(_)) => Err(ModelError::Unavailable)` | `choose-and-call-nothing` | **killed** | `the_routed_free_model_receives_the_request_and_the_named_one_does_not` |
+| `persist_support_work_health`: `cache.store(..)` → discarded | `forget-the-outcome` | **killed** | `health_learned_in_two_processes_moves_the_third_to_the_configured_model` |
+| `disposable_extraction_model`: `&& configured_candidate.is_none()` → `&& true` (the pre-batch early return) | `bypass-the-router` | **killed** | `the_routed_free_model_receives_the_request_and_the_named_one_does_not` |
+| the `with_client` call site: the label → the resolved value | `leak-the-credential` | **killed** | `the_credential_value_reaches_the_request_and_neither_the_ledger_nor_the_output` |
+
+> choose-and-call-nothing observed: assertion `left == right` failed: one extraction is one model call, no more and no fewer
+
+> forget-the-outcome observed: assertion `left == right` failed: the third dispatch must not try a resource two earlier processes found cooling down
+
+> bypass-the-router observed: … ConfiguredModel::describe with no routing rationale at all, which is the bypassed shape
+
+> leak-the-credential observed: assertion `left == right` failed: the row must name which allowance paid -- the label, which is two names
+
+Gates: `routed_extraction` 4/4, `--lib memory::extract` 85/85, `--lib routing::free` 9/9, `--bin glasshouse` 79/79, thirteen existing suites green with counts quoted in the report, `blast-radius.sh --targeted` exit 0, rustdoc clean. Scope overflow, all disclosed: the rename `RoutedNoModel` → `RoutedModel` ripples into `memory/mod.rs`, five test files' doc comments and literals, and one line of `free_resource_order` in `classification_call.rs` whose failure without it is the clearest evidence the bypass is gone.
+
+Recorded scope limits — stated by the worker, not discovered later:
+- `ConfiguredModel` reads no response headers, so a provider's declared `Retry-After` never reaches the pool on this path: every 429 is `RateLimited { retry_after: None }` and gets the invented backoff (map line 1319's authoritative half stays open here).
+- The durable pool carries health only; the `Allowance` half of `FreePool::observe` dies with the process.
+- A carried-forward health entry is re-dated by the cache's per-file timestamp (line 1854's *stale* half is weaker for entries this producer did not observe).
+- `GatewayHealthCache` now has two producers and `write_json_atomically` uses a fixed `<path>.json.writing` temporary — two writers race on the name and a killed process leaves one behind that `load_all*` reads as a second reading; `observed_health_of` handles a contradictory pair fail-safe (the resource is left unobserved). Pre-existing; a Green successor is named in the register (`GH-ATOMIC-WRITE-UNIQUE-TEMP`).
+- The four tests drive `memory commit`; the hook dispatcher shares the one function and is covered by its unchanged suites.
+- macOS only.
+
+---

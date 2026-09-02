@@ -33,12 +33,6 @@ pub(super) const ENDPOINT: &str = "/messages";
 /// each refusal carries. The pair table's per-field rows for this side.
 pub(super) const REFUSED_FIELDS: &[(&str, &str)] = &[
     (
-        "cache_control",
-        "OpenAI Chat has no prompt-cache hint to carry it to, and dropping it would silently \
-         change what the harness asked for; launch the Claude Code child with \
-         DISABLE_PROMPT_CACHING=1 so it sends none",
-    ),
-    (
         "thinking",
         "extended thinking has no OpenAI Chat equivalent; turn it off for this pairing",
     ),
@@ -171,6 +165,11 @@ pub(super) fn decode_request(body: &[u8]) -> Result<Request, Unsupported> {
     let value: Value = serde_json::from_slice(body)
         .map_err(|_| Unsupported::new("body", "the request body is not a JSON document"))?;
     let mut top = Fields::of(value, "")?;
+    // Set from any of the four seams below — the system prompt, a message
+    // content block, a tool_result's nested text block, or a tool
+    // definition — and never reset: one flag for "caching was asked for
+    // somewhere in this request" (see `Request::cache_requested`'s doc).
+    let mut cache_requested = false;
 
     let model = top.require_string("model")?;
     let max_tokens = top.take_u64("max_tokens")?;
@@ -190,7 +189,7 @@ pub(super) fn decode_request(body: &[u8]) -> Result<Request, Unsupported> {
                         format!("a system block must be text, not `{kind}`"),
                     ));
                 }
-                texts.push(text_block(block)?);
+                texts.push(text_block(block, &mut cache_requested)?);
             }
             Some(texts.join("\n\n"))
         }
@@ -212,7 +211,11 @@ pub(super) fn decode_request(body: &[u8]) -> Result<Request, Unsupported> {
         .into_iter()
         .enumerate()
     {
-        messages.push(decode_message(item, &element("messages", index))?);
+        messages.push(decode_message(
+            item,
+            &element("messages", index),
+            &mut cache_requested,
+        )?);
     }
 
     let mut tools = Vec::new();
@@ -222,7 +225,11 @@ pub(super) fn decode_request(body: &[u8]) -> Result<Request, Unsupported> {
         .into_iter()
         .enumerate()
     {
-        tools.push(decode_tool(item, &element("tools", index))?);
+        tools.push(decode_tool(
+            item,
+            &element("tools", index),
+            &mut cache_requested,
+        )?);
     }
 
     let mut parallel_tool_calls = None;
@@ -282,7 +289,15 @@ pub(super) fn decode_request(body: &[u8]) -> Result<Request, Unsupported> {
 
     top.refuse_if_present("thinking", reason("thinking"))?;
     top.refuse_if_present("service_tier", reason("service_tier"))?;
-    top.refuse_if_present("cache_control", reason("cache_control"))?;
+    // Carried (2014), not refused: no home on this wire's own top level in
+    // practice (a real Claude Code request never sets it here — every
+    // observed `cache_control` rides on a system block, a content block or
+    // a tool definition, each already caught below), but a defensive fourth
+    // seam so a future client that did would still be accepted rather than
+    // silently ignored or newly refused.
+    if top.take("cache_control").is_some() {
+        cache_requested = true;
+    }
     top.finish()?;
 
     Ok(Request {
@@ -298,10 +313,11 @@ pub(super) fn decode_request(body: &[u8]) -> Result<Request, Unsupported> {
         stop,
         stream,
         user,
+        cache_requested,
     })
 }
 
-fn decode_message(value: Value, path: &str) -> Result<Message, Unsupported> {
+fn decode_message(value: Value, path: &str, cache: &mut bool) -> Result<Message, Unsupported> {
     let mut message = Fields::of(value, path)?;
     let role = match message.require_string("role")?.as_str() {
         "user" => Role::User,
@@ -320,7 +336,7 @@ fn decode_message(value: Value, path: &str) -> Result<Message, Unsupported> {
             items
                 .into_iter()
                 .enumerate()
-                .map(|(index, item)| decode_block(item, &element(&content, index)))
+                .map(|(index, item)| decode_block(item, &element(&content, index), &mut *cache))
                 .collect::<Result<Vec<_>, _>>()?
         }
         Some(other) => {
@@ -343,21 +359,26 @@ fn decode_message(value: Value, path: &str) -> Result<Message, Unsupported> {
     Ok(Message { role, blocks })
 }
 
-/// A text block's text, refusing the two decorations OpenAI Chat cannot carry.
-fn text_block(mut block: Fields) -> Result<String, Unsupported> {
-    block.refuse_if_present("cache_control", reason("cache_control"))?;
+/// A text block's text: carries `cache_control` (2014) rather than refusing
+/// it, and still refuses `citations`, which no target here can carry.
+fn text_block(mut block: Fields, cache: &mut bool) -> Result<String, Unsupported> {
+    if block.take("cache_control").is_some() {
+        *cache = true;
+    }
     block.refuse_if_present("citations", reason("citations"))?;
     let text = block.require_string("text")?;
     block.finish()?;
     Ok(text)
 }
 
-fn decode_block(value: Value, path: &str) -> Result<Block, Unsupported> {
+fn decode_block(value: Value, path: &str, cache: &mut bool) -> Result<Block, Unsupported> {
     let mut block = Fields::of(value, path)?;
     let kind = block.require_string("type")?;
-    block.refuse_if_present("cache_control", reason("cache_control"))?;
+    if block.take("cache_control").is_some() {
+        *cache = true;
+    }
     match kind.as_str() {
-        "text" => Ok(Block::Text(text_block(block)?)),
+        "text" => Ok(Block::Text(text_block(block, cache)?)),
         "image" => {
             let mut source = block
                 .take_object("source")?
@@ -411,7 +432,7 @@ fn decode_block(value: Value, path: &str) -> Result<Block, Unsupported> {
                         let path = element(&content, index);
                         let mut inner = Fields::of(item, path)?;
                         match inner.require_string("type")?.as_str() {
-                            "text" => texts.push(text_block(inner)?),
+                            "text" => texts.push(text_block(inner, cache)?),
                             "image" => {
                                 return Err(Unsupported::new(
                                     inner.path().to_owned(),
@@ -456,9 +477,11 @@ fn decode_block(value: Value, path: &str) -> Result<Block, Unsupported> {
     }
 }
 
-fn decode_tool(value: Value, path: &str) -> Result<ToolDefinition, Unsupported> {
+fn decode_tool(value: Value, path: &str, cache: &mut bool) -> Result<ToolDefinition, Unsupported> {
     let mut tool = Fields::of(value, path)?;
-    tool.refuse_if_present("cache_control", reason("cache_control"))?;
+    if tool.take("cache_control").is_some() {
+        *cache = true;
+    }
     if let Some(kind) = tool.take_string("type")?
         && kind != "custom"
     {
@@ -674,7 +697,10 @@ pub(super) fn decode_response(body: &[u8]) -> Result<Response, Unsupported> {
 }
 
 fn decode_response_block(value: Value, path: &str) -> Result<Block, Unsupported> {
-    let block = decode_block(value, path)?;
+    // A response never legitimately carries `cache_control` — it is a
+    // request-only concept — so nothing here reads whether decode_block saw
+    // one.
+    let block = decode_block(value, path, &mut false)?;
     match block {
         Block::Text(_) | Block::ToolUse { .. } => Ok(block),
         Block::Image(_) => Err(Unsupported::new(
@@ -1097,6 +1123,11 @@ pub(super) mod tests {
             stop: vec!["END".to_owned(), "STOP".to_owned()],
             stream: true,
             user: Some("user_123".to_owned()),
+            // Encoding a marker back out onto Anthropic's own wire is not
+            // this package's scope (2014 is about Claude Code as the
+            // *source*), so `false` keeps this fixture's encode/decode
+            // round trip exact; carrying is exercised directly below.
+            cache_requested: false,
         }
     }
 
@@ -1135,6 +1166,57 @@ pub(super) mod tests {
         assert_eq!(request.parallel_tool_calls, None);
         assert_eq!(request.user.as_deref(), Some("u1"));
         assert!(request.stream);
+        assert!(!request.cache_requested);
+    }
+
+    #[test]
+    fn cache_control_is_carried_not_refused_at_every_seam() {
+        // The system prompt.
+        let wire =
+            br#"{"model": "m", "max_tokens": 1, "messages": [{"role": "user", "content": "x"}],
+            "system": [{"type": "text", "text": "s", "cache_control": {"type": "ephemeral"}}]}"#;
+        assert!(
+            decode_request(wire)
+                .expect("carried, not refused")
+                .cache_requested
+        );
+
+        // A message content block.
+        let wire = br#"{"model": "m", "max_tokens": 1, "messages": [{"role": "user",
+            "content": [{"type": "text", "text": "x", "cache_control": {"type": "ephemeral"}}]}]}"#;
+        assert!(
+            decode_request(wire)
+                .expect("carried, not refused")
+                .cache_requested
+        );
+
+        // A tool definition.
+        let wire = br#"{"model": "m", "max_tokens": 1, "messages": [],
+            "tools": [{"name": "t", "input_schema": {}, "cache_control": {"type": "ephemeral"}}]}"#;
+        assert!(
+            decode_request(wire)
+                .expect("carried, not refused")
+                .cache_requested
+        );
+
+        // A tool_result's nested text block.
+        let wire = br#"{"model": "m", "max_tokens": 1, "messages": [{"role": "user",
+            "content": [{"type": "tool_result", "tool_use_id": "t",
+            "content": [{"type": "text", "text": "x", "cache_control": {"type": "ephemeral"}}]}]}]}"#;
+        assert!(
+            decode_request(wire)
+                .expect("carried, not refused")
+                .cache_requested
+        );
+
+        // No cache_control anywhere: not asked for.
+        let wire =
+            br#"{"model": "m", "max_tokens": 1, "messages": [{"role": "user", "content": "x"}]}"#;
+        assert!(
+            !decode_request(wire)
+                .expect("plain request decodes")
+                .cache_requested
+        );
     }
 
     #[test]
@@ -1153,16 +1235,6 @@ pub(super) mod tests {
             (base(r#", "service_tier": "auto""#), "service_tier"),
             (base(r#", "unknown_future_field": 1"#), "unknown_future_field"),
             (
-                base(
-                    r#", "system": [{"type": "text", "text": "s", "cache_control": {"type": "ephemeral"}}]"#,
-                ),
-                "system[0].cache_control",
-            ),
-            (
-                r#"{"model": "m", "max_tokens": 1, "messages": [{"role": "user", "content": [{"type": "text", "text": "x", "cache_control": {"type": "ephemeral"}}]}]}"#.to_owned(),
-                "messages[0].content[0].cache_control",
-            ),
-            (
                 r#"{"model": "m", "max_tokens": 1, "messages": [{"role": "user", "content": [{"type": "text", "text": "x", "citations": []}]}]}"#.to_owned(),
                 "messages[0].content[0].citations",
             ),
@@ -1179,10 +1251,6 @@ pub(super) mod tests {
                 "tools[0].type",
             ),
             (
-                r#"{"model": "m", "max_tokens": 1, "messages": [], "tools": [{"name": "t", "input_schema": {}, "cache_control": {"type": "ephemeral"}}]}"#.to_owned(),
-                "tools[0].cache_control",
-            ),
-            (
                 r#"{"model": "m", "max_tokens": 1, "messages": [], "tool_choice": {"type": "mystery"}}"#.to_owned(),
                 "tool_choice.type",
             ),
@@ -1197,11 +1265,6 @@ pub(super) mod tests {
             assert_eq!(refusal.field, field, "{wire}");
             assert!(!refusal.reason.is_empty());
         }
-    }
-
-    #[test]
-    fn the_cache_control_refusal_tells_the_user_the_switch() {
-        assert!(reason("cache_control").contains("DISABLE_PROMPT_CACHING=1"));
     }
 
     #[test]

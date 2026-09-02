@@ -6,7 +6,7 @@
 //! Every test here proves something about the **shipped binary's actual
 //! decision path**, not a hand-built stand-in: `DisposableRouting::choose`
 //! is the exact function `main.rs`'s `disposable_extraction_model` calls
-//! (through `memory::RoutedNoModel::new`) to route `glasshouse memory
+//! (through `memory::RoutedModel::new`) to route `glasshouse memory
 //! extract`, and `crates/glasshouse/src/main.rs`'s own test module has two
 //! tests — `disposable_extraction_model_prefers_a_configured_free_model_and_names_the_reason`
 //! and `disposable_extraction_model_reflects_real_cached_capacity_telemetry`

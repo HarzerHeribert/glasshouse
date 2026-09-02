@@ -50,6 +50,20 @@ pub struct RawEntry {
     pub total_candidates: Option<usize>,
 }
 
+/// [`RawStore::savings_in_window`]'s result — map line 2034's firewall
+/// facet, windowed. `unestimated` entries count toward `results` but never
+/// toward `kept_local`/`original_of_estimated`, the same distinction
+/// `main.rs::context_firewall_savings_summary` already draws for its own
+/// unwindowed reading of every entry the store holds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WindowSavings {
+    pub sessions: usize,
+    pub results: usize,
+    pub kept_local: u64,
+    pub original_of_estimated: u64,
+    pub unestimated: usize,
+}
+
 /// A raw store rooted at one directory — normally
 /// `Runtime::state_dir().join("context-firewall")`, but a plain path here
 /// so tests can point it at a temp directory without a full
@@ -120,6 +134,41 @@ impl RawStore {
             }
         }
         Ok(out)
+    }
+
+    /// Map line 2034's firewall facet: the same estimated-tokens-kept-local
+    /// arithmetic [`Self::all_entries`]'s doc comment already names for
+    /// `status`'s unwindowed `main.rs::context_firewall_savings_summary`,
+    /// filtered to entries whose `timestamp_unix` falls in
+    /// `[earliest_unix, now_unix]` so `glasshouse routing-cost`'s own
+    /// `--hours` window applies to the firewall facet exactly as it already
+    /// does to every `PurposeConsumption` group. An entry with no
+    /// `forwarded_token_estimate` (written before map line 2005) still
+    /// counts toward `results`, never toward `kept_local` or
+    /// `original_of_estimated` — see [`WindowSavings::unestimated`].
+    pub fn savings_in_window(
+        &self,
+        earliest_unix: i64,
+        now_unix: i64,
+    ) -> io::Result<WindowSavings> {
+        let entries = self.all_entries()?;
+        let mut savings = WindowSavings::default();
+        let mut sessions = std::collections::HashSet::new();
+        for entry in entries.iter().filter(|entry| {
+            entry.timestamp_unix >= earliest_unix && entry.timestamp_unix <= now_unix
+        }) {
+            savings.results += 1;
+            sessions.insert(entry.session_id.as_str());
+            match entry.forwarded_token_estimate {
+                Some(forwarded) => {
+                    savings.original_of_estimated += entry.original_token_estimate;
+                    savings.kept_local += entry.original_token_estimate.saturating_sub(forwarded);
+                }
+                None => savings.unestimated += 1,
+            }
+        }
+        savings.sessions = sessions.len();
+        Ok(savings)
     }
 
     /// Read back an entry by its `gh-tool://<id>` reference (the bare id
@@ -280,6 +329,53 @@ mod tests {
         assert_eq!(entries[0].content, "content a");
         assert_eq!(entries[1].content, "content a2");
         assert_eq!(entries[2].content, "content b");
+    }
+
+    /// Map line 2034's own rule for [`RawStore::savings_in_window`]: an
+    /// entry with no `forwarded_token_estimate` counts toward `results` (it
+    /// was a real reduction), but never toward `kept_local` or
+    /// `original_of_estimated` — the mutation this test exists to kill
+    /// would fold its `original_token_estimate` into `kept_local`, printing
+    /// an estimated saving for an entry that recorded no comparison at all.
+    #[test]
+    fn an_entry_with_no_forwarded_estimate_counts_toward_results_never_toward_kept_local() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RawStore::open(dir.path());
+        let mut estimated = entry("session-a", "content with a real comparison");
+        estimated.original_token_estimate = 100;
+        estimated.forwarded_token_estimate = Some(40);
+        store.write(&estimated).unwrap();
+
+        let mut unestimated = entry("session-a", "content with no recorded comparison");
+        unestimated.original_token_estimate = 9_999;
+        unestimated.forwarded_token_estimate = None;
+        store.write(&unestimated).unwrap();
+
+        let savings = store.savings_in_window(0, i64::MAX).unwrap();
+        assert_eq!(savings.results, 2);
+        assert_eq!(savings.unestimated, 1);
+        assert_eq!(savings.original_of_estimated, 100);
+        assert_eq!(savings.kept_local, 60);
+    }
+
+    /// [`RawStore::savings_in_window`] excludes an entry whose
+    /// `timestamp_unix` falls outside `[earliest_unix, now_unix]` entirely
+    /// — from `results` as well as from the token sums, exactly as
+    /// `EvidenceLedger::consumption_by_purpose`'s own `observed_at` window
+    /// already does for every other figure in this report.
+    #[test]
+    fn an_entry_outside_the_window_is_excluded_entirely() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = RawStore::open(dir.path());
+        let mut inside = entry("session-a", "inside the window");
+        inside.timestamp_unix = 1_000;
+        store.write(&inside).unwrap();
+        let mut outside = entry("session-a", "outside the window");
+        outside.timestamp_unix = 5_000;
+        store.write(&outside).unwrap();
+
+        let savings = store.savings_in_window(0, 2_000).unwrap();
+        assert_eq!(savings.results, 1);
     }
 
     /// An entry written by a build before map line 2005's fields existed

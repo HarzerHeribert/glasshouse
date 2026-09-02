@@ -113,7 +113,7 @@ use super::canonical::{
 };
 use super::fields::{Fields, element};
 use super::stream::{self, SseEvent};
-use super::{Claim, Codec, StreamDecoder, StreamEncoder};
+use super::{CacheDisposition, Claim, Codec, StreamDecoder, StreamEncoder};
 
 pub(super) const PROTOCOL: &str = "gemini-generate-content";
 
@@ -464,6 +464,15 @@ impl Codec for Gemini {
     fn ignored_fields(&self) -> &'static [&'static str] {
         IGNORED_FIELDS
     }
+
+    fn cache_disposition(&self) -> Option<CacheDisposition> {
+        Some(CacheDisposition::Stripped(
+            "Gemini's caching is either implicit (an automatic prefix cache the request does \
+             not address) or the explicit `cachedContent` resource this codec already refuses \
+             on decode — neither is a per-request marker a translated request can set, so a \
+             harness's cache_control is never encoded onto this wire",
+        ))
+    }
 }
 
 /// The model as a path segment: Gemini's own full resource name is
@@ -695,6 +704,11 @@ pub(super) fn decode_request(body: &[u8]) -> Result<Request, Unsupported> {
         // honest answer from the body alone.
         stream: false,
         user: None,
+        // Gemini's own wire has no cache-hint field to decode off a
+        // request, and no installed harness speaks it at the ingress
+        // anyway (`NO_GEMINI_HARNESS`), so this is never asked for from
+        // this side.
+        cache_requested: false,
     })
 }
 
@@ -1535,6 +1549,7 @@ mod tests {
             stop: Vec::new(),
             stream: false,
             user: Some("user_abc".to_owned()),
+            cache_requested: false,
         }
     }
 

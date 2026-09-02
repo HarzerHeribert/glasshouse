@@ -361,10 +361,10 @@ impl TokenUsage {
 /// reported spending.
 ///
 /// Only an implementation that actually reached a provider constructs one.
-/// [`RoutedNoModel`](disposable::RoutedNoModel) chooses a resource and calls
-/// nothing, so it has no call to describe and reports [`None`] — the
-/// distinction that keeps a routing *decision* out of a ledger of what
-/// routing actually *cost*.
+/// [`RoutedModel`](disposable::RoutedModel) with no client supplied chooses a
+/// resource and calls nothing, so it has no call to describe and reports
+/// [`None`] — the distinction that keeps a routing *decision* out of a ledger
+/// of what routing actually *cost*.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelCall {
     /// The provider as the user's own configuration names it.
@@ -375,6 +375,16 @@ pub struct ModelCall {
     /// `crate::gateway::session` records as a route, so both producers key
     /// the same identity the same way.
     pub route: Option<String>,
+    /// Which credential paid for the call, as
+    /// [`crate::routing::CredentialId::label`] renders it — a provider and a
+    /// reference *name*, never a value. [`None`] from any implementation
+    /// that did not route to a named credential.
+    ///
+    /// The value itself has exactly one destination in this build, the
+    /// `authorization` header [`model::ConfiguredModel`] builds, and this
+    /// field is what lets everything downstream say *which allowance was
+    /// spent* without going anywhere near it.
+    pub credential_label: Option<String>,
     pub usage: TokenUsage,
 }
 
@@ -394,6 +404,13 @@ impl ModelCall {
     pub fn observation(&self) -> crate::routing::evidence::NewObservation {
         crate::routing::evidence::NewObservation::new(&self.provider, &self.model)
             .with_route(self.route.as_deref())
+            // `quota_context` is where a credential *label* already lives on
+            // this table — `crate::gateway::session` writes
+            // `assignment.backend().credential().label()` into it — so the
+            // two producers of a row about a paid call name the account the
+            // same way rather than growing a second column's worth of
+            // meaning.
+            .with_quota_context(self.credential_label.as_deref())
             .with_tokens(
                 self.usage.input_tokens,
                 self.usage.output_tokens,

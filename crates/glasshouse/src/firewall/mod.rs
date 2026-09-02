@@ -24,7 +24,7 @@ pub mod reducer;
 pub mod store;
 
 pub use model::{ToolPayload, ToolResult};
-pub use store::{RawEntry, RawStore};
+pub use store::{RawEntry, RawStore, WindowSavings};
 
 /// One hook invocation's thresholds and eligibility list — carried entirely
 /// on the subcommand's own flags, per the ruling that the registered

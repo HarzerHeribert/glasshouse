@@ -832,7 +832,7 @@ fn dispatch(
             let attempt = {
                 let mut guard = lock(live);
                 let mut api = SessionApi::new(&store, &mut guard);
-                deliver_memory(&mut api, &id, briefing, injected);
+                deliver_memory(runtime, &mut api, &id, briefing, injected);
                 deliver_policy(&mut api, runtime, &id, policied);
                 api.send_text(&id, &text, origin.message_origin())
             };
@@ -1221,7 +1221,7 @@ fn spawn_session(
         // delivered as its own message, byte for byte, and the memory arrives
         // as a separately labelled one. See `deliver_memory` for why a
         // failure here is not a failed spawn.
-        deliver_memory(&mut api, &record.id, briefing, injected);
+        deliver_memory(runtime, &mut api, &record.id, briefing, injected);
         // And after it, Glasshouse's own implementation policy — lines
         // 955-990. After, deliberately: the memory block is what this project
         // learned and the policy is what Glasshouse says about how to work,
@@ -1612,6 +1612,7 @@ fn select_memory(
 /// updated only on a send that actually succeeded, so a memory that did not
 /// arrive is not recorded as one the session already has.
 fn deliver_memory(
+    runtime: &Runtime,
     api: &mut SessionApi<'_>,
     session: &SessionId,
     briefing: Option<Injection>,
@@ -1626,6 +1627,20 @@ fn deliver_memory(
         );
         return;
     }
+
+    // Map lines 1821 and 1831's proxy join, `GH-RETRIEVAL-ATTRIBUTION`: this
+    // door already holds the `SessionId` it is briefing, so a successful
+    // delivery is where a retrieval finally gets one. One row per memory
+    // actually in this delivery — never for a memory `select_memory`'s own
+    // `already` set suppressed, because that memory was not delivered here
+    // and recording it would count a repeat as a fresh retrieval.
+    evaluation::record_memory_retrieval(
+        runtime,
+        RetrievalScope::Injection,
+        briefing.memories().iter().map(|id| id.as_str()),
+        Some(session.as_str()),
+        evaluation::now_unix(),
+    );
 
     let mut ledger = lock_injected(injected);
     let seen = ledger.entry(session.as_str().to_owned()).or_default();
@@ -3149,7 +3164,9 @@ fn query_memory(
         return query_memory_for_path(runtime, path, history, limit);
     }
 
-    let grouped = match crate::memory_search_grouped(runtime, query, history, limit) {
+    // `None`: `Request::QueryMemory` carries no session field to attribute
+    // this search to — see `memory_search_grouped`'s own doc comment.
+    let grouped = match crate::memory_search_grouped(runtime, query, history, limit, None) {
         Ok(grouped) => grouped,
         // Through [`memory_error_message`], not `Response::err(err)` directly:
         // this anyhow chain carries a `database::DatabaseError` when the

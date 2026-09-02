@@ -2285,6 +2285,45 @@ pub struct PurposeConsumption {
     pub mean_time_to_first_byte_ms: Option<f64>,
 }
 
+/// [`EvidenceLedger::translation_cache_savings`]'s result — map line 2034's
+/// translation facet, one row per `(route, quota_context)` that carries at
+/// least one [`HARNESS_TURN_PURPOSE`] row with `input_tokens` in the window.
+///
+/// `input_tokens` and `cached_input_tokens` are plain `i64`, not `Option`,
+/// because this reader's own `WHERE input_tokens IS NOT NULL` (see the
+/// method's doc comment) already excludes every relayed row before the
+/// `GROUP BY` runs — a group that exists at all is, by construction, a
+/// translated one, so there is nothing here for a `None` to distinguish.
+/// `cached_input_tokens` is summed with SQL's `COALESCE(...,0)` for the same
+/// reason [`RoutingOverhead`]'s own doc comment gives for leaving cached
+/// tokens out of its spend sum elsewhere: a translated row can carry
+/// `input_tokens` with no cache activity that turn, and that omission must
+/// not turn the whole group's cache figure absent.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranslationSavings {
+    /// `None` matches [`ObservationQuery::route`]'s own convention: these
+    /// rows were recorded with no route, not "any route."
+    pub route: Option<String>,
+    /// The credential label `crate::gateway::session` stamps on every
+    /// translated row — see `with_quota_context` there.
+    pub quota_context: Option<String>,
+    pub sample_count: usize,
+    pub input_tokens: i64,
+    pub cached_input_tokens: i64,
+}
+
+impl TranslationSavings {
+    /// Prompt-cache reads over translated input tokens — `cached_input_tokens`
+    /// of `input_tokens + cached_input_tokens`, `None` only when the
+    /// denominator is `0`, which cannot happen for a group this reader's own
+    /// `WHERE input_tokens IS NOT NULL` produced from at least one row, but
+    /// is still handled rather than assumed away.
+    pub fn cache_read_ratio(&self) -> Option<f64> {
+        let denominator = self.input_tokens + self.cached_input_tokens;
+        (denominator > 0).then(|| self.cached_input_tokens as f64 / denominator as f64)
+    }
+}
+
 /// What this project's ledger holds about one `(provider, model)` **as a
 /// routing-model classifier** — capability map lines 1422/1432 (does it
 /// come back in the schema?) and 1421/1435 (how long does it take?) — read
@@ -3417,6 +3456,60 @@ impl EvidenceLedger {
         Ok(out)
     }
 
+    /// [`TranslationSavings`] for every `(route, quota_context)` this ledger
+    /// holds at least one translated row for, within one window — map line
+    /// 2034's translation facet, and [`consumption_by_purpose`]'s sibling
+    /// query rather than a filter over its output: that reader groups by
+    /// `purpose` first and folds every route together, which is exactly the
+    /// per-route/per-credential breakdown this line asks for and that one
+    /// does not give.
+    ///
+    /// `purpose = HARNESS_TURN_PURPOSE` restricts to the gateway's own rows
+    /// (map line 1330's stamp), and `input_tokens IS NOT NULL` is what
+    /// separates a translated exchange from a relayed one **by
+    /// construction**: `crate::gateway::session`'s doc comment (near line
+    /// 485) and this module's own header (near line 89) both say a relayed
+    /// exchange leaves all three token columns `NULL`, so a row that cleared
+    /// this filter parsed a real reply body. A relayed row is never in this
+    /// reader's denominator, which is the whole point of filtering in SQL
+    /// rather than summing in Rust and hoping every caller remembers the
+    /// same guard.
+    ///
+    /// [`consumption_by_purpose`]: Self::consumption_by_purpose
+    pub fn translation_cache_savings(
+        &self,
+        now_unix: i64,
+        window_seconds: i64,
+    ) -> Result<Vec<TranslationSavings>, EvidenceLedgerError> {
+        let earliest = now_unix.saturating_sub(window_seconds);
+        let conn = self.lock();
+        let mut statement = conn
+            .prepare(
+                "SELECT route,
+                        quota_context,
+                        COUNT(*) AS sample_count,
+                        SUM(input_tokens) AS input_tokens,
+                        SUM(COALESCE(cached_input_tokens, 0)) AS cached_input_tokens
+                 FROM routing_observations
+                 WHERE project_id = ?1 AND observed_at >= ?2 AND observed_at <= ?3
+                   AND purpose = ?4 AND input_tokens IS NOT NULL
+                 GROUP BY route, quota_context
+                 ORDER BY route IS NULL, route ASC, quota_context IS NULL, quota_context ASC",
+            )
+            .map_err(sql_err("read translation cache savings"))?;
+        let rows = statement
+            .query_map(
+                params![self.project_id, earliest, now_unix, HARNESS_TURN_PURPOSE],
+                row_to_translation_savings,
+            )
+            .map_err(sql_err("read translation cache savings"))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(sql_err("read one route's translation cache savings"))?);
+        }
+        Ok(out)
+    }
+
     /// [`ClassificationRecord`] for one `(provider, model)` over the last
     /// `window_seconds` — the reader for capability map lines 1422/1432 and
     /// 1421/1435, and the one that makes those quantities *measured* for
@@ -3711,6 +3804,17 @@ fn row_to_purpose_consumption(row: &Row<'_>) -> rusqlite::Result<PurposeConsumpt
         cached_input_tokens: row.get("cached_input_tokens")?,
         first_byte_sample_count: first_byte_sample_count as usize,
         mean_time_to_first_byte_ms: row.get("mean_time_to_first_byte_ms")?,
+    })
+}
+
+fn row_to_translation_savings(row: &Row<'_>) -> rusqlite::Result<TranslationSavings> {
+    let sample_count: i64 = row.get("sample_count")?;
+    Ok(TranslationSavings {
+        route: row.get("route")?,
+        quota_context: row.get("quota_context")?,
+        sample_count: sample_count as usize,
+        input_tokens: row.get("input_tokens")?,
+        cached_input_tokens: row.get("cached_input_tokens")?,
     })
 }
 

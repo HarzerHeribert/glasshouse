@@ -4357,3 +4357,11 @@ orchestrator agreed, wrote the missing test, and left the tick. The
 distinction is whether the *mechanism* is unreachable (re-open) or one *line
 of an otherwise proven join* is unwatched (add the test). Say which in the
 ledger.
+
+## §91 — two ordered runs cannot attribute a load-sensitive red; interleave against an unmodified baseline
+
+**What happened.** The `GH-ROUTED-EXTRACTION-CLIENT` worker (2026-09-02) ran the full `pty_smoke` suite on its tree and on HEAD, sequentially, four times over — full suite, full suite again, one isolated test, a hand-built repro — and every comparison said the same thing: its tree failed, HEAD passed, the *same ten* tests each time. It concluded, and wrote, that it had a real deterministic regression. It did not: the fixture executables are written fresh per run and the gatekeeper validation cost (`syspolicyd`/XProtect, the mechanism already on record for the PTY families) falls unevenly across consecutive runs, so **which tree ran first was the variable**, and every one of the four comparisons ran the worker's tree first. Reversing the order produced `HEAD fourth: HUNG`; interleaving A/B/A/B against a detached baseline worktree cleared the worker's tree at 76/76 twice while HEAD failed once.
+
+**Why §34 was not enough.** *"Attribute with two runs"* was written for a red that is flaky in time — run it twice and see. A red that is flaky in *order* passes that test perfectly: two runs of the same ordering agree with each other and are both wrong. Repeating the same ten failures is not determinism when the cause is a validation cache the first run warms for the second.
+
+**The rule.** When a red appears in a load-sensitive family (`session_supervision`, the PTY fixtures, `integrations::version`'s `ETXTBSY` retries, `session::api`) and the question is *"my change or the machine"*, the check is A/B/A/B: a detached worktree at the base commit, the suite run alternately on the baseline and on the change, at least two rounds, and the verdict read from whether the baseline *also* fails. Two runs of one ordering attribute nothing. The worker's own words: *"Practice §34's two runs to attribute is insufficient when both runs are ordered."*

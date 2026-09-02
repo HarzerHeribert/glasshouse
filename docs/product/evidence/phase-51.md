@@ -580,3 +580,56 @@ Regression evidence (both lines):
 **1821 and 1831 — OPEN.** The explicit halves are real and proven (rate → readout; 1831's own denominator, retrievals of `memories.kind = 'failed_attempt'`, is real and tested); the proxy halves have the query and no producer for their denominator. **1824 — OPEN**: `memory revalidate`'s four outcomes share no column meaning *a revalidation happened*, so there is no honest denominator; the explicit counts print with the readout saying so. **Successor, named: `GH-RETRIEVAL-ATTRIBUTION` (Amber)** — thread the session id into `record_memory_retrieval` from `memory_search_grouped` and its two callers, record a successful injection at `deliver_memory` as a `MemoryRetrieved` row with the session, and record `memory revalidate` as its own evaluation row (`MemoryRevalidated`, no migration) so 1824 has a denominator; 1821, 1831 and 1824 tick on its landing with the readers already written.
 
 ---
+
+## Line 1824 CLOSED, 1821 and 1831 STILL OPEN — 2026-09-02 (`GH-RETRIEVAL-ATTRIBUTION`, Amber, Sonnet high): the retrieval rows gain their session, and the proxy's other half turns out to have no producer on the same session
+
+Implements the successor the entry above named. `evaluation::record_memory_retrieval` gained `session_id: Option<&str>`, threaded from `main.rs::memory_search_grouped` (both its callers pass `None` — see the packet error below); `api::unix::deliver_memory` records one `MemoryRetrieved` row per memory actually delivered at launch, with the session it briefed and `RetrievalScope::Injection`, after the send succeeded and never for a memory `select_memory`'s dedup set suppressed; `main.rs::memory_revalidate` records one `EvaluationKind::MemoryRevalidated` row (`subject` = the outcome word, `memory_id` set, `outcome` left `Unknown` because this row says *a revalidation happened*, not whether it was right) after the store write, and `revalidation_accuracy()` counts those rows as 1824's denominator with an `unknown` line in `glasshouse memory retrievals`. The two proxy tests no longer plant the retrieval row: they spawn a real session through `glasshouse api serve`'s Unix-socket door (a `#[cfg(unix)] mod door` fixture modelled on `tests/context_injection.rs`) and read the rows production wrote. 3/3 mutations KILLED with output quoted; `memory_rating` 9/9, `evaluation_observations` 26/26, `context_injection` 15/15, targeted blast green, rustdoc clean; one PTY red in `worker_access` under load re-run alone green (§34).
+
+**The finding that decides two of the three verdicts, and it is structural.** The proxy joins a session-attributed `MemoryRetrieved` row to that session's `RoutingOutcomeObserved` row. This package makes the first real. The second is written only by `evaluation::record_routing_outcome`, which refuses to write for a session with no routed destination, and the only production caller that records a routed destination is `main.rs::launch_session` — the CLI launch. `deliver_memory` is reached only from the door's `spawn_session`/`send_message`, which never route a session; and `launch_session` never calls `select_memory`/`deliver_memory` (the `glasshouse route` diagnostic's injection-scope record at `main.rs::estimated_project_memory_tokens` measures a would-be briefing and records only its miss). **So no single production session can carry both rows today.** One proxy test therefore still plants exactly one `RoutingOutcomeObserved` row, disclosed at the line. The denominator for 1821 and 1831 is `0 of 0` in production, as before, but the reason has moved: from *no producer attaches a session* to *the two producers never meet on one session*. Recorded in the refusal register (*Phase 51's memory proxy*), with the successor named there.
+
+**Two packet errors, both the worker's corrections.** (1) The packet said `api::unix::query_memory` "knows which session" it serves; `Request::QueryMemory` (`api/protocol.rs:458–466`) carries no session field, unlike `SendMessage` or `RecordAssumption`, and the MCP tool that builds it (`api/mcp.rs:636–653`) has none — so gap 1 is correct plumbing with no caller yet supplying `Some`. (2) `database.rs::EVALUATION_KINDS` and the pinning test beside it already omitted `MemoryRated` (landed by `GH-MEMORY-RATING`) despite the constant's *one entry per landed producer* rule; `database.rs` was this packet's forbidden file, so the worker left `MemoryRevalidated` out beside it and said so. **Fixed at integration** by the orchestrator: both kinds added to the constant and to `every_kind_the_type_can_produce_is_one_the_schema_constant_declares` (the constant is documentation and a pin, not a `CHECK`, so no migration).
+
+### Measure how often revalidation correctly identifies a decision whose original assumptions no longer hold. (line 1824)
+
+Contract: Given `glasshouse memory revalidate <id> <outcome>`, when the store has written the outcome, Glasshouse records that a revalidation happened as its own evaluation row, so explicit `revalidation-correct`/`revalidation-wrong` ratings print over a real count of revalidations with the unrated remainder shown as unknown, while preserving that no memory row is edited, that a ledger failure never fails the command, and that the readers' output for existing rows is unchanged.
+
+State: **COMPLETE** — ruled 2026-09-02. The denominator is a row the command itself writes, proven through the shipped binary, with the recorder mutation KILLED.
+
+Production evidence:
+- `crates/glasshouse/src/evaluation/mod.rs` — `EvaluationKind::MemoryRevalidated`, `record_memory_revalidation`, `EvaluationObservations::revalidation_accuracy`, `RevalidationAccuracyCounts { revalidations, unknown }`
+- `crates/glasshouse/src/main.rs` — `memory_revalidate` (the call after the store write), `render_memory_quality` (the 1824 section)
+
+Regression evidence:
+- `memory_rating::a_revalidation_gives_1824_a_denominator` — `memory revalidate … reaffirmed` then the readout prints `of 1 revalidations`; one `MemoryRevalidated` row
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| `glasshouse::evaluation::record_memory_revalidation(` → `let _ = (` (`main.rs`, `memory_revalidate`) | `skip-the-revalidation-row` | **killed** | `memory_rating::a_revalidation_gives_1824_a_denominator` |
+
+> skip-the-revalidation-row observed: panicked at crates/glasshouse/tests/memory_rating.rs:357:5: assertion `left == right` failed: [] (no MemoryRevalidated row)
+
+Recorded limit, the worker's: the denominator counts every `memory revalidate` call regardless of outcome; the explicit correct/wrong ratings are a separate count over `MemoryRated` rows in the same window — the same explicit-over-window shape 1823 uses — not a per-event join.
+
+### Lines 1821 and 1831 — the retrieval half is now real; the join still finds no session with both rows
+
+Production evidence (the half this package built):
+- `crates/glasshouse/src/api/unix.rs` — `deliver_memory` (the `MemoryRetrieved` row with the session, after a successful send)
+- `crates/glasshouse/src/evaluation/mod.rs` — `record_memory_retrieval` (`session_id`), the reader block's doc comment stating the remaining gap
+- `crates/glasshouse/src/main.rs` — `memory_search_grouped` (`session: Option<&str>`, both callers `None`)
+
+Regression evidence (through the shipped binary and the Unix-socket door):
+- `memory_rating::a_retrieval_delivered_by_the_briefing_door_with_no_turn_end_counts_as_unknown` — the delivered memory's row carries the spawned session's id; a repeat send with the same task records no second row
+- `memory_rating::a_retrieval_delivered_by_the_briefing_door_into_a_completed_session_counts_as_proxy` — with one planted `RoutingOutcomeObserved` row (disclosed at the line, for the reason above) the readout shows `proxy useful 1 of 1`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| `Some(session.as_str())` → `None` in `deliver_memory`'s record (`api/unix.rs`) | `drop-the-session-id` | **killed** | both door tests (`memory_rating.rs:618` and `:676`, the session-id assertions) |
+| `if seen.len() < MAX_REMEMBERED_INJECTIONS {` → `if false {` in `deliver_memory` (`api/unix.rs`) | `record-every-injection-twice` | **killed** | `a_retrieval_delivered_by_the_briefing_door_with_no_turn_end_counts_as_unknown` (`:631`, the row-count assertion) |
+
+> drop-the-session-id observed: panicked at crates/glasshouse/tests/memory_rating.rs:618:5: assertion `left == right` failed
+
+> record-every-injection-twice observed: panicked at crates/glasshouse/tests/memory_rating.rs:631:5: a dedup-suppressed repeat must not record a second retrieval
+
+State for both: **PARTIALLY VERIFIED** — the explicit halves complete (entry above), the retrieval half of the proxy complete here, the outcome half has no producer on a briefed session. **Successor, named: `GH-TURN-OUTCOME-FOR-BRIEFED-SESSIONS`** — a design ruling first, then Amber: either the door's spawn records the routing decision it embodies (so `record_routing_outcome` has a destination to attribute the turn's outcome to), or the harness-reported turn outcome becomes a row that does not require a routed destination for the memory proxy alone (the proxy's definition is about the *session's* turn, not the *route's*). The register row says which facts decide it.
+
+---

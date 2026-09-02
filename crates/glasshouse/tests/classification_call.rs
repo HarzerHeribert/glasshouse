@@ -799,6 +799,15 @@ fn a_classification_call_and_an_extraction_call_are_recorded_under_their_own_pur
     fixture.add_provider("omega-runner", "extraction-model", &model.base_url());
     fixture.pin_routing_model("alpha-runner", "routing-model");
     fixture.choose_extraction_model("omega-runner", "extraction-model");
+    // GH-ROUTED-EXTRACTION-CLIENT: `[memory] extraction_model` is the consent
+    // that a model may be called for extraction at all, and
+    // `DisposableRouting::choose` decides *which* of the user's configured
+    // resources serves — both of these providers name a free model, so
+    // without an order the extraction would route to whichever came first and
+    // this file's two calls would land on one identity. The order names the
+    // one this test is about; nothing here is a claim about precedence, which
+    // `tests/routed_extraction.rs` pins.
+    fixture.prefer_free_resource("omega-runner", "extraction-model");
 
     assert!(fixture.classify(QUESTION).status.success());
     let session = running_session(&fixture);

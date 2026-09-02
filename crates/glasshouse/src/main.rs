@@ -141,10 +141,11 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
             verbose,
             probe,
             no_harness,
+            force,
         }) => {
             print!(
                 "{}",
-                resources_report(&runtime, *verbose, probe, *no_harness)?
+                resources_report(&runtime, *verbose, probe, *no_harness, *force)?
             );
         }
         Some(Command::Classify { text }) => {
@@ -3984,11 +3985,29 @@ fn routing_cost_report(runtime: &Runtime, hours: u32) -> anyhow::Result<String> 
     let ledger = glasshouse::routing::evidence::EvidenceLedger::open(runtime)?;
     let now_unix = glasshouse::provider::cache::now_unix_seconds();
     let window_seconds = i64::from(hours) * 3600;
+    let earliest_unix = now_unix.saturating_sub(window_seconds);
     let groups = ledger.consumption_by_purpose(now_unix, window_seconds)?;
+    let translation = ledger.translation_cache_savings(now_unix, window_seconds)?;
+    // Fail-soft, the same posture `context_firewall_savings_summary` already
+    // takes for `status`: a raw store this build cannot read yet renders as
+    // "not counted", never as a hard error for a readout command.
+    let store = glasshouse::firewall::RawStore::open(runtime.state_dir().join("context-firewall"));
+    let firewall_savings = store.savings_in_window(earliest_unix, now_unix).ok();
+    let bypass_count: usize = groups
+        .iter()
+        .filter(|group| {
+            group.purpose.as_deref()
+                == Some(glasshouse::routing::evidence::CONTEXT_FIREWALL_BYPASS_PURPOSE)
+        })
+        .map(|group| group.sample_count)
+        .sum();
     Ok(render_routing_cost(
         runtime.project().id().as_str(),
         hours,
         &groups,
+        firewall_savings,
+        bypass_count,
+        &translation,
     ))
 }
 
@@ -4015,6 +4034,9 @@ fn render_routing_cost(
     project_id: &str,
     hours: u32,
     groups: &[glasshouse::routing::evidence::PurposeConsumption],
+    firewall_savings: Option<glasshouse::firewall::WindowSavings>,
+    firewall_bypasses: usize,
+    translation: &[glasshouse::routing::evidence::TranslationSavings],
 ) -> String {
     let mut out = format!("Routing consumption for project {project_id}, last {hours}h\n");
     if groups.is_empty() {
@@ -4055,6 +4077,76 @@ fn render_routing_cost(
          has its tokens print as \"not counted\" even though its request count is real; \
          \"not counted\" always means nobody read a count, never that nothing was spent.\n",
     );
+    out.push_str(&render_savings_section(
+        firewall_savings,
+        firewall_bypasses,
+        translation,
+    ));
+    out
+}
+
+/// Map line 2034: what was saved, by purpose, each figure with its own
+/// denominator — Phase 58's ingestion of Headroom's *"savings readout that
+/// is a query over the ledger"* (design-decisions.md, *"Headroom,
+/// compared"*, Taken item 4). Three facets, and the same rule
+/// [`render_routing_cost`]'s own doc comment states for every other figure
+/// in this report: a quantity nobody recorded prints as words, never as a
+/// digit and never as `0`.
+fn render_savings_section(
+    firewall_savings: Option<glasshouse::firewall::WindowSavings>,
+    firewall_bypasses: usize,
+    translation: &[glasshouse::routing::evidence::TranslationSavings],
+) -> String {
+    let mut out = String::from("\nSAVINGS\n");
+
+    out.push_str("\n  context firewall\n");
+    match firewall_savings {
+        Some(savings) if savings.results > 0 || firewall_bypasses > 0 => {
+            let total = savings.results + firewall_bypasses;
+            let unestimated_note = if savings.unestimated > 0 {
+                format!(" ({} without a recorded estimate)", savings.unestimated)
+            } else {
+                String::new()
+            };
+            out.push_str(&format!(
+                "    kept local (estimated) {} tokens across {} reductions of {total} results \
+                 above threshold{unestimated_note}\n",
+                savings.kept_local, savings.results
+            ));
+        }
+        _ => {
+            out.push_str("    not counted: no context-firewall activity recorded in this window\n")
+        }
+    }
+
+    if translation.is_empty() {
+        out.push_str("\n  translation\n    not counted: no translated exchange recorded\n");
+    } else {
+        for row in translation {
+            let route = row.route.as_deref().unwrap_or("(no route recorded)");
+            let quota_context = row
+                .quota_context
+                .as_deref()
+                .unwrap_or("(no credential recorded)");
+            out.push_str(&format!("\n  translation {route} / {quota_context}\n"));
+            let denominator = row.input_tokens + row.cached_input_tokens;
+            let ratio = row
+                .cache_read_ratio()
+                .map(|fraction| format!("{:.1}%", fraction * 100.0))
+                .unwrap_or_else(|| "not counted".to_owned());
+            out.push_str(&format!(
+                "    prompt-cache reads {} of {denominator} translated input tokens ({ratio})\n",
+                row.cached_input_tokens
+            ));
+        }
+    }
+
+    out.push_str(
+        "\n  response profile\n    not counted: no exchange row carries a response profile \
+         (no producer stamps one on a routing-observation row, and there is no session column \
+         to join `sessions.response_profile` through — a schema decision, not this package's)\n",
+    );
+
     out
 }
 
@@ -6136,7 +6228,21 @@ fn launch_session(
     // add one of its own), which keeps `mode = "off"` byte-identical to a
     // session built before this phase existed by construction: the function
     // returns before touching anything in that case.
-    install_context_firewall_hook(runtime, &selection, effective, &session_dir);
+    //
+    // Map lines 2023/2024: the resolved entitlement and this launch's own
+    // backend/profile name travel in too, so the reduction policy can be
+    // keyed on the entitlement's kind and overridden by the profile or the
+    // entitlement — never by the firewall core or the hook subprocess, which
+    // stay entitlement-blind (see `install_context_firewall_hook`'s own doc).
+    install_context_firewall_hook(
+        runtime,
+        &selection,
+        effective,
+        &session_dir,
+        entitlement.as_ref(),
+        &launch_profile.backend,
+        &launch_profile.name,
+    );
     let mut launch = HarnessLaunch::new(selection.into_executable(), runtime.project()).args(args);
     // Map line 1973: the child inherits this process's environment, so
     // another entitlement's credential variable would reach a session that
@@ -6869,14 +6975,27 @@ fn install_session_document(
 /// Best effort, matching [`install_session_document`]'s own policy: any
 /// failure here is a session that starts without the firewall bridge rather
 /// than one that fails to start, and is logged rather than propagated.
+///
+/// Map lines 2023/2024: `entitlement` and `backend` are read only to
+/// *classify* the reduction policy (subscription, metered or local) and to
+/// resolve its thresholds through `effective`'s new accessors — never baked
+/// into the registered command line themselves. The firewall core and the
+/// hook subprocess this command line invokes stay entitlement-blind, exactly
+/// as before this package: only numbers and a mode word ever reach them.
 fn install_context_firewall_hook(
     runtime: &Runtime,
     selection: &session::HarnessSelection,
     effective: config::EffectiveConfig<'_>,
     session_dir: &std::path::Path,
+    entitlement: Option<&glasshouse::config::ResolvedEntitlement>,
+    backend: &glasshouse::profile::BackendResource,
+    profile_name: &str,
 ) {
-    use glasshouse::config::firewall::FirewallMode;
+    use glasshouse::config::firewall::{FirewallMode, ReductionPolicyKind};
+    use glasshouse::config::{EntitlementBacking, EntitlementKind};
     use glasshouse::harness::claude_code;
+    use glasshouse::profile::BackendResource;
+    use glasshouse::provider::registry::{Locality, ResourceKind};
 
     if selection.id() != glasshouse::integrations::IntegrationId::ClaudeCode {
         // A non-claude-code harness gets no registration and no warning
@@ -6887,7 +7006,43 @@ fn install_context_firewall_hook(
         );
         return;
     }
-    let configured_mode = effective.context_firewall_mode().value;
+
+    // Map lines 2023/2024's classification: a subscription pays in rate
+    // limits and context window, a key in tokens, local inference in
+    // latency — so each gets its own default thresholds. Locality outranks
+    // `EntitlementKind` here: an entitlement backed by a local provider is
+    // classified `Local` regardless of what its own `kind` says, because
+    // latency is what actually drives the policy for that resource. An
+    // unresolved entitlement (`None` here) never guesses a kind.
+    let provider_is_local =
+        |provider: &str| ResourceKind::from_direct_provider(provider).locality() == Locality::Local;
+    let kind = match entitlement {
+        Some(entitlement) => match entitlement.backing() {
+            EntitlementBacking::Provider(provider) if provider_is_local(provider) => {
+                Some(ReductionPolicyKind::Local)
+            }
+            _ => match entitlement.kind() {
+                Some(
+                    EntitlementKind::Claude | EntitlementKind::ChatGpt | EntitlementKind::Gemini,
+                ) => Some(ReductionPolicyKind::Subscription),
+                Some(EntitlementKind::ApiKey) => Some(ReductionPolicyKind::Metered),
+                None => None,
+            },
+        },
+        // No entitlement describes this resource — still `Local` when the
+        // session is served by a local provider directly (map lines
+        // 2023/2024's "or a session served by such a provider with no
+        // entitlement").
+        None => match backend {
+            BackendResource::DirectProvider { provider } if provider_is_local(provider) => {
+                Some(ReductionPolicyKind::Local)
+            }
+            _ => None,
+        },
+    };
+
+    let configured_mode =
+        effective.context_firewall_policy_mode(kind, Some(profile_name), entitlement);
     if configured_mode == FirewallMode::Off {
         return;
     }
@@ -6941,9 +7096,17 @@ fn install_context_firewall_hook(
         }
     };
 
-    let passthrough_tokens = effective
-        .context_firewall_passthrough_tokens(effective_mode)
-        .value;
+    let passthrough_tokens = effective.context_firewall_policy_passthrough_tokens(
+        effective_mode,
+        kind,
+        Some(profile_name),
+        entitlement,
+    );
+    let min_semantic_tokens = effective.context_firewall_policy_min_semantic_tokens(
+        kind,
+        Some(profile_name),
+        entitlement,
+    );
     // Map line 1992: no mode, including aggressive, ever names a reducer —
     // there is no flag here that could carry one, which is the guard by
     // construction the box asks for.
@@ -6953,6 +7116,7 @@ fn install_context_firewall_hook(
         effective_mode,
         passthrough_tokens,
         emit_updated_output,
+        min_semantic_tokens,
     );
     let hook_entry = claude_code::context_firewall_hook_entry(&command_line);
 
@@ -7190,107 +7354,340 @@ fn checkpoint_before_compaction(runtime: &Runtime, id: &SessionId, harness: &str
     }
 }
 
-/// Phase 21 line 834's production caller: the cheap or local model the user
-/// actually chose, ready to be asked.
+/// Phase 21 line 834's consent: the cheap or local model the user actually
+/// chose, when they chose one.
 ///
-/// # `None` is the whole of the consent, and it is the default
+/// # This field is the whole of the consent, and it is the default
 ///
-/// This returns `Some` only when
+/// This is `Some` only when
 /// [`glasshouse::config::EffectiveConfig::memory_extraction_model`] names a
 /// provider and model — a field that is `None` until a person writes it. A
 /// user who has configured providers, free models, routing preferences and
 /// nothing else gets `None` here and therefore exactly today's behaviour:
-/// [`disposable_extraction_model`] falls through to
-/// `glasshouse::memory::RoutedNoModel`, which chooses a resource, says so,
-/// and calls nothing.
+/// [`disposable_extraction_model`] chooses a resource, says so, and calls
+/// nothing.
 ///
 /// That is deliberately stricter than "the user has configured a free
 /// model". A free-model list is a statement about cost; it is not a request
 /// that a hook running **inside a coding session** start making outbound
 /// requests. Line 834 says *configurable*, and this is the configuration.
 ///
-/// # Every failure below is `None`, logged once
+/// **What consent does not decide is *which* resource serves.** Once it is
+/// given, [`disposable_extraction_model`] puts the named model into the
+/// candidate set beside the user's own free ones and lets
+/// `DisposableRouting::choose` rank them — line 530's *prefer free models
+/// when quality is sufficient*, on the path that actually spends something.
+/// It used to bypass the router entirely, which meant the policy chose only
+/// when nothing would be called and the model that was called had never been
+/// routed.
+fn configured_extraction_choice(
+    effective: &EffectiveConfig<'_>,
+) -> Option<glasshouse::config::ExtractionModelRef> {
+    effective.memory_extraction_model().value
+}
+
+/// The provider behind a name the user's own configuration holds, resolved
+/// through the layering rule every other reader applies — project winning
+/// over user.
 ///
-/// An unreadable configuration, a provider that is not in the table, a
-/// template that does not resolve, a protocol this build does not speak, a
-/// credential that is named and unset — each is a choice that cannot produce
-/// a call, and each returns `None` after one log line. Never a guess at a
-/// correction, and never a silent one: the resulting outcome still says in
-/// words that no model was called, which is what stops an evaluation reading
-/// later as evidence that one did.
-fn configured_extraction_model(
-    runtime: &Runtime,
-) -> Option<Box<dyn glasshouse::memory::ExtractionModel>> {
-    use glasshouse::memory::ConfiguredModel;
-    use glasshouse::secret::{SecretRef, SecretStore as _};
-
-    let user = UserConfig::load(runtime.paths())
-        .inspect_err(
-            |err| tracing::debug!(error = %err, "could not read configuration for the extraction model"),
-        )
-        .ok()?;
-    let project = config::load_project_config(runtime.project())
-        .inspect_err(
-            |err| tracing::debug!(error = %err, "could not read project configuration for the extraction model"),
-        )
-        .ok()
-        .flatten();
-    let effective = EffectiveConfig::new(&user, project.as_ref());
-    let chosen = effective.memory_extraction_model().value?;
-
-    // The provider's whole configuration comes from whichever layer actually
-    // holds its name, project winning over user — the same rule
-    // `disposable_candidates` applies, and for the same reason.
+/// Every failure is `None` after one log line: an unreadable provider, one
+/// that is not in the table, a disabled one, or a template that does not
+/// resolve is a choice that cannot produce a call, and never a guess at a
+/// correction.
+fn configured_provider(
+    user: &UserConfig,
+    project: Option<&ProjectConfig>,
+    provider_name: &str,
+    subject: &str,
+) -> Option<glasshouse::provider::Provider> {
     let Some(provider_config) = project
-        .as_ref()
-        .and_then(|p| p.providers().get(chosen.provider()))
-        .or_else(|| user.providers().get(chosen.provider()))
+        .and_then(|p| p.providers().get(provider_name))
+        .or_else(|| user.providers().get(provider_name))
     else {
         tracing::warn!(
-            provider = chosen.provider(),
-            "the configured extraction model names a provider this project has not configured"
+            provider = provider_name,
+            subject,
+            "names a provider this project has not configured"
         );
         return None;
     };
     if !provider_config.enabled() {
         tracing::warn!(
-            provider = chosen.provider(),
-            "the configured extraction model names a disabled provider"
+            provider = provider_name,
+            subject,
+            "names a disabled provider"
         );
         return None;
     }
-    let provider = match provider_config.to_provider(chosen.provider()) {
-        Ok(provider) => provider,
+    match provider_config.to_provider(provider_name) {
+        Ok(provider) => Some(provider),
         Err(err) => {
-            tracing::warn!(error = %err, "the configured extraction model's provider does not resolve");
-            return None;
-        }
-    };
-
-    // A provider that names no credential variable is the local case — a
-    // runner on loopback needs none, and `ConfiguredModel::new` builds it
-    // without one. A provider that names several and has one set resolves to
-    // the first that does, the same order `disposable_candidates` walks.
-    let secrets = glasshouse::secret::native::PreferNativeSecretStore::detect();
-    let credential = provider
-        .credential_env
-        .iter()
-        .find_map(|var| secrets.resolve(&SecretRef::Environment { var: var.clone() }));
-
-    match ConfiguredModel::new(&provider, chosen.model(), credential) {
-        Ok(model) => Some(Box::new(model)),
-        Err(err) => {
-            tracing::warn!(error = %err, "the configured extraction model cannot be used");
+            tracing::warn!(error = %err, subject, "the provider does not resolve");
             None
         }
     }
 }
 
-/// Phase 9I lines 530, 531 and 540's production caller: route this
-/// extraction through `glasshouse::routing::disposable::DisposableRouting`
-/// over the free models the user has actually configured, and report the
-/// choice. Never actually calls a model — see
-/// [`glasshouse::memory::extract::disposable`], which is what this returns.
+/// The configured extraction model as one more resource
+/// `DisposableRouting::choose` may rank — map line 530 applied to the model
+/// the user named for this job.
+///
+/// # `None` is not a refusal, it is *not expressible as a candidate*
+///
+/// A [`glasshouse::routing::disposable::DisposableCandidate`] carries a
+/// [`glasshouse::routing::CredentialId`], which carries a
+/// [`glasshouse::secret::SecretRef`], and there is no honest `SecretRef` for
+/// a provider that names no credential variable at all. That is the **local**
+/// case — a runner on loopback, which `ConfiguredModel::new` builds without
+/// one and which line 834 names first — and it is why
+/// [`disposable_extraction_model`] keeps a bypass for exactly it. Nothing is
+/// lost by not routing a local model: line 530 prefers *free* resources, and
+/// a model running on the user's own machine has no marginal cost to prefer
+/// something else over.
+///
+/// The cost is [`glasshouse::config::ProviderConfig::cost_of`] — the user's
+/// own marking, never a guess — so a named model that is also in the
+/// provider's free list is `Free`, and one nobody marked is `Metered` and is
+/// gated by Phase 32F's protected reserve exactly like any other metered
+/// candidate.
+fn configured_extraction_candidate(
+    user: &UserConfig,
+    project: Option<&ProjectConfig>,
+    effective: &EffectiveConfig<'_>,
+    chosen: &glasshouse::config::ExtractionModelRef,
+    secrets: &dyn glasshouse::secret::SecretStore,
+    telemetry: &glasshouse::provider::resources::GatheredTelemetry,
+    now_unix: i64,
+) -> Option<glasshouse::routing::disposable::DisposableCandidate> {
+    use glasshouse::routing::CredentialId;
+    use glasshouse::routing::disposable::DisposableCandidate;
+    use glasshouse::secret::SecretRef;
+
+    let provider_config = project
+        .and_then(|p| p.providers().get(chosen.provider()))
+        .or_else(|| user.providers().get(chosen.provider()))?;
+    if !provider_config.enabled() {
+        return None;
+    }
+    // The first variable that actually resolves, the same order
+    // `disposable_candidates` walks. A provider that names none is the local
+    // case and is not expressible here at all.
+    let reference = provider_config
+        .credential_env()
+        .iter()
+        .map(|var| SecretRef::Environment { var: var.clone() })
+        .find(|reference| secrets.resolve(reference).is_some())?;
+
+    let capacity = disposable_candidate_capacity(chosen.provider(), effective, telemetry, now_unix);
+    let locality =
+        glasshouse::provider::registry::ResourceKind::from_direct_provider(chosen.provider())
+            .locality();
+    let entitlement = match effective.entitlement_for_provider(chosen.provider()) {
+        Ok(entitlement) => entitlement.map(|entitlement| entitlement.to_routing()),
+        Err(err) => {
+            tracing::warn!(
+                provider = chosen.provider(),
+                error = %err,
+                "the [entitlements] tables could not be resolved; the configured extraction \
+                 model is ranked with no entitlement rule"
+            );
+            None
+        }
+    };
+
+    Some(
+        DisposableCandidate::new(
+            chosen.provider().to_owned(),
+            chosen.model().to_owned(),
+            CredentialId::new(chosen.provider().to_owned(), reference),
+            provider_config.cost_of(chosen.model()),
+        )
+        .with_capacity(capacity)
+        .with_locality(locality)
+        .with_entitlement(entitlement),
+    )
+}
+
+/// The local, credential-less half of line 834: build the model the user
+/// named directly, because it cannot be expressed as a routing candidate.
+///
+/// See [`configured_extraction_candidate`] for why that is a fact about
+/// [`glasshouse::routing::CredentialId`] rather than a preference, and why
+/// line 530 has nothing to prefer here.
+fn configured_extraction_model(
+    user: &UserConfig,
+    project: Option<&ProjectConfig>,
+    chosen: &glasshouse::config::ExtractionModelRef,
+) -> Option<Box<dyn glasshouse::memory::ExtractionModel>> {
+    match extraction_client_for(user, project, chosen.provider(), chosen.model(), None) {
+        Ok(model) => Some(Box::new(model)),
+        Err(reason) => {
+            tracing::warn!(reason, "the configured extraction model cannot be used");
+            None
+        }
+    }
+}
+
+/// Build the extraction client for `provider`/`model`, or say in one sentence
+/// why it cannot be built.
+///
+/// [`classification_model`]'s exact shape, for extraction's own job name:
+/// both turn a provider name and a model name into a real
+/// [`glasshouse::memory::ConfiguredModel`] after something else has already
+/// decided them.
+///
+/// `credential` is the reference to resolve when the caller already knows
+/// which one applies — `DisposableRouting`'s choice names the exact
+/// `SecretRef` that resolved when its candidate was built, and re-deriving it
+/// here could pick a different one. `None` is the local case, where nobody
+/// has resolved anything and the first variable that resolves wins; a
+/// provider that names none needs none, and `ConfiguredModel::new` builds it
+/// without one.
+fn extraction_client_for(
+    user: &UserConfig,
+    project: Option<&ProjectConfig>,
+    provider_name: &str,
+    model_name: &str,
+    credential: Option<&glasshouse::secret::SecretRef>,
+) -> Result<glasshouse::memory::ConfiguredModel, String> {
+    use glasshouse::memory::ConfiguredModel;
+    use glasshouse::secret::{SecretRef, SecretStore as _};
+
+    let provider = configured_provider(user, project, provider_name, "the extraction model")
+        .ok_or_else(|| {
+            format!("the extraction model names `{provider_name}`, which this project cannot use")
+        })?;
+
+    let secrets = glasshouse::secret::native::PreferNativeSecretStore::detect();
+    let credential = match credential {
+        Some(reference) => secrets.resolve(reference),
+        None => provider
+            .credential_env
+            .iter()
+            .find_map(|var| secrets.resolve(&SecretRef::Environment { var: var.clone() })),
+    };
+
+    ConfiguredModel::new(&provider, model_name, credential)
+        .map_err(|err| format!("the extraction model cannot be used: {err}"))
+}
+
+/// What one routed support job learned about the resource that served it,
+/// made durable for the next process that dispatches one — Phase 9I line
+/// 534's other half, across a process boundary.
+///
+/// # Why this is here and not in `routing`
+///
+/// `crate::routing::disposable` may not name a cache, a path or the
+/// interactive policy class (`the_two_policy_classes_do_not_name_each_other`),
+/// and `crate::routing::free` is a pure value. The bridge belongs to the
+/// caller that has both, which is this file — the same place
+/// [`observed_health_of`] reads the identical cache back.
+///
+/// # The merge, and the one thing it costs
+///
+/// [`glasshouse::provider::telemetry::GatewayHealthCache::store`] replaces a
+/// provider's whole file, and its other producer (the gateway) writes a
+/// snapshot of its entire live pool at one instant. This producer holds
+/// **one** resource, so it reads the file, replaces the entry for that
+/// resource and writes every other entry back untouched — never dropping
+/// readings this process happens not to have.
+///
+/// What that costs is the file's date: `observed_at_unix` is per file, so a
+/// carried-forward entry is re-dated to now and reads as fresher than it
+/// earned (map line 1854's *stale* half). The alternative is discarding it
+/// outright, which is worse, and the deadline that actually gates scheduling
+/// is an absolute unix second on the entry itself and is unaffected.
+///
+/// A failure here is one debug line: this runs inside a hook process, and
+/// Glasshouse's bookkeeping is never more important than the session it keeps
+/// books about.
+fn persist_support_work_health(
+    paths: &glasshouse::paths::RuntimePaths,
+    resource: &glasshouse::routing::free::FreeResource,
+    outcome: glasshouse::routing::free::WorkloadOutcome,
+) {
+    use glasshouse::provider::telemetry::{GatewayHealthCache, GatewayHealthReading};
+    use glasshouse::routing::free::FreePool;
+
+    let cache = GatewayHealthCache::new(paths);
+    let provider = resource.credential().provider().to_owned();
+    let label = resource.credential().label();
+    let model = resource.model().to_owned();
+
+    let mut entries: Vec<GatewayHealthReading> = cache
+        .load_all()
+        .into_iter()
+        .find(|(name, _)| *name == provider)
+        .map(|(_, entries)| entries)
+        .unwrap_or_default();
+    // Found once and reused for both the seed and the write-back, so the two
+    // can never disagree about which entry this resource's is.
+    let existing = entries
+        .iter()
+        .position(|entry| entry.credential_label == label && entry.model == model);
+
+    // One pair, read together, for both directions of the conversion —
+    // `observed_health_of`'s hazard 2, and it applies to the write side for
+    // the same reason.
+    let now = std::time::Instant::now();
+    let now_unix = glasshouse::provider::cache::now_unix_seconds();
+
+    // Seeded from what is already on disk so `consecutive_failures`
+    // accumulates across processes rather than restarting at one every time —
+    // which is the whole of what makes `FAILURES_BEFORE_COOLDOWN` mean
+    // anything to a dispatcher that lives for a second.
+    let mut pool = FreePool::new();
+    if let Some(stored) = existing.map(|index| &entries[index]) {
+        pool.adopt_observed(
+            resource,
+            stored.consecutive_failures,
+            stored.cooling_down_until(now, now_unix),
+            stored.cooldown_cause,
+            stored.credential_rejected,
+        );
+    }
+    pool.observe(resource, outcome, now);
+
+    let health = pool.health(resource);
+    let reading = GatewayHealthReading {
+        credential_label: label.clone(),
+        model: model.clone(),
+        consecutive_failures: health.consecutive_failures(),
+        cooling_down_until_unix: health
+            .cooling_down_until()
+            .map(|until| now_unix + until.saturating_duration_since(now).as_secs() as i64),
+        cooldown_cause: health.cooldown_cause(),
+        credential_rejected: health.credential_was_rejected(),
+    };
+    match existing {
+        Some(index) => entries[index] = reading,
+        None => entries.push(reading),
+    }
+
+    cache.store(&provider, &entries, now_unix);
+}
+
+/// Phase 9I lines 530, 531 and 540's production caller, and
+/// GH-ROUTED-EXTRACTION-CLIENT's: route this extraction through
+/// `glasshouse::routing::disposable::DisposableRouting` over the resources
+/// the user has actually configured, report the choice, and — when the user
+/// has consented to a model being called at all — perform the extraction
+/// through the resource that won.
+///
+/// # The order, and what each step decides
+///
+/// 1. **Consent** ([`configured_extraction_choice`]): no `[memory]
+///    extraction_model`, no outbound request, exactly as before. The routing
+///    decision is still made, still explained and still recorded.
+/// 2. **The local bypass**: a configured provider that names no credential
+///    variable cannot be a routing candidate at all — see
+///    [`configured_extraction_candidate`] — and is built and used directly.
+/// 3. **The choice**: every free and metered candidate the configuration
+///    yields, plus the configured extraction model, ranked by
+///    `DisposableRouting::choose` against health read back off disk.
+/// 4. **The client**: resolved for the resource that won, by
+///    [`extraction_client_for`], through the same `SecretStore` path
+///    everything else here uses.
 ///
 /// Falls back to [`NoExtractionModel`] when the configuration cannot be
 /// read at all — the same non-fatal-to-the-session posture
@@ -7300,9 +7697,6 @@ fn disposable_extraction_model(
     runtime: &Runtime,
     session: &glasshouse::session::SessionId,
 ) -> Box<dyn glasshouse::memory::ExtractionModel> {
-    if let Some(chosen) = configured_extraction_model(runtime) {
-        return chosen;
-    }
     let user = match UserConfig::load(runtime.paths()) {
         Ok(user) => user,
         Err(err) => {
@@ -7323,7 +7717,38 @@ fn disposable_extraction_model(
     let telemetry = glasshouse::provider::resources::GatheredTelemetry::new().gather_gateway_quota(
         &glasshouse::provider::telemetry::GatewayQuotaCache::new(runtime.paths()),
     );
-    let candidates = disposable_candidates(
+
+    let consented = configured_extraction_choice(&effective);
+    let configured_candidate = consented.as_ref().and_then(|chosen| {
+        configured_extraction_candidate(
+            &user,
+            project.as_ref(),
+            &effective,
+            chosen,
+            &secrets,
+            &telemetry,
+            now_unix,
+        )
+    });
+    // Step 2: named, credential-less, and therefore not rankable. Nothing is
+    // routed and nothing is lost — a local model has no marginal cost for
+    // line 530 to prefer something else over.
+    //
+    // `configured_extraction_candidate` also answers `None` for a provider
+    // that is missing, disabled, or whose named credential is unset. Those
+    // are not bypasses: the direct build below fails for each of them too
+    // (`configured_provider`, and `ConfiguredModelError::NoCredential`), so
+    // they fall through to the router and end in its refusal. The `let Some`
+    // is what keeps the three cases apart without a second condition to keep
+    // in step with the first.
+    if let Some(chosen) = &consented
+        && configured_candidate.is_none()
+        && let Some(model) = configured_extraction_model(&user, project.as_ref(), chosen)
+    {
+        return model;
+    }
+
+    let mut candidates = disposable_candidates(
         &user,
         project.as_ref(),
         &effective,
@@ -7331,6 +7756,31 @@ fn disposable_extraction_model(
         &telemetry,
         now_unix,
     );
+    // Added rather than substituted, and only when the configuration did not
+    // already yield it: a model named in a provider's `free_models` **and**
+    // in `[memory] extraction_model` is one resource, ranked once.
+    if let Some(candidate) = configured_candidate
+        && !candidates.iter().any(|existing| {
+            existing.provider() == candidate.provider() && existing.model() == candidate.model()
+        })
+    {
+        candidates.push(candidate);
+    }
+
+    // Line 534, read side: what other short-lived dispatchers learned. Until
+    // this batch this path passed `FreePool::new()`, so `choose`'s health
+    // filter was handed a pool that could never exclude anything (map line
+    // 1433, practice §36).
+    let health = observed_health_of(
+        runtime,
+        candidates.iter().map(|candidate| {
+            glasshouse::routing::free::FreeResource::new(
+                candidate.credential().clone(),
+                candidate.model(),
+            )
+        }),
+    );
+
     let free_preferences = glasshouse::routing::free::FreePreferences::new()
         .with_order(
             effective
@@ -7382,7 +7832,36 @@ fn disposable_extraction_model(
             .for_scope(glasshouse::routing::pressure::ReserveScope::Background),
     );
     let job = glasshouse::routing::disposable::JobKind::MemoryExtraction;
-    let routed = glasshouse::memory::RoutedNoModel::new(job, &candidates, &routing);
+    let mut routed =
+        glasshouse::memory::RoutedModel::new(job, &candidates, &routing, health.pool());
+
+    // Step 4. Only with consent, and only for a resource the policy actually
+    // chose: a client built for a candidate the router refused would be a
+    // model reached around the protected-reserve gate, which is the whole
+    // thing `automatic_classification_model`'s own header says must not
+    // happen.
+    if consented.is_some()
+        && let Ok(choice) = routed.choice()
+    {
+        let credential = choice.credential().clone();
+        let client = extraction_client_for(
+            &user,
+            project.as_ref(),
+            choice.provider(),
+            choice.model(),
+            Some(credential.reference()),
+        );
+        if let Err(reason) = &client {
+            tracing::warn!(reason, "the routed extraction model cannot be used");
+        }
+        let paths = runtime.paths().clone();
+        routed =
+            routed
+                .with_client(client, credential.label())
+                .observing(move |resource, outcome| {
+                    persist_support_work_health(&paths, resource, outcome)
+                });
+    }
 
     // The decision is made above and, until this line existed, died in a
     // `tracing::info!` a few frames later. `describe()` is the string
@@ -7407,10 +7886,12 @@ fn disposable_extraction_model(
     // `EventRecorder::open(runtime).record_observed(..)` on this very path
     // already has. Nothing here outlives the turn, and no handle is kept.
     //
-    // Only on this branch, deliberately. The early return above is a model
-    // the user configured by name, where no disposable routing decision is
-    // made at all; recording a rationale for it would be recording something
-    // that did not happen.
+    // Every branch that reaches here made a routing decision, including the
+    // consented one — which is the change: the model that gets called is now
+    // the model that was routed, so there is no longer a path whose rationale
+    // would be a record of something that did not happen. The one branch that
+    // still records nothing is the local bypass above, which returns before
+    // this line because no decision was made for it.
     glasshouse::evaluation::record_disposable_route(
         runtime,
         job,
@@ -7873,7 +8354,7 @@ fn automatic_classification_model(
     request_text: &str,
 ) -> Result<ClassifierRef, String> {
     // The tier this job's own demand implies, from the request itself. This
-    // is `RoutedNoModel::new_for_request`'s fifth link, made by the one
+    // is `RoutedModel::new_for_request`'s fifth link, made by the one
     // `JobKind` its doc comment says the constructor was waiting for — a
     // request, not a transcript of a finished turn.
     let requirement = glasshouse::routing::classify::classify_heuristically(request_text);
@@ -10521,6 +11002,7 @@ fn resources_report(
     verbose: bool,
     probe: &[String],
     no_harness: bool,
+    force_probe: bool,
 ) -> anyhow::Result<String> {
     let user = UserConfig::load(runtime.paths())?;
     let project = config::load_project_config(runtime.project())?;
@@ -10550,9 +11032,34 @@ fn resources_report(
         let secrets = glasshouse::secret::native::PreferNativeSecretStore::detect();
         let _ = writeln!(probes, "PROBES\n");
         for name in probe {
-            let reading = glasshouse::provider::resources::probe_provider(
-                &effective, &secrets, name, now_unix,
+            let authorization = glasshouse::provider::resources::authorize_probe(
+                &effective, &telemetry, name, now_unix,
             );
+            let reading = match authorization {
+                glasshouse::provider::resources::ProbeAuthorization::Refused(budget)
+                    if !force_probe =>
+                {
+                    glasshouse::provider::resources::ProbeReading::Refused {
+                        remaining: budget.remaining,
+                        cost: budget.cost,
+                    }
+                }
+                glasshouse::provider::resources::ProbeAuthorization::Refused(budget) => {
+                    glasshouse::provider::resources::render_forced_probe(
+                        &mut probes,
+                        name,
+                        &budget,
+                    );
+                    glasshouse::provider::resources::probe_provider(
+                        &effective, &secrets, name, now_unix,
+                    )
+                }
+                glasshouse::provider::resources::ProbeAuthorization::Allowed => {
+                    glasshouse::provider::resources::probe_provider(
+                        &effective, &secrets, name, now_unix,
+                    )
+                }
+            };
             glasshouse::provider::resources::render_probe(&mut probes, name, &reading);
             if let glasshouse::provider::resources::ProbeReading::Answered {
                 headers,
@@ -10917,11 +11424,19 @@ fn render_routing_model(
 /// `glasshouse memory search`) and `api::unix::query_memory` (the machine
 /// door) both render from, so the two can never disagree about what a query
 /// finds or how it is grouped.
+///
+/// `session` is the requesting session's id, when the caller has one in
+/// scope — `GH-RETRIEVAL-ATTRIBUTION`'s gap 1. Both current callers pass
+/// `None`: `memory_report`'s CLI command has no session to attribute a
+/// person's own `memory search` to, and `query_memory`'s `Request::QueryMemory`
+/// carries no session field to thread one from. Never guessed — see
+/// [`glasshouse::evaluation::record_memory_retrieval`]'s own doc comment.
 fn memory_search_grouped(
     runtime: &Runtime,
     query: &str,
     history: bool,
     limit: usize,
+    session: Option<&str>,
 ) -> anyhow::Result<glasshouse::memory::search::RetrievalResult> {
     use glasshouse::memory::ProjectMemory;
     use glasshouse::memory::search::SearchScope;
@@ -10965,6 +11480,7 @@ fn memory_search_grouped(
                 .iter()
                 .chain(grouped.other.iter())
                 .map(|record| record.id.as_str()),
+            session,
             glasshouse::evaluation::now_unix(),
         );
     }
@@ -10986,7 +11502,7 @@ fn memory_report(
     history: bool,
     limit: usize,
 ) -> anyhow::Result<String> {
-    let grouped = memory_search_grouped(runtime, query, history, limit)?;
+    let grouped = memory_search_grouped(runtime, query, history, limit, None)?;
     render_memory_report(&grouped, query, history)
 }
 
@@ -11187,12 +11703,15 @@ fn render_memory_quality(
     let _ = writeln!(out, "\nrevalidation-accuracy (1824):");
     let _ = writeln!(
         out,
-        "  explicit revalidation-correct {} / revalidation-wrong {}",
-        revalidation_accuracy.correct, revalidation_accuracy.wrong
+        "  explicit revalidation-correct {} / revalidation-wrong {} of {} revalidations",
+        revalidation_accuracy.correct,
+        revalidation_accuracy.wrong,
+        revalidation_accuracy.revalidations
     );
     let _ = writeln!(
         out,
-        "  no denominator: revalidate's four outcomes share no single production column"
+        "  unknown {} of {} revalidations",
+        revalidation_accuracy.unknown, revalidation_accuracy.revalidations
     );
     let _ = writeln!(out, "  no proxy: nothing observed bears on this");
 
@@ -11609,6 +12128,17 @@ fn memory_revalidate(
              superseded, invalidated"
         ),
     };
+
+    // Map line 1824's own denominator, `GH-RETRIEVAL-ATTRIBUTION`: the store
+    // mutation above is the real act and has already succeeded, so this row
+    // records that a revalidation happened without being able to fail the
+    // command that already did.
+    glasshouse::evaluation::record_memory_revalidation(
+        runtime,
+        record.id.as_str(),
+        outcome,
+        glasshouse::evaluation::now_unix(),
+    );
 
     Ok(format!("{} is now {}\n", record.id, record.status))
 }

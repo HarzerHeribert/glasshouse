@@ -661,3 +661,209 @@ fn run_headless_launch(base: &Path, root: &Path, home: &Path) -> Output {
         .output()
         .expect("the glasshouse binary must be runnable")
 }
+
+// ===========================================================================
+// Map lines 2023/2024 — the reduction policy keyed on the serving
+// entitlement's kind, and the profile/entitlement overrides that outrank it.
+// Every entitlement below is `native_harness`-backed rather than a
+// direct-provider account: `EntitlementKind` is purely descriptive (no rule
+// depends on it — `config/mod.rs`'s own doc on the type), so a `kind` on a
+// native-harness entry is exactly as legal as on a provider one, and it lets
+// every one of these tests launch through the Native backend with no
+// provider or credential to stand up.
+// ===========================================================================
+
+fn policy_config(entitlement_kind: &str, extra: &str) -> String {
+    format!(
+        "\n[entitlements.policy-acct]\nkind = \"{entitlement_kind}\"\n\
+         native_harness = \"claude-code\"\n\
+         {extra}"
+    )
+}
+
+/// **Objective 5(a).** `mode = \"safe\"` plus `[context_firewall.metered]
+/// passthrough_tokens = 900` and an `api-key` entitlement serving the
+/// launch: the registered command line carries the metered kind's
+/// threshold, not the flat default.
+///
+/// Mutation target `ignore-the-kind`: forcing the classification to always
+/// answer *none* must fail this test — the kind sub-table would never be
+/// consulted and the flag would read `4000` (the flat default) instead.
+#[test]
+fn line_2023_a_metered_entitlement_carries_the_metered_kinds_threshold() {
+    let config = policy_config(
+        "api-key",
+        "\n[context_firewall]\nmode = \"safe\"\n\n\
+         [context_firewall.metered]\npassthrough_tokens = 900\n",
+    );
+    let binary = Binary::with_config(&config, GOOD_VERSION);
+    let out = binary.glasshouse(&["launch", "claude-code", "--headless"]);
+    assert!(out.status.success(), "{}", Binary::both_streams(&out));
+
+    let documents = binary.written_settings_documents();
+    let command = registered_command_line(&documents[0]).unwrap();
+    assert!(command.contains("--passthrough-tokens 900"), "{command}");
+}
+
+/// **Objective 5(b).** The identical configuration, but the entitlement's
+/// `kind` is `claude` instead of `api-key`: the entitlement classifies as
+/// `subscription`, the `metered` sub-table never applies, and the command
+/// line carries today's flat default.
+#[test]
+fn line_2023_a_subscription_entitlement_never_reads_the_metered_kinds_threshold() {
+    let config = policy_config(
+        "claude",
+        "\n[context_firewall]\nmode = \"safe\"\n\n\
+         [context_firewall.metered]\npassthrough_tokens = 900\n",
+    );
+    let binary = Binary::with_config(&config, GOOD_VERSION);
+    let out = binary.glasshouse(&["launch", "claude-code", "--headless"]);
+    assert!(out.status.success(), "{}", Binary::both_streams(&out));
+
+    let documents = binary.written_settings_documents();
+    let command = registered_command_line(&documents[0]).unwrap();
+    assert!(
+        command.contains(&format!(
+            "--passthrough-tokens {}",
+            glasshouse::config::firewall::DEFAULT_PASSTHROUGH_TOKENS
+        )),
+        "{command}"
+    );
+    assert!(!command.contains("--passthrough-tokens 900"), "{command}");
+}
+
+/// **Objective 5(c).** A launch profile's own `[profiles.<name>.context_firewall]`
+/// outranks the kind's sub-table — the metered entitlement's `900` never
+/// reaches the command line once the profile states `700`.
+///
+/// Mutation target `override-is-ignored`: never consulting the profile
+/// override must fail this test — the flag would read `900` instead.
+#[test]
+fn line_2024_a_profile_override_outranks_the_kinds_threshold() {
+    let config = policy_config(
+        "api-key",
+        "\n[context_firewall]\nmode = \"safe\"\n\n\
+         [context_firewall.metered]\npassthrough_tokens = 900\n\n\
+         [profiles.policy]\nharness = \"claude-code\"\n\
+         expected_protocol = \"anthropic-messages\"\n\n\
+         [profiles.policy.context_firewall]\npassthrough_tokens = 700\n",
+    );
+    let binary = Binary::with_config(&config, GOOD_VERSION);
+    let out = binary.glasshouse(&["launch", "claude-code", "--headless", "--profile", "policy"]);
+    assert!(out.status.success(), "{}", Binary::both_streams(&out));
+
+    let documents = binary.written_settings_documents();
+    let command = registered_command_line(&documents[0]).unwrap();
+    assert!(command.contains("--passthrough-tokens 700"), "{command}");
+}
+
+/// **Objective 5(d).** An entitlement's own `[entitlements.<name>.context_firewall]`
+/// outranks the kind's sub-table (`800` over `900`) when no profile states
+/// anything, and loses to the profile's own override (`700`) the moment one
+/// is added — same two entitlements and kind sub-table, two launches.
+///
+/// Mutation target `wrong-precedence`: the kind's value beating the
+/// entitlement's explicit value must fail the first half — the flag would
+/// read `900` instead of `800`.
+#[test]
+fn line_2024_an_entitlement_override_outranks_the_kind_and_loses_to_the_profile() {
+    let base_extra = "\n[context_firewall]\nmode = \"safe\"\n\n\
+         [context_firewall.metered]\npassthrough_tokens = 900\n\n\
+         [entitlements.policy-acct.context_firewall]\npassthrough_tokens = 800\n\n\
+         [profiles.policy]\nharness = \"claude-code\"\n\
+         expected_protocol = \"anthropic-messages\"\n";
+    let without_profile_override = policy_config("api-key", base_extra);
+    let binary = Binary::with_config(&without_profile_override, GOOD_VERSION);
+    let out = binary.glasshouse(&["launch", "claude-code", "--headless", "--profile", "policy"]);
+    assert!(out.status.success(), "{}", Binary::both_streams(&out));
+    let documents = binary.written_settings_documents();
+    let command = registered_command_line(&documents[0]).unwrap();
+    assert!(
+        command.contains("--passthrough-tokens 800"),
+        "entitlement override must outrank the kind: {command}"
+    );
+
+    let with_profile_override = policy_config(
+        "api-key",
+        &format!("{base_extra}\n[profiles.policy.context_firewall]\npassthrough_tokens = 700\n"),
+    );
+    let binary = Binary::with_config(&with_profile_override, GOOD_VERSION);
+    let out = binary.glasshouse(&["launch", "claude-code", "--headless", "--profile", "policy"]);
+    assert!(out.status.success(), "{}", Binary::both_streams(&out));
+    let documents = binary.written_settings_documents();
+    let command = registered_command_line(&documents[0]).unwrap();
+    assert!(
+        command.contains("--passthrough-tokens 700"),
+        "the profile's override must outrank the entitlement's own: {command}"
+    );
+}
+
+/// **Objective 5(e).** No entitlement is configured at all, so the harness's
+/// default per-harness entry (`kind: None`) serves — the classification
+/// never guesses a kind, the `metered` sub-table configured alongside it
+/// never applies, and the registered command line's flags are byte-identical
+/// to a configuration with no kind sub-tables at all.
+#[test]
+fn line_2023_no_entitlement_never_guesses_a_kind_and_stays_byte_identical() {
+    let with_unreachable_subtable = Binary::with_config(
+        "\n[context_firewall]\nmode = \"safe\"\n\n\
+         [context_firewall.metered]\npassthrough_tokens = 900\n",
+        GOOD_VERSION,
+    );
+    let baseline = Binary::with_config("\n[context_firewall]\nmode = \"safe\"\n", GOOD_VERSION);
+
+    for binary in [&with_unreachable_subtable, &baseline] {
+        let out = binary.glasshouse(&["launch", "claude-code", "--headless"]);
+        assert!(out.status.success(), "{}", Binary::both_streams(&out));
+    }
+
+    let with_command =
+        registered_command_line(&with_unreachable_subtable.written_settings_documents()[0])
+            .unwrap();
+    let baseline_command =
+        registered_command_line(&baseline.written_settings_documents()[0]).unwrap();
+    assert!(
+        with_command.contains(&format!(
+            "--passthrough-tokens {}",
+            glasshouse::config::firewall::DEFAULT_PASSTHROUGH_TOKENS
+        )),
+        "{with_command}"
+    );
+    assert_eq!(
+        flag_names(&with_command),
+        flag_names(&baseline_command),
+        "an unreachable kind sub-table must not change the registered flags:\n{with_command}\n{baseline_command}",
+    );
+}
+
+/// **Objective 5(f).** `[context_firewall.subscription] min_semantic_tokens
+/// = 1200` reaches the registered command line as `--min-semantic-tokens
+/// 1200` once the entitlement classifies as `subscription` — asserted on the
+/// registered command line only; the hook subprocess's own
+/// `--min-semantic-tokens` parsing is already covered by
+/// `context_firewall.rs`'s fixture, not reproduced here.
+#[test]
+fn line_2023_a_subscription_kinds_min_semantic_tokens_reaches_the_registered_line() {
+    let config = policy_config(
+        "claude",
+        "\n[context_firewall]\nmode = \"safe\"\n\n\
+         [context_firewall.subscription]\nmin_semantic_tokens = 1200\n",
+    );
+    let binary = Binary::with_config(&config, GOOD_VERSION);
+    let out = binary.glasshouse(&["launch", "claude-code", "--headless"]);
+    assert!(out.status.success(), "{}", Binary::both_streams(&out));
+
+    let documents = binary.written_settings_documents();
+    let command = registered_command_line(&documents[0]).unwrap();
+    assert!(command.contains("--min-semantic-tokens 1200"), "{command}");
+
+    let baseline = Binary::with_config("\n[context_firewall]\nmode = \"safe\"\n", GOOD_VERSION);
+    let out = baseline.glasshouse(&["launch", "claude-code", "--headless"]);
+    assert!(out.status.success(), "{}", Binary::both_streams(&out));
+    let baseline_command =
+        registered_command_line(&baseline.written_settings_documents()[0]).unwrap();
+    assert!(
+        !baseline_command.contains("--min-semantic-tokens"),
+        "an unconfigured session must never bake the flag: {baseline_command}"
+    );
+}

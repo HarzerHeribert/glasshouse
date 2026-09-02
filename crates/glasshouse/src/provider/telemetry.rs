@@ -1233,6 +1233,13 @@ impl GatewayQuotaCache {
         };
         let mut out = Vec::new();
         for entry in entries.flatten() {
+            // Skip a `<stem>.<pid>-<n>.writing` temporary from a write that
+            // crashed before its rename — its extension is never `json`, and
+            // a concurrent writer's in-progress content must never surface
+            // as a second reading for a provider that already has one.
+            if entry.path().extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
             let Ok(bytes) = std::fs::read(entry.path()) else {
                 continue;
             };
@@ -1684,6 +1691,15 @@ impl GatewayHealthCache {
         };
         let mut out = Vec::new();
         for entry in entries.flatten() {
+            // Skip a `<stem>.<pid>-<n>.writing` temporary from a write that
+            // crashed before its rename — its extension is never `json`. The
+            // health cache now has two producers in separate processes
+            // (the gateway and `main.rs::persist_support_work_health`), so a
+            // stale temporary here would otherwise surface as a second,
+            // contradictory reading for a provider that already has one.
+            if entry.path().extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
             let Ok(bytes) = std::fs::read(entry.path()) else {
                 continue;
             };
@@ -1731,6 +1747,11 @@ impl GatewayHealthCache {
         };
         let mut out = Vec::new();
         for entry in entries.flatten() {
+            // Skip a `<stem>.<pid>-<n>.writing` temporary — see
+            // `Self::load_all`'s identical guard just above.
+            if entry.path().extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
             let Ok(bytes) = std::fs::read(entry.path()) else {
                 continue;
             };
@@ -1879,6 +1900,44 @@ mod gateway_health_cache_tests {
 
         assert_eq!(cache.load("anyrouter"), Vec::new());
         assert_eq!(cache.load_all(), Vec::new());
+    }
+
+    /// A `.writing` temporary left behind by a crashed writer — the shape a
+    /// second producer in a separate process (`main.rs`'s support-work
+    /// dispatch, alongside the gateway) can now leave — must never surface as
+    /// a second reading for a provider that already has a real one on disk.
+    #[test]
+    fn a_leftover_writing_temporary_is_never_returned_as_a_reading() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let cache = GatewayHealthCache::at(dir.path());
+        let real_entries = vec![GatewayHealthReading {
+            credential_label: "anyrouter/ANYROUTER_API_KEY".to_owned(),
+            model: "anyrouter/free-model".to_owned(),
+            consecutive_failures: 1,
+            cooling_down_until_unix: None,
+            cooldown_cause: None,
+            credential_rejected: false,
+        }];
+        cache.store("anyrouter", &real_entries, 1_787_800_000);
+
+        let stem = crate::provider::cache::file_stem("anyrouter");
+        let real_path = dir.path().join(format!("{stem}.json"));
+        let bytes = std::fs::read(&real_path).expect("the store above wrote a file");
+        // A valid, fully-written temporary — the shape a crash right after
+        // `std::fs::write` but before the rename leaves behind.
+        let temporary_path = dir.path().join(format!("{stem}.4242-7.writing"));
+        std::fs::write(&temporary_path, &bytes).expect("planted temporary");
+
+        assert_eq!(
+            cache.load_all(),
+            vec![("anyrouter".to_owned(), real_entries.clone())],
+            "load_all must return only the real reading, not the planted temporary"
+        );
+        assert_eq!(
+            cache.load_all_dated(),
+            vec![("anyrouter".to_owned(), 1_787_800_000, real_entries)],
+            "load_all_dated must return only the real reading, not the planted temporary"
+        );
     }
 
     /// A format version this build does not recognise must read as nothing —

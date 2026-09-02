@@ -113,6 +113,123 @@ pub const DEFAULT_AGGRESSIVE_PASSTHROUGH_TOKENS: u64 = 1500;
 /// sooner or later overrides it like any other threshold here.
 pub const DEFAULT_MIN_SEMANTIC_TOKENS: u64 = 12_000;
 
+/// Map lines 2023/2024: which shape of reduction policy a serving
+/// entitlement's kind implies — a subscription pays in rate limits and
+/// context window, a key in tokens, local inference in latency, so each gets
+/// its own default thresholds.
+///
+/// Derived once, in `main.rs::install_context_firewall_hook`, from the
+/// resolved entitlement — never carried by [`crate::firewall`] or the hook
+/// subcommand, which stay entitlement-blind by construction: this type
+/// exists only to select a sub-table here, and is not part of the value
+/// that reaches a command line.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReductionPolicyKind {
+    /// A harness's own first-party plan — `EntitlementKind::Claude`,
+    /// `ChatGpt` or `Gemini`.
+    Subscription,
+    /// An API key — `EntitlementKind::ApiKey`.
+    Metered,
+    /// The entitlement's backing provider runs on this machine
+    /// (`crate::provider::registry::Locality::Local`), or the session is
+    /// served by such a provider directly with no entitlement naming it.
+    Local,
+}
+
+impl ReductionPolicyKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Subscription => "subscription",
+            Self::Metered => "metered",
+            Self::Local => "local",
+        }
+    }
+}
+
+impl fmt::Display for ReductionPolicyKind {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad(self.as_str())
+    }
+}
+
+/// The four fields a kind's sub-table, a launch profile, or an entitlement
+/// may override — map lines 2023/2024. Shared shape rather than three
+/// separate types, so `[context_firewall.<kind>]`,
+/// `[profiles.<name>.context_firewall]` and
+/// `[entitlements.<name>.context_firewall]` read and layer identically.
+///
+/// Deliberately narrower than [`ContextFirewallConfig`] itself: the reducer
+/// name and model are a *resource*, not a *policy* — map line 1997's own
+/// distinction — so they stay flat and have no place here.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ContextFirewallOverride {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mode: Option<FirewallMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    passthrough_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    aggressive_passthrough_tokens: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    min_semantic_tokens: Option<u64>,
+}
+
+impl ContextFirewallOverride {
+    pub fn is_unset(&self) -> bool {
+        self.mode.is_none()
+            && self.passthrough_tokens.is_none()
+            && self.aggressive_passthrough_tokens.is_none()
+            && self.min_semantic_tokens.is_none()
+    }
+
+    pub fn mode(&self) -> Option<FirewallMode> {
+        self.mode
+    }
+
+    pub fn set_mode(&mut self, mode: Option<FirewallMode>) -> &mut Self {
+        self.mode = mode;
+        self
+    }
+
+    pub fn passthrough_tokens(&self) -> Option<u64> {
+        self.passthrough_tokens
+    }
+
+    pub fn set_passthrough_tokens(&mut self, value: Option<u64>) -> &mut Self {
+        self.passthrough_tokens = value;
+        self
+    }
+
+    pub fn aggressive_passthrough_tokens(&self) -> Option<u64> {
+        self.aggressive_passthrough_tokens
+    }
+
+    pub fn set_aggressive_passthrough_tokens(&mut self, value: Option<u64>) -> &mut Self {
+        self.aggressive_passthrough_tokens = value;
+        self
+    }
+
+    /// Reads a different field per mode, exactly like
+    /// [`crate::config::EffectiveConfig::context_firewall_passthrough_tokens`]:
+    /// `aggressive_passthrough_tokens` under [`FirewallMode::Aggressive`],
+    /// `passthrough_tokens` under every other mode.
+    pub fn passthrough_tokens_for(&self, mode: FirewallMode) -> Option<u64> {
+        if mode == FirewallMode::Aggressive {
+            self.aggressive_passthrough_tokens
+        } else {
+            self.passthrough_tokens
+        }
+    }
+
+    pub fn min_semantic_tokens(&self) -> Option<u64> {
+        self.min_semantic_tokens
+    }
+
+    pub fn set_min_semantic_tokens(&mut self, value: Option<u64>) -> &mut Self {
+        self.min_semantic_tokens = value;
+        self
+    }
+}
+
 /// The `[context_firewall]` table.
 ///
 /// Every field is optional so a layer that never touched this table has
@@ -167,6 +284,21 @@ pub struct ContextFirewallConfig {
     /// silent fallback to a remote one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     reducer_local_only: Option<bool>,
+    /// `[context_firewall.subscription]` — map line 2023's per-kind
+    /// thresholds for a serving entitlement classified
+    /// [`ReductionPolicyKind::Subscription`]. An unset field here falls
+    /// through to the flat field above it and then to the constant, exactly
+    /// like every other layer on this type.
+    #[serde(default, skip_serializing_if = "ContextFirewallOverride::is_unset")]
+    subscription: ContextFirewallOverride,
+    /// `[context_firewall.metered]` — [`ReductionPolicyKind::Metered`]'s own
+    /// thresholds, same fallthrough as [`Self::subscription`].
+    #[serde(default, skip_serializing_if = "ContextFirewallOverride::is_unset")]
+    metered: ContextFirewallOverride,
+    /// `[context_firewall.local]` — [`ReductionPolicyKind::Local`]'s own
+    /// thresholds, same fallthrough as [`Self::subscription`].
+    #[serde(default, skip_serializing_if = "ContextFirewallOverride::is_unset")]
+    local: ContextFirewallOverride,
 }
 
 impl ContextFirewallConfig {
@@ -182,6 +314,9 @@ impl ContextFirewallConfig {
             && self.min_semantic_tokens.is_none()
             && self.aggressive_drops_uncertain.is_none()
             && self.reducer_local_only.is_none()
+            && self.subscription.is_unset()
+            && self.metered.is_unset()
+            && self.local.is_unset()
     }
 
     pub fn mode(&self) -> Option<FirewallMode> {
@@ -255,6 +390,41 @@ impl ContextFirewallConfig {
         self.reducer_local_only = value;
         self
     }
+
+    pub fn subscription(&self) -> &ContextFirewallOverride {
+        &self.subscription
+    }
+
+    pub fn subscription_mut(&mut self) -> &mut ContextFirewallOverride {
+        &mut self.subscription
+    }
+
+    pub fn metered(&self) -> &ContextFirewallOverride {
+        &self.metered
+    }
+
+    pub fn metered_mut(&mut self) -> &mut ContextFirewallOverride {
+        &mut self.metered
+    }
+
+    pub fn local(&self) -> &ContextFirewallOverride {
+        &self.local
+    }
+
+    pub fn local_mut(&mut self) -> &mut ContextFirewallOverride {
+        &mut self.local
+    }
+
+    /// The sub-table [`ReductionPolicyKind`] selects — map lines 2023/2024's
+    /// per-kind lookup, in one place so a caller never matches on the kind
+    /// itself to pick a field.
+    pub fn kind_override(&self, kind: ReductionPolicyKind) -> &ContextFirewallOverride {
+        match kind {
+            ReductionPolicyKind::Subscription => &self.subscription,
+            ReductionPolicyKind::Metered => &self.metered,
+            ReductionPolicyKind::Local => &self.local,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -322,5 +492,85 @@ mod tests {
         assert!(err.contains("stealth"));
         assert!(err.contains("off"));
         assert!(err.contains("aggressive"));
+    }
+
+    #[test]
+    fn a_freshly_defaulted_override_is_unset() {
+        assert!(ContextFirewallOverride::default().is_unset());
+    }
+
+    #[test]
+    fn setting_any_override_field_marks_it_no_longer_unset() {
+        let mut over = ContextFirewallOverride::default();
+        over.set_min_semantic_tokens(Some(1200));
+        assert!(!over.is_unset());
+    }
+
+    #[test]
+    fn a_kind_subtable_marks_the_table_no_longer_unset_without_touching_the_flat_fields() {
+        let mut config = ContextFirewallConfig::default();
+        config.metered_mut().set_passthrough_tokens(Some(900));
+        assert!(!config.is_unset());
+        assert_eq!(
+            config.passthrough_tokens(),
+            None,
+            "the flat field is untouched"
+        );
+        assert_eq!(config.metered().passthrough_tokens(), Some(900));
+    }
+
+    #[test]
+    fn kind_override_selects_the_matching_subtable() {
+        let mut config = ContextFirewallConfig::default();
+        config.subscription_mut().set_mode(Some(FirewallMode::Safe));
+        config
+            .metered_mut()
+            .set_mode(Some(FirewallMode::Aggressive));
+        config.local_mut().set_mode(Some(FirewallMode::Shadow));
+
+        assert_eq!(
+            config
+                .kind_override(ReductionPolicyKind::Subscription)
+                .mode(),
+            Some(FirewallMode::Safe)
+        );
+        assert_eq!(
+            config.kind_override(ReductionPolicyKind::Metered).mode(),
+            Some(FirewallMode::Aggressive)
+        );
+        assert_eq!(
+            config.kind_override(ReductionPolicyKind::Local).mode(),
+            Some(FirewallMode::Shadow)
+        );
+    }
+
+    #[test]
+    fn passthrough_tokens_for_reads_the_aggressive_field_only_under_aggressive_mode() {
+        let mut over = ContextFirewallOverride::default();
+        over.set_passthrough_tokens(Some(4000))
+            .set_aggressive_passthrough_tokens(Some(1500));
+        assert_eq!(over.passthrough_tokens_for(FirewallMode::Safe), Some(4000));
+        assert_eq!(
+            over.passthrough_tokens_for(FirewallMode::Shadow),
+            Some(4000)
+        );
+        assert_eq!(
+            over.passthrough_tokens_for(FirewallMode::Aggressive),
+            Some(1500)
+        );
+    }
+
+    #[test]
+    fn the_table_with_kind_subtables_serializes_to_json_and_back_unchanged() {
+        let mut config = ContextFirewallConfig::default();
+        config
+            .set_mode(Some(FirewallMode::Safe))
+            .set_passthrough_tokens(Some(4000));
+        config.subscription_mut().set_passthrough_tokens(Some(6000));
+        config.metered_mut().set_min_semantic_tokens(Some(2000));
+        config.local_mut().set_mode(Some(FirewallMode::Aggressive));
+        let json = serde_json::to_string(&config).unwrap();
+        let restored: ContextFirewallConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(config, restored);
     }
 }

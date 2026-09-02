@@ -311,19 +311,30 @@ pub(crate) fn provider_json_path(root: &Path, provider: &str) -> PathBuf {
     root.join(format!("{}.json", file_stem(provider)))
 }
 
-/// Write `encoded` to `path` via a same-directory `.json.writing` temporary
-/// file, then rename into place, so a crash or a full disk mid-write leaves
-/// whatever was at `path` before intact rather than a half-written file a
-/// later read would have to quietly discard. Does **not** create `path`'s
-/// parent directory — every call site already does that itself, with its own
-/// error type, before calling this.
+/// A process-wide counter that, combined with the process id, gives every
+/// [`write_json_atomically`] call its own temporary file name.
+static ATOMIC_WRITE_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Write `encoded` to `path` via a same-directory `<stem>.<pid>-<n>.writing`
+/// temporary file, then rename into place, so a crash or a full disk
+/// mid-write leaves whatever was at `path` before intact rather than a
+/// half-written file a later read would have to quietly discard. The
+/// temporary name carries the writing process's id and a process-wide
+/// counter — no longer a single fixed `.json.writing` name — because the
+/// gateway health cache now gains a second producer in a separate process
+/// (`main.rs::persist_support_work_health`), and two writers on one provider
+/// file sharing a fixed temporary could clobber each other's half-written
+/// content before either renames. Does **not** create `path`'s parent
+/// directory — every call site already does that itself, with its own error
+/// type, before calling this.
 ///
 /// The one atomic-write primitive [`ModelCache::store`],
 /// `telemetry::GatewayQuotaCache::try_store`,
 /// `telemetry::GatewayHealthCache::try_store` and
 /// `telemetry::RoutingStickyCache::try_store` used to reimplement separately.
 pub(crate) fn write_json_atomically(path: &Path, encoded: &[u8]) -> std::io::Result<()> {
-    let temporary = path.with_extension("json.writing");
+    let n = ATOMIC_WRITE_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let temporary = path.with_extension(format!("{}-{n}.writing", std::process::id()));
     std::fs::write(&temporary, encoded)?;
     std::fs::rename(&temporary, path)
 }
@@ -578,14 +589,17 @@ mod tests {
         let dir = tempfile::tempdir().expect("a temporary directory");
         let cache = ModelCache::at(dir.path());
         cache.store(&catalogue("p", &["a/one"])).expect("stored");
-        // The temporary name the write goes through must not be the file
-        // `load` reads, or a crash mid-write would be a corrupt cache.
-        let final_path = cache.path_for("p");
-        let temporary = final_path.with_extension("json.writing");
-        assert_ne!(temporary, final_path);
+        // No `.writing` temporary — whatever its process-id-and-counter
+        // name — must be left behind after the rename, or a crash mid-write
+        // would be a corrupt cache.
+        let leftover_temporaries: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("readable dir")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path().to_string_lossy().ends_with(".writing"))
+            .collect();
         assert!(
-            !temporary.exists(),
-            "the temporary file must be renamed away, not left behind"
+            leftover_temporaries.is_empty(),
+            "the temporary file must be renamed away, not left behind: {leftover_temporaries:?}"
         );
         assert!(cache.load("p").is_some());
     }
@@ -609,10 +623,44 @@ mod tests {
             b"{\"a\":1}",
             "the target must hold the full contents"
         );
-        let temporary = path.with_extension("json.writing");
+        let leftover_temporaries: Vec<_> = std::fs::read_dir(dir.path())
+            .expect("readable dir")
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.path() != path)
+            .collect();
         assert!(
-            !temporary.exists(),
-            "the temporary file must be renamed away, not left behind"
+            leftover_temporaries.is_empty(),
+            "the temporary file must be renamed away, not left behind: {leftover_temporaries:?}"
+        );
+    }
+
+    /// Two threads writing the same target concurrently each get their own
+    /// process-id-and-counter temporary, so neither ever renames a half of
+    /// the other's payload into place — the final file is always one writer's
+    /// payload whole.
+    #[test]
+    fn concurrent_writers_to_one_path_never_produce_a_mixed_file() {
+        let dir = tempfile::tempdir().expect("a temporary directory");
+        let path = dir.path().join("reading.json");
+
+        let payload_a = vec![b'a'; 200_000];
+        let payload_b = vec![b'b'; 200_000];
+        let path_a = path.clone();
+        let path_b = path.clone();
+
+        let handle_a = std::thread::spawn(move || {
+            write_json_atomically(&path_a, &payload_a).expect("a written")
+        });
+        let handle_b = std::thread::spawn(move || {
+            write_json_atomically(&path_b, &payload_b).expect("b written")
+        });
+        handle_a.join().expect("thread a");
+        handle_b.join().expect("thread b");
+
+        let final_contents = std::fs::read(&path).expect("readable");
+        assert!(
+            final_contents.iter().all(|&b| b == b'a') || final_contents.iter().all(|&b| b == b'b'),
+            "the final file must be one writer's payload whole, never a mix"
         );
     }
 

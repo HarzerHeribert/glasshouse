@@ -317,12 +317,33 @@ pub fn is_supported(from: &str, to: &str) -> bool {
     lookup(from, to).is_some_and(Pair::is_supported)
 }
 
-/// The per-field rows of one codec — what it refuses, with reasons, and
-/// what it ignores by name in a response.
+/// What a codec's own wire does with a prompt-cache marker decoded off
+/// another protocol's request (capability map line 2014) — the pair
+/// table's per-target answer, read by [`field_rows`] rather than carried on
+/// [`canonical::Request`] itself, because it is a property of the encoding
+/// codec, not of any one request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CacheDisposition {
+    /// Carried under this wire's own hint field, named, with one sentence on
+    /// how its value is derived.
+    Carried {
+        field: &'static str,
+        note: &'static str,
+    },
+    /// This wire has no equivalent; the marker is never encoded, for the
+    /// stated reason.
+    Stripped(&'static str),
+}
+
+/// The per-field rows of one codec — what it refuses, with reasons; what it
+/// ignores by name in a response; and, where the concept applies, what its
+/// encoder does with a prompt-cache marker (`None` for a protocol never
+/// asked to carry one, such as Anthropic — see `Codec::cache_disposition`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FieldRows {
     pub refused: &'static [(&'static str, &'static str)],
     pub ignored: &'static [&'static str],
+    pub cache: Option<CacheDisposition>,
 }
 
 /// The per-field rows for `protocol`'s codec, or `None` for a protocol with
@@ -331,6 +352,7 @@ pub fn field_rows(protocol: &str) -> Option<FieldRows> {
     codec_for(protocol).map(|codec| FieldRows {
         refused: codec.refused_fields(),
         ignored: codec.ignored_fields(),
+        cache: codec.cache_disposition(),
     })
 }
 
@@ -434,6 +456,14 @@ pub(super) trait Codec: Sync {
     fn decode_error(&self, body: &[u8]) -> Option<String>;
     fn refused_fields(&self) -> &'static [(&'static str, &'static str)];
     fn ignored_fields(&self) -> &'static [&'static str];
+    /// What this codec's [`Codec::encode_request`] does with a prompt-cache
+    /// marker carried on [`Request::cache_requested`] (2014). `None` is the
+    /// default for a wire never asked to answer the question — Anthropic's
+    /// own, since no pair supported today decodes a cache marker from a
+    /// protocol other than Anthropic Messages and then encodes back onto it.
+    fn cache_disposition(&self) -> Option<CacheDisposition> {
+        None
+    }
 }
 
 /// Turns one wire's stream events into canonical events, as they arrive.
@@ -673,13 +703,17 @@ pub(super) fn serve(
         );
     }
 
-    // Decode on the harness's codec, then let the provider's codec refuse,
-    // by name, any canonical field its wire has no home for — both before
-    // anything is opened upstream.
-    let request = match from.decode_request(&body).and_then(|request| {
-        to.refuse_unencodable(&request)?;
-        Ok(request)
-    }) {
+    // Decode on the harness's codec, normalize (2016: stable tool order),
+    // then let the provider's codec refuse, by name, any canonical field
+    // its wire has no home for — all three before anything is opened
+    // upstream.
+    let request = match from
+        .decode_request(&body)
+        .map(Request::normalized)
+        .and_then(|request| {
+            to.refuse_unencodable(&request)?;
+            Ok(request)
+        }) {
         Ok(request) => request,
         Err(unsupported) => {
             let refusal = TranslationRefusal::new(pair, unsupported);
@@ -691,6 +725,19 @@ pub(super) fn serve(
             );
         }
     };
+    // Observability for 2014's strip case: the harness asked for prompt
+    // caching and this pairing's target has no equivalent to carry it to.
+    // Never a refusal — the request is still served — just a per-exchange
+    // record of why the marker did not reach the provider.
+    if request.cache_requested
+        && let Some(CacheDisposition::Stripped(reason)) = to.cache_disposition()
+    {
+        tracing::debug!(
+            pair = %pair.slug(),
+            reason,
+            "the harness asked for prompt caching; this pairing has no equivalent and strips the marker"
+        );
+    }
     let translated = to.encode_request(&request);
 
     let Some(uri) = route.uri_for(&outbound_target(to, &request)) else {
@@ -1560,25 +1607,40 @@ mod tests {
         let pair = lookup("anthropic-messages", "openai-chat").unwrap();
         let refusal = TranslationRefusal::new(
             pair,
-            Unsupported::new("system[0].cache_control", "no home for it"),
+            Unsupported::new("messages[0].content[0].citations", "no home for it"),
         );
         let text = refusal.to_string();
         assert!(text.contains("anthropic-messages->openai-chat"));
-        assert!(text.contains("`system[0].cache_control`"));
+        assert!(text.contains("`messages[0].content[0].citations`"));
         assert!(text.contains("no home for it"));
     }
 
     #[test]
     fn field_rows_exist_for_every_codec_and_for_nothing_else() {
         let rows = field_rows("anthropic-messages").unwrap();
+        // Carried (2014), not refused: `cache_control` left REFUSED_FIELDS
+        // when this codec started accepting it.
         assert!(
-            rows.refused
+            !rows
+                .refused
                 .iter()
-                .any(|(field, _)| *field == "cache_control")
+                .any(|(field, _)| *field == "cache_control"),
+            "cache_control is carried now, not refused"
+        );
+        assert_eq!(
+            rows.cache, None,
+            "Anthropic is never asked to encode a cache marker it did not itself decode"
         );
         assert!(rows.ignored.contains(&"usage.service_tier"));
         let rows = field_rows("openai-chat").unwrap();
         assert!(rows.refused.iter().any(|(field, _)| *field == "n"));
+        assert!(matches!(
+            rows.cache,
+            Some(CacheDisposition::Carried {
+                field: "prompt_cache_key",
+                ..
+            })
+        ));
         let rows = field_rows("openai-responses").unwrap();
         assert!(
             rows.refused
@@ -1586,6 +1648,13 @@ mod tests {
                 .any(|(field, _)| *field == "previous_response_id")
         );
         assert!(rows.ignored.contains(&"output[].id"));
+        assert!(matches!(
+            rows.cache,
+            Some(CacheDisposition::Carried {
+                field: "prompt_cache_key",
+                ..
+            })
+        ));
         let rows = field_rows("gemini-generate-content").unwrap();
         assert!(
             rows.refused
@@ -1595,6 +1664,10 @@ mod tests {
         assert!(
             rows.ignored.contains(&"user"),
             "the one request field this gateway drops is named in the table it drops it from"
+        );
+        assert!(
+            matches!(rows.cache, Some(CacheDisposition::Stripped(_))),
+            "Gemini has no per-request cache marker to carry the harness's onto"
         );
         // ... and `gemini` alone is not a protocol slug.
         assert!(field_rows("gemini").is_none());
@@ -1614,6 +1687,7 @@ mod tests {
             stop: Vec::new(),
             stream,
             user: None,
+            cache_requested: false,
         }
     }
 

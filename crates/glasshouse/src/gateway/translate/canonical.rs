@@ -60,6 +60,43 @@ pub struct Request {
     /// An end-user identifier the harness attached — Anthropic's
     /// `metadata.user_id`, OpenAI's `user`.
     pub user: Option<String>,
+    /// Whether the harness marked any point of this request for prompt
+    /// caching — Anthropic's `cache_control`, on the system prompt, a
+    /// content block or a tool definition.
+    ///
+    /// Collapsed to one flag rather than threaded through [`Block`] and
+    /// [`ToolDefinition`]: no target this gateway translates to has a
+    /// per-block cache primitive to carry a position into. OpenAI's
+    /// `prompt_cache_key` and Gemini's cached-content resource are both
+    /// request/session-scoped, so the position Claude Code marked carries
+    /// no information a target here can use — only the fact that caching
+    /// was asked for at all, which is what a decoder must not silently drop
+    /// (see the module doc's *"refused by name, never dropped"*).
+    pub cache_requested: bool,
+}
+
+impl Request {
+    /// The stable per-session prompt-cache key a target that accepts one
+    /// should carry (2018) — Claude Code's own `metadata.user_id`, already
+    /// decoded into [`Request::user`] and already sent to every provider
+    /// under that name, so nothing new crosses the wire. Never anything
+    /// else: a cache key must be a value already visible to the evidence
+    /// ledger, not the gateway's own token or a credential.
+    pub fn prompt_cache_key(&self) -> Option<&str> {
+        self.user.as_deref()
+    }
+
+    /// Serialize deterministically (2016): tool definitions sorted by name,
+    /// once, at the seam every translated request passes through, so all
+    /// three encoders emit the same order for the same tool set however the
+    /// harness listed them. JSON-Schema key order needs no equivalent step
+    /// here — this crate never enables `serde_json`'s `preserve_order`
+    /// feature, so `Value::Object` is a sorted map and already serializes
+    /// with keys in order; see the tripwire test in this module.
+    pub fn normalized(mut self) -> Self {
+        self.tools.sort_by(|a, b| a.name.cmp(&b.name));
+        self
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -538,6 +575,49 @@ pub(super) mod tests {
                 cached: Some(100),
             },
         }
+    }
+
+    #[test]
+    fn json_object_keys_serialize_sorted_because_this_crate_never_enables_preserve_order() {
+        // The tripwire for 2016: if `serde_json`'s `preserve_order` feature
+        // is ever turned on (a feature unification from an unrelated
+        // dependency, not a choice made here), a JSON-Schema's declared key
+        // order would leak into encoded bytes and break prefix stability
+        // across turns — this pins the sorted-map behaviour the encoders
+        // rely on instead.
+        let mut map = serde_json::Map::new();
+        map.insert("zebra".to_owned(), json!(1));
+        map.insert("apple".to_owned(), json!(2));
+        map.insert("mango".to_owned(), json!(3));
+        let value = Value::Object(map);
+        assert_eq!(value.to_string(), r#"{"apple":2,"mango":3,"zebra":1}"#);
+    }
+
+    #[test]
+    fn normalized_sorts_tools_by_name_regardless_of_the_harnesss_order() {
+        let tool = |name: &str| ToolDefinition {
+            name: name.to_owned(),
+            description: None,
+            input_schema: json!({}),
+        };
+        let request = Request {
+            model: "m".to_owned(),
+            max_tokens: None,
+            system: None,
+            messages: Vec::new(),
+            tools: vec![tool("zeta"), tool("alpha"), tool("mu")],
+            tool_choice: None,
+            parallel_tool_calls: None,
+            temperature: None,
+            top_p: None,
+            stop: Vec::new(),
+            stream: false,
+            user: None,
+            cache_requested: false,
+        }
+        .normalized();
+        let names: Vec<&str> = request.tools.iter().map(|t| t.name.as_str()).collect();
+        assert_eq!(names, vec!["alpha", "mu", "zeta"]);
     }
 
     #[test]

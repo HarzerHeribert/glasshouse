@@ -471,7 +471,7 @@ fn a_count_that_is_not_a_non_negative_integer_is_recorded_as_unreported() {
 
 /// The discriminating half, and the guard practice §65 asks for.
 ///
-/// A user who has configured no extraction model gets `RoutedNoModel`, which
+/// A user who has configured no extraction model gets `RoutedModel`, which
 /// chooses a resource and calls nothing. There is no call, so there is no
 /// usage, so there must be no row — and, because
 /// `ExtractionOutcome::observation` is what gates it, no
@@ -512,6 +512,7 @@ fn a_call_reporting_nothing_maps_to_an_observation_with_no_counts() {
         provider: "p".to_owned(),
         model: "m".to_owned(),
         route: Some(ROUTE.to_owned()),
+        credential_label: None,
         usage: TokenUsage::UNREPORTED,
     }
     .observation();
@@ -533,6 +534,10 @@ fn a_call_reporting_nothing_maps_to_an_observation_with_no_counts() {
     assert_eq!(observation.outcome, None);
     assert_eq!(observation.purpose, None);
     assert_eq!(observation.tool_rounds, None);
+    // `quota_context` carries the credential *label* when the call was routed
+    // to a named credential, and nothing at all when it was not — never a
+    // provider name standing in for an account.
+    assert_eq!(observation.quota_context, None);
 }
 
 /// The counts survive the mapping unchanged, in the order the fields are
@@ -547,6 +552,7 @@ fn the_three_counts_reach_the_three_columns_they_belong_in() {
         provider: "p".to_owned(),
         model: "m".to_owned(),
         route: None,
+        credential_label: None,
         usage: TokenUsage {
             input_tokens: Some(11),
             output_tokens: Some(22),

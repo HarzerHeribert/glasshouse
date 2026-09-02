@@ -384,6 +384,18 @@ pub struct ProfileConfig {
         skip_serializing_if = "is_enabled_by_default"
     )]
     enabled: bool,
+    /// `[profiles.<name>.context_firewall]` — map line 2024's explicit
+    /// override, outranking the serving entitlement's kind and the flat
+    /// `[context_firewall]` table, and itself outranked by nothing: the
+    /// profile is the more specific choice, one profile serving one launch.
+    /// `None` here, on a file written before this field existed, loads as
+    /// "this profile states no override" — the behaviour those files
+    /// already had.
+    #[serde(
+        default,
+        skip_serializing_if = "firewall::ContextFirewallOverride::is_unset"
+    )]
+    context_firewall: firewall::ContextFirewallOverride,
 }
 
 fn is_native_backend(backend: &ProfileBackend) -> bool {
@@ -438,6 +450,7 @@ impl ProfileConfig {
             pin_gateway_backend: false,
             response_preset: None,
             enabled: true,
+            context_firewall: firewall::ContextFirewallOverride::default(),
         }
     }
 
@@ -515,6 +528,16 @@ impl ProfileConfig {
     pub fn set_response_preset(&mut self, preset: Option<String>) -> &mut Self {
         self.response_preset = preset;
         self
+    }
+
+    /// This profile's `[profiles.<name>.context_firewall]` override — see
+    /// the field's own doc.
+    pub fn context_firewall(&self) -> &firewall::ContextFirewallOverride {
+        &self.context_firewall
+    }
+
+    pub fn context_firewall_mut(&mut self) -> &mut firewall::ContextFirewallOverride {
+        &mut self.context_firewall
     }
 
     /// Turn this stored configuration into the resolvable domain type,
@@ -2044,6 +2067,18 @@ pub struct EntitlementConfig {
     /// is read only afterward, to skip the estimator call alone.
     #[serde(default, skip_serializing_if = "is_false")]
     disable_headroom_estimate: bool,
+    /// `[entitlements.<name>.context_firewall]` — map line 2024's explicit
+    /// override: what this account's own reduction policy should be,
+    /// outranking its kind's sub-table and the flat `[context_firewall]`
+    /// table, and itself outranked by the launch profile's own override —
+    /// the entitlement is what pays, the profile is the more specific
+    /// choice. `None` here, on a file written before this field existed,
+    /// loads as "this entitlement states no override".
+    #[serde(
+        default,
+        skip_serializing_if = "firewall::ContextFirewallOverride::is_unset"
+    )]
+    context_firewall: firewall::ContextFirewallOverride,
 }
 
 impl EntitlementConfig {
@@ -2176,6 +2211,16 @@ impl EntitlementConfig {
         self
     }
 
+    /// This entitlement's `[entitlements.<name>.context_firewall]`
+    /// override — see the field's own doc.
+    pub fn context_firewall(&self) -> &firewall::ContextFirewallOverride {
+        &self.context_firewall
+    }
+
+    pub fn context_firewall_mut(&mut self) -> &mut firewall::ContextFirewallOverride {
+        &mut self.context_firewall
+    }
+
     /// This entry's six lists and its spend ceiling as the router's one
     /// rules value.
     pub fn rules(&self) -> crate::routing::EntitlementRules {
@@ -2233,6 +2278,7 @@ impl EntitlementConfig {
             headroom_estimate: None,
             headroom_override: self.headroom_override(),
             disable_headroom_estimate: self.disable_headroom_estimate,
+            context_firewall: self.context_firewall.clone(),
         })
     }
 }
@@ -2380,6 +2426,11 @@ pub struct ResolvedEntitlement {
     /// [`Self::populate_provider_facets`], after `capacity`/`reset` are
     /// already populated, so disabling never touches those facets.
     disable_headroom_estimate: bool,
+    /// Map line 2024 — this entry's own `context_firewall` override, read
+    /// straight from `[entitlements.<name>.context_firewall]` at load time.
+    /// Carried here rather than looked up again by name later, the same
+    /// choice [`Self::headroom_override`] already makes.
+    context_firewall: firewall::ContextFirewallOverride,
 }
 
 impl ResolvedEntitlement {
@@ -2393,6 +2444,11 @@ impl ResolvedEntitlement {
 
     pub fn vendor(&self) -> Option<EntitlementVendor> {
         self.vendor
+    }
+
+    /// Map line 2024's explicit override — see the field's own doc.
+    pub fn context_firewall(&self) -> &firewall::ContextFirewallOverride {
+        &self.context_firewall
     }
 
     /// The credential reference this account authenticates with, when the
@@ -5577,6 +5633,158 @@ impl<'a> EffectiveConfig<'a> {
         Layered::new(false, Layer::Default)
     }
 
+    /// `[profiles.<name>.context_firewall]`, project before user, matching
+    /// [`Self::launch_profile`]'s own "project's definition wins over the
+    /// user's, by name" rule — `None` for the implied Native profile (no
+    /// configured entry can name it) and for a name neither layer defines.
+    fn context_firewall_profile_override(
+        &self,
+        name: &str,
+    ) -> Option<&firewall::ContextFirewallOverride> {
+        if name == crate::profile::NATIVE_PROFILE_NAME {
+            return None;
+        }
+        if let Some(config) = self.project.and_then(|p| p.profiles().get(name)) {
+            return Some(config.context_firewall());
+        }
+        self.user
+            .profiles()
+            .get(name)
+            .map(ProfileConfig::context_firewall)
+    }
+
+    /// Map lines 2023/2024's mode resolution: `[profiles.<name>.context_firewall]`,
+    /// then the serving entitlement's own `[entitlements.<name>.context_firewall]`
+    /// (via [`ResolvedEntitlement::context_firewall`] — resolved once at
+    /// entitlement-lookup time, never re-looked-up by name here), then
+    /// `kind`'s `[context_firewall.<kind>]` sub-table (project before user),
+    /// then [`Self::context_firewall_mode`]'s flat value. A profile name of
+    /// `None` or an entitlement of `None` simply skips that layer — the
+    /// caller passes `None` for a resource neither names, exactly as
+    /// [`Self::entitlement_for`] already returns `None` for one.
+    pub fn context_firewall_policy_mode(
+        &self,
+        kind: Option<firewall::ReductionPolicyKind>,
+        profile_name: Option<&str>,
+        entitlement: Option<&ResolvedEntitlement>,
+    ) -> firewall::FirewallMode {
+        if let Some(value) = profile_name
+            .and_then(|name| self.context_firewall_profile_override(name))
+            .and_then(firewall::ContextFirewallOverride::mode)
+        {
+            return value;
+        }
+        if let Some(value) = entitlement.and_then(|e| e.context_firewall().mode()) {
+            return value;
+        }
+        if let Some(kind) = kind {
+            if let Some(value) = self
+                .project
+                .and_then(|p| p.context_firewall().kind_override(kind).mode())
+            {
+                return value;
+            }
+            if let Some(value) = self.user.context_firewall().kind_override(kind).mode() {
+                return value;
+            }
+        }
+        self.context_firewall_mode().value
+    }
+
+    /// Map lines 2023/2024's passthrough-threshold resolution, same layer
+    /// order as [`Self::context_firewall_policy_mode`]. `mode` (the already
+    /// version-floor-adjusted effective mode) picks between the aggressive
+    /// and ordinary field at every layer, exactly like
+    /// [`Self::context_firewall_passthrough_tokens`] does for the flat
+    /// fallback it ends on.
+    pub fn context_firewall_policy_passthrough_tokens(
+        &self,
+        mode: firewall::FirewallMode,
+        kind: Option<firewall::ReductionPolicyKind>,
+        profile_name: Option<&str>,
+        entitlement: Option<&ResolvedEntitlement>,
+    ) -> u64 {
+        if let Some(value) = profile_name
+            .and_then(|name| self.context_firewall_profile_override(name))
+            .and_then(|over| over.passthrough_tokens_for(mode))
+        {
+            return value;
+        }
+        if let Some(value) =
+            entitlement.and_then(|e| e.context_firewall().passthrough_tokens_for(mode))
+        {
+            return value;
+        }
+        if let Some(kind) = kind {
+            if let Some(value) = self.project.and_then(|p| {
+                p.context_firewall()
+                    .kind_override(kind)
+                    .passthrough_tokens_for(mode)
+            }) {
+                return value;
+            }
+            if let Some(value) = self
+                .user
+                .context_firewall()
+                .kind_override(kind)
+                .passthrough_tokens_for(mode)
+            {
+                return value;
+            }
+        }
+        self.context_firewall_passthrough_tokens(mode).value
+    }
+
+    /// Map lines 2023/2024's `--min-semantic-tokens` resolution, same layer
+    /// order as [`Self::context_firewall_policy_mode`] — but, unlike mode
+    /// and passthrough tokens, `None` when **no layer at all** set a value,
+    /// flat field and constant included. This is what lets
+    /// `install_context_firewall_hook` omit the flag entirely for a session
+    /// nobody configured: before this resolver existed the flag was never
+    /// baked, so REQUIRED BEHAVIOR's byte-identical regression pin needs the
+    /// unconfigured case to keep producing no flag, not the constant's own
+    /// value spelled out for the first time.
+    pub fn context_firewall_policy_min_semantic_tokens(
+        &self,
+        kind: Option<firewall::ReductionPolicyKind>,
+        profile_name: Option<&str>,
+        entitlement: Option<&ResolvedEntitlement>,
+    ) -> Option<u64> {
+        if let Some(value) = profile_name
+            .and_then(|name| self.context_firewall_profile_override(name))
+            .and_then(firewall::ContextFirewallOverride::min_semantic_tokens)
+        {
+            return Some(value);
+        }
+        if let Some(value) = entitlement.and_then(|e| e.context_firewall().min_semantic_tokens()) {
+            return Some(value);
+        }
+        if let Some(kind) = kind {
+            if let Some(value) = self.project.and_then(|p| {
+                p.context_firewall()
+                    .kind_override(kind)
+                    .min_semantic_tokens()
+            }) {
+                return Some(value);
+            }
+            if let Some(value) = self
+                .user
+                .context_firewall()
+                .kind_override(kind)
+                .min_semantic_tokens()
+            {
+                return Some(value);
+            }
+        }
+        if let Some(value) = self
+            .project
+            .and_then(|p| p.context_firewall().min_semantic_tokens())
+        {
+            return Some(value);
+        }
+        self.user.context_firewall().min_semantic_tokens()
+    }
+
     /// Resolve which routing model classifies requests, reporting which
     /// layer decided it.
     ///
@@ -5927,6 +6135,7 @@ impl<'a> EffectiveConfig<'a> {
                 headroom_estimate: None,
                 headroom_override: None,
                 disable_headroom_estimate: false,
+                context_firewall: firewall::ContextFirewallOverride::default(),
             });
         }
         Ok(resolved)

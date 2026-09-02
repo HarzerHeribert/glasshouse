@@ -49,7 +49,7 @@ use super::canonical::{
 };
 use super::fields::{Fields, element};
 use super::stream::{self, SseEvent};
-use super::{Codec, StreamDecoder, StreamEncoder, TOOL_ERROR_MARKER};
+use super::{CacheDisposition, Codec, StreamDecoder, StreamEncoder, TOOL_ERROR_MARKER};
 
 pub(super) const PROTOCOL: &str = "openai-responses";
 
@@ -159,6 +159,15 @@ pub(super) const REFUSED_FIELDS: &[(&str, &str)] = &[
         "the OpenAI Responses API has no stop sequences; remove them for this pairing",
     ),
 ];
+
+/// [`CacheDisposition::Carried`]'s note for this codec's `prompt_cache_key`
+/// (2018): the pair table's answer to *how* it is derived. This is the
+/// encoder's own field, distinct from the same name refused above when a
+/// client on this wire tries to set it itself (`REFUSED_FIELDS`).
+const PROMPT_CACHE_KEY_NOTE: &str = "set to the harness's own per-session identifier (Claude Code's \
+     `metadata.user_id`, decoded into `Request::user` and already sent to the provider under \
+     that name) so repeat requests in the same session route to the same cache; omitted when the \
+     harness set no user id, and never derived from a credential or the gateway's own token";
 
 /// Fields ignored by name: informational, never asked for by the caller,
 /// and named here so that ignoring them is a recorded decision.
@@ -275,6 +284,13 @@ impl Codec for OpenAiResponses {
 
     fn ignored_fields(&self) -> &'static [&'static str] {
         IGNORED_FIELDS
+    }
+
+    fn cache_disposition(&self) -> Option<CacheDisposition> {
+        Some(CacheDisposition::Carried {
+            field: "prompt_cache_key",
+            note: PROMPT_CACHE_KEY_NOTE,
+        })
     }
 }
 
@@ -503,6 +519,10 @@ pub(super) fn decode_request(body: &[u8]) -> Result<Request, Unsupported> {
         stop: Vec::new(),
         stream,
         user,
+        // A client on this wire that sets its own `prompt_cache_key` is
+        // refused above by name (REFUSED_FIELDS); this codec's own decode
+        // never carries a cache hint into the canonical form.
+        cache_requested: false,
     })
 }
 
@@ -963,6 +983,14 @@ pub(super) fn encode_request(request: &Request) -> Vec<u8> {
     document.insert("store".to_owned(), json!(false));
     if let Some(user) = &request.user {
         document.insert("user".to_owned(), json!(user));
+    }
+    // A stable per-session cache-routing hint (2018): unconditional on
+    // whether this request's harness marked anything with `cache_control`,
+    // because the Responses API's own caching is automatic and
+    // prefix-based — the key only helps colocate a session's requests, not
+    // gate caching itself.
+    if let Some(key) = request.prompt_cache_key() {
+        document.insert("prompt_cache_key".to_owned(), json!(key));
     }
     Value::Object(document).to_string().into_bytes()
 }
@@ -1977,6 +2005,17 @@ mod tests {
     use super::super::stream::SseReader;
     use std::io::BufReader;
 
+    /// `wire` with top-level `key` removed, for a test that must decode
+    /// bytes this codec's own encoder wrote minus one field.
+    fn drop_key(wire: &[u8], key: &str) -> Vec<u8> {
+        let mut document: Value = serde_json::from_slice(wire).expect("valid JSON");
+        document
+            .as_object_mut()
+            .expect("a top-level object")
+            .remove(key);
+        document.to_string().into_bytes()
+    }
+
     /// The supported subset on this wire: [`full_request`] minus the stop
     /// sequences the Responses API has no parameter for.
     fn responses_request() -> Request {
@@ -1989,6 +2028,15 @@ mod tests {
     fn a_request_round_trips_through_the_openai_responses_wire() {
         let request = responses_request();
         let wire = encode_request(&request);
+        // `encode_request` always writes `prompt_cache_key` when `user` is
+        // set (2018) — this codec's own hint, added only when it plays
+        // *target*. No supported pair has openai-responses as both source
+        // and target of itself (`SAME_PROTOCOL` is always refused), so this
+        // codec's decoder never needs to read it back, and still refuses it
+        // by name like a real Codex-shaped client that set its own
+        // (`REFUSED_FIELDS`). Stripped here so the fidelity round trip
+        // below covers everything else this codec carries.
+        let wire = drop_key(&wire, "prompt_cache_key");
         let decoded = decode_request(&wire).expect("the codec reads what it wrote");
         assert_eq!(decoded, request);
     }

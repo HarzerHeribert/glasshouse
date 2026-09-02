@@ -1248,6 +1248,117 @@ pub fn usage_probe(
     ))
 }
 
+/// Capability map line 1369 — the fraction of a provider's remaining request
+/// pool a `--probe` is allowed to spend before Glasshouse refuses on its own
+/// initiative.
+///
+/// 10%: small enough that one probe never meaningfully dents a pool a user
+/// may need for real work a minute later, and large enough that a pool
+/// already down to single digits — the thinnest free tiers this project has
+/// measured — is still refused rather than walked down to zero one `--probe`
+/// at a time. [`ProbeBudget`]'s own materiality check also floors the
+/// threshold at 2 requests, so a percentage this small never rounds down to
+/// "anything at all is fine" against a pool of one or two.
+pub const PROBE_BUDGET_FRACTION: f64 = 0.10;
+
+/// What a `--probe` would cost, against what a provider's own pool has left.
+///
+/// Built only when [`authorize_probe`] has a **known** remainder to compare
+/// against — an unknown, unmeasured, or non-request-pool resource (a
+/// metered/token-priced provider, in this module's own vocabulary) never
+/// produces one, which is what keeps [`ProbeAuthorization::Allowed`] the
+/// answer for every one of those shapes without a special case for each.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ProbeBudget {
+    pub remaining: u32,
+    pub cost: u32,
+}
+
+impl ProbeBudget {
+    /// Whether spending `cost` out of `remaining` is a material fraction of
+    /// what is left — capability map line 1369's own phrase.
+    fn is_material(&self) -> bool {
+        let threshold = (f64::from(self.remaining) * PROBE_BUDGET_FRACTION).ceil() as u32;
+        self.cost >= threshold.max(2)
+    }
+}
+
+/// What a `--probe <name>` costs: one request for the connectivity read
+/// every provider gets, plus a second when `provider` declares a usage
+/// endpoint — capability map line 1230's own extra request, and the same
+/// fact [`usage_probe`] answers as "does this provider get a second
+/// request".
+pub fn probe_cost(provider: &crate::provider::Provider) -> u32 {
+    1 + u32::from(crate::provider::usage_endpoint(&provider.name).is_some())
+}
+
+/// Capability map line 1369's decision: whether a `--probe <name>` should
+/// fire, or whether it would spend a material fraction of what the
+/// provider's own pool has left.
+#[derive(Debug, Clone, Copy)]
+pub enum ProbeAuthorization {
+    /// Nothing stops the probe: the provider is unconfigured (`probe_provider`
+    /// reports that on its own), its pool has never been measured, or it is
+    /// not a request-pool resource at all (a metered/token-priced provider).
+    Allowed,
+    /// Refused: spending `budget.cost` requests would be a material fraction
+    /// of the `budget.remaining` this provider's pool has left.
+    Refused(ProbeBudget),
+}
+
+/// Whether `--probe <name>` should be allowed to fire — capability map
+/// line 1369, run before [`probe_provider`] rather than inside it, so a
+/// refusal never opens a socket.
+///
+/// # Where the remainder comes from, and why this is not a new read
+///
+/// The same [`GatewayQuotaCache`] reading `resources_report` already folds
+/// into `telemetry` before this runs (`GatheredTelemetry::gather_gateway_quota`),
+/// through the exact production path every other number in the report reads
+/// it through: [`observed_capacity`] for `name`'s own
+/// [`ResourceKind::DirectProvider`], whose `requests().remaining()` is
+/// `Some` only when a real response's rate-limit headers stated one. No new
+/// network path and no new credential resolution — this asks the same cache
+/// the report already reads, keyed the same way it already is: by provider
+/// name, not by credential. [`GatewayQuotaCache`]'s own `path_for` and
+/// [`GatheredTelemetry::with_provider_headers`] are both keyed by provider
+/// alone, so a request-pool reading here is provider-wide by construction —
+/// the same granularity `--probe <name>` itself already probes at.
+///
+/// An unconfigured provider, a pool nothing has measured, and a
+/// non-request-pool resource all answer [`ProbeAuthorization::Allowed`]: the
+/// first because there is nothing to compare a cost against and
+/// [`probe_provider`] already reports it as not configured; the other two
+/// because "unknown" and "this provider is not limited by a request count at
+/// all" both mean there is no remainder to spend down.
+pub fn authorize_probe(
+    effective: &EffectiveConfig<'_>,
+    telemetry: &GatheredTelemetry,
+    name: &str,
+    now_unix: i64,
+) -> ProbeAuthorization {
+    let Ok(provider) = effective.configured_provider(name) else {
+        return ProbeAuthorization::Allowed;
+    };
+    let kind = ResourceKind::from_direct_provider(provider.value.name.clone());
+    let state = observed_capacity(&kind, effective, telemetry, now_unix);
+    let Some(remaining) = state.requests().remaining().reading() else {
+        return ProbeAuthorization::Allowed;
+    };
+    let Some(remaining) = u32::try_from(remaining.value().value()).ok() else {
+        return ProbeAuthorization::Allowed;
+    };
+    let budget = ProbeBudget {
+        remaining,
+        cost: probe_cost(&provider.value),
+    };
+    if budget.is_material() {
+        ProbeAuthorization::Refused(budget)
+    } else {
+        ProbeAuthorization::Allowed
+    }
+}
+
 /// What one `--probe` produced, for a caller to report.
 ///
 /// A named type rather than a tuple because the *absence* of headers is the
@@ -1258,6 +1369,10 @@ pub fn usage_probe(
 pub enum ProbeReading {
     /// The provider is not configured, or declares nowhere to send a request.
     NotProbeable { reason: String },
+    /// Capability map line 1369: [`authorize_probe`] refused to spend a
+    /// material fraction of the provider's own remaining request pool.
+    /// Carries no credential — only what [`ProbeBudget`] already stated.
+    Refused { remaining: u32, cost: u32 },
     /// A request was made. `headers` is empty when it carried no rate-limit
     /// header this reader understands, which is a finding about the provider
     /// and not a failure.
@@ -1341,6 +1456,13 @@ pub fn render_probe(out: &mut String, name: &str, reading: &ProbeReading) {
         ProbeReading::NotProbeable { reason } => {
             let _ = writeln!(out, "  {name}: not probed — {reason}");
         }
+        ProbeReading::Refused { remaining, cost } => {
+            let _ = writeln!(
+                out,
+                "  glasshouse: not probing {name}: {remaining} request(s) remain in its pool \
+                 and this probe would spend {cost}; pass --force to spend them."
+            );
+        }
         ProbeReading::Answered {
             outcome,
             headers,
@@ -1372,6 +1494,17 @@ pub fn render_probe(out: &mut String, name: &str, reading: &ProbeReading) {
             }
         }
     }
+}
+
+/// The line `--force` prints when it overrides a refusal
+/// [`authorize_probe`] would otherwise have made — capability map line
+/// 1369's override, stated rather than spent silently.
+pub fn render_forced_probe(out: &mut String, name: &str, budget: &ProbeBudget) {
+    let _ = writeln!(
+        out,
+        "  glasshouse: probing {name} anyway: spending {} of {} request(s) left in its pool.",
+        budget.cost, budget.remaining
+    );
 }
 
 /// Capability map line 1230's own line of a `--probe` report.

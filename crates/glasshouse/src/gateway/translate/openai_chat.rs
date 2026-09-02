@@ -29,7 +29,7 @@ use super::canonical::{
 };
 use super::fields::{Fields, element};
 use super::stream::{self, SseEvent};
-use super::{Codec, StreamDecoder, StreamEncoder};
+use super::{CacheDisposition, Codec, StreamDecoder, StreamEncoder};
 
 pub(super) const PROTOCOL: &str = "openai-chat";
 
@@ -100,6 +100,13 @@ pub(super) const REFUSED_FIELDS: &[(&str, &str)] = &[
         "a per-message participant name has no Anthropic Messages equivalent",
     ),
 ];
+
+/// [`CacheDisposition::Carried`]'s note for this codec's `prompt_cache_key`
+/// (2018): the pair table's answer to *how* it is derived.
+const PROMPT_CACHE_KEY_NOTE: &str = "set to the harness's own per-session identifier (Claude Code's \
+     `metadata.user_id`, decoded into `Request::user` and already sent to the provider under \
+     that name) so repeat requests in the same session route to the same cache; omitted when the \
+     harness set no user id, and never derived from a credential or the gateway's own token";
 
 /// Response fields ignored by name: informational, never asked for.
 pub(super) const IGNORED_FIELDS: &[&str] = &[
@@ -198,6 +205,13 @@ impl Codec for OpenAiChat {
 
     fn ignored_fields(&self) -> &'static [&'static str] {
         IGNORED_FIELDS
+    }
+
+    fn cache_disposition(&self) -> Option<CacheDisposition> {
+        Some(CacheDisposition::Carried {
+            field: "prompt_cache_key",
+            note: PROMPT_CACHE_KEY_NOTE,
+        })
     }
 }
 
@@ -532,6 +546,11 @@ pub(super) fn decode_request(body: &[u8]) -> Result<Request, Unsupported> {
         stop,
         stream,
         user,
+        // OpenAI Chat's own wire has no explicit cache-hint field to
+        // decode off a request — its caching is automatic and keyed only
+        // by `prompt_cache_key`, which `finish()` above already refuses by
+        // name like any other unlisted field when a client sets it.
+        cache_requested: false,
     })
 }
 
@@ -803,6 +822,13 @@ pub(super) fn encode_request(request: &Request) -> Vec<u8> {
     }
     if let Some(user) = &request.user {
         document.insert("user".to_owned(), json!(user));
+    }
+    // A stable per-session cache-routing hint (2018): unconditional on
+    // whether this request's harness marked anything with `cache_control`,
+    // because OpenAI Chat's own caching is automatic and prefix-based — the
+    // key only helps colocate a session's requests, not gate caching itself.
+    if let Some(key) = request.prompt_cache_key() {
+        document.insert("prompt_cache_key".to_owned(), json!(key));
     }
     Value::Object(document).to_string().into_bytes()
 }
@@ -1391,10 +1417,30 @@ mod tests {
     use super::super::stream::SseReader;
     use std::io::BufReader;
 
+    /// `wire` with top-level `key` removed, for a test that must decode
+    /// bytes this codec's own encoder wrote minus one field.
+    fn drop_key(wire: &[u8], key: &str) -> Vec<u8> {
+        let mut document: Value = serde_json::from_slice(wire).expect("valid JSON");
+        document
+            .as_object_mut()
+            .expect("a top-level object")
+            .remove(key);
+        document.to_string().into_bytes()
+    }
+
     #[test]
     fn a_request_round_trips_through_the_openai_chat_wire() {
         let request = full_request();
         let wire = encode_request(&request);
+        // `encode_request` always writes `prompt_cache_key` when `user` is
+        // set (2018) — this codec's own hint, added only when it plays
+        // *target*. No supported pair has openai-chat as both source and
+        // target of itself (`SAME_PROTOCOL` is always refused), so this
+        // codec's decoder never needs to read it back, and still refuses it
+        // like any other field a real OpenAI-shaped client might set on its
+        // own request. Stripped here so the fidelity round trip below
+        // covers everything else this codec carries.
+        let wire = drop_key(&wire, "prompt_cache_key");
         let decoded = decode_request(&wire).expect("the codec reads what it wrote");
         assert_eq!(decoded, request);
     }

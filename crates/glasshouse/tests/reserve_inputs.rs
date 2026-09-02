@@ -22,7 +22,7 @@
 //! Every test that exercises the override goes through
 //! `DisposableRouting::choose`, which is the function the shipped binary
 //! calls (`main.rs::disposable_extraction_model` →
-//! `memory::RoutedNoModel::new` → here). Practice §35: a policy proven only
+//! `memory::RoutedModel::new` → here). Practice §35: a policy proven only
 //! against `evaluate_reserve_spend` in isolation would be proven below the
 //! production entry point.
 

@@ -360,6 +360,12 @@ impl ConfiguredModel {
             call: Some(ModelCall {
                 provider: self.provider.clone(),
                 model: self.model.clone(),
+                // Not known here, and deliberately not invented: this type
+                // holds a resolved `Secret` and never the *name* the caller
+                // resolved it from. `RoutedModel` — which held the
+                // `CredentialId` the routing choice named — stamps it after
+                // the call.
+                credential_label: None,
                 // The wire protocol slug, which is what
                 // `crate::gateway::session` records as a route for its own
                 // observations. Two producers, one spelling of the same
@@ -512,6 +518,20 @@ fn reported_count(value: Option<&serde_json::Value>) -> Option<i64> {
     }
 }
 
+/// The phrase a `429` produces, named rather than spelled inline.
+///
+/// [`ModelError`] is deliberately not an HTTP status — a status carries
+/// cases routing must not conflate — so by the time a caller sees a rate
+/// limit it is a [`ModelError::Failed`] indistinguishable in *shape* from a
+/// dozen unrelated transport problems. A caller translating one finished
+/// exchange into a [`crate::routing::free::WorkloadOutcome`] needs that one
+/// distinction back, and this constant is how it gets it without this module
+/// growing a second, parallel vocabulary for the same fact.
+///
+/// `crate::memory::extract::disposable::workload_outcome` is the reader, and
+/// the only one.
+pub const RATE_LIMITED: &str = "the extraction model is rate limited";
+
 /// An HTTP status, as a [`ModelError`].
 ///
 /// Every arm is a fixed phrase. A status a provider chose is a number
@@ -522,7 +542,7 @@ fn status_error(status: u16) -> ModelError {
         401 | 403 => ModelError::Refused,
         408 | 504 => ModelError::TimedOut,
         429 => ModelError::Failed {
-            phrase: "the extraction model is rate limited",
+            phrase: RATE_LIMITED,
         },
         404 => ModelError::Failed {
             phrase: "the extraction model's endpoint answered 404; check the provider's base URL",

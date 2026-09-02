@@ -661,6 +661,12 @@ pub fn supports_updated_tool_output(version: (u32, u32, u32)) -> bool {
 /// carrying no reducer name because no flag here could name one (map line
 /// 1992).
 ///
+/// `min_semantic_tokens` is `None` for a session no layer of map lines
+/// 2023/2024's policy resolution set one for — the flag is then omitted
+/// entirely, matching this builder's behaviour before that resolver existed,
+/// rather than spelling out the hook subcommand's own CLI default for the
+/// first time.
+///
 /// Quoted the same way [`HookCommand::shell_command`] quotes its own
 /// program path, for the same reason: a Windows path is full of backslashes
 /// and an unquoted one would not survive a POSIX shell either.
@@ -669,6 +675,7 @@ pub fn context_firewall_command_line(
     mode: crate::config::firewall::FirewallMode,
     passthrough_tokens: u64,
     emit_updated_output: bool,
+    min_semantic_tokens: Option<u64>,
 ) -> String {
     let mut command = format!(
         "{program} context-firewall hook --passthrough-tokens {passthrough_tokens} --mode \
@@ -678,6 +685,9 @@ pub fn context_firewall_command_line(
     );
     if emit_updated_output {
         command.push_str(" --emit-updated-output");
+    }
+    if let Some(min_semantic_tokens) = min_semantic_tokens {
+        command.push_str(&format!(" --min-semantic-tokens {min_semantic_tokens}"));
     }
     command
 }
@@ -922,7 +932,7 @@ mod tests {
         let program = std::path::Path::new("/usr/local/bin/glasshouse");
         for mode in crate::config::firewall::FirewallMode::ALL {
             for emit in [false, true] {
-                let line = context_firewall_command_line(program, *mode, 4000, emit);
+                let line = context_firewall_command_line(program, *mode, 4000, emit, None);
                 assert!(
                     !line.contains("reducer") && !line.contains("provider"),
                     "mode {mode} emit {emit}: {line}"
@@ -945,6 +955,7 @@ mod tests {
             crate::config::firewall::FirewallMode::Shadow,
             4000,
             false,
+            None,
         );
         assert!(!line.contains("--emit-updated-output"));
         assert!(line.contains("--mode shadow"));
@@ -958,11 +969,41 @@ mod tests {
             crate::config::firewall::FirewallMode::Aggressive,
             1500,
             true,
+            None,
         );
         assert!(line.contains("--mode aggressive"));
         assert!(line.contains("--passthrough-tokens 1500"));
         assert!(line.contains("--emit-updated-output"));
         assert!(line.contains("context-firewall hook"));
+        assert!(!line.contains("--min-semantic-tokens"));
+    }
+
+    #[test]
+    fn the_command_line_carries_min_semantic_tokens_only_when_given_one() {
+        let program = std::path::Path::new("/usr/local/bin/glasshouse");
+        let with_value = context_firewall_command_line(
+            program,
+            crate::config::firewall::FirewallMode::Safe,
+            4000,
+            true,
+            Some(1200),
+        );
+        assert!(
+            with_value.contains("--min-semantic-tokens 1200"),
+            "{with_value}"
+        );
+
+        let without_value = context_firewall_command_line(
+            program,
+            crate::config::firewall::FirewallMode::Safe,
+            4000,
+            true,
+            None,
+        );
+        assert!(
+            !without_value.contains("--min-semantic-tokens"),
+            "{without_value}"
+        );
     }
 
     #[test]

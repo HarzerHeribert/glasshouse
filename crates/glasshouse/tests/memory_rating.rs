@@ -18,20 +18,31 @@
 //! methods is that `glasshouse memory retrievals` (their one production
 //! caller) actually prints what they compute.
 //!
-//! # The proxy's world is planted directly, and that is disclosed, not hidden
+//! `GH-RETRIEVAL-ATTRIBUTION` adds three more producers: a session id on a
+//! retrieval (`main.rs::memory_search_grouped`'s two callers, still `None`
+//! in production today — see that function's own doc comment),
+//! `api::unix::deliver_memory` attaching a session id to a successful
+//! launch-time injection, and `EvaluationKind::MemoryRevalidated` giving
+//! 1824 a denominator.
 //!
-//! No production caller in this build attaches `session_id` to a
-//! [`glasshouse::evaluation::EvaluationKind::MemoryRetrieved`] row — see
-//! `evaluation/mod.rs`'s own doc comment on the reader block this package
-//! adds. `glasshouse hook`'s `TurnEnded` → `RoutingOutcomeObserved` path is
-//! already proved through the shipped binary by `tests/routing_outcome.rs`
-//! and is not re-proved here. So the proxy tests below plant the two rows
-//! the proxy join needs (`MemoryRetrieved` with a `session_id`,
-//! `RoutingOutcomeObserved`) directly through
-//! [`glasshouse::evaluation::EvaluationObservations::record_all`], and read
-//! the result back through the real CLI — proving the *reader's* join logic,
-//! which is what this package builds, while being honest that the producer
-//! gap named above is not this test's claim to have closed.
+//! # Half the proxy's world is now real production; the other half is still
+//! planted, and disclosed exactly where
+//!
+//! `deliver_memory`'s new row is proven through the shipped binary below —
+//! a session really spawned through the machine door, briefed with a real
+//! memory, whose `MemoryRetrieved` row really carries that session's id.
+//! `glasshouse hook`'s `TurnEnded` → `RoutingOutcomeObserved` half is already
+//! proved through the shipped binary by `tests/routing_outcome.rs` and is
+//! not re-proved here — but it cannot be chained onto the door-spawned
+//! session above either: `evaluation::record_routing_outcome` refuses to
+//! write anything for a session with no routed destination, and only
+//! `main.rs::launch_session` (the CLI `glasshouse launch` path) ever
+//! attributes one. The machine door's `spawn_session`, which is what calls
+//! `deliver_memory`, never routes a session at all — see
+//! `evaluation/mod.rs`'s own doc comment on the reader block below for the
+//! full account. So one test still plants a `RoutingOutcomeObserved` row for
+//! the session the door really produced, disclosed at the point it does it,
+//! to read the proxy join back through the real CLI.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -309,14 +320,14 @@ fn challenge_accuracy_counts_over_memories_marked_for_review() {
 }
 
 // -------------------------------------------------------------------------
-// Proxy — planted directly (see module header), read through the real CLI
+// 1824 — revalidation's own denominator, `GH-RETRIEVAL-ATTRIBUTION`
 // -------------------------------------------------------------------------
 
-/// A retrieval attributed to a session whose harness reported a `Completed`
-/// turn, with no rating, is counted as `proxy` — never merged into
-/// `explicit`.
+/// `glasshouse memory revalidate <id> reaffirmed` records its own
+/// `EvaluationKind::MemoryRevalidated` row, giving 1824 a real denominator
+/// where none existed before this package.
 #[test]
-fn a_retrieval_into_a_completed_session_with_no_rating_counts_as_proxy() {
+fn a_revalidation_gives_1824_a_denominator() {
     let tmp = tempdir();
     let fixture = Fixture::new(tmp.path(), "alpha");
 
@@ -326,24 +337,364 @@ fn a_retrieval_into_a_completed_session_with_no_rating_counts_as_proxy() {
             .store()
             .record(NewMemory::new(
                 MemoryKind::Decision,
-                "onyx sharding is by content hash",
+                "onyx caching is keyed by content hash",
             ))
             .unwrap();
         record.id.as_str().to_owned()
     };
 
-    let now = glasshouse::evaluation::now_unix();
-    let ledger = fixture.ledger();
-    let retrieval = NewObservation::new(EvaluationKind::MemoryRetrieved)
-        .with_subject("current")
-        .with_memory_id(memory_id.clone())
-        .with_session_id("proxy-session");
-    let outcome = NewObservation::new(EvaluationKind::RoutingOutcomeObserved)
-        .with_subject("completed")
-        .with_session_id("proxy-session");
-    ledger.record_all(&[retrieval, outcome], now).unwrap();
+    let output = fixture.run(&["memory", "revalidate", &memory_id, "reaffirmed"]);
+    assert!(
+        output.status.success(),
+        "`glasshouse memory revalidate` failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let rows = fixture
+        .ledger()
+        .recent_of_kind(EvaluationKind::MemoryRevalidated, 10)
+        .unwrap();
+    assert_eq!(rows.len(), 1, "{rows:#?}");
+    assert_eq!(rows[0].memory_id.as_deref(), Some(memory_id.as_str()));
+    assert_eq!(rows[0].subject.as_deref(), Some("reaffirmed"));
 
     let report = fixture.retrievals();
+    let line = line_containing(&report, "explicit revalidation-correct");
+    assert!(
+        line.contains("explicit revalidation-correct 0 / revalidation-wrong 0 of 1 revalidations"),
+        "got: {line}"
+    );
+    line_containing(&report, "unknown 1 of 1 revalidations");
+}
+
+// -------------------------------------------------------------------------
+// Proxy — through the real briefing door, `GH-RETRIEVAL-ATTRIBUTION`
+//
+// A minimal `glasshouse api serve` + a long-running no-op harness, so
+// `api::unix::deliver_memory` actually runs — see the module header for why
+// half of this join is production now and half is still planted.
+// -------------------------------------------------------------------------
+
+#[cfg(unix)]
+mod door {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::net::UnixStream;
+    use std::path::{Path, PathBuf};
+    use std::process::{Child, Command, Stdio};
+    use std::time::{Duration, Instant};
+
+    use clap::Parser;
+
+    use glasshouse::{Cli, Runtime};
+
+    const TIMEOUT: Duration = Duration::from_secs(30);
+
+    /// A project wired with a harness that stays alive reading its stdin
+    /// forever — `deliver_memory`'s `SessionApi::send_text` needs a live
+    /// process on the far end of the pty, and nothing here cares what it
+    /// does with what it reads.
+    pub struct Fixture {
+        _tmp: tempfile::TempDir,
+        pub base: PathBuf,
+    }
+
+    impl Fixture {
+        pub fn new() -> Self {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let base = tmp.path().to_path_buf();
+
+            let bin_dir = base.join("bin");
+            std::fs::create_dir_all(&bin_dir).expect("create bin dir");
+            let harness = bin_dir.join("silent-harness");
+            std::fs::write(&harness, "#!/bin/sh\nwhile IFS= read -r line; do :; done\n")
+                .expect("write the silent harness");
+            let mut perms = std::fs::metadata(&harness).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(&harness, perms).unwrap();
+
+            let config_dir = base.join("config");
+            std::fs::create_dir_all(&config_dir).expect("create config dir");
+            let escaped = harness.display().to_string().replace('\\', "\\\\");
+            std::fs::write(
+                config_dir.join("config.toml"),
+                format!(
+                    "version = 1\nimplementation_policy = false\n\n[integrations.claude-code]\n\
+                     enabled = true\nexecutable = \"{escaped}\"\n"
+                ),
+            )
+            .expect("write user config");
+
+            Self { _tmp: tmp, base }
+        }
+
+        pub fn project_root(&self, name: &str) -> PathBuf {
+            let root = self.base.join("workspace").join(name);
+            std::fs::create_dir_all(root.join(".git")).expect("create project root");
+            std::fs::canonicalize(&root).expect("canonicalize project root")
+        }
+
+        pub fn runtime(&self, root: &Path) -> Runtime {
+            let cli = Cli::try_parse_from([
+                "glasshouse",
+                "--data-dir",
+                self.base.join("data").to_str().unwrap(),
+                "--config-dir",
+                self.base.join("config").to_str().unwrap(),
+            ])
+            .unwrap();
+            glasshouse::bootstrap(&cli, root).unwrap()
+        }
+    }
+
+    /// A running `glasshouse api serve`, killed on drop — the same shape
+    /// `tests/context_injection.rs`'s own `Server` uses for this door.
+    pub struct Server {
+        child: Child,
+        socket: PathBuf,
+    }
+
+    impl Server {
+        pub fn start(fixture: &Fixture, root: &Path) -> Self {
+            let mut child = Command::new(env!("CARGO_BIN_EXE_glasshouse"))
+                .arg("--scope")
+                .arg(root)
+                .arg("--data-dir")
+                .arg(fixture.base.join("data"))
+                .arg("--config-dir")
+                .arg(fixture.base.join("config"))
+                .arg("api")
+                .arg("serve")
+                .stderr(Stdio::piped())
+                .spawn()
+                .expect("spawn `glasshouse api serve`");
+
+            let stderr = child.stderr.take().expect("captured stderr");
+            let mut reader = BufReader::new(stderr);
+            let deadline = Instant::now() + TIMEOUT;
+            let socket = loop {
+                let mut line = String::new();
+                let read = reader.read_line(&mut line).expect("read server stderr");
+                assert!(read > 0, "the server exited before announcing its socket");
+                if let Some(path) = line
+                    .trim_end()
+                    .strip_prefix("glasshouse: control API listening on ")
+                {
+                    break PathBuf::from(path);
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out waiting for the server to announce its socket"
+                );
+            };
+
+            Self { child, socket }
+        }
+
+        pub fn call(&self, request: serde_json::Value) -> serde_json::Value {
+            let deadline = Instant::now() + TIMEOUT;
+            let mut stream = loop {
+                match UnixStream::connect(&self.socket) {
+                    Ok(stream) => break stream,
+                    Err(err) => {
+                        assert!(
+                            Instant::now() < deadline,
+                            "timed out connecting to the control socket: {err}"
+                        );
+                        std::thread::sleep(Duration::from_millis(20));
+                    }
+                }
+            };
+            let mut payload = serde_json::to_string(&request).expect("encode request");
+            payload.push('\n');
+            stream.write_all(payload.as_bytes()).expect("write request");
+
+            let mut reader = BufReader::new(stream);
+            let mut line = String::new();
+            reader.read_line(&mut line).expect("read response");
+            serde_json::from_str(line.trim_end()).expect("parse response")
+        }
+
+        /// `Request::SpawnSession` with a task — the same door that runs
+        /// `select_memory`/`deliver_memory` before the task is ever sent.
+        pub fn spawn_with_task(&self, task: &str) -> String {
+            let response = self.call(serde_json::json!({
+                "op": "spawn_session",
+                "harness": "claude-code",
+                "role": "worker",
+                "task": task,
+            }));
+            assert_eq!(response["status"], "ok", "{response}");
+            response["result"]["session"]
+                .as_str()
+                .expect("a session id")
+                .to_owned()
+        }
+
+        /// `Request::SendMessage` to an already-live session — the
+        /// hot-session half of `deliver_memory`'s dedup.
+        pub fn send_message(&self, session: &str, text: &str) {
+            let response = self.call(serde_json::json!({
+                "op": "send_message",
+                "session": session,
+                "text": text,
+            }));
+            assert_eq!(response["status"], "ok", "{response}");
+        }
+    }
+
+    impl Drop for Server {
+        fn drop(&mut self) {
+            let _ = self.child.kill();
+            let _ = self.child.wait();
+        }
+    }
+}
+
+/// `glasshouse memory retrievals` against a project reached by its own
+/// `base`/`root` rather than through [`Fixture`] — the shape [`door::Fixture`]
+/// needs, since it drives the door directly instead of one-shot CLI calls.
+#[cfg(unix)]
+fn retrievals_report(base: &Path, root: &Path) -> String {
+    let output = Command::new(env!("CARGO_BIN_EXE_glasshouse"))
+        .current_dir(root)
+        .arg("--data-dir")
+        .arg(base.join("data"))
+        .arg("--config-dir")
+        .arg(base.join("config"))
+        .arg("memory")
+        .arg("retrievals")
+        .arg("--hours")
+        .arg("24")
+        .output()
+        .expect("the glasshouse binary must run");
+    assert!(
+        output.status.success(),
+        "`glasshouse memory retrievals` failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+/// A memory injected into a session through the real launch-time briefing
+/// door carries that session's id into `MemoryRetrieved` —
+/// `api::unix::deliver_memory`'s new row, `GH-RETRIEVAL-ATTRIBUTION`'s
+/// producer for gap 2. With no turn end ever reported for the session, the
+/// proxy reads `unknown`, never `proxy` — nothing is inferred from silence.
+///
+/// # Mutation `record-every-injection-twice` (§16)
+///
+/// A second `send_message` with the same task to the same now-live session
+/// must not inject the unchanged memory again — `select_memory`'s own
+/// `already`-set dedup, proven here against the row count rather than
+/// against delivered text the way `tests/context_injection.rs` does.
+#[cfg(unix)]
+#[test]
+fn a_retrieval_delivered_by_the_briefing_door_with_no_turn_end_counts_as_unknown() {
+    let fixture = door::Fixture::new();
+    let root = fixture.project_root("alpha");
+    let runtime = fixture.runtime(&root);
+    let memory_id = ProjectMemory::open(&runtime)
+        .unwrap()
+        .store()
+        .record(NewMemory::new(
+            MemoryKind::Decision,
+            "onyx sharding is by content hash",
+        ))
+        .unwrap()
+        .id
+        .as_str()
+        .to_owned();
+
+    let server = door::Server::start(&fixture, &root);
+    let session = server.spawn_with_task("onyx");
+
+    let ledger = EvaluationObservations::open(&runtime).unwrap();
+    let retrieved = ledger
+        .recent_of_kind(EvaluationKind::MemoryRetrieved, 10)
+        .unwrap();
+    assert_eq!(retrieved.len(), 1, "{retrieved:#?}");
+    assert_eq!(retrieved[0].memory_id.as_deref(), Some(memory_id.as_str()));
+    assert_eq!(
+        retrieved[0].session_id.as_deref(),
+        Some(session.as_str()),
+        "deliver_memory must attach the session it briefed"
+    );
+
+    // The dedup mutation target: the same unchanged memory must not be
+    // injected, and so must not be recorded, a second time into a session
+    // that already has it.
+    server.send_message(&session, "onyx");
+    let retrieved_again = ledger
+        .recent_of_kind(EvaluationKind::MemoryRetrieved, 10)
+        .unwrap();
+    assert_eq!(
+        retrieved_again.len(),
+        1,
+        "a dedup-suppressed repeat must not record a second retrieval: {retrieved_again:#?}"
+    );
+
+    // No hook `TurnEnded` was ever sent for this session — a real production
+    // absence, not a plant.
+    let report = retrievals_report(&fixture.base, &root);
+    let proxy_line = line_containing(&report, "proxy useful");
+    assert!(
+        proxy_line.contains("proxy useful 0 of 0 retrieved-into-completed-turns"),
+        "a session with no turn end must not qualify for the proxy; got: {proxy_line}"
+    );
+    line_containing(&report, "unknown 1 of 1 retrieved");
+}
+
+/// The other half of the proxy join: a session whose harness reported a
+/// `Completed` turn, with no rating, counts as `proxy`. Half of this test's
+/// world is real production — see the module header, and the comment at the
+/// one row still planted below, for exactly why the other half cannot be
+/// yet.
+#[cfg(unix)]
+#[test]
+fn a_retrieval_delivered_by_the_briefing_door_into_a_completed_session_counts_as_proxy() {
+    let fixture = door::Fixture::new();
+    let root = fixture.project_root("alpha");
+    let runtime = fixture.runtime(&root);
+    ProjectMemory::open(&runtime)
+        .unwrap()
+        .store()
+        .record(NewMemory::new(
+            MemoryKind::Decision,
+            "onyx replicas are pinned by zone",
+        ))
+        .unwrap();
+
+    let server = door::Server::start(&fixture, &root);
+    let session = server.spawn_with_task("onyx");
+
+    let ledger = EvaluationObservations::open(&runtime).unwrap();
+    let retrieved = ledger
+        .recent_of_kind(EvaluationKind::MemoryRetrieved, 10)
+        .unwrap();
+    assert_eq!(retrieved.len(), 1, "{retrieved:#?}");
+    assert_eq!(retrieved[0].session_id.as_deref(), Some(session.as_str()));
+
+    // The other half of the join — a harness's own `TurnEnded` — is proven
+    // through the shipped binary independently by
+    // `tests/routing_outcome.rs`, against a session `glasshouse launch`
+    // routed. It cannot be proven here too:
+    // `evaluation::record_routing_outcome` refuses to write anything for a
+    // session with no routed destination, and only
+    // `main.rs::launch_session` — the CLI `glasshouse launch` path, which
+    // never calls `deliver_memory` — ever attributes one. So this one row is
+    // still planted, exactly as `evaluation/mod.rs`'s own doc comment on
+    // this reader block discloses: the proxy has a real producer on each
+    // side of the join now, but nothing in this build yet drives both for
+    // one session.
+    let outcome = NewObservation::new(EvaluationKind::RoutingOutcomeObserved)
+        .with_subject("completed")
+        .with_session_id(session.clone());
+    ledger
+        .record(outcome, glasshouse::evaluation::now_unix())
+        .unwrap();
+
+    let report = retrievals_report(&fixture.base, &root);
     let line = line_containing(&report, "proxy useful");
     assert!(
         line.contains("proxy useful 1 of 1 retrieved-into-completed-turns"),
@@ -355,46 +706,6 @@ fn a_retrieval_into_a_completed_session_with_no_rating_counts_as_proxy() {
         explicit_line.contains("explicit useful 0 / not-useful 0 of 0 rated"),
         "got: {explicit_line}"
     );
-}
-
-/// A retrieval attributed to a session whose harness never reported a turn
-/// end at all is `unknown` — nothing is inferred from silence.
-#[test]
-fn a_retrieval_into_a_session_with_no_turn_end_counts_as_unknown() {
-    let tmp = tempdir();
-    let fixture = Fixture::new(tmp.path(), "alpha");
-
-    let memory_id = {
-        let memory = fixture.memory();
-        let record = memory
-            .store()
-            .record(NewMemory::new(
-                MemoryKind::Decision,
-                "onyx replicas are pinned by zone",
-            ))
-            .unwrap();
-        record.id.as_str().to_owned()
-    };
-
-    let now = glasshouse::evaluation::now_unix();
-    let ledger = fixture.ledger();
-    let retrieval = NewObservation::new(EvaluationKind::MemoryRetrieved)
-        .with_subject("current")
-        .with_memory_id(memory_id)
-        .with_session_id("silent-session");
-    ledger.record(retrieval, now).unwrap();
-    // Deliberately no RoutingOutcomeObserved row for "silent-session": its
-    // harness never reported a turn end.
-
-    let report = fixture.retrievals();
-    let proxy_line = line_containing(&report, "proxy useful");
-    assert!(
-        proxy_line.contains("proxy useful 0 of 0 retrieved-into-completed-turns"),
-        "a session with no turn end must not qualify for the proxy; got: {proxy_line}"
-    );
-    // `line_containing` panics if no line has this exact figure, which is
-    // the assertion: the retrieval is counted `unknown`, never dropped.
-    line_containing(&report, "unknown 1 of 1 retrieved");
 }
 
 // -------------------------------------------------------------------------

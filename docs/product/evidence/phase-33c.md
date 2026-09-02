@@ -633,3 +633,53 @@ generated `429` fabricates nothing the provider did not say.
 **1369 — *reduce or suppress active probes when probing would consume a material fraction of a scarce request pool*.** One production path probes actively: `probe_provider` (`provider/resources.rs:1287-1332`), a real connectivity request plus a usage-endpoint request where declared, reached only from `resources_report`'s `--probe <name>` (`main.rs:10536-10554`) — user-invoked, never automatic (1323's user-settled shape). It **does** spend against a paced credential (its headers fold back into telemetry like any request) and **the pool's size is not known to it when it fires**: its signature takes no `FreePool`, no remaining count, no budget, and nothing in `resources_report` checks `Allowance`/`Capacity` before the call — the report otherwise reads only cached telemetry with no network. That is the line's exact absence, and it is packageable: **`GH-PROBE-BUDGET-1369`** (Amber) — before probing a provider whose cached telemetry knows a request-pool remainder, refuse the probe by name when it would spend a material fraction of what remains, say what remains and how much the probe costs, and offer the override; probe as today when the pool is unknown or not paced.
 
 ---
+
+## 1369 CLOSED — 2026-09-02 (`GH-PROBE-BUDGET-1369`, Amber, Sonnet high): a user-invoked probe asks the pool before it spends
+
+Implements the packet the census above named. `glasshouse resources --probe <name>` now runs `provider::resources::authorize_probe` before `probe_provider`: it resolves the provider by name the way `probe_provider` does, asks `observed_capacity(&ResourceKind::from_direct_provider(name), ..)` — the same `CapacityState`/`Pool` projection the report already renders every resource's percentage through, fed from the same `GatewayQuotaCache` reading `resources_report` folds into `telemetry` before the probe loop — for `requests().remaining()`, and refuses when the probe's cost (`probe_cost`: one request, two where the provider declares a usage endpoint) is `>= max(2, ceil(remaining * PROBE_BUDGET_FRACTION))`, with `PROBE_BUDGET_FRACTION = 0.10` stated once with its reason and floored at two requests so a pool of one or two is never walked to zero. The refusal renders through `render_probe` where the probe's result would (`ProbeReading::Refused { remaining, cost }`): *glasshouse: not probing <name>: <remaining> request(s) remain in its pool and this probe would spend <cost>; pass --force to spend them.* `--force` (`cli.rs`, the one flag) probes and prints *probing <name> anyway: spending <cost> of <remaining> request(s) left in its pool* first. An unconfigured provider, an unmeasured pool, and a resource not limited by a request count at all answer `Allowed` and probe exactly as before. Without `--probe`, the report still opens no socket.
+
+**The packet's producer was wrong and the worker corrected it — read before the results.** The packet named `FreePool::allowance` / `Allowance::RequestPool` through `observed_provider_health` (`main.rs:2862`) as the remainder to read. That path needs `destinations: &[Destination]`, a session-launch input a bare `--probe <name>` does not have, and the cache it would read (`GatewayQuotaCache`, `telemetry.rs:1198` `path_for(provider)`) is keyed by provider name, not credential — a credential-keyed `Allowance` would not change which remainder is read, and building a `CredentialId` would have added the secret-store resolution the packet's own invariant forbids. The check is therefore provider-wide, which is the granularity `--probe <name>` itself already has.
+
+### Reduce or suppress active probes when probing would consume a material fraction of a scarce request pool. (line 1369)
+
+Contract: Given `glasshouse resources --probe <provider>` for a provider whose cached telemetry knows a request-pool remainder, when the probe's requests would spend a material fraction of what remains, Glasshouse refuses the probe by the provider's name, states the remainder and the cost, and names `--force` as the override, while preserving that an unconfigured provider, an unmeasured pool, or a token-priced resource is probed exactly as before, that `--force` probes and says what it spends, and that the report without `--probe` makes no network request.
+
+State: **COMPLETE** — ruled 2026-09-02. The decision (the threshold, its floor, and "unknown is never refused") is read in the diff; three mutations KILLED on the three clauses the line has, each through the shipped binary against a fixture upstream that counts its requests.
+
+Production evidence:
+- `crates/glasshouse/src/provider/resources.rs` — `authorize_probe`, `ProbeBudget::is_material`, `PROBE_BUDGET_FRACTION`, `probe_cost`, `ProbeReading::Refused`, `render_forced_probe`
+- `crates/glasshouse/src/main.rs` — `resources_report`, the `--probe` loop (`ProbeAuthorization` matched before `probe_provider`)
+- `crates/glasshouse/src/cli.rs` — `Command::Resources { force }`
+
+Regression evidence (all through the shipped binary, `tests/provider_resources_probe.rs`):
+- `a_probe_costing_a_material_fraction_of_a_thin_pool_is_refused_and_the_fixture_is_untouched` — planted remainder 3, cost 2: refused by name, zero requests at the fixture
+- `force_overrides_the_refusal_and_spends_the_budget_it_announced` — `--force`: two requests at the fixture, the spending line printed, no refusal line
+- `no_cache_row_is_probed_as_today` — no reading: probed, two requests
+- `a_token_priced_providers_declared_plan_does_not_trigger_a_refusal` — a declared `plan` and no reading: probed, two requests
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| `if budget.is_material() {` → `if false {` (`provider/resources.rs`) | `never-refuse` | **killed** | `a_probe_costing_a_material_fraction_of_a_thin_pool_is_refused_and_the_fixture_is_untouched` (and the `--force` test, whose spending line never fires) |
+| the two `Some(..) else { return Allowed }` gates on the reading → `.unwrap_or(0)` (`provider/resources.rs`) | `refuse-the-unknown-pool` | **killed** | `no_cache_row_is_probed_as_today` (and the token-priced test) |
+| `if !force_probe =>` → `if true =>` (`main.rs`, the `--probe` arm) | `force-is-ignored` | **killed** | `force_overrides_the_refusal_and_spends_the_budget_it_announced` |
+
+> never-refuse observed: panicked at crates/glasshouse/tests/provider_resources_probe.rs:230:28 (no refusal row found)
+
+> refuse-the-unknown-pool observed: panicked at crates/glasshouse/tests/provider_resources_probe.rs:331:5 (assert !stdout.contains("not probing openrouter") failed)
+
+> force-is-ignored observed: panicked at crates/glasshouse/tests/provider_resources_probe.rs:288:28 (no spending row found: --force always took the Refused-and-print-only branch)
+
+Gates (worker's, re-run on the merged tree by the integration gate): `provider_resources_probe` 4/4; `provider_discovery` 45/45; `--lib provider::resources` 44/44; `--lib cli` 30/30; `v1_criteria_setup v1_1906` 1/1 (the pre-existing probe test still hits its fixture twice); clippy and rustdoc clean — the first `blast-radius.sh --targeted` run failed rustdoc on an intra-doc link to a private method, fixed in-band, every gate re-run green after.
+
+Recorded scope limits — stated by the worker, not discovered later:
+- No production signal marks a bare provider-level probe's allowance *token-priced* as distinct from *unmeasured*: both read as "no known remainder" and take one code path, so tests (c) and (d) are killed by the same mutation; (d) still guards a declared quota `plan` from ever entering the request-count computation.
+- The check is provider-wide (the cache's own key), not per credential as `routing::free::Allowance` is on the session-launch path.
+- macOS only, run here.
+
+---
+
+## 1367 now has a spend to reserve — 2026-09-02 (`GH-ROUTED-EXTRACTION-CLIENT`, Red, Opus 5 high; the entry is in `phase-9i.md`)
+
+The census above found nothing to reserve because the disposable router chose and called nothing. That is no longer true: a dispatch resolves a credential and makes a real request against it, and pool health crosses processes through `GatewayHealthCache` (write side `main.rs::persist_support_work_health`, read side `observed_health_of`). **1367 stays open** — this package supplies the spend, not the reservation — and `GH-DISPATCH-RESERVATION-ROW` (Red) can now build on named facts: the `CredentialId` and model that will be spent are known at `RoutedModel::choice()`, before the call, which is the moment a lease has to be taken; the two dispatchers (`report_hook`, `memory_commit`) are still separate processes and both reach `disposable_extraction_model`, so a row is written at one site; the cross-process channel is the on-disk cache the health already uses, so a reservation row keyed by credential and model with an expiry (a hook process can be killed before it clears its row) is the same shape with a deadline — and the packet must decide what a dispatcher does when the row says the allowance is spoken for (wait, choose another, or proceed and say so), which is the ruling that packet carries.
+
+---

@@ -480,7 +480,7 @@ fn the_tail_returns_harness_reports_and_not_the_interfaces_own_events() {
 /// default, so no `memory_extraction` key is written at all — a `Stop` for a
 /// completed turn reaches `run_extraction`, which always logs one of its two
 /// `tracing::info!` lines: this fixture configures no provider, so
-/// `RoutedNoModel` always fails and the "produced nothing" line is the one
+/// `RoutedModel` always fails and the "produced nothing" line is the one
 /// that fires, but either is proof the trigger ran.
 ///
 /// **The trigger is asserted as well as the attempt.** Those two log lines

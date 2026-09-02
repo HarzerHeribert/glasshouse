@@ -945,16 +945,20 @@ fn a_request_the_pair_cannot_carry_is_refused_by_name_and_nothing_is_opened_upst
     let fixture = ChatOnlyUpstream::start(Answer::Completion);
     let gateway = start_gateway(upstream_from(&chat_only_provider(&fixture)), None);
 
-    let with_cache_control = json!({
+    // `cache_control` moved from refused to carried (2014) — this pair's
+    // still-refused field is `thinking`, extended thinking having no OpenAI
+    // Chat equivalent at all.
+    let with_thinking = json!({
         "model": "claude-x",
         "max_tokens": 10,
-        "system": [{"type": "text", "text": PLANTED_PROMPT, "cache_control": {"type": "ephemeral"}}],
-        "messages": [{"role": "user", "content": "hi"}]
+        "system": [{"type": "text", "text": PLANTED_PROMPT}],
+        "messages": [{"role": "user", "content": "hi"}],
+        "thinking": {"type": "enabled", "budget_tokens": 1024}
     })
     .to_string();
     let response = send_and_read(
         gateway.address(),
-        &messages_request(gateway.token().expose(), &with_cache_control),
+        &messages_request(gateway.token().expose(), &with_thinking),
     );
     let (head, body) = head_and_body(&response);
     assert!(head.starts_with("HTTP/1.1 400"), "{head}");
@@ -966,8 +970,8 @@ fn a_request_the_pair_cannot_carry_is_refused_by_name_and_nothing_is_opened_upst
         message.contains("anthropic-messages->openai-chat"),
         "{message}"
     );
-    assert!(message.contains("`system[0].cache_control`"), "{message}");
-    assert!(message.contains("DISABLE_PROMPT_CACHING=1"), "{message}");
+    assert!(message.contains("`thinking`"), "{message}");
+    assert!(message.contains("no OpenAI Chat equivalent"), "{message}");
     assert!(
         !message.contains(PLANTED_PROMPT),
         "a refusal names the field and never quotes the request: {message}"

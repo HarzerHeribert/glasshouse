@@ -1366,7 +1366,7 @@ Phase 33C — Failure, quota, and route correlation
 ☐ Learn or parse provider cadence separately from Retry-After remainder values when evidence permits.
 ☐ Reserve known paced capacity at dispatch so concurrent workers do not all consume the same apparent allowance.
 ☑ Avoid retrying a paced route in place when the current cadence makes the retry predictably unavailable.
-☐ Reduce or suppress active probes when probing would consume a material fraction of a scarce request pool.
+☑ Reduce or suppress active probes when probing would consume a material fraction of a scarce request pool.
 ☑ Measure temporally overlapping failures between routes rather than assuming different front doors are independent providers.
 ☑ Represent a quota domain separately from a failure domain.
 ☑ Treat uncorrelated account-level 429 events as evidence of separate quota buckets, not automatically as independent upstreams.
@@ -1821,7 +1821,7 @@ Phase 51 — Evaluation hooks
 ☐ Measure how often retrieved memory is actually useful to the receiving agent.
 ☑ Measure how often stale or incorrect memory is retrieved.
 ☑ Measure how often an old decision causes an agent to add unnecessary implementation complexity.
-☐ Measure how often revalidation correctly identifies a decision whose original assumptions no longer hold.
+☑ Measure how often revalidation correctly identifies a decision whose original assumptions no longer hold.
 ☑ Measure how often agents challenge a remembered decision and whether the challenge was justified.
 ☑ Measure how often superseded memories are incorrectly resurfaced as current guidance.
 ☐ Measure whether production-aware checks catch expensive query patterns or scaling assumptions before deployment.
@@ -2011,17 +2011,17 @@ Recorded 2026-09-02 from the user's instruction of record, after a side-by-side 
 
 Cache-stable translation — the gap the comparison exposed: a default Claude Code launch on any translated pairing is refused today because its prompt-cache markers are refused by field name.
 
-☐ Carry a harness's prompt-cache markers across a translated pairing where the target protocol has an equivalent, and strip them with a recorded reason where it does not, instead of refusing the request.
-☐ Keep a default Claude Code launch usable on every supported translated pairing without the user disabling prompt caching.
-☐ Serialize translated requests deterministically — stable tool order and stable JSON Schema key order — so an unchanged prompt prefix stays byte-identical across turns.
-☐ Never alter the bytes of a message already sent upstream in an earlier turn of the same session on a translated pairing, as the relay already guarantees for native ones.
-☐ Supply a stable per-session prompt-cache key on targets that accept one when the harness did not set its own.
+☑ Carry a harness's prompt-cache markers across a translated pairing where the target protocol has an equivalent, and strip them with a recorded reason where it does not, instead of refusing the request.
+☑ Keep a default Claude Code launch usable on every supported translated pairing without the user disabling prompt caching.
+☑ Serialize translated requests deterministically — stable tool order and stable JSON Schema key order — so an unchanged prompt prefix stays byte-identical across turns.
+☑ Never alter the bytes of a message already sent upstream in an earlier turn of the same session on a translated pairing, as the relay already guarantees for native ones.
+☑ Supply a stable per-session prompt-cache key on targets that accept one when the harness did not set its own.
 ☐ Measure prompt-cache read and creation tokens per exchange where the provider reports them, and show the per-session cache ratio beside the routing evidence.
 
 Entitlement-aware reduction — a subscription pays in rate limits and context window, a metered key pays in tokens, local inference pays in latency; one threshold cannot serve all three.
 
-☐ Key the context firewall's reduction policy on the serving entitlement's kind, with per-kind thresholds that default to today's values.
-☐ Allow a launch profile or an entitlement to declare its reduction policy explicitly, overriding the kind's default.
+☑ Key the context firewall's reduction policy on the serving entitlement's kind, with per-kind thresholds that default to today's values.
+☑ Allow a launch profile or an entitlement to declare its reduction policy explicitly, overriding the kind's default.
 
 A local reducer the user installs — Headroom's compressors are more developed than the deterministic ladder and run locally; use them, do not rewrite them.
 
@@ -2031,8 +2031,8 @@ A local reducer the user installs — Headroom's compressors are more developed 
 
 A savings readout that is a query, not an estimate.
 
-☐ Report token savings by purpose — firewall reduction, response profile, translation — from the evidence ledger's own rows with denominators, so a savings claim is a query over recorded exchanges.
-☐ Provide a seeded, offline proof fixture for the firewall's deterministic ladder so its reduction ratios are reproducible without any provider.
+☑ Report token savings by purpose — firewall reduction, response profile, translation — from the evidence ledger's own rows with denominators, so a savings claim is a query over recorded exchanges.
+☑ Provide a seeded, offline proof fixture for the firewall's deterministic ladder so its reduction ratios are reproducible without any provider.
 
 Effort and learning — evaluate before offering, and export what memory already knows.
 

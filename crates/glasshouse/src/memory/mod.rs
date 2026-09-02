@@ -53,7 +53,7 @@ mod store;
 pub use export::{ExportError, Manifest, Selection, TrackedKnowledge, WrittenFile};
 pub use extract::{
     ExtractionModel, ExtractionOutcome, ExtractionTrigger, Extractor, ModelError,
-    disposable::RoutedNoModel,
+    disposable::RoutedModel,
     model::{ConfiguredModel, ConfiguredModelError},
 };
 pub use policy::{MemoryRefusal, admit};

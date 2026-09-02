@@ -12,9 +12,9 @@
 //! for the exact main.rs lines and the patch that would reorder them.
 //!
 //! So this proves the mechanism at the next entry point down instead:
-//! [`glasshouse::memory::RoutedNoModel::new_for_request`], the same
+//! [`glasshouse::memory::RoutedModel::new_for_request`], the same
 //! `DisposableRouting::choose` wrapper `disposable_extraction_model` already
-//! builds in production (`RoutedNoModel::new`) — `new_for_request` differs
+//! builds in production (`RoutedModel::new`) — `new_for_request` differs
 //! only in classifying real text first, per this package's objective. It is
 //! not yet called by `main.rs`, so per practice §35/§36 this does not by
 //! itself prove a *production* caller varies the tier; it proves the
@@ -23,7 +23,7 @@
 
 use std::time::Instant;
 
-use glasshouse::memory::{ExtractionModel, RoutedNoModel};
+use glasshouse::memory::{ExtractionModel, RoutedModel};
 use glasshouse::provider::quota::{
     Capacity, CapacityBand, CapacityState, NativeAmount, Pool, Reading, ReadingSource,
     RemainingCapacityScore,
@@ -66,7 +66,7 @@ fn reserve_banded_candidate() -> DisposableCandidate {
 }
 
 /// The acceptance test itself: a trivial job and a demanding job, through the
-/// same entry point (`RoutedNoModel::new_for_request`, in turn
+/// same entry point (`RoutedModel::new_for_request`, in turn
 /// `DisposableRouting::choose`), produce different outcomes for the
 /// identical Reserve-band, distant-reset candidate — attributable only to
 /// the classification, since nothing else about the call differs.
@@ -74,7 +74,7 @@ fn reserve_banded_candidate() -> DisposableCandidate {
 fn a_trivial_and_a_demanding_job_get_different_outcomes_through_the_same_entry_point() {
     let routing = DisposableRouting::for_support_work(true, FreePreferences::new());
 
-    let trivial = RoutedNoModel::new_for_request(
+    let trivial = RoutedModel::new_for_request(
         JobKind::MemoryExtraction,
         "what is a mutex",
         &[reserve_banded_candidate()],
@@ -86,7 +86,7 @@ fn a_trivial_and_a_demanding_job_get_different_outcomes_through_the_same_entry_p
         "a leaf-tier classification must not justify spending the reserve: {trivial_description}"
     );
 
-    let demanding = RoutedNoModel::new_for_request(
+    let demanding = RoutedModel::new_for_request(
         JobKind::MemoryExtraction,
         "run cargo test and fix whatever fails",
         &[reserve_banded_candidate()],
@@ -120,13 +120,13 @@ fn a_trivial_and_a_demanding_job_get_different_outcomes_through_the_same_entry_p
 fn an_ambiguous_empty_request_does_not_get_the_confidently_trivial_outcome() {
     let routing = DisposableRouting::for_support_work(true, FreePreferences::new());
 
-    let confidently_trivial = RoutedNoModel::new_for_request(
+    let confidently_trivial = RoutedModel::new_for_request(
         JobKind::MemoryExtraction,
         "what is a mutex",
         &[reserve_banded_candidate()],
         &routing,
     );
-    let ambiguous = RoutedNoModel::new_for_request(
+    let ambiguous = RoutedModel::new_for_request(
         JobKind::MemoryExtraction,
         "",
         &[reserve_banded_candidate()],
@@ -136,7 +136,7 @@ fn an_ambiguous_empty_request_does_not_get_the_confidently_trivial_outcome() {
     // Both are denied at this Reserve-band/distant-reset candidate (neither
     // reaches Heavy), but the escalation still means they are not the same
     // raw tier — proven at `classify_heuristically`'s own level, since
-    // `RoutedNoModel::describe` does not print a raw tier to assert on
+    // `RoutedModel::describe` does not print a raw tier to assert on
     // directly.
     let trivial_tier = glasshouse::routing::classify::classify_heuristically("what is a mutex")
         .conservative_workload_tier();
@@ -171,7 +171,7 @@ fn an_ambiguous_empty_request_does_not_get_the_confidently_trivial_outcome() {
 // GH-ROUTING-STICKINESS — map lines 1434, 1441, 1442.
 //
 // The first two here (1434) go through `DisposableRouting::choose` directly,
-// the same production entry point `RoutedNoModel::new_for_request` above
+// the same production entry point `RoutedModel::new_for_request` above
 // wraps for `JobKind::MemoryExtraction` — `choose` itself is unchanged in
 // what calls it, only in what it eliminates before scoring.
 //

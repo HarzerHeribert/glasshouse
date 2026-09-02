@@ -245,6 +245,13 @@ pub enum Command {
         /// Do not run any harness's status command.
         #[arg(long)]
         no_harness: bool,
+
+        /// Probe even when it would spend a material fraction of a
+        /// provider's own remaining request pool — capability map line
+        /// 1369's override. No effect unless `--probe` would otherwise be
+        /// refused.
+        #[arg(long)]
+        force: bool,
     },
     /// Report what Glasshouse believes a request needs, without acting on it.
     ///

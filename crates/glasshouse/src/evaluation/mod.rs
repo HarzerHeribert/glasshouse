@@ -260,6 +260,23 @@ pub enum EvaluationKind {
     /// was never retrieved in this exact window at all) without touching it
     /// — the same append-only shape every kind in this ledger keeps.
     MemoryRated,
+    /// `glasshouse memory revalidate <id> <outcome>` happened — map line
+    /// 1824's own denominator. `subject` is the outcome word verbatim
+    /// (`reaffirmed`, `needs-review`, `superseded` or `invalidated`);
+    /// `memory_id` is the revalidated memory; `outcome` stays
+    /// [`EvaluationOutcome::Unknown`], because this row is not a verdict on
+    /// whether the revalidation was *correct* — [`Self::MemoryRated`]'s
+    /// `revalidation-correct`/`revalidation-wrong` words already carry that
+    /// judgement. This row only answers *"did a revalidation happen"*.
+    ///
+    /// **Its own row, not a reuse of an existing column.** `main.rs::memory_revalidate`'s
+    /// four outcomes write to different places in `memories` —
+    /// `last_validated_at`, `review_marked_at` (shared with `memory
+    /// challenge`, so it cannot double as this line's denominator without
+    /// conflating the two — see [`Self::MemoryRated`]'s challenge doc), and
+    /// two outcomes with no distinguishing column at all — so no single
+    /// production column ever meant "a revalidation happened" until this one.
+    MemoryRevalidated,
 }
 
 /// The `subject` this ledger writes for a destination whose cost class no
@@ -475,6 +492,7 @@ impl EvaluationKind {
             Self::RoutingTierObserved => "routing_tier_observed",
             Self::FailoverPrevented => "failover_prevented",
             Self::MemoryRated => "memory_rated",
+            Self::MemoryRevalidated => "memory_revalidated",
         }
     }
 
@@ -497,6 +515,7 @@ impl EvaluationKind {
             "routing_tier_observed" => Some(Self::RoutingTierObserved),
             "failover_prevented" => Some(Self::FailoverPrevented),
             "memory_rated" => Some(Self::MemoryRated),
+            "memory_revalidated" => Some(Self::MemoryRevalidated),
             _ => None,
         }
     }
@@ -1212,22 +1231,37 @@ impl EvaluationObservations {
 /// §77's reason: a second worker's reader and this one must not be able to
 /// land on the same lines.
 ///
-/// # The proxy's join key has no producer yet, and every proxy figure below
-/// says so honestly rather than hiding it
+/// # The proxy's join key, and where its producer stands after
+/// `GH-RETRIEVAL-ATTRIBUTION`
 ///
 /// The design decision's proxy for 1821/1831 is *"the retrieving session's
 /// turn ended `Completed` … with no failover, retry, override or early
 /// abandonment recorded against it."* That needs a
 /// [`EvaluationKind::MemoryRetrieved`] row's `session_id` to find "the
-/// retrieving session" at all, and **no production caller sets one**:
-/// `main.rs::memory_search_grouped` (the CLI and machine-door search core)
-/// and the launch-time briefing door (`api/unix.rs::select_memory`,
-/// `deliver_memory`) never pass a session id into
-/// [`record_memory_retrieval`]. The queries below join on `session_id`
-/// correctly and will count a real proxy hit the day a producer attaches
-/// one — nothing here fabricates an attribution — but today every such join
-/// legitimately matches zero rows. This is disclosed once here rather than
-/// on every field, and again in this package's own report.
+/// retrieving session" at all. `GH-RETRIEVAL-ATTRIBUTION` gives the
+/// launch-time briefing door — `api/unix.rs::deliver_memory` — exactly that:
+/// a successful injection now carries the session it was delivered to.
+/// `main.rs::memory_search_grouped`'s two callers still pass `None`:
+/// `glasshouse memory search` has no session to attribute a person's own
+/// command to, and the machine door's `query_memory` has no session field on
+/// its `Request::QueryMemory` to thread one from at all (that request carries
+/// no `session_id`, unlike `SendMessage` or `RecordAssumption` — see
+/// `query_memory`'s own doc comment; widening the protocol is out of this
+/// package's scope). So one of `record_memory_retrieval`'s two producers
+/// attaches a session today, not both.
+///
+/// **A session-attributed retrieval and a `RoutingOutcomeObserved` row for
+/// the *same* session still cannot both arise from one production launch.**
+/// [`record_routing_outcome`] refuses to write anything for a session with no
+/// prior routed destination, and only `main.rs::launch_session` (the `CLI
+/// glasshouse launch` path) ever calls [`record_routed_session`] — the
+/// door's own `Request::SpawnSession`/`Request::SendMessage`, which is what
+/// actually calls `deliver_memory`, never routes a session at all. So the
+/// proxy's join has a real producer on each side now, but nothing in this
+/// build yet drives both sides for one session; the queries below join on
+/// `session_id` correctly and will count a real proxy hit the day a producer
+/// closes that remaining gap. This is disclosed once here rather than on
+/// every field, and again in this package's own report.
 ///
 /// Of the four negative signals the design names — failover, retry,
 /// override, early abandonment — only **override**
@@ -1406,17 +1440,18 @@ impl EvaluationObservations {
 
     /// **Map line 1824**: *"Measure how often revalidation correctly
     /// identifies a decision whose original assumptions no longer hold."*
-    /// Explicit only, and **no denominator**: `glasshouse memory
-    /// revalidate`'s four outcomes share no single production column that
-    /// means "a revalidation happened" — `reaffirmed` writes
+    /// Explicit ratings over a real denominator: `glasshouse memory
+    /// revalidate`'s four outcomes share no single production *memory*
+    /// column that means "a revalidation happened" — `reaffirmed` writes
     /// `last_validated_at`, `needs-review` reuses `mark_for_review`'s
     /// `review_marked_at` (the same column [`Self::challenge_accuracy`]
     /// reads, so it cannot serve as *this* line's own denominator without
     /// double meaning), and `superseded`/`invalidated` write no
-    /// distinguishing column at all. Rather than undercount by picking one
-    /// of the four, this returns the real explicit tally and no
-    /// denominator; the reader prints that plainly instead of a fabricated
-    /// ratio.
+    /// distinguishing column at all. `GH-RETRIEVAL-ATTRIBUTION` closes that
+    /// gap with its own row instead —
+    /// [`EvaluationKind::MemoryRevalidated`], written once per call to
+    /// `main.rs::memory_revalidate` regardless of which outcome — so the
+    /// denominator below counts that kind, not a `memories` column.
     pub fn revalidation_accuracy(
         &self,
         from: i64,
@@ -1431,6 +1466,9 @@ impl EvaluationObservations {
                       AND observed_at >= ?4 AND observed_at <= ?5),
                  (SELECT COUNT(*) FROM evaluation_observations
                     WHERE kind = ?1 AND outcome = ?3
+                      AND observed_at >= ?4 AND observed_at <= ?5),
+                 (SELECT COUNT(*) FROM evaluation_observations
+                    WHERE kind = ?6
                       AND observed_at >= ?4 AND observed_at <= ?5)",
             params![
                 EvaluationKind::MemoryRated.as_str(),
@@ -1438,11 +1476,17 @@ impl EvaluationObservations {
                 EvaluationOutcome::RevalidationWrong.as_str(),
                 from,
                 to,
+                EvaluationKind::MemoryRevalidated.as_str(),
             ],
             |row| {
+                let correct: i64 = row.get(0)?;
+                let wrong: i64 = row.get(1)?;
+                let revalidations: i64 = row.get(2)?;
                 Ok(RevalidationAccuracyCounts {
-                    correct: row.get(0)?,
-                    wrong: row.get(1)?,
+                    correct,
+                    wrong,
+                    revalidations,
+                    unknown: (revalidations - correct - wrong).max(0),
                 })
             },
         )
@@ -1546,13 +1590,18 @@ pub struct CausedComplexityCounts {
     pub retrieved: i64,
 }
 
-/// **Map line 1824**'s counts: explicit only, and no denominator at all —
-/// see [`EvaluationObservations::revalidation_accuracy`]'s own doc comment
-/// for why.
+/// **Map line 1824**'s counts: explicit ratings, denominator from
+/// [`EvaluationKind::MemoryRevalidated`] — see
+/// [`EvaluationObservations::revalidation_accuracy`]'s own doc comment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct RevalidationAccuracyCounts {
     pub correct: i64,
     pub wrong: i64,
+    /// `glasshouse memory revalidate` calls in the window, any outcome.
+    pub revalidations: i64,
+    /// Revalidations in the window nobody has rated `revalidation-correct`
+    /// or `revalidation-wrong`.
+    pub unknown: i64,
 }
 
 /// **Map line 1825**'s counts: explicit only, denominator from
@@ -2169,7 +2218,9 @@ fn trim_within(
 }
 
 /// Record that a memory search handed these memories back — the producer for
-/// map lines 1822 and 1826.
+/// map lines 1822 and 1826, and — when `session_id` is carried — the
+/// [`EvaluationKind::MemoryRetrieved`] half of map lines 1821 and 1831's own
+/// proxy join (this reader block's own doc comment names the other half).
 ///
 /// **This never fails a retrieval.** Memory search is on the user's path and
 /// bookkeeping is not allowed to break it, so every error here is a
@@ -2179,18 +2230,33 @@ fn trim_within(
 /// The database handle is opened here, and only here, and only when there is
 /// something to record — practice §65's rule that a resource is acquired where
 /// its consumer starts. A search that returned nothing opens nothing.
+///
+/// `session_id` is `None` whenever the caller has no session in scope —
+/// never guessed. `GH-RETRIEVAL-ATTRIBUTION`'s two production callers today:
+/// `main.rs::memory_search_grouped` passes `None` from the CLI's `memory
+/// search` (no session to attribute a person's own command to) and from
+/// `api::unix::query_memory` (the machine door's `QueryMemory` request
+/// carries no session field to thread one from — see that caller's own doc
+/// comment); `api::unix::deliver_memory` passes `Some` on every successful
+/// launch-time injection, because that door already holds the `SessionId`
+/// it is briefing.
 pub fn record_memory_retrieval<'a>(
     runtime: &Runtime,
     scope: RetrievalScope,
     memory_ids: impl IntoIterator<Item = &'a str>,
+    session_id: Option<&str>,
     observed_at_unix: i64,
 ) {
     let observations: Vec<NewObservation> = memory_ids
         .into_iter()
         .map(|id| {
-            NewObservation::new(EvaluationKind::MemoryRetrieved)
+            let mut observation = NewObservation::new(EvaluationKind::MemoryRetrieved)
                 .with_subject(scope.as_str())
-                .with_memory_id(id)
+                .with_memory_id(id);
+            if let Some(session_id) = session_id {
+                observation = observation.with_session_id(session_id);
+            }
+            observation
         })
         .collect();
     if observations.is_empty() {
@@ -2742,6 +2808,50 @@ pub fn record_memory_rating(
     Ok(ledger.record(observation, observed_at_unix)?)
 }
 
+/// Record that `glasshouse memory revalidate` ran — the producer for
+/// [`EvaluationKind::MemoryRevalidated`], map line 1824's own denominator.
+/// Its one caller (`main.rs::memory_revalidate`) calls this after the store
+/// has already written the outcome, so a ledger failure here can never leave
+/// a revalidation half-applied.
+///
+/// **Never fails the command**, the same shape [`record_memory_retrieval`]
+/// and its neighbours use rather than [`record_memory_rating`]'s: the store
+/// mutation is the real act and has already succeeded by the time this runs,
+/// so a bookkeeping error here must not turn a successful `memory revalidate`
+/// into a failed command exit.
+///
+/// `outcome` is the CLI's own word (`reaffirmed`, `needs-review`,
+/// `superseded` or `invalidated`), stored verbatim as `subject` — this
+/// producer does not judge whether the revalidation was correct, only that
+/// it happened.
+pub fn record_memory_revalidation(
+    runtime: &Runtime,
+    memory_id: &str,
+    outcome: &str,
+    observed_at_unix: i64,
+) {
+    let observation = NewObservation::new(EvaluationKind::MemoryRevalidated)
+        .with_memory_id(memory_id)
+        .with_subject(outcome);
+    let ledger = match EvaluationObservations::open(runtime) {
+        Ok(ledger) => ledger,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "could not open the evaluation ledger; the revalidation stands, but it was not \
+                 counted"
+            );
+            return;
+        }
+    };
+    if let Err(err) = ledger.record(observation, observed_at_unix) {
+        tracing::warn!(
+            error = %err,
+            "could not record that a memory revalidation happened"
+        );
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2766,6 +2876,8 @@ mod tests {
             EvaluationKind::RoutingOutcomeObserved,
             EvaluationKind::RoutingTierObserved,
             EvaluationKind::FailoverPrevented,
+            EvaluationKind::MemoryRated,
+            EvaluationKind::MemoryRevalidated,
         ];
         let names: Vec<&str> = declared.iter().map(|kind| kind.as_str()).collect();
         assert_eq!(
