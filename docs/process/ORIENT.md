@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1237 / 1347 mandatory capabilities (92%)** — 110 open across 33 phases.
+**1238 / 1347 mandatory capabilities (92%)** — 109 open across 32 phases.
 
 ## Where the work is
 
@@ -35,7 +35,6 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 34B | Routing-model role | **1** | 14 | `1406` |
 | Phase 34C | Automatic routing-model selection | **1** | 12 | `1429` |
 | Phase 37 | Basic session-aware router | **1** | 10 | `1590` |
-| Phase 39 | Gateway-backed disposable jobs | **1** | 8 | `1614` |
 | Phase 9 | Antigravity adapter | **2** | 5 | `330` |
 | Phase 20 | Minimal durable project memory | **2** | 16 | `805` |
 | Phase 21F | Memory retrieval quality | **2** | 9 | `927` |
@@ -56,7 +55,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 33B | Reliability-adjusted agent performance | **10** | 4 | `1345` |
 | Phase 51 | Evaluation hooks | **20** | 17 | `1818` |
 
-**Fully closed (75):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 7, Phase 8, Phase 9A, Phase 9B, Phase 9C, Phase 9D, Phase 9F, Phase 9G, Phase 9I, Phase 9J, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 16, Phase 17, Phase 18, Phase 19, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 21H, Phase 21I, Phase 21J, Phase 22, Phase 23, Phase 24, Phase 25, Phase 26, Phase 29, Phase 32, Phase 32B, Phase 32E, Phase 34, Phase 34A, Phase 34D, Phase 34E, Phase 34F, Phase 35, Phase 35A, Phase 35C, Phase 35D, Phase 36, Phase 40, Phase 41, Phase 42, Phase 43, Phase 44, Phase 45, Phase 46, Phase 48, Phase 49, Phase 50, Phase 54, Phase 54A, Phase 55, Phase 56, Phase 56A, Phase 57, Phase 58.
+**Fully closed (76):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 7, Phase 8, Phase 9A, Phase 9B, Phase 9C, Phase 9D, Phase 9F, Phase 9G, Phase 9I, Phase 9J, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 16, Phase 17, Phase 18, Phase 19, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 21H, Phase 21I, Phase 21J, Phase 22, Phase 23, Phase 24, Phase 25, Phase 26, Phase 29, Phase 32, Phase 32B, Phase 32E, Phase 34, Phase 34A, Phase 34D, Phase 34E, Phase 34F, Phase 35, Phase 35A, Phase 35C, Phase 35D, Phase 36, Phase 39, Phase 40, Phase 41, Phase 42, Phase 43, Phase 44, Phase 45, Phase 46, Phase 48, Phase 49, Phase 50, Phase 54, Phase 54A, Phase 55, Phase 56, Phase 56A, Phase 57, Phase 58.
 
 ## The nearly-finished phases, in full
 
@@ -122,10 +121,6 @@ these unwrapped.
 ### Phase 37 — Basic session-aware router  (1 open, 10 closed)
 
 - **1594** ☐ Prefer a fresh session when existing relevant sessions are cold, bloated, or semantically poor and a good checkpoint exists.
-
-### Phase 39 — Gateway-backed disposable jobs  (1 open, 8 closed)
-
-- **1625** ☐ Use disposable jobs for classification, memory extraction, reranking, and other bounded support tasks.
 
 ### Phase 9 — Antigravity adapter  (2 open, 5 closed)
 

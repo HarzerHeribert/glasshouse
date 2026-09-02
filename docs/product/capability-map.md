@@ -1622,7 +1622,7 @@ Fixed architectural requirements
 ☑ Add a simple provider interface for non-interactive disposable LLM jobs.
 ☑ Allow OpenAI-compatible gateways to be configured through the disposable-job interface.
 ☑ Allow local Ollama or llama.cpp endpoints to be configured through the disposable-job interface.
-☐ Use disposable jobs for classification, memory extraction, reranking, and other bounded support tasks.
+☑ Use disposable jobs for classification, memory extraction, reranking, and other bounded support tasks.
 ☑ Keep disposable jobs distinct from first-class interactive harness sessions.
 ☑ Do not give disposable jobs an autonomous coding-agent loop, unrestricted repository tools, or native-session identity.
 ☑ Do not pretend a disposable API call is a user-enterable worker session.

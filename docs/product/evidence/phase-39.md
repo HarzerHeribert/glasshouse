@@ -312,3 +312,45 @@ Recorded scope limits — stated by the worker, not discovered later:
 - EvidenceLedger::recent (the exact-identity reader) is unchanged; this is a new sibling, not a rewrite of it
 
 ---
+
+### Use disposable jobs for classification, memory extraction, reranking, and other bounded support tasks. (line 1625) — CLOSED 2026-09-02
+
+**How it closed.** The 2026-08-31 refusal above rested on reranking's Cluster Q
+absence, and `tests/disposable_interface.rs` carried a tripwire asserting no
+production reranking caller existed, *"so that the day one is added it fails
+loudly, by name"*. `GH-MEMORY-RERANKER` landed the reranking seat in wave 101
+(`phase-24.md`), and the waves 101–102 trailing sweep fired the tripwire
+exactly as designed. The orchestrator ruled rather than re-armed it.
+
+**Contract.** Given Glasshouse's own support work, when it needs a bounded
+model call, Glasshouse routes it as a disposable job through
+`DisposableRouting` under one of its named kinds — classification, memory
+extraction, reranking, context reduction — never as a native interactive
+session, while preserving that each seat's failure is a stated bypass and
+that the vocabulary stays closed (1621).
+
+**Production evidence.** Classification —
+`main.rs::choose_for_automatic_classification` (Phase 34C); memory
+extraction — `main.rs::disposable_extraction_model`, `JobKind::MemoryExtraction`
+(Phase 9I, `GH-ROUTED-EXTRACTION-CLIENT`); reranking —
+`memory/rerank.rs::resolve_rerank_model`, `JobKind::Reranking` (Phase 24; in
+the library because the machine door cannot call the binary crate); another
+bounded support task — `main.rs::disposable_reducer`,
+`JobKind::ContextReduction` (Phase 58's reducer seat).
+
+**Regression evidence.** The census,
+`disposable_interface::disposable_jobs_serve_classification_extraction_reranking_and_reduction_in_production`
+(the inverted tripwire — four source assertions naming each caller), and the
+behaviour of each seat through the shipped binary in its own package:
+`classification_call.rs` (10), `routed_extraction.rs` (4),
+`memory_reranker.rs` (8), `firewall_reducer.rs` (9) — each with its package's
+KILLED mutations (`phase-34c.md`, `phase-9i.md`, `phase-24.md`,
+`phase-58.md`). No mutation was run on the census itself: a source scan is a
+census, not a behaviour proof (§35), and the behaviour proofs are the four
+files above.
+
+**Recorded limit.** *Other bounded support tasks* is proven by one — the
+reducer; `JobKind::Evaluation` has no production caller yet and the census
+does not claim it.
+
+State: **COMPLETE**. **Phase 39 stands at 9 of 9.**

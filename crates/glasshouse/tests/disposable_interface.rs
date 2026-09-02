@@ -290,35 +290,33 @@ fn a_non_openai_chat_protocol_is_refused_even_on_a_loopback_host() {
 }
 
 // ---------------------------------------------------------------------------
-// 1625 — the two real uses, and reranking's Cluster Q absence.
+// 1625 — the four uses, each with a production caller.
 // ---------------------------------------------------------------------------
 
 /// Phase 39 line 1625 names four uses: classification, memory extraction,
-/// reranking, and "other bounded support tasks". Classification and memory
-/// extraction each have a real production caller in `main.rs`. Reranking has
-/// none — `JobKind::Reranking` is a representable value (proven above by
-/// 1621's exhaustive match) that nothing in the shipped binary ever
-/// constructs, because no search-results reranker exists yet
-/// (`src/routing/classify.rs`'s workload-tier doc names reranking only as a
-/// hypothetical tier-1 job; the audit's Cluster Q).
+/// reranking, and "other bounded support tasks". Each now has a real
+/// production caller through `DisposableRouting`:
 ///
-/// This is a source-level tripwire in the shape
-/// `support_work_economy::no_repository_summarization_job_exists_to_route_cheaply_yet`
-/// used for line 1608: it fails loudly, by name, the day a production
-/// reranking caller is added, rather than staying silently green forever.
+/// - classification — `main.rs::choose_for_automatic_classification`;
+/// - memory extraction — `main.rs`'s extraction seat, `JobKind::MemoryExtraction`;
+/// - reranking — the seat in the library, `memory/rerank.rs::resolve_rerank_model`,
+///   `JobKind::Reranking` (landed 2026-09-02, `GH-MEMORY-RERANKER`; it lives in
+///   the library because the machine door cannot call the binary crate);
+/// - another bounded support task — the context-firewall reducer,
+///   `main.rs::disposable_reducer`, `JobKind::ContextReduction`.
 ///
-/// **Recorded limit, not proved here**: this does not claim reranking will
-/// never exist — only that today it does not, so line 1625's reranking
-/// clause is a Cluster Q gap the orchestrator must rule on, the same way
-/// 1611 and 1608 were ruled.
-///
-/// Mutation: `main.rs`'s doc comment naming `JobKind`'s constructor (the line
-/// immediately preceding `main.rs`'s `#[cfg(test)]` module) rewritten to
-/// mention `JobKind::Reranking`, standing in for a real caller being added.
+/// This test was a tripwire until 2026-09-02: it asserted that *no* reranking
+/// caller existed, so that the day one was added it would fail by name and
+/// send line 1625 back for a ruling rather than stay silently green. It fired
+/// in the waves 101–102 trailing sweep exactly as designed, and the ruling is
+/// in `docs/product/evidence/phase-39.md`. It is now the census of the four
+/// callers; the behaviour of each seat is proven by its own shipped-binary
+/// tests (`classification_call.rs`, `routed_extraction.rs`,
+/// `memory_reranker.rs`, `firewall_reducer.rs`), not by this scan.
 #[test]
-fn disposable_jobs_serve_classification_and_extraction_in_production_reranking_does_not_exist_yet()
-{
+fn disposable_jobs_serve_classification_extraction_reranking_and_reduction_in_production() {
     let main_source = include_str!("../src/main.rs");
+    let rerank_source = include_str!("../src/memory/rerank.rs");
 
     assert!(
         main_source.contains("JobKind::MemoryExtraction"),
@@ -329,10 +327,14 @@ fn disposable_jobs_serve_classification_and_extraction_in_production_reranking_d
         "classification's production caller must still route through DisposableRouting"
     );
     assert!(
-        !main_source.contains("JobKind::Reranking"),
-        "a production reranking caller now exists in main.rs: capability map line 1625's \
-         reranking clause is no longer a Cluster Q refusal (no search-results reranker existed) \
-         and this line needs repackaging, not this tripwire"
+        rerank_source.contains("JobKind::Reranking"),
+        "the reranking seat must still route through JobKind::Reranking — capability map \
+         line 1625's reranking clause rests on it"
+    );
+    assert!(
+        main_source.contains("JobKind::ContextReduction"),
+        "the context-firewall reducer must still route through JobKind::ContextReduction — \
+         line 1625's other bounded support task"
     );
 }
 
