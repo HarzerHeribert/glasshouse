@@ -263,12 +263,17 @@ and it is what correctly held the box open through the 2026-08-29 re-open. The
 
 **Record dispatch time, first-byte time, time to first real token, time to
 first tool call, and completion time when the protocol exposes them.**
-**OPEN.** `completed_at` is accurate; `dispatched_at` is an honest upper-
+**CLOSED 2026-09-02** (`GH-STREAM-FIRST-EVENTS`, wave 102 — the 1331/1332
+entry below; this census verdict was *open* when written and is kept as
+history). At the census: `completed_at` is accurate; `dispatched_at` is an honest upper-
 bound proxy (see this entry's opening finding); the other three are
 structurally unavailable to a pass-through gateway and are not attempted.
 
 **Do not treat whitespace padding, transport keepalives, or reasoning-only
-deltas as the first generated token.** **OPEN, moot.** This producer never
+deltas as the first generated token.** **CLOSED 2026-09-02** (the same
+package — `FirstEvents::note` credits no padding, keepalive or
+reasoning-only delta; the entry below). At the census, open and moot: this
+producer never
 computes a first-token time, so it cannot violate this line, but it also
 does not satisfy it — there is no correct behaviour to credit yet.
 

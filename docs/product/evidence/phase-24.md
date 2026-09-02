@@ -163,8 +163,11 @@ enrichment (inert defaults); `--explain` ignores `--history`/`--limit` by
 design; `memory_retrieval_diagnostics_enabled` exists once in the library and
 once in the binary (the crate boundary); `main.rs::estimated_project_memory_tokens`
 passes no model (a `route` estimate should not spend a call); macOS only.
-Not yet wired: the seat's chooser does not gather budget spend
-(`GH-BUDGET-SPEND-REMAINING-CALLERS`, `phase-32d.md`).
+Not yet wired at the time of writing: the seat's chooser did not gather
+budget spend — landed later the same day by
+`GH-BUDGET-SPEND-REMAINING-CALLERS` (see `phase-32d.md`, the 1263 entry's
+dated note): `resolve_rerank_model` now refuses a metered candidate on an
+exhausted provider through `ModelError::Declined`, and a free one still runs.
 
 State: **COMPLETE** for 1089, 1090, 1091, 1092 and 1094. **Phase 24 stands
 at 6 of 6.**

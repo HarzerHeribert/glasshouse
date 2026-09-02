@@ -390,3 +390,20 @@ each.
 
 State: **COMPLETE**. Phase 32D stands at 11 of 12; 1267 stays open (no latency
 or concurrency reader for local inference exists).
+
+**2026-09-02, later (`GH-BUDGET-SPEND-REMAINING-CALLERS`, Sonnet, no box).**
+The two callers the limit above named now gather budget spend the same way:
+`main.rs::disposable_reducer` (the context-firewall reducer's chooser) and
+`memory/rerank.rs::resolve_rerank_model` (the reranking seat). An exhausted
+provider's metered candidate is never dialled on either; a free model is
+never excluded. The rerank seat answers with a `BudgetExhaustedModel` whose
+`complete` refuses through a new owned-string `ModelError::Declined { reason }`
+— the worker's first draft leaked the reason into `Failed`'s `&'static str`,
+refused by the orchestrator because `api/unix.rs::select_memory` calls the
+same resolver from the long-lived control server. Proof:
+`budget_spend.rs::a_context_firewall_reducer_on_an_exhausted_provider_falls_open_and_runs_once_the_budget_is_raised`,
+`memory_reranker.rs::a_metered_rerank_model_on_an_exhausted_provider_bypasses_and_diagnostics_record_the_budget`,
+`memory_reranker.rs::a_free_rerank_model_on_an_exhausted_provider_still_runs`;
+three mutations KILLED (the gather dropped at the reducer, the check dropped
+at the rerank seat, the free-model guard deleted). The limit above is
+discharged; 1263's state is unchanged.

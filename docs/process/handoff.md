@@ -22,16 +22,25 @@ validated and waiting on the commit. Next action: `.agent-runtime/CONTINUATION.m
 
 Last updated: 2026-09-02 (Europe/Berlin)
 
-## Checkpoint — 2026-09-02, batch 92 (interim): 1241 / 1347 (92.1%) — Phase 39 complete, Cluster H down to three, wave 104 staged, handed off at 75 % context
+## Checkpoint — 2026-09-02, batch 92: 1243 / 1347 (92.3%) — Phase 33A complete, rounds per minute printed as what it is, and the Windows leg's stack reserve holds
 
-Session `0c56372c` (Fable 5.1), continued. Wave 102 landed 1331/1332; a
-tripwire in the trailing sweep fired as designed and 1625 closed on the four
-disposable seats (Phase 39 complete); wave 103 landed 1759 and 1757/1766 (the
-session router's rationale on the durable sink). Wave 104 (1334, 1350) is
-staged behind its gate; a Red packet for migration 25's millisecond offsets is
-written. The Windows VM leg's fifth run — the first on a clean disk after the
-stack-reserve fix — is in flight. Live: `estimator-reset` (1247). Exact next
-actions: `.agent-runtime/CONTINUATION.md`.
+Session `221d1dd9` (Fable 5.1), inherited hot from `0c56372c`. Wave 103
+landed 1759 and 1757/1766 (the session router's rationale on the durable
+sink); wave 104 landed 1334 (Phase 33A complete — tool rounds, retries,
+repairs, failovers and the outcome recorded separately on the translated
+path) and 1350 (successful tool rounds per minute of serving time). The
+Windows VM leg's fifth run — the first on a clean disk after the 8 MiB
+stack reserve — built and passed MSRV with no stack overflow anywhere; its
+test leg was red on three targets, every one a pre-existing Windows gap:
+two test binaries Windows refuses to start because their file names contain
+*setup* and *patch* (installer detection, error 740), and the ingress's
+read-half shutdown, which resets a connection on Windows while bytes are
+queued. All three fixed forward in `windows-run5-gaps`, verified by the next
+VM run. The budget-spend residue (the reducer's and the rerank seat's
+choosers count budget spend; an owned-string `ModelError::Declined`) is
+integrated with `estimator-reset`. Live: `estimator-reset` (1247) and
+`stream-timing-ms` (Red — migration 25's millisecond offsets; 1347, 1348,
+1349, 1355). Exact next actions: `.agent-runtime/CONTINUATION.md`.
 
 ## Checkpoint — 2026-09-02, batch 91: 1235 / 1347 (91.7%) — Phase 24 complete, expected latency scored, and the Windows leg found the binary could not start
 

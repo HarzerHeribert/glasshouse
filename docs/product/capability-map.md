@@ -1331,7 +1331,7 @@ Phase 33A — Routing evidence ledger
 ☑ Record dispatch time, first-byte time, time to first real token, time to first tool call, and completion time when the protocol exposes them.
 ☑ Do not treat whitespace padding, transport keepalives, or reasoning-only deltas as the first generated token.
 ☑ Record input tokens, output tokens, cached-input tokens, and monetary cost only when they are actually exposed or can be estimated with an explicit confidence label.
-☐ Record successful tool rounds, retries, repairs, failovers, and the final user-visible outcome separately.
+☑ Record successful tool rounds, retries, repairs, failovers, and the final user-visible outcome separately.
 ☑ Preserve raw observations alongside rolling aggregates so a routing decision can be audited and aggregation logic can be recalibrated.
 ☑ Compute robust rolling summaries such as median, tail latency, exponentially weighted averages, failure rates, and sample counts where useful.
 ☑ Separate warm-context, cold-context, and unknown-context observations instead of averaging away cache effects.
@@ -1347,7 +1347,7 @@ Phase 33B — Reliability-adjusted agent performance
 ☐ Treat time to first tool call, TTFC, as the primary responsiveness measure for tool-using agent work when structured tool events are available.
 ☐ Keep TTFT as a separate measure of generation responsiveness rather than presenting it as agent productivity.
 ☐ Keep decode tokens per second as a model-serving characteristic rather than presenting it as task progress.
-☐ Track successful tool rounds per minute of serving time as an outcome-adjacent agent-system measure.
+☑ Track successful tool rounds per minute of serving time as an outcome-adjacent agent-system measure.
 ☐ Define effective TTFC as observed TTFC divided by one minus the relevant failure probability when enough observations exist.
 ☐ Use reliability-adjusted latency in route comparison so a fast route that frequently fails is not ranked as genuinely fast.
 ☑ Keep an additive failure penalty available because a failed turn can also stop a harness, lose user attention, or require recovery beyond elapsed time.
