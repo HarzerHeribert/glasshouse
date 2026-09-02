@@ -56,6 +56,7 @@ mod openai_responses;
 
 use std::io::{BufReader, Read, Write};
 use std::net::{Shutdown, TcpStream};
+use std::time::Instant;
 
 use ureq::http::{HeaderValue, Request as HttpRequest, StatusCode, header};
 use ureq::{Agent, SendBody};
@@ -63,7 +64,9 @@ use ureq::{Agent, SendBody};
 use crate::provider::telemetry::RateLimitHeaders;
 
 use super::http::{self, RequestHead};
-use super::ingress::{Exchange, Framing, Outcome, StreamEnd, Tokens, transport_detail};
+use super::ingress::{
+    Exchange, Framing, Outcome, StreamEnd, Tokens, millis_since, transport_detail,
+};
 use super::upstream::{Route, Upstream, UpstreamBackend, VERSION_SEGMENT, path_of};
 use canonical::{BlockStart, Delta, Request, Response, StreamEvent, Unsupported};
 use stream::{SseEvent, SseReader};
@@ -853,6 +856,12 @@ pub(super) fn serve(
         return (decoded(Outcome::Declined, 400), RateLimitHeaders::default());
     };
 
+    // Migration 25's zero, taken immediately before the translated request
+    // leaves — `ingress::forward`'s own comment applies here word for word:
+    // the seconds `dispatched_at` names the hand-off to the gateway, this
+    // names the send, and a monotonic `Instant` is the only clock that can
+    // answer at this resolution without a step making the answer negative.
+    let dispatch = Instant::now();
     let response = match agent.run(outbound) {
         Ok(response) => response,
         Err(err) => {
@@ -869,6 +878,8 @@ pub(super) fn serve(
         }
     };
     let first_byte_at = Some(crate::provider::cache::now_unix_seconds());
+    // The same instant as an offset from the send — migration 25.
+    let first_byte_ms = Some(millis_since(dispatch));
     let (parts, mut body) = response.into_parts();
     let status = parts.status;
     let quota = RateLimitHeaders::read(
@@ -892,10 +903,19 @@ pub(super) fn serve(
         (
             Exchange {
                 first_byte_at,
+                first_byte_ms,
+                // Migration 25's `completed_ms`. `finish` is the one place
+                // every path that reached a response ends, so `elapsed()`
+                // here is the end of the exchange on all of them — the same
+                // reading `ingress::forward` takes at each of its own three
+                // post-response returns.
+                completed_ms: Some(millis_since(dispatch)),
                 framing: Some(framing),
                 tokens,
                 first_token_at: first.first_token_at,
                 first_tool_call_at: first.first_tool_call_at,
+                first_token_ms: first.first_token_ms,
+                first_tool_call_ms: first.first_tool_call_ms,
                 // Line 1334's `tool_rounds`: `Some` the moment a response
                 // arrived — `finish` is only ever reached after one did —
                 // `first.tool_uses` honestly `0` for a response the seam
@@ -959,6 +979,7 @@ pub(super) fn serve(
                 from,
                 &finish,
                 upstream_status,
+                dispatch,
             );
         }
         // The harness asked for a document and the provider streamed anyway:
@@ -1022,6 +1043,7 @@ pub(super) fn serve(
                 from,
                 &response,
                 first_byte_at,
+                first_byte_ms,
                 &finish,
                 upstream_status,
             ),
@@ -1101,7 +1123,7 @@ pub(super) fn serve(
                 ended: StreamEnd::Complete,
             },
             Some(tokens_of(&response)),
-            FirstEvents::of_document(&events, first_byte_at),
+            FirstEvents::of_document(&events, first_byte_at, first_byte_ms),
         );
     }
     deliver_document(
@@ -1109,6 +1131,7 @@ pub(super) fn serve(
         from,
         &response,
         first_byte_at,
+        first_byte_ms,
         &finish,
         upstream_status,
     )
@@ -1141,6 +1164,14 @@ type Finish<'a> =
 struct FirstEvents {
     first_token_at: Option<i64>,
     first_tool_call_at: Option<i64>,
+    /// Migration 25's `first_token_ms`: the same event as
+    /// [`Self::first_token_at`], measured as milliseconds since the upstream
+    /// request was sent rather than named on the wall clock. Stamped by the
+    /// same `is_none()` guard and from the same [`Self::note`] call, so the
+    /// two can never disagree about *which* event they describe.
+    first_token_ms: Option<i64>,
+    /// [`Self::first_token_ms`]'s sibling for the first tool-use block start.
+    first_tool_call_ms: Option<i64>,
     /// Line 1334's `tool_rounds`: how many [`BlockStart::ToolUse`] events
     /// this response's canonical events carried — the rounds this exchange
     /// *began*. Never stamped, always incremented; `0` is `serve`'s own
@@ -1156,13 +1187,22 @@ impl FirstEvents {
     /// `Delta::InputJson`, `BlockStart::Text`, a whitespace-only text delta —
     /// leaves all three untouched, and `first_token_at`/`first_tool_call_at`,
     /// once stamped, are never restamped.
-    fn note(&mut self, event: &StreamEvent, now: &dyn Fn() -> i64) {
+    ///
+    /// `now` answers **both** readings for the one instant a qualifying
+    /// event passes: the unix second the row's `*_at` columns hold, and
+    /// migration 25's milliseconds since the upstream request was sent. One
+    /// closure and not two, because the whole point of the pair is that they
+    /// describe the same moment — asking twice would let them drift by
+    /// whatever ran in between.
+    fn note(&mut self, event: &StreamEvent, now: &dyn Fn() -> (i64, Option<i64>)) {
         match event {
             StreamEvent::BlockDelta {
                 delta: Delta::Text(text),
                 ..
             } if self.first_token_at.is_none() && text.chars().any(|c| !c.is_whitespace()) => {
-                self.first_token_at = Some(now());
+                let (at, ms) = now();
+                self.first_token_at = Some(at);
+                self.first_token_ms = ms;
             }
             StreamEvent::BlockStart {
                 block: BlockStart::ToolUse { .. },
@@ -1170,7 +1210,9 @@ impl FirstEvents {
             } => {
                 self.tool_uses += 1;
                 if self.first_tool_call_at.is_none() {
-                    self.first_tool_call_at = Some(now());
+                    let (at, ms) = now();
+                    self.first_tool_call_at = Some(at);
+                    self.first_tool_call_ms = ms;
                 }
             }
             _ => {}
@@ -1184,13 +1226,23 @@ impl FirstEvents {
     /// — the protocol exposed no finer boundary than the document's own
     /// arrival, so there is one rule ([`Self::note`]) and not two, run here
     /// with a clock that always answers the same instant.
-    fn of_document(events: &[StreamEvent], first_byte_at: Option<i64>) -> Self {
+    ///
+    /// Migration 25's two offsets follow the same rule and for the same
+    /// reason: a document exposed no finer boundary than its own arrival, so
+    /// `first_token_ms` and `first_tool_call_ms` are the document's own
+    /// `first_byte_ms` — equality, exactly as the seconds are, rather than
+    /// an offset invented to look more precise than the protocol was.
+    fn of_document(
+        events: &[StreamEvent],
+        first_byte_at: Option<i64>,
+        first_byte_ms: Option<i64>,
+    ) -> Self {
         let mut first = Self::default();
         let Some(at) = first_byte_at else {
             return first;
         };
         for event in events {
-            first.note(event, &|| at);
+            first.note(event, &|| (at, first_byte_ms));
         }
         first
     }
@@ -1206,15 +1258,17 @@ fn tokens_of(response: &Response) -> Tokens {
 
 /// A translated document, written whole.
 ///
-/// `first_byte_at` is threaded in rather than read off `finish` — the
-/// caller's own capture — because [`FirstEvents::of_document`] needs it to
-/// derive the 1331/1332 pair from `response.as_events()` before `finish`
-/// attaches it to the [`Exchange`].
+/// `first_byte_at` and migration 25's `first_byte_ms` are threaded in rather
+/// than read off `finish` — the caller's own captures — because
+/// [`FirstEvents::of_document`] needs both to derive the 1331/1332 pair and
+/// its millisecond siblings from `response.as_events()` before `finish`
+/// attaches them to the [`Exchange`].
 fn deliver_document(
     out: &mut TcpStream,
     from: &dyn Codec,
     response: &Response,
     first_byte_at: Option<i64>,
+    first_byte_ms: Option<i64>,
     finish: Finish<'_>,
     upstream_status: u16,
 ) -> (Exchange, RateLimitHeaders) {
@@ -1233,7 +1287,7 @@ fn deliver_document(
                 ended: StreamEnd::Complete,
             },
             Some(tokens_of(response)),
-            FirstEvents::of_document(&response.as_events(), first_byte_at),
+            FirstEvents::of_document(&response.as_events(), first_byte_at, first_byte_ms),
         ),
         Err(_) => finish(
             Outcome::ClientGone,
@@ -1290,14 +1344,17 @@ fn stream_events<R: Read>(
     from: &dyn Codec,
     finish: Finish<'_>,
     upstream_status: u16,
+    dispatch: Instant,
 ) -> (Exchange, RateLimitHeaders) {
     let mut encoder = from.stream_encoder();
     let mut written = 0u64;
     let mut usage = None;
     let mut order = canonical::Order::default();
-    // Line 1331/1332's pair, noted in real time as each canonical event
-    // passes — the one case where `FirstEvents::note` gets a real wall
-    // clock rather than the constant `of_document` feeds it.
+    // Line 1331/1332's pair and migration 25's two offsets, noted in real
+    // time as each canonical event passes — the one case where
+    // `FirstEvents::note` gets a real clock rather than the constant
+    // `of_document` feeds it, and therefore the only path on which the two
+    // token offsets can differ from `first_byte_ms`.
     let mut first_events = FirstEvents::default();
     let client_gone = |written: u64| {
         finish(
@@ -1349,7 +1406,12 @@ fn stream_events<R: Read>(
                             cached: final_usage.cached,
                         });
                     }
-                    first_events.note(event, &crate::provider::cache::now_unix_seconds);
+                    first_events.note(event, &|| {
+                        (
+                            crate::provider::cache::now_unix_seconds(),
+                            Some(millis_since(dispatch)),
+                        )
+                    });
                     let bytes = encoder.encode(event);
                     if bytes.is_empty() {
                         continue;
@@ -1480,6 +1542,14 @@ fn exchange(
         // and `finish`'s own struct-update overrides both once one has.
         first_token_at: None,
         first_tool_call_at: None,
+        // Migration 25's four: `None` for `first_byte_at`'s reason again —
+        // this helper serves refusals raised before the upstream answered,
+        // and two of them before it was even asked. `finish`'s own
+        // struct-update overrides all four once a response has arrived.
+        first_byte_ms: None,
+        first_token_ms: None,
+        first_tool_call_ms: None,
+        completed_ms: None,
         framing: None,
         tokens: None,
         // Migration 24's two: `None` here, because this helper serves the
@@ -1660,11 +1730,14 @@ mod tests {
     fn first_events_note_stamps_only_a_real_token_and_a_tool_use_and_never_twice() {
         use std::cell::Cell;
 
+        // Both readings the production closure supplies, moving together:
+        // the seconds tick from 100 and the milliseconds are 50x each, so an
+        // assertion can tell which reading a stamp came from.
         let clock = Cell::new(100i64);
         let now = || {
             let at = clock.get();
             clock.set(at + 1);
-            at
+            (at, Some(at * 50))
         };
 
         let mut first = FirstEvents::default();
@@ -1712,7 +1785,13 @@ mod tests {
             &now,
         );
         assert_eq!(first.first_token_at, Some(100));
+        assert_eq!(
+            first.first_token_ms,
+            Some(5000),
+            "migration 25's offset is stamped from the same reading as the second"
+        );
         assert_eq!(first.first_tool_call_at, None);
+        assert_eq!(first.first_tool_call_ms, None);
 
         // A tool-use block start: the first qualifying event for its field.
         first.note(
@@ -1727,6 +1806,8 @@ mod tests {
         );
         assert_eq!(first.first_token_at, Some(100));
         assert_eq!(first.first_tool_call_at, Some(101));
+        assert_eq!(first.first_token_ms, Some(5000));
+        assert_eq!(first.first_tool_call_ms, Some(5050));
 
         // Neither restamps on a later qualifying event of its own kind.
         first.note(
@@ -1756,6 +1837,12 @@ mod tests {
             Some(101),
             "first tool call must not restamp"
         );
+        assert_eq!(
+            first.first_token_ms,
+            Some(5000),
+            "migration 25's offset must not restamp either"
+        );
+        assert_eq!(first.first_tool_call_ms, Some(5050));
     }
 
     /// [`FirstEvents::of_document`]'s own rule: both instants equal the given
@@ -1781,28 +1868,36 @@ mod tests {
                 },
             },
         ];
-        let first = FirstEvents::of_document(&events, Some(1_700_000_000));
+        let first = FirstEvents::of_document(&events, Some(1_700_000_000), Some(42));
         assert_eq!(first.first_token_at, Some(1_700_000_000));
         assert_eq!(first.first_tool_call_at, Some(1_700_000_000));
+        assert_eq!(
+            (first.first_token_ms, first.first_tool_call_ms),
+            (Some(42), Some(42)),
+            "a document exposes no finer boundary than its own arrival, in \
+             milliseconds exactly as in seconds"
+        );
 
         let text_only = vec![StreamEvent::BlockDelta {
             index: 0,
             delta: Delta::Text("hi".to_owned()),
         }];
-        let first = FirstEvents::of_document(&text_only, Some(1_700_000_000));
+        let first = FirstEvents::of_document(&text_only, Some(1_700_000_000), Some(42));
         assert_eq!(first.first_token_at, Some(1_700_000_000));
         assert_eq!(first.first_tool_call_at, None);
+        assert_eq!(first.first_token_ms, Some(42));
+        assert_eq!(first.first_tool_call_ms, None);
 
         let nothing_qualifying = vec![StreamEvent::BlockDelta {
             index: 0,
             delta: Delta::Text("   ".to_owned()),
         }];
-        let first = FirstEvents::of_document(&nothing_qualifying, Some(1_700_000_000));
+        let first = FirstEvents::of_document(&nothing_qualifying, Some(1_700_000_000), Some(42));
         assert_eq!(first.first_token_at, None);
         assert_eq!(first.first_tool_call_at, None);
 
         // No `first_byte_at` at all: nothing to derive an instant from.
-        let first = FirstEvents::of_document(&events, None);
+        let first = FirstEvents::of_document(&events, None, None);
         assert_eq!(first, FirstEvents::default());
     }
 
@@ -2243,6 +2338,10 @@ mod tests {
                 first_byte_at: None,
                 first_token_at: first.first_token_at,
                 first_tool_call_at: first.first_tool_call_at,
+                first_byte_ms: None,
+                first_token_ms: first.first_token_ms,
+                first_tool_call_ms: first.first_tool_call_ms,
+                completed_ms: None,
                 framing: Some(framing),
                 tokens,
                 effort: None,
@@ -2310,7 +2409,15 @@ mod tests {
         let (mut server, _) = listener.accept().expect("loopback accepts");
 
         let finish: Finish<'_> = &test_finish;
-        stream_events(&mut server, &mut events, &mut decoder, from, finish, 200);
+        stream_events(
+            &mut server,
+            &mut events,
+            &mut decoder,
+            from,
+            finish,
+            200,
+            Instant::now(),
+        );
         drop(server);
 
         let mut received = Vec::new();

@@ -22,6 +22,25 @@ validated and waiting on the commit. Next action: `.agent-runtime/CONTINUATION.m
 
 Last updated: 2026-09-02 (Europe/Berlin)
 
+## Checkpoint — 2026-09-02, batch 93: 1248 / 1347 (92.6%) — the Windows leg fully green, migration 25's millisecond offsets, retrieval feedback per scope, and the board repackaged by mechanism
+
+Session `221d1dd9` (Fable 5.1), continued. Wave 105 landed 1247 (Phase 32C
+11/12 — the headroom estimator re-calibrates at a quota regime change), the
+budget-spend residue on the reducer's and the rerank seat's choosers, and
+three Windows fix-forwards; **Windows VM run 6 on that commit passed all
+three legs — the first fully green Windows run** (two test binaries whose
+names Windows treated as installers had never executed; the ingress's
+read-half shutdown reset connections). Wave 106 lands 939 (a rating carries
+the scope of the retrieval it judges; Phase 21F 10/11) and migration 25
+(1347, 1348, 1349 — TTFC, TTFT and decode tokens per second from a monotonic
+instant before the send, four separately labelled lines; an independent Opus
+verifier accepted the Red diff; 1355 stays open on its *effective TTFC*
+clause). The user ruled tonight that packages be sized by mechanism: Phase 51
+joins (1836, 1854, 1855) and Phase 47's last three (1760, 1767, 1769) are
+live; responsiveness terms (1351, 1352, 1542, 1543, 1544, 1845, 1850) is
+validated and next; 1366 and 1419 are designed. Exact next actions:
+`.agent-runtime/CONTINUATION.md`.
+
 ## Checkpoint — 2026-09-02, batch 92: 1243 / 1347 (92.3%) — Phase 33A complete, rounds per minute printed as what it is, and the Windows leg's stack reserve holds
 
 Session `221d1dd9` (Fable 5.1), inherited hot from `0c56372c`. Wave 103

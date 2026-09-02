@@ -212,9 +212,15 @@ const CACHED_TOKENS: &str = "    cached input tokens : ";
 const FIRST_BYTE_SAMPLES: &str = "    first-byte samples  : ";
 const TIME_TO_FIRST_BYTE: &str = "    time to first byte  : ";
 const FIRST_TOKEN_SAMPLES: &str = "    first-token samples : ";
-const TIME_TO_FIRST_TOKEN: &str = "    time to first token : ";
+/// `GH-STREAM-TIMING-MS` gave line 1348's figure the name the map line uses.
+/// The reading is the same reading; the label now says which of the four
+/// separate measures it is.
+const TIME_TO_FIRST_TOKEN: &str = "    TTFT (generation responsiveness) : ";
 const FIRST_TOOL_CALL_SAMPLES: &str = "    first-tool-call samples : ";
-const TIME_TO_FIRST_TOOL_CALL: &str = "    time to first tool call : ";
+/// Line 1347's figure, and the first of the four — see
+/// `no_line_of_the_routing_cost_readout_carries_two_of_the_four_figures`.
+const TIME_TO_FIRST_TOOL_CALL: &str = "    TTFC (tool-using responsiveness) : ";
+const DECODE_RATE: &str = "    decode tokens/s (model serving) : ";
 const TOOL_ROUNDS: &str = "    tool rounds         : ";
 
 // ---------------------------------------------------------------------------
@@ -873,14 +879,19 @@ fn a_row_carrying_first_token_and_first_tool_call_prints_real_figures_and_an_unt
 
     let classification = section(&run.stdout, "classification");
     assert_eq!(value_after(&classification, FIRST_TOKEN_SAMPLES), "1");
-    assert!(
-        value_after(&classification, TIME_TO_FIRST_TOKEN).ends_with("ms (mean)"),
+    // The seeded row carries the seconds columns and no millisecond offset,
+    // which is exactly the pre-migration-25 shape, so the figure is real and
+    // marked for what it is.
+    assert_eq!(
+        value_after(&classification, TIME_TO_FIRST_TOKEN),
+        "2000ms (mean) (seconds only)",
         "{}",
         run.stdout
     );
     assert_eq!(value_after(&classification, FIRST_TOOL_CALL_SAMPLES), "1");
-    assert!(
-        value_after(&classification, TIME_TO_FIRST_TOOL_CALL).ends_with("ms (mean)"),
+    assert_eq!(
+        value_after(&classification, TIME_TO_FIRST_TOOL_CALL),
+        "3000ms (mean) (seconds only)",
         "{}",
         run.stdout
     );
@@ -953,4 +964,183 @@ fn two_seeded_rows_print_summed_rounds_repairs_and_a_real_per_minute_rate() {
         "a group with no counted row must say so, never a fabricated 0: {}",
         run.stdout
     );
+}
+
+// ---------------------------------------------------------------------------
+// 8. GH-STREAM-TIMING-MS (lines 1347, 1348, 1349, 1355): the four figures, at
+//    a resolution worth comparing, each on its own line.
+// ---------------------------------------------------------------------------
+
+/// Two seeded rows carrying migration 25's offsets and real output-token
+/// counts: TTFC, TTFT and decode tokens per second all print measured
+/// figures with no *(seconds only)* marker, and a group whose rows carry the
+/// seconds columns alone prints the marker instead — the figure is real, and
+/// it is a one-second clock rendered in milliseconds.
+///
+/// The arithmetic is fixed so a mutation cannot pass by accident:
+/// `first_tool_call_ms` 2,600 and 3,400 mean a 3,000ms TTFC;
+/// `first_token_ms` 1,000 and 1,900 mean a 1,450ms TTFT; and 240 + 360
+/// output tokens over (9,000 − 1,000) + (7,900 − 1,900) = 14,000ms of decode
+/// is 42.86 tokens a second.
+///
+/// Mutation target `zero-at-handoff` has its own socket test in
+/// `tests/gateway_timing_ms.rs`; what this one guards is that the readout
+/// divides and labels what the columns hold.
+#[test]
+fn seeded_millisecond_offsets_print_ttfc_ttft_and_a_decode_rate_without_the_seconds_marker() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+    let at = now() - 60;
+
+    for (first_token_ms, first_tool_call_ms, completed_ms, output) in
+        [(1_000, 2_600, 9_000, 240), (1_900, 3_400, 7_900, 360)]
+    {
+        let row = NewObservation::new("timed-provider", "timed-model")
+            .with_purpose(Some("classification"))
+            .with_timing(Some(at - 10), Some(at))
+            .with_tokens(None, Some(output), None)
+            .with_first_byte_ms(Some(120))
+            .with_first_token_ms(Some(first_token_ms))
+            .with_first_tool_call_ms(Some(first_tool_call_ms))
+            .with_completed_ms(Some(completed_ms));
+        fixture.ledger().record(row, at).unwrap();
+    }
+
+    // A group of the pre-migration-25 shape: the seconds columns and no
+    // offset anywhere.
+    let seconds_only = NewObservation::new("old-provider", "old-model")
+        .with_purpose(Some("legacy"))
+        .with_timing(Some(at - 10), Some(at))
+        .with_first_byte_at(Some(at - 9))
+        .with_first_token_at(Some(at - 8))
+        .with_first_tool_call_at(Some(at - 7));
+    fixture.ledger().record(seconds_only, at).unwrap();
+
+    let run = fixture.routing_cost(None);
+    assert!(run.status.success(), "stderr: {}", run.stderr);
+
+    let measured = section(&run.stdout, "classification");
+    assert_eq!(value_after(&measured, FIRST_TOOL_CALL_SAMPLES), "0");
+    assert_eq!(
+        value_after(&measured, TIME_TO_FIRST_TOOL_CALL),
+        "3000ms (mean)",
+        "{}",
+        run.stdout
+    );
+    assert_eq!(
+        value_after(&measured, TIME_TO_FIRST_TOKEN),
+        "1450ms (mean)",
+        "{}",
+        run.stdout
+    );
+    assert_eq!(
+        value_after(&measured, TIME_TO_FIRST_BYTE),
+        "120ms (mean)",
+        "{}",
+        run.stdout
+    );
+    assert_eq!(
+        value_after(&measured, DECODE_RATE),
+        "42.86 tok/s (mean)",
+        "{}",
+        run.stdout
+    );
+
+    let legacy = section(&run.stdout, "legacy");
+    assert_eq!(
+        value_after(&legacy, TIME_TO_FIRST_TOOL_CALL),
+        "3000ms (mean) (seconds only)",
+        "a group whose rows predate migration 25 must say so: {}",
+        run.stdout
+    );
+    assert_eq!(
+        value_after(&legacy, TIME_TO_FIRST_TOKEN),
+        "2000ms (mean) (seconds only)"
+    );
+    assert_eq!(
+        value_after(&legacy, DECODE_RATE),
+        "not recorded",
+        "there is no seconds fallback for a decode rate, and never a 0.00: {}",
+        run.stdout
+    );
+}
+
+/// **Line 1355, asserted structurally.** Raw TTFC, TTFT, throughput and
+/// rounds per minute stay visible separately rather than collapsing into one
+/// performance headline: each of the four labels appears exactly once in a
+/// group, each on its own line, and no line of the whole report carries more
+/// than one of the four figures.
+///
+/// Mutation target `headline-collapsed`: joining any two of the four onto
+/// one line must fail this test.
+#[test]
+fn no_line_of_the_routing_cost_readout_carries_two_of_the_four_figures() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+    let at = now() - 60;
+
+    let row = NewObservation::new("timed-provider", "timed-model")
+        .with_purpose(Some("classification"))
+        .with_timing(Some(at - 10), Some(at))
+        .with_tokens(None, Some(240), None)
+        .with_first_byte_ms(Some(120))
+        .with_first_token_ms(Some(1_000))
+        .with_first_tool_call_ms(Some(2_600))
+        .with_completed_ms(Some(9_000))
+        .with_tool_rounds(Some(2))
+        .with_repairs(Some(1));
+    fixture.ledger().record(row, at).unwrap();
+
+    let run = fixture.routing_cost(None);
+    assert!(run.status.success(), "stderr: {}", run.stderr);
+
+    // The four figures line 1355 names as this build's own — `effective
+    // TTFC` is the fifth and has no producer here at all, which is what
+    // `tests/gateway_timing_ms.rs`'s limits record.
+    const FIGURES: [&str; 4] = [
+        "TTFC (tool-using responsiveness)",
+        "TTFT (generation responsiveness)",
+        "decode tokens/s (model serving)",
+        "tool rounds",
+    ];
+
+    for figure in FIGURES {
+        let occurrences = run
+            .stdout
+            .lines()
+            .filter(|line| line.contains(figure))
+            .count();
+        assert_eq!(
+            occurrences, 1,
+            "{figure:?} must appear on exactly one line: {}",
+            run.stdout
+        );
+    }
+
+    for line in run.stdout.lines() {
+        let carried = FIGURES
+            .iter()
+            .filter(|figure| line.contains(*figure))
+            .count();
+        assert!(
+            carried <= 1,
+            "no line may carry two of the four figures, and this one carries {carried}: \
+             {line:?}"
+        );
+    }
+
+    // And no headline: nothing sums, scores or averages them together.
+    let classification = section(&run.stdout, "classification");
+    for forbidden in [
+        "overall",
+        "score",
+        "headline",
+        "combined",
+        "performance index",
+    ] {
+        assert!(
+            !classification.to_lowercase().contains(forbidden),
+            "the group must carry no collapsed figure named {forbidden:?}: {classification}"
+        );
+    }
 }

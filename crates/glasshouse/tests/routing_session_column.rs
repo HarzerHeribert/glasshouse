@@ -1022,7 +1022,11 @@ fn a_version_23_database_migrates_and_reads_back_three_nulls() {
     {
         let conn = Connection::open(&db_path).expect("open");
         conn.execute_batch(
-            "ALTER TABLE routing_observations DROP COLUMN turn_shape;
+            "ALTER TABLE routing_observations DROP COLUMN completed_ms;
+             ALTER TABLE routing_observations DROP COLUMN first_tool_call_ms;
+             ALTER TABLE routing_observations DROP COLUMN first_token_ms;
+             ALTER TABLE routing_observations DROP COLUMN first_byte_ms;
+             ALTER TABLE routing_observations DROP COLUMN turn_shape;
              ALTER TABLE routing_observations DROP COLUMN effort_level;
              ALTER TABLE routing_observations DROP COLUMN session_id;
              DELETE FROM schema_migrations WHERE version >= 24;",

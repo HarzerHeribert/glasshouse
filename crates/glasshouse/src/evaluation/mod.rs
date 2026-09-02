@@ -242,8 +242,10 @@ pub enum EvaluationKind {
     FailoverPrevented,
     /// A person's or an agent's own verdict on a memory Glasshouse retrieved
     /// — `glasshouse memory rate <memory-id> <verdict>` — map lines 1821,
-    /// 1823, 1824, 1825 and 1831's explicit half. `subject` is unused;
-    /// `outcome` carries the verdict word itself
+    /// 1823, 1824, 1825, 1831 and **939**'s explicit half. `subject` carries
+    /// the [`RetrievalScope`] word of the retrieval this rating judges (see
+    /// [`record_memory_rating`]'s own doc comment), or is absent when the
+    /// memory was never retrieved; `outcome` carries the verdict word itself
     /// ([`EvaluationOutcome`]'s eight non-[`EvaluationOutcome::Unknown`]
     /// values), `memory_id` is the rated memory, `session_id` is the
     /// session the rating is about when one was given, and `detail` is the
@@ -1253,6 +1255,42 @@ impl EvaluationObservations {
         collect_observations(rows)
     }
 
+    /// The `subject` (the [`RetrievalScope`] word) of the retrieval
+    /// [`record_memory_rating`] is attributing this rating to — map line
+    /// 939. The most recent [`EvaluationKind::MemoryRetrieved`] row for
+    /// `memory_id` carrying the given `session_id` when one is given and a
+    /// row matches it, else the most recent such row for `memory_id`
+    /// regardless of session, else [`None`] when the memory was never
+    /// retrieved at all.
+    ///
+    /// **One query.** The `ORDER BY` puts a session match first (when
+    /// `session_id` is [`Some`]) and falls back to recency alone otherwise —
+    /// a plain `session_id = ?3` in that position would rank a real,
+    /// differing session above a `NULL` one whenever `session_id` is
+    /// [`None`], which is not "the most recent at all".
+    fn most_recent_retrieval_scope(
+        &self,
+        memory_id: &str,
+        session_id: Option<&str>,
+    ) -> Result<Option<String>, EvaluationError> {
+        let conn = self.lock();
+        conn.query_row(
+            "SELECT subject
+               FROM evaluation_observations
+              WHERE kind = ?1 AND memory_id = ?2
+              ORDER BY CASE WHEN session_id = ?3 THEN 1 ELSE 0 END DESC, seq DESC
+              LIMIT 1",
+            params![
+                EvaluationKind::MemoryRetrieved.as_str(),
+                memory_id,
+                session_id
+            ],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(sql_err("look up a memory rating's retrieval scope"))
+    }
+
     /// Refuse a window that reaches back past what retention kept.
     ///
     /// **The test is whether anything was actually trimmed, not whether the
@@ -1626,6 +1664,75 @@ impl EvaluationObservations {
         )
         .map_err(sql_err("count challenge-accuracy ratings"))
     }
+
+    /// **Map line 939**: *"Record false-positive or harmful memory
+    /// retrievals so the retrieval policy can be evaluated."* One row per
+    /// [`RetrievalScope`] word present on any [`EvaluationKind::MemoryRetrieved`]
+    /// or [`EvaluationKind::MemoryRated`] row in the window, plus one row with
+    /// `scope: None` for [`EvaluationKind::MemoryRated`] rows whose `subject`
+    /// is unset — a rating of a memory this window never saw retrieved
+    /// ([`record_memory_rating`]'s attribution lookup found nothing).
+    ///
+    /// `retrieved` counts that scope's [`EvaluationKind::MemoryRetrieved`]
+    /// rows; `not_useful` and `caused_complexity` count that scope's
+    /// [`EvaluationKind::MemoryRated`] rows carrying those two verdicts
+    /// only — [`EvaluationOutcome::Useful`] and the other five verdicts are
+    /// never counted here, because this reader answers "was this retrieval
+    /// a false positive or harmful", not [`Self::usefulness`]'s question.
+    pub fn false_positives_by_scope(
+        &self,
+        from: i64,
+        to: i64,
+    ) -> Result<Vec<FalsePositivesByScope>, EvaluationError> {
+        self.refuse_unretained_window(from)?;
+        let conn = self.lock();
+        let mut statement = conn
+            .prepare(
+                "WITH scopes AS (
+                     SELECT DISTINCT subject FROM evaluation_observations
+                      WHERE kind = ?1 AND observed_at >= ?5 AND observed_at <= ?6
+                     UNION
+                     SELECT DISTINCT subject FROM evaluation_observations
+                      WHERE kind = ?2 AND observed_at >= ?5 AND observed_at <= ?6
+                 )
+                 SELECT
+                     s.subject,
+                     (SELECT COUNT(*) FROM evaluation_observations r
+                        WHERE r.kind = ?1 AND r.subject IS s.subject
+                          AND r.observed_at >= ?5 AND r.observed_at <= ?6),
+                     (SELECT COUNT(*) FROM evaluation_observations o
+                        WHERE o.kind = ?2 AND o.subject IS s.subject AND o.outcome = ?3
+                          AND o.observed_at >= ?5 AND o.observed_at <= ?6),
+                     (SELECT COUNT(*) FROM evaluation_observations o
+                        WHERE o.kind = ?2 AND o.subject IS s.subject AND o.outcome = ?4
+                          AND o.observed_at >= ?5 AND o.observed_at <= ?6)
+                 FROM scopes s
+                 ORDER BY s.subject IS NULL, s.subject",
+            )
+            .map_err(sql_err("read false-positive counts by retrieval scope"))?;
+        let rows = statement
+            .query_map(
+                params![
+                    EvaluationKind::MemoryRetrieved.as_str(),
+                    EvaluationKind::MemoryRated.as_str(),
+                    EvaluationOutcome::NotUseful.as_str(),
+                    EvaluationOutcome::CausedComplexity.as_str(),
+                    from,
+                    to,
+                ],
+                |row| {
+                    Ok(FalsePositivesByScope {
+                        scope: row.get(0)?,
+                        retrieved: row.get(1)?,
+                        not_useful: row.get(2)?,
+                        caused_complexity: row.get(3)?,
+                    })
+                },
+            )
+            .map_err(sql_err("read false-positive counts by retrieval scope"))?;
+        rows.collect::<Result<Vec<_>, rusqlite::Error>>()
+            .map_err(sql_err("read false-positive counts by retrieval scope"))
+    }
 }
 
 /// **Map line 1821**'s counts: explicit ratings, the labelled proxy, and
@@ -1699,6 +1806,25 @@ pub struct ChallengeAccuracyCounts {
     /// `needs-review` revalidation — see the reader's own doc comment) in
     /// the window.
     pub challenges: i64,
+}
+
+/// **Map line 939**'s counts, one bucket per [`RetrievalScope`] —
+/// [`EvaluationObservations::false_positives_by_scope`]'s own row.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FalsePositivesByScope {
+    /// The [`RetrievalScope`] word, or [`None`] for ratings of a memory this
+    /// window never saw retrieved.
+    pub scope: Option<String>,
+    /// That scope's [`EvaluationKind::MemoryRetrieved`] rows in the window.
+    /// Always 0 when [`Self::scope`] is [`None`] — a retrieval always
+    /// carries a scope, so nothing ever populates that bucket's numerator.
+    pub retrieved: i64,
+    /// That scope's [`EvaluationKind::MemoryRated`] rows carrying
+    /// [`EvaluationOutcome::NotUseful`] in the window.
+    pub not_useful: i64,
+    /// That scope's [`EvaluationKind::MemoryRated`] rows carrying
+    /// [`EvaluationOutcome::CausedComplexity`] in the window.
+    pub caused_complexity: i64,
 }
 
 /// One bucket of routed sessions, and what their harnesses said about their
@@ -3276,6 +3402,18 @@ pub fn record_failover_prevention(
 /// project's own store — `glasshouse memory rate`'s project-isolation check
 /// runs before this is ever called, the same way `memory_challenge` and
 /// `memory_resolve_conflict` resolve an id before acting on it.
+///
+/// **Carries the scope of the retrieval it judges — map line 939.** Before
+/// writing, this looks up the [`RetrievalScope`] of the retrieval the
+/// rating is about (`EvaluationObservations`'s own private attribution
+/// lookup) and copies it onto the row's own `subject`, so `false positives by
+/// retrieval scope` can be read out per scope rather than only per memory.
+/// Every verdict is attributed the same way — the scope is a fact about
+/// which retrieval produced the memory being rated, not a judgement the
+/// verdict itself makes. A memory this rating never saw retrieved carries no
+/// scope. **A lookup failure fails the command exactly as a write failure
+/// does** — this producer has no door to protect, per this function's own
+/// header above.
 pub fn record_memory_rating(
     runtime: &Runtime,
     memory_id: &str,
@@ -3284,16 +3422,21 @@ pub fn record_memory_rating(
     note: Option<&str>,
     observed_at_unix: i64,
 ) -> anyhow::Result<i64> {
+    let ledger = EvaluationObservations::open(runtime)?;
+    let scope = ledger.most_recent_retrieval_scope(memory_id, session_id)?;
+
     let mut observation = NewObservation::new(EvaluationKind::MemoryRated)
         .with_memory_id(memory_id)
         .with_outcome(verdict);
+    if let Some(scope) = scope {
+        observation = observation.with_subject(scope);
+    }
     if let Some(session_id) = session_id {
         observation = observation.with_session_id(session_id);
     }
     if let Some(note) = note {
         observation = observation.with_detail(note);
     }
-    let ledger = EvaluationObservations::open(runtime)?;
     Ok(ledger.record(observation, observed_at_unix)?)
 }
 

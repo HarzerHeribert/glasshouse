@@ -147,7 +147,7 @@
 
 use std::io::{BufReader, Read, Write};
 use std::net::{Shutdown, TcpStream};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use ureq::http::{HeaderValue, Request, StatusCode, header};
 use ureq::{Agent, SendBody};
@@ -235,6 +235,26 @@ pub(super) struct Exchange {
     /// exchange only — the same rule and the same `None` cases as
     /// [`Self::first_token_at`].
     pub(super) first_tool_call_at: Option<i64>,
+    /// Milliseconds from the instant this exchange's upstream request was
+    /// **sent** to the instant the provider's status and headers were in
+    /// hand — `crate::database` migration 25, and an offset rather than a
+    /// clock reading. Measured from a monotonic [`Instant`] taken
+    /// immediately before the send, so it is never negative and never
+    /// derived by subtracting two wall-clock readings. `None` on every path
+    /// that never sent a request, and on every path that never got an
+    /// answer.
+    pub(super) first_byte_ms: Option<i64>,
+    /// [`Self::first_byte_ms`]'s sibling for the first real generated token,
+    /// on a **translated** exchange only — the same rule and the same `None`
+    /// cases as [`Self::first_token_at`].
+    pub(super) first_token_ms: Option<i64>,
+    /// [`Self::first_byte_ms`]'s sibling for the first tool-use block start,
+    /// on a **translated** exchange only.
+    pub(super) first_tool_call_ms: Option<i64>,
+    /// [`Self::first_byte_ms`]'s sibling for the instant this exchange
+    /// stopped moving bytes, on both paths. `None` whenever the request
+    /// never left, which is exactly when `first_byte_ms` is `None` too.
+    pub(super) completed_ms: Option<i64>,
     /// How the provider's response was framed and how its stream ended —
     /// `None` on every path where no response arrived, exactly like
     /// `first_byte_at`. See this module's own "a fourth thing may now be
@@ -685,6 +705,16 @@ fn forward(
         );
     };
 
+    // Migration 25's zero, and the reason it is taken *here* rather than in
+    // the accept loop: `dispatched_at` up there is the instant the
+    // connection was handed to `serve`, which is before the head was read
+    // and before this request was rebuilt for the provider. The offsets
+    // measure the provider's own responsiveness, so their zero is the send.
+    // A monotonic `Instant`, never a wall clock: two wall readings
+    // subtracted across a clock step produce a negative "duration", which is
+    // what migration 25's `CHECK` refuses and what this measurement cannot
+    // produce at all.
+    let dispatch = Instant::now();
     let response = match agent.run(request) {
         Ok(response) => response,
         Err(err) => {
@@ -706,6 +736,9 @@ fn forward(
     // thing may now be recorded". Read once, here, before anything below
     // touches the body: every return past this point carries it.
     let first_byte_at = Some(crate::provider::cache::now_unix_seconds());
+    // The same instant, measured against the send rather than named on the
+    // wall clock — migration 25's `first_byte_ms`.
+    let first_byte_ms = Some(millis_since(dispatch));
 
     let (parts, mut body) = response.into_parts();
     let status = parts.status;
@@ -773,6 +806,8 @@ fn forward(
         return (
             Exchange {
                 first_byte_at,
+                first_byte_ms,
+                completed_ms: Some(millis_since(dispatch)),
                 framing: Some(framing),
                 ..exchange(Outcome::ClientGone, status.as_u16(), upstream, Some(route))
             },
@@ -822,6 +857,8 @@ fn forward(
                 return (
                     Exchange {
                         first_byte_at,
+                        first_byte_ms,
+                        completed_ms: Some(millis_since(dispatch)),
                         framing: Some(framing),
                         ..exchange(Outcome::ClientGone, status.as_u16(), upstream, Some(route))
                     },
@@ -845,6 +882,12 @@ fn forward(
     (
         Exchange {
             first_byte_at,
+            first_byte_ms,
+            // The exchange is over here — every byte has been relayed and
+            // the socket is shut down — so this is the reading migration
+            // 25's `completed_ms` means, taken before anything below it can
+            // push it later.
+            completed_ms: Some(millis_since(dispatch)),
             framing: Some(framing),
             ..exchange(
                 Outcome::Forwarded {
@@ -1116,6 +1159,18 @@ fn status_carries_a_body(status: StatusCode) -> bool {
         || status == StatusCode::NOT_MODIFIED)
 }
 
+/// Milliseconds elapsed since `dispatch`, as the ledger's column holds them.
+///
+/// [`Instant`] is monotonic on every platform Glasshouse ships on, so this
+/// can never be negative and migration 25's `CHECK` can never fire on a
+/// value this function produced. The saturation is for a duration no
+/// exchange can survive to report — a `u128` of milliseconds that will not
+/// fit an `i64` is roughly 292 million years — and exists so that the
+/// conversion has one stated answer rather than a panic or a wrap.
+pub(super) fn millis_since(dispatch: Instant) -> i64 {
+    i64::try_from(dispatch.elapsed().as_millis()).unwrap_or(i64::MAX)
+}
+
 /// One [`Exchange`], with the upstream's non-secret identity filled in.
 ///
 /// `route` is `None` for everything refused before a target could be placed.
@@ -1140,6 +1195,17 @@ fn exchange(outcome: Outcome, status: u16, upstream: &Upstream, route: Option<&R
         // of its returns.
         first_token_at: None,
         first_tool_call_at: None,
+        // Migration 25's four offsets, and the same rule one line up: every
+        // caller of this helper returns before the upstream request was
+        // sent or before an answer came back, so there is no monotonic zero
+        // to measure from. [`forward`]'s own three post-response returns
+        // override `first_byte_ms` and `completed_ms` via struct-update
+        // syntax; the two token offsets stay `None` on this path for
+        // `first_token_at`'s reason.
+        first_byte_ms: None,
+        first_token_ms: None,
+        first_tool_call_ms: None,
+        completed_ms: None,
         framing: None,
         tokens: None,
         // The relay never decodes a request, so it has nothing to derive
@@ -1314,6 +1380,10 @@ mod tests {
                 first_byte_at: Some(1_700_000_000),
                 first_token_at: Some(1_700_000_001),
                 first_tool_call_at: Some(1_700_000_002),
+                first_byte_ms: Some(120),
+                first_token_ms: Some(1_100),
+                first_tool_call_ms: Some(2_400),
+                completed_ms: Some(3_600),
                 framing: Some(Framing {
                     declared: Some(4096),
                     relayed: Some(4096),

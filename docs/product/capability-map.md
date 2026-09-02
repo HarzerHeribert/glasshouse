@@ -936,7 +936,7 @@ Phase 21F — Memory retrieval quality
 ☑ Include rationale and invalidation conditions when a remembered decision may constrain implementation.
 ☑ Allow the receiving agent to challenge a memory explicitly when current evidence contradicts it.
 ☑ Treat a challenged memory as requiring validation before further automatic injection into the same task.
-☐ Record false-positive or harmful memory retrievals so the retrieval policy can be evaluated.
+☑ Record false-positive or harmful memory retrievals so the retrieval policy can be evaluated.
 
 Phase 21G — Memory revalidation
 
@@ -1344,9 +1344,9 @@ Phase 33A — Routing evidence ledger
 
 Phase 33B — Reliability-adjusted agent performance
 
-☐ Treat time to first tool call, TTFC, as the primary responsiveness measure for tool-using agent work when structured tool events are available.
-☐ Keep TTFT as a separate measure of generation responsiveness rather than presenting it as agent productivity.
-☐ Keep decode tokens per second as a model-serving characteristic rather than presenting it as task progress.
+☑ Treat time to first tool call, TTFC, as the primary responsiveness measure for tool-using agent work when structured tool events are available.
+☑ Keep TTFT as a separate measure of generation responsiveness rather than presenting it as agent productivity.
+☑ Keep decode tokens per second as a model-serving characteristic rather than presenting it as task progress.
 ☑ Track successful tool rounds per minute of serving time as an outcome-adjacent agent-system measure.
 ☐ Define effective TTFC as observed TTFC divided by one minus the relevant failure probability when enough observations exist.
 ☐ Use reliability-adjusted latency in route comparison so a fast route that frequently fails is not ranked as genuinely fast.

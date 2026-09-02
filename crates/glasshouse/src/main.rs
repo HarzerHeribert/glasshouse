@@ -4118,9 +4118,8 @@ fn routing_cost_report(runtime: &Runtime, hours: u32) -> anyhow::Result<String> 
 /// a read of the response body the relay never parses.
 ///
 /// `GH-STREAM-FIRST-EVENTS` (lines 1331/1332) adds two more such pairs beside
-/// it, `first-token`/`time to first token` and `first-tool-call`/`time to
-/// first tool call`, through the same `render_time_to_first_byte` renderer —
-/// but only a **translated** exchange can ever supply a sample for either:
+/// it, `first-token`/`TTFT` and `first-tool-call`/`TTFC` — but only a
+/// **translated** exchange can ever supply a sample for either:
 /// `crate::gateway::translate` decodes every provider event anyway, so the
 /// instant a qualifying one passes is a clock reading, same as the byte
 /// above; a relayed exchange leaves both `NULL`.
@@ -4132,6 +4131,38 @@ fn routing_cost_report(runtime: &Runtime, hours: u32) -> anyhow::Result<String> 
 /// printed as an outcome-adjacent measure and never folded into a score, the
 /// same restraint `render_savings_section` and this function's own token
 /// figures already keep.
+///
+/// # Phase 33B's four figures, and why they are four lines
+///
+/// `GH-STREAM-TIMING-MS` gives those latency lines a resolution worth
+/// comparing (`crate::database` migration 25) and names them for what each
+/// one measures:
+///
+/// - **`TTFC (tool-using responsiveness)`** — line 1347. The primary
+///   responsiveness measure for tool-using agent work, and *primary* here is
+///   the label and the position: it leads the four, ahead of TTFT.
+/// - **`TTFT (generation responsiveness)`** — line 1348. Kept as a separate
+///   measure of generation responsiveness and never presented as agent
+///   productivity, which is why it is not merged into the line above it.
+/// - **`decode tokens/s (model serving)`** — line 1349, through
+///   [`render_decode_rate`]. A characteristic of how the model is served,
+///   never a statement about task progress.
+/// - **`tool rounds`** — line 1350, unchanged.
+///
+/// **Line 1355 is the restraint that governs all four**: raw TTFC, TTFT,
+/// throughput and rounds per minute stay visible separately rather than
+/// collapsing into one performance headline. There is no total here, no
+/// score, and no arithmetic joining any two of them — each is its own line
+/// with its own label and its own *not recorded*. `effective TTFC`, the
+/// fifth figure 1355 names, has no producer in this build at all; when
+/// `GH-EFFECTIVE-TTFC` supplies one it gets a line of its own under the same
+/// rule and never a slot inside one of these.
+///
+/// `(seconds only)` on a latency line is [`render_latency_ms`]'s marker for
+/// a group whose rows all predate migration 25: the figure is a
+/// one-second clock rendered in milliseconds, which is honest and nearly
+/// useless, and saying so is cheaper than letting a reader compare it
+/// against a measured one.
 #[allow(clippy::too_many_arguments)]
 fn render_routing_cost(
     project_id: &str,
@@ -4172,23 +4203,40 @@ fn render_routing_cost(
             ));
             out.push_str(&format!(
                 "    time to first byte  : {}\n",
-                render_time_to_first_byte(group.mean_time_to_first_byte_ms)
+                render_latency_ms(
+                    group.mean_time_to_first_byte_ms,
+                    group.first_byte_ms_sample_count
+                )
+            ));
+            // Line 1347 is the ordering as much as the label: TTFC leads the
+            // four figures because it is the responsiveness measure for
+            // tool-using agent work, and TTFT follows it as a separate
+            // measure of something else (1348) rather than as its summary.
+            out.push_str(&format!(
+                "    first-tool-call samples : {}\n",
+                group.first_tool_call_sample_count
+            ));
+            out.push_str(&format!(
+                "    TTFC (tool-using responsiveness) : {}\n",
+                render_latency_ms(
+                    group.mean_time_to_first_tool_call_ms,
+                    group.first_tool_call_ms_sample_count
+                )
             ));
             out.push_str(&format!(
                 "    first-token samples : {}\n",
                 group.first_token_sample_count
             ));
             out.push_str(&format!(
-                "    time to first token : {}\n",
-                render_time_to_first_byte(group.mean_time_to_first_token_ms)
+                "    TTFT (generation responsiveness) : {}\n",
+                render_latency_ms(
+                    group.mean_time_to_first_token_ms,
+                    group.first_token_ms_sample_count
+                )
             ));
             out.push_str(&format!(
-                "    first-tool-call samples : {}\n",
-                group.first_tool_call_sample_count
-            ));
-            out.push_str(&format!(
-                "    time to first tool call : {}\n",
-                render_time_to_first_byte(group.mean_time_to_first_tool_call_ms)
+                "    decode tokens/s (model serving) : {}\n",
+                render_decode_rate(group)
             ));
             out.push_str(&format!(
                 "    tool rounds         : {}\n",
@@ -4423,6 +4471,43 @@ fn render_token_count(value: Option<i64>) -> String {
 fn render_time_to_first_byte(mean_ms: Option<f64>) -> String {
     match mean_ms {
         Some(ms) => format!("{}ms (mean)", ms.round() as i64),
+        None => "not recorded".to_owned(),
+    }
+}
+
+/// [`render_time_to_first_byte`] plus migration 25's honesty marker.
+///
+/// The mean a group carries is computed over both kinds of row — the
+/// measured `*_ms` offset where one exists, the second-resolution difference
+/// where it does not — so a figure alone cannot say which it is. When no row
+/// in the group carried a measured offset, *(seconds only)* is appended:
+/// the number is real, and it is a one-second clock rounded into
+/// milliseconds, which for a time-to-first-token is very nearly always `0`
+/// or `1000`. A group with even one measured row prints no marker, because
+/// the mean is then a mixture and the count beside it is the honest
+/// statement of how much of one.
+///
+/// *not recorded* is never marked: there is no figure to qualify.
+fn render_latency_ms(mean_ms: Option<f64>, ms_sample_count: usize) -> String {
+    let rendered = render_time_to_first_byte(mean_ms);
+    if mean_ms.is_some() && ms_sample_count == 0 {
+        return format!("{rendered} (seconds only)");
+    }
+    rendered
+}
+
+/// Capability map line 1349, rendered: decode tokens per second, **as a
+/// model-serving characteristic and never as task progress**.
+///
+/// Its own line, its own label, and no arithmetic joining it to TTFC, TTFT
+/// or the rounds rate beside it — line 1355's rule, which this function
+/// exists to keep by construction rather than by intention.
+/// `render_token_count`'s rule again for the absence: a group whose rows
+/// carry no millisecond offsets has nothing to divide, and says so rather
+/// than printing `0.00`.
+fn render_decode_rate(group: &glasshouse::routing::evidence::PurposeConsumption) -> String {
+    match group.decode_tokens_per_second() {
+        Some(rate) => format!("{rate:.2} tok/s (mean)"),
         None => "not recorded".to_owned(),
     }
 }
@@ -12787,6 +12872,7 @@ fn memory_retrievals_report(
     let caused_complexity = ledger.caused_complexity(from, to)?;
     let revalidation_accuracy = ledger.revalidation_accuracy(from, to)?;
     let challenge_accuracy = ledger.challenge_accuracy(from, to)?;
+    let false_positives_by_scope = ledger.false_positives_by_scope(from, to)?;
     Ok(render_memory_retrievals(
         runtime.project().id().as_str(),
         hours,
@@ -12797,6 +12883,7 @@ fn memory_retrievals_report(
         &caused_complexity,
         &revalidation_accuracy,
         &challenge_accuracy,
+        &false_positives_by_scope,
     ))
 }
 
@@ -12872,6 +12959,7 @@ fn render_memory_retrievals(
     caused_complexity: &glasshouse::evaluation::CausedComplexityCounts,
     revalidation_accuracy: &glasshouse::evaluation::RevalidationAccuracyCounts,
     challenge_accuracy: &glasshouse::evaluation::ChallengeAccuracyCounts,
+    false_positives_by_scope: &[glasshouse::evaluation::FalsePositivesByScope],
 ) -> String {
     use std::fmt::Write as _;
 
@@ -12895,7 +12983,8 @@ fn render_memory_retrievals(
             prevented_repetition,
             caused_complexity,
             revalidation_accuracy,
-            challenge_accuracy
+            challenge_accuracy,
+            false_positives_by_scope
         )
     );
     out
@@ -12911,6 +13000,7 @@ fn render_memory_quality(
     caused_complexity: &glasshouse::evaluation::CausedComplexityCounts,
     revalidation_accuracy: &glasshouse::evaluation::RevalidationAccuracyCounts,
     challenge_accuracy: &glasshouse::evaluation::ChallengeAccuracyCounts,
+    false_positives_by_scope: &[glasshouse::evaluation::FalsePositivesByScope],
 ) -> String {
     use std::fmt::Write as _;
 
@@ -12991,6 +13081,33 @@ fn render_memory_quality(
         challenge_accuracy.unknown, challenge_accuracy.challenges
     );
     let _ = writeln!(out, "  no proxy: nothing observed bears on this");
+
+    let _ = writeln!(out, "\nfalse positives by retrieval scope (939):");
+    if false_positives_by_scope.is_empty() {
+        let _ = writeln!(out, "  none recorded");
+    } else {
+        let find = |want: Option<&str>| {
+            false_positives_by_scope
+                .iter()
+                .find(|row| row.scope.as_deref() == want)
+        };
+        for scope in ["current", "historical", "injection"] {
+            let (not_useful, caused_complexity, retrieved) = find(Some(scope))
+                .map(|row| (row.not_useful, row.caused_complexity, row.retrieved))
+                .unwrap_or((0, 0, 0));
+            let _ = writeln!(
+                out,
+                "  {scope}: not-useful {not_useful} / caused-complexity {caused_complexity} of {retrieved} retrieved"
+            );
+        }
+        let (never_not_useful, never_caused_complexity) = find(None)
+            .map(|row| (row.not_useful, row.caused_complexity))
+            .unwrap_or((0, 0));
+        let _ = writeln!(
+            out,
+            "  never retrieved: not-useful {never_not_useful} / caused-complexity {never_caused_complexity}"
+        );
+    }
 
     out
 }

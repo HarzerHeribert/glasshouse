@@ -351,3 +351,119 @@ State: **COMPLETE**. Phase 33B stands at 5 of 14; 1347, 1348, 1349, 1355
 wait on the millisecond columns (their readouts are `GH-STREAM-TIMING-MS`'s),
 1351/1352 on the term after them, 1353/1359 packaged separately, 1354 half,
 1356/1360 Cluster P/Q.
+
+## Lines 1347, 1348, 1349 — CLOSED 2026-09-02 (`GH-STREAM-TIMING-MS`, Red, Opus 5 high): millisecond offsets since the send, and four figures on four lines; 1355 stays OPEN on its *effective TTFC* clause
+
+**The mechanism** (design note *Millisecond offsets on the routing row —
+Cluster G's second column set*). Migration 25 adds four nullable
+`INTEGER CHECK (col IS NULL OR col >= 0)` columns to `routing_observations`
+— `first_byte_ms`, `first_token_ms`, `first_tool_call_ms`, `completed_ms` —
+in migration 24's shape with migration 11's `CHECK` (a quantity with an
+arithmetic floor, not a vocabulary word; the worker's reasoning, accepted).
+Each gateway path takes its own monotonic `Instant` immediately before its
+send — `ingress::forward` one line above `agent.run(request)`,
+`translate::serve` one line above `agent.run(outbound)` — and
+`ingress::millis_since` is the one saturating conversion. `FirstEvents::note`'s
+clock closure now yields `(seconds, Option<ms>)` and stamps both; the document
+case reuses the first-byte reading for both token offsets, as the seconds
+do. The seconds columns are written exactly as before. `Exchange` carries the
+four offsets, `None` on refusal; `record_routing_observation` writes them
+through four builders. Readers: `RoutingObservation::duration_ms` prefers
+`completed_ms` and falls back to the seconds difference;
+`consumption_by_purpose`'s three means prefer the ms column per row and
+carry `*_ms_sample_count` beside the seconds count so the readout can say
+*(seconds only)*; `PurposeConsumption::decode_tokens_per_second` is output
+tokens over the decode span (`completed_ms − first_token_ms`) summed over
+rows carrying all three, `None` when either half is unmeasured — never a
+rate from a second-resolution denominator. `render_routing_cost` prints
+`TTFC (tool-using responsiveness)`, `TTFT (generation responsiveness)`,
+`decode tokens/s (model serving)` and the tool-rounds line each on its own
+line, *not recorded* per figure, *(seconds only)* per group.
+
+**Contracts.** 1347: given a translated exchange with a tool-use block,
+Glasshouse records the milliseconds from the send to that block and prints it
+first and labelled as the responsiveness measure for tool-using work. 1348:
+TTFT is its own column, its own line, its own label, never derived from or
+folded into TTFC. 1349: decode tokens per second is a model-serving figure
+on its own line, absent rather than zero, and in no score.
+
+**Regression** (`tests/gateway_timing_ms.rs`, 4/4, a real socket with a
+translated and a relayed exchange and planted pauses; `tests/routing_cost.rs`,
+12/12, the shipped binary; `--lib gateway` 210/210; `--lib routing::evidence`
+62/62; `--lib database`'s migration test): a translated stream with a 1.2 s
+pause before the first real token and another before the tool-use block
+measures `first_byte_ms < first_token_ms`, the two gaps ≥ 1000 ms, completion
+after the tool call, and the seconds columns unchanged; a relayed exchange
+with the pause planted in the *provider's* body measures first byte and
+completion and neither token offset; a refused exchange measures none; a
+version-24 database migrates, reads back four `None`s, and a new row carries
+them; migration 25 undoes cleanly (whole-schema byte comparison); no line of
+the readout carries two of the four figures (a structural test over the
+rendered report).
+
+**Mutations, 5/5 KILLED** (worker's `mutate.sh`, restores byte-identical):
+`zero-at-handoff` (the `Instant` moved 1.2 s earlier — `first_byte_ms=1211`
+where the planted pre-send wait must not be inside it), `wall-clock-offset`
+(the offset floored to whole seconds — the value set two wall readings can
+produce; a stand-in the worker named as such, and the independent verifier's
+objective 5 rules on its faithfulness), `fallback-dropped` (`duration_ms`
+without the seconds fallback), `headline-collapsed` (two figures on one
+line), `migration-missing-check` (a column without its `CHECK` accepts −1).
+
+**Packet errors, all five right**: `gateway/mod.rs` needed no change (the
+design note's zero is each path's own send, not a hand-off instant threaded
+down); twelve literal version pins, not eleven (`session/store.rs` ×4, and
+`tests/session_context.rs` spells one across three lines); seventeen rollback
+lists undo migration 24 and every one now leads with 25's four drops (the
+migration ripple this project's memory records); a client-side pause on the
+relay is *inside* the relay's time to first byte, because `ureq` reads the
+harness body lazily — a real behavioural difference, recorded; the label
+reading. Scope overflow: `session/store.rs`, `routing/burn.rs`,
+`routing/interactive.rs` (test literals gaining four `None`s),
+`tests/session_context.rs`, `tests/routing_session_column.rs` — all the
+migration's own ripple.
+
+**The one red, attributed twice**:
+`database::tests::concurrent_first_bootstraps_serialize_on_one_database`
+fails under `--lib database` on the worker's tree and identically on a
+detached unmodified worktree at its base (§91), and passes alone — the
+load-sensitive bootstrap race recorded against batch 87.
+
+**Independent verification** (Red tier): `GH-VERIFY-STREAM-TIMING-MS`, an
+Opus reader in the worker's worktree — rollback completeness enumerated,
+the two send sites, the `CHECK` and saturation, the readers' unit mixing,
+the stand-in mutation's faithfulness; its verdict is recorded below this
+entry when it lands. The Windows VM leg and the Linux leg trail on the
+merged tree.
+
+**Recorded limits** (the worker's): one protocol pair driven
+(anthropic-messages → openai-chat), the mechanism pair-agnostic; *primary*
+proven as the label and the ordering, not a score; the support-work rows
+`record_extraction_observation` writes keep their seconds (a Green successor:
+that producer holds no `Instant`); a mid-stream client disconnect keeps the
+offsets already noted, untested either way; macOS only here.
+
+**1355 — OPEN by ruling.** The line names five figures — raw TTFC, effective
+TTFC, TTFT, throughput, rounds per minute — and four exist and are proven
+separate; *effective TTFC* exists nowhere in this tree. It is
+`GH-RESPONSIVENESS-TERMS`'s (1351/1352, dispatched next), whose objective 4
+prints it on its own line and closes this one. The worker returned `open`
+for exactly this reason and was right to.
+
+State: **COMPLETE** for 1347, 1348 and 1349. Phase 33B stands at 8 of 14.
+
+**Independent verification landed** (`GH-VERIFY-STREAM-TIMING-MS`, Opus 5
+high, read-only, 2026-09-02 late night): **ACCEPT**. It enumerated the
+rollback sites itself, confirmed each path's `Instant` sits after the
+harness body is read and immediately before the send, that no wall reading
+feeds an offset, that a refused exchange and the relay's token offsets are
+`None`, that the `CHECK` and the saturating conversion leave no negative or
+overflow path, and that the readers never mix units within a mean; it
+attributed the one red by an interleaved A/B/A/B against the base commit
+(stronger than the worker's own, and agreeing). Two non-blocking findings,
+both doc comments: `render_latency_ms`'s comment claims the count printed
+beside a mixed group's mean is the count of measured rows, but the readout
+prints the seconds counts and never the `*_ms_sample_count`s — and a mixed
+group (some rows with offsets, some without) is untested. **Successor:**
+`GH-RESPONSIVENESS-TERMS` prints `<ms> of <n> measured` beside each mean and
+tests the mixed group (its objective 4). Ticked on the verdict.

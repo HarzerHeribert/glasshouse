@@ -183,6 +183,161 @@ fn a_rated_memory_appears_as_explicit_in_the_retrievals_readout() {
 }
 
 // -------------------------------------------------------------------------
+// 939 — the rating carries the scope of the retrieval it judges
+// -------------------------------------------------------------------------
+
+/// A memory this project never retrieved, rated `caused-complexity`, carries
+/// no scope — the attribution lookup's third branch — and the readout's
+/// *never retrieved* line counts it.
+///
+/// A second, unrelated memory **is** retrieved first, so a lookup that
+/// forgot to filter by `memory_id` and attributed to "the latest retrieval
+/// of any memory" would wrongly pick up that other retrieval's scope
+/// instead of `None` — the `never-retrieved-attributed` mutation's target.
+#[test]
+fn a_rating_of_a_never_retrieved_memory_carries_no_scope() {
+    let tmp = tempdir();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+
+    let memory_id = {
+        let memory = fixture.memory();
+        let store = memory.store();
+        store
+            .record(NewMemory::new(
+                MemoryKind::Decision,
+                "onyx write-ahead logs are compacted hourly",
+            ))
+            .unwrap();
+        let never_retrieved = store
+            .record(NewMemory::new(
+                MemoryKind::Decision,
+                "onyx compaction never touches the hot shard",
+            ))
+            .unwrap();
+        never_retrieved.id.as_str().to_owned()
+    };
+
+    // A different memory retrieved through a real search, so a retrieval
+    // row exists in the ledger — but not for `memory_id` above.
+    let search_output = fixture.run(&["memory", "search", "write-ahead"]);
+    assert!(search_output.status.success());
+
+    let rate_output = fixture.run(&["memory", "rate", &memory_id, "caused-complexity"]);
+    assert!(
+        rate_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rate_output.stderr)
+    );
+
+    let rated = fixture
+        .ledger()
+        .recent_of_kind(EvaluationKind::MemoryRated, 10)
+        .unwrap();
+    assert_eq!(rated.len(), 1, "{rated:#?}");
+    assert_eq!(
+        rated[0].subject, None,
+        "a memory this project never retrieved must carry no scope"
+    );
+
+    let report = fixture.retrievals();
+    let line = line_containing(&report, "never retrieved:");
+    assert!(
+        line.contains("never retrieved: not-useful 0 / caused-complexity 1"),
+        "got: {line}"
+    );
+}
+
+/// A `useful` rating of a retrieved memory carries its scope like every
+/// other verdict, but `useful` is never counted as a false positive or as
+/// harmful — only `not-useful` and `caused-complexity` are.
+#[test]
+fn a_useful_rating_carries_its_scope_but_is_never_counted_as_a_false_positive() {
+    let tmp = tempdir();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+
+    let memory_id = {
+        let memory = fixture.memory();
+        let record = memory
+            .store()
+            .record(NewMemory::new(
+                MemoryKind::Decision,
+                "onyx backups run to cold storage nightly",
+            ))
+            .unwrap();
+        record.id.as_str().to_owned()
+    };
+
+    let search_output = fixture.run(&["memory", "search", "onyx"]);
+    assert!(search_output.status.success());
+
+    let rate_output = fixture.run(&["memory", "rate", &memory_id, "useful"]);
+    assert!(
+        rate_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rate_output.stderr)
+    );
+
+    let rated = fixture
+        .ledger()
+        .recent_of_kind(EvaluationKind::MemoryRated, 10)
+        .unwrap();
+    assert_eq!(rated.len(), 1, "{rated:#?}");
+    assert_eq!(
+        rated[0].subject.as_deref(),
+        Some("current"),
+        "the rating still carries the scope of the retrieval it judges"
+    );
+
+    let report = fixture.retrievals();
+    let line = line_containing(&report, "current:");
+    assert!(
+        line.contains("current: not-useful 0 / caused-complexity 0 of 1 retrieved"),
+        "a useful rating must not be counted as a false positive or as harmful; got: {line}"
+    );
+}
+
+/// This package adds a sixth block after the five map lines 1821, 1823,
+/// 1824, 1825 and 1831 already print. Every one of those five lines must
+/// stay byte-identical — pinned here against a fresh fixture where every
+/// count is honestly zero.
+#[test]
+fn the_five_existing_quality_lines_are_unchanged_by_the_new_block() {
+    let tmp = tempdir();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+
+    let report = fixture.retrievals();
+
+    assert_eq!(
+        line_containing(&report, "explicit useful"),
+        "  explicit useful 0 / not-useful 0 of 0 rated"
+    );
+    assert_eq!(
+        line_containing(&report, "proxy useful"),
+        "  proxy useful 0 of 0 retrieved-into-completed-turns"
+    );
+    assert_eq!(
+        line_containing(&report, "explicit prevented-repetition"),
+        "  explicit prevented-repetition 0 of 0 retrieved-failed-approach-memories"
+    );
+    assert_eq!(
+        line_containing(&report, "proxy prevented-repetition"),
+        "  proxy prevented-repetition 0 of 0 retrieved-into-completed-turns"
+    );
+    assert_eq!(
+        line_containing(&report, "explicit caused-complexity"),
+        "  explicit caused-complexity 0 of 0 retrieved-decision-memories"
+    );
+    assert_eq!(
+        line_containing(&report, "explicit revalidation-correct"),
+        "  explicit revalidation-correct 0 / revalidation-wrong 0 of 0 revalidations"
+    );
+    assert_eq!(
+        line_containing(&report, "explicit challenge-justified"),
+        "  explicit challenge-justified 0 / challenge-unjustified 0 of 0 challenges"
+    );
+}
+
+// -------------------------------------------------------------------------
 // 1823, 1825, 1831 — explicit ratings over a real denominator
 // -------------------------------------------------------------------------
 
@@ -574,6 +729,22 @@ fn retrievals_report(base: &Path, root: &Path) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
+/// Run the shipped binary against a project reached by its own `base`/`root`
+/// — the same reason [`retrievals_report`] does not go through [`Fixture`],
+/// for the two tests below that rate a memory the door retrieved.
+#[cfg(unix)]
+fn run_glasshouse(base: &Path, root: &Path, args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_glasshouse"))
+        .current_dir(root)
+        .arg("--data-dir")
+        .arg(base.join("data"))
+        .arg("--config-dir")
+        .arg(base.join("config"))
+        .args(args)
+        .output()
+        .expect("the glasshouse binary must run")
+}
+
 /// Run `glasshouse hook`, exactly as a harness runs it — the same shape
 /// `tests/routing_outcome.rs::Fixture::hook` uses — against a project
 /// reached by `base`/`root` rather than through [`Fixture`], for the same
@@ -807,6 +978,148 @@ fn a_routed_and_briefed_session_counts_the_proxy_once() {
     assert!(
         line.contains("proxy useful 1 of 1 retrieved-into-completed-turns"),
         "one retrieval, one completed turn, one proxy hit — not two; got: {line}"
+    );
+}
+
+// -------------------------------------------------------------------------
+// 939 — the rating carries the scope of the retrieval it judges
+// -------------------------------------------------------------------------
+
+/// A memory retrieved through the real briefing door — `injection` scope,
+/// with a session id — rated `not-useful` carries that scope on its own
+/// row, and the new readout counts it under `injection`.
+#[cfg(unix)]
+#[test]
+fn a_rating_of_an_injected_memory_carries_the_injection_scope() {
+    let fixture = door::Fixture::new();
+    let root = fixture.project_root("alpha");
+    let runtime = fixture.runtime(&root);
+    let memory_id = ProjectMemory::open(&runtime)
+        .unwrap()
+        .store()
+        .record(NewMemory::new(
+            MemoryKind::Decision,
+            "onyx retries are capped at three",
+        ))
+        .unwrap()
+        .id
+        .as_str()
+        .to_owned();
+
+    let server = door::Server::start(&fixture, &root);
+    let _session = server.spawn_with_task("onyx");
+
+    let rate_output = run_glasshouse(
+        &fixture.base,
+        &root,
+        &["memory", "rate", &memory_id, "not-useful"],
+    );
+    assert!(
+        rate_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rate_output.stderr)
+    );
+
+    let ledger = EvaluationObservations::open(&runtime).unwrap();
+    let rated = ledger
+        .recent_of_kind(EvaluationKind::MemoryRated, 10)
+        .unwrap();
+    assert_eq!(rated.len(), 1, "{rated:#?}");
+    assert_eq!(
+        rated[0].subject.as_deref(),
+        Some("injection"),
+        "the rating must carry the scope of the retrieval it judges"
+    );
+
+    let report = retrievals_report(&fixture.base, &root);
+    let line = line_containing(&report, "injection:");
+    assert!(
+        line.contains("injection: not-useful 1 / caused-complexity 0 of 1 retrieved"),
+        "got: {line}"
+    );
+}
+
+/// The same memory retrieved under `current` (a `memory search`) and, in a
+/// different session, under `injection` — rating it with `--session
+/// <that session>` attributes the injection retrieval, not the later
+/// `current` one. Without the session narrowing the attribution lookup
+/// would pick "the most recent retrieval at all", which is `current`.
+#[cfg(unix)]
+#[test]
+fn rating_with_a_session_narrows_to_that_sessions_retrieval() {
+    let fixture = door::Fixture::new();
+    let root = fixture.project_root("alpha");
+    let runtime = fixture.runtime(&root);
+    let memory_id = ProjectMemory::open(&runtime)
+        .unwrap()
+        .store()
+        .record(NewMemory::new(
+            MemoryKind::Decision,
+            "onyx snapshots run every six hours",
+        ))
+        .unwrap()
+        .id
+        .as_str()
+        .to_owned();
+
+    let server = door::Server::start(&fixture, &root);
+    let session = server.spawn_with_task("onyx");
+
+    let ledger = EvaluationObservations::open(&runtime).unwrap();
+    assert_eq!(
+        ledger
+            .recent_of_kind(EvaluationKind::MemoryRetrieved, 10)
+            .unwrap()
+            .len(),
+        1,
+        "the injection retrieval must land first"
+    );
+
+    // Retrieved again, later, under `current`, with no session at all.
+    let search_output = run_glasshouse(&fixture.base, &root, &["memory", "search", "onyx"]);
+    assert!(search_output.status.success());
+    assert_eq!(
+        ledger
+            .recent_of_kind(EvaluationKind::MemoryRetrieved, 10)
+            .unwrap()
+            .len(),
+        2,
+        "the current-scope search must add its own retrieval row"
+    );
+
+    let rate_output = run_glasshouse(
+        &fixture.base,
+        &root,
+        &[
+            "memory",
+            "rate",
+            &memory_id,
+            "caused-complexity",
+            "--session",
+            &session,
+        ],
+    );
+    assert!(
+        rate_output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&rate_output.stderr)
+    );
+
+    let rated = ledger
+        .recent_of_kind(EvaluationKind::MemoryRated, 10)
+        .unwrap();
+    assert_eq!(rated.len(), 1, "{rated:#?}");
+    assert_eq!(
+        rated[0].subject.as_deref(),
+        Some("injection"),
+        "the session must narrow to the injection retrieval, not the later current one"
+    );
+
+    let report = retrievals_report(&fixture.base, &root);
+    let line = line_containing(&report, "injection:");
+    assert!(
+        line.contains("injection: not-useful 0 / caused-complexity 1 of 1 retrieved"),
+        "got: {line}"
     );
 }
 

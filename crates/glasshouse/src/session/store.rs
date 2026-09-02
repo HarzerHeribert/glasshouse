@@ -2936,9 +2936,16 @@ mod tests {
     /// and 24 are one and three statements for the same reason again —
     /// nothing indexes `task_class`, `session_id`, `effort_level` or
     /// `turn_shape`, and none of the four carries a `CHECK` or a
-    /// `REFERENCES`. Newest first, so 24's three lead, in the reverse of the
-    /// order that migration adds them.
+    /// `REFERENCES`. Migration 25 is four statements for migration 16's
+    /// reason instead: nothing indexes the four millisecond offsets, and the
+    /// `CHECK` each of them carries is column-scoped, so SQLite drops it with
+    /// the column. Newest first, so 25's four lead and 24's three follow,
+    /// each set in the reverse of the order that migration adds them.
     const UNDO_MIGRATIONS_ABOVE_THIRTEEN: &str = "
+        ALTER TABLE routing_observations DROP COLUMN completed_ms;
+        ALTER TABLE routing_observations DROP COLUMN first_tool_call_ms;
+        ALTER TABLE routing_observations DROP COLUMN first_token_ms;
+        ALTER TABLE routing_observations DROP COLUMN first_byte_ms;
         ALTER TABLE routing_observations DROP COLUMN turn_shape;
         ALTER TABLE routing_observations DROP COLUMN effort_level;
         ALTER TABLE routing_observations DROP COLUMN session_id;
@@ -4142,6 +4149,12 @@ mod tests {
                 "routing_observations.session_id",
                 "routing_observations.effort_level",
                 "routing_observations.turn_shape",
+                // Migration 25's four millisecond offsets: integers, and an
+                // integer has nowhere to keep a credential.
+                "routing_observations.first_byte_ms",
+                "routing_observations.first_token_ms",
+                "routing_observations.first_tool_call_ms",
+                "routing_observations.completed_ms",
                 "schema_migrations.version",
                 "sessions.id",
                 "sessions.project_id",
@@ -4352,7 +4365,11 @@ mod tests {
         fixture
             .conn
             .execute_batch(
-                "ALTER TABLE routing_observations DROP COLUMN turn_shape;
+                "ALTER TABLE routing_observations DROP COLUMN completed_ms;
+                 ALTER TABLE routing_observations DROP COLUMN first_tool_call_ms;
+                 ALTER TABLE routing_observations DROP COLUMN first_token_ms;
+                 ALTER TABLE routing_observations DROP COLUMN first_byte_ms;
+                 ALTER TABLE routing_observations DROP COLUMN turn_shape;
                  ALTER TABLE routing_observations DROP COLUMN effort_level;
                  ALTER TABLE routing_observations DROP COLUMN session_id;
                  ALTER TABLE routing_observations DROP COLUMN task_class;
@@ -4395,7 +4412,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            version, 24,
+            version, 25,
             "the launch must have applied migrations 3 through 22"
         );
 
@@ -4587,7 +4604,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            version, 24,
+            version, 25,
             "the launch must have applied migrations 2 through 22"
         );
 
@@ -5611,7 +5628,7 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(
-                version, 24,
+                version, 25,
                 "the launch must have applied migrations 8 through 22"
             );
 
@@ -5740,7 +5757,7 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(
-                version, 24,
+                version, 25,
                 "the reopen must have applied migrations 12 through 22"
             );
 

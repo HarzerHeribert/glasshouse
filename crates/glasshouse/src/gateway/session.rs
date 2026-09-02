@@ -563,6 +563,18 @@ impl SessionRouting {
         // exactly like `first_byte_at` above.
         .with_first_token_at(exchange.first_token_at)
         .with_first_tool_call_at(exchange.first_tool_call_at)
+        // Migration 25's four offsets, beside the second-resolution
+        // timestamps above rather than instead of them. Their zero is the
+        // instant each path sent its upstream request — `ingress::forward`
+        // and `translate::serve` each hold their own `Instant` and neither
+        // hands one back through `ExchangeReading`, because the accept
+        // loop's `dispatched_at` is the hand-off and not the send. A relayed
+        // exchange carries the first-byte and completion offsets and `None`
+        // for the two token offsets, exactly as it does one line up.
+        .with_first_byte_ms(exchange.first_byte_ms)
+        .with_first_token_ms(exchange.first_token_ms)
+        .with_first_tool_call_ms(exchange.first_tool_call_ms)
+        .with_completed_ms(exchange.completed_ms)
         // Line 1334's last two quantities: `translate::serve` derives both
         // from the request and response it already had to decode, and
         // `None` on a relayed exchange (this method's own caller never
@@ -1186,6 +1198,12 @@ mod tests {
             first_byte_at: None,
             first_token_at: None,
             first_tool_call_at: None,
+            // The request never left, so there is no monotonic zero to
+            // measure any of migration 25's four offsets from.
+            first_byte_ms: None,
+            first_token_ms: None,
+            first_tool_call_ms: None,
+            completed_ms: None,
             framing: None,
             tokens: None,
             effort: None,
@@ -1242,6 +1260,12 @@ mod tests {
             first_byte_at: Some(1_700_000_000),
             first_token_at: None,
             first_tool_call_at: None,
+            // A relayed exchange: the two offsets its path can measure, and
+            // `None` for the two only a decoded stream can supply.
+            first_byte_ms: Some(120),
+            first_token_ms: None,
+            first_tool_call_ms: None,
+            completed_ms: Some(900),
             framing: Some(Framing {
                 declared,
                 relayed,

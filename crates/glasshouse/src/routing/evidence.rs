@@ -822,6 +822,17 @@ pub struct NewObservation {
     pub first_tool_call_at_unix: Option<i64>,
     pub completed_at_unix: Option<i64>,
 
+    /// Milliseconds from the instant the upstream request was sent to the
+    /// first response byte — `crate::database` migration 25, and never an
+    /// absolute instant. See [`Self::with_first_byte_ms`].
+    pub first_byte_ms: Option<i64>,
+    /// [`Self::first_byte_ms`]'s sibling for the first real generated token.
+    pub first_token_ms: Option<i64>,
+    /// [`Self::first_byte_ms`]'s sibling for the first tool-use block start.
+    pub first_tool_call_ms: Option<i64>,
+    /// [`Self::first_byte_ms`]'s sibling for the end of the exchange.
+    pub completed_ms: Option<i64>,
+
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
     pub cached_input_tokens: Option<i64>,
@@ -867,6 +878,10 @@ impl NewObservation {
             first_token_at_unix: None,
             first_tool_call_at_unix: None,
             completed_at_unix: None,
+            first_byte_ms: None,
+            first_token_ms: None,
+            first_tool_call_ms: None,
+            completed_ms: None,
             input_tokens: None,
             output_tokens: None,
             cached_input_tokens: None,
@@ -962,6 +977,56 @@ impl NewObservation {
     /// tool-use block started, under the same rule and the same `None` case.
     pub fn with_first_tool_call_at(mut self, first_tool_call_at_unix: Option<i64>) -> Self {
         self.first_tool_call_at_unix = first_tool_call_at_unix;
+        self
+    }
+
+    /// Migration 25's first offset: milliseconds from the instant the
+    /// upstream request was **sent** to the instant the provider's status
+    /// and headers were in hand.
+    ///
+    /// Not a duration derived from the columns above. Those are unix
+    /// seconds, and their zero — `dispatched_at` — is the instant the
+    /// gateway handed a connection to `ingress::serve`, which is earlier
+    /// than the send by however long reading and rebuilding the request
+    /// took. This offset's zero is the send itself, and it is read from a
+    /// monotonic `std::time::Instant` rather than from two wall-clock
+    /// readings subtracted, so a clock step cannot make it negative. The
+    /// column's own `CHECK` refuses a negative value if one ever arrives
+    /// anyway. See `docs/product/design-decisions.md`'s *"Millisecond
+    /// offsets on the routing row — Cluster G's second column set"*.
+    ///
+    /// A separate builder rather than a parameter on [`Self::with_timing`],
+    /// for exactly [`Self::with_first_byte_at`]'s reason: only the producer
+    /// that holds the dispatch `Instant` can supply it, and every other
+    /// producer's existing call stays untouched.
+    pub fn with_first_byte_ms(mut self, first_byte_ms: Option<i64>) -> Self {
+        self.first_byte_ms = first_byte_ms;
+        self
+    }
+
+    /// [`Self::with_first_byte_ms`]'s sibling for the first real generated
+    /// token — supplied only by a **translated** exchange, whose seam
+    /// decodes the canonical events, exactly like
+    /// [`Self::with_first_token_at`]'s own relayed `None`.
+    pub fn with_first_token_ms(mut self, first_token_ms: Option<i64>) -> Self {
+        self.first_token_ms = first_token_ms;
+        self
+    }
+
+    /// [`Self::with_first_token_ms`]'s sibling for the first tool-use block
+    /// start.
+    pub fn with_first_tool_call_ms(mut self, first_tool_call_ms: Option<i64>) -> Self {
+        self.first_tool_call_ms = first_tool_call_ms;
+        self
+    }
+
+    /// [`Self::with_first_byte_ms`]'s sibling for the end of the exchange —
+    /// supplied on both the relayed and the translated path, since both know
+    /// when they stopped moving bytes. [`RoutingObservation::duration_ms`]
+    /// prefers it over the seconds difference precisely because this one was
+    /// measured rather than subtracted.
+    pub fn with_completed_ms(mut self, completed_ms: Option<i64>) -> Self {
+        self.completed_ms = completed_ms;
         self
     }
 
@@ -1155,6 +1220,21 @@ pub struct RoutingObservation {
     pub first_tool_call_at_unix: Option<i64>,
     pub completed_at_unix: Option<i64>,
 
+    /// Milliseconds from the send to the first response byte — migration 25,
+    /// and `None` for every row written before it as well as for every
+    /// exchange whose request never left. See
+    /// [`NewObservation::with_first_byte_ms`] for why this is an offset from
+    /// the send rather than from `dispatched_at`.
+    pub first_byte_ms: Option<i64>,
+    /// [`Self::first_byte_ms`]'s sibling for the first real generated token
+    /// — additionally `None` on every relayed exchange.
+    pub first_token_ms: Option<i64>,
+    /// [`Self::first_token_ms`]'s sibling for the first tool-use block start.
+    pub first_tool_call_ms: Option<i64>,
+    /// [`Self::first_byte_ms`]'s sibling for the end of the exchange — the
+    /// figure [`Self::duration_ms`] prefers over the seconds difference.
+    pub completed_ms: Option<i64>,
+
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
     pub cached_input_tokens: Option<i64>,
@@ -1189,13 +1269,27 @@ pub struct RoutingObservation {
 }
 
 impl RoutingObservation {
-    /// The wall-clock duration of this exchange, when both ends were
-    /// recorded — the closest this ledger comes to a latency figure at
-    /// second resolution now that a translated exchange also carries
-    /// `first_token_at` and `first_tool_call_at` (see this module's header);
-    /// the honest gap that remains is a **relayed** exchange's alone, which
-    /// still has no producer for either.
+    /// How long this exchange took, in milliseconds — [`Self::completed_ms`]
+    /// when the producer measured it, and the second-resolution difference
+    /// `completed_at - dispatched_at` otherwise.
+    ///
+    /// The preference is the point, and it is silent: every consumer of this
+    /// method — [`EvidenceLedger::classification_record`],
+    /// [`EvidenceLedger::support_work_latency`] and the medians they compute
+    /// — improves from a figure that was zero or one second to one that was
+    /// actually measured, without any of them changing. A row written before
+    /// migration 25, or by a producer holding no dispatch `Instant`, keeps
+    /// the fallback and reads exactly as it always did.
+    ///
+    /// The two are not the same span, and the difference is smaller than the
+    /// resolution the fallback has: `completed_ms` is measured from the
+    /// instant the upstream request was **sent**, and the fallback from the
+    /// instant the connection was handed to the gateway's ingress. See
+    /// [`NewObservation::with_first_byte_ms`].
     pub fn duration_ms(&self) -> Option<i64> {
+        if let Some(completed_ms) = self.completed_ms {
+            return Some(completed_ms);
+        }
         let dispatched = self.dispatched_at_unix?;
         let completed = self.completed_at_unix?;
         if completed < dispatched {
@@ -2691,25 +2785,59 @@ pub struct PurposeConsumption {
     /// Line 1331's gateway producer is the only writer that can ever supply
     /// this column, so today it is nonzero only for the coding-agent group.
     pub first_byte_sample_count: usize,
-    /// The mean time to first byte, in milliseconds, over exactly the rows
-    /// counted in [`Self::first_byte_sample_count`] — `None` when that count
-    /// is `0`, never a fabricated duration for a group nothing timed.
+    /// How many rows in this group carried migration 25's `first_byte_ms` —
+    /// the *measured* offset, as against the second-resolution difference
+    /// [`Self::first_byte_sample_count`] counts.
+    ///
+    /// Two counts rather than one, because the mean beside them is computed
+    /// over both kinds of row and a reader must be able to say which it is
+    /// looking at: `0` here with a nonzero
+    /// [`Self::first_byte_sample_count`] means every row in this group
+    /// predates migration 25, and the figure is a seconds difference wearing
+    /// millisecond units. `main.rs::render_routing_cost` prints *(seconds
+    /// only)* for exactly that case.
+    pub first_byte_ms_sample_count: usize,
+    /// The mean time to first byte, in milliseconds — migration 25's
+    /// `first_byte_ms` for each row that carries one, and the
+    /// `first_byte_at - dispatched_at` difference in milliseconds for each
+    /// row that does not. `None` when neither was available for any row in
+    /// the group, never a fabricated duration for a group nothing timed.
     pub mean_time_to_first_byte_ms: Option<f64>,
     /// [`Self::first_byte_sample_count`]'s sibling for `first_token_at` — a
     /// real `COUNT(first_token_at)`. Only a **translated** exchange can ever
     /// supply it (`GH-STREAM-FIRST-EVENTS`, lines 1331/1332), so it is
     /// honestly `0` for every group whose rows are all relayed.
     pub first_token_sample_count: usize,
-    /// The mean time to first token, in milliseconds, over exactly the rows
-    /// counted in [`Self::first_token_sample_count`] — `None` when that count
-    /// is `0`, under the same rule as [`Self::mean_time_to_first_byte_ms`].
+    /// [`Self::first_byte_ms_sample_count`]'s sibling for `first_token_ms`.
+    pub first_token_ms_sample_count: usize,
+    /// The mean time to first token, in milliseconds, under
+    /// [`Self::mean_time_to_first_byte_ms`]'s own two-source rule — line
+    /// 1348's TTFT, kept as a measure of generation responsiveness and
+    /// never presented as agent productivity.
     pub mean_time_to_first_token_ms: Option<f64>,
     /// [`Self::first_byte_sample_count`]'s sibling for `first_tool_call_at`.
     pub first_tool_call_sample_count: usize,
-    /// The mean time to the first tool call, in milliseconds, over exactly
-    /// the rows counted in [`Self::first_tool_call_sample_count`] — `None`
-    /// when that count is `0`.
+    /// [`Self::first_byte_ms_sample_count`]'s sibling for
+    /// `first_tool_call_ms`.
+    pub first_tool_call_ms_sample_count: usize,
+    /// The mean time to the first tool call, in milliseconds, under
+    /// [`Self::mean_time_to_first_byte_ms`]'s own two-source rule — line
+    /// 1347's TTFC, the responsiveness measure for tool-using work.
     pub mean_time_to_first_tool_call_ms: Option<f64>,
+    /// Output tokens summed over exactly the rows that carried all three of
+    /// `output_tokens`, `first_token_ms` and `completed_ms` with the
+    /// completion not before the first token — line 1349's numerator, and
+    /// `None` when no row in the group carried all three.
+    ///
+    /// Summed under the same filter as [`Self::decode_ms`] so the two are a
+    /// matched pair over one set of rows; a rate built from a numerator and
+    /// a denominator drawn from different rows would be a number about no
+    /// exchange that happened.
+    pub decode_output_tokens: Option<i64>,
+    /// Milliseconds of decode time summed over exactly the rows
+    /// [`Self::decode_output_tokens`] sums — `completed_ms - first_token_ms`
+    /// each, line 1349's denominator.
+    pub decode_ms: Option<i64>,
     /// How many tool-use rounds the responses in this group began —
     /// `SUM(tool_rounds)`, `None` when no row in the group ever counted one
     /// (`SUM` over an all-`NULL` column is already `NULL`, so there is no
@@ -2741,6 +2869,32 @@ impl PurposeConsumption {
             return None;
         }
         Some(rounds as f64 * 60.0 / serving_seconds as f64)
+    }
+
+    /// Line 1349: decode tokens per second — output tokens over the time
+    /// between the first real token and the end of the exchange, summed
+    /// across exactly the rows that recorded all three.
+    ///
+    /// **A model-serving characteristic and not task progress**, which is the
+    /// whole of what line 1349 asks for and the reason it is a method here
+    /// and never a term in any score: a fast decode says the provider is
+    /// serving quickly, not that the agent got anywhere. It is printed on its
+    /// own line beside TTFC and TTFT (line 1355) rather than folded in with
+    /// them.
+    ///
+    /// `None` when either half is unrecorded — a group of rows written
+    /// before migration 25 has no `first_token_ms` at all, and there is no
+    /// seconds fallback here on purpose: at one-second resolution the
+    /// denominator is routinely `0` and the rate it produces is an artefact
+    /// of the clock rather than a reading. `None` too when the summed decode
+    /// time is `0`, never an infinite rate.
+    pub fn decode_tokens_per_second(&self) -> Option<f64> {
+        let output_tokens = self.decode_output_tokens?;
+        let decode_ms = self.decode_ms?;
+        if decode_ms <= 0 {
+            return None;
+        }
+        Some(output_tokens as f64 * 1000.0 / decode_ms as f64)
     }
 }
 
@@ -3288,7 +3442,8 @@ impl EvidenceLedger {
                 cost_micro_usd, cost_confidence,
                 tool_rounds, retries, repairs, failovers, outcome,
                 context_state, failure_class, task_class,
-                session_id, effort_level, turn_shape
+                session_id, effort_level, turn_shape,
+                first_byte_ms, first_token_ms, first_tool_call_ms, completed_ms
             ) VALUES (
                 ?1, ?2,
                 ?3, ?4, ?5, ?6, ?7, ?8,
@@ -3297,7 +3452,8 @@ impl EvidenceLedger {
                 ?17, ?18,
                 ?19, ?20, ?21, ?22, ?23,
                 ?24, ?25, ?26,
-                ?27, ?28, ?29
+                ?27, ?28, ?29,
+                ?30, ?31, ?32, ?33
             )",
             params![
                 self.project_id,
@@ -3329,6 +3485,10 @@ impl EvidenceLedger {
                 new.session_id,
                 new.effort_level.map(EffortLevel::as_str),
                 new.turn_shape.map(TurnShape::as_str),
+                new.first_byte_ms,
+                new.first_token_ms,
+                new.first_tool_call_ms,
+                new.completed_ms,
             ],
         )
         .map_err(sql_err("record a routing observation"))?;
@@ -3974,15 +4134,23 @@ impl EvidenceLedger {
     /// in between for a mutation to weaken.
     ///
     /// `first_byte_sample_count` is a genuine `COUNT(first_byte_at)`, so it
-    /// is honestly `0` — not absent — for a group nothing timed.
-    /// `mean_time_to_first_byte_ms` is computed only across rows carrying
-    /// **both** `first_byte_at` and `dispatched_at`, and is `NULL` (`None`)
-    /// exactly when that count is `0` — SQLite's `AVG` over an empty set is
-    /// already `NULL`, so there is no manual zero-guard here either.
-    /// `first_token_sample_count`/`mean_time_to_first_token_ms` and their
-    /// tool-call siblings are the identical pair, copied for
-    /// `first_token_at`/`first_tool_call_at` — `GH-STREAM-FIRST-EVENTS`,
-    /// lines 1331/1332.
+    /// is honestly `0` — not absent — for a group nothing timed, and
+    /// `first_byte_ms_sample_count` is the same count over migration 25's
+    /// measured offset. `mean_time_to_first_byte_ms` **prefers the offset**:
+    /// each row contributes its own `first_byte_ms` when it has one and its
+    /// `first_byte_at - dispatched_at` difference in milliseconds when it
+    /// does not, so a window spanning the migration produces one mean over
+    /// every timed row rather than two incomparable ones. It is `NULL`
+    /// (`None`) exactly when no row offered either — SQLite's `AVG` over an
+    /// empty set is already `NULL`, so there is no manual zero-guard here.
+    /// `first_token_*`/`first_tool_call_*` are the identical triple.
+    ///
+    /// `decode_output_tokens` and `decode_ms` are line 1349's matched pair,
+    /// summed over exactly the rows carrying `output_tokens`,
+    /// `first_token_ms` and `completed_ms` with a non-negative gap — the one
+    /// figure here with **no** seconds fallback, because at one-second
+    /// resolution its denominator is routinely `0`. See
+    /// [`PurposeConsumption::decode_tokens_per_second`].
     ///
     /// Scoped to this ledger's own `project_id`, like [`Self::observed_identities`]
     /// next door and for the same belt-and-suspenders reason: this reads
@@ -4003,26 +4171,53 @@ impl EvidenceLedger {
                         SUM(output_tokens) AS output_tokens,
                         SUM(cached_input_tokens) AS cached_input_tokens,
                         COUNT(first_byte_at) AS first_byte_sample_count,
+                        COUNT(first_byte_ms) AS first_byte_ms_sample_count,
                         AVG(
                             CASE
+                                WHEN first_byte_ms IS NOT NULL
+                                THEN CAST(first_byte_ms AS REAL)
                                 WHEN first_byte_at IS NOT NULL AND dispatched_at IS NOT NULL
                                 THEN CAST(first_byte_at - dispatched_at AS REAL) * 1000
                             END
                         ) AS mean_time_to_first_byte_ms,
                         COUNT(first_token_at) AS first_token_sample_count,
+                        COUNT(first_token_ms) AS first_token_ms_sample_count,
                         AVG(
                             CASE
+                                WHEN first_token_ms IS NOT NULL
+                                THEN CAST(first_token_ms AS REAL)
                                 WHEN first_token_at IS NOT NULL AND dispatched_at IS NOT NULL
                                 THEN CAST(first_token_at - dispatched_at AS REAL) * 1000
                             END
                         ) AS mean_time_to_first_token_ms,
                         COUNT(first_tool_call_at) AS first_tool_call_sample_count,
+                        COUNT(first_tool_call_ms) AS first_tool_call_ms_sample_count,
                         AVG(
                             CASE
+                                WHEN first_tool_call_ms IS NOT NULL
+                                THEN CAST(first_tool_call_ms AS REAL)
                                 WHEN first_tool_call_at IS NOT NULL AND dispatched_at IS NOT NULL
                                 THEN CAST(first_tool_call_at - dispatched_at AS REAL) * 1000
                             END
                         ) AS mean_time_to_first_tool_call_ms,
+                        SUM(
+                            CASE
+                                WHEN output_tokens IS NOT NULL
+                                 AND first_token_ms IS NOT NULL
+                                 AND completed_ms IS NOT NULL
+                                 AND completed_ms >= first_token_ms
+                                THEN output_tokens
+                            END
+                        ) AS decode_output_tokens,
+                        SUM(
+                            CASE
+                                WHEN output_tokens IS NOT NULL
+                                 AND first_token_ms IS NOT NULL
+                                 AND completed_ms IS NOT NULL
+                                 AND completed_ms >= first_token_ms
+                                THEN completed_ms - first_token_ms
+                            END
+                        ) AS decode_ms,
                         SUM(tool_rounds) AS tool_rounds,
                         SUM(repairs) AS repairs,
                         SUM(
@@ -4609,6 +4804,14 @@ fn row_to_observation(
         first_token_at_unix: row.get("first_token_at")?,
         first_tool_call_at_unix: row.get("first_tool_call_at")?,
         completed_at_unix: row.get("completed_at")?,
+        // Migration 25. No vocabulary to fail against and no arm of their
+        // own: an integer column reads back as the integer it holds, and
+        // `NULL` is the *this producer did not measure* every other optional
+        // column on this row already means.
+        first_byte_ms: row.get("first_byte_ms")?,
+        first_token_ms: row.get("first_token_ms")?,
+        first_tool_call_ms: row.get("first_tool_call_ms")?,
+        completed_ms: row.get("completed_ms")?,
         input_tokens: row.get("input_tokens")?,
         output_tokens: row.get("output_tokens")?,
         cached_input_tokens: row.get("cached_input_tokens")?,
@@ -4634,8 +4837,11 @@ fn row_to_observation(
 fn row_to_purpose_consumption(row: &Row<'_>) -> rusqlite::Result<PurposeConsumption> {
     let sample_count: i64 = row.get("sample_count")?;
     let first_byte_sample_count: i64 = row.get("first_byte_sample_count")?;
+    let first_byte_ms_sample_count: i64 = row.get("first_byte_ms_sample_count")?;
     let first_token_sample_count: i64 = row.get("first_token_sample_count")?;
+    let first_token_ms_sample_count: i64 = row.get("first_token_ms_sample_count")?;
     let first_tool_call_sample_count: i64 = row.get("first_tool_call_sample_count")?;
+    let first_tool_call_ms_sample_count: i64 = row.get("first_tool_call_ms_sample_count")?;
     Ok(PurposeConsumption {
         purpose: row.get("purpose")?,
         harness_recorded: row.get("harness_recorded")?,
@@ -4644,11 +4850,16 @@ fn row_to_purpose_consumption(row: &Row<'_>) -> rusqlite::Result<PurposeConsumpt
         output_tokens: row.get("output_tokens")?,
         cached_input_tokens: row.get("cached_input_tokens")?,
         first_byte_sample_count: first_byte_sample_count as usize,
+        first_byte_ms_sample_count: first_byte_ms_sample_count as usize,
         mean_time_to_first_byte_ms: row.get("mean_time_to_first_byte_ms")?,
         first_token_sample_count: first_token_sample_count as usize,
+        first_token_ms_sample_count: first_token_ms_sample_count as usize,
         mean_time_to_first_token_ms: row.get("mean_time_to_first_token_ms")?,
         first_tool_call_sample_count: first_tool_call_sample_count as usize,
+        first_tool_call_ms_sample_count: first_tool_call_ms_sample_count as usize,
         mean_time_to_first_tool_call_ms: row.get("mean_time_to_first_tool_call_ms")?,
+        decode_output_tokens: row.get("decode_output_tokens")?,
+        decode_ms: row.get("decode_ms")?,
         tool_rounds: row.get("tool_rounds")?,
         repairs: row.get("repairs")?,
         serving_seconds: row.get("serving_seconds")?,
@@ -4967,6 +5178,156 @@ mod tests {
         );
         assert_eq!(row.failovers, None, "this test's producer did not count");
         assert_eq!(row.retries, None);
+        assert_eq!(
+            (
+                row.first_byte_ms,
+                row.first_token_ms,
+                row.first_tool_call_ms,
+                row.completed_ms
+            ),
+            (None, None, None, None),
+            "migration 25's four are this producer's absence too"
+        );
+    }
+
+    /// Migration 25's four offsets, through the real schema and back — the
+    /// round trip [`a_recorded_observation_reads_back_with_every_field_it_was_given`]
+    /// makes for every other column, and the one property that separates
+    /// them from every other optional column on this row:
+    /// [`RoutingObservation::duration_ms`] prefers the measured completion.
+    ///
+    /// Mutation target `fallback-dropped`: making `duration_ms` answer
+    /// `None` when `completed_ms` is `None` must fail the second half here.
+    #[test]
+    fn the_millisecond_offsets_round_trip_and_duration_prefers_the_measured_one() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let ledger = fixture.ledger();
+
+        let query = |provider| ObservationQuery {
+            provider,
+            model: "claude-opus-4-1",
+            route: Some("anthropic-messages"),
+            harness: Some("claude-code"),
+        };
+
+        // A measured row. The seconds say nine; the offsets say 8,910, and
+        // the offsets are what was actually timed.
+        ledger
+            .record(
+                observation("measured", "claude-opus-4-1")
+                    .with_timing(Some(1_000), Some(1_009))
+                    .with_first_byte_ms(Some(120))
+                    .with_first_token_ms(Some(1_450))
+                    .with_first_tool_call_ms(Some(2_600))
+                    .with_completed_ms(Some(8_910)),
+                1_009,
+            )
+            .unwrap();
+        let rows = ledger.recent(query("measured"), 10).unwrap();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].first_byte_ms, Some(120));
+        assert_eq!(rows[0].first_token_ms, Some(1_450));
+        assert_eq!(rows[0].first_tool_call_ms, Some(2_600));
+        assert_eq!(rows[0].completed_ms, Some(8_910));
+        assert_eq!(
+            rows[0].duration_ms(),
+            Some(8_910),
+            "a measured completion is preferred over the seconds difference"
+        );
+
+        // An unmeasured row — every producer that holds no dispatch
+        // `Instant`, and every row written before migration 25.
+        ledger
+            .record(
+                observation("unmeasured", "claude-opus-4-1").with_timing(Some(1_000), Some(1_009)),
+                1_009,
+            )
+            .unwrap();
+        let rows = ledger.recent(query("unmeasured"), 10).unwrap();
+        assert_eq!(rows[0].completed_ms, None);
+        assert_eq!(
+            rows[0].duration_ms(),
+            Some(9_000),
+            "with nothing measured the seconds difference is still the answer"
+        );
+
+        // A relayed exchange's own shape: the two offsets its path can
+        // measure and `None` for the two only a decoded stream supplies.
+        ledger
+            .record(
+                observation("relayed", "claude-opus-4-1")
+                    .with_timing(Some(1_000), Some(1_002))
+                    .with_first_byte_ms(Some(88))
+                    .with_completed_ms(Some(1_940)),
+                1_002,
+            )
+            .unwrap();
+        let rows = ledger.recent(query("relayed"), 10).unwrap();
+        assert_eq!(rows[0].first_byte_ms, Some(88));
+        assert_eq!(rows[0].first_token_ms, None);
+        assert_eq!(rows[0].first_tool_call_ms, None);
+        assert_eq!(rows[0].duration_ms(), Some(1_940));
+    }
+
+    /// Line 1349 on fixed rows: output tokens over the decode span, summed
+    /// across exactly the rows that recorded all three parts of it, and
+    /// `None` — never `0.00`, never an infinity — for every group that did
+    /// not.
+    #[test]
+    fn decode_tokens_per_second_divides_only_what_was_measured() {
+        fn group(output: Option<i64>, decode_ms: Option<i64>) -> PurposeConsumption {
+            PurposeConsumption {
+                purpose: Some("classification".to_owned()),
+                harness_recorded: false,
+                sample_count: 1,
+                input_tokens: None,
+                output_tokens: output,
+                cached_input_tokens: None,
+                first_byte_sample_count: 0,
+                first_byte_ms_sample_count: 0,
+                mean_time_to_first_byte_ms: None,
+                first_token_sample_count: 0,
+                first_token_ms_sample_count: 0,
+                mean_time_to_first_token_ms: None,
+                first_tool_call_sample_count: 0,
+                first_tool_call_ms_sample_count: 0,
+                mean_time_to_first_tool_call_ms: None,
+                decode_output_tokens: output,
+                decode_ms,
+                tool_rounds: None,
+                repairs: None,
+                serving_seconds: None,
+            }
+        }
+
+        // 240 tokens over 4,000ms of decode is 60 tokens a second.
+        assert_eq!(
+            group(Some(240), Some(4_000)).decode_tokens_per_second(),
+            Some(60.0)
+        );
+        // Sub-second decode spans are the whole reason this figure needed
+        // millisecond columns: 30 tokens in 250ms is 120 a second, and at
+        // second resolution the denominator would have been `0`.
+        assert_eq!(
+            group(Some(30), Some(250)).decode_tokens_per_second(),
+            Some(120.0)
+        );
+        assert_eq!(
+            group(None, Some(4_000)).decode_tokens_per_second(),
+            None,
+            "no counted output tokens is not a rate of zero"
+        );
+        assert_eq!(
+            group(Some(240), None).decode_tokens_per_second(),
+            None,
+            "a group of rows written before migration 25 has no decode span at all"
+        );
+        assert_eq!(
+            group(Some(240), Some(0)).decode_tokens_per_second(),
+            None,
+            "a zero decode span is never an infinite rate"
+        );
     }
 
     /// Migration 18's column and line 1334's two counters the gateway can
@@ -6005,6 +6366,10 @@ mod correlation_tests {
             first_token_at_unix: None,
             first_tool_call_at_unix: None,
             completed_at_unix: Some(end),
+            first_byte_ms: None,
+            first_token_ms: None,
+            first_tool_call_ms: None,
+            completed_ms: None,
             input_tokens: None,
             output_tokens: None,
             cached_input_tokens: None,
@@ -6219,11 +6584,16 @@ mod correlation_tests {
                 output_tokens: None,
                 cached_input_tokens: None,
                 first_byte_sample_count: 0,
+                first_byte_ms_sample_count: 0,
                 mean_time_to_first_byte_ms: None,
                 first_token_sample_count: 0,
+                first_token_ms_sample_count: 0,
                 mean_time_to_first_token_ms: None,
                 first_tool_call_sample_count: 0,
+                first_tool_call_ms_sample_count: 0,
                 mean_time_to_first_tool_call_ms: None,
+                decode_output_tokens: None,
+                decode_ms: None,
                 tool_rounds: None,
                 repairs: None,
                 serving_seconds: None,
@@ -6236,11 +6606,16 @@ mod correlation_tests {
                 output_tokens: None,
                 cached_input_tokens: None,
                 first_byte_sample_count: 0,
+                first_byte_ms_sample_count: 0,
                 mean_time_to_first_byte_ms: None,
                 first_token_sample_count: 0,
+                first_token_ms_sample_count: 0,
                 mean_time_to_first_token_ms: None,
                 first_tool_call_sample_count: 0,
+                first_tool_call_ms_sample_count: 0,
                 mean_time_to_first_tool_call_ms: None,
+                decode_output_tokens: None,
+                decode_ms: None,
                 tool_rounds: None,
                 repairs: None,
                 serving_seconds: None,
@@ -6270,11 +6645,16 @@ mod correlation_tests {
                 output_tokens: Some(50),
                 cached_input_tokens: None,
                 first_byte_sample_count: 0,
+                first_byte_ms_sample_count: 0,
                 mean_time_to_first_byte_ms: None,
                 first_token_sample_count: 0,
+                first_token_ms_sample_count: 0,
                 mean_time_to_first_token_ms: None,
                 first_tool_call_sample_count: 0,
+                first_tool_call_ms_sample_count: 0,
                 mean_time_to_first_tool_call_ms: None,
+                decode_output_tokens: None,
+                decode_ms: None,
                 tool_rounds: None,
                 repairs: None,
                 serving_seconds: None,
@@ -6287,11 +6667,16 @@ mod correlation_tests {
                 output_tokens: Some(5),
                 cached_input_tokens: None,
                 first_byte_sample_count: 0,
+                first_byte_ms_sample_count: 0,
                 mean_time_to_first_byte_ms: None,
                 first_token_sample_count: 0,
+                first_token_ms_sample_count: 0,
                 mean_time_to_first_token_ms: None,
                 first_tool_call_sample_count: 0,
+                first_tool_call_ms_sample_count: 0,
                 mean_time_to_first_tool_call_ms: None,
+                decode_output_tokens: None,
+                decode_ms: None,
                 tool_rounds: None,
                 repairs: None,
                 serving_seconds: None,
@@ -6304,11 +6689,16 @@ mod correlation_tests {
                 output_tokens: None,
                 cached_input_tokens: None,
                 first_byte_sample_count: 0,
+                first_byte_ms_sample_count: 0,
                 mean_time_to_first_byte_ms: None,
                 first_token_sample_count: 0,
+                first_token_ms_sample_count: 0,
                 mean_time_to_first_token_ms: None,
                 first_tool_call_sample_count: 0,
+                first_tool_call_ms_sample_count: 0,
                 mean_time_to_first_tool_call_ms: None,
+                decode_output_tokens: None,
+                decode_ms: None,
                 tool_rounds: None,
                 repairs: None,
                 serving_seconds: None,
@@ -6366,6 +6756,10 @@ mod throttle_scope_tests {
             first_token_at_unix: None,
             first_tool_call_at_unix: None,
             completed_at_unix: Some(end),
+            first_byte_ms: None,
+            first_token_ms: None,
+            first_tool_call_ms: None,
+            completed_ms: None,
             input_tokens: None,
             output_tokens: None,
             cached_input_tokens: None,
@@ -6695,6 +7089,10 @@ mod credential_throttle_tests {
             first_token_at_unix: None,
             first_tool_call_at_unix: None,
             completed_at_unix: Some(1_000),
+            first_byte_ms: None,
+            first_token_ms: None,
+            first_tool_call_ms: None,
+            completed_ms: None,
             input_tokens: None,
             output_tokens: None,
             cached_input_tokens: None,
@@ -6812,6 +7210,10 @@ mod credential_spend_tests {
             first_token_at_unix: None,
             first_tool_call_at_unix: None,
             completed_at_unix: Some(1_000),
+            first_byte_ms: None,
+            first_token_ms: None,
+            first_tool_call_ms: None,
+            completed_ms: None,
             input_tokens: tokens.map(|(input, _)| input),
             output_tokens: tokens.map(|(_, output)| output),
             cached_input_tokens: Some(9_999),
@@ -6946,6 +7348,10 @@ mod credential_cost_tests {
             first_token_at_unix: None,
             first_tool_call_at_unix: None,
             completed_at_unix: Some(observed_at_unix),
+            first_byte_ms: None,
+            first_token_ms: None,
+            first_tool_call_ms: None,
+            completed_ms: None,
             input_tokens: tokens.map(|(input, _)| input),
             output_tokens: tokens.map(|(_, output)| output),
             cached_input_tokens: None,

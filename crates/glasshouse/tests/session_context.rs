@@ -204,7 +204,11 @@ fn a_schema_fifteen_database_migrates_forward_and_its_sessions_read_as_uncounted
         // columns, 23's column, 22's column, 21's two, 20's column, 19's two
         // tables, 18's column, 17's table, then 16's.
         conn.execute_batch(
-            "ALTER TABLE routing_observations DROP COLUMN turn_shape;
+            "ALTER TABLE routing_observations DROP COLUMN completed_ms;
+             ALTER TABLE routing_observations DROP COLUMN first_tool_call_ms;
+             ALTER TABLE routing_observations DROP COLUMN first_token_ms;
+             ALTER TABLE routing_observations DROP COLUMN first_byte_ms;
+             ALTER TABLE routing_observations DROP COLUMN turn_shape;
              ALTER TABLE routing_observations DROP COLUMN effort_level;
              ALTER TABLE routing_observations DROP COLUMN session_id;
              ALTER TABLE routing_observations DROP COLUMN task_class;
@@ -231,8 +235,8 @@ fn a_schema_fifteen_database_migrates_forward_and_its_sessions_read_as_uncounted
     let conn = Connection::open(migrated.database_path()).unwrap();
     assert_eq!(
         schema_version(&conn),
-        24,
-        "the launch must have applied migrations 16 through 24"
+        25,
+        "the launch must have applied migrations 16 through 25"
     );
     drop(conn);
 

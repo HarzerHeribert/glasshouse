@@ -327,3 +327,61 @@ Gates the worker ran (re-run the decisive ones yourself):
 - scripts/check-doc-boundary.sh: clean
 - Windows: NOT RUN — cargo check --target aarch64-pc-windows-msvc fails with std missing for the target, as in phase-27. src/memory/** diff has zero cfg, path, OS-string or line-ending constructs.
 
+
+## 939 — CLOSED 2026-09-02 (`GH-RETRIEVAL-FEEDBACK`, Amber, Sonnet high): a rating carries the scope of the retrieval it judges, and the policy is read per scope
+
+**The line.** *Record false-positive or harmful memory retrievals so the
+retrieval policy can be evaluated.* The record existed since Phase 51's
+memory half (`glasshouse memory rate`, eight verdicts, one `MemoryRated` row
+per rating), but a rating named only the memory — nothing tied it to the
+retrieval that surfaced it, so no reader could say *which* retrieval policy
+produced the false positive. That link is this package.
+
+**Contract.** Given a memory that a retrieval returned (a `MemoryRetrieved`
+row with a `RetrievalScope` subject and, for a launch-time injection, a
+session id), when a person or agent rates it with `glasshouse memory rate
+<id> <verdict> [--session <id>]`, Glasshouse records the rating carrying the
+scope of the retrieval it judges — the most recent retrieval of that memory
+in the named session, else the most recent retrieval of that memory at all,
+else no scope — and `glasshouse memory retrievals` prints, per retrieval
+scope (`current`, `historical`, `injection`, *never retrieved*), how many
+retrievals were rated `not-useful` (a false positive) and
+`caused-complexity` (harmful) out of how many retrievals that scope made;
+while preserving that a rating is still its own row and never an edit of a
+retrieval, that `useful` and the other six verdicts are attributed the same
+way but never counted, that a rating of a memory this project cannot see is
+refused before anything is written, and that every existing quality line
+keeps its exact text.
+
+**Production.** `evaluation/mod.rs :: EvaluationObservations::most_recent_retrieval_scope`
+(one query; `ORDER BY CASE WHEN session_id = ?3 THEN 1 ELSE 0 END DESC, seq
+DESC` — the session narrowing and the recency fallback in one ordering, and a
+`None` session compares as no match so the plain latest wins),
+`record_memory_rating` (copies the scope onto the row's `subject`, every
+verdict alike), `EvaluationObservations::false_positives_by_scope` (a CTE
+over both kinds' subjects, `IS` for the never-retrieved bucket);
+`main.rs :: memory_retrievals_report` → `render_memory_quality` (the
+`false positives by retrieval scope (939):` block after the existing five).
+No migration, no column, no flag — `--session` already existed.
+
+**Regression** (`tests/memory_rating.rs`, 15/15, shipped binary, the briefing
+door for the `injection` scope): an injected memory rated `not-useful`
+carries `injection` and the block counts it; a rating `--session S` picks
+S's retrieval over a later `current` one; a never-retrieved memory carries no
+scope while another memory *was* retrieved (the fixture the worker
+strengthened so the `memory_id` filter is actually exercised — §80); a
+`useful` rating carries its scope and is counted nowhere; the five existing
+lines are byte-identical.
+
+**Mutations, 4/4 KILLED** (worker's `mutate.sh --script`, restores
+byte-identical): `scope-not-copied`, `session-ignored`, `useful-counted`,
+`never-retrieved-attributed` — each killed by the test named for it, failure
+text in `.agent-runtime/report-retrieval-feedback.md`.
+
+**Recorded limits** (the worker's): the three scope lines print `0/0/0` when
+any scope in the window has data and `none recorded` only for an empty
+window — a reading the packet did not pin; the reader is proven only through
+the shipped binary (§35, deliberately). Windows/Linux legs trail.
+
+State: **COMPLETE**. Phase 21F stands at 10 of 11; 932 stays refused (four
+identical rulings, `phase-21f.md` above).

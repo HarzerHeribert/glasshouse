@@ -375,7 +375,7 @@ fn a_ledger_that_cannot_be_written_does_not_fail_the_retrieval() {
             })
             .unwrap();
         assert_eq!(
-            version, 24,
+            version, 25,
             "the database must still claim the current schema version, so nothing \
              rebuilds the table"
         );
@@ -1175,6 +1175,10 @@ fn a_version_fourteen_database_migrates_forward_keeping_every_row() {
              -- Migration 22's column, newest of all, so it leads: a rollback
              -- undoes every migration above the version it claims, or the
              -- re-run meets a column it has already added.
+             ALTER TABLE routing_observations DROP COLUMN completed_ms;
+             ALTER TABLE routing_observations DROP COLUMN first_tool_call_ms;
+             ALTER TABLE routing_observations DROP COLUMN first_token_ms;
+             ALTER TABLE routing_observations DROP COLUMN first_byte_ms;
              ALTER TABLE routing_observations DROP COLUMN turn_shape;
              ALTER TABLE routing_observations DROP COLUMN effort_level;
              ALTER TABLE routing_observations DROP COLUMN session_id;
@@ -1208,7 +1212,7 @@ fn a_version_fourteen_database_migrates_forward_keeping_every_row() {
         })
         .unwrap();
     assert_eq!(
-        version, 24,
+        version, 25,
         "the launch must have applied migrations 15 through 22"
     );
 
