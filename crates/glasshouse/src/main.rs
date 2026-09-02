@@ -155,16 +155,68 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
             // is unchanged — this command has never had a failure mode, and a
             // routing model the user configured being unreachable is not one
             // it should acquire.
-            let model_output = match classify_with_routing_model(
-                &runtime,
-                &glasshouse::routing::request::RouterRequest::for_text(&request),
+            //
+            // Line 1469: the same text-keyed cache `classify_for_routing`
+            // consults, best-effort on a configuration re-read exactly like
+            // `forbidden_providers` does — this command has no `EffectiveConfig`
+            // of its own to reuse.
+            let text_cache =
+                ClassificationTextCache::new(runtime.paths(), runtime.project().id().as_str());
+            let text_key = glasshouse::routing::request::normalised_task_key(&request);
+            let resolution_tag = match (
+                UserConfig::load(runtime.paths()),
+                config::load_project_config(runtime.project()),
             ) {
-                ClassificationAttempt::NotConfigured => None,
-                ClassificationAttempt::Answered(classification) => Some(classification),
-                ClassificationAttempt::Failed(why) => {
-                    eprintln!("glasshouse: {why}; deterministic heuristics answered instead");
+                (Ok(user), Ok(project)) => {
+                    let effective = EffectiveConfig::new(&user, project.as_ref());
+                    classification_cache_resolution_tag(&effective.routing_model_resolution().value)
+                }
+                _ => {
+                    tracing::debug!(
+                        "could not re-read configuration for the classification text cache"
+                    );
                     None
                 }
+            };
+            let no_fingerprint = glasshouse::routing::request::RoutingFingerprint::new(
+                None,
+                &[],
+                std::iter::empty::<String>(),
+            );
+            let cached = resolution_tag.as_deref().and_then(|tag| {
+                let record = text_cache.lookup(&text_key)?;
+                let now = glasshouse::provider::cache::now_unix_seconds();
+                record
+                    .is_reusable_for(now, &no_fingerprint, tag)
+                    .then(|| record.classification())
+                    .flatten()
+            });
+            let model_output = match cached {
+                Some(classification) => Some(classification),
+                None => match classify_with_routing_model(
+                    &runtime,
+                    &glasshouse::routing::request::RouterRequest::for_text(&request),
+                ) {
+                    ClassificationAttempt::NotConfigured => None,
+                    ClassificationAttempt::Answered(classification) => {
+                        if let Some(tag) = resolution_tag.as_deref() {
+                            text_cache.store(
+                                glasshouse::routing::request::CachedClassification::new(
+                                    text_key.clone(),
+                                    no_fingerprint.clone(),
+                                    tag,
+                                    &classification,
+                                    glasshouse::provider::cache::now_unix_seconds(),
+                                ),
+                            );
+                        }
+                        Some(classification)
+                    }
+                    ClassificationAttempt::Failed(why) => {
+                        eprintln!("glasshouse: {why}; deterministic heuristics answered instead");
+                        None
+                    }
+                },
             };
             print!(
                 "{}",
@@ -4282,6 +4334,7 @@ fn route_recommendation(
             destinations: &destinations,
             health: health.pool(),
             sticky: None,
+            text_cache: None,
         },
     );
     let inputs = RouterInputs {
@@ -4413,6 +4466,11 @@ struct RoutingClassificationSite<'a> {
     /// The sticky record to consult for line 1467. `Some` on the path that
     /// acts; `None` on the path that reports, which never reuses.
     sticky: Option<&'a ClassificationStickyCache>,
+    /// Line 1469's text-keyed cache. `Some` on the path that acts; `None` on
+    /// the path that reports — the same reason `sticky` is `None` there:
+    /// `route`'s own comment says it always asks rather than reusing, and a
+    /// diagnostic that answers from yesterday's cache is not a diagnostic.
+    text_cache: Option<&'a ClassificationTextCache>,
 }
 
 /// Deterministic heuristics' answer for `text`, with the reason they answered.
@@ -4492,10 +4550,13 @@ fn classify_for_routing(
         .with_capacity(bands)
         .with_constraints(constraints);
 
+    let resolution = effective.routing_model_resolution().value;
+    let resolution_tag = classification_cache_resolution_tag(&resolution);
+
     let answer = if request.constraints().is_deterministic() {
         heuristic_answer(text, HeuristicReason::DeterministicOverride)
     } else {
-        match effective.routing_model_resolution().value {
+        match resolution {
             RoutingModelResolution::Heuristics(_) => {
                 heuristic_answer(text, HeuristicReason::NoRoutingModel)
             }
@@ -4525,21 +4586,71 @@ fn classify_for_routing(
                 });
                 match reused {
                     Some(answer) => answer,
-                    None => match classify_with_routing_model(runtime, &request) {
-                        ClassificationAttempt::NotConfigured => {
-                            heuristic_answer(text, HeuristicReason::NoRoutingModel)
+                    None => {
+                        // Line 1469, read side: a normalised-text hit stands
+                        // in for the model ask below when it is reusable —
+                        // never below `Confidence::Low`, the same
+                        // fingerprint, the same routing-model identity, and
+                        // recorded recently. `resolution_tag` is `None` for
+                        // `Automatic` (see `classification_cache_resolution_tag`),
+                        // which keeps this lookup out of the arm entirely
+                        // rather than risk serving one model's answer as
+                        // another's.
+                        let text_key = glasshouse::routing::request::normalised_task_key(text);
+                        let text_cached = resolution_tag.as_deref().and_then(|tag| {
+                            site.text_cache.and_then(|cache| {
+                                let record = cache.lookup(&text_key)?;
+                                let now = glasshouse::provider::cache::now_unix_seconds();
+                                if !record.is_reusable_for(now, &fingerprint, tag) {
+                                    return None;
+                                }
+                                let classification = record.classification()?;
+                                let previously = classification.source().to_string();
+                                Some(RouterAnswer::new(
+                                    classification,
+                                    AnswerProvenance::ReusedFromCache { previously },
+                                ))
+                            })
+                        });
+                        match text_cached {
+                            Some(answer) => answer,
+                            None => match classify_with_routing_model(runtime, &request) {
+                                ClassificationAttempt::NotConfigured => {
+                                    heuristic_answer(text, HeuristicReason::NoRoutingModel)
+                                }
+                                ClassificationAttempt::Answered(classification) => {
+                                    let provenance =
+                                        AnswerProvenance::of_source(classification.source());
+                                    // Line 1469, write side: only a real
+                                    // model answer is worth remembering,
+                                    // exactly the same rule
+                                    // `remember_classification` applies to
+                                    // the sticky cache.
+                                    if let (Some(cache), Some(tag)) =
+                                        (site.text_cache, resolution_tag.as_deref())
+                                    {
+                                        cache.store(
+                                            glasshouse::routing::request::CachedClassification::new(
+                                                text_key.clone(),
+                                                fingerprint.clone(),
+                                                tag,
+                                                &classification,
+                                                glasshouse::provider::cache::now_unix_seconds(),
+                                            ),
+                                        );
+                                    }
+                                    RouterAnswer::new(classification, provenance)
+                                }
+                                ClassificationAttempt::Failed(why) => {
+                                    eprintln!(
+                                        "glasshouse: {why}; deterministic heuristics answered \
+                                         instead"
+                                    );
+                                    heuristic_answer(text, HeuristicReason::ModelFailed(why))
+                                }
+                            },
                         }
-                        ClassificationAttempt::Answered(classification) => {
-                            let provenance = AnswerProvenance::of_source(classification.source());
-                            RouterAnswer::new(classification, provenance)
-                        }
-                        ClassificationAttempt::Failed(why) => {
-                            eprintln!(
-                                "glasshouse: {why}; deterministic heuristics answered instead"
-                            );
-                            heuristic_answer(text, HeuristicReason::ModelFailed(why))
-                        }
-                    },
+                    }
                 }
             }
         }
@@ -4548,6 +4659,35 @@ fn classify_for_routing(
         answer,
         fingerprint,
     })
+}
+
+/// Line 1469's routing-model identity, for the text-keyed cache: the model
+/// label for a [`RoutingModelResolution::Pinned`] resolution — known without
+/// asking anything, since a pin already names the exact model — and `None`
+/// for [`RoutingModelResolution::Automatic`] and
+/// [`RoutingModelResolution::Heuristics`].
+///
+/// `Automatic` is deliberately excluded rather than tagged with whichever
+/// model last answered: the recon this package closes (`GH-RECON-1469`)
+/// notes that automatic selection can differ call to call for the same
+/// text, and the only way to know *which* model would currently answer is
+/// [`automatic_classification_choice`] — a stateful, side-effecting local
+/// pick (it writes `RoutingStickyCache`) that this cache has no business
+/// calling just to decide whether to skip a lookup. So an `Automatic`
+/// classification is never served from this cache; `Pinned`'s identity is
+/// free, and is the case this cache actually saves a call for.
+/// `Heuristics` never reaches the arm that would call this at all.
+fn classification_cache_resolution_tag(
+    resolution: &glasshouse::config::RoutingModelResolution,
+) -> Option<String> {
+    use glasshouse::config::RoutingModelResolution;
+
+    match resolution {
+        RoutingModelResolution::Pinned { provider, model } => {
+            Some(format!("pinned:{provider}/{model}"))
+        }
+        RoutingModelResolution::Heuristics(_) | RoutingModelResolution::Automatic => None,
+    }
 }
 
 /// Line 1449's producer: one capacity **band** per candidate provider, read
@@ -4644,6 +4784,77 @@ impl ClassificationStickyCache {
         })();
         if let Err(err) = attempt {
             tracing::debug!(error = %err, "could not persist the routing classification");
+        }
+    }
+}
+
+/// The most entries [`ClassificationTextCache`] keeps. Past this, the oldest
+/// recorded entry is dropped before a new one is written — a small, named
+/// cap rather than a file that grows for as long as a project is worked in.
+const CLASSIFICATION_TEXT_CACHE_CAPACITY: usize = 64;
+
+/// Where line 1469's text-keyed cache is kept — the same project-scoped
+/// directory as [`ClassificationStickyCache`] and
+/// [`glasshouse::provider::telemetry::RoutingStickyCache`], and the same
+/// file shape, except the record is a map keyed by
+/// [`glasshouse::routing::request::normalised_task_key`] rather than a
+/// single value: one JSON file, written to a temporary name and renamed,
+/// every read failure answering an empty cache rather than an error.
+struct ClassificationTextCache {
+    path: std::path::PathBuf,
+}
+
+impl ClassificationTextCache {
+    fn new(paths: &glasshouse::paths::RuntimePaths, project_id: &str) -> Self {
+        Self {
+            path: paths
+                .project_state_dir(project_id)
+                .join("routing-classification-cache.json"),
+        }
+    }
+
+    fn load(
+        &self,
+    ) -> std::collections::BTreeMap<String, glasshouse::routing::request::CachedClassification>
+    {
+        std::fs::read(&self.path)
+            .ok()
+            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
+            .unwrap_or_default()
+    }
+
+    /// The record for `key`, if one is on disk. Every gate beyond "a record
+    /// exists" is [`glasshouse::routing::request::CachedClassification::is_reusable_for`]'s,
+    /// not this method's.
+    fn lookup(&self, key: &str) -> Option<glasshouse::routing::request::CachedClassification> {
+        self.load().remove(key)
+    }
+
+    fn store(&self, record: glasshouse::routing::request::CachedClassification) {
+        let mut entries = self.load();
+        entries.insert(record.key().to_owned(), record);
+        while entries.len() > CLASSIFICATION_TEXT_CACHE_CAPACITY {
+            let Some(oldest) = entries
+                .iter()
+                .min_by_key(|(_, record)| record.recorded_at_unix())
+                .map(|(key, _)| key.clone())
+            else {
+                break;
+            };
+            entries.remove(&oldest);
+        }
+        let attempt = (|| -> std::io::Result<()> {
+            if let Some(parent) = self.path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let encoded = serde_json::to_vec_pretty(&entries)
+                .map_err(|err| std::io::Error::other(err.to_string()))?;
+            let temporary = self.path.with_extension("json.writing");
+            std::fs::write(&temporary, encoded)?;
+            std::fs::rename(&temporary, &self.path)
+        })();
+        if let Err(err) = attempt {
+            tracing::debug!(error = %err, "could not persist the classification text cache");
         }
     }
 }
@@ -4944,6 +5155,7 @@ fn launch_session(
     //
     let sticky_cache =
         ClassificationStickyCache::new(runtime.paths(), runtime.project().id().as_str());
+    let text_cache = ClassificationTextCache::new(runtime.paths(), runtime.project().id().as_str());
     // # Why routing off does not report what it would have done
     //
     // The obvious courtesy is to rank anyway and print *"routing is off; it
@@ -5071,6 +5283,7 @@ fn launch_session(
                 destinations: &destinations,
                 health: health.pool(),
                 sticky: Some(&sticky_cache),
+                text_cache: Some(&text_cache),
             },
         );
         let inputs = glasshouse::routing::session::RouterInputs {
@@ -16874,5 +17087,129 @@ mod tests {
             "with neither a quota reading nor a price, the allowance must stay exactly what it \
              was before this package"
         );
+    }
+
+    // ---------------------------------------------------------------------
+    // Line 1469 — the text-keyed classification cache.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn classification_cache_resolution_tag_names_the_pin_and_nothing_else() {
+        use glasshouse::config::{RoutingFallback, RoutingModelResolution};
+
+        assert_eq!(
+            classification_cache_resolution_tag(&RoutingModelResolution::Pinned {
+                provider: "route-probe".to_owned(),
+                model: "router-model".to_owned(),
+            }),
+            Some("pinned:route-probe/router-model".to_owned())
+        );
+        assert_eq!(
+            classification_cache_resolution_tag(&RoutingModelResolution::Automatic),
+            None,
+            "automatic selection can differ call to call for the same text, so this cache \
+             never claims to know the identity in advance"
+        );
+        assert_eq!(
+            classification_cache_resolution_tag(&RoutingModelResolution::Heuristics(
+                RoutingFallback::NotConfigured
+            )),
+            None
+        );
+        // A different pin is a different tag: two pins never share a cache
+        // entry, even for the same normalised text.
+        assert_ne!(
+            classification_cache_resolution_tag(&RoutingModelResolution::Pinned {
+                provider: "route-probe".to_owned(),
+                model: "router-model".to_owned(),
+            }),
+            classification_cache_resolution_tag(&RoutingModelResolution::Pinned {
+                provider: "route-probe".to_owned(),
+                model: "a-different-model".to_owned(),
+            })
+        );
+    }
+
+    /// The store round-trips a record by key, and — Phase 34E's "bounded" —
+    /// keeps at most [`CLASSIFICATION_TEXT_CACHE_CAPACITY`] entries, dropping
+    /// the oldest by `recorded_at_unix` rather than growing without limit.
+    #[test]
+    fn a_classification_cache_round_trips_a_text_keyed_entry_and_bounds_its_size() {
+        use glasshouse::routing::request::{CachedClassification, RoutingFingerprint};
+
+        let fixture = CliFixture::new();
+        let cache = ClassificationTextCache::new(
+            fixture.runtime.paths(),
+            fixture.runtime.project().id().as_str(),
+        );
+
+        assert!(
+            cache.load().is_empty(),
+            "no file on disk yet must read as an empty cache, not an error"
+        );
+
+        let classification = glasshouse::routing::classify::classify_heuristically(
+            "what is a mutex? (bin-test fixture)",
+        );
+        let fingerprint = RoutingFingerprint::new(None, &[], std::iter::empty::<String>());
+        for i in 0..(CLASSIFICATION_TEXT_CACHE_CAPACITY + 5) {
+            cache.store(CachedClassification::new(
+                format!("key-{i}"),
+                fingerprint.clone(),
+                "pinned:route-probe/router-model",
+                &classification,
+                1_000 + i as i64,
+            ));
+        }
+
+        let entries = cache.load();
+        assert_eq!(
+            entries.len(),
+            CLASSIFICATION_TEXT_CACHE_CAPACITY,
+            "the cache must never grow past its named capacity"
+        );
+        assert!(
+            !entries.contains_key("key-0"),
+            "the oldest entry must be the one dropped"
+        );
+        assert!(
+            entries.contains_key(&format!("key-{}", CLASSIFICATION_TEXT_CACHE_CAPACITY + 4)),
+            "the newest entry must survive"
+        );
+
+        let round_tripped = cache
+            .lookup(&format!("key-{}", CLASSIFICATION_TEXT_CACHE_CAPACITY + 4))
+            .expect("the newest entry round-trips");
+        assert_eq!(round_tripped.classification(), Some(classification));
+    }
+
+    /// A file this build cannot parse — corrupt, or written by a build with
+    /// a different vocabulary — reads as an empty cache, the same rule
+    /// [`ClassificationStickyCache::load`] follows for its own file.
+    #[test]
+    fn an_unreadable_classification_cache_file_reads_as_empty() {
+        let fixture = CliFixture::new();
+        let cache = ClassificationTextCache::new(
+            fixture.runtime.paths(),
+            fixture.runtime.project().id().as_str(),
+        );
+        std::fs::create_dir_all(
+            fixture
+                .runtime
+                .paths()
+                .project_state_dir(fixture.runtime.project().id().as_str()),
+        )
+        .unwrap();
+        std::fs::write(
+            fixture
+                .runtime
+                .paths()
+                .project_state_dir(fixture.runtime.project().id().as_str())
+                .join("routing-classification-cache.json"),
+            b"not json",
+        )
+        .unwrap();
+        assert!(cache.load().is_empty());
+        assert!(cache.lookup("anything").is_none());
     }
 }

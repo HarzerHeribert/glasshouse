@@ -233,3 +233,77 @@ dispatched once the three-leg gate has the machine to itself. Every line
 number the packet inherited was stale and the worker corrected all of them
 (`classify_with_routing_model` `:7746`, `classify_for_routing` `:4464`,
 callers `:158`, `:4528`, `:4272`, `:5061`).
+
+---
+
+## 1469 — CLOSED 2026-09-02 (`GH-CLASSIFICATION-CACHE`, Amber, Sonnet high): the census above, closed
+
+`routing/request.rs`: `CachedClassification` (hash of the normalised text,
+`RoutingFingerprint`, resolution tag, the existing `StoredClassification`,
+`recorded_at_unix`), `is_reusable_for` with four gates, the normaliser (trim,
+collapse whitespace, lowercase, SHA-256 — the file never holds the text),
+`CLASSIFICATION_CACHE_WINDOW_SECONDS` beside the sticky window, and a new
+`AnswerProvenance::ReusedFromCache` so a served answer says so. `main.rs`:
+`ClassificationTextCache` in `ClassificationStickyCache`'s exact file shape
+(`routing-classification-cache.json` under the project state dir), read in
+`classify_for_routing` after the sticky-session reuse did not fire and before
+the model ask, written after a real answer; `launch` passes it, `route`
+passes `None`; `glasshouse classify` reads and writes it too. One
+pre-existing test that launched the same text twice now sees the second
+served from the cache, as it should. The worker's report was cut off by a
+dropped connection and written again on a nudge; the work was intact.
+
+**Phase 34E is complete.**
+
+### Cache recent classification results for semantically identical task starts when safe. (line 1469)
+
+Contract: Given a task start whose normalised text was classified in this project recently, under the same routing-model resolution, with a confidence above Low and an unchanged fingerprint, when `launch` (or `glasshouse classify`) needs its classification, Glasshouse answers from the cache and makes no model call — while preserving that `route`'s report path always asks fresh, that a Low-confidence, expired, differently-resolved or differently-fingerprinted entry is never served, and that the task text is stored only as a hash.
+
+State: **COMPLETE** — ruled 2026-09-02. The cache answers a task start whose normalised text was classified in this project within the window, under the same pinned resolution, above Low confidence, with an unchanged fingerprint — and makes no model call, proven through the shipped binary with a provider that fails the test if asked; the three mutations are on the three gates the line's *when safe* names and all are KILLED. The two orchestrator rulings hold (`route` asks fresh; the window is a named constant), and the worker added a third, accepted here: an `Automatic` resolution neither reads nor writes the cache, because the model that would answer *now* cannot be known before asking, so a cached answer could stand in for a different model's — the recon's own warning, applied on the read side. The cache therefore serves pinned resolutions; that is the honest scope of *when safe* in this build.
+
+Production evidence:
+- `crates/glasshouse/src/routing/request.rs` — `normalised_task_key`
+- `crates/glasshouse/src/routing/request.rs` — `CachedClassification::is_reusable_for`
+- `crates/glasshouse/src/routing/request.rs` — `CachedClassification::new/classification/key/recorded_at_unix`
+- `crates/glasshouse/src/routing/request.rs` — `AnswerProvenance::ReusedFromCache`
+- `crates/glasshouse/src/main.rs` — `ClassificationTextCache::load/lookup/store`
+- `crates/glasshouse/src/main.rs` — `classification_cache_resolution_tag`
+- `crates/glasshouse/src/main.rs` — `classify_for_routing (text-cache lookup and write, Pinned|Automatic arm)`
+- `crates/glasshouse/src/main.rs` — `Command::Classify handler (text-cache lookup and write)`
+
+Regression evidence:
+- `routing::request::tests::normalisation_collapses_whitespace_and_case_to_the_same_key`
+- `routing::request::tests::normalisation_never_stores_the_task_text`
+- `routing::request::tests::a_reusable_entry_passes_all_four_gates`
+- `routing::request::tests::a_low_confidence_entry_is_never_reusable`
+- `routing::request::tests::a_different_fingerprint_is_never_reusable`
+- `routing::request::tests::a_different_resolution_tag_is_never_reusable`
+- `routing::request::tests::an_entry_older_than_the_window_is_never_reusable`
+- `tests::classification_cache_resolution_tag_names_the_pin_and_nothing_else (bin glasshouse)`
+- `tests::a_classification_cache_round_trips_a_text_keyed_entry_and_bounds_its_size (bin glasshouse)`
+- `tests::an_unreadable_classification_cache_file_reads_as_empty (bin glasshouse)`
+- `launch_classification::identical_task_text_up_to_whitespace_and_case_is_served_from_the_text_cache`
+- `launch_classification::a_low_confidence_answer_for_the_same_text_is_never_served_from_the_text_cache`
+- `launch_classification::route_after_launch_with_the_same_task_always_asks_the_model`
+- `launch_classification::the_text_cache_file_never_contains_the_task_text`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| let digest = Sha256::digest(normalised.as_bytes()); -> let digest = Sha256::digest(text.as_bytes()); | `compare-raw-text` | **killed** | `launch_classification::identical_task_text_up_to_whitespace_and_case_is_served_from_the_text_cache` |
+| let age = now_unix.saturating_sub(self.recorded_at_unix); (0..=CLASSIFICATION_CACHE_WINDOW_SECONDS).contains(&age) -> let _ = self.recorded_at_unix; true | `drop-the-age-gate` | **killed** | `routing::request::tests::an_entry_older_than_the_window_is_never_reusable` |
+| if classification.confidence() == Confidence::Low { return false; } block deleted | `serve-low-confidence` | **killed** | `routing::request::tests::a_low_confidence_entry_is_never_reusable` |
+
+> compare-raw-text observed: assertion `left == right` failed: a repeat of the same normalised task text must not ask the routing model again: (model.requests().len() came back 2, expected 1)
+
+> drop-the-age-gate observed: assertion failed: !cached.is_reusable_for(1_000 + CLASSIFICATION_CACHE_WINDOW_SECONDS + 1, &fingerprint(), "pinned:route-probe/router-model")
+
+> serve-low-confidence observed: assertion failed: !cached.is_reusable_for(1_500, &fingerprint(), "pinned:route-probe/router-model")
+
+Recorded scope limits — stated by the worker, not discovered later:
+- Automatic-resolution classifications are written to the cache (their real model label is captured in the stored record) but never served back — classification_cache_resolution_tag returns None for RoutingModelResolution::Automatic by deliberate ruling, documented in this report and as a doc comment on that function. Only Pinned-resolution reuse is proven end to end.
+- route's report path (main.rs:4272 area) is confirmed never wired to either cache, by design (map line 1469's contract and the packet's explicit ruling).
+- Windows and Linux legs of the local gate were not run this session; only macOS. main.rs carries unrelated pre-existing cfg(unix/windows) code, so blast-radius.sh flags the whole file as platform-conditional even though this package adds no new cfg.
+
+---
+
+---

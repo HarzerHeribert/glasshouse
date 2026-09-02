@@ -752,9 +752,18 @@ fn a_stated_task_classifies_through_the_routing_model_and_the_request_carries_ba
     );
     assert!(said.contains("tier frontier"), "{said}");
 
-    // A second launch sees the session the first one recorded, and the
-    // request says so — the warm-session fact is a fact about the candidates.
-    let (out, said) = fixture.launch(&["--profile", "metered", "--task", task]);
+    // A second launch, with a *different* task, sees the session the first
+    // one recorded, and the request says so — the warm-session fact is a
+    // fact about the candidates. The task must differ from the first: line
+    // 1469's text-keyed cache would otherwise serve this decision without
+    // asking the model at all — `FRONTIER_ANSWER` is high-confidence, so a
+    // repeat of the *same* normalised text is exactly the case that cache
+    // exists to skip (proven separately in
+    // `identical_task_text_up_to_whitespace_and_case_is_served_from_the_text_cache`).
+    // This assertion is about the request body a *live* call carries, which
+    // needs a live call to inspect.
+    let second_task = "refactor the session store's locking so resume never blocks, once more";
+    let (out, said) = fixture.launch(&["--profile", "metered", "--task", second_task]);
     assert!(out.status.success(), "{said}");
     let requests = model.requests();
     assert_eq!(requests.len(), 2, "{said}");
@@ -1261,6 +1270,129 @@ fn a_classification_that_is_not_low_risk_is_asked_again_every_turn() {
         model.requests().len(),
         2,
         "frontier work is not low-risk; each turn is classified afresh:\n{said}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Line 1469: the text-keyed classification cache.
+// ---------------------------------------------------------------------------
+
+/// REQUIRED BEHAVIOR 1. Two launches whose `--task` strings differ only in
+/// whitespace and case classify to the same normalised key: the second makes
+/// zero model calls, and its classification equals the first's.
+///
+/// `FRONTIER_ANSWER` is used deliberately: it is **not** low-risk
+/// (`needs_code_modification`, `needs_shell_execution` and
+/// `needs_browser_interaction` are all `true`, and its tier is `frontier`),
+/// so the *session-keyed* sticky cache refuses it on the second launch —
+/// `StickyClassification::reuse_for`'s own `is_low_risk()` gate returns
+/// `StickyRefusal::NotLowRisk` before it ever looks at the session or the
+/// fingerprint. Any reuse that still happens here is therefore provably the
+/// text-keyed cache line 1469 adds, not the existing session-keyed one.
+#[test]
+fn identical_task_text_up_to_whitespace_and_case_is_served_from_the_text_cache() {
+    let model = FakeModel::answering(FRONTIER_ANSWER);
+    let fixture = Fixture::new(Some(&model.base_url()));
+
+    let (out, said) = fixture.launch(&["--task", "  Fix the Bug "]);
+    assert!(out.status.success(), "{said}");
+    assert_eq!(model.requests().len(), 1, "{said}");
+    assert!(said.contains("tier frontier"), "{said}");
+
+    let (out, said) = fixture.launch(&["--task", "fix   THE bug"]);
+    assert!(out.status.success(), "{said}");
+    assert_eq!(
+        model.requests().len(),
+        1,
+        "a repeat of the same normalised task text must not ask the routing model again:\n\
+         {said}"
+    );
+    assert!(
+        said.contains("the cached classification for the same task text"),
+        "{said}"
+    );
+    assert!(
+        said.contains(&format!("({ROUTING_MODEL_LABEL})")),
+        "the cached answer still names the model that originally gave it:\n{said}"
+    );
+    assert!(
+        said.contains("tier frontier"),
+        "the reused classification must equal the first's:\n{said}"
+    );
+}
+
+/// REQUIRED BEHAVIOR 2 (the `Confidence::Low` clause). The same normalised
+/// task text is asked about again when the answer it would reuse was
+/// low-confidence — `is_reusable_for`'s own gate, exercised end to end.
+#[test]
+fn a_low_confidence_answer_for_the_same_text_is_never_served_from_the_text_cache() {
+    let model = FakeModel::answering(LOW_CONFIDENCE_ANSWER);
+    let fixture = Fixture::new(Some(&model.base_url()));
+
+    let (out, said) = fixture.launch(&["--task", "rename the widget struct"]);
+    assert!(out.status.success(), "{said}");
+    assert_eq!(model.requests().len(), 1, "{said}");
+
+    let (out, said) = fixture.launch(&["--task", "RENAME the WIDGET struct"]);
+    assert!(out.status.success(), "{said}");
+    assert_eq!(
+        model.requests().len(),
+        2,
+        "a low-confidence classification is exactly the one that must be asked about again, \
+         even for the same normalised task text:\n{said}"
+    );
+}
+
+/// REQUIRED BEHAVIOR 3. `route --task X` never answers from the text cache,
+/// however recently `launch --task X` populated it — `route`'s own comment
+/// says it always asks fresh, and `RoutingClassificationSite::text_cache` is
+/// `None` on that path.
+#[test]
+fn route_after_launch_with_the_same_task_always_asks_the_model() {
+    let model = FakeModel::answering(FRONTIER_ANSWER);
+    let fixture = Fixture::new(Some(&model.base_url()));
+
+    let (out, said) = fixture.launch(&["--task", "audit the routing tier"]);
+    assert!(out.status.success(), "{said}");
+    assert_eq!(model.requests().len(), 1, "{said}");
+
+    let report = String::from_utf8_lossy(
+        &fixture
+            .glasshouse(&["route", "--task", "audit the routing tier"])
+            .stdout,
+    )
+    .into_owned();
+    assert_eq!(
+        model.requests().len(),
+        2,
+        "`route`'s report path must always ask fresh, never serve the text cache:\n{report}"
+    );
+}
+
+/// REQUIRED BEHAVIOR 4. The cache file never carries the task text itself —
+/// only the hash [`normalised_task_key`](glasshouse::routing::request) produces.
+#[test]
+fn the_text_cache_file_never_contains_the_task_text() {
+    let model = FakeModel::answering(FRONTIER_ANSWER);
+    let fixture = Fixture::new(Some(&model.base_url()));
+
+    let distinctive = "zzz-unmistakable-task-text-marker-zzz";
+    let (out, said) = fixture.launch(&["--task", distinctive]);
+    assert!(out.status.success(), "{said}");
+    assert_eq!(model.requests().len(), 1, "{said}");
+
+    let runtime = fixture.runtime();
+    let cache_path = runtime
+        .paths()
+        .project_state_dir(runtime.project().id().as_str())
+        .join("routing-classification-cache.json");
+    let contents = std::fs::read_to_string(&cache_path)
+        .unwrap_or_else(|err| panic!("the text cache file must exist: {err}"));
+    assert!(
+        !contents
+            .to_lowercase()
+            .contains(&distinctive.to_lowercase()),
+        "the cache file must never carry the task text: {contents}"
     );
 }
 

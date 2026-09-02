@@ -1466,7 +1466,7 @@ Phase 34E — Router economics
 ☑ Warn when routing overhead becomes a non-trivial fraction of the resources it is intended to save.
 ☑ Allow repeated low-risk turns in the same sticky session to bypass the routing model.
 ☑ Re-run classification only when the user starts a new task, requests migration, the current session becomes unsuitable, or resource conditions materially change.
-☐ Cache recent classification results for semantically identical task starts when safe.
+☑ Cache recent classification results for semantically identical task starts when safe.
 ☑ Prefer deterministic routing for obvious commands such as explicitly selecting a named existing session.
 ☑ Ensure the scheduler can be useful even if every LLM-based routing call is disabled.
 

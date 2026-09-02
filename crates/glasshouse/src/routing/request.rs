@@ -34,6 +34,7 @@
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::config::pairing::{WarmSession, WarmSessionState};
 use crate::integrations::IntegrationId;
@@ -571,6 +572,12 @@ pub enum AnswerProvenance {
     /// Line 1467: the previous low-risk classification for the same sticky
     /// session was reused, and no routing model was asked.
     Reused { session: String, previously: String },
+    /// Line 1469: a classification cached for the same normalised task text
+    /// was reused, and no routing model was asked. Deliberately distinct
+    /// from [`Self::Reused`] — that variant's `session` names a warm session
+    /// a person is returning to, and this one has no session at all, only a
+    /// hash of the text.
+    ReusedFromCache { previously: String },
 }
 
 impl AnswerProvenance {
@@ -602,6 +609,11 @@ impl fmt::Display for AnswerProvenance {
                 f,
                 "the previous low-risk classification for session {session} ({previously}), \
                  reused without asking the routing model"
+            ),
+            Self::ReusedFromCache { previously } => write!(
+                f,
+                "the cached classification for the same task text ({previously}), reused \
+                 without asking the routing model"
             ),
         }
     }
@@ -1038,6 +1050,125 @@ impl StickyClassification {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Line 1469 — a text-keyed cache beside the session-keyed one above: the same
+// low-confidence gate, a fingerprint, and a routing-model identity, but keyed
+// by the normalised task text itself rather than by which session is warm.
+// ---------------------------------------------------------------------------
+
+/// How long a text-keyed cache entry may still answer for its key before
+/// this build asks again — map line 1469's "recent". Named beside
+/// [`STICKY_TURN_WINDOW_SECONDS`] rather than sharing it: that window
+/// measures session warmth, a signal this cache does not have, so it earns
+/// its own name instead of borrowing a number reasoned about a different
+/// question. Set to the same span anyway — nothing in current practice
+/// suggests a classification goes stale on a faster clock than a session
+/// does.
+pub const CLASSIFICATION_CACHE_WINDOW_SECONDS: i64 = STICKY_TURN_WINDOW_SECONDS;
+
+/// Map line 1469's "semantically identical, honestly": no embeddings exist
+/// in this build (Phase 52 is Cluster Q for exactly that reason), so
+/// identity is a normalised literal text match — trim, collapse every run of
+/// internal whitespace to one space, lowercase — hashed with this crate's
+/// existing choice ([`Sha256`], the same digest `crate::firewall::store` and
+/// `crate::project` already key their own content by), so a cache keyed by
+/// this value never carries the task text itself.
+pub fn normalised_task_key(text: &str) -> String {
+    let mut normalised = String::with_capacity(text.len());
+    let mut last_was_space = false;
+    for ch in text.trim().chars() {
+        if ch.is_whitespace() {
+            if !last_was_space {
+                normalised.push(' ');
+                last_was_space = true;
+            }
+        } else {
+            normalised.extend(ch.to_lowercase());
+            last_was_space = false;
+        }
+    }
+    let digest = Sha256::digest(normalised.as_bytes());
+    hex::encode(&digest[..16])
+}
+
+/// One remembered answer for a normalised task text — map line 1469's
+/// memory, beside [`StickyClassification`]'s session-keyed one and in the
+/// same shape: a fingerprint, a routing-model identity, the classification
+/// itself in the shape `StoredClassification` already carries, and when it
+/// was recorded. The caller persists and reloads this; this module never
+/// touches a file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CachedClassification {
+    key: String,
+    fingerprint: RoutingFingerprint,
+    resolution: String,
+    stored: StoredClassification,
+    recorded_at_unix: i64,
+}
+
+impl CachedClassification {
+    pub fn new(
+        key: impl Into<String>,
+        fingerprint: RoutingFingerprint,
+        resolution: impl Into<String>,
+        classification: &TaskClassification,
+        recorded_at_unix: i64,
+    ) -> Self {
+        Self {
+            key: key.into(),
+            fingerprint,
+            resolution: resolution.into(),
+            stored: StoredClassification::of(classification),
+            recorded_at_unix,
+        }
+    }
+
+    /// The key this record answers for — [`normalised_task_key`]'s output,
+    /// never the task text.
+    pub fn key(&self) -> &str {
+        &self.key
+    }
+
+    pub fn recorded_at_unix(&self) -> i64 {
+        self.recorded_at_unix
+    }
+
+    /// The classification this record stores, when this build can read it —
+    /// `None` for a record written by a build with a different vocabulary,
+    /// exactly as `StoredClassification::classification` refuses one.
+    pub fn classification(&self) -> Option<TaskClassification> {
+        self.stored.classification()
+    }
+
+    /// Map line 1469's "when safe", in one function: never below
+    /// [`Confidence::Low`] — the same rule
+    /// [`super::classify::TaskClassification::is_low_risk`] states this
+    /// reasoning for, reused here rather than restated a second time — the
+    /// same fingerprint, the same routing-model identity, and recorded
+    /// within [`CLASSIFICATION_CACHE_WINDOW_SECONDS`] of `now_unix`.
+    pub fn is_reusable_for(
+        &self,
+        now_unix: i64,
+        fingerprint: &RoutingFingerprint,
+        resolution: &str,
+    ) -> bool {
+        let Some(classification) = self.stored.classification() else {
+            return false;
+        };
+        if classification.confidence() == Confidence::Low {
+            return false;
+        }
+        if &self.fingerprint != fingerprint {
+            return false;
+        }
+        if self.resolution != resolution {
+            return false;
+        }
+        let age = now_unix.saturating_sub(self.recorded_at_unix);
+        (0..=CLASSIFICATION_CACHE_WINDOW_SECONDS).contains(&age)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1355,5 +1486,103 @@ mod tests {
             None
         );
         assert_eq!(StickyClassification::from_json(b"not json"), None);
+    }
+
+    // --- 1469: the text-keyed cache ----------------------------------------
+
+    #[test]
+    fn normalisation_collapses_whitespace_and_case_to_the_same_key() {
+        let a = normalised_task_key("Fix   the Bug");
+        let b = normalised_task_key("  fix the bug  ");
+        let c = normalised_task_key("fix\tthe\nbug");
+        assert_eq!(a, b);
+        assert_eq!(a, c);
+        assert_ne!(a, normalised_task_key("fix the bugs"));
+    }
+
+    #[test]
+    fn normalisation_never_stores_the_task_text() {
+        let key = normalised_task_key("a very specific secret task string");
+        assert!(!key.contains("secret"));
+        assert!(key.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn a_reusable_entry_passes_all_four_gates() {
+        let cached = CachedClassification::new(
+            normalised_task_key("fix the bug"),
+            fingerprint(),
+            "pinned:route-probe/router-model",
+            &low_risk(),
+            1_000,
+        );
+        assert!(cached.is_reusable_for(1_500, &fingerprint(), "pinned:route-probe/router-model"));
+    }
+
+    #[test]
+    fn a_low_confidence_entry_is_never_reusable() {
+        let low_confidence = classify_heuristically("thing");
+        assert_eq!(low_confidence.confidence(), Confidence::Low);
+        let cached = CachedClassification::new(
+            normalised_task_key("thing"),
+            fingerprint(),
+            "pinned:route-probe/router-model",
+            &low_confidence,
+            1_000,
+        );
+        assert!(!cached.is_reusable_for(1_500, &fingerprint(), "pinned:route-probe/router-model"));
+    }
+
+    #[test]
+    fn a_different_fingerprint_is_never_reusable() {
+        let cached = CachedClassification::new(
+            normalised_task_key("fix the bug"),
+            fingerprint(),
+            "pinned:route-probe/router-model",
+            &low_risk(),
+            1_000,
+        );
+        let changed = RoutingFingerprint::new(
+            Some(IntegrationId::ClaudeCode),
+            &[ProviderBand::new(
+                "route-probe",
+                Some(CapacityBand::Exhausted),
+            )],
+            Vec::<String>::new(),
+        );
+        assert!(!cached.is_reusable_for(1_500, &changed, "pinned:route-probe/router-model"));
+    }
+
+    #[test]
+    fn a_different_resolution_tag_is_never_reusable() {
+        let cached = CachedClassification::new(
+            normalised_task_key("fix the bug"),
+            fingerprint(),
+            "pinned:route-probe/router-model",
+            &low_risk(),
+            1_000,
+        );
+        assert!(!cached.is_reusable_for(1_500, &fingerprint(), "pinned:route-probe/other-model"));
+    }
+
+    #[test]
+    fn an_entry_older_than_the_window_is_never_reusable() {
+        let cached = CachedClassification::new(
+            normalised_task_key("fix the bug"),
+            fingerprint(),
+            "pinned:route-probe/router-model",
+            &low_risk(),
+            1_000,
+        );
+        assert!(cached.is_reusable_for(
+            1_000 + CLASSIFICATION_CACHE_WINDOW_SECONDS,
+            &fingerprint(),
+            "pinned:route-probe/router-model"
+        ));
+        assert!(!cached.is_reusable_for(
+            1_000 + CLASSIFICATION_CACHE_WINDOW_SECONDS + 1,
+            &fingerprint(),
+            "pinned:route-probe/router-model"
+        ));
     }
 }
