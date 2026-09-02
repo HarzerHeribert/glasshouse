@@ -86,11 +86,19 @@
 //!   `crate::gateway::session`'s `failure_class` from the status, the
 //!   rate-limit headers, the byte count and how the stream ended — never
 //!   from a byte of the body. `None` on a served exchange.
-//! - **`input_tokens`, `output_tokens`, `cached_input_tokens`,
-//!   `cost_micro_usd`: not supplied *by this producer*.** Same reason as the
-//!   timing columns above: reading them means parsing a response body this
-//!   module is forbidden to parse. See the second producer below, which is
-//!   not a gateway and is not forbidden it.
+//! - **`input_tokens`, `output_tokens`, `cached_input_tokens`: supplied by
+//!   this producer only for a *translated* exchange.** `crate::gateway::translate`
+//!   decodes the canonical response anyway, so its `usage` is a sibling of
+//!   something already parsed: `tokens_of` hands it to
+//!   `record_routing_observation`'s `with_tokens`, and
+//!   `tests/gateway_translate_evidence.rs` proves the row carries the
+//!   provider's own three counts. A *relayed* exchange leaves all three
+//!   `NULL`, for the same reason as the timing columns above: reading them
+//!   means parsing a response body this module is forbidden to parse — and
+//!   the same test proves nothing is invented for it. **`cost_micro_usd`:
+//!   not supplied by this producer** (its one producer is line 1307's,
+//!   `main.rs::record_entitlement_fallback`). See also the second producer
+//!   below, which is not a gateway and is not forbidden the body.
 //! - **`outcome`: a coarse proxy, not the user-visible outcome line 1334
 //!   asks for.** This producer only records an observation when an exchange
 //!   actually reached the provider (`Forwarded` or `Unreachable` — the same

@@ -37,6 +37,8 @@ struct Fixture {
     _tmp: tempfile::TempDir,
     base: PathBuf,
     root: PathBuf,
+    /// See [`Fixture::harness_path`] — read only by `#[cfg(unix)]` tests.
+    #[cfg(unix)]
     harness: PathBuf,
 }
 
@@ -68,6 +70,7 @@ impl Fixture {
             _tmp: tmp,
             base,
             root,
+            #[cfg(unix)]
             harness,
         }
     }
@@ -78,6 +81,7 @@ impl Fixture {
     /// `install_fake_harness` actually returned rather than reconstructing
     /// `bin_dir.join("fake-claude")`, because a shared fixture no longer
     /// lives there.
+    #[cfg(unix)]
     fn harness_path(&self) -> &Path {
         &self.harness
     }
@@ -419,6 +423,9 @@ fn install_fake_harness(bin_dir: &Path, body: &str) -> PathBuf {
 
 #[cfg(test)]
 mod shared_fixture_proof {
+    /// Every test in this module is `#[cfg(unix)]`: the shared fixture it
+    /// proves is a `#!/bin/sh` script there and a `.cmd` file on Windows.
+    #[cfg(unix)]
     use super::install_fake_harness;
 
     /// **The once-per-binary proof, through the real caller.** Two

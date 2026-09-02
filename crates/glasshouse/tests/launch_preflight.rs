@@ -109,7 +109,14 @@ fn shared_fixture(unique_name: &str, contents: &str) -> PathBuf {
 
 #[cfg(test)]
 mod shared_fixture_proof {
-    use super::{HARNESS_EXIT, install_fake_harness};
+    use super::install_fake_harness;
+
+    /// `HARNESS_EXIT` is read only by the byte-for-byte fixture check in this
+    /// module, which is `#[cfg(unix)]` because the shared fixture is a
+    /// `#!/bin/sh` script there and a `.cmd` file on Windows. Gated to the
+    /// same cfg as its only user rather than silenced with an `allow`.
+    #[cfg(unix)]
+    use super::HARNESS_EXIT;
 
     /// **The once-per-binary proof, through the real caller.** Every test in
     /// this file calls `Fixture::new`, which unconditionally calls

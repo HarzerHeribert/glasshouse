@@ -750,7 +750,14 @@ fn install_fake_harness(_bin_dir: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod shared_fixture_proof {
-    use super::{Binary, ENV_LOG_VAR, install_fake_harness, pool_config};
+    use super::{Binary, install_fake_harness, pool_config};
+
+    /// `ENV_LOG_VAR` is read only by the byte-for-byte fixture check in this
+    /// module, which is `#[cfg(unix)]` because the shared fixture is a
+    /// `#!/bin/sh` script there and a `.cmd` file on Windows. Gated to the
+    /// same cfg as its only user rather than silenced with an `allow`.
+    #[cfg(unix)]
+    use super::ENV_LOG_VAR;
 
     /// **The once-per-binary proof, through the real caller.** Every test in
     /// this file that spawns the harness goes through [`Binary::with_config`],

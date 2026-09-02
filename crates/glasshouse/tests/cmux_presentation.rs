@@ -24,7 +24,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use clap::Parser;
-use glasshouse::session::{NewSession, ProjectSessions, SessionPresentation};
+use glasshouse::session::ProjectSessions;
+/// Only `Fixture::record_external_session` builds one, and it is `#[cfg(unix)]`.
+#[cfg(unix)]
+use glasshouse::session::{NewSession, SessionPresentation};
 use glasshouse::{Cli, Runtime, bootstrap};
 
 // -------------------------------------------------------------------------
@@ -33,6 +36,8 @@ use glasshouse::{Cli, Runtime, bootstrap};
 
 /// The workspace reference the fake `cmux` hands out for every `workspace
 /// create`, and reports as the caller's from `identify`.
+/// Only the `#[cfg(unix)]` tests present a pane, so this is gated with them.
+#[cfg(unix)]
 const FAKE_WORKSPACE: &str = "workspace:7";
 
 /// A fake harness that exits at once — enough for a launch to record a
@@ -131,17 +136,30 @@ impl Fixture {
                     .env_remove("CMUX_SURFACE_ID")
                     .env_remove("CMUX_WORKSPACE_ID");
             }
-            Cmux::Answering | Cmux::Dead => {
-                command
-                    .env("CMUX_SOCKET_PATH", self.base.join("cmux.sock"))
-                    .env("CMUX_SURFACE_ID", "FAKE-SURFACE")
-                    .env("CMUX_WORKSPACE_ID", "FAKE-WORKSPACE");
-                if inside_cmux == Cmux::Dead {
-                    command.env("FAKE_CMUX_DEAD", "1");
-                }
-            }
+            // Both in-pane cases set the same control environment; they are
+            // two arms rather than one because `Answering` exists only on
+            // unix (see the enum), and a `|` pattern cannot name a variant
+            // that is not compiled.
+            #[cfg(unix)]
+            Cmux::Answering => self.inside_cmux_env(&mut command, false),
+            #[cfg(unix)]
+            Cmux::Dead => self.inside_cmux_env(&mut command, true),
         }
         command
+    }
+
+    /// The cmux control environment shared by `Answering` and `Dead`, with
+    /// `dead` selecting the fake `cmux` that fails `ping`. Both variants are
+    /// `unix`, so this is too.
+    #[cfg(unix)]
+    fn inside_cmux_env(&self, command: &mut Command, dead: bool) {
+        command
+            .env("CMUX_SOCKET_PATH", self.base.join("cmux.sock"))
+            .env("CMUX_SURFACE_ID", "FAKE-SURFACE")
+            .env("CMUX_WORKSPACE_ID", "FAKE-WORKSPACE");
+        if dead {
+            command.env("FAKE_CMUX_DEAD", "1");
+        }
     }
 
     fn glasshouse(&self, inside_cmux: Cmux, args: &[&str]) -> Output {
@@ -161,6 +179,8 @@ impl Fixture {
         std::env::join_paths(paths).expect("join PATH")
     }
 
+    /// Reads the fake `cmux`'s log — a `#!/bin/sh` fixture, hence `unix`.
+    #[cfg(unix)]
     fn cmux_calls(&self) -> Vec<String> {
         std::fs::read_to_string(&self.cmux_log)
             .expect("read the cmux log")
@@ -169,6 +189,8 @@ impl Fixture {
             .collect()
     }
 
+    /// See [`Fixture::cmux_calls`].
+    #[cfg(unix)]
     fn cmux_calls_starting_with(&self, prefix: &str) -> Vec<String> {
         self.cmux_calls()
             .into_iter()
@@ -192,6 +214,7 @@ impl Fixture {
 
     /// A session recorded directly through the store — the way a launch
     /// inside a pane records one — without starting any process.
+    #[cfg(unix)]
     fn record_external_session(&self, reference: &str) -> String {
         let sessions = ProjectSessions::open(&self.runtime).unwrap();
         let record = sessions
@@ -210,10 +233,17 @@ impl Fixture {
 enum Cmux {
     /// No cmux control environment at all.
     Absent,
-    /// Inside cmux, and the fake answers `ping`.
+    /// Inside cmux, and the fake answers `ping`. Gated to `unix` because the
+    /// fake that answers is a `#!/bin/sh` script, so every test constructing
+    /// this variant is `#[cfg(unix)]`. `Dead` needs no such fake — it is the
+    /// stale-variable case — and stays on every platform.
+    #[cfg(unix)]
     Answering,
     /// Inside cmux by the environment's account, but `ping` fails — the
-    /// stale-variable case line 754's ruling names.
+    /// stale-variable case line 754's ruling names. Its one construction site
+    /// sits in a `#[cfg(unix)]` block, so it is gated like `Answering`; on
+    /// Windows the only compiled variant is `Absent`.
+    #[cfg(unix)]
     Dead,
 }
 

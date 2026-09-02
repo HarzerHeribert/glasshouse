@@ -683,3 +683,27 @@ reports `Declared`. The same mutation now reads:
 | mutation | vocabulary | result | observed |
 |---|---|---|---|
 | `observed_health_of` passes `None` for the persisted cause | `glue-drops-cause` | **killed** | `panicked at crates/glasshouse/src/main.rs:15658:9` |
+
+---
+
+## Line 1540 — CLOSED 2026-09-02 (`GH-PAIRING-PRIOR`)
+
+(line 1540)
+
+Contract: Given a scored destination, when Glasshouse reads its pairing-prior contribution, the explanation names the pairing class and states the prior is a starting assumption (or plainly inert for a non-native pairing), never an unnamed magnitude.
+
+State: **COMPLETE** — ruled 2026-09-02. The term is named, carries the class and the words *starting assumption*, and the mutation that drops those words is KILLED. See `phase-9j.md`'s 2026-09-02 closure for the term and its bounds.
+
+Production evidence:
+- `crates/glasshouse/src/routing/session.rs` — `pairing_prior`
+
+Regression evidence:
+- `routing::session::pairing_prior_tests::a_tied_pair_differing_only_in_vendor_native_class_is_won_by_the_native_one`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| "a starting assumption for a fresh" -> "an assumption for a fresh" | `drop-explanation-text` | **killed** | `routing::session::pairing_prior_tests::a_tied_pair_differing_only_in_vendor_native_class_is_won_by_the_native_one` |
+
+> drop-explanation-text observed: panicked at crates/glasshouse/src/routing/session.rs:5271:9 (the evidence().contains("starting assumption") assertion)
+
+---

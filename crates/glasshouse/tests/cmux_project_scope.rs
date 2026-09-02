@@ -14,8 +14,16 @@
 //! for the second, because only the running binary can show that cmux is
 //! asked nothing.
 
-use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::path::Path;
+/// Held only by the `#[cfg(unix)]` fields of `Fixture`.
+#[cfg(unix)]
+use std::path::PathBuf;
+/// Only `Fixture::glasshouse_inside_cmux` spawns a process, and it is
+/// `#[cfg(unix)]` — see its doc.
+#[cfg(unix)]
+use std::process::Command;
+#[cfg(unix)]
+use std::process::Output;
 
 use clap::Parser;
 use rusqlite::Connection;
@@ -30,7 +38,11 @@ use glasshouse::{Cli, Runtime, bootstrap};
 // -------------------------------------------------------------------------
 
 struct Fixture {
+    /// `root` and `base` are read only by `glasshouse_inside_cmux`, which is
+    /// `#[cfg(unix)]`; the database-level tests use `runtime` alone.
+    #[cfg(unix)]
     root: PathBuf,
+    #[cfg(unix)]
     base: PathBuf,
     runtime: Runtime,
 }
@@ -51,7 +63,9 @@ impl Fixture {
         .unwrap();
         let runtime = bootstrap(&cli, &root).unwrap();
         Fixture {
+            #[cfg(unix)]
             root,
+            #[cfg(unix)]
             base: base.to_path_buf(),
             runtime,
         }
@@ -75,6 +89,11 @@ impl Fixture {
     /// `tests/cmux_presentation.rs` uses, reduced to what this file needs
     /// (`ping` and `identify`; nothing here should ever reach `workspace` or
     /// `send`).
+    ///
+    /// Gated to `unix` because the seam is: `path_with_fake_cmux` installs a
+    /// `#!/bin/sh` script and marks it executable with a Unix mode. Its only
+    /// caller is already `#[cfg(unix)]` for the same reason.
+    #[cfg(unix)]
     fn glasshouse_inside_cmux(&self, cmux_log: &Path, args: &[&str]) -> Output {
         Command::new(env!("CARGO_BIN_EXE_glasshouse"))
             .current_dir(&self.root)
@@ -98,14 +117,19 @@ fn tempdir() -> tempfile::TempDir {
     tempfile::tempdir().unwrap()
 }
 
+/// The three output helpers are used only by the `#[cfg(unix)]` test that
+/// runs the real binary; gated with it.
+#[cfg(unix)]
 fn stdout(output: &Output) -> String {
     String::from_utf8_lossy(&output.stdout).into_owned()
 }
 
+#[cfg(unix)]
 fn stderr(output: &Output) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+#[cfg(unix)]
 fn both(output: &Output) -> String {
     format!("{}{}", stdout(output), stderr(output))
 }

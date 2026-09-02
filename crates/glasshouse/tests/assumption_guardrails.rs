@@ -92,6 +92,9 @@ impl Fixture {
     }
 
     /// Write the project's `.glasshouse/config.toml`.
+    /// Every caller lives in the `#[cfg(unix)] mod with_a_harness` below,
+    /// which needs a real spawnable harness script; gated with them.
+    #[cfg(unix)]
     fn write_project_config(&self, root: &Path, contents: &str) {
         let dir = root.join(".glasshouse");
         std::fs::create_dir_all(&dir).expect("create .glasshouse");

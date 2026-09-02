@@ -553,3 +553,33 @@ Recorded scope limits — stated by the worker, not discovered later:
 - does not re-prove bootstrap_prompt()'s field ordering or plain-text/no-harness-naming shape — checkpoint_portability.rs and handoff_lines.rs already do and are unchanged
 
 ---
+
+---
+
+## Line 1923 — HELD 2026-09-02 (`GH-PAIRING-PRIOR` built the decay; nothing feeds it yet)
+
+(line 1923)
+
+Contract: Given a vendor-native destination that has accumulated at least PAIRING_PRIOR_EVIDENCE_THRESHOLD local observations, when Glasshouse scores it, the prior reads 0.0 with text saying observed evidence replaced it; given a RoutingOverride naming the non-native destination, the override wins regardless of the prior; while preserving that no candidate is ever rejected on this axis.
+
+State: **PARTIALLY VERIFIED — HELD, not ticked.** Ruled 2026-09-02. The *user choice* half is proven (`apply_override` wins over the prior, with a test). The *without overriding stronger observed evidence* half has its mechanism — `pairing_prior` decays to `0.0` at `PAIRING_PRIOR_EVIDENCE_THRESHOLD`, mutation KILLED — but its input, `Destination::pairing_prior_evidence`, has **no production caller**: every destination `routing_destinations` builds carries `0`, so on the shipped path the prior never yields to evidence. The worker found this itself: the packet's two suggested evidence sources were not growing counters (`consecutive_failures` resets on success), and it added the field in the file's own wire-now/populate-later shape rather than borrow the wrong signal. Successor, named: `GH-PAIRING-EVIDENCE` — count the destination's own rows in the window `routing_destinations` already reads (`consumption`, since `bc81b11`) and call `with_pairing_prior_evidence`; ticks then, with a mutation on the count.
+
+Production evidence:
+- `crates/glasshouse/src/routing/session.rs` — `pairing_prior`
+- `crates/glasshouse/src/routing/session.rs` — `Destination::pairing_prior_evidence`
+- `crates/glasshouse/src/routing/session.rs` — `SessionRouter::apply_override`
+
+Regression evidence:
+- `routing::session::pairing_prior_tests::accumulated_local_evidence_decays_the_prior_to_zero`
+- `routing::session::pairing_prior_tests::a_user_override_naming_the_non_native_destination_wins`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| if observed >= PAIRING_PRIOR_EVIDENCE_THRESHOLD { -> if false { | `remove-evidence-decay` | **killed** | `routing::session::pairing_prior_tests::accumulated_local_evidence_decays_the_prior_to_zero` |
+
+> remove-evidence-decay observed: assertion `left == right` failed: accumulated local evidence must decay the prior to zero; left: 0.2 right: 0.0
+
+Recorded scope limits — stated by the worker, not discovered later:
+- Destination::pairing_prior_evidence has no production caller yet (see packet_errors and the report's own section on this gap)
+
+---

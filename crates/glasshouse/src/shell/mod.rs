@@ -5231,6 +5231,41 @@ mod project_knowledge_tests {
         assert_eq!(detail.source_commit, None);
         assert_eq!(detail.lifecycle, MemoryStatus::Active.to_string());
     }
+
+    /// Map lines 1880 and 1881's positive half: a supersession relationship
+    /// recorded through the real store (`MemoryStore::supersede`, not a
+    /// hand-built `MemoryRecord`) reaches `knowledge_line` and is said in
+    /// words — the successor is named, not drawn as an edge.
+    #[test]
+    fn a_supersession_recorded_through_the_real_store_is_named_in_the_knowledge_line() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+        let memory = ProjectMemory::open(&runtime).expect("open");
+        let store = memory.store();
+
+        let old = store
+            .record(NewMemory::new(
+                MemoryKind::Constraint,
+                "the old relationship shape",
+            ))
+            .unwrap();
+        let new = store
+            .record(NewMemory::new(
+                MemoryKind::Constraint,
+                "the replacement relationship shape",
+            ))
+            .unwrap();
+        store.supersede(&old.id, &new.id).unwrap();
+
+        let record = store
+            .get(&old.id)
+            .expect("read back")
+            .expect("still present");
+        assert_eq!(record.superseded_by.as_ref(), Some(&new.id));
+
+        let line = knowledge_line(&record);
+        assert!(line.contains("superseded by"), "{line}");
+        assert!(line.contains(&new.id.to_string()), "{line}");
+    }
 }
 
 /// Map line 234: the project-memory view reads every kind of durable

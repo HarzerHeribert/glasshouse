@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1175 / 1332 mandatory capabilities (88%)** — 157 open across 42 phases.
+**1182 / 1332 mandatory capabilities (89%)** — 150 open across 41 phases.
 
 ## Where the work is
 
@@ -37,41 +37,40 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 54A | Setup and portability completion criteria | **1** | 9 | `1897` |
 | Phase 9 | Antigravity adapter | **2** | 5 | `330` |
 | Phase 9E | Secret storage | **2** | 11 | `432` |
-| Phase 9J | Harness-model pairing model | **2** | 18 | `545` |
 | Phase 20 | Minimal durable project memory | **2** | 16 | `805` |
 | Phase 21F | Memory retrieval quality | **2** | 9 | `927` |
 | Phase 32C | Subscription capacity estimation | **2** | 10 | `1242` |
 | Phase 32D | Normalized remaining-capacity score | **2** | 10 | `1257` |
 | Phase 33 | Resource health | **2** | 13 | `1309` |
 | Phase 38 | Quota-preserving routing | **2** | 5 | `1604` |
+| Phase 53 | Criteria before adding graph storage | **2** | 3 | `1872` |
 | Phase 55 | V1 completion definition | **2** | 21 | `1910` |
 | Phase 28 | File-aware memory lookup | **3** | 2 | `1137` |
+| Phase 33A | Routing evidence ledger | **3** | 12 | `1327` |
 | Phase 33C | Failure, quota, and route correlation | **3** | 12 | `1362` |
 | Phase 34C | Automatic routing-model selection | **3** | 10 | `1429` |
 | Phase 35A | Candidate generation | **3** | 8 | `1504` |
 | Phase 21E | Decision ladder and conflict handling | **4** | 8 | `907` |
 | Phase 32G | Provider-aware request-cost estimation | **4** | 6 | `1296` |
-| Phase 33A | Routing evidence ledger | **4** | 11 | `1327` |
 | Phase 24 | Memory reranking | **5** | 1 | `1082` |
 | Phase 31 | Compaction-aware behavior | **5** | 2 | `1167` |
-| Phase 53 | Criteria before adding graph storage | **5** | 0 | `1872` |
 | Phase 56 | Harness–subscription decoupling: choose the harness, route the subscription and model | **5** | 7 | `1941` |
 | Phase 21G | Memory revalidation | **6** | 3 | `941` |
 | Phase 52 | Criteria before adding semantic/vector retrieval | **6** | 0 | `1858` |
+| Phase 35B | Candidate scoring | **7** | 18 | `1523` |
 | Phase 47 | Observability without spectacle | **7** | 8 | `1750` |
 | Phase 9K | Harness-aware response profiles | **8** | 29 | `578` |
 | Phase 32A | Unified quota and capacity model | **8** | 13 | `1196` |
-| Phase 35B | Candidate scoring | **8** | 17 | `1523` |
 | Phase 33B | Reliability-adjusted agent performance | **10** | 4 | `1345` |
 | Phase 51 | Evaluation hooks | **27** | 10 | `1818` |
 
-**Fully closed (65):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 7, Phase 8, Phase 9A, Phase 9B, Phase 9C, Phase 9D, Phase 9F, Phase 9G, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 16, Phase 17, Phase 18, Phase 19, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 21H, Phase 21I, Phase 21J, Phase 22, Phase 23, Phase 25, Phase 26, Phase 29, Phase 32, Phase 32B, Phase 34, Phase 34A, Phase 34D, Phase 34F, Phase 35, Phase 35C, Phase 35D, Phase 36, Phase 40, Phase 41, Phase 42, Phase 43, Phase 44, Phase 45, Phase 46, Phase 48, Phase 49, Phase 50, Phase 54, Phase 56A, Phase 57.
+**Fully closed (66):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 7, Phase 8, Phase 9A, Phase 9B, Phase 9C, Phase 9D, Phase 9F, Phase 9G, Phase 9J, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 16, Phase 17, Phase 18, Phase 19, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 21H, Phase 21I, Phase 21J, Phase 22, Phase 23, Phase 25, Phase 26, Phase 29, Phase 32, Phase 32B, Phase 34, Phase 34A, Phase 34D, Phase 34F, Phase 35, Phase 35C, Phase 35D, Phase 36, Phase 40, Phase 41, Phase 42, Phase 43, Phase 44, Phase 45, Phase 46, Phase 48, Phase 49, Phase 50, Phase 54, Phase 56A, Phase 57.
 
 ## The nearly-finished phases, in full
 
 Every phase with **three or fewer** open lines, quoted verbatim. These are
 where a single package finishes a phase, so they are listed here and the
-other ~112 open lines are not.
+other ~102 open lines are not.
 
 For any other phase: `scripts/discover.py --phase <id>` prints its open
 lines and evidence together. **Do not open the 178 KB map to read them.**
@@ -142,11 +141,6 @@ these unwrapped.
 - **441** ☐ Prefer Windows Credential Manager for user-entered provider secrets on Windows when available.
 - **442** ☐ Prefer a Secret Service-compatible keyring on Linux when available.
 
-### Phase 9J — Harness-model pairing model  (2 open, 18 closed)
-
-- **566** ☐ Give a compatible vendor-native harness-model pairing a positive initial routing prior for a fresh session with little local evidence.
-- **569** ☐ Allow the value of a relevant warm session to outweigh the native-pairing prior when continuity evidence is stronger.
-
 ### Phase 20 — Minimal durable project memory  (2 open, 16 closed)
 
 - **828** ☐ Do not store obvious source-code facts when rereading the source is cheaper and more reliable than maintaining the memory.
@@ -177,6 +171,11 @@ these unwrapped.
 - **1608** ☐ Prefer cheap resources for simple repository summarization when no valuable warm session already exists.
 - **1610** ☐ Avoid migrating a nearly completed task solely to preserve a small amount of quota.
 
+### Phase 53 — Criteria before adding graph storage  (2 open, 3 closed)
+
+- **1879** ☐ Do not add a graph database solely to visualize project memory.
+- **1882** ☐ Evaluate whether SQLite relations are insufficient before adopting a dedicated graph database.
+
 ### Phase 55 — V1 completion definition  (2 open, 21 closed)
 
 - **1923** ☐ Consider V1 usable when a compatible vendor-native pairing receives an inspectable initial prior without overriding stronger observed evidence or user choice.
@@ -187,6 +186,12 @@ these unwrapped.
 - **1139** ☐ Track file paths explicitly referenced by durable memories when extraction can identify them reliably.
 - **1141** ☐ Prefer constraints, decisions, and failed approaches when retrieving memory for an intended code edit.
 - **1142** ☐ Keep file-aware retrieval advisory and never treat stale memory as stronger evidence than the current source code.
+
+### Phase 33A — Routing evidence ledger  (3 open, 12 closed)
+
+- **1331** ☐ Record dispatch time, first-byte time, time to first real token, time to first tool call, and completion time when the protocol exposes them.
+- **1332** ☐ Do not treat whitespace padding, transport keepalives, or reasoning-only deltas as the first generated token.
+- **1334** ☐ Record successful tool rounds, retries, repairs, failovers, and the final user-visible outcome separately.
 
 ### Phase 33C — Failure, quota, and route correlation  (3 open, 12 closed)
 

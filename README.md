@@ -19,10 +19,10 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`███████████████████████████████████░░░░░` 1175 / 1332 mandatory capabilities (88%)
+`███████████████████████████████████░░░░░` 1182 / 1332 mandatory capabilities (88%)
 
 <details>
-<summary>Per-phase breakdown (65 of 107 phases complete)</summary>
+<summary>Per-phase breakdown (66 of 107 phases complete)</summary>
 
 | Phase | Done |
 |---|---|
@@ -49,7 +49,7 @@ the authoritative specification and tracks what is done.
 | Phase 9G — Glasshouse local gateway process | 19/19 ✅ |
 | Phase 9H — Sticky gateway routing for harness-backed interactive sessions | 13/14 |
 | Phase 9I — Free-pool routing | 13/14 |
-| Phase 9J — Harness-model pairing model | 18/20 |
+| Phase 9J — Harness-model pairing model | 20/20 ✅ |
 | Phase 9K — Harness-aware response profiles | 29/37 |
 | Phase 10 — Unified session model | 14/14 ✅ |
 | Phase 10A — Session supervision | 13/13 ✅ |
@@ -94,7 +94,7 @@ the authoritative specification and tracks what is done.
 | Phase 32F — Protected quota reserve | 7/8 |
 | Phase 32G — Provider-aware request-cost estimation | 6/10 |
 | Phase 33 — Resource health | 13/15 |
-| Phase 33A — Routing evidence ledger | 11/15 |
+| Phase 33A — Routing evidence ledger | 12/15 |
 | Phase 33B — Reliability-adjusted agent performance | 4/14 |
 | Phase 33C — Failure, quota, and route correlation | 12/15 |
 | Phase 34 — Capability registry | 10/10 ✅ |
@@ -106,7 +106,7 @@ the authoritative specification and tracks what is done.
 | Phase 34F — Model capability and tier calibration | 11/11 ✅ |
 | Phase 35 — Lightweight task classification | 14/14 ✅ |
 | Phase 35A — Candidate generation | 8/11 |
-| Phase 35B — Candidate scoring | 17/25 |
+| Phase 35B — Candidate scoring | 18/25 |
 | Phase 35C — Capacity-aware tier escalation and downgrade | 9/9 ✅ |
 | Phase 35D — Routing under subscription pressure | 8/8 ✅ |
 | Phase 36 — Session affinity | 8/8 ✅ |
@@ -126,7 +126,7 @@ the authoritative specification and tracks what is done.
 | Phase 50 — Tracked project knowledge as an optional feature | 7/7 ✅ |
 | Phase 51 — Evaluation hooks | 10/37 |
 | Phase 52 — Criteria before adding semantic/vector retrieval | 0/6 |
-| Phase 53 — Criteria before adding graph storage | 0/5 |
+| Phase 53 — Criteria before adding graph storage | 3/5 |
 | Phase 54 — Criteria before deeper cmux coupling | 4/4 ✅ |
 | Phase 54A — Setup and portability completion criteria | 9/10 |
 | Phase 55 — V1 completion definition | 21/23 |

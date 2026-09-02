@@ -158,3 +158,73 @@ pub fn read_output(
 ) -> anyhow::Result<()> {
     Err(no_unix_socket())
 }
+
+/// See [`no_unix_socket`]. Line 1717's two verbs are client calls like the
+/// three above, so they are absent here for exactly the same reason and say
+/// so in exactly the same sentence — the CLI shape is identical on every
+/// platform, and only the answer differs.
+#[cfg(not(unix))]
+pub fn mute(_runtime: &glasshouse::Runtime, _session: &str, _seconds: u64) -> anyhow::Result<()> {
+    Err(no_unix_socket())
+}
+
+/// See [`no_unix_socket`].
+#[cfg(not(unix))]
+pub fn unmute(_runtime: &glasshouse::Runtime, _session: &str) -> anyhow::Result<()> {
+    Err(no_unix_socket())
+}
+
+/// The Windows half of Phase 42's door, proved on the platform that has it.
+///
+/// `main.rs`'s `ApiCommand::Mute`/`Unmute` arms call `api::mute`/`api::unmute`
+/// unconditionally — that is the CLI shape being identical everywhere — so on
+/// Windows the person running them must get a sentence rather than a build
+/// failure. This asserts the sentence is `no_unix_socket`'s own, and that it
+/// names no socket path: there is no socket here, and an error that invented a
+/// path would be describing a machine rather than a missing transport.
+#[cfg(all(test, not(unix)))]
+mod platform_refusal {
+    use clap::Parser;
+
+    fn runtime(tmp: &std::path::Path) -> glasshouse::Runtime {
+        let root = tmp.join("project");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        let cli = glasshouse::Cli::try_parse_from([
+            "glasshouse",
+            "--data-dir",
+            tmp.join("data").to_str().unwrap(),
+            "--config-dir",
+            tmp.join("config").to_str().unwrap(),
+        ])
+        .unwrap();
+        glasshouse::bootstrap(&cli, &root).unwrap()
+    }
+
+    #[test]
+    fn mute_and_unmute_refuse_by_name_where_there_is_no_unix_socket() {
+        let tmp = tempfile::tempdir().unwrap();
+        let runtime = runtime(tmp.path());
+
+        for message in [
+            super::mute(&runtime, "session-1", 600)
+                .expect_err("mute must refuse without a Unix socket")
+                .to_string(),
+            super::unmute(&runtime, "session-1")
+                .expect_err("unmute must refuse without a Unix socket")
+                .to_string(),
+        ] {
+            assert!(
+                message.contains("the control API needs a Unix domain socket"),
+                "the refusal must be `no_unix_socket`'s own sentence, got: {message}"
+            );
+            assert!(
+                message.contains("named-pipe transport that does not exist yet"),
+                "the refusal must name what is missing, got: {message}"
+            );
+            assert!(
+                !message.contains(".sock") && !message.contains('\\'),
+                "the refusal must not print a socket path, got: {message}"
+            );
+        }
+    }
+}

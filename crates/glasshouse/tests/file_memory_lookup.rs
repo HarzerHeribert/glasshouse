@@ -24,10 +24,14 @@
 //! does not say `referenced`.
 
 use std::collections::HashSet;
+#[cfg(unix)]
 use std::io::{BufRead, BufReader, Write};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
+#[cfg(unix)]
 use std::process::{Child, Command, Stdio};
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
 use clap::Parser;
@@ -36,6 +40,8 @@ use glasshouse::memory::inject::{MAX_INJECTED_BYTES, MEMORY_MARKER, briefing};
 use glasshouse::memory::{MemoryAuthority, MemoryId, MemoryKind, NewMemory, ProjectMemory};
 use glasshouse::{Cli, Runtime};
 
+/// Only the control-door half waits on a socket.
+#[cfg(unix)]
 const TIMEOUT: Duration = Duration::from_secs(15);
 
 // -------------------------------------------------------------------------
@@ -401,12 +407,18 @@ fn the_file_observed_records_for_an_in_bounds_task_keep_the_old_order_and_count(
 // Line 1143 — `query_memory`'s `path` mode, against the shipped binary.
 // -------------------------------------------------------------------------
 
+// The control-door half of this file speaks over a Unix domain socket
+// (`api::unix`), which Windows has no drop-in equivalent for — see
+// `api::no_unix_socket`. Everything above is platform-neutral briefing
+// assembly and stays compiled everywhere.
+#[cfg(unix)]
 struct DoorFixture {
     _tmp: tempfile::TempDir,
     base: PathBuf,
     root: PathBuf,
 }
 
+#[cfg(unix)]
 impl DoorFixture {
     fn new() -> Self {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -435,11 +447,13 @@ impl DoorFixture {
     }
 }
 
+#[cfg(unix)]
 struct DoorServer {
     child: Child,
     socket: PathBuf,
 }
 
+#[cfg(unix)]
 impl DoorServer {
     fn start(fixture: &DoorFixture) -> Self {
         let mut child = Command::new(env!("CARGO_BIN_EXE_glasshouse"))
@@ -502,6 +516,7 @@ impl DoorServer {
     }
 }
 
+#[cfg(unix)]
 impl Drop for DoorServer {
     fn drop(&mut self) {
         let _ = self.child.kill();
@@ -513,6 +528,7 @@ impl Drop for DoorServer {
 /// acceptance case: a query whose text matches nothing still returns the
 /// memory associated with `path`, and every returned row carries
 /// `association: "observed"` alongside the rationale line 1143 asks for.
+#[cfg(unix)]
 #[test]
 fn path_present_answers_from_for_path_with_the_association_kind_on_each_row() {
     let fixture = DoorFixture::new();
@@ -575,6 +591,7 @@ fn path_present_answers_from_for_path_with_the_association_kind_on_each_row() {
 
 /// `path` absent leaves the verb exactly what it already was — no
 /// `association` field, and the text-search `report` still present.
+#[cfg(unix)]
 #[test]
 fn path_absent_leaves_the_verb_unchanged() {
     let fixture = DoorFixture::new();

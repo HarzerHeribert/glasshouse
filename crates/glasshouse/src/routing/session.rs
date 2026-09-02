@@ -26,15 +26,21 @@
 //! asserts they resolve differently; a contribution that could not do that
 //! would be dead weight, and saying so is the finding rather than the failure.
 //!
-//! # The one thing this module deliberately does not weigh
+//! # The native-pairing prior, and why it belongs here and not one layer down
 //!
-//! The native-pairing prior (line 566). It is constant across every candidate
-//! set the shipped binary builds — see the entry cited above — and adding a
-//! term that separates nothing to an explanation a person reads is worse than
-//! leaving it out. [`harness_capability_fit`] reads `classify`'s *capability*
-//! axes (protocol fit, model-behaviour fit, tool semantics), which do vary
-//! with the harness, and not its vendor class, which does not vary with
-//! anything this router can change.
+//! `docs/product/evidence/phase-9j.md`'s 2026-09-02 entry corrects the
+//! sentence this paragraph used to carry: the constancy proof it cites is
+//! scoped to [`super::interactive`]'s `UpstreamBackend`, which has no model
+//! field of its own and takes one model for the whole candidate set at
+//! `SessionRouting::bind`. A [`Destination`]'s [`Backend`] carries a model
+//! resolved **per launch profile** (`main.rs::destination_backend` →
+//! `session_pairing`), so a candidate set built from two enabled profiles of
+//! one harness genuinely varies in `PairingClass` — a fact
+//! `docs/product/evidence/phase-56.md`'s "The question the orchestrator
+//! added" section establishes from current production code. [`pairing_prior`]
+//! reads `classify`'s *vendor* axis for exactly that reason, beside
+//! [`harness_capability_fit`], which reads its *capability* axes (protocol
+//! fit, model-behaviour fit, tool semantics) and does not.
 //!
 //! # Purity
 //!
@@ -507,6 +513,17 @@ pub struct Destination {
     /// for any caller that did not measure — including every live (warm)
     /// session, on purpose.
     estimated_input_size: EstimatedInputSize,
+    /// Line 1923's decay: how many local observations exist for this
+    /// destination's own harness-model-route pairing, attached via
+    /// [`Self::with_pairing_prior_evidence`]. `0` — the default, and what
+    /// every destination carries until a caller populates it — is the honest
+    /// floor [`pairing_prior`] reads as "little local evidence", the same
+    /// wiring-now/populate-later shape [`Self::capability_tier`] and
+    /// [`EstimatedInputSize`] already carry: `main.rs` does not call the
+    /// builder below yet, so every destination it constructs keeps the
+    /// starting prior until a follow-up package reads
+    /// `crate::routing::evidence`'s own counts and attaches them here.
+    pairing_prior_evidence: u32,
 }
 
 impl Destination {
@@ -570,6 +587,7 @@ impl Destination {
             context: SessionContextFacts::UNREAD,
             entitlement: None,
             estimated_input_size: EstimatedInputSize::UNESTIMATED,
+            pairing_prior_evidence: 0,
         }
     }
 
@@ -737,6 +755,22 @@ impl Destination {
 
     pub fn estimated_input_size(&self) -> &EstimatedInputSize {
         &self.estimated_input_size
+    }
+
+    /// Attach how many local observations exist for this destination's own
+    /// harness-model-route pairing — line 1923's decay for [`pairing_prior`].
+    /// The default is `0`, on which the term reads as a fresh session with
+    /// little local evidence, whatever [`Self::pairing_prior_evidence`]
+    /// returns until a caller attaches a real count.
+    ///
+    /// No production caller attaches this today — see the field's own doc.
+    pub fn with_pairing_prior_evidence(mut self, count: u32) -> Self {
+        self.pairing_prior_evidence = count;
+        self
+    }
+
+    pub fn pairing_prior_evidence(&self) -> u32 {
+        self.pairing_prior_evidence
     }
 
     /// The stable identifier a user names in an override, and the one a
@@ -947,6 +981,34 @@ impl RoutingOverride {
 /// module's rule is that only established facts earn a candidate anything.
 const PROTOCOL_NATIVE_FIT: f64 = 1.0;
 const PROTOCOL_COMPATIBLE_FIT: f64 = 0.4;
+
+/// Lines 566, 1540, 1923. What a compatible vendor-native harness-model
+/// pairing is worth for a fresh session with little local evidence — a
+/// starting assumption, never a quality claim (`PairingClass::is_vendor_native`'s
+/// own doc, and the map's first fixed architectural requirement).
+///
+/// Small on purpose, and bounded two ways: strictly below
+/// [`FreePool`]-observed evidence's own weight — one consecutive observed
+/// failure ([`HEALTH_FAILURE_PENALTY`], `0.3` in magnitude) already outweighs
+/// it, so a single bad exchange on the native candidate settles a tie this
+/// term made — and strictly below warmth's `1.5` ceiling (line 569), so a
+/// relevant warm session on a non-native candidate always outranks it. `0.2`
+/// keeps [`METERED_COST_PREFERENCE`]'s own claim about the smallest magnitude
+/// in this module true, sitting instead beside [`CACHE_LIKELY_LOST`] and
+/// [`TIER_FIT_HEADROOM`].
+const PAIRING_PRIOR: f64 = 0.2;
+
+/// Line 1923's decay: how many local observations [`Destination::pairing_prior_evidence`]
+/// must carry before the starting assumption above is considered replaced by
+/// what was actually observed. `5`, matching
+/// [`crate::routing::evidence::MIN_SAMPLE_FOR_SUMMARY`] and
+/// `crate::config::pairing::CONFIDENT_AT_OBSERVATIONS`'s own choice — not
+/// because the numbers must agree, but because all three answer the same
+/// underlying question ("how many local observations before this project
+/// trusts them at all"), and picking a fourth number with no evidence either
+/// way would be exactly the unearned precision line 1234 forbids on the quota
+/// side.
+const PAIRING_PRIOR_EVIDENCE_THRESHOLD: u32 = 5;
 
 /// A model established **not** to behave the way the harness needs. Large and
 /// negative: this is a "known no", not an absence of evidence, and it is the
@@ -1179,11 +1241,10 @@ const EXPECTED_MARGINAL_COST_PENALTY: f64 = -0.1;
 /// contributes.
 ///
 /// Reads `classify`'s three **capability** axes and not its vendor class —
-/// see this module's header for why the vendor class is deliberately absent.
-/// The axes vary with the harness, which is exactly what makes this term able
-/// to separate a candidate set: `crate::harness::adapter_for` returns a
-/// different adapter per [`IntegrationId`], and each declares its own
-/// protocols.
+/// [`pairing_prior`], right below, reads that one. The axes vary with the
+/// harness, which is exactly what makes this term able to separate a
+/// candidate set: `crate::harness::adapter_for` returns a different adapter
+/// per [`IntegrationId`], and each declares its own protocols.
 pub fn harness_capability_fit(
     destination: &Destination,
     overrides: &pairing::PairingOverrides,
@@ -1227,6 +1288,66 @@ pub fn harness_capability_fit(
             destination.harness().slug(),
             pairing.protocol_fit(),
             pairing.model_behaviour(),
+        ),
+    )
+}
+
+/// Lines 566, 1540, 1923: the vendor-native pairing's own soft starting
+/// prior — see this module's header for why it is reachable here and not in
+/// [`super::interactive`].
+///
+/// **Order of the two checks matters for the explanation a reader gets.** A
+/// non-native pairing is inert regardless of how much local evidence exists
+/// for it — it never had a prior to decay — so that check runs first and
+/// reports plainly that this is not a vendor-native pairing. Only a
+/// vendor-native pairing goes on to ask whether `PAIRING_PRIOR_EVIDENCE_THRESHOLD`
+/// worth of local observations have replaced its starting assumption.
+///
+/// Never rejects: this term is a preference among candidates a hard
+/// constraint has already admitted, and map line 1950's *"never rejecting
+/// solely for being cross-vendor"* is a hard-constraint rule — no candidate
+/// is refused on this axis anywhere in this module. `is_vendor_native`'s own
+/// doc is the source of the "not a quality claim" wording repeated in both
+/// branches below, and the map's first fixed architectural requirement is the
+/// same claim at the product level.
+pub fn pairing_prior(destination: &Destination, inputs: &RouterInputs<'_>) -> Contribution {
+    let pairing = classify_destination(destination, inputs.overrides);
+    let class = pairing.class();
+
+    if !class.is_vendor_native() {
+        return Contribution::new(
+            "pairing prior",
+            0.0,
+            format!(
+                "`{}` operating `{}` is a {class} pairing — inert: not a vendor-native pairing",
+                destination.harness().slug(),
+                destination.backend().model().label(),
+            ),
+        );
+    }
+
+    let observed = destination.pairing_prior_evidence();
+    if observed >= PAIRING_PRIOR_EVIDENCE_THRESHOLD {
+        return Contribution::new(
+            "pairing prior",
+            0.0,
+            format!(
+                "`{}` operating `{}` is a {class} pairing, but {observed} local observations \
+                 have accumulated for it — observed evidence has replaced the starting prior",
+                destination.harness().slug(),
+                destination.backend().model().label(),
+            ),
+        );
+    }
+
+    Contribution::new(
+        "pairing prior",
+        PAIRING_PRIOR,
+        format!(
+            "`{}` operating `{}` is a {class} pairing — a starting assumption for a fresh \
+             session with little local evidence, not a quality claim",
+            destination.harness().slug(),
+            destination.backend().model().label(),
         ),
     )
 }
@@ -4681,6 +4802,7 @@ fn score(
         explanation.push(classification_note(answer));
     }
     explanation.push(harness_capability_fit(destination, inputs.overrides));
+    explanation.push(pairing_prior(destination, inputs));
     explanation.push(capability_fit(destination, &inputs.requirements));
     // `movement` is `Some` exactly when a tier was stated — `decide_tier_movement`
     // answers `None` otherwise — so the three terms under it keep the
@@ -5463,5 +5585,312 @@ mod hard_constraint_tests {
             !routed.render_overview().contains("rejected"),
             "no rejected section renders when nothing is excluded"
         );
+    }
+}
+
+#[cfg(test)]
+mod pairing_prior_tests {
+    use super::*;
+    use crate::config::pairing::WarmSessionState;
+    use crate::routing::{AssignedModel, Cost, CredentialId};
+    use crate::secret::SecretRef;
+
+    /// `claude-fable-5` under Claude Code is `PairingClass::VendorNative`
+    /// (`crate::harness::pairing::tests::a_vendor_native_pairing_needs_the_family_and_the_developer`).
+    /// `gpt-5.5` under Claude Code is not — attributed to a different vendor
+    /// than Claude Code's own, so it never satisfies the family-and-developer
+    /// check regardless of route (the comment on
+    /// `crate::harness::pairing::tests::a_harness_speaking_anthropic_messages_on_a_chat_only_route_is_translated`).
+    /// Both share the same wire protocol Claude Code itself speaks, so the
+    /// only axis a fresh pair built from these two ever varies on is the one
+    /// this package adds.
+    const NATIVE_MODEL: &str = "claude-fable-5";
+    const OTHER_MODEL: &str = "gpt-5.5";
+
+    fn backend(model: &str, credential_var: &str) -> Backend {
+        Backend::new(
+            "anthropic",
+            "anthropic-messages",
+            AssignedModel::named(model),
+            CredentialId::new(
+                "anthropic",
+                SecretRef::Environment {
+                    var: credential_var.to_owned(),
+                },
+            ),
+            Cost::Metered,
+            ToolSemantics::Verified,
+        )
+    }
+
+    fn fresh(id: &str, model: &str, credential_var: &str) -> Destination {
+        Destination::fresh(
+            id,
+            IntegrationId::ClaudeCode,
+            "profile",
+            backend(model, credential_var),
+            None,
+        )
+    }
+
+    fn warm(id: &str, model: &str, credential_var: &str, idle_seconds: i64) -> Destination {
+        Destination::existing(
+            id,
+            IntegrationId::ClaudeCode,
+            "profile",
+            backend(model, credential_var),
+            WarmSession {
+                state: WarmSessionState::Live,
+                idle_seconds,
+            },
+        )
+    }
+
+    fn inputs<'a>(
+        overrides: &'a pairing::PairingOverrides,
+        health: &'a FreePool,
+        now: Instant,
+    ) -> RouterInputs<'a> {
+        RouterInputs {
+            overrides,
+            health,
+            now,
+            requirements: TaskRequirements::default(),
+        }
+    }
+
+    fn term(explanation: &RoutingExplanation) -> &Contribution {
+        explanation
+            .contributions()
+            .iter()
+            .find(|c| c.name() == "pairing prior")
+            .expect("every scored destination's explanation must carry the pairing prior term")
+    }
+
+    /// 566, 1540: two fresh, cold, equally healthy destinations of one
+    /// harness, differing only in `PairingClass`. Listed non-native-first so
+    /// a stable tie-break cannot be mistaken for the term actually
+    /// separating them — if [`PAIRING_PRIOR`] were zeroed, the first-listed
+    /// candidate would win regardless, and this assertion would catch it.
+    #[test]
+    fn a_tied_pair_differing_only_in_vendor_native_class_is_won_by_the_native_one() {
+        let now = Instant::now();
+        let overrides = pairing::PairingOverrides::default();
+        let health = FreePool::new();
+        let inputs = inputs(&overrides, &health, now);
+
+        let other = fresh("other", OTHER_MODEL, "PAIRING_PRIOR_TEST_A");
+        let native = fresh("native", NATIVE_MODEL, "PAIRING_PRIOR_TEST_B");
+
+        let routed = SessionRouter::new()
+            .choose(RoutingMoment::SessionStart, None, &[other, native], &inputs)
+            .expect("two eligible fresh destinations must produce a decision");
+
+        assert!(
+            routed.rejected().is_empty(),
+            "no candidate is ever refused on this axis: {:?}",
+            routed.rejected()
+        );
+        assert_eq!(
+            routed.chosen().id(),
+            "native",
+            "the vendor-native pairing must win the tie"
+        );
+
+        let winner_term = term(routed.explanation());
+        assert!(
+            winner_term.magnitude() > 0.0,
+            "the native pairing's prior must be positive: {}",
+            winner_term.magnitude()
+        );
+        assert!(
+            winner_term.evidence().contains("vendor-native")
+                && winner_term.evidence().contains("starting assumption"),
+            "the explanation must name the class and call it a starting assumption, not a \
+             quality claim: {}",
+            winner_term.evidence()
+        );
+
+        let (_, loser_explanation) = routed
+            .considered()
+            .iter()
+            .find(|(d, _)| d.id() == "other")
+            .expect("the non-native candidate must still be considered, never rejected");
+        let loser_term = term(loser_explanation);
+        assert_eq!(
+            loser_term.magnitude(),
+            0.0,
+            "a non-native pairing contributes nothing"
+        );
+        assert!(
+            loser_term
+                .evidence()
+                .contains("inert: not a vendor-native pairing"),
+            "a non-native pairing's explanation must say so plainly: {}",
+            loser_term.evidence()
+        );
+    }
+
+    /// 569, killed directly rather than through a set that also prices
+    /// bootstrap cost and a hot prompt cache (a fresh-vs-existing comparison
+    /// would still choose the warm side even with a mutated, oversized
+    /// prior, which would make that test a weak witness for this line —
+    /// practice §41). This is the dedicated killer, isolating exactly the
+    /// weight the packet names: [`PAIRING_PRIOR`] must stay strictly below
+    /// the `warmth` facet's own ceiling — a live warm session at zero idle,
+    /// worth `1.5` (this module's own header comment, and
+    /// [`AffinityBreakdown::warmth`]) — never the full breakdown total,
+    /// which other facets such as a hot prompt cache also add to.
+    #[test]
+    fn pairing_prior_stays_below_a_live_warm_sessions_own_warmth_facet() {
+        let warm_dest = warm("warm", OTHER_MODEL, "PAIRING_PRIOR_TEST_C", 0);
+        let breakdown = affinity_breakdown(&warm_dest, None, &TaskRequirements::default())
+            .expect("an existing destination always has a breakdown");
+        assert!(
+            PAIRING_PRIOR < breakdown.warmth.magnitude(),
+            "the pairing prior ({PAIRING_PRIOR}) must stay strictly below a live warm \
+             session's own warmth facet ({}), or it could outrank one",
+            breakdown.warmth.magnitude()
+        );
+    }
+
+    /// 569's behavioural half: the same tied pair as the first test, except
+    /// the non-native candidate is now a relevant warm existing session
+    /// instead of a fresh one. The warm side must win.
+    #[test]
+    fn a_relevant_warm_session_outweighs_the_native_pairing_prior() {
+        let now = Instant::now();
+        let overrides = pairing::PairingOverrides::default();
+        let health = FreePool::new();
+        let inputs = inputs(&overrides, &health, now);
+
+        let native = fresh("native", NATIVE_MODEL, "PAIRING_PRIOR_TEST_D");
+        let warm_other = warm("other", OTHER_MODEL, "PAIRING_PRIOR_TEST_E", 0);
+
+        let routed = SessionRouter::new()
+            .choose(
+                RoutingMoment::SessionStart,
+                None,
+                &[native, warm_other],
+                &inputs,
+            )
+            .expect("two eligible candidates must produce a decision");
+
+        assert!(routed.rejected().is_empty());
+        assert_eq!(
+            routed.chosen().id(),
+            "other",
+            "a relevant warm session must outweigh the native pairing's starting prior"
+        );
+    }
+
+    /// 1923, 1541: the same tied pair, except the native candidate has
+    /// accumulated at least [`PAIRING_PRIOR_EVIDENCE_THRESHOLD`] local
+    /// observations. Its own `pairing prior` term must read `0.0` with text
+    /// saying observed evidence replaced the starting prior — the direct
+    /// killer for "remove the evidence decay (always apply the prior)": with
+    /// that mutation this assertion reads [`PAIRING_PRIOR`], not `0.0`.
+    #[test]
+    fn accumulated_local_evidence_decays_the_prior_to_zero() {
+        let now = Instant::now();
+        let overrides = pairing::PairingOverrides::default();
+        let health = FreePool::new();
+        let inputs = inputs(&overrides, &health, now);
+
+        let other = fresh("other", OTHER_MODEL, "PAIRING_PRIOR_TEST_F");
+        let seasoned_native = fresh("native", NATIVE_MODEL, "PAIRING_PRIOR_TEST_G")
+            .with_pairing_prior_evidence(PAIRING_PRIOR_EVIDENCE_THRESHOLD);
+
+        let routed = SessionRouter::new()
+            .choose(
+                RoutingMoment::SessionStart,
+                None,
+                &[other, seasoned_native],
+                &inputs,
+            )
+            .expect("two eligible fresh destinations must produce a decision");
+
+        assert!(routed.rejected().is_empty());
+
+        let (_, native_explanation) = routed
+            .considered()
+            .iter()
+            .find(|(d, _)| d.id() == "native")
+            .expect("the seasoned native candidate must still be considered");
+        let decayed = term(native_explanation);
+        assert_eq!(
+            decayed.magnitude(),
+            0.0,
+            "accumulated local evidence must decay the prior to zero"
+        );
+        assert!(
+            decayed
+                .evidence()
+                .contains("observed evidence has replaced the starting prior"),
+            "the explanation must say evidence replaced the prior: {}",
+            decayed.evidence()
+        );
+    }
+
+    /// 1923's "user choice": a `RoutingOverride` naming the non-native
+    /// destination wins even though the native one's prior would otherwise
+    /// carry the tie (it is listed first too, so an unhonoured override
+    /// would still pick it on both counts). The override is asserted here,
+    /// never rebuilt from the prior's own logic.
+    #[test]
+    fn a_user_override_naming_the_non_native_destination_wins() {
+        let now = Instant::now();
+        let overrides = pairing::PairingOverrides::default();
+        let health = FreePool::new();
+        let inputs = inputs(&overrides, &health, now);
+
+        let native = fresh("native", NATIVE_MODEL, "PAIRING_PRIOR_TEST_H");
+        let other = fresh("other", OTHER_MODEL, "PAIRING_PRIOR_TEST_I");
+
+        let routed = SessionRouter::with_override(RoutingOverride::to("other"))
+            .choose(RoutingMoment::SessionStart, None, &[native, other], &inputs)
+            .expect("an override naming an eligible destination must produce a decision");
+
+        assert!(routed.rejected().is_empty());
+        assert!(
+            routed.override_refused().is_none(),
+            "the override must be honoured: {:?}",
+            routed.override_refused()
+        );
+        assert_eq!(
+            routed.chosen().id(),
+            "other",
+            "the user's own override must win over the native pairing's prior"
+        );
+    }
+
+    /// The map's own "ranks byte-for-byte" requirement: a candidate set with
+    /// no vendor-native member gets a `pairing prior` term of exactly `0.0`
+    /// on every candidate, so the total this term adds to is unchanged from
+    /// what the ranking summed to before this package existed.
+    #[test]
+    fn a_set_with_no_vendor_native_member_adds_nothing_to_the_ranking() {
+        let now = Instant::now();
+        let overrides = pairing::PairingOverrides::default();
+        let health = FreePool::new();
+        let inputs = inputs(&overrides, &health, now);
+
+        let a = fresh("a", OTHER_MODEL, "PAIRING_PRIOR_TEST_J");
+        let b = fresh("b", OTHER_MODEL, "PAIRING_PRIOR_TEST_K");
+
+        let routed = SessionRouter::new()
+            .choose(RoutingMoment::SessionStart, None, &[a, b], &inputs)
+            .expect("two eligible fresh destinations must produce a decision");
+
+        assert!(routed.rejected().is_empty());
+        for (destination, explanation) in routed.considered() {
+            let t = term(explanation);
+            assert_eq!(
+                t.magnitude(),
+                0.0,
+                "`{}` is not vendor-native, so the term must contribute nothing to its total",
+                destination.id()
+            );
+        }
     }
 }

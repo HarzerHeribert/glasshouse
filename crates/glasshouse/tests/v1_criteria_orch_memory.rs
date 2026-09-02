@@ -19,6 +19,9 @@ use glasshouse::{Cli, Runtime, bootstrap};
 /// subprocess through — the same idiom `tests/cmux_presentation.rs` and
 /// `tests/checkpoint_portability.rs` use to inspect what a subprocess wrote,
 /// rather than parsing the subprocess's own text output.
+/// Called only from `mod cmux_optional` and `mod checkpoint_handoff`, both
+/// `#[cfg(unix)]`; gated with them.
+#[cfg(unix)]
 fn open_runtime(base: &std::path::Path, root: &std::path::Path) -> Runtime {
     let cli = Cli::try_parse_from([
         "glasshouse",

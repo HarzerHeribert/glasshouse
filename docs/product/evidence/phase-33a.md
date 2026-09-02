@@ -668,3 +668,51 @@ That mutation **is** the regression the arm was added to prevent, so lines
 - **1333 — the ledger's *"no producer in this build ever supplies a value"* is STALE.** A translated gateway exchange (`translate::place` → `translate::serve`, a real path whenever the harness's protocol differs from the provider's and a supported pair exists) decodes the canonical response, and `tokens_of` (`gateway/translate/mod.rs:825-831`) hands its `usage` to `record_routing_observation`'s `.with_tokens(...)` (`gateway/session.rs:478-488`) — all three columns, cached included. The relayed majority still writes `NULL`, by design. Nothing proves the translated chain end to end: `conformance.rs` proves the relay's row only. **Successor dispatched: `GH-TRANSLATED-USAGE-PROOF`** (Green, two socket tests: the translated row carries the fixture's exact counts; the relayed row is `NULL` even when the body carried a usage object). **Reading call, made now:** the line says *only when they are actually exposed*; a translated exchange exposes them and a relayed one does not, so the pair of tests — counts where exposed, `NULL` where not — is the line's own claim, and 1333 ticks on it. The production module doc at `routing/evidence.rs:89-93` repeats the stale sentence and is corrected with that package.
 - **1331, 1332 — refused, unchanged, word for word.** `first_token_at`/`first_tool_call_at` still have no builder; the new `Framing` type carries byte counts and stream-end state, not SSE event boundaries, so it cannot say *first real token* without the content read the ingress design forbids. Register row P1b.
 - **1334 — the ledger's PARTIAL is accurate.** `retries` (`gateway/session.rs:474`, a true `0`: `ureq` 3 retries nothing) and `failovers` (`:473`, from `ExchangeEffect`) are written; `tool_rounds` and `repairs` have no concept anywhere in the tree. No successor.
+
+---
+
+## 1333 — CLOSED 2026-09-02 (`GH-TRANSLATED-USAGE-PROOF`, Green, tests only)
+
+The census above said no test joined a translated exchange to the ledger; the
+worker found one already did (`gateway_translate.rs:802-821`, since
+`bbd8103`) and said so before writing anything — the recon grepped the file
+it had and still reported no hits. What was genuinely missing was the
+**restraint half**: nothing asserted a relayed exchange writes `NULL`. The new
+file proves both through a real socket, and the relay-path mutation
+(fabricate `Some(Tokens { input: 1, .. })` at the one `Exchange` default,
+`ingress.rs:1057`) is the one that proves the line's *only when*. The stale
+sentence at `routing/evidence.rs:89-93` is corrected in the same commit.
+
+### Record input tokens, output tokens, cached-input tokens, and monetary cost only when they are actually exposed or can be estimated with an explicit confidence label. (line 1333)
+
+Contract: Given a translated gateway exchange with provider-stated usage, when it completes, Glasshouse records input, output and cached-input tokens on its routing row equal to the provider's own numbers; given a relayed exchange whose body it never reads, the same row records NULL for all three, while preserving zero production behaviour change.
+
+State: **COMPLETE** — ruled 2026-09-02. The worker returned `open`, deferring the *whole line* reading to the orchestrator; the reading was made in the census entry above and holds: the line says *only when they are actually exposed*, a translated exchange exposes the three token counts and a relayed one does not, and the pair of socket tests proves counts where exposed and `NULL` where not, with both mutations KILLED. The monetary-cost half is line 1307's (☑, `with_cost` carrying `cost_confidence` — an explicit confidence label, which is the line's other condition), not this package's to re-prove. The worker's third limit stands as scope: one protocol pair, non-streaming; the same `tokens_of` → `with_tokens` chain serves the other pairs and the streaming path.
+
+Production evidence:
+- `gateway/session.rs` — `record_routing_observation (.with_tokens at :478-488, unchanged by this package)`
+- `gateway/ingress.rs` — `exchange() (:1045-1058, tokens: None default for every relay-path Exchange, unchanged by this package)`
+- `gateway/translate/mod.rs` — `tokens_of/finish (:629-639, :825-831, unchanged by this package)`
+
+Regression evidence:
+- `gateway_translate_evidence::a_translated_exchanges_stated_usage_reaches_the_routing_row`
+- `gateway_translate_evidence::a_relayed_exchange_invents_no_usage_even_though_its_body_has_some`
+- `gateway_translate::a_claude_code_request_is_translated_to_chat_completions_and_the_answer_back_with_ids_preserved (pre-existing, same claim, independently confirmed still passing)`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| gateway/session.rs:478-489 .with_tokens(exchange.tokens...) -> .with_tokens(None, None, None) | `skip-state-update` | **killed** | `gateway_translate_evidence::a_translated_exchanges_stated_usage_reaches_the_routing_row` |
+| gateway/ingress.rs:1057 tokens: None -> tokens: Some(Tokens { input: 1, output: 1, cached: None }) | `fabricate-value` | **killed** | `gateway_translate_evidence::a_relayed_exchange_invents_no_usage_even_though_its_body_has_some` |
+
+> skip-state-update observed: assertion `left == right` failed: prompt_tokens (40) minus cached_tokens (8) is Anthropic's input_tokens
+
+> fabricate-value observed: assertion `left == right` failed: a relayed exchange's body is never read; nothing may be invented for it
+
+Recorded scope limits — stated by the worker, not discovered later:
+- does not authorise ticking 1333 as a whole line: the relayed majority stays NULL by design, and whether that satisfies the line's words is an orchestrator reading call
+- the monetary-cost (cost_micro_usd) half of 1333 has no producer traced or proven here
+- only the anthropic-messages<->openai-chat pair and non-streaming responses are exercised; the other two supported pairs and the streaming path share the same producer/writer but are not separately driven by this package
+
+---
+
+---

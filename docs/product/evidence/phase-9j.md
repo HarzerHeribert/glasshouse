@@ -485,3 +485,65 @@ destination beside a non-native one. `GH-RECON-56` found it; `phase-56.md`'s
 2026-09-02 entry has the path. **566 and 569 leave Cluster E for
 `routing::session` only**, packaged with 1540 and 1923 as `GH-PAIRING-PRIOR`.
 Nothing here changes for `routing::interactive`; do not edit its tripwire.
+
+---
+
+## 566 and 569 — CLOSED 2026-09-02 (`GH-PAIRING-PRIOR`, Amber, Sonnet high), in the session router
+
+The 2026-09-02 scope note above is what made this packageable: the session
+router's destinations carry a per-profile model, so a candidate set can hold
+a vendor-native pairing beside a non-native one. `routing/session.rs` now
+pushes a `pairing prior` term from `score()`: `PAIRING_PRIOR = 0.2` for a
+`VendorNative` class, inert and saying so otherwise, decayed to `0.0` once
+`Destination::pairing_prior_evidence` reaches five observations. `0.2` is
+strictly below the warmth facet's `1.5` and below one provider-health failure
+step, so one bad exchange settles a tie the prior made. `routing::interactive`
+and its tripwire are untouched and still green.
+
+(line 566)
+
+Contract: Given a fresh, cold, equally healthy pair of destinations of one harness differing only in PairingClass, when Glasshouse scores them, the vendor-native one receives a positive pairing-prior contribution and wins the tie, while preserving that the non-native candidate is never rejected.
+
+State: **COMPLETE** — ruled 2026-09-02. The prior is positive, applied on the real ranking path for a fresh vendor-native destination, and the non-native candidate is never rejected. Its *little local evidence* qualifier is where 1923's held half lives: today no production caller counts evidence, so the prior applies to every fresh vendor-native candidate — the line's condition is met trivially rather than measured, recorded here and closed by `GH-PAIRING-EVIDENCE`.
+
+Production evidence:
+- `crates/glasshouse/src/routing/session.rs` — `pairing_prior`
+- `crates/glasshouse/src/routing/session.rs` — `score`
+
+Regression evidence:
+- `routing::session::pairing_prior_tests::a_tied_pair_differing_only_in_vendor_native_class_is_won_by_the_native_one`
+- `routing::session::pairing_prior_tests::a_set_with_no_vendor_native_member_adds_nothing_to_the_ranking`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| const PAIRING_PRIOR: f64 = 0.2; -> const PAIRING_PRIOR: f64 = 0.0; | `zero-the-term` | **killed** | `routing::session::pairing_prior_tests::a_tied_pair_differing_only_in_vendor_native_class_is_won_by_the_native_one` |
+
+> zero-the-term observed: assertion `left == right` failed: the vendor-native pairing must win the tie; left: "other" right: "native"
+
+Recorded scope limits — stated by the worker, not discovered later:
+- no production caller sets Destination::pairing_prior_evidence yet, so every vendor-native candidate keeps the full starting prior in production today
+
+---
+(line 569)
+
+Contract: Given the same tied pair but the non-native candidate is a relevant warm existing session, when Glasshouse scores them, the warm session's continuity evidence outweighs the native pairing's starting prior and wins, while preserving PAIRING_PRIOR strictly below the warmth facet's own 1.5 ceiling.
+
+State: **COMPLETE** — ruled 2026-09-02. The choose-level test has a relevant warm non-native session beat a fresh native one; the mutation killer compares the constant against the warmth facet itself after the worker caught its own first version comparing against a total that included a cache facet (§41 applied before reporting).
+
+Production evidence:
+- `crates/glasshouse/src/routing/session.rs` — `pairing_prior`
+
+Regression evidence:
+- `routing::session::pairing_prior_tests::a_relevant_warm_session_outweighs_the_native_pairing_prior`
+- `routing::session::pairing_prior_tests::pairing_prior_stays_below_a_live_warm_sessions_own_warmth_facet`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| const PAIRING_PRIOR: f64 = 0.2; -> const PAIRING_PRIOR: f64 = 1.6; | `raise-above-warmth` | **killed** | `routing::session::pairing_prior_tests::pairing_prior_stays_below_a_live_warm_sessions_own_warmth_facet` |
+
+> raise-above-warmth observed: panicked at crates/glasshouse/src/routing/session.rs:5312:9 (assert! PAIRING_PRIOR < breakdown.warmth.magnitude() is false)
+
+Recorded scope limits — stated by the worker, not discovered later:
+- the mutation killer compares against the warmth facet directly, not the full session-affinity total, which can exceed 1.5 when other facets (e.g. a hot prompt cache) also apply
+
+---

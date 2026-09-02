@@ -563,10 +563,10 @@ Pairing identity
 
 Pairing prior and evidence
 
-☐ Give a compatible vendor-native harness-model pairing a positive initial routing prior for a fresh session with little local evidence.
+☑ Give a compatible vendor-native harness-model pairing a positive initial routing prior for a fresh session with little local evidence.
 ☑ Treat the native-pairing preference as a soft prior rather than a hard routing rule or proof of superior performance.
 ☑ Apply hard protocol, tool, capability, privacy, and user constraints before applying the pairing prior.
-☐ Allow the value of a relevant warm session to outweigh the native-pairing prior when continuity evidence is stronger.
+☑ Allow the value of a relevant warm session to outweigh the native-pairing prior when continuity evidence is stronger.
 ☑ Reduce the influence of the pairing prior as reliable local observations accumulate for the exact harness, launch profile, model, and backend combination.
 ☑ Allow observed task success, usable tool calls, repair rate, effective TTFC, reliability, and user overrides to outweigh the initial pairing prior.
 ☑ Keep evidence for the same nominal model distinct across different harnesses, gateways, quantizations, model revisions, or protocol translations.
@@ -1330,7 +1330,7 @@ Phase 33A — Routing evidence ledger
 ☑ Record provider, route, model identity, authenticated quota context, harness, request purpose, and observation timestamp for each measurable turn.
 ☐ Record dispatch time, first-byte time, time to first real token, time to first tool call, and completion time when the protocol exposes them.
 ☐ Do not treat whitespace padding, transport keepalives, or reasoning-only deltas as the first generated token.
-☐ Record input tokens, output tokens, cached-input tokens, and monetary cost only when they are actually exposed or can be estimated with an explicit confidence label.
+☑ Record input tokens, output tokens, cached-input tokens, and monetary cost only when they are actually exposed or can be estimated with an explicit confidence label.
 ☐ Record successful tool rounds, retries, repairs, failovers, and the final user-visible outcome separately.
 ☑ Preserve raw observations alongside rolling aggregates so a routing decision can be audited and aggregation logic can be recalibrated.
 ☑ Compute robust rolling summaries such as median, tail latency, exponentially weighted averages, failure rates, and sample counts where useful.
@@ -1537,7 +1537,7 @@ Fixed architectural requirements
 ☑ Include provider health in candidate scoring.
 ☑ Include expected marginal cost in candidate scoring.
 ☐ Include expected latency in candidate scoring.
-☐ Include harness-model pairing as an inspectable soft prior for fresh sessions with limited local evidence.
+☑ Include harness-model pairing as an inspectable soft prior for fresh sessions with limited local evidence.
 ☑ Decay the pairing prior as reliable observations accumulate for the exact harness-profile-model-backend combination.
 ☐ Prefer observed success and reliability over same-vendor alignment when evidence is sufficient.
 ☐ Prefer effective TTFC over raw TTFC for tool-using gateway routes when reliability evidence is sufficient.
@@ -1877,10 +1877,10 @@ Fixed architectural requirements
 - No graph database is introduced as speculative infrastructure.
 
 ☐ Do not add a graph database solely to visualize project memory.
-☐ Add explicit typed relationships in SQLite first when relationships become useful.
-☐ Introduce relationships such as supersedes, affects, and implemented_by only when they improve real queries.
+☑ Add explicit typed relationships in SQLite first when relationships become useful.
+☑ Introduce relationships such as supersedes, affects, and implemented_by only when they improve real queries.
 ☐ Evaluate whether SQLite relations are insufficient before adopting a dedicated graph database.
-☐ Keep the user-facing project-knowledge view useful even if no graph database is ever added.
+☑ Keep the user-facing project-knowledge view useful even if no graph database is ever added.
 
 Phase 54 — Criteria before deeper cmux coupling
 
