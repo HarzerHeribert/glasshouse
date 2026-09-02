@@ -2005,6 +2005,41 @@ Recorded 2026-09-01 from the user's instruction of record: a coding model should
 ☑ Compare shadow-mode reductions against forwarded originals so recall and savings claims rest on recorded evidence rather than on the compression ratio alone.
 ☑ Show the firewall's mode and per-session aggregate savings in the existing status and settings surfaces without cluttering the primary workflow.
 
+Phase 58 — Context economy: cache-stable translation, entitlement-aware reduction, and a measured token budget
+
+Recorded 2026-09-02 from the user's instruction of record, after a side-by-side comparison with Headroom (headroomlabs-ai/headroom, Apache-2.0, a local context-compression proxy): *"take everything which would benefit us in a meaningful way and ingest it — make sure this is documented going forward so future orchestrators won't forget."* `docs/product/design-decisions.md` (*"Headroom, compared"*) records the comparison, what was taken, what was refused by name, and the order of work. The lines below are the taken half. Nothing here weakens the relay's byte-for-byte promise, the firewall's fail-open rule, or the response profiles' native-mechanism route; each line embeds in the mechanism Glasshouse already owns.
+
+Cache-stable translation — the gap the comparison exposed: a default Claude Code launch on any translated pairing is refused today because its prompt-cache markers are refused by field name.
+
+☐ Carry a harness's prompt-cache markers across a translated pairing where the target protocol has an equivalent, and strip them with a recorded reason where it does not, instead of refusing the request.
+☐ Keep a default Claude Code launch usable on every supported translated pairing without the user disabling prompt caching.
+☐ Serialize translated requests deterministically — stable tool order and stable JSON Schema key order — so an unchanged prompt prefix stays byte-identical across turns.
+☐ Never alter the bytes of a message already sent upstream in an earlier turn of the same session on a translated pairing, as the relay already guarantees for native ones.
+☐ Supply a stable per-session prompt-cache key on targets that accept one when the harness did not set its own.
+☐ Measure prompt-cache read and creation tokens per exchange where the provider reports them, and show the per-session cache ratio beside the routing evidence.
+
+Entitlement-aware reduction — a subscription pays in rate limits and context window, a metered key pays in tokens, local inference pays in latency; one threshold cannot serve all three.
+
+☐ Key the context firewall's reduction policy on the serving entitlement's kind, with per-kind thresholds that default to today's values.
+☐ Allow a launch profile or an entitlement to declare its reduction policy explicitly, overriding the kind's default.
+
+A local reducer the user installs — Headroom's compressors are more developed than the deterministic ladder and run locally; use them, do not rewrite them.
+
+☐ Allow the semantic reducer to be a local out-of-process tool the user installs, selected by configuration beside the model-backed reducer, with the same provenance header, raw preservation, and expansion path.
+☐ Treat a local reducer's absence, timeout, or failure as a bypass with a stated reason, never as an error the session sees.
+☐ Record which reducer produced each reduction, so savings and recall are attributable per reducer.
+
+A savings readout that is a query, not an estimate.
+
+☐ Report token savings by purpose — firewall reduction, response profile, translation — from the evidence ledger's own rows with denominators, so a savings claim is a query over recorded exchanges.
+☐ Provide a seeded, offline proof fixture for the firewall's deterministic ladder so its reduction ratios are reproducible without any provider.
+
+Effort and learning — evaluate before offering, and export what memory already knows.
+
+☐ Evaluate a clamp-only per-turn effort reduction on translated pairings for turns that only resume after a tool result, never raising effort and never touching the byte-for-byte relay, before offering it.
+☐ Offer an opt-in export of remembered constraints and failed approaches into a marker-delimited block of the harness's native local instruction file, gitignored by default, replacing only its own block on re-export.
+
+
 
 ────────
 

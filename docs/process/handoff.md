@@ -1,3 +1,5 @@
+**2026-09-02 (new requirement):** Phase 58 — context economy learned from a side-by-side comparison with Headroom (map lines 2014–2040, 15 lines) — recorded from the user's instruction (*"take everything which would benefit us in a meaningful way and ingest it … make sure this is documented going forward"*); `design-decisions.md` (*Headroom, compared*) has the comparison, the refusals by name and the order of work. Denominator now 1347.
+
 **2026-08-31 (requirement refined):** Phase 56A — entitlement pool and subscription broker (map 1962–1974, thirteen lines) — recorded from the user; it is the core of Phase 56. Denominator now 1305.
 
 **2026-08-31 (hand-off):** the Opus 5 orchestrator handed off HOT to a Fable 5 orchestrator at the user's request — 1037/1292 committed (`d584ad3`), 1480 in flight behind a gate, subscription-rules (Phase 56 #1) live, wire-file-memory reported with its patch staged. Everything is in `.agent-runtime/CONTINUATION.md` and `.agent-runtime/handoff-batch59-60/`.

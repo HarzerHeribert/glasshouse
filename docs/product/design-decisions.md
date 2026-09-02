@@ -3512,3 +3512,98 @@ maps onto.
 Package: `GH-MEMORY-RATING` (Amber): the command, the kind and verdicts, the
 recorder, and the readers for the five lines with `explicit / proxy / unknown`
 and denominators.
+
+## Headroom, compared — what Glasshouse takes, what it refuses, and why — user instruction 2026-09-02
+
+**The instruction.** The user asked for a side-by-side comparison with
+[headroomlabs-ai/headroom](https://github.com/headroomlabs-ai/headroom)
+(Apache-2.0, a local context-compression layer: library, proxy, agent wrap, MCP
+server; 68k stars on 2026-09-02) and then ruled: *"take everything which would
+benefit us in a meaningful way and ingest it — make sure this is documented
+going forward so future orchestrators won't forget and it's not getting lost on
+the sidelines."* The taken half is **Phase 58** (map lines 2014–2040, 15 lines);
+this entry is the reasoning, so nobody re-derives the comparison or re-litigates
+the refusals.
+
+**What Headroom is.** One problem solved deeply: compress everything an agent
+reads — tool outputs, logs, RAG chunks, files, history — before the model sees
+it, locally, reversibly. A statistical JSON crusher, an AST code compressor and
+a trained prose model behind a content router; originals kept in a hash-keyed
+SQLite store with a `headroom_retrieve` tool and a 30-minute TTL (CCR); a Rust
+proxy being rebuilt around byte-faithful passthrough (`RawValue` diffs), a
+frozen cache hot zone, append-only history and live-zone-only compression;
+auth mode (pay-as-you-go / OAuth / subscription) detected from header shapes
+and used as a compression-policy axis; deterministic tool-array and JSON-Schema
+key ordering, automatic `cache_control` placement and `prompt_cache_key`
+injection for cache stability; an output shaper (a terse note appended at the
+*end* of the system prompt to keep the cache, and a clamp-only per-turn effort
+reduction when a turn only resumes after a tool result); `headroom learn`,
+which mines failed sessions, correlates each failure with the fix that
+followed, and writes a marker-delimited block into `CLAUDE.local.md`; seeded
+offline proof tables and accuracy suites; a telemetry beacon on by default.
+
+**Side by side, in one table.**
+
+| concept | Headroom | Glasshouse | verdict |
+|---|---|---|---|
+| tool-output compression | three developed compressors, sub-millisecond, published ratios | Phase 57: deterministic ladder plus a reducer that is a routed disposable job | theirs deeper; ours honest about cost |
+| reversibility | CCR store, retrieve tool, TTL | `gh-tool://` content-addressed raw store, expansion counted as the recall signal | equivalent; ours measures recall |
+| proxy fidelity | byte-faithful passthrough by `RawValue` diff, hot zone frozen | the relay never parses a body; codecs only on translated pairs | ours stricter by construction |
+| cache stability | tool sort, schema-key sort, `cache_control` placement, `prompt_cache_key` | codecs **refuse** `cache_control` by field name; a default Claude Code launch on a translated pair needs `DISABLE_PROMPT_CACHING=1` (`phase-56.md`, T1's recorded limit) | **our gap** |
+| auth mode as a policy axis | sniffed from headers and user-agent prefixes; drives compression policy | entitlements: configured, ruled, pooled, brokered, with telemetry facets — but the firewall's thresholds are plain config | ours is the model; theirs uses the axis |
+| output shaping | proxy-appended terse note; per-turn effort clamp | response profiles through native mechanisms with a verification floor; tiers pick the model per task | ours safer; the per-turn clamp is an idea we lack |
+| learning from sessions | failure-to-fix mining into a marker block in the native instruction file | extraction, authority classes, revalidation, conflicts, ratings, injected at launch | ours stronger; their delivery shape is cheap and visible |
+| harness coverage | fifteen agents by base-URL rewiring | four adapters with PTY, lifecycle, hooks, approval modes | broad and shallow vs narrow and deep |
+| measurement | seeded proof tables, accuracy suites, a savings readout | evidence-ledger rows by purpose; Phase 9K's measurement lines open | they publish numbers we cannot yet print |
+
+**Taken, and where each lives in Glasshouse (Phase 58).**
+
+1. **Cache-stable translation.** Carry `cache_control` where the target has an
+   equivalent, strip with a recorded reason where it does not, deterministic
+   tool and schema ordering, hot-zone bytes unchanged across turns, a
+   per-session `prompt_cache_key`, and cache read/creation tokens measured per
+   exchange. This is the one place the comparison found Glasshouse behind on a
+   thing the user needs: the harness we care most about is refused on every
+   translated pair by default. Package first.
+2. **Reduction policy keyed by entitlement kind.** We already know at launch
+   whether the serving resource is a subscription, a metered key or local
+   inference; the firewall's thresholds should follow.
+3. **A local out-of-process reducer.** Headroom's compressors are better than
+   ours will be for a long time and they run locally under a permissive
+   licence; the firewall's reducer seat can take an installed tool beside the
+   model-backed reducer, with the same provenance, preservation and expansion
+   path, and absence or failure as a stated bypass. Use it; do not rewrite it.
+4. **A savings readout that is a query over the ledger**, by purpose and
+   profile, with denominators — which is what Phase 9K's open measurement
+   lines have been waiting for — and a seeded offline proof fixture for the
+   deterministic ladder.
+5. **Per-turn effort clamp, evaluated first.** Cheap where a body is already
+   parsed (translated pairs), impossible on the relay without breaking its
+   promise; a recon decides whether to offer it.
+6. **An opt-in export** of remembered constraints and failed approaches into a
+   marker-delimited block of the harness's native local instruction file.
+
+**Refused by name, so the next reader does not re-derive them.**
+
+- *Header-sniffed auth mode.* We have the real thing (entitlements); a
+  user-agent prefix is not a policy input.
+- *A telemetry beacon on by default.* Against this project's own rule that
+  telemetry measures outcomes locally, never phones home.
+- *Base-URL wrapping instead of adapters.* Breadth we do not want at the
+  price of lifecycle, approval and hook fidelity.
+- *Steering text appended to the system prompt at a proxy.* Our native
+  mechanism with the verification floor is proven; a proxy-side append would
+  have to touch the relayed body.
+- *Deleting or summarising history.* Headroom itself abandoned deletion for
+  live-zone-only compression; the map's own rule keeps native compaction and
+  project memory separate.
+
+**Validity condition.** This holds while Headroom stays local, permissively
+licensed and reversible. If its reducer moves behind a hosted API, item 3
+becomes a provider entry like any other and loses its "local" seat.
+
+**Order of work:** `GH-TRANSLATE-CACHE-STABILITY` (Amber, the codecs) →
+`GH-FIREWALL-ENTITLEMENT-POLICY` (Amber) → `GH-SAVINGS-READOUT` (Green/Amber,
+also serves 627–630) → `GH-LOCAL-REDUCER` (Amber, with a design note on the
+subprocess boundary and the tool's version pin) → `GH-RECON-EFFORT-CLAMP`
+(read-only, names its successor) → `GH-MEMORY-EXPORT` (Green).

@@ -19,10 +19,10 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`████████████████████████████████████░░░░` 1201 / 1332 mandatory capabilities (90%)
+`███████████████████████████████████░░░░░` 1201 / 1347 mandatory capabilities (89%)
 
 <details>
-<summary>Per-phase breakdown (71 of 107 phases complete)</summary>
+<summary>Per-phase breakdown (71 of 108 phases complete)</summary>
 
 | Phase | Done |
 |---|---|
@@ -133,6 +133,7 @@ the authoritative specification and tracks what is done.
 | Phase 56 — Harness–subscription decoupling: choose the harness, route the subscription and model | 12/12 ✅ |
 | Phase 56A — Entitlement pool and subscription broker: several accounts, one scheduler | 13/13 ✅ |
 | Phase 57 — Context firewall: tool-output compaction between harness and model | 27/27 ✅ |
+| Phase 58 — Context economy: cache-stable translation, entitlement-aware reduction, and a measured token budget | 0/15 |
 
 </details>
 <!-- progress:end -->
