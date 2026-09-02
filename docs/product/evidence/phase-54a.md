@@ -444,3 +444,13 @@ next fully green three-leg run. The gate's `lint / script tests` step also
 read FAIL from the worktree it ran in; that is environmental and attributed
 (the same file passes in the main checkout on the same commit) — a Green
 packet, `GH-SCRIPT-TESTS-IN-WORKTREES`, is the fix.
+
+**The local legs of the same run, `785a47f` (2026-09-02, later):** macOS
+build, test (128/128 targets) and MSRV all PASS. Linux run 1 failed build,
+clippy and MSRV together with `No space left on device` inside the
+container — the host had 3.6 GiB free under 156 GB of retired workers'
+build caches, since reclaimed and now removed by `close-worker.sh`
+(`6bb7a19`); Linux run 2, alone on a clean disk: build+test (128/128),
+clippy and MSRV all PASS. So on `785a47f` two legs are fully green and the
+Windows leg is 126/128 three times with rotating non-PTY flakes;
+`GH-WINDOWS-FLAKES` is dispatched and 1908 ticks on its green leg.
