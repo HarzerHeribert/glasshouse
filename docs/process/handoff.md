@@ -20,6 +20,18 @@ validated and waiting on the commit. Next action: `.agent-runtime/CONTINUATION.m
 
 Last updated: 2026-08-31 (Europe/Berlin)
 
+## Checkpoint — 2026-09-02, batch 85: 1194 / 1332 (89.6%) — 1908 and 1924 closed, Phases 54A and 55 complete
+
+Session `14f81d52` (Fable 5.1). 1908 ticked on a three-leg green run of
+`ff57ddb` from a detached worktree (macOS 128/128, Linux 128/128, Windows
+128/128, lib 1959/1959); 1924 ticked on a shipped-binary tripwire with three
+KILLED mutations. The SQLite contention question was recon'd and decided (no
+WAL; `design-decisions.md`), the tool-semantics rejection now quotes the
+declared fact, `cluster-b.py`'s test boundary was fixed, 542 audited and kept,
+and 441's Windows finding recorded with a Red successor. Live at checkpoint:
+`gateway-translate-launch` (Amber, 1948/1950/1956's launch link) and
+`windows-secret-store` (Red, 441). Exact next actions: `.agent-runtime/CONTINUATION.md`.
+
 ## Checkpoint — 2026-09-02, the Fable 5.1 → Fable 5.1 hand-off at 1192 / 1332 (89.5%)
 
 Session `21f45818` hands off hot at 75% context with 1908 one integration and

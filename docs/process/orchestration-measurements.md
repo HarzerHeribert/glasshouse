@@ -4889,3 +4889,56 @@ parser quirk, a TOML escape. (2) A local `pgrep` cannot see a peer's cargo
 on the VM; the runner now asks the VM. (3) Every VM run still carries about
 one flake in a non-PTY test, never the same one twice — the next Red packet
 if run 3 is not clean. (4) `rustup run stable` does not pin `rustc`.
+
+## Batch 85 (2026-09-02, late morning) — 1908 lands on a three-leg green run, Phase 54A and Phase 55 complete, and the census tool had been reading the wrong half of its biggest file
+
+Fable 5.1 orchestrator, session `14f81d52`, inheriting at 7.07M day-output
+with the flakes worker finishing. **Map 1192 → 1194** (1908, 1924), Phase 54A
+and Phase 55 complete. Integrations: `ff57ddb` (the two Windows worktrees in
+one call), `35544b6` (1924 + tool-semantics in one call). The 1908 gate ran
+alone from a detached worktree: macOS 128/128, Linux 128/128, Windows
+128/128 (lib 1959/1959), thirteen steps PASS, nothing attributed.
+
+| package | tier | result |
+|---|---|---|
+| `windows-flakes` (inherited) | Opus 5 high, Red | integrated; two causes, neither product; the revert mutation returned the exact baseline rate |
+| `windows-stub-drain` (inherited) | Sonnet low, Green | integrated; tripwire script test 6/6 |
+| `sqlite-contention-recon` | Sonnet medium, read-only, beside the gate | verdict (b): every production write a single statement or small batch; two OS processes on one database real and already ordered by `BEGIN IMMEDIATE`; successor is a design note, no product change |
+| `prove-it-1924` | Sonnet medium, Green | **1924 closed** — three clauses, three seams, three KILLED through the shipped binary; Phase 55 complete |
+| `tool-semantics-evidence` | Sonnet high, Amber | the rejected line quotes the declared fact and layer; 3/3 KILLED; the ledger's own citation of the drop site was wrong and is corrected |
+| `gateway-translate-launch` | Sonnet high, Amber | live at checkpoint — the launch link for 1948/1950/1956 |
+| `windows-secret-store` | Opus 5 high, Red | live at checkpoint — why Credential Manager would not open in the VM's ssh session (five round-trips SKIPPED on the first green Windows leg) |
+
+**Output per box.** Day total 8.03M at this checkpoint; this session ≈
+0.96M (from 7.07M at inherit) for **+2 net** (1908, 1924) — the gate, the recon and two audits
+moved no box, and the Windows leg was the whole reason 1908 had been open
+since 2026-08-27. Two-day window (Sep 1–2): 16.2M over 1087 → 1194, about
+150k per net box, under the 250k trigger.
+
+**Four findings worth carrying forward.**
+
+1. **`cluster-b.py` took a file's first `#[cfg(test)]` as its test boundary.**
+   `config/mod.rs` has one on a helper at line 657 of 9,800; everything after
+   it counted as test, so a real production caller (`recent_credential_spend`
+   at `:2565`) read as a test call and 42 pub fns defined in that span were
+   left out of the census entirely (67 → 109 uncalled once counted). Fixed
+   (`b6b4d17`): the boundary is the first `#[cfg(test)]` followed by a `mod`
+   item. The tool that guards trap 4 had a trap of its own.
+2. **A "no production caller" hit can be the expected shape.** The fixed
+   census flagged 542's two constructors; the run that line names is the
+   project's own test suite, and `tests/routing_live.rs` builds exactly that
+   policy and would make a real request if not gated. The evaluation-run
+   half has no producer until Phase 51 dispatches a job — recorded as the
+   limit the original entry never wrote. Not every census hit is a wrong tick;
+   the check is still owed before ruling.
+3. **The first green Windows leg answered a different phase's question.**
+   441's entry said the closing run was a green `--windows-vm` with the
+   secret-store round-trips executing; the leg was green and five of them
+   printed `SKIPPED: the native secure store would not open in this session`.
+   A green leg is not evidence that a platform test ran; grep for the skip
+   sentence. A Red package now prints the swallowed `keyring::Error`.
+4. **A read-only recon runs beside a gate that must run alone.** The SQLite
+   recon did no cargo work and shared the machine with the macOS+Linux leg;
+   the two cargo workers were dispatched only once that leg finished and the
+   Windows leg (remote) had started. Sequencing the local legs first kept
+   the board non-empty through the whole gate.
