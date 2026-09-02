@@ -325,3 +325,38 @@ it compile the tree it reports on?*
 **State: NOT STARTED → SCAFFOLDED** for the Windows leg (the build exists and
 is green; the smoke tests do not pass). The tick needs a three-leg green run on
 a merged tree after the three families close.
+
+---
+
+## Families B and C closed on the VM — 2026-09-02 (`GH-WINDOWS-FIXTURES`, Amber, Sonnet medium); 1908 still open
+
+Both were the test fixtures' own defects, and no production line changed:
+
+- **Family C** (`tests/tier_ceiling.rs`): the calibration test interpolated
+  a Windows path into TOML unescaped, so `C:\Users` read as a broken
+  `\u` escape. Escaped the way `session_supervision.rs:57` already does.
+  Mutation on the VM: revert the escape → the exact original
+  *too few unicode value digits* error returns. KILLED.
+- **Family B** (`tests/firewall_bridge.rs`): the packet's Phase −1 read the
+  wrong assertion — both `left: 0, right: 1` failures are
+  `harness_invocations().len()`, the fake harness's own argv log, not the
+  settings-document count. Root cause, reproduced by hand on the VM with the
+  byte-identical script: `install_fake_claude`'s `.cmd` interpolates
+  `"2.1.252 (Claude Code)"` inside a parenthesised `if (...)` block, and
+  cmd.exe's block parser eats the literal `)`, so the fake harness never
+  ran to completion and never wrote its log. Fix: escape `(`/`)` as
+  `^(`/`^)` in the Windows branch. Not product behaviour.
+
+VM evidence: run 1 (Family C only) — `tier_ceiling` 8/8, `firewall_bridge`
+still red, as expected; runs 2 and 3 (both fixes) — 8/8 and 11/11, twice.
+Every other red in those runs was Family A (`GH-WINDOWS-EXIT-OBSERVATION`,
+in flight) or the known roughly-one-flake-per-run (`evaluation_producers`,
+`gateway_failure_taxonomy`, `v1_criteria_routing` — a different test each
+run, none regressing). Cross-check `cargo check --tests --target
+x86_64-pc-windows-gnu` clean. **Operational finding:** the runner refuses a
+busy VM tree (*Could not replace CI source tree*) rather than clobbering it,
+so two concurrent runs fail fast instead of corrupting each other; it still
+has no queue.
+
+**1908 stays open** until the three-leg `ci-local.sh --macos --linux
+--windows-vm` is green on a tree carrying both Windows packages.

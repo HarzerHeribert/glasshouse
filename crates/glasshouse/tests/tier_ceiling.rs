@@ -739,6 +739,10 @@ fn a_calibration_suggestion_requires_the_same_evidence_gate_outcomes_by_tier_use
     let fixture = SuggestionFixture::new(tmp.path());
     let bin_dir = tmp.path().join("bin-1481");
     std::fs::create_dir_all(&bin_dir).unwrap();
+    let escaped = install_fake_harness(&bin_dir, "claude-code")
+        .display()
+        .to_string()
+        .replace('\\', "\\\\");
     fixture.write_config(&format!(
         "[integrations.claude-code]\nenabled = true\nexecutable = \"{}\"\n\n\
          [providers.alpha]\ntemplate = \"openrouter\"\n\
@@ -746,7 +750,7 @@ fn a_calibration_suggestion_requires_the_same_evidence_gate_outcomes_by_tier_use
          [providers.alpha.model_capabilities.tiny]\nceiling = \"leaf\"\nprovenance = \"user\"\n\n\
          [providers.alpha.model_capabilities.workhorse]\nceiling = \"standard\"\n\
          provenance = \"user\"\n",
-        install_fake_harness(&bin_dir, "claude-code").display(),
+        escaped,
     ));
 
     let now = glasshouse::evaluation::now_unix();

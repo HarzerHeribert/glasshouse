@@ -375,12 +375,22 @@ fn install_fake_claude(bin_dir: &Path, argv_log: &Path, version_line: &str) -> P
 #[cfg(windows)]
 fn install_fake_claude(bin_dir: &Path, argv_log: &Path, version_line: &str) -> PathBuf {
     let path = bin_dir.join("fake-claude.cmd");
+    // `version_line` (e.g. "2.1.252 (Claude Code)") lands inside a
+    // parenthesized `if (...)` block. cmd.exe's block-form parser counts
+    // parens to find the block's own closing one, so an unescaped `(`/`)`
+    // in the echoed text terminates the block early and corrupts every
+    // later line in the script -- confirmed on the VM: the unescaped form
+    // truncated `--version`'s own output (`2.1.252 (Claude Code` with no
+    // closing paren) and, for any other argv, failed to invoke the file at
+    // all ("The system cannot find the file specified"), so argv.log was
+    // never written. `^(` / `^)` escapes them as literal text.
+    let escaped_version = version_line.replace('(', "^(").replace(')', "^)");
     std::fs::write(
         &path,
         format!(
             "@echo off\r\n\
              if \"%1\"==\"--version\" (\r\n\
-             \x20\x20echo {version_line}\r\n\
+             \x20\x20echo {escaped_version}\r\n\
              \x20\x20exit /b 0\r\n\
              )\r\n\
              echo %*>>\"{argv}\"\r\n\
