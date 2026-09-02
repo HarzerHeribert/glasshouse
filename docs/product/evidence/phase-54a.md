@@ -268,3 +268,60 @@ Recorded scope limits — stated by the worker, not discovered later:
 - no Linux or native Windows CI run exists in any evidence-ledger entry this packet's READ ONLY THIS names; this worktree cannot produce either
 
 ---
+
+---
+
+## Line 1908 — OPEN, and for the first time on evidence rather than absence (2026-09-02)
+
+**The user's ruling:** *"Local ci-local.sh run with --windows-vm satisfies
+1908 -- close it on that evidence."* So the three-leg run
+`scripts/ci-local.sh --macos --linux --windows-vm` is the runner the line
+names, and the line ticks on a green one.
+
+**The run, on `2edce1b`:**
+
+| leg | result |
+|---|---|
+| macOS lint (fmt, clippy, rustdoc, doc boundary, evidence coverage, script tests) | PASS; README progress was stale (regenerated since) |
+| macOS test | 4 probe timeouts in `shell::settings_persistence_tests`, on a machine running four worker builds — **18/18 twice alone**, load |
+| Linux build+test, clippy, MSRV | PASS |
+| **Windows build, test, MSRV** | **FAIL — does not compile.** `dfaf27f` added `api::mute`/`unmute` calls to `main.rs:622/625` while `api/mod.rs` exports them only under `cfg(unix)`; plus a `cfg(unix)` test helper called unconditionally and unused-import errors under `-D warnings` in fourteen test files |
+
+**`GH-WINDOWS-TEST-BUILD` (Opus 5 high, Red) fixed the build**: `cfg(not(unix))`
+twins for `mute`/`unmute` returning the existing `no_unix_socket()` refusal —
+a missed case in a pattern `api/mod.rs` already had for `serve`, `send_message`,
+`interrupt`, `read_output`; every test straggler gated to the cfg its only user
+carries, no `#[allow]` anywhere. Mutation KILLED by the cross-check itself (a
+compile error is the observable). On the real ARM64 VM: `build` exit 0, `msrv`
+exit 0, and the new `#[cfg(windows)]` refusal test observed passing.
+
+**The Windows test leg then ran for the first time ever, and seven tests fail
+in three families**, identical across three runs:
+
+- **A — "the fake harness never exited"** (4): `shell::shell_entitlement_scrub_tests::…never_carry…`
+  and three in `tests/entitlement_shell_scrub.rs`, all at a 20-second
+  `poll_exits` deadline. A session/process-exit-observation defect on Windows,
+  or the `.cmd` fixture never exiting. **Red packet: `GH-WINDOWS-EXIT-OBSERVATION`.**
+- **B — firewall hook registration count** (2): `tests/firewall_bridge.rs:418`
+  and `:504`, `left: 0, right: 1`. Undiagnosed; Amber.
+- **C — an unescaped Windows path in a test fixture's TOML** (1):
+  `tests/tier_ceiling.rs:668`, `C:\Users` read as a unicode escape.
+  `session_supervision.rs:57` already escapes; this fixture does not. Green,
+  cheapest.
+- Plus **about one flake per full run, a different test each time** — runs 1
+  and 2 ran byte-identical binaries and disagreed. The rate is the finding.
+
+**The finding that outranks the failures: the Windows runner can run stale
+binaries and report them as the tree's result.** `install-source.ps1`
+extracts with `tar`, which restores archive mtimes, and `C:\ci\target`
+persists, so a changed source file older than a previous artifact is judged
+fresh — two consecutive `test` runs compiled nothing (`0.58s`, `0.47s`) and
+silently did not run the test the packet had just added. One `touch` made the
+VM recompile and report 65 tests instead of 64. Fixed the same day in the
+runner (stamp the extracted tree to *now*); until a run proves the stamp, any
+Windows-only evidence from this leg must be read with §16's question — *did
+it compile the tree it reports on?*
+
+**State: NOT STARTED → SCAFFOLDED** for the Windows leg (the build exists and
+is green; the smoke tests do not pass). The tick needs a three-leg green run on
+a merged tree after the three families close.
