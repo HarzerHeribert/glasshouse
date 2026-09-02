@@ -45,9 +45,11 @@ use std::process::Command;
 
 use clap::Parser;
 
-use glasshouse::evaluation::{
-    EvaluationKind, EvaluationObservations, EvaluationOutcome, NewObservation,
-};
+use glasshouse::evaluation::{EvaluationKind, EvaluationObservations, EvaluationOutcome};
+// Used only by the `#[cfg(unix)]` tests below; on Windows the import would be
+// unused and `-D warnings` refuses it (the wave-100 Windows VM leg, 2026-09-02).
+#[cfg(unix)]
+use glasshouse::evaluation::NewObservation;
 use glasshouse::memory::{MemoryKind, NewMemory, ProjectMemory};
 use glasshouse::{Cli, Runtime, bootstrap};
 
