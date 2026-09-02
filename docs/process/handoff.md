@@ -20,6 +20,10 @@ validated and waiting on the commit. Next action: `.agent-runtime/CONTINUATION.m
 
 Last updated: 2026-08-31 (Europe/Berlin)
 
+## Checkpoint — 2026-09-02, batch 80 and the Fable 5.1 hand-off: 1179 / 1332 (88.5%)
+
+Twenty boxes closed in one session (Phase 32E 9/10, Phase 35A 10/11, 1945/1955), the twelfth wrongly ticked box found and repaired (1357/1358 — `session_router()` never read the configured weights; practice §90), four censuses written (35A, 56, 33A/32G, and 52/53 running), the Windows build repaired after `dfaf27f` broke it, and the Windows runner fixed for running stale binaries. Four finished worktrees (pairing-prior, windows-test-build, harness-preference, translated-usage-proof) wait behind the wave-81 sweep; four validated packets wait behind them. `.agent-runtime/CONTINUATION.md` has the exact queue, ticks, staged ledger texts and rulings. Parked with the user: how Glasshouse learns a routing decision was good (Phase 51's twelve RC-B lines).
+
 ## Checkpoint — 2026-08-31, batches 59–61 and the Opus → Fable hand-off: 1040 / 1305 (79%)
 
 **The hand-off landed hot and the board never emptied.** The Opus 5 orchestrator
