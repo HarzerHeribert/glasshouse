@@ -486,3 +486,25 @@ Recorded scope limits — stated by the worker, not discovered later:
 - The two-line call from the sink closure to record_correlation_steer is not under a test; deleting it would survive. The effect reaching a sink (mutation 9) and the write itself (mutations 10, 11) are proven; the closure is built only by launch_session/resume, which no test drives to a correlated failover — the same gap 1851 was ruled COMPLETE across
 - The row appears in observed_identities under route = None, as ROUTING_LATENCY rows already do
 
+
+---
+
+## 1822 and 1826 — RE-OPENED 2026-09-02: the measure has no production reader
+
+The first entry above ticked both on a producer
+(`memory_search_grouped`'s `record_memory_retrieval`, real, driven through the
+shipped binary) and a reader, `EvaluationObservations::stale_retrievals`
+(`evaluation/mod.rs:948`). The reader is called only from
+`tests/evaluation_observations.rs`: `scripts/cluster-b.py` lists it among the
+zero-caller symbols, and no `glasshouse` command or shell view prints a stale
+count, a retrieved count, or any memory-evaluation figure. That is the shape
+the 1276 ruling rejected the same day (*a reader with zero production callers
+is not a tick*) and §90's *recorded limit that is the defect*. **Un-ticked**,
+state **LOCALLY VERIFIED**: producer real, measure computable, nothing in the
+product observes it.
+
+Re-closed by `GH-RETRIEVAL-CRITERIA` (dispatched 2026-09-02, `phase-52.md`):
+`glasshouse memory retrievals` prints retrieved, stale, stale-under-history,
+unresolved and missed counts for a window, giving `stale_retrievals` its
+production caller; the 1826 distinction this entry records — a `--history`
+search is *asking* for superseded memories — is one of its acceptance tests.

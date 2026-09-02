@@ -1510,11 +1510,11 @@ Fixed architectural requirements
 
 ☑ Generate routing candidates from relevant existing sessions before considering fresh sessions.
 ☑ Generate fresh native-subscription session candidates from enabled harness launch profiles.
-☑ Generate fresh gateway-backed session candidates only as installed-harness launch profiles whose protocol, model, tool semantics, and capability requirements match.
+☐ Generate fresh gateway-backed session candidates only as installed-harness launch profiles whose protocol, model, tool semantics, and capability requirements match.
 ☑ Never generate a direct API or gateway endpoint as a first-class interactive session candidate without an owning installed harness.
 ☑ Generate disposable-job candidates for tasks that do not need a first-class interactive session.
 ☑ Exclude candidates below the classified minimum workload tier.
-☑ Exclude candidates missing a hard required capability.
+☐ Exclude candidates missing a hard required capability.
 ☑ Exclude candidates whose provider is unavailable or in an authoritative cooldown.
 ☐ Exclude candidates whose user-defined spending budget has been exhausted.
 ☑ Exclude candidates explicitly disabled or forbidden by user policy.
@@ -1819,11 +1819,11 @@ Phase 51 — Evaluation hooks
 
 ☐ Measure how many repository exploration operations occur before and after relevant project memory exists.
 ☐ Measure how often retrieved memory is actually useful to the receiving agent.
-☑ Measure how often stale or incorrect memory is retrieved.
+☐ Measure how often stale or incorrect memory is retrieved.
 ☐ Measure how often an old decision causes an agent to add unnecessary implementation complexity.
 ☐ Measure how often revalidation correctly identifies a decision whose original assumptions no longer hold.
 ☐ Measure how often agents challenge a remembered decision and whether the challenge was justified.
-☑ Measure how often superseded memories are incorrectly resurfaced as current guidance.
+☐ Measure how often superseded memories are incorrectly resurfaced as current guidance.
 ☐ Measure whether production-aware checks catch expensive query patterns or scaling assumptions before deployment.
 ☐ Measure how often one harness successfully continues work from another harness’s checkpoint.
 ☑ Measure how often automatic routing is overridden by the user.

@@ -1307,3 +1307,36 @@ their deletion-shaped mutations all used compiling non-empty replacements
 Both stay open. A tripwire is not worth writing: the moment the CLI grows an
 event surface, the adapter's own `:194` comment is what a worker would have to
 delete first, and that deletion is the signal.
+
+## Phases 52 and 53 — eleven lines censused 2026-09-02: six Cluster Q, one refused with a successor, four packaged
+
+`GH-RECON-52-53`; the rulings are in `phase-52.md` and `phase-53.md`. The
+tree-wide fact: no vector, embedding, semantic-retrieval or graph-database
+code exists anywhere in `crates/glasshouse/src`, and `JobKind::Reranking` is a
+declared variant with no production caller.
+
+| line | why it cannot be packaged |
+|---|---|
+| **1867** *"If semantic retrieval is added, combine it with lexical retrieval…"* | Cluster Q: no second retrieval path exists to combine with the lexical one. |
+| **1868** *"Keep project isolation physically intact when adding embeddings."* | Cluster Q: no embeddings table or column exists to isolate. |
+| **1869** *"Ensure semantic retrieval respects memory lifecycle status…"* | Cluster Q: nothing can resurrect a superseded memory while one retrieval path exists; the lexical precedent to copy is `memory/search.rs:44-54`. |
+| **1870** *"Evaluate semantic retrieval on real Glasshouse queries before making it part of the default path."* | Cluster Q in an evaluation gate's clothing: the object of the evaluation does not exist. |
+| **1879** *"Do not add a graph database solely to visualize project memory."* | Cluster Q: no graph database exists; line 1107's tripwire guards the widget, not a database, and would not tick this regardless. |
+| **1882** *"Evaluate whether SQLite relations are insufficient before adopting a dedicated graph database."* | Cluster Q on the restraint reading; the evaluation itself is recorded in `phase-53.md` (one relationship ever needed, ever built) and closes the line the day a graph database is proposed. |
+| **1866** *"Define concrete retrieval cases that lexical search cannot solve…"* | **Not Cluster Q** — a reachable question with no material: no recorded lexical failure exists. Successor: revisit after `GH-RETRIEVAL-CRITERIA`'s miss rows accumulate. |
+
+Packaged: **1865** (`GH-RETRIEVAL-CRITERIA`, Amber) and **1880, 1881, 1883**
+(`GH-RELATIONSHIP-PROOFS`, Green, tests only).
+
+### Wave-80 audit, same day — four boxes un-ticked, all the "no producer" shape
+
+`GH-AUDIT-WAVE80` confirmed eighteen of twenty and re-opened **1517** and
+**1513** (`phase-35a.md`): the fact `is_adequate` and the tool-semantics gate
+exclude on is never constructed by any adapter, template or config key —
+`Destination::with_resource_facts` has one caller and it is a test. The same
+day's `cluster-b.py` reading re-opened **1822** and **1826** (`phase-51.md`):
+`stale_retrievals` has no production caller. Successors: `GH-CAPABILITY-FACTS`
+(a declared producer for both facts) and `GH-RETRIEVAL-CRITERIA` (the
+readout), respectively. Twelve wrongly-ticked boxes had this shape before
+today; **all sixteen were found by an audit or a script, none by the diff
+read that preceded the tick.**

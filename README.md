@@ -19,7 +19,7 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`███████████████████████████████████░░░░░` 1179 / 1332 mandatory capabilities (88%)
+`███████████████████████████████████░░░░░` 1175 / 1332 mandatory capabilities (88%)
 
 <details>
 <summary>Per-phase breakdown (65 of 107 phases complete)</summary>
@@ -105,7 +105,7 @@ the authoritative specification and tracks what is done.
 | Phase 34E — Router economics | 8/9 |
 | Phase 34F — Model capability and tier calibration | 11/11 ✅ |
 | Phase 35 — Lightweight task classification | 14/14 ✅ |
-| Phase 35A — Candidate generation | 10/11 |
+| Phase 35A — Candidate generation | 8/11 |
 | Phase 35B — Candidate scoring | 17/25 |
 | Phase 35C — Capacity-aware tier escalation and downgrade | 9/9 ✅ |
 | Phase 35D — Routing under subscription pressure | 8/8 ✅ |
@@ -124,7 +124,7 @@ the authoritative specification and tracks what is done.
 | Phase 48 — CLI ergonomics | 8/8 ✅ |
 | Phase 49 — Configuration | 16/16 ✅ |
 | Phase 50 — Tracked project knowledge as an optional feature | 7/7 ✅ |
-| Phase 51 — Evaluation hooks | 12/37 |
+| Phase 51 — Evaluation hooks | 10/37 |
 | Phase 52 — Criteria before adding semantic/vector retrieval | 0/6 |
 | Phase 53 — Criteria before adding graph storage | 0/5 |
 | Phase 54 — Criteria before deeper cmux coupling | 4/4 ✅ |

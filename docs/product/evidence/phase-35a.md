@@ -435,3 +435,68 @@ Gates the worker ran (re-run the decisive ones yourself):
 **1513 ticks here.** Its protocol/tool half: `tests/routing_candidates.rs` (the proofs package); its capability half: `routing::session::hard_constraint_tests::an_established_absent_hard_capability_excludes_and_an_unverified_one_passes`, whose excluded candidate is gateway-backed.
 
 **Phase 35A stands at 10 of 11.** 1519 stays refused (Cluster M, the money-spend counter).
+
+---
+
+## 1517 and 1513 — RE-OPENED 2026-09-02 (`GH-AUDIT-WAVE80`): the excluding fact has no producer anywhere
+
+The audit re-ran every recorded mutation for wave 80's twenty ticks (eighteen
+confirmed) and found this pair by asking a question the closure packets had
+not: **what in production could ever construct the input these gates exclude
+on?** Nothing.
+
+- **1517.** `hard_constraint` (`routing/session.rs:4876`) calls `is_adequate`
+  (`:4791-4806`), which excludes only when an axis is
+  `Declared::Verified { value: false, .. }`. `ResourceCapabilities::describe`
+  (`routing/capability.rs:188-198`) prefers a model-specific `ResourceFacts`
+  axis when verified and otherwise falls through to the harness's own
+  declaration. `Destination::with_resource_facts` (`session.rs:645`) has
+  **one caller, at `:5196`, inside the file's own `#[cfg(test)]`** (boundary
+  `:5009`) — re-verified by the orchestrator. Every one of the seven harness
+  adapters passes `true` or `Unverified` for `code_editing`, `shell_access`
+  and `browser_use`; the two `verified(false, ..)` constructions under
+  `harness/` are both test code (`pairing.rs:1277` past its `:1077` boundary,
+  `mod.rs:1982` past `:1466`). So `resource.axis(..)` is `Verified{true}` or
+  `Unverified` for every real destination, and `is_adequate` cannot return
+  `false` in production. Mutation: `is_adequate` hardcoded to `true`
+  **SURVIVED** 54 tests across five integration suites; only
+  `hard_constraint_tests::an_established_absent_hard_capability_excludes_and_an_unverified_one_passes`
+  kills the recorded mutation, and it builds its destination through the
+  test-only setter.
+- **1513, the tool-semantics and capability clauses.** `Backend::tools()` is
+  built by `destination_backend` → `session_pairing` (`main.rs:11288-11319`),
+  which threads `Support.tool_calls` from a configured provider
+  (`config/pairing.rs:1067`) or falls back to `Declared::Unverified`. No
+  provider template sets `ProtocolSupport.tool_calls` to anything but
+  `Unverified` (`provider/mod.rs:342`, `:406`) and no TOML site deserialises
+  it. A prior worker's own test comment (`main.rs:15456-15466`) had already
+  recorded that `ToolSemantics::KnownAbsent` *"is unreachable through
+  `glasshouse route`'s compiled-binary path today"* — never carried into this
+  ledger, which is the packet error the audit filed. Mutation: the
+  tool-semantics arm short-circuited **survived every test but one**,
+  `a_tool_incompatible_destination_is_excluded_when_the_task_needs_tool_calls_1513`,
+  which hand-builds its `Backend`. **The protocol clause stays proven**:
+  `classify_destination(..).protocol_fit()` reads
+  `gateway::translate::is_supported`, a static real table, and its
+  `drop-protocol-hard-constraint` mutation is unaffected. The model clause is
+  not implicated.
+
+**Ruling: both boxes un-ticked.** This is the §90 shape at its strongest —
+not a test that bypasses the production path, but a production path whose
+deciding input has no producer. The gates are correct on the one input shape
+that can trigger them, and that shape is dead code outside tests. State:
+**SCAFFOLDED** for 1517 and for 1513's tool-semantics and capability
+clauses; LOCALLY VERIFIED for 1513's protocol clause.
+
+**Successor, named: `GH-CAPABILITY-FACTS`** (Amber). A declared producer for
+the two facts: a configured provider may state that a protocol has no tool
+calls (`ProtocolSupport.tool_calls = Declared::verified(false, <reason>)`,
+read from the provider's TOML through the path `config/pairing.rs:1035-1067`
+already threads into `Backend::tools()`), and a configured model may state a
+resource fact absent (`ResourceFacts`, reaching
+`Destination::with_resource_facts` from `routing_destinations`). Both gates
+then tick on a mutation through the shipped binary against a fixture config
+that declares the absence — and stay honest: a user-declared fact is
+`Verified` because the user verified it, with the reason stored beside it.
+
+**Phase 35A stands at 8 of 11.** 1519 stays refused (Cluster M).

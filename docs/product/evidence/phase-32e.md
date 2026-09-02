@@ -525,3 +525,12 @@ Gates the worker ran (re-run the decisive ones yourself):
 
 
 **Phase 32E stands at 9 of 10.** 1275 stays with register row P1b.
+
+**1276, audit note 2026-09-02 (`GH-AUDIT-WAVE80`): boundary unpinned, tick
+stands.** An off-by-one mutation at the surface gate (`>=` → `>` on
+`MIN_ROWS_FOR_BURN_RATE`) SURVIVED `shell::project_overview_capacity_tests`:
+neither test seeds exactly eight rows (they use 3/12 and 12). Production is
+correct; the boundary is unwatched — §90's *one line of an otherwise-proven
+join* case, not a re-open. Owed: one test seeding exactly
+`MIN_ROWS_FOR_BURN_RATE` rows (prints) and one fewer (does not), folded into
+the next Green package that touches `shell/mod.rs`'s capacity tests.
