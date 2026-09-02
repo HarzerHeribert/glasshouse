@@ -1178,6 +1178,11 @@ fn routing_destinations(
         // the backend's resolved model rather than off the profile.
         let query = destination_capability_query(harness, &profile.name, wire_protocol);
         let ceiling = destination_tier_ceiling(effective, &backend, &query);
+        // Line 1923's producer, read off the same in-scope `backend` and
+        // `consumption` the fresh destinations below use — a resumed session
+        // is scored by the same local evidence as a fresh one under the same
+        // provider and model.
+        let pairing_prior_evidence = pairing_prior_evidence_count(consumption, &backend);
         // Phase 56 line 1954's producer: the entitlement this session's
         // profile charges, so a rule the user has since written applies to
         // continuing it exactly as it applies to starting a fresh one. When
@@ -1208,7 +1213,8 @@ fn routing_destinations(
             .with_capability_tier(ceiling)
             .with_session_context(context)
             .with_entitlement(entitlement)
-            .with_estimated_input_size(estimated_size),
+            .with_estimated_input_size(estimated_size)
+            .with_pairing_prior_evidence(pairing_prior_evidence),
         );
     }
     drop(checkpoints);
@@ -1296,6 +1302,7 @@ fn routing_destinations(
             for resolved in matches {
                 let backend = backend_for_entitlement(&backend, resolved);
                 let ceiling = destination_tier_ceiling(effective, &backend, &query);
+                let pairing_prior_evidence = pairing_prior_evidence_count(consumption, &backend);
                 destinations.push(
                     with_capacity(
                         with_provider_protocols(
@@ -1314,11 +1321,13 @@ fn routing_destinations(
                     .with_capability_tier(ceiling)
                     .with_entitlement(Some(routing_entitlement(resolved, &band_thresholds)))
                     .with_estimated_input_size(fresh_estimated_size)
-                    .with_resource_facts(resource_facts),
+                    .with_resource_facts(resource_facts)
+                    .with_pairing_prior_evidence(pairing_prior_evidence),
                 );
             }
         } else {
             let ceiling = destination_tier_ceiling(effective, &backend, &query);
+            let pairing_prior_evidence = pairing_prior_evidence_count(consumption, &backend);
             let fresh_entitlement = matches
                 .first()
                 .map(|resolved| routing_entitlement(resolved, &band_thresholds));
@@ -1340,12 +1349,32 @@ fn routing_destinations(
                 .with_capability_tier(ceiling)
                 .with_entitlement(fresh_entitlement)
                 .with_estimated_input_size(fresh_estimated_size)
-                .with_resource_facts(resource_facts),
+                .with_resource_facts(resource_facts)
+                .with_pairing_prior_evidence(pairing_prior_evidence),
             );
         }
     }
 
     Ok(destinations)
+}
+
+/// Line 1923's producer: how many of `consumption`'s rows this backend's own
+/// provider and model account for — the same `(provider, model)` identity
+/// `record_routing_latency`'s siblings write into the ledger, matched the way
+/// `observed_provider_health`'s `FreeResource::new` already matches a
+/// destination's backend against a rendered key. `None` (no ledger) counts as
+/// zero, exactly as `destination_capacity` already treats an absent
+/// `consumption` read.
+fn pairing_prior_evidence_count(
+    consumption: Option<&[glasshouse::routing::evidence::RoutingObservation]>,
+    backend: &glasshouse::routing::Backend,
+) -> u32 {
+    let Some(rows) = consumption else {
+        return 0;
+    };
+    rows.iter()
+        .filter(|row| row.provider == backend.provider() && row.model == backend.model().label())
+        .count() as u32
 }
 
 /// Whether a launch under `profile` would get past `glasshouse::profile::resolve`'s
@@ -16416,6 +16445,77 @@ mod tests {
         assert!(
             rows.is_empty(),
             "the search matched something real; excluding it is not a retrieval miss: {rows:?}"
+        );
+    }
+
+    /// Map line 1923's missing link: `routing_destinations` must itself count
+    /// a fresh destination's own ledger rows and hand them to
+    /// `Destination::with_pairing_prior_evidence`, rather than leaving every
+    /// destination at the default `0` `pairing_prior_evidence` carries until
+    /// wired (`docs/product/evidence/phase-55.md`'s 1923 HELD entry).
+    ///
+    /// Mutation target: hand `0` instead of the count → this test fails,
+    /// because `alpha`'s six matching rows would no longer be reported.
+    #[test]
+    fn routing_destinations_1923_reports_pairing_prior_evidence_from_the_ledger() {
+        use glasshouse::routing::evidence::{EvidenceLedger, NewObservation};
+
+        let fixture = CliFixture::new();
+        let harness = glasshouse::integrations::IntegrationId::ClaudeCode;
+
+        let mut user = UserConfig::default();
+        let mut native_profile = glasshouse::config::ProfileConfig::new(harness);
+        native_profile.set_model(Some("claude-native-model".to_owned()));
+        user.profiles_mut().set("alpha-native", native_profile);
+
+        let mut direct_profile = glasshouse::config::ProfileConfig::new(harness);
+        direct_profile.set_backend(glasshouse::config::ProfileBackend::DirectProvider {
+            provider: "openrouter".to_owned(),
+        });
+        direct_profile.set_model(Some("some/other-model".to_owned()));
+        user.profiles_mut().set("beta-direct", direct_profile);
+
+        let effective = EffectiveConfig::new(&user, None);
+
+        let now_unix = glasshouse::provider::cache::now_unix_seconds();
+        let ledger = EvidenceLedger::open(&fixture.runtime).unwrap();
+        for _ in 0..6 {
+            ledger
+                .record(
+                    NewObservation::new(harness.slug(), "claude-native-model"),
+                    now_unix,
+                )
+                .unwrap();
+        }
+
+        let destinations = routing_destinations(
+            &fixture.runtime,
+            &effective,
+            harness,
+            DestinationScope::Everything,
+            None,
+        )
+        .unwrap();
+
+        let alpha = destinations
+            .iter()
+            .find(|d| d.is_fresh() && d.launch_profile() == "alpha-native")
+            .expect("the native-backed profile must offer its own fresh destination");
+        assert_eq!(
+            alpha.pairing_prior_evidence(),
+            6,
+            "six ledger rows matching this destination's provider and model must all count"
+        );
+
+        let beta = destinations
+            .iter()
+            .find(|d| d.is_fresh() && d.launch_profile() == "beta-direct")
+            .expect("the direct-provider profile must offer its own fresh destination");
+        assert_eq!(
+            beta.pairing_prior_evidence(),
+            0,
+            "a destination with no matching ledger rows must report zero, byte-identical to \
+             today"
         );
     }
 }

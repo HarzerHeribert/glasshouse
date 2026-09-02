@@ -583,3 +583,40 @@ Recorded scope limits — stated by the worker, not discovered later:
 - Destination::pairing_prior_evidence has no production caller yet (see packet_errors and the report's own section on this gap)
 
 ---
+
+---
+
+## Line 1923 — CLOSED 2026-09-02 (`GH-PAIRING-EVIDENCE`, Green, Sonnet medium) — the HELD half above, filled
+
+`main.rs::pairing_prior_evidence_count(consumption, backend)` counts the
+ledger rows `routing_destinations` already reads whose provider and model
+match the destination's backend, and every `Destination` the function builds
+— warm, multi-entitlement, single — carries it through
+`with_pairing_prior_evidence`. No change to `routing/**`.
+
+### Consider V1 usable when a compatible vendor-native pairing receives an inspectable initial prior without overriding stronger observed evidence or user choice. (line 1923)
+
+Contract: Given a vendor-native destination that has accumulated at least PAIRING_PRIOR_EVIDENCE_THRESHOLD local observations, when routing_destinations builds it, the destination carries that real count via with_pairing_prior_evidence so SessionRouter::choose decays its prior to 0.0; given no matching ledger rows or no ledger, the destination carries 0 and ranking is byte-identical to today.
+
+State: **COMPLETE** — ruled 2026-09-02. The HELD entry above named exactly this: the decay's input now comes from the project's own ledger rows for the destination's provider and model, on every path `routing_destinations` builds a destination, and the mutation that hands `0` instead of the count is KILLED. With `apply_override` already proven, both halves of *without overriding stronger observed evidence or user choice* hold, and the prior's text says which state it is in.
+
+Production evidence:
+- `crates/glasshouse/src/main.rs` — `pairing_prior_evidence_count`
+- `crates/glasshouse/src/main.rs` — `routing_destinations (three call sites: existing-session loop, multi-entitlement fresh arm, single/no-entitlement fresh arm)`
+
+Regression evidence:
+- `tests::routing_destinations_1923_reports_pairing_prior_evidence_from_the_ledger`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| let pairing_prior_evidence = pairing_prior_evidence_count(consumption, &backend); -> let pairing_prior_evidence = 0u32;  (else-arm call site) | `hand-zero-instead-of-count` | **killed** | `tests::routing_destinations_1923_reports_pairing_prior_evidence_from_the_ledger` |
+
+> hand-zero-instead-of-count observed: assertion `left == right` failed: six ledger rows matching this destination's provider and model must all count
+
+Recorded scope limits — stated by the worker, not discovered later:
+- Does not re-verify pairing_prior's own decay math or apply_override's precedence (routing/session.rs), already mutation-proven and untouched here.
+- Only this platform's (macOS) test run; no platform-conditional code was added.
+
+---
+
+---

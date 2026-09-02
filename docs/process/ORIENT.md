@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1188 / 1332 mandatory capabilities (89%)** — 144 open across 41 phases.
+**1189 / 1332 mandatory capabilities (89%)** — 143 open across 41 phases.
 
 ## Where the work is
 
@@ -36,6 +36,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 37 | Basic session-aware router | **1** | 10 | `1590` |
 | Phase 39 | Gateway-backed disposable jobs | **1** | 8 | `1614` |
 | Phase 54A | Setup and portability completion criteria | **1** | 9 | `1897` |
+| Phase 55 | V1 completion definition | **1** | 22 | `1910` |
 | Phase 9 | Antigravity adapter | **2** | 5 | `330` |
 | Phase 9E | Secret storage | **2** | 11 | `432` |
 | Phase 20 | Minimal durable project memory | **2** | 16 | `805` |
@@ -45,7 +46,6 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 33 | Resource health | **2** | 13 | `1309` |
 | Phase 38 | Quota-preserving routing | **2** | 5 | `1604` |
 | Phase 53 | Criteria before adding graph storage | **2** | 3 | `1872` |
-| Phase 55 | V1 completion definition | **2** | 21 | `1910` |
 | Phase 28 | File-aware memory lookup | **3** | 2 | `1137` |
 | Phase 33A | Routing evidence ledger | **3** | 12 | `1327` |
 | Phase 33C | Failure, quota, and route correlation | **3** | 12 | `1362` |
@@ -135,6 +135,10 @@ these unwrapped.
 
 - **1908** ☐ Consider cross-platform support stable only after PTY/session smoke tests pass on macOS, Linux, and native Windows CI runners.
 
+### Phase 55 — V1 completion definition  (1 open, 22 closed)
+
+- **1924** ☐ Consider V1 usable when a response profile can control user-facing communication without reducing verification or replacing native harness coding instructions.
+
 ### Phase 9 — Antigravity adapter  (2 open, 5 closed)
 
 - **340** ☐ Integrate structured Antigravity lifecycle events where the CLI exposes them.
@@ -179,11 +183,6 @@ these unwrapped.
 
 - **1879** ☐ Do not add a graph database solely to visualize project memory.
 - **1882** ☐ Evaluate whether SQLite relations are insufficient before adopting a dedicated graph database.
-
-### Phase 55 — V1 completion definition  (2 open, 21 closed)
-
-- **1923** ☐ Consider V1 usable when a compatible vendor-native pairing receives an inspectable initial prior without overriding stronger observed evidence or user choice.
-- **1924** ☐ Consider V1 usable when a response profile can control user-facing communication without reducing verification or replacing native harness coding instructions.
 
 ### Phase 28 — File-aware memory lookup  (3 open, 2 closed)
 
