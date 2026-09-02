@@ -19,7 +19,7 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`███████████████████████████████████░░░░░` 1173 / 1332 mandatory capabilities (88%)
+`███████████████████████████████████░░░░░` 1176 / 1332 mandatory capabilities (88%)
 
 <details>
 <summary>Per-phase breakdown (65 of 107 phases complete)</summary>
@@ -105,7 +105,7 @@ the authoritative specification and tracks what is done.
 | Phase 34E — Router economics | 8/9 |
 | Phase 34F — Model capability and tier calibration | 11/11 ✅ |
 | Phase 35 — Lightweight task classification | 14/14 ✅ |
-| Phase 35A — Candidate generation | 7/11 |
+| Phase 35A — Candidate generation | 10/11 |
 | Phase 35B — Candidate scoring | 17/25 |
 | Phase 35C — Capacity-aware tier escalation and downgrade | 9/9 ✅ |
 | Phase 35D — Routing under subscription pressure | 8/8 ✅ |

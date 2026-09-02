@@ -335,3 +335,103 @@ Gates the worker ran (re-run the decisive ones yourself):
 - cargo clippy -p glasshouse --all-targets --all-features -- -D warnings: clean
 - scripts/blast-radius.sh --targeted crates/glasshouse/src/main.rs crates/glasshouse/src/session/select.rs crates/glasshouse/tests/routing_candidates.rs: every traced target passed
 
+---
+
+# Cause 1 — CLOSED 2026-09-02 (`GH-CANDIDATE-GEN`, Amber, Sonnet high): 1517, 1518, and 1513's capability half
+
+Two arms in `hard_constraint`, a new `HardConstraint::ProviderUnavailable`
+variant with a readable reason, and two stale doc comments corrected. Three
+mutations KILLED. The worker ran the full workspace suite beyond its targeted
+gate and found the two pre-existing test files whose fixtures the new
+exclusions invalidated — reported them with the analysis instead of editing
+`FORBIDDEN` files, which is the right call, and fixed them under the ruling
+recorded at 1518 below.
+
+**1513 ticks with this package.** Its protocol/tool half was proven by
+`GH-CANDIDATE-PROOFS`; its capability half is
+`routing::session::hard_constraint_tests::an_established_absent_hard_capability_excludes_and_an_unverified_one_passes`,
+whose excluded candidate is a gateway-backed destination built the way
+`destination_backend` builds one for `BackendResource::GlasshouseGateway`.
+
+### Exclude candidates missing a hard required capability. (line 1517)
+
+Contract: Given a classified task and a candidate set, when the router applies its hard-constraint gate, Glasshouse excludes a candidate established to lack a required hard capability, naming the reason in the refusal — while preserving that an unverified capability stays priced, never excluded, and a candidate set with no such candidates ranks byte-for-byte as it does today.
+
+State: **COMPLETE** — ruled 2026-09-02. The arm is asked on both gate passes; `is_adequate` refuses only on `Declared::Verified { value: false }`, so an unverified axis still passes and is priced. The refusal renders as the bare category name (no `reason()`), matching its `Protocol`/`ToolSemantics` siblings — recorded as a limit, not a gap. `tests/routing_capability.rs`'s established-absent pricing test was rewritten under this closure to assert the refusal, which is the same ordering as a fact.
+
+Production evidence:
+- `crates/glasshouse/src/routing/session.rs` — `hard_constraint (new arm calling is_adequate)`
+- `crates/glasshouse/src/routing/session.rs` — `is_adequate (pre-existing, now wired into the gate)`
+- `crates/glasshouse/src/routing/mod.rs` — `HardConstraint::Capability (pre-existing variant, now constructed)`
+
+Regression evidence:
+- `routing::session::hard_constraint_tests::an_established_absent_hard_capability_excludes_and_an_unverified_one_passes`
+- `routing::session::hard_constraint_tests::a_candidate_set_with_no_excluded_candidate_ranks_exactly_as_before_this_gate`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| if !is_adequate(destination, &inputs.requirements) { -> if false { | `skip-state-update` | **killed** | `routing::session::hard_constraint_tests::an_established_absent_hard_capability_excludes_and_an_unverified_one_passes` |
+
+> skip-state-update observed: panicked at crates/glasshouse/src/routing/session.rs:5191:9: assertion `left == right` failed (rejected count / chosen id no longer matched)
+
+Recorded scope limits — stated by the worker, not discovered later:
+- capability_fit's own established-absent scoring branch is now unreachable through the production gate path (an established-absent candidate never reaches scoring) — it remains directly testable and is exercised by tests/routing_capability.rs, one of whose tests (an_unverified_axis_scores_strictly_better_than_an_established_absent_one) now fails for exactly this reason; not fixed here, tests/** is FORBIDDEN FILES.
+- HardConstraint::Capability's reason() stays None (unchanged), matching the pre-existing Protocol/ToolSemantics siblings; glasshouse route's refused list renders it as the bare category name rather than naming which capability axis failed. Building a fuller sentence would need is_adequate to report the failing requirement, which the packet said to use as-is.
+
+---
+
+### Exclude candidates whose provider is unavailable or in an authoritative cooldown. (line 1518)
+
+Contract: Given a classified task and a candidate set, when the router applies its hard-constraint gate, Glasshouse excludes a candidate whose provider is rejected or in a provider-declared cooldown, naming the reason in the refusal — while preserving that a Glasshouse-invented cooldown stays priced, never excluded, and a candidate set with no such candidates ranks byte-for-byte as it does today.
+
+State: **COMPLETE** — ruled 2026-09-02, with the ruling the package carried: a rejected credential or a **provider-declared** cooldown excludes; a Glasshouse-**invented** cooldown stays `provider_health`'s soft penalty (its own mutation, `wrong-source`, is the one that proves the word *authoritative* is watched). **A second ruling followed from the sweep the worker ran beyond its gate:** three `tests/tier_escalation.rs` fixtures had modelled *struggling* (lines 1559–1565) as `CredentialRejected`, which this arm now removes from the candidate set before `decide_tier_movement` runs. Ruled: a rejected credential or declared cooldown is *unavailable*; *struggling* is a candidate that can still serve and is doing badly — repeated failures, an invented backoff, or an exhausted band, exactly the other three disjuncts of `struggling()`. The fixtures were changed to repeated failures; the escalation behaviour they assert is unchanged.
+
+Production evidence:
+- `crates/glasshouse/src/routing/session.rs` — `hard_constraint (new arm)`
+- `crates/glasshouse/src/routing/session.rs` — `provider_unavailable_cause (new)`
+- `crates/glasshouse/src/routing/mod.rs` — `HardConstraint::ProviderUnavailable (new variant)`
+- `crates/glasshouse/src/routing/mod.rs` — `ProviderUnavailableCause (new enum + Display)`
+
+Regression evidence:
+- `routing::session::hard_constraint_tests::a_credential_the_provider_rejected_is_excluded`
+- `routing::session::hard_constraint_tests::a_declared_cooldown_still_in_force_is_excluded`
+- `routing::session::hard_constraint_tests::an_invented_cooldown_is_priced_softly_and_never_excludes`
+- `routing::session::hard_constraint_tests::an_existing_warm_session_is_excluded_when_its_provider_is_unavailable`
+- `routing::session::hard_constraint_tests::a_candidate_set_with_no_excluded_candidate_ranks_exactly_as_before_this_gate`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| if let Some(cause) = provider_unavailable_cause(destination, inputs.health, inputs.now) { -> if let Some(cause) = None::<ProviderUnavailableCause> { | `skip-state-update` | **killed** | `routing::session::hard_constraint_tests::a_declared_cooldown_still_in_force_is_excluded (and two others died the same run: a_credential_the_provider_rejected_is_excluded, an_existing_warm_session_is_excluded_when_its_provider_is_unavailable)` |
+| if health.declared_wait_remaining(now).is_some() { -> if health.cooldown_cause().is_some() { | `wrong-source` | **killed** | `routing::session::hard_constraint_tests::an_invented_cooldown_is_priced_softly_and_never_excludes` |
+
+> skip-state-update observed: 3 FAILED: "an existing session must not be favoured over the gate that excludes its unavailable provider"; two `assertion left == right failed` (rejected count no longer 1)
+
+> wrong-source observed: panicked at crates/glasshouse/src/routing/session.rs:5327:9: assertion `left == right` failed (an Invented cooldown was wrongly excluded, proving the Declared/Invented distinction is watched)
+
+Recorded scope limits — stated by the worker, not discovered later:
+- A candidate-rejected-credential fact is now excluded on BOTH hard_constraint passes (matching tool-semantics/protocol, per the packet's explicit instruction), which removes such a candidate from decide_tier_movement's input set. Three pre-existing tests in tests/tier_escalation.rs used WorkloadOutcome::CredentialRejected as their stand-in for a 'struggling' (soft) candidate and now fail: an_escalation_with_no_healthy_target_is_held_and_says_so, every_struggling_candidate_at_the_classified_tier_escalates_the_preference_one_step, two_triggers_move_one_tier_and_the_second_is_named_as_capped (file: 10 passed, 3 failed). I believe this is the correct consequence of closing the disposable/interactive asymmetry FEASIBILITY names, not a defect — a rejected credential cannot serve at all, unlike the file's own still-passing CapacityBand::Exhausted 'struggling' case — but it is a behavioral change to lines 1559-1565, outside this package's box lines, and needs a ruling plus a test-fixture fix (swap CredentialRejected for a soft-degraded reading). Not fixed here: tests/** is FORBIDDEN FILES and this crosses into another feature's evidence.
+
+---
+
+## REVIEW — the orchestrator owes an answer to each of these
+
+This section is the point of the generator. Everything above is the
+worker's facts, transcribed. Nothing below is decided.
+
+- **1517** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
+- **1518** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
+
+Gates the worker ran (re-run the decisive ones yourself):
+- cargo test -p glasshouse --lib routing::session: test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 1905 filtered out
+- cargo test -p glasshouse --lib routing::: test result: ok. 236 passed; 0 failed; 0 ignored; 0 measured; 1677 filtered out
+- cargo test -p glasshouse --test routing_policy: test result: ok. 37 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+- cargo test -p glasshouse --test routing_score: test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+- cargo clippy -p glasshouse --all-targets --all-features -- -D warnings: clean
+- scripts/blast-radius.sh --targeted crates/glasshouse/src/routing/session.rs crates/glasshouse/src/routing/mod.rs: every traced target passed (rustdoc clean after fixing two link errors my own edits introduced); 33 full-trace targets skipped by design
+- known pre-existing red gateway::session::tests::observe_exchange_scores_a_real_failover_against_the_configured_preference: passed in every run here (only flakes under --targeted's concurrent plan)
+- cargo test -p glasshouse --lib --tests --no-fail-fast (full sweep, beyond what this packet requires): 120 of 122 targets green (lib: 1913 passed); tests/routing_capability.rs 3 passed/1 failed and tests/tier_escalation.rs 10 passed/3 failed, both explained above and both outside FORBIDDEN tests/**
+
+
+**1513 ticks here.** Its protocol/tool half: `tests/routing_candidates.rs` (the proofs package); its capability half: `routing::session::hard_constraint_tests::an_established_absent_hard_capability_excludes_and_an_unverified_one_passes`, whose excluded candidate is gateway-backed.
+
+**Phase 35A stands at 10 of 11.** 1519 stays refused (Cluster M, the money-spend counter).

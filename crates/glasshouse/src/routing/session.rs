@@ -63,8 +63,9 @@ use super::pressure::{
 };
 use super::request::{RouterAnswer, TaskClass};
 use super::{
-    Backend, CacheLocality, Contribution, EntitlementSource, HardConstraint, RoutingExplanation,
-    TierRelation, ToolSemantics, apply_hard_constraints, same_capability_tier,
+    Backend, CacheLocality, Contribution, EntitlementSource, HardConstraint,
+    ProviderUnavailableCause, RoutingExplanation, TierRelation, ToolSemantics,
+    apply_hard_constraints, same_capability_tier,
 };
 
 // ---------------------------------------------------------------------------
@@ -785,22 +786,23 @@ impl Destination {
 /// What the work itself requires, as facts a caller states rather than
 /// preferences a router guesses.
 ///
-/// `needs_tool_calls` is the one field that can actually **reject** a
-/// destination: a task that needs tool calls cannot go somewhere tool calls
-/// are established not to work. Anything a router would only *prefer* belongs
-/// in a contribution, not here — that is design decision 1 ("additive, never
-/// a filter") carried into this phase.
+/// `needs_tool_calls` can **reject** a destination: a task that needs tool
+/// calls cannot go somewhere tool calls are established not to work.
+/// Anything a router would only *prefer* belongs in a contribution, not
+/// here — that is design decision 1 ("additive, never a filter") carried
+/// into this phase.
 ///
 /// `hard_capabilities` carries `TaskClassification::hard_capabilities()`'s own
 /// output (`super::classify`) so [`capability_fit`] has something to compare
-/// a destination's registry entry against. It is additive only — ruling 4 of
-/// the `GH-ROUTING-CAPABILITY` packet gives capability mismatch exactly one
-/// rejecting exception (a hard capability the resource is *established* to
-/// lack), and that exception is not wired here: nothing in this package
-/// constructs a `HardConstraint::Capability`, so an established-absent axis
-/// still only costs a candidate a contribution, never a rejection.
+/// a destination's registry entry against, and so does the hard-constraint
+/// gate (map line 1517): ruling 4 of the `GH-ROUTING-CAPABILITY` packet gives
+/// capability mismatch exactly one rejecting exception — a hard capability
+/// the resource is *established* to lack — and `session::hard_constraint`
+/// raises `HardConstraint::Capability` from exactly that reading
+/// (`session::is_adequate`). An unverified axis is "nobody has said," not
+/// "cannot," and still only costs a candidate a `capability_fit` contribution.
 ///
-/// `minimum_tier` is the second field that can reject (map line 1516), and
+/// `minimum_tier` also rejects (map line 1516), and
 /// it rejects only a destination whose ceiling is *established* below it —
 /// see [`Destination::with_tier_ceiling`]. `classification` is the answer
 /// the requirements were built from, carried so the explanation can say who
@@ -1235,15 +1237,15 @@ pub fn harness_capability_fit(
 /// compares a task's tier to a resource's tier, only a resource's registry
 /// entry to the specific axis a requirement names.
 ///
-/// This is `TaskClassification::hard_capabilities`' real production
-/// consumer: nothing else in the shipped binary reads the value that
-/// function returns for anything other than the diagnostic `writeln!` in
-/// `classify::describe`. `requirements.hard_capabilities` is where a caller
-/// of [`SessionRouter::choose`] attaches it (`main.rs` passes
-/// `TaskRequirements::default()` today, which is an empty list and therefore
-/// a `0.0` contribution — this package wires the mechanism; a follow-up
-/// package is what will have `main.rs` actually call
-/// `TaskClassification::hard_capabilities` and populate the field).
+/// This is one of `TaskClassification::hard_capabilities`' two production
+/// consumers — the other is `is_adequate`, which `session::hard_constraint`
+/// asks the same question of to raise `HardConstraint::Capability` (map line
+/// 1517). `requirements.hard_capabilities` is where a caller of
+/// [`SessionRouter::choose`] attaches it: `main.rs`'s `launch_session` and
+/// `route_recommendation` both build it from `classified.answer.requirements()`
+/// on every classified launch; a caller with no task in hand still passes
+/// `TaskRequirements::default()`, an empty list that contributes `0.0` here
+/// and excludes nothing at the gate.
 ///
 /// Reads `destination.harness()` the same way [`harness_capability_fit`]
 /// does — the identity is already in hand at the point this term is
@@ -4814,15 +4816,56 @@ fn provider_available(destination: &Destination, pool: &FreePool, now: Instant) 
     !health.credential_was_rejected() && health.is_available(now)
 }
 
-/// The gate step 2 runs. Three constraints and no others, for the same
+/// Line 1518's exclusion, read directly from `pool.health` rather than
+/// through [`provider_available`]. `provider_available` folds credential
+/// rejection and *any* cooldown — declared or invented — into one boolean
+/// for its two existing callers ([`decide_tier_movement`],
+/// [`alternatives_for`]), and both must keep pricing an invented cooldown
+/// as a soft penalty rather than excluding on it (line 534). Extending it
+/// with the cause would hand that distinction to callers that must not act
+/// on it; a second, narrower read is smaller than teaching the existing one
+/// a case its callers need to ignore.
+///
+/// `None` when nothing here excludes: no rejection, no cooldown, or a
+/// cooldown whose cause is `Invented` or was never established (adopted
+/// health — see `FreePool::adopt_observed`) — [`super::free::ResourceHealth::declared_wait_remaining`]
+/// already answers exactly that question.
+fn provider_unavailable_cause(
+    destination: &Destination,
+    pool: &FreePool,
+    now: Instant,
+) -> Option<ProviderUnavailableCause> {
+    let health = pool.health(&FreeResource::new(
+        destination.backend().credential().clone(),
+        destination.backend().model().label(),
+    ));
+    if health.credential_was_rejected() {
+        return Some(ProviderUnavailableCause::CredentialRejected);
+    }
+    if health.declared_wait_remaining(now).is_some() {
+        return Some(ProviderUnavailableCause::DeclaredCooldown);
+    }
+    None
+}
+
+/// The gate step 2 runs. Five constraints and no others, for the same
 /// reason [`crate::routing::interactive`]'s `compatible` has two: each is a
 /// fact about whether the destination *can* serve, not a preference about
 /// whether it *should*.
 ///
-/// The third — map line 1516 — fires only on an **established** ceiling
+/// Two of the five — map lines 1517 and 1518 — are asked on both passes,
+/// like tool semantics and protocol: whether a destination lacks a required
+/// hard capability, or whether its provider has refused the credential or
+/// declared a still-active cooldown, does not depend on which tier the
+/// movement settled. Both follow the same "established, not merely unread"
+/// rule as the others: an unverified capability axis and an *invented*
+/// cooldown are not "cannot," so neither excludes — see [`is_adequate`] and
+/// [`provider_unavailable_cause`].
+///
+/// The fifth — map line 1516 — fires only on an **established** ceiling
 /// strictly below the required tier. A destination with no ceiling stated
-/// passes, because "nobody has said" is not "cannot"; the same rule the two
-/// constraints above already follow for `Unverified` tool semantics and an
+/// passes, because "nobody has said" is not "cannot"; the same rule the
+/// other constraints already follow for `Unverified` tool semantics and an
 /// unknown protocol.
 ///
 /// `minimum_tier` is the tier the gate reads — [`TierMovement::gate_tier`]
@@ -4874,6 +4917,27 @@ fn hard_constraint(
         == ProtocolFit::Incompatible
     {
         return Err(HardConstraint::Protocol);
+    }
+    // Line 1517, asked on both passes like the two facts above: whether the
+    // destination *can* serve is independent of which tier movement decided
+    // to admit, so this does not wait for `minimum_tier` to resolve.
+    // `is_adequate` refuses only an axis established absent
+    // (`Declared::Verified { value: false }`); an unverified axis is "nobody
+    // has said," not "cannot," and keeps passing to be priced by
+    // `capability_fit` exactly as before this gate existed.
+    if !is_adequate(destination, &inputs.requirements) {
+        return Err(HardConstraint::Capability);
+    }
+    // Line 1518, same reasoning: a provider that has refused the credential
+    // or declared a cooldown still in force cannot serve either pass asks
+    // about, so it is excluded rather than merely priced worse by
+    // `provider_health`. An *invented* cooldown is Glasshouse's own guess
+    // (line 534) and stays a soft penalty — see `provider_unavailable_cause`.
+    if let Some(cause) = provider_unavailable_cause(destination, inputs.health, inputs.now) {
+        return Err(HardConstraint::ProviderUnavailable {
+            credential: destination.backend().credential().label(),
+            cause,
+        });
     }
     if let (Some(required), Some(offered)) = (minimum_tier, destination.tier_ceiling())
         && offered < required
@@ -5037,6 +5101,367 @@ mod provider_health_tests {
             many.magnitude(),
             HEALTH_PENALTY_FLOOR,
             "the additive climb is bounded, never worsening without limit"
+        );
+    }
+}
+
+/// Map lines 1517 and 1518 — the two new `hard_constraint` exclusion arms —
+/// driven through `SessionRouter::choose`, the real production path, per
+/// `GH-CANDIDATE-GEN`'s acceptance tests.
+#[cfg(test)]
+mod hard_constraint_tests {
+    use super::*;
+    use crate::config::pairing::WarmSessionState;
+    use crate::routing::free::CooldownCause;
+    use crate::routing::{AssignedModel, Cost, CredentialId};
+    use crate::secret::SecretRef;
+    use std::time::Duration;
+
+    fn anthropic_destination(id: &str, credential_var: &str) -> Destination {
+        Destination::fresh(
+            id,
+            IntegrationId::ClaudeCode,
+            "profile",
+            Backend::new(
+                "anthropic",
+                "anthropic-messages",
+                AssignedModel::named("claude-opus-4-1"),
+                CredentialId::new(
+                    "anthropic",
+                    SecretRef::Environment {
+                        var: credential_var.to_owned(),
+                    },
+                ),
+                Cost::Metered,
+                ToolSemantics::Verified,
+            ),
+            None,
+        )
+    }
+
+    /// A gateway-backed candidate, built the same way `main.rs::destination_backend`
+    /// builds one for `BackendResource::GlasshouseGateway` — the provider and
+    /// credential name it, never a routing-level type, so this is what "gateway
+    /// candidate" means at this layer.
+    fn gateway_destination(id: &str) -> Destination {
+        Destination::fresh(
+            id,
+            IntegrationId::ClaudeCode,
+            "profile",
+            Backend::new(
+                "the Glasshouse gateway",
+                "anthropic-messages",
+                AssignedModel::named("claude-opus-4-1"),
+                CredentialId::new(
+                    "the Glasshouse gateway",
+                    SecretRef::OsCredential {
+                        service: "glasshouse-gateway".to_owned(),
+                        account: "assigned when the session starts".to_owned(),
+                    },
+                ),
+                Cost::Metered,
+                ToolSemantics::Verified,
+            ),
+            None,
+        )
+    }
+
+    fn inputs<'a>(
+        overrides: &'a pairing::PairingOverrides,
+        health: &'a FreePool,
+        now: Instant,
+        requirements: TaskRequirements,
+    ) -> RouterInputs<'a> {
+        RouterInputs {
+            overrides,
+            health,
+            now,
+            requirements,
+        }
+    }
+
+    /// Line 1517. A gateway-backed candidate established to lack a required
+    /// hard capability is excluded outright, never merely scored; an
+    /// unverified axis on the surviving candidate still passes and is priced
+    /// by `capability_fit` exactly as before this gate existed. The gateway
+    /// candidate also stands as line 1513's capability-half production
+    /// evidence: a fresh gateway-backed candidate is filtered by the same
+    /// hard-constraint gate as every other backend.
+    #[test]
+    fn an_established_absent_hard_capability_excludes_and_an_unverified_one_passes() {
+        let now = Instant::now();
+        let overrides = pairing::PairingOverrides::default();
+        let health = FreePool::new();
+
+        let lacking = gateway_destination("gateway-no-shell").with_resource_facts(ResourceFacts {
+            shell_tool_use: Declared::verified(false, "test evidence"),
+            ..ResourceFacts::UNVERIFIED
+        });
+        let adequate = anthropic_destination("anthropic-unverified", "CAP_TEST_KEY");
+
+        let requirements = TaskRequirements {
+            hard_capabilities: vec![HardCapability::ShellExecution],
+            ..TaskRequirements::default()
+        };
+        let router_inputs = inputs(&overrides, &health, now, requirements);
+
+        let routed = SessionRouter::new()
+            .choose(
+                RoutingMoment::SessionStart,
+                None,
+                &[lacking.clone(), adequate.clone()],
+                &router_inputs,
+            )
+            .expect("an adequate destination was offered");
+
+        assert_eq!(
+            routed.chosen().id(),
+            "anthropic-unverified",
+            "an established-absent capability must not win over an adequate destination"
+        );
+        assert_eq!(routed.rejected().len(), 1);
+        assert_eq!(routed.rejected()[0].0.id(), "gateway-no-shell");
+        assert_eq!(routed.rejected()[0].1, HardConstraint::Capability);
+        assert!(
+            routed
+                .considered()
+                .iter()
+                .any(|(d, _)| d.id() == "anthropic-unverified"),
+            "an unverified axis must still be scored, not excluded"
+        );
+    }
+
+    /// Line 1518. A credential the provider refused is excluded, never merely
+    /// priced worse.
+    #[test]
+    fn a_credential_the_provider_rejected_is_excluded() {
+        let now = Instant::now();
+        let overrides = pairing::PairingOverrides::default();
+        let rejected_dest = anthropic_destination("rejected", "REJECTED_TEST_KEY");
+        let healthy_dest = anthropic_destination("healthy", "HEALTHY_TEST_KEY");
+
+        let mut health = FreePool::new();
+        let resource = FreeResource::new(
+            rejected_dest.backend().credential().clone(),
+            rejected_dest.backend().model().label(),
+        );
+        health.adopt_observed(&resource, 0, None, None, true);
+
+        let router_inputs = inputs(&overrides, &health, now, TaskRequirements::default());
+        let routed = SessionRouter::new()
+            .choose(
+                RoutingMoment::SessionStart,
+                None,
+                &[rejected_dest.clone(), healthy_dest.clone()],
+                &router_inputs,
+            )
+            .expect("a healthy destination was offered");
+
+        assert_eq!(routed.chosen().id(), "healthy");
+        assert_eq!(routed.rejected().len(), 1);
+        assert_eq!(routed.rejected()[0].0.id(), "rejected");
+        assert_eq!(
+            routed.rejected()[0].1,
+            HardConstraint::ProviderUnavailable {
+                credential: rejected_dest.backend().credential().label(),
+                cause: ProviderUnavailableCause::CredentialRejected,
+            }
+        );
+        assert!(
+            routed.rejected()[0]
+                .1
+                .reason()
+                .expect("a provider-unavailable constraint always carries a reason")
+                .contains("refused by its provider"),
+            "the refusal reason must be a sentence a person can read"
+        );
+    }
+
+    /// Line 1518. A cooldown the provider itself declared, still in force at
+    /// `inputs.now`, is authoritative per line 1319 and excludes.
+    #[test]
+    fn a_declared_cooldown_still_in_force_is_excluded() {
+        let now = Instant::now();
+        let overrides = pairing::PairingOverrides::default();
+        let cooling_dest = anthropic_destination("cooling", "DECLARED_TEST_KEY");
+        let healthy_dest = anthropic_destination("healthy", "HEALTHY_TEST_KEY_2");
+
+        let mut health = FreePool::new();
+        let resource = FreeResource::new(
+            cooling_dest.backend().credential().clone(),
+            cooling_dest.backend().model().label(),
+        );
+        health.adopt_observed(
+            &resource,
+            1,
+            Some(now + Duration::from_secs(120)),
+            Some(CooldownCause::Declared),
+            false,
+        );
+
+        let router_inputs = inputs(&overrides, &health, now, TaskRequirements::default());
+        let routed = SessionRouter::new()
+            .choose(
+                RoutingMoment::SessionStart,
+                None,
+                &[cooling_dest.clone(), healthy_dest.clone()],
+                &router_inputs,
+            )
+            .expect("a healthy destination was offered");
+
+        assert_eq!(routed.chosen().id(), "healthy");
+        assert_eq!(routed.rejected().len(), 1);
+        assert_eq!(routed.rejected()[0].0.id(), "cooling");
+        assert_eq!(
+            routed.rejected()[0].1,
+            HardConstraint::ProviderUnavailable {
+                credential: cooling_dest.backend().credential().label(),
+                cause: ProviderUnavailableCause::DeclaredCooldown,
+            }
+        );
+    }
+
+    /// Line 1518's own preservation clause. An *invented* cooldown — line 534's
+    /// bounded backoff Glasshouse imposed on itself — is not authoritative,
+    /// so it must never exclude and must keep pricing exactly as
+    /// `provider_health` did before this gate existed.
+    #[test]
+    fn an_invented_cooldown_is_priced_softly_and_never_excludes() {
+        let now = Instant::now();
+        let overrides = pairing::PairingOverrides::default();
+        let cooling_dest = anthropic_destination("cooling", "INVENTED_TEST_KEY");
+        let other_dest = anthropic_destination("other", "OTHER_TEST_KEY");
+
+        let mut health = FreePool::new();
+        let resource = FreeResource::new(
+            cooling_dest.backend().credential().clone(),
+            cooling_dest.backend().model().label(),
+        );
+        health.adopt_observed(
+            &resource,
+            3,
+            Some(now + Duration::from_secs(60)),
+            Some(CooldownCause::Invented),
+            false,
+        );
+
+        let router_inputs = inputs(&overrides, &health, now, TaskRequirements::default());
+        let routed = SessionRouter::new()
+            .choose(
+                RoutingMoment::SessionStart,
+                None,
+                &[cooling_dest.clone(), other_dest.clone()],
+                &router_inputs,
+            )
+            .expect("a destination was offered");
+
+        assert!(
+            routed.rejected().is_empty(),
+            "an invented cooldown must not exclude — line 534 keeps it probeable by real work"
+        );
+        assert!(
+            routed.considered().iter().any(|(d, _)| d.id() == "cooling"),
+            "the cooling destination must still be scored, not excluded"
+        );
+    }
+
+    /// The gate applies to an existing (warm) session exactly as it does to a
+    /// fresh one — a session already running cannot serve either, if its
+    /// provider has refused the credential.
+    #[test]
+    fn an_existing_warm_session_is_excluded_when_its_provider_is_unavailable() {
+        let now = Instant::now();
+        let overrides = pairing::PairingOverrides::default();
+        let warm_backend = Backend::new(
+            "anthropic",
+            "anthropic-messages",
+            AssignedModel::named("claude-opus-4-1"),
+            CredentialId::new(
+                "anthropic",
+                SecretRef::Environment {
+                    var: "WARM_REJECTED_KEY".to_owned(),
+                },
+            ),
+            Cost::Metered,
+            ToolSemantics::Verified,
+        );
+        let warm_dest = Destination::existing(
+            "warm",
+            IntegrationId::ClaudeCode,
+            "profile",
+            warm_backend,
+            WarmSession {
+                state: WarmSessionState::Live,
+                idle_seconds: 0,
+            },
+        );
+        let fresh_dest = anthropic_destination("fresh", "FRESH_KEY");
+
+        let mut health = FreePool::new();
+        let resource = FreeResource::new(
+            warm_dest.backend().credential().clone(),
+            warm_dest.backend().model().label(),
+        );
+        health.adopt_observed(&resource, 0, None, None, true);
+
+        let router_inputs = inputs(&overrides, &health, now, TaskRequirements::default());
+        let routed = SessionRouter::new()
+            .choose(
+                RoutingMoment::SessionStart,
+                Some(&warm_dest),
+                &[warm_dest.clone(), fresh_dest.clone()],
+                &router_inputs,
+            )
+            .expect("a fresh destination was offered");
+
+        assert_eq!(
+            routed.chosen().id(),
+            "fresh",
+            "an existing session must not be favoured over the gate that excludes its unavailable provider"
+        );
+        assert_eq!(routed.rejected().len(), 1);
+        assert_eq!(routed.rejected()[0].0.id(), "warm");
+    }
+
+    /// With no candidate either new arm would touch, the gate excludes
+    /// nothing extra: both candidates are still scored, destination order is
+    /// still the tiebreaker, and no "rejected" section renders — the ranking
+    /// and explanation this package must not disturb.
+    #[test]
+    fn a_candidate_set_with_no_excluded_candidate_ranks_exactly_as_before_this_gate() {
+        let now = Instant::now();
+        let overrides = pairing::PairingOverrides::default();
+        let health = FreePool::new();
+        let first = anthropic_destination("first", "INERT_TEST_KEY_1");
+        let second = anthropic_destination("second", "INERT_TEST_KEY_2");
+
+        let router_inputs = inputs(&overrides, &health, now, TaskRequirements::default());
+        let routed = SessionRouter::new()
+            .choose(
+                RoutingMoment::SessionStart,
+                None,
+                &[first.clone(), second.clone()],
+                &router_inputs,
+            )
+            .expect("two destinations were offered");
+
+        assert!(
+            routed.rejected().is_empty(),
+            "neither candidate should be excluded by the new gate arms"
+        );
+        assert_eq!(
+            routed.considered().len(),
+            2,
+            "both candidates must still be scored"
+        );
+        assert_eq!(
+            routed.chosen().id(),
+            "first",
+            "with every term tied, destination order is still the tiebreaker"
+        );
+        assert!(
+            !routed.render_overview().contains("rejected"),
+            "no rejected section renders when nothing is excluded"
         );
     }
 }

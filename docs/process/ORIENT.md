@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1173 / 1332 mandatory capabilities (88%)** — 159 open across 42 phases.
+**1176 / 1332 mandatory capabilities (88%)** — 156 open across 42 phases.
 
 ## Where the work is
 
@@ -31,6 +31,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 32F | Protected quota reserve | **1** | 7 | `1285` |
 | Phase 34B | Routing-model role | **1** | 14 | `1406` |
 | Phase 34E | Router economics | **1** | 8 | `1461` |
+| Phase 35A | Candidate generation | **1** | 10 | `1504` |
 | Phase 37 | Basic session-aware router | **1** | 10 | `1590` |
 | Phase 39 | Gateway-backed disposable jobs | **1** | 8 | `1614` |
 | Phase 54A | Setup and portability completion criteria | **1** | 9 | `1897` |
@@ -51,7 +52,6 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 21E | Decision ladder and conflict handling | **4** | 8 | `907` |
 | Phase 32G | Provider-aware request-cost estimation | **4** | 6 | `1296` |
 | Phase 33A | Routing evidence ledger | **4** | 11 | `1327` |
-| Phase 35A | Candidate generation | **4** | 7 | `1504` |
 | Phase 24 | Memory reranking | **5** | 1 | `1082` |
 | Phase 31 | Compaction-aware behavior | **5** | 2 | `1167` |
 | Phase 53 | Criteria before adding graph storage | **5** | 0 | `1872` |
@@ -71,7 +71,7 @@ closures are usually at the top. Open the map at the line number given.
 
 Every phase with **three or fewer** open lines, quoted verbatim. These are
 where a single package finishes a phase, so they are listed here and the
-other ~116 open lines are not.
+other ~112 open lines are not.
 
 For any other phase: `scripts/discover.py --phase <id>` prints its open
 lines and evidence together. **Do not open the 178 KB map to read them.**
@@ -115,6 +115,10 @@ these unwrapped.
 ### Phase 34E — Router economics  (1 open, 8 closed)
 
 - **1469** ☐ Cache recent classification results for semantically identical task starts when safe.
+
+### Phase 35A — Candidate generation  (1 open, 10 closed)
+
+- **1519** ☐ Exclude candidates whose user-defined spending budget has been exhausted.
 
 ### Phase 37 — Basic session-aware router  (1 open, 10 closed)
 

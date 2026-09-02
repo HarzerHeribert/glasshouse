@@ -183,12 +183,22 @@ impl World {
         }
     }
 
-    fn refuse(&mut self, destination: &Destination) {
-        self.health.observe(
-            &resource_of(destination),
-            WorkloadOutcome::CredentialRejected,
-            self.now,
-        );
+    /// A candidate that can still serve but is doing badly — `struggling`'s
+    /// own definition (`session.rs:3328`): `REPEATED_FAILURES` (2)
+    /// consecutive failures that stated no wait, which crosses into an
+    /// *invented* cooldown (line 534) but never a rejection. Ruling
+    /// 2026-09-02 (`GH-CANDIDATE-GEN`, line 1518): a struggling candidate
+    /// must still pass the hard-constraint gate — only a rejected credential
+    /// or a provider-*declared* cooldown is hard-excluded, which is a
+    /// different fact ("unavailable") than this one ("struggling").
+    fn struggle(&mut self, destination: &Destination) {
+        for _ in 0..2 {
+            self.health.observe(
+                &resource_of(destination),
+                WorkloadOutcome::CapacityFailure,
+                self.now,
+            );
+        }
     }
 
     fn choose(
@@ -257,7 +267,7 @@ fn rejected(routed: &Routed, id: &str) -> bool {
 fn every_struggling_candidate_at_the_classified_tier_escalates_the_preference_one_step() {
     for (label, struggling) in [
         (
-            "refused by its provider",
+            "repeatedly failing without rejection",
             fresh("c-standard", Some(WorkloadTier::Standard), Cost::Metered),
         ),
         (
@@ -267,8 +277,11 @@ fn every_struggling_candidate_at_the_classified_tier_escalates_the_preference_on
         ),
     ] {
         let mut world = World::new();
-        if label.starts_with("refused") {
-            world.refuse(&struggling);
+        // Ruling 2026-09-02 (GH-CANDIDATE-GEN, line 1518): a rejected
+        // credential is UNAVAILABLE and hard-excluded, not struggling —
+        // this fixture must still pass the gate.
+        if label.starts_with("repeatedly") {
+            world.struggle(&struggling);
         }
         let destinations = [
             fresh("a-frontier", Some(WorkloadTier::Frontier), Cost::Metered),
@@ -365,8 +378,12 @@ fn an_escalation_with_no_healthy_target_is_held_and_says_so() {
     let mut world = World::new();
     let standard = fresh("a-standard", Some(WorkloadTier::Standard), Cost::Metered);
     let heavy = fresh("b-heavy", Some(WorkloadTier::Heavy), Cost::Metered);
-    world.refuse(&standard);
-    world.refuse(&heavy);
+    // Ruling 2026-09-02 (GH-CANDIDATE-GEN, line 1518): both must remain
+    // eligible for the movement decision to see them as struggling with
+    // nowhere better to go — a rejected credential would be hard-excluded
+    // instead, which is a different fact than "no healthy target".
+    world.struggle(&standard);
+    world.struggle(&heavy);
     let routed = world.choose(
         SessionRouter::new(),
         None,
@@ -534,7 +551,10 @@ fn an_attributable_failure_promotes_one_tier_and_a_health_failure_does_not() {
 fn two_triggers_move_one_tier_and_the_second_is_named_as_capped() {
     let mut world = World::new();
     let struggling = fresh("c-standard", Some(WorkloadTier::Standard), Cost::Metered);
-    world.refuse(&struggling);
+    // Ruling 2026-09-02 (GH-CANDIDATE-GEN, line 1518): struggling, not
+    // rejected — a rejected credential would be hard-excluded rather than
+    // capped as a second trigger.
+    world.struggle(&struggling);
     let destinations = [
         fresh("a-frontier", Some(WorkloadTier::Frontier), Cost::Metered),
         fresh("b-heavy", Some(WorkloadTier::Heavy), Cost::Metered),

@@ -23,7 +23,9 @@ use glasshouse::routing::free::FreePool;
 use glasshouse::routing::session::{
     Destination, RouterInputs, RoutingMoment, SessionRouter, TaskRequirements,
 };
-use glasshouse::routing::{AssignedModel, Backend, Cost, CredentialId, ToolSemantics};
+use glasshouse::routing::{
+    AssignedModel, Backend, Cost, CredentialId, HardConstraint, ToolSemantics,
+};
 use glasshouse::secret::SecretRef;
 
 /// `WireProtocol::OpenAiResponses`'s slug — the one protocol
@@ -151,10 +153,14 @@ fn a_task_needing_browser_interaction_ranks_the_browser_capable_destination_high
 }
 
 /// Acceptance test 2, and ruling 3's own test. A resource whose axis is
-/// `Declared::Unverified` must score strictly better than one established
-/// absent, and must not read as a `no`.
+/// `Declared::Unverified` must not read as a `no`: it is chosen over one
+/// established absent, which line 1517 now excludes outright rather than
+/// merely pricing worse — ruling 2026-09-02 (`GH-CANDIDATE-GEN`). Renamed
+/// from `an_unverified_axis_scores_strictly_better_than_an_established_absent_one`,
+/// which would now lie: the two are no longer both scored candidates on one
+/// ranking, so there is no "scores strictly better than" to compare.
 #[test]
-fn an_unverified_axis_scores_strictly_better_than_an_established_absent_one() {
+fn an_established_absent_axis_is_refused_and_an_unverified_one_is_chosen() {
     let fixture = Fixture::new();
     let unverified = codex_destination("unverified", ResourceFacts::UNVERIFIED);
     let established_absent = codex_destination(
@@ -180,28 +186,26 @@ fn an_unverified_axis_scores_strictly_better_than_an_established_absent_one() {
         "unverified",
         "an established-absent resource must not outrank one that is merely unverified"
     );
-
-    let capability_fit = |id: &str| {
-        routed
-            .considered()
-            .iter()
-            .find(|(destination, _)| destination.id() == id)
-            .expect("both candidates were eligible")
-            .1
-            .contributions()
-            .iter()
-            .find(|c| c.name() == "capability fit")
-            .expect("every candidate is scored for capability fit")
-            .clone()
-    };
-    let unverified_term = capability_fit("unverified");
-    let absent_term = capability_fit("established-absent");
-    assert!(
-        unverified_term.magnitude() > absent_term.magnitude(),
-        "unverified ({}) did not score strictly better than established-absent ({})",
-        unverified_term.magnitude(),
-        absent_term.magnitude()
+    assert_eq!(
+        routed.rejected().len(),
+        1,
+        "the established-absent resource must be excluded, not merely scored worse:\n{}",
+        routed.render_overview()
     );
+    assert_eq!(routed.rejected()[0].0.id(), "established-absent");
+    assert_eq!(routed.rejected()[0].1, HardConstraint::Capability);
+
+    let unverified_term = routed
+        .considered()
+        .iter()
+        .find(|(destination, _)| destination.id() == "unverified")
+        .expect("the unverified candidate was eligible")
+        .1
+        .contributions()
+        .iter()
+        .find(|c| c.name() == "capability fit")
+        .expect("the unverified candidate is scored for capability fit")
+        .clone();
     assert!(
         unverified_term.evidence().contains("not a `no`"),
         "the unverified evidence string does not read as \"not a no\": {}",

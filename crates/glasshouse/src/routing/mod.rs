@@ -565,6 +565,47 @@ pub enum HardConstraint {
         entitlement: String,
         refused: EntitlementRefusal,
     },
+    /// Line 1518. The provider behind this destination cannot serve right
+    /// now, established via [`free::FreePool::health`]: its
+    /// credential was rejected, or it declared a cooldown still in force
+    /// (`free::CooldownCause::Declared`, authoritative per line
+    /// 1319). A resource under Glasshouse's own **invented** cooldown is
+    /// never given this constraint — line 534 keeps that guess probeable by
+    /// real work, so it stays [`session::provider_health`]'s soft
+    /// penalty instead (`session::hard_constraint`).
+    ProviderUnavailable {
+        /// The credential's label, for the sentence a person reads.
+        credential: String,
+        cause: ProviderUnavailableCause,
+    },
+}
+
+/// Which of the two facts [`HardConstraint::ProviderUnavailable`] is
+/// reporting — named for what each is, the same way
+/// `free::CooldownCause` is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ProviderUnavailableCause {
+    /// The provider itself refused the credential. Not a cooldown: waiting
+    /// does not fix a revoked key.
+    CredentialRejected,
+    /// The provider declared a cooldown (`free::CooldownCause::Declared`)
+    /// and it has not yet elapsed.
+    DeclaredCooldown,
+}
+
+impl std::fmt::Display for ProviderUnavailableCause {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::CredentialRejected => write!(
+                f,
+                "was refused by its provider — waiting does not fix a revoked key"
+            ),
+            Self::DeclaredCooldown => write!(
+                f,
+                "is in a cooldown its provider declared, which has not yet elapsed"
+            ),
+        }
+    }
 }
 
 impl HardConstraint {
@@ -577,11 +618,12 @@ impl HardConstraint {
             Self::UserConstraint => "user constraint",
             Self::WorkloadTier { .. } => "workload tier",
             Self::Entitlement { .. } => "entitlement",
+            Self::ProviderUnavailable { .. } => "provider availability",
         }
     }
 
     /// The sentence a person reads beside a rejection, for the constraints
-    /// that carry enough to write one. `None` for the five that name only
+    /// that carry enough to write one. `None` for the four that name only
     /// their kind — their explanations live at the site that raised them.
     pub fn reason(&self) -> Option<String> {
         match self {
@@ -595,6 +637,9 @@ impl HardConstraint {
             } => Some(format!(
                 "entitlement `{entitlement}` does not serve {refused}"
             )),
+            Self::ProviderUnavailable { credential, cause } => {
+                Some(format!("`{credential}` {cause}"))
+            }
             Self::Protocol
             | Self::ToolSemantics
             | Self::Capability
