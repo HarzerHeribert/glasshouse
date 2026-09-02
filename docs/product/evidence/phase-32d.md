@@ -369,6 +369,18 @@ maps `mktime` onto `_mktime64`). Fixed forward at integration: the arm declares
 cross-check of the crate is impossible here (`ring`'s C build needs a Windows
 SDK), so the Windows VM leg is owed and trails this wave.
 
+> **The VM leg ran the same evening and found the fix insufficient.** The
+> crate depends on `libc` only under `cfg(unix)`; on Windows it uses
+> `windows-sys`, so both `cfg(windows)` sites — the arm and its unit test —
+> failed with *cannot find module or crate `libc`* on the VM
+> (`telemetry.rs:1059–1067`, `:2657`). The scratch crate had declared `libc`
+> unconditionally, which is exactly the difference. Fixed forward again:
+> `libc` is declared for the Windows target in `crates/glasshouse/Cargo.toml`
+> beside `windows-sys`, with the reason in a comment; the VM leg was re-run
+> on that tree. **Lesson, recorded in the measurements ledger:** a scratch
+> crate that proves a `cfg` arm must mirror the crate's target-conditional
+> dependencies, or it proves the arm against a crate that does not exist.
+
 **Recorded limits.** The calendar-month instant is the machine's own zone,
 pinned by invariants rather than a fixed timestamp. `disposable_reducer` (the
 context-firewall reducer's non-`local:` chooser) does not gather budget spend

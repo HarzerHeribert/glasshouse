@@ -68,6 +68,13 @@ keyring = { workspace = true, features = ["apple-native"] }
 [target.'cfg(target_os = "windows")'.dependencies]
 keyring = { workspace = true, features = ["windows-native"] }
 windows-sys.workspace = true
+# The calendar-month start of a money budget (`provider/telemetry.rs`) reads the
+# C runtime's local time through the same `libc` bindings the Unix arm uses;
+# the UCRT exports `_localtime64_s` and `_mktime64`, and `libc` binds the
+# first for Windows. Found by the Windows VM leg on 2026-09-02: the arm
+# type-checked against libc's Windows bindings in isolation and then could not
+# name `libc` at all in a crate that only depended on it under `cfg(unix)`.
+libc.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

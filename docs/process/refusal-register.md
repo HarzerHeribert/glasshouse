@@ -1417,7 +1417,7 @@ sites (`phase-32d.md`, `phase-35a.md`, `phase-32a.md`). Row 336 (Cluster M,
 inference) is Cluster M's last. **Phase 35A is complete.** The worker's own
 thin spot was real: the `#[cfg(windows)]` calendar-month arm did not compile
 (`libc` binds no `mktime` for Windows) — caught by a cross-check, fixed forward
-to the UCRT's `_mktime64` at integration, Windows VM leg trailing. Residue:
+to the UCRT's `_mktime64` at integration — and the trailing Windows VM leg then found `libc` is a `cfg(unix)`-only dependency of this crate; declared for Windows too, second fix-forward the same evening (`phase-32d.md`). Residue:
 `disposable_reducer` and the reranking seat's chooser do not gather budget
 spend — `GH-BUDGET-SPEND-REMAINING-CALLERS` (Green, after the reranker lands).
 
