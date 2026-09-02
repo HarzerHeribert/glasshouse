@@ -1065,7 +1065,10 @@ fn a_task_needing_tool_calls_refuses_a_backend_known_not_to_carry_them() {
         .expect("destinations were offered");
     assert_eq!(routed.chosen().id(), "unverified");
     assert_eq!(routed.rejected().len(), 1);
-    assert_eq!(routed.rejected()[0].1, HardConstraint::ToolSemantics);
+    assert_eq!(
+        routed.rejected()[0].1,
+        HardConstraint::ToolSemantics { evidence: None }
+    );
 }
 
 /// A user correction is what makes `ModelBehaviourFit::KnownAbsent` reachable

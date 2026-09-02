@@ -542,8 +542,24 @@ impl RoutingExplanation {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HardConstraint {
     Protocol,
-    ToolSemantics,
-    Capability,
+    /// Line 1517/1513's tool-semantics half: `Backend::tools() ==
+    /// KnownAbsent`. `evidence` is the `Declared` string behind that
+    /// verdict, when it can reach here — `Backend::tools()` is a bare
+    /// verdict by construction (see its own doc comment, and
+    /// `session::classify_destination`'s), so this is `None` until
+    /// something on that call path is widened to carry a `Declared`
+    /// through; `session::hard_constraint` fills whichever this build can
+    /// produce.
+    ToolSemantics {
+        evidence: Option<&'static str>,
+    },
+    /// Line 1517's capability half: the resource axis
+    /// `session::is_adequate` established absent, and the
+    /// `Declared::Verified` evidence behind it.
+    Capability {
+        axis: capability::CapabilityAxis,
+        evidence: &'static str,
+    },
     Privacy,
     UserConstraint,
     /// Line 1516. `offered` is the destination's established ceiling, which
@@ -612,8 +628,8 @@ impl HardConstraint {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Protocol => "protocol",
-            Self::ToolSemantics => "tool semantics",
-            Self::Capability => "capability",
+            Self::ToolSemantics { .. } => "tool semantics",
+            Self::Capability { .. } => "capability",
             Self::Privacy => "privacy",
             Self::UserConstraint => "user constraint",
             Self::WorkloadTier { .. } => "workload tier",
@@ -623,10 +639,16 @@ impl HardConstraint {
     }
 
     /// The sentence a person reads beside a rejection, for the constraints
-    /// that carry enough to write one. `None` for the four that name only
+    /// that carry enough to write one. `None` for the three that name only
     /// their kind — their explanations live at the site that raised them.
     pub fn reason(&self) -> Option<String> {
         match self {
+            Self::ToolSemantics { evidence } => evidence
+                .map(|evidence| format!("the provider declared no tool-call support — {evidence}")),
+            Self::Capability { axis, evidence } => Some(format!(
+                "the `{}` axis is declared absent — {evidence}",
+                axis.name()
+            )),
             Self::WorkloadTier { required, offered } => Some(format!(
                 "the task needs at least the `{required}` tier and this destination is \
                  established to offer at most `{offered}`"
@@ -640,11 +662,7 @@ impl HardConstraint {
             Self::ProviderUnavailable { credential, cause } => {
                 Some(format!("`{credential}` {cause}"))
             }
-            Self::Protocol
-            | Self::ToolSemantics
-            | Self::Capability
-            | Self::Privacy
-            | Self::UserConstraint => None,
+            Self::Protocol | Self::Privacy | Self::UserConstraint => None,
         }
     }
 }

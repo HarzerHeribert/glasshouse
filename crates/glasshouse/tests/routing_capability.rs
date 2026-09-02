@@ -193,7 +193,13 @@ fn an_established_absent_axis_is_refused_and_an_unverified_one_is_chosen() {
         routed.render_overview()
     );
     assert_eq!(routed.rejected()[0].0.id(), "established-absent");
-    assert_eq!(routed.rejected()[0].1, HardConstraint::Capability);
+    assert_eq!(
+        routed.rejected()[0].1,
+        HardConstraint::Capability {
+            axis: CapabilityAxis::BrowserUse,
+            evidence: "test evidence",
+        }
+    );
 
     let unverified_term = routed
         .considered()

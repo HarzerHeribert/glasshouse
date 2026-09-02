@@ -163,7 +163,7 @@ fn a_tool_incompatible_destination_is_excluded_when_the_task_needs_tool_calls_15
     assert_eq!(rejected.len(), 1);
     assert_eq!(
         rejected[0].1,
-        HardConstraint::ToolSemantics,
+        HardConstraint::ToolSemantics { evidence: None },
         "a task needing tool calls must refuse a destination established not to carry them"
     );
 }
@@ -543,6 +543,70 @@ mod shipped_binary {
             "a model nobody declared facts for must stay Unverified and must not be \
              excluded, even though a sibling model on the same provider is declared \
              shell-blind:\n{rejected}"
+        );
+    }
+
+    /// `GH-CONSTRAINT-REASONS` REQUIRED BEHAVIOR bullet 1: with a declared
+    /// model-level `shell_tool_use = false`, the rejected line names the
+    /// axis (`shell/tool-use`) and quotes the declared fact's own evidence
+    /// text — the gap phase-35a.md's re-close recorded as the limit this
+    /// package closes, now carried from `is_adequate` through
+    /// `HardConstraint::Capability` into `reason()`.
+    #[test]
+    fn a_declared_shell_tool_use_false_names_the_axis_and_evidence_in_the_rejected_line() {
+        let fixture = Fixture::new(
+            "version = 1\n\n\
+             [integrations.claude-code]\nenabled = true\nexecutable = \"{harness}\"\n\n\
+             [providers.route-probe]\ntemplate = \"openrouter\"\n\
+             credential_env = [\"GLASSHOUSE_CAPFACTS_TEST_KEY\"]\n\n\
+             [providers.route-probe.model_facts.shell-blind-model]\n\
+             shell_tool_use = false\n\n\
+             [profiles.direct]\nharness = \"claude-code\"\n\
+             expected_protocol = \"openai-chat\"\n\
+             model = \"shell-blind-model\"\n\n\
+             [profiles.direct.backend]\nkind = \"direct-provider\"\n\
+             provider = \"route-probe\"\n",
+        );
+
+        let rejected = fixture.rejected(SHELL_TASK);
+        assert!(
+            rejected.contains("shell/tool-use"),
+            "the rejected line must name the failing axis:\n{rejected}"
+        );
+        assert!(
+            rejected.contains("declared in the user config's [providers.*.model_facts] table"),
+            "the rejected line must quote the declared fact's own evidence text:\n{rejected}"
+        );
+    }
+
+    /// `GH-CONSTRAINT-REASONS` REQUIRED BEHAVIOR bullet 2: with a declared
+    /// `tool_calls = false`, the rejected line names tool semantics. The
+    /// `Declared` evidence behind `Backend::tools() == KnownAbsent` cannot
+    /// reach this line yet — it is dropped one step earlier, in the
+    /// read-only `config::pairing::tool_semantics` this package may not
+    /// change (see `HardConstraint::ToolSemantics`'s own doc comment and
+    /// this report's `packet_errors`/limits) — so no evidence is quoted, and
+    /// the constraint's name is the whole line, exactly as before this
+    /// package.
+    #[test]
+    fn a_declared_tool_calls_false_names_tool_semantics_with_no_evidence_in_the_rejected_line() {
+        let fixture = Fixture::new(
+            "version = 1\n\n\
+             [integrations.claude-code]\nenabled = true\nexecutable = \"{harness}\"\n\n\
+             [providers.route-probe]\ntemplate = \"openrouter\"\n\
+             credential_env = [\"GLASSHOUSE_CAPFACTS_TEST_KEY\"]\n\
+             tool_calls = false\n\n\
+             [profiles.direct]\nharness = \"claude-code\"\n\
+             expected_protocol = \"openai-chat\"\n\n\
+             [profiles.direct.backend]\nkind = \"direct-provider\"\n\
+             provider = \"route-probe\"\n",
+        );
+
+        let rejected = fixture.rejected(SHELL_TASK);
+        assert!(
+            rejected.contains("hard tool semantics constraint\n"),
+            "with no evidence able to reach this line, the rejected line must still name \
+             tool semantics and nothing more:\n{rejected}"
         );
     }
 }

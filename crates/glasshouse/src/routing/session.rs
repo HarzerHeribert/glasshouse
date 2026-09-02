@@ -3701,7 +3701,7 @@ fn decide_tier_movement(
     let Some(target) = candidates.iter().find(|destination| {
         destination.backend().cost().is_free()
             && provider_available(destination, inputs.health, inputs.now)
-            && is_adequate(destination, &inputs.requirements)
+            && is_adequate(destination, &inputs.requirements).is_none()
             && destination
                 .tier_ceiling()
                 .is_none_or(|ceiling| ceiling >= to)
@@ -5199,7 +5199,7 @@ fn alternatives_for(
         // `provider_health` is about to score as unavailable, and the work
         // would go to the one place it cannot run.
         if other_index == index
-            || !is_adequate(other, &inputs.requirements)
+            || is_adequate(other, &inputs.requirements).is_some()
             || !provider_available(other, inputs.health, inputs.now)
         {
             continue;
@@ -5224,21 +5224,37 @@ fn alternatives_for(
 /// Whether `destination` is established to lack none of the task's required
 /// hard capabilities — the negative half of [`capability_fit`]'s reading,
 /// as a fact rather than a price. Unverified is not a `no`, here as there.
-fn is_adequate(destination: &Destination, requirements: &TaskRequirements) -> bool {
+///
+/// `None` means adequate. `Some((axis, evidence))` names the first
+/// requirement whose axis is established absent — the axis
+/// [`HardConstraint::Capability`] carries, not merely the first requirement
+/// in `requirements.hard_capabilities` (a requirement that is `Unverified`
+/// or present is skipped rather than reported).
+fn is_adequate(
+    destination: &Destination,
+    requirements: &TaskRequirements,
+) -> Option<(capability::CapabilityAxis, &'static str)> {
     if requirements.hard_capabilities.is_empty() {
-        return true;
+        return None;
     }
     let harness_caps = crate::harness::adapter_for(destination.harness())
         .map(|adapter| adapter.describe().capabilities)
         .unwrap_or(HarnessCapabilities::UNVERIFIED);
     let resource =
         capability::ResourceCapabilities::describe(&harness_caps, destination.resource_facts());
-    requirements.hard_capabilities.iter().all(|requirement| {
-        !matches!(
-            resource.axis(capability::axis_for(*requirement)),
-            Declared::Verified { value: false, .. }
-        )
-    })
+    requirements
+        .hard_capabilities
+        .iter()
+        .find_map(|requirement| {
+            let axis = capability::axis_for(*requirement);
+            match resource.axis(axis) {
+                Declared::Verified {
+                    value: false,
+                    evidence,
+                } => Some((axis, evidence)),
+                _ => None,
+            }
+        })
 }
 
 /// Whether the provider behind `destination` is currently usable by its
@@ -5347,7 +5363,12 @@ fn hard_constraint(
     if inputs.requirements.needs_tool_calls
         && destination.backend().tools() == ToolSemantics::KnownAbsent
     {
-        return Err(HardConstraint::ToolSemantics);
+        // `Backend::tools()` is a bare verdict by construction (see its own
+        // doc comment) — the `Declared` evidence behind `KnownAbsent` is
+        // dropped one step earlier, in the read-only `config::pairing::tool_semantics`
+        // this package may not change. `evidence` is `None` until that
+        // conversion is widened to carry it through.
+        return Err(HardConstraint::ToolSemantics { evidence: None });
     }
     if classify_destination(destination, inputs.overrides).protocol_fit()
         == ProtocolFit::Incompatible
@@ -5361,8 +5382,8 @@ fn hard_constraint(
     // (`Declared::Verified { value: false }`); an unverified axis is "nobody
     // has said," not "cannot," and keeps passing to be priced by
     // `capability_fit` exactly as before this gate existed.
-    if !is_adequate(destination, &inputs.requirements) {
-        return Err(HardConstraint::Capability);
+    if let Some((axis, evidence)) = is_adequate(destination, &inputs.requirements) {
+        return Err(HardConstraint::Capability { axis, evidence });
     }
     // Line 1518, same reasoning: a provider that has refused the credential
     // or declared a cooldown still in force cannot serve either pass asks
@@ -5859,13 +5880,48 @@ mod hard_constraint_tests {
         );
         assert_eq!(routed.rejected().len(), 1);
         assert_eq!(routed.rejected()[0].0.id(), "gateway-no-shell");
-        assert_eq!(routed.rejected()[0].1, HardConstraint::Capability);
+        assert_eq!(
+            routed.rejected()[0].1,
+            HardConstraint::Capability {
+                axis: capability::CapabilityAxis::ShellToolUse,
+                evidence: "test evidence",
+            }
+        );
         assert!(
             routed
                 .considered()
                 .iter()
                 .any(|(d, _)| d.id() == "anthropic-unverified"),
             "an unverified axis must still be scored, not excluded"
+        );
+    }
+
+    /// `GH-CONSTRAINT-REASONS` same-crate test: `is_adequate` must report the
+    /// requirement that is actually established absent, not merely the
+    /// first requirement in `hard_capabilities` — every other test in this
+    /// module has only one requirement, so the two read the same there. This
+    /// one names two, in an order where they would tell them apart.
+    #[test]
+    fn is_adequate_reports_the_failing_axis_not_merely_the_first_requirement() {
+        let destination = gateway_destination("mixed-facts").with_resource_facts(ResourceFacts {
+            code_edit: Declared::verified(true, "present evidence"),
+            shell_tool_use: Declared::verified(false, "absent evidence"),
+            ..ResourceFacts::UNVERIFIED
+        });
+        let requirements = TaskRequirements {
+            hard_capabilities: vec![
+                HardCapability::RepositoryAccess,
+                HardCapability::ShellExecution,
+            ],
+            ..TaskRequirements::default()
+        };
+
+        assert_eq!(
+            is_adequate(&destination, &requirements),
+            Some((capability::CapabilityAxis::ShellToolUse, "absent evidence")),
+            "the first requirement (repository access) is established present; only the \
+             second (shell execution) is established absent, and that is the axis a caller \
+             must be told about"
         );
     }
 

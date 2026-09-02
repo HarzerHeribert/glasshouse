@@ -15728,7 +15728,7 @@ mod tests {
         assert_eq!(routed.rejected().len(), 1);
         assert_eq!(
             routed.rejected()[0].1,
-            glasshouse::routing::HardConstraint::ToolSemantics
+            glasshouse::routing::HardConstraint::ToolSemantics { evidence: None }
         );
 
         // The absent-`--task` behaviour: `classify_for_routing` answers

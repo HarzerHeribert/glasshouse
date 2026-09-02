@@ -594,3 +594,31 @@ Recorded scope limits — stated by the worker, not discovered later:
 ---
 
 ---
+
+---
+
+## The 1517/1513 recorded limit, half removed — 2026-09-02 (`GH-CONSTRAINT-REASONS`, Amber, Sonnet medium)
+
+`HardConstraint::Capability { axis, evidence }` and
+`HardConstraint::ToolSemantics { evidence: Option<..> }`; `is_adequate` now
+returns the first axis established *absent* with its `Declared` evidence
+(`find_map` on `Verified { value: false, .. }`, pinned by
+`is_adequate_reports_the_failing_axis_not_merely_the_first_requirement`,
+whose `wrong-axis` mutation is KILLED), and `reason()` renders both, so
+`glasshouse route`'s rejected line for a `model_facts` exclusion reads *the
+`shell tool use` axis is declared absent — declared in the … config's
+[providers.*.model_facts] table* (`drop-the-payload` KILLED through the
+shipped binary). Which destinations are excluded is unchanged: every
+pre-existing gate test passes with only its payload assertion updated. Three
+mechanical arm updates outside the packet's files (`main.rs`,
+`tests/session_router.rs`, `tests/routing_capability.rs`), each disclosed as
+an exhaustive match.
+
+**What stays recorded.** The tool-semantics line still names only the
+constraint's kind: `Backend::tools()` is a bare `ToolSemantics` because
+`config/pairing.rs::tool_semantics` drops the `Declared` before the router
+ever sees it. Carrying it through means widening `Backend` and
+`ToolSemantics` to hold a `Declared<bool>` — a small Amber package
+(`config/pairing.rs`, `routing/mod.rs`), not opened today because no map
+line waits on it; the exclusion itself is proven and the capability clause
+now says which fact. No box moves on this entry.
