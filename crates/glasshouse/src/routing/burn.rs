@@ -597,6 +597,11 @@ mod tests {
             outcome: Some(Outcome::Succeeded),
             failure_class: None,
             task_class: class,
+            // Migration 24's three columns. This module reads none of them;
+            // they are here because the struct literal must be complete.
+            session_id: None,
+            effort_level: None,
+            turn_shape: None,
             context_state: ContextState::Unknown,
         }
     }

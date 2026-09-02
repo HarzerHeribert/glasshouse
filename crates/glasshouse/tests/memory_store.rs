@@ -344,6 +344,9 @@ fn a_version_three_database_gains_the_memory_table_with_its_sessions_intact() {
              -- Migration 22's column, newest of all, so it leads: a rollback
              -- undoes every migration above the version it claims, or the
              -- re-run meets a column it has already added.
+             ALTER TABLE routing_observations DROP COLUMN turn_shape;
+             ALTER TABLE routing_observations DROP COLUMN effort_level;
+             ALTER TABLE routing_observations DROP COLUMN session_id;
              ALTER TABLE routing_observations DROP COLUMN task_class;
              ALTER TABLE sessions DROP COLUMN entitlement;
              ALTER TABLE sessions DROP COLUMN last_seen_commit;
@@ -383,7 +386,7 @@ fn a_version_three_database_gains_the_memory_table_with_its_sessions_intact() {
         })
         .unwrap();
     assert_eq!(
-        version, 23,
+        version, 24,
         "the launch must have applied migrations 4 through 22"
     );
 

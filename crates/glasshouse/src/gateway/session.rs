@@ -47,6 +47,7 @@ use crate::routing::interactive::{
     StayReason,
 };
 use crate::routing::{AssignedModel, Backend, CacheLocality};
+use crate::session::SessionId;
 
 use super::ingress::{Exchange, Framing, Outcome, StreamEnd, TRANSPORT_TIMEOUT_DETAIL};
 use super::upstream::Upstream;
@@ -101,6 +102,12 @@ struct State {
     /// exactly as `on_provider_failure` always has.
     pairing_preference: PairingPreference,
     pairing_overrides: PairingOverrides,
+    /// The Glasshouse session this gateway serves — `crate::database`
+    /// migration 24's `routing_observations.session_id`. `None` until a
+    /// launch tells it (see [`SessionRouting::serve_session`]), and a
+    /// gateway nothing has told is a gateway serving no session: its rows
+    /// say so with `NULL` rather than an invented id.
+    session_id: Option<SessionId>,
 }
 
 /// What one finished exchange said about the backend that served it.
@@ -240,6 +247,32 @@ impl SessionRouting {
         let mut state = self.lock();
         state.pairing_preference = preference;
         state.pairing_overrides = overrides;
+    }
+
+    /// Capability map line 2019, and `crate::database` migration 24: record
+    /// which Glasshouse session this gateway is serving, so that every row
+    /// this type's own `record_routing_observation` writes can name it.
+    ///
+    /// [`Self::set_pairing_preference`]'s shape, and separate from
+    /// [`Self::bind`] for its reason: `bind` answers only when a backend
+    /// actually resolved, while the session this gateway serves is known
+    /// whether or not that lookup succeeded.
+    ///
+    /// # Told by the launch, not learned from the wire
+    ///
+    /// `main.rs`'s two launch doors call this — `launch_session` after
+    /// `store.create` returns the record and before the harness is spawned,
+    /// and `resolve_resume_overlay` for the record being resumed. A gateway
+    /// is started once per launched session, so there is exactly one answer
+    /// per gateway and nothing here ever changes it from the wire. In
+    /// particular this is **not** derived from a request: the relay reads no
+    /// body by construction (`super::ingress`'s own
+    /// `an_exchange_has_nowhere_to_put_a_body`), and the harness's
+    /// `metadata.user_id` names an account, not a Glasshouse session — see
+    /// `docs/product/design-decisions.md`, *A session identity on the
+    /// routing evidence rows*.
+    pub fn serve_session(&self, session_id: &SessionId) {
+        self.lock().session_id = Some(session_id.clone());
     }
 
     /// The backend serving this session, once one has been bound.
@@ -462,6 +495,17 @@ impl SessionRouting {
             return;
         };
 
+        // Migration 24's three. The session is what this gateway was told it
+        // serves — `None`, and so `NULL`, for a gateway nothing told; the
+        // other two are the decoded request's own facts, carried on the
+        // exchange from `super::translate::serve` and `None` on every
+        // relayed exchange, whose body this gateway never reads.
+        let session_id = self
+            .lock()
+            .session_id
+            .as_ref()
+            .map(|id| id.as_str().to_owned());
+
         let new = NewObservation::new(
             exchange.provider.clone(),
             assignment.backend().model().label().to_owned(),
@@ -479,6 +523,9 @@ impl SessionRouting {
         .with_failure_class(failure_class)
         .with_failovers(Some(reading.effect.failovers()))
         .with_retries(Some(0))
+        .with_session_id(session_id)
+        .with_effort_level(exchange.effort)
+        .with_turn_shape(exchange.turn_shape)
         // Phase 56: a translated exchange has a parsed response, so its
         // usage is exact where the provider stated it. A relayed exchange
         // carries `None` here and writes the same NULLs it always did.
@@ -1088,6 +1135,8 @@ mod tests {
             first_byte_at: None,
             framing: None,
             tokens: None,
+            effort: None,
+            turn_shape: None,
         }
     }
 
@@ -1142,6 +1191,8 @@ mod tests {
                 ended,
             }),
             tokens: None,
+            effort: None,
+            turn_shape: None,
         }
     }
 

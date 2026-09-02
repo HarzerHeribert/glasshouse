@@ -10,7 +10,9 @@ use glasshouse::checkpoint::{
     Checkpoint, CheckpointReason, CheckpointStore, Handoff, ProjectCheckpoints, Stored,
     WorkingTreeStatus,
 };
-use glasshouse::cli::{ApiCommand, CheckpointCommand, ContextFirewallCommand, McpCommand};
+use glasshouse::cli::{
+    ApiCommand, CheckpointCommand, ContextFirewallCommand, GatewayCommand, McpCommand,
+};
 use glasshouse::config::response::{ResponseProfileEntry, ResponseRequest};
 use glasshouse::config::{self, EffectiveConfig, ProjectConfig, UserConfig};
 use glasshouse::events::{
@@ -92,6 +94,11 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
         Some(Command::Doctor) => {
             print!("{}", glasshouse::integrations::doctor_report(&runtime));
         }
+        Some(Command::Gateway { command }) => match command {
+            GatewayCommand::Pairs => {
+                print!("{}", gateway_pairs_report());
+            }
+        },
         Some(Command::Setup) => {
             if !setup(&runtime, SetupTrigger::Requested)? {
                 return Ok(ExitCode::FAILURE);
@@ -4001,6 +4008,11 @@ fn routing_cost_report(runtime: &Runtime, hours: u32) -> anyhow::Result<String> 
     let earliest_unix = now_unix.saturating_sub(window_seconds);
     let groups = ledger.consumption_by_purpose(now_unix, window_seconds)?;
     let translation = ledger.translation_cache_savings(now_unix, window_seconds)?;
+    // Map line 2019's per-session clause: the same window and the same rows,
+    // grouped by migration 24's `session_id` instead of by route and
+    // credential.
+    let translation_by_session =
+        ledger.session_translation_cache_savings(now_unix, window_seconds)?;
     // Fail-soft, the same posture `context_firewall_savings_summary` already
     // takes for `status`: a raw store this build cannot read yet renders as
     // "not counted", never as a hard error for a readout command.
@@ -4021,6 +4033,7 @@ fn routing_cost_report(runtime: &Runtime, hours: u32) -> anyhow::Result<String> 
         firewall_savings,
         bypass_count,
         &translation,
+        &translation_by_session,
     ))
 }
 
@@ -4050,6 +4063,7 @@ fn render_routing_cost(
     firewall_savings: Option<glasshouse::firewall::WindowSavings>,
     firewall_bypasses: usize,
     translation: &[glasshouse::routing::evidence::TranslationSavings],
+    translation_by_session: &[glasshouse::routing::evidence::SessionTranslationSavings],
 ) -> String {
     let mut out = format!("Routing consumption for project {project_id}, last {hours}h\n");
     if groups.is_empty() {
@@ -4094,6 +4108,7 @@ fn render_routing_cost(
         firewall_savings,
         firewall_bypasses,
         translation,
+        translation_by_session,
     ));
     out
 }
@@ -4109,6 +4124,7 @@ fn render_savings_section(
     firewall_savings: Option<glasshouse::firewall::WindowSavings>,
     firewall_bypasses: usize,
     translation: &[glasshouse::routing::evidence::TranslationSavings],
+    translation_by_session: &[glasshouse::routing::evidence::SessionTranslationSavings],
 ) -> String {
     let mut out = String::from("\nSAVINGS\n");
 
@@ -4154,10 +4170,53 @@ fn render_savings_section(
         }
     }
 
+    // Map line 2019's per-session clause, beside the per-credential grouping
+    // above it and read off the same rows over the same window — see
+    // `SessionTranslationSavings`.
+    if translation_by_session.is_empty() {
+        out.push_str(
+            "\n  translation by session\n    not counted: no translated exchange recorded\n",
+        );
+    } else {
+        out.push_str("\n  translation by session\n");
+        for row in translation_by_session {
+            // Never an empty name and never a `0`: a group whose rows name no
+            // session is a real reading about real exchanges, and it says in
+            // words which fact it is. A gateway is told its session by the
+            // launch, so this is what a build older than migration 24 wrote,
+            // or what a gateway nobody told wrote.
+            let session = row.session_id.as_deref().unwrap_or("(no session recorded)");
+            let denominator = row.input_tokens + row.cached_input_tokens;
+            // The ratio is a *rate*, so it sits behind the standing sample
+            // floor every other rate on this ledger sits behind
+            // (`MIN_SAMPLE_FOR_SUMMARY`), and below it prints as words —
+            // `render_token_count`'s own rule, never a digit. The counts
+            // beside it are counts, honest at any sample size, exactly as
+            // the per-purpose groups' `requests` line above is.
+            let ratio = if row.meets_sample_floor() {
+                row.cache_read_ratio()
+                    .map(|fraction| format!("{:.1}%", fraction * 100.0))
+                    .unwrap_or_else(|| "not counted".to_owned())
+            } else {
+                format!(
+                    "not counted: {} of {} exchanges needed",
+                    row.sample_count,
+                    glasshouse::routing::evidence::MIN_SAMPLE_FOR_SUMMARY
+                )
+            };
+            out.push_str(&format!(
+                "    {session}  {} exchanges, prompt-cache reads {} of {denominator} \
+                 translated input tokens ({ratio})\n",
+                row.sample_count, row.cached_input_tokens
+            ));
+        }
+    }
+
     out.push_str(
         "\n  response profile\n    not counted: no exchange row carries a response profile \
-         (no producer stamps one on a routing-observation row, and there is no session column \
-         to join `sessions.response_profile` through — a schema decision, not this package's)\n",
+         (migration 24 added the session column this could be joined through, but no producer \
+         stamps a response profile on a routing-observation row, so there is still nothing to \
+         count — capability map line 627's, not this package's)\n",
     );
 
     out
@@ -5060,6 +5119,16 @@ const EXTRACTION_PURPOSE: &str = glasshouse::routing::evidence::EXTRACTION_PURPO
 /// sub-second decision reads back as `0` through `duration_ms()`; the
 /// millisecond figure goes to the log beside it. A finer column is a schema
 /// decision this package does not take.
+///
+/// **This row carries no session id** — `glasshouse::database` migration
+/// 24's `session_id` stays `NULL` here, deliberately and permanently. The
+/// decision this row measures is taken *before* `store.create` mints a
+/// session, so there is no id to write; and the row is about the routing
+/// decision rather than about an exchange some session was served, which is
+/// the only thing that column is for. Filling it from a session recorded
+/// later would make "the launch decided this before any session existed"
+/// indistinguishable from "this exchange belonged to that session", which is
+/// the distinction the nullable column exists to keep.
 fn record_routing_latency(
     runtime: &Runtime,
     started: std::time::Instant,
@@ -6127,6 +6196,20 @@ fn launch_session(
             // `native` there.
             .with_entitlement(entitlement.as_ref().map(|entry| entry.name().to_owned())),
     )?;
+    // Capability map line 2019 and `glasshouse::database` migration 24: tell
+    // the gateway which session it is serving, so every routing-observation
+    // row it writes from here on can name one.
+    //
+    // **Here, and not beside the gateway's own start**, for
+    // `record_routing_decision`'s reason a few lines down: the id does not
+    // exist up there. The gateway is started before the record so that the
+    // overlay can name its address, and the record is minted by
+    // `store.create` — so this is the first line at which both are real, and
+    // it is still before the harness is spawned, which is before any
+    // exchange can arrive.
+    if let Some(gateway) = gateway.as_ref() {
+        gateway.routing().serve_session(&record.id);
+    }
     // Line 1467, the fresh half: the session just recorded is the one the
     // next low-risk turn will be in.
     remember_classification(&sticky_cache, classified.as_ref(), record.id.as_str());
@@ -7106,6 +7189,13 @@ fn evidence_ledger(
     }
 }
 
+// Eight parameters, and the eighth is the session id below. It stays a
+// parameter rather than moving to the caller so that the gateway is told
+// which session it serves *inside the function that started it*, before the
+// gateway can be returned to anyone: a caller-side call is exactly the shape
+// practice §35 warns about — a production step a later edit can drop with
+// nothing to object. None of the eight names a fact any other one carries.
+#[allow(clippy::too_many_arguments)]
 fn resolve_resume_overlay(
     effective: &EffectiveConfig<'_>,
     user: &UserConfig,
@@ -7116,6 +7206,12 @@ fn resolve_resume_overlay(
     // the project's database and its project id, and narrowing to `paths`
     // here would put the ledger out of reach on the resume path alone.
     runtime: &glasshouse::Runtime,
+    // Capability map line 2019 and `glasshouse::database` migration 24: the
+    // session this resume continues, handed to the gateway started below.
+    // The second of the binary's two doors, and the easier one — a resume's
+    // record already exists, so there is no ordering to get right the way
+    // `launch_session` has to wait for `store.create`.
+    session_id: &session::SessionId,
     // Map line 1735. Built by `resume_session`, which is where the recorder
     // this eventually writes into is opened; this function only starts the
     // gateway, so it is a parameter rather than something resolved here.
@@ -7155,6 +7251,9 @@ fn resolve_resume_overlay(
         // launched ones would make the denominator a subset nobody stated.
         Some(failover_prevention_sink(runtime)),
     )?;
+    if let Some(gateway) = gateway.as_ref() {
+        gateway.routing().serve_session(session_id);
+    }
     let resolution = glasshouse::profile::Resolution {
         adapter: selection.adapter(),
         acknowledged_bypass,
@@ -11313,6 +11412,7 @@ fn resume_session(
             &selection,
             name,
             runtime,
+            &record.id,
             degrade_relay.sink(),
         ) {
             Ok(resolved) => Some(resolved),
@@ -13563,6 +13663,75 @@ fn entitlement_pool_with_telemetry(
 /// by its kind and vendor. Its `credential` is a `config::SecretRef` and this
 /// function never touches it — nothing here opens a secret store, and there
 /// is no branch on which this view could print a value.
+/// The gateway's translation table as compiled: every ordered wire-protocol
+/// pair with its status, then each codec's refused and ignored fields and its
+/// prompt-cache and effort dispositions.
+///
+/// Reads nothing but the binary: `translate::pairs()` and
+/// `translate::field_rows()` are static tables, so this opens no file, reads
+/// no configuration, and resolves no secret.
+fn gateway_pairs_report() -> String {
+    use std::fmt::Write as _;
+
+    use glasshouse::gateway::translate::{self, CacheDisposition, EffortDisposition};
+
+    let mut out = String::new();
+    let _ = writeln!(out, "PAIRS");
+    let _ = writeln!(out, "=====");
+    for pair in translate::pairs() {
+        match pair.refusal() {
+            None => {
+                let _ = writeln!(out, "{} -> {}: supported", pair.from, pair.to);
+            }
+            Some(reason) => {
+                let _ = writeln!(out, "{} -> {}: refused ({reason})", pair.from, pair.to);
+            }
+        }
+    }
+    let _ = writeln!(out);
+    let _ = writeln!(out, "FIELDS");
+    let _ = writeln!(out, "======");
+    for protocol in translate::PROTOCOLS {
+        let _ = writeln!(out, "{protocol}");
+        match translate::field_rows(protocol) {
+            None => {
+                let _ = writeln!(out, "  no codec");
+            }
+            Some(rows) => {
+                for (field, reason) in rows.refused {
+                    let _ = writeln!(out, "  refuses {field}: {reason}");
+                }
+                for field in rows.ignored {
+                    let _ = writeln!(out, "  ignores {field}");
+                }
+                match rows.cache {
+                    Some(CacheDisposition::Carried { field, note }) => {
+                        let _ = writeln!(out, "  cache: carried under {field} ({note})");
+                    }
+                    Some(CacheDisposition::Stripped(reason)) => {
+                        let _ = writeln!(out, "  cache: stripped: {reason}");
+                    }
+                    None => {
+                        let _ = writeln!(out, "  cache: not applicable");
+                    }
+                }
+                match rows.effort {
+                    Some(EffortDisposition::Carried { field, note }) => {
+                        let _ = writeln!(out, "  effort: carried under {field} ({note})");
+                    }
+                    Some(EffortDisposition::Stripped(reason)) => {
+                        let _ = writeln!(out, "  effort: stripped: {reason}");
+                    }
+                    None => {
+                        let _ = writeln!(out, "  effort: not applicable");
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
 fn entitlements_report(runtime: &Runtime) -> anyhow::Result<String> {
     use std::collections::BTreeMap;
     use std::fmt::Write as _;

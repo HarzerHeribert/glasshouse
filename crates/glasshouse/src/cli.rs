@@ -128,6 +128,11 @@ pub enum Command {
     Entitlements,
     /// Report detected harnesses, optional integrations, and setup problems.
     Doctor,
+    /// Report on the gateway's wire-protocol translation.
+    Gateway {
+        #[command(subcommand)]
+        command: GatewayCommand,
+    },
     /// Reopen the first-run setup wizard.
     ///
     /// Setup runs by itself the first time Glasshouse is used in an
@@ -988,6 +993,15 @@ pub enum ContextFirewallCommand {
         #[arg(long, conflicts_with_all = ["candidate", "file", "range"])]
         stats: bool,
     },
+}
+
+/// `glasshouse gateway` subcommands.
+#[derive(Debug, Subcommand)]
+pub enum GatewayCommand {
+    /// Report every wire-protocol pair the gateway can translate, and what
+    /// each codec refuses, ignores, or carries. Reads nothing but the
+    /// binary.
+    Pairs,
 }
 
 /// `glasshouse mcp` subcommands.

@@ -312,3 +312,129 @@ Regression evidence (`tests/gateway_translate_effort.rs`, through the shipped bi
 > strip-silently observed: panicked at translate/mod.rs:1727:9 (the Carried disposition for Gemini is None)
 
 ---
+
+
+---
+
+## Line 2019 CLOSED — 2026-09-02 (`GH-OBSERVATION-SESSION-COLUMN`, Red, Opus 5 high): the routing evidence rows learn which session they served, from the launch and never from the wire
+
+Implements `design-decisions.md`'s *A session identity on the routing evidence rows — Cluster G's first column*. **Migration 24** adds `session_id`, `effort_level` and `turn_shape` to `routing_observations` in migration 23's shape — nullable, no `CHECK`, no `REFERENCES`, no index, an unrecognised stored word reading back as `None` — and every existing row backfills `NULL`. **The identity is Glasshouse's own** `sessions.id`: `SessionRouting::serve_session(&SessionId)` takes a typed id so nothing else can be handed to it, called in `launch_session` the line after `store.create(...)` returns and inside `resolve_resume_overlay` right after the gateway starts (a parameter rather than a caller-side call, so a gateway cannot be handed back before it knows its session; `#[allow(clippy::too_many_arguments)]` with the reason stated); `record_routing_observation` stamps it on every row the gateway writes, relayed or translated. **The two request facts** ride `Exchange` as enums: `translate::serve` reduces `Request::effort` to the four-word `EffortLevel` and asks `Request::turn_shape()` — *tool-resume* when the last `Role::User` message has blocks and every one is a `Block::ToolResult`, *prompt* otherwise — while the relay's `exchange()` helper leaves both `None`, so a relayed row reads *unread*, not *absent*. The stored effort vocabulary is a mirror type in `routing/evidence.rs` (`routing` must not depend on `gateway`), pinned in lockstep by an exhaustive `From` and a round-trip test; `TurnShape` lives only in `routing/evidence.rs` because it has no wire spelling to diverge from. **The readout**: `EvidenceLedger::session_translation_cache_savings` groups the translation facet by `session_id`, and `render_savings_section` prints *translation by session* — the id, the exchange count, the reads over the translated input tokens with the ratio, and *(no session recorded)* for `NULL` rows — with the ratio withheld below `MIN_SAMPLE_FOR_SUMMARY` in the ledger's own `AggregateReading` manner (counts print at any size). The existing per-credential facet is unchanged and still prints at any sample count — noted, not retrofitted.
+
+**Worker corrections, all accepted:** the nine version pins were the count of literals, not of edits — eleven `DROP COLUMN` rollback lists across `database.rs`, `session/store.rs` and four test files needed 24's three drops newest-first or the next bootstrap fails with `duplicate column name`; `session_context.rs`'s version assertion moved with its undo list; three column-count assertions in `database.rs` moved with the schema; two `#[cfg(test)]` `RoutingObservation` literals in `routing/burn.rs` and `routing/interactive.rs` (the latter forbidden) needed three `None`s each because a struct literal must be complete; the response-profile facet's parenthetical *there is no session column* became false and was corrected. The design note the packet cited was uncommitted when the worker started and is committed as `4446fdf`.
+
+### Measure prompt-cache read and creation tokens per exchange where the provider reports them, and show the per-session cache ratio beside the routing evidence. (line 2019)
+
+Contract: Given a session Glasshouse launched on a gateway-backed profile whose provider reports prompt-cache reads, when the gateway records each exchange it served, Glasshouse stamps the row with that session's own id (and, on a translated exchange, the effort level carried and whether the turn was a tool-resume), and `glasshouse routing-cost`'s SAVINGS section shows the cache-read ratio per session beside the per-credential ratio it already shows — while preserving that a relayed exchange records the session and nothing read from a body, that every row written before migration 24 reads back with NULL in all three columns, that a gateway told no session writes NULL rather than an invented id, and that no harness identifier and no credential value reaches the row.
+
+State: **COMPLETE** — ruled 2026-09-02 (evening) by the orchestrator. The measuring half was production since Phase 56 and proven above; the per-session clause now has its producer (the launch tells the gateway which session it serves, and every served row carries `sessions.id`) and its readout (`routing-cost`'s SAVINGS prints the cache-read ratio per session with its denominator beside the per-credential ratio). The *creation*-token clause stays what the earlier entry recorded: no translated target reports cache creation tokens distinctly — *where the provider reports them* is honoured, and none does. Verified before the tick by reading the decisive seams in the worktree: `SessionRouting::serve_session` stores the typed `SessionId` and both doors call it after the record exists; `record_routing_observation` stamps the three columns; `Request::turn_shape` is the design's predicate (an empty user message is `prompt`); migration 24 is three `ADD COLUMN`s and `SUPPORTED_SCHEMA_VERSION` is 24. Red tier: the mutation suite 4/4 KILLED with output; full relevant regression run one target at a time with counts; the one red, `database::tests::concurrent_first_bootstraps_serialize_on_one_database`, was attributed by the worker against an unmodified detached worktree at `739b182` (§34/§91) and is the load-sensitive bootstrap race batch 87 already recorded; platform leg macOS with the migration on the one `MIGRATIONS` path; the independent read was the orchestrator's own.
+
+Production evidence:
+- `src/database.rs` — `MIGRATIONS[23] (migration 24: session_id, effort_level, turn_shape)`
+- `src/database.rs` — `SUPPORTED_SCHEMA_VERSION`
+- `src/routing/evidence.rs` — `EffortLevel`
+- `src/routing/evidence.rs` — `TurnShape`
+- `src/routing/evidence.rs` — `NewObservation::with_session_id`
+- `src/routing/evidence.rs` — `NewObservation::with_effort_level`
+- `src/routing/evidence.rs` — `NewObservation::with_turn_shape`
+- `src/routing/evidence.rs` — `RoutingObservation::{session_id, effort_level, turn_shape}`
+- `src/routing/evidence.rs` — `row_to_observation`
+- `src/routing/evidence.rs` — `SessionTranslationSavings`
+- `src/routing/evidence.rs` — `EvidenceLedger::session_translation_cache_savings`
+- `src/gateway/translate/canonical.rs` — `Request::turn_shape`
+- `src/gateway/translate/canonical.rs` — `From<EffortLevel> for routing::evidence::EffortLevel`
+- `src/gateway/translate/mod.rs` — `serve (the effort/turn_shape bindings and the `decoded` closure)`
+- `src/gateway/ingress.rs` — `Exchange::{effort, turn_shape}`
+- `src/gateway/ingress.rs` — `Exchange::record`
+- `src/gateway/session.rs` — `SessionRouting::serve_session`
+- `src/gateway/session.rs` — `SessionRouting::record_routing_observation`
+- `src/main.rs` — `launch_session (serve_session after store.create)`
+- `src/main.rs` — `resolve_resume_overlay (serve_session after the gateway starts)`
+- `src/main.rs` — `render_savings_section (the `translation by session` facet)`
+- `src/main.rs` — `routing_cost_report / render_routing_cost`
+
+Regression evidence:
+- `routing_session_column::a_launched_sessions_gateway_stamps_its_id_the_effort_and_a_tool_resume_shape`
+- `routing_session_column::a_prompt_shaped_request_records_the_prompt_shape_and_no_invented_effort`
+- `routing_session_column::a_relayed_exchange_records_the_session_and_neither_request_fact`
+- `routing_session_column::routing_cost_prints_a_per_session_ratio_and_words_for_a_row_with_no_session`
+- `routing_session_column::a_version_23_database_migrates_and_reads_back_three_nulls`
+- `routing_session_column::no_harness_identifier_and_no_credential_reaches_any_row`
+- `database::tests::migration_24_adds_the_session_columns_and_undoes_cleanly`
+- `gateway::translate::canonical::tests::every_wire_effort_level_stores_and_reads_back_as_the_same_word`
+- `gateway::translate::canonical::tests::turn_shape_is_tool_resume_only_when_the_last_user_message_is_all_tool_results`
+- `session::store::tests::the_project_database_schema_has_nowhere_to_put_a_credential`
+- `gateway::ingress::tests::an_exchange_has_nowhere_to_put_a_body`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| gateway/session.rs: `.with_session_id(session_id)` -> `.with_session_id(None::<String>)` | `never-stamp-session` | **killed** | `routing_session_column::a_launched_sessions_gateway_stamps_its_id_the_effort_and_a_tool_resume_shape` |
+| translate/canonical.rs: Request::turn_shape's tool-resume arm `TurnShape::ToolResume` -> `TurnShape::Prompt` | `shape-always-prompt` | **killed** | `routing_session_column::a_launched_sessions_gateway_stamps_its_id_the_effort_and_a_tool_resume_shape` |
+| translate/mod.rs: `let effort = request.effort.map(|effort| EffortLevel::from(effort.level()));` -> `let effort = None;` | `effort-dropped-at-seam` | **killed** | `routing_session_column::a_launched_sessions_gateway_stamps_its_id_the_effort_and_a_tool_resume_shape` |
+| routing/evidence.rs: `GROUP BY session_id` -> `GROUP BY purpose` in session_translation_cache_savings | `ratio-not-per-session` | **killed** | `routing_session_column::routing_cost_prints_a_per_session_ratio_and_words_for_a_row_with_no_session` |
+
+> never-stamp-session observed: panicked at crates/glasshouse/tests/routing_session_column.rs:744:5: assertion `left == right` failed: the row must name the session this launch created
+
+> shape-always-prompt observed: panicked at crates/glasshouse/tests/routing_session_column.rs:759:5: assertion `left == right` failed: the last user message carried nothing but a tool result
+
+> effort-dropped-at-seam observed: panicked at crates/glasshouse/tests/routing_session_column.rs:754:5: assertion `left == right` failed: a 16,000-token thinking budget is the medium rung of the ladder
+
+> ratio-not-per-session observed: panicked at crates/glasshouse/tests/routing_session_column.rs:940:5: expected the launched session's own counts and ratio in: -- the printed facet held one merged group instead of the launched session's
+
+Recorded scope limits — stated by the worker, not discovered later:
+- The resume door (resolve_resume_overlay) has no behavioural test; it is proven by compilation and by reading only. The launch door is proven end to end.
+- Cache CREATION tokens are still not measured -- a wire-protocol limit phase-58.md already recorded, unchanged here.
+- No join to evaluation_observations. The columns line 2039's shadow reads exist and carry values; the join is GH-EFFORT-CLAMP-SHADOW's.
+- macOS only. blast-radius.sh warned that database.rs, main.rs, tests/evaluation_observations.rs and the new test file carry cfg(unix/windows) code and that a green result here is not evidence about the other two platforms.
+- The standing sample floor is applied to the NEW per-session facet only; the existing per-credential translation facet still prints a ratio at any sample count, unchanged.
+- One user-visible line changed that the packet did not ask for: the response-profile facet's parenthetical, which asserted no session column exists.
+
+---
+
+## REVIEW — the orchestrator owes an answer to each of these
+
+This section is the point of the generator. Everything above is the
+worker's facts, transcribed. Nothing below is decided.
+
+- **2019** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
+
+**Packet errors the worker reported — read these BEFORE its results.**
+Thirteen consecutive rounds a worker corrected its packet and was right:
+- the packet's READ ONLY THIS item 5 names the LAST section of docs/product/design-decisions.md; that section does not exist at HEAD 739b182 (the last committed one is `Memory is the project's, not the launch path's`, 0f047be). The note is UNCOMMITTED in the main checkout at /Users/eneas/projects/glasshouse/docs/product/design-decisions.md:3657, and I read it there.
+- the packet scopes src/session/store.rs and four test files to `version pins only`; each also carries a DROP COLUMN rollback list that fails with `duplicate column name: session_id` unless 24's three columns are dropped in it. Eleven such lists across the tree needed the three drops (src/database.rs x8, src/session/store.rs x2, plus the four test files' inline batches).
+- the packet says tests/session_context.rs needs `the undo list only`; the `schema_version(&conn) == 23` assertion two lines below it also had to move to 24 (tests/session_context.rs:233).
+- three column-count assertions in src/database.rs had to move with the schema and are not version pins: migration_18's `exactly two columns, both appended` (now five), migration_23's `exactly one column, appended` (now 23's plus 24's three), and session::store::tests::the_project_database_schema_has_nowhere_to_put_a_credential's column list.
+- passing the session id into resolve_resume_overlay takes it to eight parameters, which `-D warnings` refuses; it needed #[allow(clippy::too_many_arguments)] with a stated reason (src/main.rs:6921).
+- database::tests::concurrent_first_bootstraps_serialize_on_one_database is red under load and is NOT this package's: an unmodified detached worktree at HEAD 739b182, built into its own CARGO_TARGET_DIR, fails the identical command with the identical `exists but is empty (zero bytes)` message.
+
+**Files touched outside EXPECTED FILES** — disclosed, not hidden:
+- `crates/glasshouse/src/routing/burn.rs` — one RoutingObservation struct literal inside its own #[cfg(test)] module; adding three fields to the struct makes it a compile error. Three `None`s and a two-line comment; no production line touched, no assertion weakened.
+- `crates/glasshouse/src/routing/interactive.rs` — FORBIDDEN file, and the same cause: one RoutingObservation struct literal inside #[cfg(test)]. Three `None`s and a two-line comment; no production line touched, no assertion weakened. The alternative (deriving Default and rewriting the literal) would have been a larger edit to this file.
+
+Gates the worker ran (re-run the decisive ones yourself):
+- cargo fmt --all -- --check: clean
+- cargo clippy -p glasshouse --all-targets --all-features -- -D warnings: clean
+- RUSTDOCFLAGS='-D warnings' cargo doc -p glasshouse --no-deps: clean
+- cargo test -p glasshouse --test routing_session_column: test result: ok. 6 passed; 0 failed
+- cargo test -p glasshouse --lib routing::evidence: test result: ok. 56 passed; 0 failed
+- cargo test -p glasshouse --lib gateway::session: test result: ok. 13 passed; 0 failed
+- cargo test -p glasshouse --lib gateway::ingress: test result: ok. 9 passed; 0 failed
+- cargo test -p glasshouse --lib gateway::translate: test result: ok. 84 passed; 0 failed
+- cargo test -p glasshouse --lib gateway::translate::canonical: test result: ok. 15 passed; 0 failed
+- cargo test -p glasshouse --lib session::store: test result: ok. 69 passed; 0 failed
+- cargo test -p glasshouse --lib routing::burn: test result: ok. 14 passed; 0 failed
+- cargo test -p glasshouse --lib routing::interactive: test result: ok. 34 passed; 0 failed
+- cargo test -p glasshouse --test evaluation_observations: test result: ok. 26 passed; 0 failed
+- cargo test -p glasshouse --test memory_provenance: test result: ok. 13 passed; 0 failed
+- cargo test -p glasshouse --test memory_store: test result: ok. 22 passed; 0 failed
+- cargo test -p glasshouse --test session_context: test result: ok. 18 passed; 0 failed
+- cargo test -p glasshouse --test routing_burn: test result: ok. 7 passed; 0 failed
+- cargo test -p glasshouse --test routing_evidence: test result: ok. 15 passed; 0 failed
+- cargo test -p glasshouse --test gateway_translate_effort: test result: ok. 6 passed; 0 failed
+- cargo test -p glasshouse --test gateway_translate_cache: test result: ok. 6 passed; 0 failed
+- cargo test -p glasshouse --test gateway_translate: test result: ok. 9 passed; 0 failed
+- cargo test -p glasshouse --test gateway_translate_evidence: test result: ok. 2 passed; 0 failed
+- cargo test -p glasshouse --test savings_readout: test result: ok. 3 passed; 0 failed
+- cargo test -p glasshouse --test routing_cost: test result: ok. 8 passed; 0 failed
+- cargo test -p glasshouse --lib database: test result: FAILED. 45 passed; 1 failed -- database::tests::concurrent_first_bootstraps_serialize_on_one_database ONLY, reproduced identically on an unmodified HEAD worktree; green 5/5 in isolation and at --test-threads=1
+- scripts/blast-radius.sh --targeted <all 15 changed files>: exit 1, seventeen targets run one at a time, sixteen green with counts, the seventeenth (--lib database) red on the baseline flake above only; cargo check --tests clean; rustdoc clean; 108 full-trace targets skipped (this is the blocking gate, not the sweep)
+

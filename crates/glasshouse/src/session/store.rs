@@ -2932,9 +2932,16 @@ mod tests {
     /// triggers with it — and they go first, newest migration undone first.
     /// Migrations 21 and 22 are each one statement for migration 16's reason
     /// as well: nothing indexes `last_seen_commit`, `extraction_trigger` or
-    /// `entitlement`, and none of the three carries a `CHECK`. Migration 22's
-    /// column is the newest of all, so it leads.
+    /// `entitlement`, and none of the three carries a `CHECK`. Migrations 23
+    /// and 24 are one and three statements for the same reason again —
+    /// nothing indexes `task_class`, `session_id`, `effort_level` or
+    /// `turn_shape`, and none of the four carries a `CHECK` or a
+    /// `REFERENCES`. Newest first, so 24's three lead, in the reverse of the
+    /// order that migration adds them.
     const UNDO_MIGRATIONS_ABOVE_THIRTEEN: &str = "
+        ALTER TABLE routing_observations DROP COLUMN turn_shape;
+        ALTER TABLE routing_observations DROP COLUMN effort_level;
+        ALTER TABLE routing_observations DROP COLUMN session_id;
         ALTER TABLE routing_observations DROP COLUMN task_class;
         ALTER TABLE sessions DROP COLUMN entitlement;
         ALTER TABLE memories DROP COLUMN extraction_trigger;
@@ -4112,6 +4119,29 @@ mod tests {
                 // the one writer (`main.rs::record_routing_latency`) holds
                 // no credential in scope. Nowhere to put one.
                 "routing_observations.task_class",
+                // Migration 24 (Phase 58 lines 2019 and 2039). Three columns
+                // and no credential anywhere near any of them.
+                //
+                // `session_id` holds `crate::session::SessionId`'s own
+                // string — a value this database already stores as
+                // `sessions.id` and prints in `glasshouse sessions` — set
+                // from the launch through
+                // `gateway::session::SessionRouting::serve_session`, which
+                // takes a `&SessionId` and can therefore be handed nothing
+                // else. Never the harness's `metadata.user_id` and never
+                // the gateway's own token.
+                //
+                // `effort_level` and `turn_shape` are fixed vocabularies
+                // that live in Rust — `routing::evidence::EffortLevel` and
+                // `::TurnShape` — written only from their `as_str`, which
+                // is `&'static str` precisely so that no runtime string can
+                // reach either column. Both are derived from the *request*
+                // Glasshouse decoded in order to translate it, never from a
+                // provider's reply, and the relay (which reads no body at
+                // all) writes `NULL` for both.
+                "routing_observations.session_id",
+                "routing_observations.effort_level",
+                "routing_observations.turn_shape",
                 "schema_migrations.version",
                 "sessions.id",
                 "sessions.project_id",
@@ -4322,7 +4352,10 @@ mod tests {
         fixture
             .conn
             .execute_batch(
-                "ALTER TABLE routing_observations DROP COLUMN task_class;
+                "ALTER TABLE routing_observations DROP COLUMN turn_shape;
+                 ALTER TABLE routing_observations DROP COLUMN effort_level;
+                 ALTER TABLE routing_observations DROP COLUMN session_id;
+                 ALTER TABLE routing_observations DROP COLUMN task_class;
                  ALTER TABLE sessions DROP COLUMN entitlement;
                  ALTER TABLE sessions DROP COLUMN last_seen_commit;
                 ALTER TABLE sessions DROP COLUMN presentation_ref;
@@ -4362,7 +4395,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            version, 23,
+            version, 24,
             "the launch must have applied migrations 3 through 22"
         );
 
@@ -4554,7 +4587,7 @@ mod tests {
             })
             .unwrap();
         assert_eq!(
-            version, 23,
+            version, 24,
             "the launch must have applied migrations 2 through 22"
         );
 
@@ -5578,7 +5611,7 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(
-                version, 23,
+                version, 24,
                 "the launch must have applied migrations 8 through 22"
             );
 
@@ -5707,7 +5740,7 @@ mod tests {
                 })
                 .unwrap();
             assert_eq!(
-                version, 23,
+                version, 24,
                 "the reopen must have applied migrations 12 through 22"
             );
 

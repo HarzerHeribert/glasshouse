@@ -5019,3 +5019,5 @@ Same session as Batch 87 (`56821d4d`). **Map 1213 → 1218** (2028, 2029, 2030, 
 5. **Batch reports into one gate when finishes align.** Three reports within twenty minutes became one 18-file gate instead of three; the wave-92 gate was stopped two minutes in to make that happen.
 
 **Waves 92–93's trailing sweep** (`scripts/blast-radius.sh --since bfa3242` from a detached worktree at `739b182`, run by the successor session `4d589d24` while the next package was designed): **118/118 green**, twelve minutes, worktree removed.
+
+**Waves 94–95's trailing sweep** (`--since 154fb84` from a detached worktree at `44a3f01`, run while wave 96 was reviewed and applied; the wave-96 gate was held until it ended): **137/137 green**, about seven minutes, worktree removed.

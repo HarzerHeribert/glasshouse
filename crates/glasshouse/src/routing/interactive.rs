@@ -2403,6 +2403,11 @@ mod tests {
             outcome: Some(Outcome::Failed),
             failure_class: Some(FailureClass::Upstream5xx),
             task_class: None,
+            // Migration 24's three columns. This module reads none of them;
+            // they are here because the struct literal must be complete.
+            session_id: None,
+            effort_level: None,
+            turn_shape: None,
             context_state: ContextState::Unknown,
         };
         let mut rows = Vec::new();

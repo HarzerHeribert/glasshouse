@@ -125,6 +125,7 @@ use ureq::http::{HeaderValue, Request, StatusCode, header};
 use ureq::{Agent, SendBody};
 
 use crate::provider::telemetry::RateLimitHeaders;
+use crate::routing::evidence::{EffortLevel, TurnShape};
 
 use super::GatewayToken;
 use super::http::{self, HeadError};
@@ -205,6 +206,18 @@ pub(super) struct Exchange {
     /// see the module's "narrowed and not repealed". `None` on every relayed
     /// exchange, whose body this gateway never reads.
     pub(super) tokens: Option<Tokens>,
+    /// The four-word effort the request carried, on a **translated**
+    /// exchange whose harness asked for thinking — `crate::database`
+    /// migration 24. A name from a fixed vocabulary, derived from the
+    /// request this gateway had to decode anyway in order to translate it,
+    /// and never a byte of it. `None` on every relayed exchange and on a
+    /// translated request that asked for no thinking.
+    pub(super) effort: Option<EffortLevel>,
+    /// Whether the request's last user turn was handing tool results back or
+    /// writing a new prompt — migration 24, and [`Self::effort`]'s rule for
+    /// `None`. A name from a two-word vocabulary; see
+    /// `translate::canonical::Request::turn_shape`.
+    pub(super) turn_shape: Option<TurnShape>,
 }
 
 /// Token counts the provider stated for a translated exchange — Phase 56's
@@ -390,6 +403,11 @@ impl Exchange {
             protocol = ?self.protocol,
             host = %self.host,
             tokens = ?self.tokens,
+            // Two more names from fixed vocabularies, never a byte of the
+            // request they were derived from — migration 24's `effort_level`
+            // and `turn_shape`.
+            effort = ?self.effort.map(EffortLevel::as_str),
+            turn_shape = ?self.turn_shape.map(TurnShape::as_str),
             "glasshouse gateway exchange"
         );
     }
@@ -1055,6 +1073,12 @@ fn exchange(outcome: Outcome, status: u16, upstream: &Upstream, route: Option<&R
         first_byte_at: None,
         framing: None,
         tokens: None,
+        // The relay never decodes a request, so it has nothing to derive
+        // either of these from and writes `NULL` for both — unread, not
+        // absent. `translate::serve` fills them; nothing on this path does,
+        // on any of its returns.
+        effort: None,
+        turn_shape: None,
     }
 }
 
@@ -1222,6 +1246,8 @@ mod tests {
                     output: 33,
                     cached: Some(100),
                 }),
+                effort: Some(EffortLevel::Medium),
+                turn_shape: Some(TurnShape::ToolResume),
             };
             let line = recorded(&exchange);
 

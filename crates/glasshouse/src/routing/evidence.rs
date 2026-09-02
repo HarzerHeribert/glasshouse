@@ -428,6 +428,93 @@ impl ContextState {
     }
 }
 
+/// The four-word effort ladder a translated exchange's row records —
+/// migration 24's `routing_observations.effort_level`.
+///
+/// # Why this mirrors a type in the gateway instead of borrowing it
+///
+/// The value comes from
+/// [`crate::gateway::translate::canonical::EffortRequest::level`], whose own
+/// `EffortLevel` is the *wire* vocabulary: it exists to be spelled onto
+/// OpenAI's `reasoning_effort` and to be derived from Anthropic's
+/// `budget_tokens`. This one is the *stored* vocabulary, and this module may
+/// not reach into `crate::gateway` — the dependency runs the other way, and
+/// `crate::gateway::session` is what writes these rows. So the four words
+/// are declared here and pinned against the gateway's four, exhaustively and
+/// in lockstep, by `canonical`'s own
+/// `every_wire_effort_level_stores_and_reads_back_as_the_same_word`: a fifth
+/// variant on either side fails to compile there rather than drifting.
+///
+/// [`Self::from_stored`] answers [`None`] for a word this build does not
+/// know, and this module's own row reader keeps that as `None` rather than an
+/// error — migration 24's own doc comment has the reason, which is migration
+/// 23's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum EffortLevel {
+    Minimal,
+    Low,
+    Medium,
+    High,
+}
+
+impl EffortLevel {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Minimal => "minimal",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+        }
+    }
+
+    pub fn from_stored(value: &str) -> Option<Self> {
+        match value {
+            "minimal" => Some(Self::Minimal),
+            "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            _ => None,
+        }
+    }
+}
+
+/// What shape the turn a translated exchange carried was — migration 24's
+/// `routing_observations.turn_shape`.
+///
+/// Two words, and unlike [`EffortLevel`] there is no second vocabulary
+/// anywhere for this to drift from: no wire spells a turn shape, and
+/// [`crate::gateway::translate::canonical::Request::turn_shape`] derives it
+/// from the decoded request alone. So it is declared once, here, where the
+/// column it is stored in lives.
+///
+/// [`Self::from_stored`] answers [`None`] for an unrecognised word, on
+/// [`EffortLevel`]'s reasoning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TurnShape {
+    /// The last user message carried nothing but tool results: the harness
+    /// is handing back what a tool returned, not writing a new prompt.
+    ToolResume,
+    /// Everything else, a turn with no user message at all included.
+    Prompt,
+}
+
+impl TurnShape {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ToolResume => "tool-resume",
+            Self::Prompt => "prompt",
+        }
+    }
+
+    pub fn from_stored(value: &str) -> Option<Self> {
+        match value {
+            "tool-resume" => Some(Self::ToolResume),
+            "prompt" => Some(Self::Prompt),
+            _ => None,
+        }
+    }
+}
+
 /// How well a stored [`ObservedCost::micro_usd`] is actually known —
 /// capability map line 1333's "explicit confidence label," made unforgeable
 /// by migration 11's own `CHECK` pairing the two columns.
@@ -741,6 +828,15 @@ pub struct NewObservation {
     /// — see [`super::request::TaskClass`] and `crate::database` migration
     /// 23.
     pub task_class: Option<super::request::TaskClass>,
+    /// The Glasshouse session this exchange belonged to, when the producer
+    /// was told one — migration 24. See [`Self::with_session_id`].
+    pub session_id: Option<String>,
+    /// The effort the request carried, on a translated exchange — migration
+    /// 24. See [`Self::with_effort_level`].
+    pub effort_level: Option<EffortLevel>,
+    /// The shape of the turn the request carried, on a translated exchange
+    /// — migration 24. See [`Self::with_turn_shape`].
+    pub turn_shape: Option<TurnShape>,
 
     pub context_state: ContextState,
 }
@@ -772,6 +868,9 @@ impl NewObservation {
             outcome: None,
             failure_class: None,
             task_class: None,
+            session_id: None,
+            effort_level: None,
+            turn_shape: None,
             context_state: ContextState::Unknown,
         }
     }
@@ -893,6 +992,52 @@ impl NewObservation {
         self
     }
 
+    /// Which Glasshouse session this exchange served — capability map line
+    /// 2019's *per-session* clause and migration 24's first column.
+    ///
+    /// The value is `crate::session::SessionId`'s own string and nothing
+    /// else: never the harness's `metadata.user_id`, never a native session
+    /// id, never a credential. `docs/product/design-decisions.md`'s *A
+    /// session identity on the routing evidence rows* argues each of those
+    /// three exclusions.
+    ///
+    /// `None` is *this producer was never told which session it serves* —
+    /// the same honest absence every other nullable column on this type
+    /// carries — and it is what a gateway nothing has called
+    /// [`crate::gateway::session::SessionRouting::serve_session`] on writes,
+    /// never an invented id. `main.rs::record_routing_latency`'s row keeps
+    /// it too, deliberately: that row is about a routing decision taken
+    /// before any session record existed.
+    pub fn with_session_id(mut self, session_id: Option<impl Into<String>>) -> Self {
+        self.session_id = session_id.map(Into::into);
+        self
+    }
+
+    /// The effort the harness asked for on this exchange — migration 24's
+    /// second column, and half of what capability map line 2039's shadow
+    /// measurement joins.
+    ///
+    /// A fact of the *request*, read at the one seam that holds a decoded
+    /// one (`crate::gateway::translate::serve`). `None` on every relayed
+    /// exchange, whose body this gateway never reads, and on a translated
+    /// request that asked for no thinking at all — the same absence to this
+    /// column, with the row's own `route` telling the two apart.
+    pub fn with_effort_level(mut self, effort_level: Option<EffortLevel>) -> Self {
+        self.effort_level = effort_level;
+        self
+    }
+
+    /// Whether this exchange's turn handed back tool results or wrote a new
+    /// prompt — migration 24's third column, and the other half of what line
+    /// 2039's shadow measurement selects on.
+    ///
+    /// [`Self::with_effort_level`]'s rule for `None`, for the same reason: a
+    /// relayed exchange has no decoded request to derive a shape from.
+    pub fn with_turn_shape(mut self, turn_shape: Option<TurnShape>) -> Self {
+        self.turn_shape = turn_shape;
+        self
+    }
+
     /// How many times this exchange's own outcome moved the session to
     /// another backend — capability map line 1334's `failovers`, the one of
     /// its four counters a gateway exchange can honestly supply, because the
@@ -974,6 +1119,17 @@ pub struct RoutingObservation {
     /// build does not recognise — see migration 23's own doc comment for why
     /// the third case is not an error the way an unknown `failure_class` is.
     pub task_class: Option<super::request::TaskClass>,
+    /// The Glasshouse session this exchange served, `None` for a row whose
+    /// producer was never told one and for every row written before
+    /// migration 24 — see [`NewObservation::with_session_id`].
+    pub session_id: Option<String>,
+    /// `None` for a relayed exchange, for a translated request that asked
+    /// for no thinking, for every row written before migration 24, **and**
+    /// for a row whose stored word this build does not recognise — see
+    /// [`EffortLevel`].
+    pub effort_level: Option<EffortLevel>,
+    /// [`Self::effort_level`]'s four cases, for [`TurnShape`]'s two words.
+    pub turn_shape: Option<TurnShape>,
 
     pub context_state: ContextState,
 }
@@ -2324,6 +2480,48 @@ impl TranslationSavings {
     }
 }
 
+/// [`TranslationSavings`] grouped by the session that was served rather than
+/// by the route and credential that served it — capability map line 2019's
+/// *"show the per-session cache ratio beside the routing evidence"*, whose
+/// producer is migration 24's `session_id`.
+///
+/// The same reader, the same window and the same `WHERE input_tokens IS NOT
+/// NULL` filter as [`EvidenceLedger::translation_cache_savings`], so every
+/// note on that type applies here unchanged. What differs is the grouping
+/// key, and one consequence of it: `session_id` is nullable, so **one group
+/// may have no session at all** — every translated row written by a gateway
+/// nothing told which session it serves, and every row written before
+/// migration 24. That group is a real reading about real exchanges and is
+/// not dropped; it is [`Self::session_id`] `None`, and a renderer says so in
+/// words rather than printing an empty name or a zero.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionTranslationSavings {
+    /// `None` is *these rows name no session*, never "any session" — the
+    /// convention [`TranslationSavings::route`] already follows.
+    pub session_id: Option<String>,
+    pub sample_count: usize,
+    pub input_tokens: i64,
+    pub cached_input_tokens: i64,
+}
+
+impl SessionTranslationSavings {
+    /// [`TranslationSavings::cache_read_ratio`], per session.
+    pub fn cache_read_ratio(&self) -> Option<f64> {
+        let denominator = self.input_tokens + self.cached_input_tokens;
+        (denominator > 0).then(|| self.cached_input_tokens as f64 / denominator as f64)
+    }
+
+    /// Whether this group carries at least [`MIN_SAMPLE_FOR_SUMMARY`]
+    /// exchanges — the standing floor every *rate* on this ledger sits
+    /// behind ([`AggregateReading`]'s own doc comment), applied to the ratio
+    /// and to nothing else. The counts beside it are counts, not rates, and
+    /// are honest at any sample size, exactly as
+    /// [`PurposeConsumption::sample_count`] is.
+    pub fn meets_sample_floor(&self) -> bool {
+        self.sample_count >= MIN_SAMPLE_FOR_SUMMARY
+    }
+}
+
 /// What this project's ledger holds about one `(provider, model)` **as a
 /// routing-model classifier** — capability map lines 1422/1432 (does it
 /// come back in the schema?) and 1421/1435 (how long does it take?) — read
@@ -2724,7 +2922,8 @@ impl EvidenceLedger {
                 input_tokens, output_tokens, cached_input_tokens,
                 cost_micro_usd, cost_confidence,
                 tool_rounds, retries, repairs, failovers, outcome,
-                context_state, failure_class, task_class
+                context_state, failure_class, task_class,
+                session_id, effort_level, turn_shape
             ) VALUES (
                 ?1, ?2,
                 ?3, ?4, ?5, ?6, ?7, ?8,
@@ -2732,7 +2931,8 @@ impl EvidenceLedger {
                 ?14, ?15, ?16,
                 ?17, ?18,
                 ?19, ?20, ?21, ?22, ?23,
-                ?24, ?25, ?26
+                ?24, ?25, ?26,
+                ?27, ?28, ?29
             )",
             params![
                 self.project_id,
@@ -2761,6 +2961,9 @@ impl EvidenceLedger {
                 new.context_state.as_str(),
                 new.failure_class.map(FailureClass::as_str),
                 new.task_class.map(super::request::TaskClass::as_str),
+                new.session_id,
+                new.effort_level.map(EffortLevel::as_str),
+                new.turn_shape.map(TurnShape::as_str),
             ],
         )
         .map_err(sql_err("record a routing observation"))?;
@@ -3510,6 +3713,54 @@ impl EvidenceLedger {
         Ok(out)
     }
 
+    /// [`Self::translation_cache_savings`] grouped by migration 24's
+    /// `session_id` instead of by route and credential — capability map line
+    /// 2019's per-session clause.
+    ///
+    /// Deliberately a second query rather than a second grouping column on
+    /// the first: the two readings answer different questions (*which
+    /// credential's traffic is cache-warm* and *which session's is*), a row
+    /// belongs to exactly one group in each, and folding them into one
+    /// `GROUP BY route, quota_context, session_id` would give a reader
+    /// neither total without re-summing in Rust — which is the thing the
+    /// existing reader's own doc comment says it filters in SQL to avoid.
+    ///
+    /// `session_id IS NULL` is a group, not an exclusion: see
+    /// [`SessionTranslationSavings::session_id`]. Ordered with that group
+    /// last, so a report's named sessions read first.
+    pub fn session_translation_cache_savings(
+        &self,
+        now_unix: i64,
+        window_seconds: i64,
+    ) -> Result<Vec<SessionTranslationSavings>, EvidenceLedgerError> {
+        let earliest = now_unix.saturating_sub(window_seconds);
+        let conn = self.lock();
+        let mut statement = conn
+            .prepare(
+                "SELECT session_id,
+                        COUNT(*) AS sample_count,
+                        SUM(input_tokens) AS input_tokens,
+                        SUM(COALESCE(cached_input_tokens, 0)) AS cached_input_tokens
+                 FROM routing_observations
+                 WHERE project_id = ?1 AND observed_at >= ?2 AND observed_at <= ?3
+                   AND purpose = ?4 AND input_tokens IS NOT NULL
+                 GROUP BY session_id
+                 ORDER BY session_id IS NULL, session_id ASC",
+            )
+            .map_err(sql_err("read per-session translation cache savings"))?;
+        let rows = statement
+            .query_map(
+                params![self.project_id, earliest, now_unix, HARNESS_TURN_PURPOSE],
+                row_to_session_translation_savings,
+            )
+            .map_err(sql_err("read per-session translation cache savings"))?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row.map_err(sql_err("read one session's translation cache savings"))?);
+        }
+        Ok(out)
+    }
+
     /// [`ClassificationRecord`] for one `(provider, model)` over the last
     /// `window_seconds` — the reader for capability map lines 1422/1432 and
     /// 1421/1435, and the one that makes those quantities *measured* for
@@ -3719,6 +3970,20 @@ fn row_to_observation(
         .as_deref()
         .and_then(super::request::TaskClass::from_stored);
 
+    // Migration 24, and `task_class`'s arm above rather than
+    // `failure_class`'s, for the reason that migration's own doc comment
+    // gives: both stored words are bucketing inputs to a ratio, so a word a
+    // future build invents must lower no reader here rather than failing the
+    // whole row for an older build. `session_id` needs no arm of its own —
+    // it is an opaque identifier with no vocabulary to fail against.
+    let effort_level_text: Option<String> = row.get("effort_level")?;
+    let effort_level = effort_level_text
+        .as_deref()
+        .and_then(EffortLevel::from_stored);
+
+    let turn_shape_text: Option<String> = row.get("turn_shape")?;
+    let turn_shape = turn_shape_text.as_deref().and_then(TurnShape::from_stored);
+
     let context_text: String = row.get("context_state")?;
     let Some(context_state) = ContextState::from_stored(&context_text) else {
         return Ok(Err(EvidenceLedgerError::UnknownValue {
@@ -3784,6 +4049,9 @@ fn row_to_observation(
         outcome,
         failure_class,
         task_class,
+        session_id: row.get("session_id")?,
+        effort_level,
+        turn_shape,
         context_state,
     }))
 }
@@ -3804,6 +4072,18 @@ fn row_to_purpose_consumption(row: &Row<'_>) -> rusqlite::Result<PurposeConsumpt
         cached_input_tokens: row.get("cached_input_tokens")?,
         first_byte_sample_count: first_byte_sample_count as usize,
         mean_time_to_first_byte_ms: row.get("mean_time_to_first_byte_ms")?,
+    })
+}
+
+fn row_to_session_translation_savings(
+    row: &Row<'_>,
+) -> rusqlite::Result<SessionTranslationSavings> {
+    let sample_count: i64 = row.get("sample_count")?;
+    Ok(SessionTranslationSavings {
+        session_id: row.get("session_id")?,
+        sample_count: sample_count as usize,
+        input_tokens: row.get("input_tokens")?,
+        cached_input_tokens: row.get("cached_input_tokens")?,
     })
 }
 
@@ -5160,6 +5440,9 @@ mod correlation_tests {
             }),
             failure_class: class,
             task_class: None,
+            session_id: None,
+            effort_level: None,
+            turn_shape: None,
             context_state: ContextState::Unknown,
         }
     }
@@ -5483,6 +5766,9 @@ mod throttle_scope_tests {
             }),
             failure_class: class,
             task_class: None,
+            session_id: None,
+            effort_level: None,
+            turn_shape: None,
             context_state: ContextState::Unknown,
         }
     }
@@ -5809,6 +6095,9 @@ mod credential_throttle_tests {
             }),
             failure_class: class,
             task_class: None,
+            session_id: None,
+            effort_level: None,
+            turn_shape: None,
             context_state: ContextState::Unknown,
         }
     }
@@ -5919,6 +6208,9 @@ mod credential_spend_tests {
             outcome: Some(Outcome::Succeeded),
             failure_class: None,
             task_class: None,
+            session_id: None,
+            effort_level: None,
+            turn_shape: None,
             context_state: ContextState::Unknown,
         }
     }

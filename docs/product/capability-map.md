@@ -2016,7 +2016,7 @@ Cache-stable translation — the gap the comparison exposed: a default Claude Co
 ☑ Serialize translated requests deterministically — stable tool order and stable JSON Schema key order — so an unchanged prompt prefix stays byte-identical across turns.
 ☑ Never alter the bytes of a message already sent upstream in an earlier turn of the same session on a translated pairing, as the relay already guarantees for native ones.
 ☑ Supply a stable per-session prompt-cache key on targets that accept one when the harness did not set its own.
-☐ Measure prompt-cache read and creation tokens per exchange where the provider reports them, and show the per-session cache ratio beside the routing evidence.
+☑ Measure prompt-cache read and creation tokens per exchange where the provider reports them, and show the per-session cache ratio beside the routing evidence.
 
 Entitlement-aware reduction — a subscription pays in rate limits and context window, a metered key pays in tokens, local inference pays in latency; one threshold cannot serve all three.
 

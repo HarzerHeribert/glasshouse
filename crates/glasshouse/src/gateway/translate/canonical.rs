@@ -35,6 +35,8 @@
 
 use serde_json::Value;
 
+use crate::routing::evidence::TurnShape;
+
 /// A request, as either protocol's client would have made it.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Request {
@@ -204,6 +206,62 @@ impl Request {
     pub fn normalized(mut self) -> Self {
         self.tools.sort_by(|a, b| a.name.cmp(&b.name));
         self
+    }
+
+    /// What shape this turn is — `crate::database` migration 24's
+    /// `turn_shape`, and half of what capability map line 2039's shadow
+    /// measurement selects on.
+    ///
+    /// [`TurnShape::ToolResume`] when the last [`Role::User`] message exists
+    /// and **every** one of its blocks is a [`Block::ToolResult`]:
+    /// that is the harness handing back what a tool returned, with nothing
+    /// of its own added. [`TurnShape::Prompt`] otherwise — which includes a
+    /// request with no user message at all, and a user message with no
+    /// blocks, because neither is a resumption of a tool call and inventing
+    /// a third word for them would give the ledger a bucket nothing means.
+    /// A message that mixes a tool result with text is a prompt: the person
+    /// typed something, and 2039's reduction is only ever offered on the
+    /// turn where they did not.
+    ///
+    /// A pure function of the decoded request, with no reference to the
+    /// target protocol, which is why it is derived once at the translation
+    /// seam rather than by any codec.
+    pub fn turn_shape(&self) -> TurnShape {
+        let last_user = self
+            .messages
+            .iter()
+            .rev()
+            .find(|message| message.role == Role::User);
+        match last_user {
+            Some(message)
+                if !message.blocks.is_empty()
+                    && message
+                        .blocks
+                        .iter()
+                        .all(|block| matches!(block, Block::ToolResult { .. })) =>
+            {
+                TurnShape::ToolResume
+            }
+            _ => TurnShape::Prompt,
+        }
+    }
+}
+
+impl From<EffortLevel> for crate::routing::evidence::EffortLevel {
+    /// The wire ladder's word, as the ledger stores it — `crate::database`
+    /// migration 24's `effort_level`.
+    ///
+    /// An exhaustive match on purpose: a fifth [`EffortLevel`] must not
+    /// compile until somebody has decided what the ledger stores for it, and
+    /// `every_wire_effort_level_stores_and_reads_back_as_the_same_word`
+    /// below pins the four spellings themselves in lockstep.
+    fn from(level: EffortLevel) -> Self {
+        match level {
+            EffortLevel::Minimal => Self::Minimal,
+            EffortLevel::Low => Self::Low,
+            EffortLevel::Medium => Self::Medium,
+            EffortLevel::High => Self::High,
+        }
     }
 }
 
@@ -938,6 +996,140 @@ pub(super) mod tests {
             .expect_err("index 0 is not the open block");
         assert_eq!(refusal.field, "content_block_stop[0]");
         assert!(refusal.reason.contains("not the open one"));
+    }
+
+    /// The lockstep pin `crate::routing::evidence::EffortLevel`'s own doc
+    /// comment names: every word this wire ladder can produce stores as a
+    /// word the ledger reads back as the same level, and the ledger's
+    /// spelling is the wire's own (`as_openai_word`) rather than a second
+    /// table that could drift from it.
+    ///
+    /// The `for` list is exhaustive by construction: the `match` in
+    /// `From<EffortLevel> for evidence::EffortLevel` fails to compile if a
+    /// fifth variant appears, and this test fails if that fifth variant is
+    /// then given a spelling the ledger cannot read back.
+    #[test]
+    fn every_wire_effort_level_stores_and_reads_back_as_the_same_word() {
+        use crate::routing::evidence::EffortLevel as Stored;
+
+        for level in [
+            EffortLevel::Minimal,
+            EffortLevel::Low,
+            EffortLevel::Medium,
+            EffortLevel::High,
+        ] {
+            let stored = Stored::from(level);
+            assert_eq!(
+                stored.as_str(),
+                level.as_openai_word(),
+                "the ledger must store the same word this level is spelled with on the wire"
+            );
+            assert_eq!(
+                Stored::from_stored(stored.as_str()),
+                Some(stored),
+                "a word this build stored must be a word this build reads back"
+            );
+        }
+    }
+
+    /// `turn_shape` is `ToolResume` only for a last user message that is
+    /// *entirely* tool results — the three cases migration 24's column has
+    /// to keep apart.
+    #[test]
+    fn turn_shape_is_tool_resume_only_when_the_last_user_message_is_all_tool_results() {
+        let tool_result = |id: &str| Block::ToolResult {
+            tool_use_id: id.to_owned(),
+            content: "done".to_owned(),
+            is_error: false,
+        };
+        let request = |messages: Vec<Message>| Request {
+            model: "m".to_owned(),
+            max_tokens: None,
+            system: None,
+            messages,
+            tools: Vec::new(),
+            tool_choice: None,
+            parallel_tool_calls: None,
+            temperature: None,
+            top_p: None,
+            stop: Vec::new(),
+            stream: false,
+            user: None,
+            cache_requested: false,
+            effort: None,
+        };
+
+        // Every block of the last user message is a tool result — including
+        // when there are two of them, which is what a parallel tool call
+        // comes back as.
+        assert_eq!(
+            request(vec![
+                Message {
+                    role: Role::User,
+                    blocks: vec![Block::Text("go".to_owned())],
+                },
+                Message {
+                    role: Role::Assistant,
+                    blocks: vec![Block::ToolUse {
+                        id: "call_A".to_owned(),
+                        name: "Bash".to_owned(),
+                        input: Value::Null,
+                    }],
+                },
+                Message {
+                    role: Role::User,
+                    blocks: vec![tool_result("call_A"), tool_result("call_B")],
+                },
+            ])
+            .turn_shape(),
+            TurnShape::ToolResume
+        );
+
+        // A plain prompt.
+        assert_eq!(
+            request(vec![Message {
+                role: Role::User,
+                blocks: vec![Block::Text("hi".to_owned())],
+            }])
+            .turn_shape(),
+            TurnShape::Prompt
+        );
+
+        // One tool result and one line of text: the person typed something,
+        // so this is a prompt.
+        assert_eq!(
+            request(vec![Message {
+                role: Role::User,
+                blocks: vec![tool_result("call_A"), Block::Text("and also".to_owned())],
+            }])
+            .turn_shape(),
+            TurnShape::Prompt
+        );
+
+        // A user message with no blocks at all is a prompt, not a third word.
+        assert_eq!(
+            request(vec![Message {
+                role: Role::User,
+                blocks: Vec::new(),
+            }])
+            .turn_shape(),
+            TurnShape::Prompt
+        );
+
+        // No user message anywhere, and an assistant message whose blocks
+        // would otherwise qualify: still a prompt, because the rule asks
+        // about the last USER message.
+        assert_eq!(
+            request(vec![Message {
+                role: Role::Assistant,
+                blocks: vec![tool_result("call_A")],
+            }])
+            .turn_shape(),
+            TurnShape::Prompt
+        );
+
+        // No messages at all.
+        assert_eq!(request(Vec::new()).turn_shape(), TurnShape::Prompt);
     }
 
     #[test]

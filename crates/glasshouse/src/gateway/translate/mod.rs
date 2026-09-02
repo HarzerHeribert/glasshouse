@@ -756,6 +756,27 @@ pub(super) fn serve(
             );
         }
     };
+    // Migration 24's two request-derived columns, taken here and nowhere
+    // else: this is the only point in the gateway that holds a decoded
+    // request, and both are pure functions of it. `effort` is `None` when
+    // the harness asked for no thinking; `turn_shape` is always known once
+    // a request has decoded, because every request has a last user message
+    // or does not, and both answers are words.
+    let effort = request
+        .effort
+        .map(|effort| crate::routing::evidence::EffortLevel::from(effort.level()));
+    let turn_shape = Some(request.turn_shape());
+    // Every `Exchange` this function returns from here on carries them —
+    // the refusals below included, because a request that decoded and was
+    // then refused downstream is still a request whose effort and shape were
+    // read. `exchange` above (and the relay's own helper) leaves both `None`,
+    // which is what the paths *before* the decode must record.
+    let decoded = |outcome: Outcome, status: u16| Exchange {
+        effort,
+        turn_shape,
+        ..exchange(outcome, status, upstream, pair, route)
+    };
+
     // Observability for 2014's strip case: the harness asked for prompt
     // caching and this pairing's target has no equivalent to carry it to.
     // Never a refusal — the request is still served — just a per-exchange
@@ -777,10 +798,7 @@ pub(super) fn serve(
             StatusCode::BAD_REQUEST,
             "the translated request could not be addressed to the configured provider",
         );
-        return (
-            exchange(Outcome::Declined, 400, upstream, pair, route),
-            RateLimitHeaders::default(),
-        );
+        return (decoded(Outcome::Declined, 400), RateLimitHeaders::default());
     };
     let mut outbound = HttpRequest::builder()
         .method(ureq::http::Method::POST)
@@ -826,10 +844,7 @@ pub(super) fn serve(
             StatusCode::BAD_REQUEST,
             "the translated request could not be built for the configured provider",
         );
-        return (
-            exchange(Outcome::Declined, 400, upstream, pair, route),
-            RateLimitHeaders::default(),
-        );
+        return (decoded(Outcome::Declined, 400), RateLimitHeaders::default());
     };
 
     let response = match agent.run(outbound) {
@@ -842,7 +857,7 @@ pub(super) fn serve(
                 "the Glasshouse gateway could not reach the configured provider",
             );
             return (
-                exchange(Outcome::Unreachable { detail }, 502, upstream, pair, route),
+                decoded(Outcome::Unreachable { detail }, 502),
                 RateLimitHeaders::default(),
             );
         }
@@ -869,7 +884,7 @@ pub(super) fn serve(
                 first_byte_at,
                 framing: Some(framing),
                 tokens,
-                ..exchange(outcome, status, upstream, pair, route)
+                ..decoded(outcome, status)
             },
             quota.clone(),
         )
@@ -1324,6 +1339,12 @@ fn exchange(
         first_byte_at: None,
         framing: None,
         tokens: None,
+        // Migration 24's two: `None` here, because this helper serves the
+        // refusals that happen *before* a request has decoded and there is
+        // nothing to derive them from yet. `serve`'s own `decoded` closure
+        // overrides both on every return after the decode.
+        effort: None,
+        turn_shape: None,
     }
 }
 
@@ -1916,6 +1937,8 @@ mod tests {
                 first_byte_at: None,
                 framing: Some(framing),
                 tokens,
+                effort: None,
+                turn_shape: None,
             },
             RateLimitHeaders::default(),
         )

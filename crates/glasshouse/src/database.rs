@@ -128,9 +128,18 @@ pub(crate) const DATABASE_FILE_NAME: &str = "glasshouse.db";
 /// unrecognised stored word reads back as `None` rather than as an error
 /// (unlike `failure_class`), and
 /// [`crate::routing::burn`] for the only reader.
+/// Version 24 adds `routing_observations.session_id`, `.effort_level` and
+/// `.turn_shape` — capability map line 2019's *per-session* cache ratio and
+/// line 2039's shadow measurement, both of which need a gateway-written row
+/// to name the session it served. Three nullable `TEXT` columns with no
+/// `CHECK`, no `REFERENCES` and no index, migration 23's shape exactly. See
+/// the migration's own doc comment for each of those four choices and for
+/// why an unrecognised stored word reads back as `None`, and
+/// `docs/product/design-decisions.md`'s *A session identity on the routing
+/// evidence rows* for the identity itself.
 /// Later migrations are appended to [`MIGRATIONS`], and this constant moves
 /// with them.
-const SUPPORTED_SCHEMA_VERSION: i64 = 23;
+const SUPPORTED_SCHEMA_VERSION: i64 = 24;
 
 /// The `lifecycle_events.kind` values migration 5's `CHECK` constraint allows.
 ///
@@ -2393,6 +2402,74 @@ const MIGRATIONS: [&str; SUPPORTED_SCHEMA_VERSION as usize] = [
     "
     ALTER TABLE routing_observations ADD COLUMN task_class TEXT;
     ",
+    // 24: `routing_observations.session_id`, `.effort_level` and
+    // `.turn_shape` — capability map line 2019's *"show the per-session
+    // cache ratio beside the routing evidence"* and line 2039's shadow
+    // measurement, neither of which has a producer while this table cannot
+    // name the session an exchange belonged to. Designed before it was
+    // written: `docs/product/design-decisions.md`, *A session identity on
+    // the routing evidence rows — Cluster G's first column*.
+    //
+    // # Which identity, and which two facts beside it
+    //
+    // `sessions.id` — Glasshouse's own session id — and nothing else. Not
+    // the harness's `metadata.user_id`: carrying that would mean the relay
+    // reading a body it never reads (`crate::gateway::ingress`'s own
+    // `an_exchange_has_nowhere_to_put_a_body`), and it names an account this
+    // ledger has no business holding. Not `sessions.native_session_id`
+    // either: that column already resolves the harness-side mapping, and the
+    // Glasshouse id is the value `evaluation_observations.session_id`
+    // already keys by, so every join these columns exist for is on one value
+    // with no translation step.
+    //
+    // The other two are facts of the *request*, filled at the one seam that
+    // holds a decoded one — `crate::gateway::translate::serve` — and they
+    // ride here so that line 2039's shadow needs no second migration:
+    // `effort_level` is the four-word ladder
+    // `crate::gateway::translate::canonical::EffortRequest::level` reduces
+    // the harness's thinking request to, and `turn_shape` is *tool-resume*
+    // when the last user message's blocks are all tool results and *prompt*
+    // otherwise. A relayed exchange, whose body is never read, records
+    // `NULL` for both: unread, not absent.
+    //
+    // # What may write them
+    //
+    // `crate::gateway::session::SessionRouting::record_routing_observation`,
+    // once per exchange the gateway serves, from the id `main.rs`'s two
+    // launch doors hand it through `SessionRouting::serve_session` after the
+    // session record exists. A gateway nothing has told is a gateway serving
+    // no session, and its rows say so with `NULL` rather than an invented
+    // id. `main.rs::record_routing_latency`'s own row — written before the
+    // record exists — stays `NULL` and says why in its doc comment: it is a
+    // row about the routing decision, not about a served exchange.
+    //
+    // # `ADD COLUMN`, nullable, no `CHECK`, no `REFERENCES`, no index
+    //
+    // Migration 23's shape and its reasons. `NULL` backfills every existing
+    // row, which is the honest reading for a row written before a session
+    // could be named — "this build recorded none here", never "none". No
+    // `CHECK`: `effort_level` and `turn_shape` are Rust enums pinned by
+    // tests exactly as `task_class` is, and `session_id` is an opaque
+    // identifier with no enumerable vocabulary at all. No `REFERENCES`:
+    // migration 12's rule, and a routing row must outlive the deletion of
+    // the session it names, as the evaluation rows already do. No index: the
+    // readers are bounded window passes `routing_observations_by_route_time`
+    // already serves, and migration 15's closing note applies — measure
+    // before indexing.
+    //
+    // # An unrecognised word reads back as `None`
+    //
+    // Migration 23's rule, not migration 18's: both stored vocabularies are
+    // *bucketing* inputs to a ratio, and a row whose word this build does
+    // not recognise is exactly as informative as a row from before the
+    // column existed. Failing the whole row would let a future build's fifth
+    // effort word break this build's savings readout, which is worse than
+    // this build ignoring a bucket it never knew about.
+    "
+    ALTER TABLE routing_observations ADD COLUMN session_id TEXT;
+    ALTER TABLE routing_observations ADD COLUMN effort_level TEXT;
+    ALTER TABLE routing_observations ADD COLUMN turn_shape TEXT;
+    ",
 ];
 
 pub(crate) const PROJECT_ID_KEY: &str = "project_id";
@@ -2969,8 +3046,15 @@ mod tests {
     /// nothing indexes `last_seen_commit`, `extraction_trigger` or
     /// `entitlement` and none of the three carries a `CHECK`. Migration 23 is
     /// one statement for the same reason — nothing indexes `task_class` and
-    /// it carries no `CHECK`. Newest first, so 23 leads.
+    /// it carries no `CHECK`. Migration 24 is three for the same reason
+    /// again — nothing indexes `session_id`, `effort_level` or `turn_shape`
+    /// and none of the three carries a `CHECK` or a `REFERENCES`. Newest
+    /// first, so 24's three lead, in the reverse of the order they were
+    /// added.
     const UNDO_MIGRATIONS_ABOVE_THIRTEEN: &str = "
+        ALTER TABLE routing_observations DROP COLUMN turn_shape;
+        ALTER TABLE routing_observations DROP COLUMN effort_level;
+        ALTER TABLE routing_observations DROP COLUMN session_id;
         ALTER TABLE routing_observations DROP COLUMN task_class;
         ALTER TABLE sessions DROP COLUMN entitlement;
         ALTER TABLE memories DROP COLUMN extraction_trigger;
@@ -3205,6 +3289,9 @@ mod tests {
         // `duplicate column name` — `UNDO_MIGRATIONS_ABOVE_THIRTEEN`'s own
         // lesson.
         const UNDO_18: &str = "
+            ALTER TABLE routing_observations DROP COLUMN turn_shape;
+            ALTER TABLE routing_observations DROP COLUMN effort_level;
+            ALTER TABLE routing_observations DROP COLUMN session_id;
             ALTER TABLE routing_observations DROP COLUMN task_class;
             ALTER TABLE sessions DROP COLUMN entitlement;
             ALTER TABLE memories DROP COLUMN extraction_trigger;
@@ -3255,13 +3342,16 @@ mod tests {
             let columns = columns_of(&conn, "routing_observations");
             let mut expected = columns_at_17.clone();
             expected.push("failure_class".to_owned());
-            // Migration 23 appends `task_class` to the same table, so a
-            // forward run from 17 now lands two columns rather than one.
-            // Both are asserted by name and in order, which is the property
-            // this test was always about — migration 18 appended
-            // `failure_class` and rebuilt nothing.
+            // Migrations 23 and 24 append to the same table, so a forward
+            // run from 17 now lands five columns rather than one. All five
+            // are asserted by name and in order, which is the property this
+            // test was always about — migration 18 appended `failure_class`
+            // and rebuilt nothing.
             expected.push("task_class".to_owned());
-            assert_eq!(columns, expected, "exactly two columns, both appended");
+            expected.push("session_id".to_owned());
+            expected.push("effort_level".to_owned());
+            expected.push("turn_shape".to_owned());
+            assert_eq!(columns, expected, "exactly five columns, all appended");
         }
 
         // The pre-migration row reads as *unknown kind*, never as a class,
@@ -3342,6 +3432,9 @@ mod tests {
         use crate::routing::request::TaskClass;
 
         const UNDO_23: &str = "
+            ALTER TABLE routing_observations DROP COLUMN turn_shape;
+            ALTER TABLE routing_observations DROP COLUMN effort_level;
+            ALTER TABLE routing_observations DROP COLUMN session_id;
             ALTER TABLE routing_observations DROP COLUMN task_class;
             DELETE FROM schema_migrations WHERE version >= 23;
         ";
@@ -3381,15 +3474,20 @@ mod tests {
             "the launch must have applied migration 23"
         );
         assert_eq!(
-            SUPPORTED_SCHEMA_VERSION, 23,
-            "a fresh database reports the version this migration ships"
+            SUPPORTED_SCHEMA_VERSION, 24,
+            "a fresh database reports the version the newest migration ships"
         );
         {
             let conn = Connection::open(&db_path).unwrap();
             let columns = columns_of(&conn, "routing_observations");
             let mut expected = columns_at_22.clone();
             expected.push("task_class".to_owned());
-            assert_eq!(columns, expected, "exactly one column, appended");
+            // Migration 24's own three ride along on this bootstrap, in the
+            // order it adds them; 23's column is still the first appended.
+            expected.push("session_id".to_owned());
+            expected.push("effort_level".to_owned());
+            expected.push("turn_shape".to_owned());
+            assert_eq!(columns, expected, "23's column, then 24's three, appended");
         }
 
         // The pre-migration row names no class; a row written now carries
@@ -3495,6 +3593,199 @@ mod tests {
         assert_eq!(schema_version(&db_path), 22);
     }
 
+    /// Migration proof for 24: a version-23 database with a row written the
+    /// way a version-23 build wrote them opens, migrates to 24 adding
+    /// exactly three columns in the order the migration names them, reads
+    /// that pre-migration row back with `NULL` in all three, records a
+    /// stamped row through the real writer, reads an unrecognised
+    /// `effort_level` and an unrecognised `turn_shape` back as `None`
+    /// **rather than as an error** (migration 23's rule, not 18's), and the
+    /// undo takes the whole schema back to exactly what it was — every
+    /// table, index and trigger, the two project-scope triggers included.
+    ///
+    /// One connection at a time throughout (practice §65).
+    #[test]
+    fn migration_24_adds_the_session_columns_and_undoes_cleanly() {
+        use crate::routing::evidence::{
+            EffortLevel, EvidenceLedger, NewObservation, ObservationQuery, Outcome, TurnShape,
+        };
+
+        const UNDO_24: &str = "
+            ALTER TABLE routing_observations DROP COLUMN turn_shape;
+            ALTER TABLE routing_observations DROP COLUMN effort_level;
+            ALTER TABLE routing_observations DROP COLUMN session_id;
+            DELETE FROM schema_migrations WHERE version >= 24;
+        ";
+
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let db_path = fixture.runtime.database_path();
+        let project_id = stored_project_id(&db_path);
+
+        // Back to 23, with a row written the way a version-23 build wrote
+        // them — no session, no effort and no shape to name.
+        let (schema_at_23, columns_at_23) = {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(UNDO_24).unwrap();
+            conn.execute(
+                "INSERT INTO routing_observations (project_id, observed_at, provider, model, outcome)
+                 VALUES (?1, 1, 'pre-migration', 'm', 'succeeded')",
+                [&project_id],
+            )
+            .unwrap();
+            (
+                whole_schema(&conn),
+                columns_of(&conn, "routing_observations"),
+            )
+        };
+        assert_eq!(schema_version(&db_path), 23, "the rollback must land on 23");
+        for column in ["session_id", "effort_level", "turn_shape"] {
+            assert!(
+                !columns_at_23.iter().any(|held| held == column),
+                "{columns_at_23:?}"
+            );
+        }
+
+        // Forward: an ordinary bootstrap, exactly as a real upgrade happens.
+        let migrated = fixture.rebootstrap().unwrap();
+        assert_eq!(
+            schema_version(&migrated.database_path()),
+            SUPPORTED_SCHEMA_VERSION,
+            "the launch must have applied migration 24"
+        );
+        assert_eq!(
+            SUPPORTED_SCHEMA_VERSION, 24,
+            "a fresh database reports the version this migration ships"
+        );
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            let columns = columns_of(&conn, "routing_observations");
+            let mut expected = columns_at_23.clone();
+            expected.push("session_id".to_owned());
+            expected.push("effort_level".to_owned());
+            expected.push("turn_shape".to_owned());
+            assert_eq!(
+                columns, expected,
+                "exactly three columns, appended in order"
+            );
+        }
+
+        // The pre-migration row names none of the three; a row written now
+        // carries what it was given.
+        {
+            let ledger = EvidenceLedger::open(&migrated).unwrap();
+            let query = |provider| ObservationQuery {
+                provider,
+                model: "m",
+                route: None,
+                harness: None,
+            };
+            let pre = ledger.recent(query("pre-migration"), 1).unwrap();
+            assert_eq!(pre.len(), 1);
+            assert_eq!(
+                pre[0].session_id, None,
+                "a row from before the column existed names no session, not an invented id"
+            );
+            assert_eq!(pre[0].effort_level, None);
+            assert_eq!(pre[0].turn_shape, None);
+
+            ledger
+                .record(
+                    NewObservation::new("post-migration", "m")
+                        .with_outcome(Outcome::Succeeded)
+                        .with_session_id(Some("ses_planted"))
+                        .with_effort_level(Some(EffortLevel::Medium))
+                        .with_turn_shape(Some(TurnShape::ToolResume)),
+                    2,
+                )
+                .unwrap();
+            let post = ledger.recent(query("post-migration"), 1).unwrap();
+            assert_eq!(post[0].session_id.as_deref(), Some("ses_planted"));
+            assert_eq!(post[0].effort_level, Some(EffortLevel::Medium));
+            assert_eq!(post[0].turn_shape, Some(TurnShape::ToolResume));
+        }
+
+        // Words this build does not recognise read back as *nothing
+        // recorded*, and — the property that separates these columns from
+        // `failure_class` — the row itself still reads. An `UnknownValue`
+        // here would let a future build's fifth effort word break this
+        // build's savings readout.
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute(
+                "INSERT INTO routing_observations
+                     (project_id, observed_at, provider, model, outcome,
+                      session_id, effort_level, turn_shape)
+                 VALUES (?1, 3, 'future-build', 'm', 'succeeded',
+                         'ses_future', 'transcendent', 'interpretive dance')",
+                [&project_id],
+            )
+            .unwrap();
+        }
+        {
+            let ledger = EvidenceLedger::open(&migrated).unwrap();
+            let future = ledger
+                .recent(
+                    ObservationQuery {
+                        provider: "future-build",
+                        model: "m",
+                        route: None,
+                        harness: None,
+                    },
+                    1,
+                )
+                .unwrap();
+            assert_eq!(future.len(), 1, "the row reads, it does not error");
+            assert_eq!(future[0].effort_level, None);
+            assert_eq!(future[0].turn_shape, None);
+            assert_eq!(
+                future[0].session_id.as_deref(),
+                Some("ses_future"),
+                "the session id has no vocabulary to fail against and is returned as stored"
+            );
+            assert_eq!(future[0].outcome, Some(Outcome::Succeeded));
+        }
+
+        // Project isolation survives 24 → 23 → 24.
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            let refused = conn.execute(
+                "INSERT INTO routing_observations (project_id, observed_at, provider, model)
+                 VALUES ('another-project', 4, 'p', 'm')",
+                [],
+            );
+            assert!(
+                refused.is_err(),
+                "the foreign-project trigger must still refuse after 23 → 24"
+            );
+        }
+
+        // Back again: the whole schema is what it was at 23, byte for byte,
+        // and the rows are still there.
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            conn.execute_batch(UNDO_24).unwrap();
+            assert_eq!(whole_schema(&conn), schema_at_23);
+            assert_eq!(columns_of(&conn, "routing_observations"), columns_at_23);
+            let rows: i64 = conn
+                .query_row("SELECT COUNT(*) FROM routing_observations", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(rows, 3, "dropping the columns drops no rows");
+            let refused = conn.execute(
+                "INSERT INTO routing_observations (project_id, observed_at, provider, model)
+                 VALUES ('another-project', 5, 'p', 'm')",
+                [],
+            );
+            assert!(
+                refused.is_err(),
+                "the foreign-project trigger must still refuse after 24 → 23"
+            );
+        }
+        assert_eq!(schema_version(&db_path), 23);
+    }
+
     /// Migration proof for 19: a version-18 database opens, migrates to 19
     /// adding exactly two tables with their indexes and triggers, accepts an
     /// assumption and a transition through the real writer, refuses an edit
@@ -3522,6 +3813,9 @@ mod tests {
         // fails with `duplicate column name` instead of proving anything about
         // 19. A migration 21 owes this constant its own line.
         const UNDO_19: &str = "
+            ALTER TABLE routing_observations DROP COLUMN turn_shape;
+            ALTER TABLE routing_observations DROP COLUMN effort_level;
+            ALTER TABLE routing_observations DROP COLUMN session_id;
             ALTER TABLE routing_observations DROP COLUMN task_class;
             ALTER TABLE sessions DROP COLUMN entitlement;
             ALTER TABLE memories DROP COLUMN extraction_trigger;
@@ -3703,6 +3997,9 @@ mod tests {
         use crate::session::{NewSession, ProjectSessions, SessionId, SessionPresentation};
 
         const UNDO_20: &str = "
+            ALTER TABLE routing_observations DROP COLUMN turn_shape;
+            ALTER TABLE routing_observations DROP COLUMN effort_level;
+            ALTER TABLE routing_observations DROP COLUMN session_id;
             ALTER TABLE routing_observations DROP COLUMN task_class;
             ALTER TABLE sessions DROP COLUMN entitlement;
             ALTER TABLE memories DROP COLUMN extraction_trigger;
@@ -3823,6 +4120,9 @@ mod tests {
         use crate::session::{NewSession, ProjectSessions};
 
         const UNDO: &str = "
+            ALTER TABLE routing_observations DROP COLUMN turn_shape;
+            ALTER TABLE routing_observations DROP COLUMN effort_level;
+            ALTER TABLE routing_observations DROP COLUMN session_id;
             ALTER TABLE routing_observations DROP COLUMN task_class;
             ALTER TABLE sessions DROP COLUMN entitlement;
             ALTER TABLE memories DROP COLUMN extraction_trigger;
@@ -3999,6 +4299,9 @@ mod tests {
         use crate::session::{NewSession, ProjectSessions};
 
         const UNDO: &str = "
+            ALTER TABLE routing_observations DROP COLUMN turn_shape;
+            ALTER TABLE routing_observations DROP COLUMN effort_level;
+            ALTER TABLE routing_observations DROP COLUMN session_id;
             ALTER TABLE routing_observations DROP COLUMN task_class;
             ALTER TABLE sessions DROP COLUMN entitlement;
             DELETE FROM schema_migrations WHERE version >= 22;
@@ -4040,8 +4343,8 @@ mod tests {
             "the launch must have applied the entitlement migration"
         );
         assert_eq!(
-            SUPPORTED_SCHEMA_VERSION, 23,
-            "a fresh database reports the version this migration ships"
+            SUPPORTED_SCHEMA_VERSION, 24,
+            "a fresh database reports the version the newest migration ships"
         );
         {
             let conn = Connection::open(&db_path).unwrap();
@@ -4146,7 +4449,10 @@ mod tests {
             // **every** migration above the version it claims, or the
             // re-run fails — `UNDO_MIGRATIONS_ABOVE_THIRTEEN`'s own lesson.
             conn.execute_batch(
-                "ALTER TABLE routing_observations DROP COLUMN task_class;
+                "ALTER TABLE routing_observations DROP COLUMN turn_shape;
+                 ALTER TABLE routing_observations DROP COLUMN effort_level;
+                 ALTER TABLE routing_observations DROP COLUMN session_id;
+                 ALTER TABLE routing_observations DROP COLUMN task_class;
                  ALTER TABLE sessions DROP COLUMN entitlement;
                 ALTER TABLE memories DROP COLUMN extraction_trigger;
                  ALTER TABLE sessions DROP COLUMN last_seen_commit;

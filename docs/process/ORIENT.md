@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1219 / 1347 mandatory capabilities (90%)** — 128 open across 37 phases.
+**1220 / 1347 mandatory capabilities (91%)** — 127 open across 37 phases.
 
 ## Where the work is
 
@@ -35,6 +35,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 35A | Candidate generation | **1** | 10 | `1504` |
 | Phase 37 | Basic session-aware router | **1** | 10 | `1590` |
 | Phase 39 | Gateway-backed disposable jobs | **1** | 8 | `1614` |
+| Phase 58 | Context economy: cache-stable translation, entitlement-aware reduction, and a measured token budget | **1** | 14 | `2008` |
 | Phase 9 | Antigravity adapter | **2** | 5 | `330` |
 | Phase 20 | Minimal durable project memory | **2** | 16 | `805` |
 | Phase 21F | Memory retrieval quality | **2** | 9 | `927` |
@@ -43,7 +44,6 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 33 | Resource health | **2** | 13 | `1309` |
 | Phase 38 | Quota-preserving routing | **2** | 5 | `1604` |
 | Phase 53 | Criteria before adding graph storage | **2** | 3 | `1872` |
-| Phase 58 | Context economy: cache-stable translation, entitlement-aware reduction, and a measured token budget | **2** | 13 | `2008` |
 | Phase 28 | File-aware memory lookup | **3** | 2 | `1137` |
 | Phase 32G | Provider-aware request-cost estimation | **3** | 7 | `1296` |
 | Phase 33A | Routing evidence ledger | **3** | 12 | `1327` |
@@ -127,6 +127,10 @@ these unwrapped.
 
 - **1625** ☐ Use disposable jobs for classification, memory extraction, reranking, and other bounded support tasks.
 
+### Phase 58 — Context economy: cache-stable translation, entitlement-aware reduction, and a measured token budget  (1 open, 14 closed)
+
+- **2039** ☐ Evaluate a clamp-only per-turn effort reduction on translated pairings for turns that only resume after a tool result, never raising effort and never touching the byte-for-byte relay, before offering it.
+
 ### Phase 9 — Antigravity adapter  (2 open, 5 closed)
 
 - **340** ☐ Integrate structured Antigravity lifecycle events where the CLI exposes them.
@@ -166,11 +170,6 @@ these unwrapped.
 
 - **1879** ☐ Do not add a graph database solely to visualize project memory.
 - **1882** ☐ Evaluate whether SQLite relations are insufficient before adopting a dedicated graph database.
-
-### Phase 58 — Context economy: cache-stable translation, entitlement-aware reduction, and a measured token budget  (2 open, 13 closed)
-
-- **2019** ☐ Measure prompt-cache read and creation tokens per exchange where the provider reports them, and show the per-session cache ratio beside the routing evidence.
-- **2039** ☐ Evaluate a clamp-only per-turn effort reduction on translated pairings for turns that only resume after a tool result, never raising effort and never touching the byte-for-byte relay, before offering it.
 
 ### Phase 28 — File-aware memory lookup  (3 open, 2 closed)
 
