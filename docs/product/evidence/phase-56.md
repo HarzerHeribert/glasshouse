@@ -905,3 +905,78 @@ warm affinity (569) and decaying as observed evidence accumulates (1923,
 with two enabled profiles of one harness was observed; the architecture
 permits it and the package's own acceptance test is the first to exercise it
 end to end.
+
+---
+
+# Cause 1 — CLOSED 2026-09-02 (`GH-DECOUPLE-PROOFS`, Green, tests only): 1945, 1955
+
+Three tests, two KILLED mutations, zero production lines. The worker edited
+`main.rs`'s test module before claiming the declared co-edit, was told
+mid-turn, claimed, read (no peer), and declared done — recorded because §77's
+claim-before-edit is what the hook now enforces.
+
+### Allow a user to choose the coding harness for a task independently of which provider, subscription, or model serves it. (line 1945)
+
+Contract: Given a launch profile naming any harness and any backend/model combination the user configured, when Glasshouse resolves a launch, the harness selected and the provider/subscription/model that serves it are chosen independently, neither constraining the other beyond the profile's own stored harness match.
+
+State: **COMPLETE** — ruled 2026-09-02. Proof-only. Sampled one harness with `Native` beside `DirectProvider`; the resolver is per-name and uniform, so the sampling is a limit, not a gap. The destination half drives the real `routing_destinations`.
+
+Production evidence:
+- `crates/glasshouse/src/config/mod.rs:5070-5107` — `EffectiveConfig::launch_profile`
+- `crates/glasshouse/src/main.rs:1521-1634` — `destination_backend`
+- `crates/glasshouse/src/main.rs:1033` — `routing_destinations`
+
+Regression evidence:
+- `decoupled_profiles::line_1945_two_profiles_of_one_harness_resolve_independent_backend_and_model`
+- `tests::routing_destinations_1945_carries_each_profiles_own_backend_and_model (main.rs)`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| config/mod.rs launch_profile: replace `if name == crate::profile::NATIVE_PROFILE_NAME {` (in its own function signature context) with `if true {` | `collapse-profile-lookup` | **killed** | `decoupled_profiles::line_1945_two_profiles_of_one_harness_resolve_independent_backend_and_model` |
+
+> collapse-profile-lookup observed: assertion `left == right` failed (decoupled_profiles.rs:44:5)
+
+Recorded scope limits — stated by the worker, not discovered later:
+- sampled one harness and two backend kinds (Native, DirectProvider); does not exercise GlasshouseGateway in the same candidate set
+
+---
+
+### Keep the decoupling opt-in per launch profile, so an existing profile keeps its native pairing until the user changes it. (line 1955)
+
+Contract: Given an existing launch profile with no explicit backend/model configured, when Glasshouse resolves it for a launch, it keeps its native pairing regardless of what other profiles are added or enabled, until the user edits that profile's own entry.
+
+State: **COMPLETE** — ruled 2026-09-02. Proof-only. The adversarial case the census named — a config table literally called `native` — is the test's own assertion, and the mutation that removes the short-circuit is KILLED by it.
+
+Production evidence:
+- `crates/glasshouse/src/config/mod.rs:5075-5079` — `EffectiveConfig::launch_profile (native short-circuit)`
+- `crates/glasshouse/src/config/mod.rs:5082-5089` — `same fn, name-keyed map lookup`
+
+Regression evidence:
+- `decoupled_profiles::line_1955_native_is_unshadowable_and_existing_profiles_survive_new_ones`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| config/mod.rs launch_profile: delete the `if name == NATIVE_PROFILE_NAME { return Ok(Layered::new(LaunchProfile::native(harness), Layer::Default)); }` block, falling straight into the name-keyed lookup | `remove-native-shortcircuit` | **killed** | `decoupled_profiles::line_1955_native_is_unshadowable_and_existing_profiles_survive_new_ones` |
+
+> remove-native-shortcircuit observed: assertion `left == right` failed: a configured [profiles.native] table must never shadow the built-in native profile (decoupled_profiles.rs:125:5)
+
+Recorded scope limits — stated by the worker, not discovered later:
+- tested a user-layer [profiles.native] shadow only, not a project-layer one; the short-circuit runs before either layer is consulted so the code path is identical
+
+---
+
+## REVIEW — the orchestrator owes an answer to each of these
+
+This section is the point of the generator. Everything above is the
+worker's facts, transcribed. Nothing below is decided.
+
+- **1945** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
+- **1955** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
+
+Gates the worker ran (re-run the decisive ones yourself):
+- cargo test -p glasshouse --test decoupled_profiles: test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+- cargo test -p glasshouse --bin glasshouse routing_destinations_1945: test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 65 filtered out
+- cargo test -p glasshouse --lib config::: test result: ok. 96 passed; 0 failed; 0 ignored; 0 measured; 1811 filtered out
+- cargo clippy -p glasshouse --all-targets --all-features -- -D warnings: clean
+- scripts/blast-radius.sh --targeted (no path arg, both changed files traced): cargo check --tests clean; cargo test --test decoupled_profiles ok (2 passed); --targeted skipped 69 full-trace targets (expected, fast gate); cargo doc --no-deps clean; every traced target passed
+

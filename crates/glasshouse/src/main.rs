@@ -16140,4 +16140,69 @@ mod tests {
                 .collect::<Vec<_>>()
         );
     }
+
+    /// Map line 1945's destination-carrying half: two enabled launch profiles
+    /// of one harness, differing in backend and model, each yield their own
+    /// fresh destination — `routing_destinations` never collapses them onto
+    /// one backend or one model.
+    ///
+    /// Mutation target: make `EffectiveConfig::launch_profile` return the
+    /// native profile for every name (collapse the lookup) → this test fails
+    /// because both fresh destinations would carry the native backend.
+    #[test]
+    fn routing_destinations_1945_carries_each_profiles_own_backend_and_model() {
+        let fixture = CliFixture::new();
+        let harness = glasshouse::integrations::IntegrationId::ClaudeCode;
+
+        let mut user = UserConfig::default();
+
+        let mut native_profile = glasshouse::config::ProfileConfig::new(harness);
+        native_profile.set_model(Some("claude-native-model".to_owned()));
+        user.profiles_mut().set("alpha-native", native_profile);
+
+        let mut direct_profile = glasshouse::config::ProfileConfig::new(harness);
+        direct_profile.set_backend(glasshouse::config::ProfileBackend::DirectProvider {
+            provider: "openrouter".to_owned(),
+        });
+        direct_profile.set_model(Some("some/other-model".to_owned()));
+        user.profiles_mut().set("beta-direct", direct_profile);
+
+        let effective = EffectiveConfig::new(&user, None);
+
+        let destinations = routing_destinations(
+            &fixture.runtime,
+            &effective,
+            harness,
+            DestinationScope::Everything,
+            None,
+        )
+        .unwrap();
+
+        let alpha = destinations
+            .iter()
+            .find(|d| d.is_fresh() && d.launch_profile() == "alpha-native")
+            .expect("the native-backed profile must offer its own fresh destination");
+        assert_eq!(alpha.backend().provider(), harness.slug());
+        assert_eq!(
+            alpha.backend().model(),
+            &glasshouse::routing::AssignedModel::Named("claude-native-model".to_owned())
+        );
+
+        let beta = destinations
+            .iter()
+            .find(|d| d.is_fresh() && d.launch_profile() == "beta-direct")
+            .expect("the direct-provider profile must offer its own fresh destination");
+        assert_eq!(beta.backend().provider(), "openrouter");
+        assert_eq!(
+            beta.backend().model(),
+            &glasshouse::routing::AssignedModel::Named("some/other-model".to_owned())
+        );
+
+        assert_ne!(
+            alpha.backend(),
+            beta.backend(),
+            "two profiles of the same harness must resolve to two independent destinations, \
+             never collapsed onto one backend"
+        );
+    }
 }
