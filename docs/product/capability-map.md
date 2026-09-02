@@ -528,7 +528,7 @@ Fixed architectural requirements
 - Free capacity may back an interactive profile only when the selected installed harness, protocol, and tool semantics remain compatible.
 
 ☑ Allow provider instances to mark selected models as free-tier or zero-marginal-cost resources.
-☐ Track request-pool limits separately from token-priced limits when a provider exposes request quotas.
+☑ Track request-pool limits separately from token-priced limits when a provider exposes request quotas.
 ☑ Track per-model free-tier health independently when a router exposes multiple free models.
 ☑ Prefer free models for bounded Glasshouse support work such as classification, memory extraction, and reranking when quality is sufficient.
 ☑ Allow explicitly configured free models such as Nemotron variants to participate in disposable-job routing.
@@ -1299,7 +1299,7 @@ Phase 32G — Provider-aware request-cost estimation
 ☑ Estimate the marginal input cost of resuming a cold existing session when context size is known or approximated.
 ☐ Estimate cached-input cost separately from uncached-input cost when provider pricing supports caching.
 ☐ Estimate expected output cost from task tier and recent comparable tasks when useful.
-☐ Estimate request-pool cost for free providers whose scarce unit is requests rather than tokens.
+☑ Estimate request-pool cost for free providers whose scarce unit is requests rather than tokens.
 ☐ Estimate local compute cost qualitatively through latency and occupancy instead of pretending local tokens are financially free of all cost.
 ☑ Include bootstrap context, project memory, checkpoints, and likely repository reads in fresh-session cost estimates when possible.
 ☑ Treat unknown pricing as unknown instead of assigning a fake zero cost.

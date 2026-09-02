@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1189 / 1332 mandatory capabilities (89%)** — 143 open across 41 phases.
+**1191 / 1332 mandatory capabilities (89%)** — 141 open across 40 phases.
 
 ## Where the work is
 
@@ -23,7 +23,6 @@ closures are usually at the top. Open the map at the line number given.
 | phase | title | open | closed | map line |
 |---|---|---|---|---|
 | Phase 9H | Sticky gateway routing for harness-backed interactive sessions | **1** | 13 | `501` |
-| Phase 9I | Free-pool routing | **1** | 13 | `523` |
 | Phase 15 | Orchestrator wake-up flow | **1** | 7 | `731` |
 | Phase 21K | Assumption-aware implementation guardrails | **1** | 42 | `992` |
 | Phase 27 | Context injection | **1** | 10 | `1118` |
@@ -47,11 +46,11 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 38 | Quota-preserving routing | **2** | 5 | `1604` |
 | Phase 53 | Criteria before adding graph storage | **2** | 3 | `1872` |
 | Phase 28 | File-aware memory lookup | **3** | 2 | `1137` |
+| Phase 32G | Provider-aware request-cost estimation | **3** | 7 | `1296` |
 | Phase 33A | Routing evidence ledger | **3** | 12 | `1327` |
 | Phase 33C | Failure, quota, and route correlation | **3** | 12 | `1362` |
 | Phase 34C | Automatic routing-model selection | **3** | 10 | `1429` |
 | Phase 21E | Decision ladder and conflict handling | **4** | 8 | `907` |
-| Phase 32G | Provider-aware request-cost estimation | **4** | 6 | `1296` |
 | Phase 56 | Harness–subscription decoupling: choose the harness, route the subscription and model | **4** | 8 | `1941` |
 | Phase 24 | Memory reranking | **5** | 1 | `1082` |
 | Phase 31 | Compaction-aware behavior | **5** | 2 | `1167` |
@@ -64,13 +63,13 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 33B | Reliability-adjusted agent performance | **10** | 4 | `1345` |
 | Phase 51 | Evaluation hooks | **25** | 12 | `1818` |
 
-**Fully closed (66):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 7, Phase 8, Phase 9A, Phase 9B, Phase 9C, Phase 9D, Phase 9F, Phase 9G, Phase 9J, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 16, Phase 17, Phase 18, Phase 19, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 21H, Phase 21I, Phase 21J, Phase 22, Phase 23, Phase 25, Phase 26, Phase 29, Phase 32, Phase 32B, Phase 34, Phase 34A, Phase 34D, Phase 34F, Phase 35, Phase 35C, Phase 35D, Phase 36, Phase 40, Phase 41, Phase 42, Phase 43, Phase 44, Phase 45, Phase 46, Phase 48, Phase 49, Phase 50, Phase 54, Phase 56A, Phase 57.
+**Fully closed (67):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 7, Phase 8, Phase 9A, Phase 9B, Phase 9C, Phase 9D, Phase 9F, Phase 9G, Phase 9I, Phase 9J, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 16, Phase 17, Phase 18, Phase 19, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 21H, Phase 21I, Phase 21J, Phase 22, Phase 23, Phase 25, Phase 26, Phase 29, Phase 32, Phase 32B, Phase 34, Phase 34A, Phase 34D, Phase 34F, Phase 35, Phase 35C, Phase 35D, Phase 36, Phase 40, Phase 41, Phase 42, Phase 43, Phase 44, Phase 45, Phase 46, Phase 48, Phase 49, Phase 50, Phase 54, Phase 56A, Phase 57.
 
 ## The nearly-finished phases, in full
 
 Every phase with **three or fewer** open lines, quoted verbatim. These are
 where a single package finishes a phase, so they are listed here and the
-other ~98 open lines are not.
+other ~94 open lines are not.
 
 For any other phase: `scripts/discover.py --phase <id>` prints its open
 lines and evidence together. **Do not open the 178 KB map to read them.**
@@ -82,10 +81,6 @@ these unwrapped.
 ### Phase 9H — Sticky gateway routing for harness-backed interactive sessions  (1 open, 13 closed)
 
 - **514** ☐ Allow an explicit session migration to create a new provider/model assignment at a task boundary.
-
-### Phase 9I — Free-pool routing  (1 open, 13 closed)
-
-- **531** ☐ Track request-pool limits separately from token-priced limits when a provider exposes request quotas.
 
 ### Phase 15 — Orchestrator wake-up flow  (1 open, 7 closed)
 
@@ -189,6 +184,12 @@ these unwrapped.
 - **1139** ☐ Track file paths explicitly referenced by durable memories when extraction can identify them reliably.
 - **1141** ☐ Prefer constraints, decisions, and failed approaches when retrieving memory for an intended code edit.
 - **1142** ☐ Keep file-aware retrieval advisory and never treat stale memory as stronger evidence than the current source code.
+
+### Phase 32G — Provider-aware request-cost estimation  (3 open, 7 closed)
+
+- **1300** ☐ Estimate cached-input cost separately from uncached-input cost when provider pricing supports caching.
+- **1301** ☐ Estimate expected output cost from task tier and recent comparable tasks when useful.
+- **1303** ☐ Estimate local compute cost qualitatively through latency and occupancy instead of pretending local tokens are financially free of all cost.
 
 ### Phase 33A — Routing evidence ledger  (3 open, 12 closed)
 

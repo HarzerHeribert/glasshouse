@@ -374,3 +374,50 @@ Recorded scope limits — stated by the worker, not discovered later:
 ---
 
 ---
+
+---
+
+## 1302 — CLOSED 2026-09-02 (`GH-POOL-ALLOWANCE`, Amber, Sonnet high): the HELD entry above, lifted
+
+`main.rs::observed_provider_health` now takes `effective`, gathers the same
+telemetry `routing_destinations` reads, and per destination: a `Measured`
+remaining-requests reading → `FreePool::record_pool` with the provider's own
+limit, remaining and `seconds_until_reset` (positive only, never guessed); else
+a `pricing.toml` entry for a `Cost::Metered` pair → `declare_token_priced`;
+else untouched. The packet named a private accessor; the worker used the
+public one a layer up and said so. 363 lines, one file.
+
+### Estimate request-pool cost for free providers whose scarce unit is requests rather than tokens. (line 1302)
+
+Contract: Given a destination whose allowance is a request pool, when Glasshouse ranks it, it prices the scarcity of that pool's requests from the persisted burn rate and remaining count as a qualitative cost, saying so -- while contributing nothing, and saying so, for a token-priced allowance, for a pool with no burn rate, and whenever the exhaustion-forecast term is already active for the same resource, so one forecast is never priced twice.
+
+State: **COMPLETE** — ruled 2026-09-02, lifting this morning's HELD. The allowance now has a producer on the shipped path: `observed_provider_health`, the one function behind all three `RouterInputs.health` builders, records the provider's own limit, remaining and reset from the same `observed_capacity` reading `destination_capacity` uses, and declares a priced pair token-priced. The first acceptance test drives the real `routing_destinations` → `observed_provider_health` → `session_router().choose()` chain from a stored quota reading and reads a non-zero `request-pool cost` term back; both `skip-state-update` mutations are KILLED.
+
+Production evidence:
+- `crates/glasshouse/src/main.rs` — `observed_provider_health`
+- `crates/glasshouse/src/routing/free.rs` — `FreePool::record_pool (now has a production caller)`
+- `crates/glasshouse/src/routing/free.rs` — `FreePool::declare_token_priced (now has a production caller)`
+- `crates/glasshouse/src/routing/session.rs` — `request_pool_cost (unchanged; now reachable in a non-inert state)`
+
+Regression evidence:
+- `tests::pool_allowance_1302_531_a_measured_remaining_requests_becomes_a_request_pool_and_prices_the_term`
+- `tests::pool_allowance_1302_531_a_pricing_toml_entry_with_no_quota_reading_becomes_token_priced`
+- `tests::pool_allowance_1302_531_neither_signal_leaves_the_pool_unknown`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| health.pool.record_pool(credential, &PoolReading { limit, remaining, resets_in }, now); -> let _ = (credential, limit, remaining, resets_in, now); | `skip-state-update` | **killed** | `tests::pool_allowance_1302_531_a_measured_remaining_requests_becomes_a_request_pool_and_prices_the_term` |
+| health.pool.declare_token_priced(credential); -> let _ = credential; | `skip-state-update` | **killed** | `tests::pool_allowance_1302_531_a_pricing_toml_entry_with_no_quota_reading_becomes_token_priced` |
+
+> skip-state-update observed: panicked at crates/glasshouse/src/main.rs:16692:17: assertion `left == right` failed: the provider's own limit, nothing derived
+
+> skip-state-update observed: panicked at crates/glasshouse/src/main.rs:16796:9: assertion `left == right` failed: a priced pair with no quota reading must declare token-priced, never a pool
+
+Recorded scope limits — stated by the worker, not discovered later:
+- resets_in does not distinguish a rolling reset from a calendar one; both feed the same field
+- provider classification for the telemetry/price lookup is by Backend::provider() string identity, which could theoretically collide with a harness slug or the gateway's fixed label
+- no exercise beyond direct FreePool/CapacityState construction from a real cache file and a real ledger -- no live gateway response in the loop
+
+---
+
+---

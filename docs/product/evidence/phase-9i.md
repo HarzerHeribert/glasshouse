@@ -141,3 +141,42 @@ by unit tests, and unexercised.
 Recorded so the next reader does not repeat the path: mechanism present, tests
 present, mutation killed — and still not closeable, because the caller check is
 the one that decides.
+
+---
+
+## 531 — CLOSED 2026-09-02 (`GH-POOL-ALLOWANCE`): the refusal's producer and consumer both exist now
+
+See `phase-32g.md`'s entry of the same day for the mechanism; the consumer,
+`routing/session.rs::request_pool_cost`, landed in `e12c73e`.
+
+### Track request-pool limits separately from token-priced limits when a provider exposes request quotas. (line 531)
+
+Contract: Track request-pool limits separately from token-priced limits when a provider exposes request quotas.
+
+State: **COMPLETE** — ruled 2026-09-02. The 2026-08-29 refusal named the missing caller and consumer exactly: nothing distinguished a request pool from a token-priced allowance and nothing consumed the distinction. Both exist now — the pool is recorded from the provider's exposed request quota, separately from the token-priced declaration the price table drives, and `request_pool_cost` behaves differently for the two. The line's *when a provider exposes request quotas* is the `Measured` check; a provider that exposes none leaves `unknown_pool()`, pinned by the third test.
+
+Production evidence:
+- `crates/glasshouse/src/main.rs` — `observed_provider_health`
+- `crates/glasshouse/src/routing/free.rs` — `FreePool::record_pool (now has a production caller)`
+- `crates/glasshouse/src/routing/free.rs` — `FreePool::declare_token_priced (now has a production caller)`
+- `crates/glasshouse/src/routing/free.rs` — `Allowance::record (early-returns for a TokenPriced allowance; phase-9i.md's own KILLED mutation, unchanged)`
+
+Regression evidence:
+- `tests::pool_allowance_1302_531_a_measured_remaining_requests_becomes_a_request_pool_and_prices_the_term`
+- `tests::pool_allowance_1302_531_a_pricing_toml_entry_with_no_quota_reading_becomes_token_priced`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| health.pool.record_pool(credential, &PoolReading { limit, remaining, resets_in }, now); -> let _ = (credential, limit, remaining, resets_in, now); | `skip-state-update` | **killed** | `tests::pool_allowance_1302_531_a_measured_remaining_requests_becomes_a_request_pool_and_prices_the_term` |
+| health.pool.declare_token_priced(credential); -> let _ = credential; | `skip-state-update` | **killed** | `tests::pool_allowance_1302_531_a_pricing_toml_entry_with_no_quota_reading_becomes_token_priced` |
+
+> skip-state-update observed: panicked at crates/glasshouse/src/main.rs:16692:17: assertion `left == right` failed: the provider's own limit, nothing derived
+
+> skip-state-update observed: panicked at crates/glasshouse/src/main.rs:16796:9: assertion `left == right` failed: a priced pair with no quota reading must declare token-priced, never a pool
+
+Recorded scope limits — stated by the worker, not discovered later:
+- the two allowances still coexist only by never being written for the same credential in one call; nothing reconciles a provider that somehow qualified for both signals in the same pass -- the if/else-if in observed_provider_health simply prefers the measured request pool
+
+---
+
+---

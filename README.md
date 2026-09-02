@@ -19,10 +19,10 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`███████████████████████████████████░░░░░` 1189 / 1332 mandatory capabilities (89%)
+`███████████████████████████████████░░░░░` 1191 / 1332 mandatory capabilities (89%)
 
 <details>
-<summary>Per-phase breakdown (66 of 107 phases complete)</summary>
+<summary>Per-phase breakdown (67 of 107 phases complete)</summary>
 
 | Phase | Done |
 |---|---|
@@ -48,7 +48,7 @@ the authoritative specification and tracks what is done.
 | Phase 9F — Direct provider launch profiles | 13/13 ✅ |
 | Phase 9G — Glasshouse local gateway process | 19/19 ✅ |
 | Phase 9H — Sticky gateway routing for harness-backed interactive sessions | 13/14 |
-| Phase 9I — Free-pool routing | 13/14 |
+| Phase 9I — Free-pool routing | 14/14 ✅ |
 | Phase 9J — Harness-model pairing model | 20/20 ✅ |
 | Phase 9K — Harness-aware response profiles | 29/37 |
 | Phase 10 — Unified session model | 14/14 ✅ |
@@ -92,7 +92,7 @@ the authoritative specification and tracks what is done.
 | Phase 32D — Normalized remaining-capacity score | 10/12 |
 | Phase 32E — Burn rate and exhaustion forecasting | 9/10 |
 | Phase 32F — Protected quota reserve | 7/8 |
-| Phase 32G — Provider-aware request-cost estimation | 6/10 |
+| Phase 32G — Provider-aware request-cost estimation | 7/10 |
 | Phase 33 — Resource health | 13/15 |
 | Phase 33A — Routing evidence ledger | 12/15 |
 | Phase 33B — Reliability-adjusted agent performance | 4/14 |

@@ -2714,6 +2714,23 @@ fn with_capacity(
 /// match is string equality between two calls of one renderer, in the forward
 /// direction only.
 ///
+/// # GH-POOL-ALLOWANCE — the allowance half, beside the health half
+///
+/// This is also where `FreePool::allowance` gets a value instead of
+/// answering `unknown_pool()` for every credential. For each destination's
+/// provider, the same [`glasshouse::provider::resources::observed_capacity`]
+/// [`destination_capacity`] already calls is asked again, from a freshly
+/// gathered [`glasshouse::provider::resources::GatheredTelemetry`] — the same
+/// cheap, local, no-network read `routing_destinations` performs per call,
+/// never shared with it because nothing here outlives one call (Hazard 1's
+/// own reasoning applies again: cheap enough to redo, too easy to get wrong
+/// to smuggle across a boundary). Its own remaining-requests reading, when
+/// the provider published one, becomes `FreePool::record_pool` — the
+/// provider's own numbers, nothing derived. Absent that, a `pricing.toml`
+/// entry for the pair, for a destination the user has not marked free, is
+/// `FreePool::declare_token_priced`. Neither: `unknown_pool()`, exactly as
+/// before this package.
+///
 /// Three things it therefore refuses to do:
 ///
 /// - **attribute across providers.** The provider whose file a reading came
@@ -2742,11 +2759,15 @@ fn with_capacity(
 /// against a clock that moved between them.
 fn observed_provider_health(
     runtime: &Runtime,
+    effective: &EffectiveConfig<'_>,
     destinations: &[glasshouse::routing::session::Destination],
 ) -> ObservedHealth {
-    use glasshouse::routing::free::FreeResource;
+    use glasshouse::provider::registry::ResourceKind;
+    use glasshouse::provider::resources::{GatheredTelemetry, observed_capacity};
+    use glasshouse::provider::telemetry::GatewayQuotaCache;
+    use glasshouse::routing::free::{FreeResource, PoolReading};
 
-    observed_health_of(
+    let mut health = observed_health_of(
         runtime,
         destinations.iter().map(|destination| {
             FreeResource::new(
@@ -2754,7 +2775,62 @@ fn observed_provider_health(
                 destination.backend().model().label(),
             )
         }),
-    )
+    );
+
+    // GH-POOL-ALLOWANCE, this function's own doc section above: the same
+    // telemetry `routing_destinations` gathers for `destination_capacity`,
+    // re-read here because nothing survives from that call to this one, and
+    // the same price table `session_router` loads for `expected_marginal_cost`.
+    let now_unix = glasshouse::provider::cache::now_unix_seconds();
+    let now = std::time::Instant::now();
+    let telemetry =
+        GatheredTelemetry::new().gather_gateway_quota(&GatewayQuotaCache::new(runtime.paths()));
+    let price_table =
+        glasshouse::provider::pricing::PriceTable::load_from_dir(runtime.paths().config_dir());
+
+    for destination in destinations {
+        let backend = destination.backend();
+        let credential = backend.credential();
+        let provider = backend.provider();
+        let kind = ResourceKind::from_direct_provider(provider);
+        let state = observed_capacity(&kind, effective, &telemetry, now_unix);
+
+        if let Some(remaining) = state.requests().remaining().reading() {
+            // The provider's own numbers, nothing derived: `limit` and
+            // `resets_in` are each `None` on their own if the provider did
+            // not also publish them, exactly as `PoolReading`'s own doc
+            // requires.
+            let limit = state
+                .requests()
+                .limit()
+                .reading()
+                .and_then(|reading| u32::try_from(reading.value().value()).ok());
+            let remaining = u32::try_from(remaining.value().value()).ok();
+            // Reused, never guessed: the same reset `destination_capacity`
+            // hands `CapacityFacts` and the burn forecast, converted to a
+            // duration only when it has not already passed.
+            let resets_in = state
+                .seconds_until_reset(now_unix)
+                .filter(|seconds| *seconds > 0)
+                .map(|seconds| std::time::Duration::from_secs(seconds as u64));
+            health.pool.record_pool(
+                credential,
+                &PoolReading {
+                    limit,
+                    remaining,
+                    resets_in,
+                },
+                now,
+            );
+        } else if let Some(model) = backend.model().name()
+            && effective.model_cost(provider, model).value == glasshouse::routing::Cost::Metered
+            && price_table.price_for(provider, model).is_some()
+        {
+            health.pool.declare_token_priced(credential);
+        }
+    }
+
+    health
 }
 
 /// The pool the router is handed, and **when each adopted reading was
@@ -4186,7 +4262,7 @@ fn route_recommendation(
     // ranking from the one the acting path produces, which is the one defect
     // a routing explanation cannot have. `routing_caveats` below says which
     // of the two happened rather than asserting the empty case.
-    let health = observed_provider_health(runtime, &destinations);
+    let health = observed_provider_health(runtime, effective, &destinations);
     // Phase 34D on the path that reports: the same classifier the launch
     // path calls, over the same destinations, so the explanation printed
     // here is the one a launch would act on. No sticky record is consulted
@@ -4977,7 +5053,7 @@ fn launch_session(
         // The reading comes from a *previous* process. That is the whole point:
         // the health of a provider is not a fact this launch can observe about a
         // session it has not started yet.
-        let health = observed_provider_health(runtime, &destinations);
+        let health = observed_provider_health(runtime, &effective, &destinations);
         // Phase 34D, on the path that acts: what the work *is* decides what the
         // destination must be able to do. `None` — no `--task` — hands the
         // router `TaskRequirements::default()` and asks nothing, which is this
@@ -9734,7 +9810,7 @@ fn report_task_boundary_routing(runtime: &Runtime, session: &str) {
     // Line 1599's bridge again — see `observed_provider_health`. This report
     // is read beside the launch path's own decision, so it weighs the same
     // persisted readings that path does.
-    let health = observed_provider_health(runtime, &destinations);
+    let health = observed_provider_health(runtime, &effective, &destinations);
     // Phase 34D does not reach this report: `glasshouse resume` carries no
     // task text, so there is nothing to classify and nothing is invented.
     // The moment a `resume` learns what the next task is, this is the site
@@ -16516,6 +16592,287 @@ mod tests {
             0,
             "a destination with no matching ledger rows must report zero, byte-identical to \
              today"
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // GH-POOL-ALLOWANCE — 1302, 531: `observed_provider_health` gives the
+    // router's pool the allowance its setters were written for.
+    // ---------------------------------------------------------------------
+
+    /// A profile whose backend is a direct provider, so `destination_capacity`
+    /// treats it as a `ResourceKind::DirectProvider` and this package's join
+    /// asks the same telemetry that shape reads. No `[providers.*]` entry is
+    /// configured — matching `routing_destinations_1923`'s `beta-direct` — so
+    /// nothing here depends on credential resolution succeeding.
+    fn pool_allowance_test_profile(
+        harness: glasshouse::integrations::IntegrationId,
+        provider: &str,
+        model: &str,
+    ) -> UserConfig {
+        let mut user = UserConfig::default();
+        let mut profile = glasshouse::config::ProfileConfig::new(harness);
+        profile.set_backend(glasshouse::config::ProfileBackend::DirectProvider {
+            provider: provider.to_owned(),
+        });
+        profile.set_model(Some(model.to_owned()));
+        user.profiles_mut().set("pool-allowance-profile", profile);
+        user
+    }
+
+    /// Required behaviour 1: a stored gateway quota reading becomes
+    /// `Allowance::RequestPool { remaining: Some(n), .. }`, and — for a
+    /// destination that also has a burn forecast — the `request-pool cost`
+    /// term prices it rather than staying inert.
+    ///
+    /// The eight ledger rows are all stamped at the same `now_unix`, which
+    /// `routing::burn::bucket_counts` folds into one bucket of eight — a
+    /// median rate of `8 * 3600 / 300 = 96` requests/hour. At 50 remaining
+    /// that is `50 / 96 * 3600 ≈ 1875s` to exhaustion against the reading's
+    /// own 3600s reset: past half the reset (1800s), so
+    /// `exhausts_well_before_reset` is false and the term must contribute —
+    /// the case beside 1302's own guard, not the one it exists to skip.
+    ///
+    /// Mutation target: drop the `record_pool` call this package adds → the
+    /// allowance assertion below fails, reading `unknown_pool()` instead.
+    #[test]
+    fn pool_allowance_1302_531_a_measured_remaining_requests_becomes_a_request_pool_and_prices_the_term()
+     {
+        use glasshouse::provider::telemetry::{GatewayQuotaCache, RateLimitHeaders};
+        use glasshouse::routing::evidence::{EvidenceLedger, NewObservation};
+        use glasshouse::routing::free::Allowance;
+        use glasshouse::routing::session::{RouterInputs, RoutingMoment, RoutingOverride};
+
+        const PROVIDER: &str = "wire-pool-allowance-request-pool-provider";
+        const MODEL: &str = "pool-allowance-model";
+
+        let fixture = CliFixture::new();
+        let harness = glasshouse::integrations::IntegrationId::ClaudeCode;
+        let user = pool_allowance_test_profile(harness, PROVIDER, MODEL);
+        let effective = EffectiveConfig::new(&user, None);
+
+        let now_unix = glasshouse::provider::cache::now_unix_seconds();
+        GatewayQuotaCache::new(fixture.runtime.paths()).store(
+            PROVIDER,
+            &RateLimitHeaders::read(vec![
+                ("x-ratelimit-limit-requests", "100"),
+                ("x-ratelimit-remaining-requests", "50"),
+                ("x-ratelimit-reset-requests", "3600s"),
+            ]),
+            now_unix,
+        );
+
+        let ledger = EvidenceLedger::open(&fixture.runtime).unwrap();
+        for _ in 0..8 {
+            ledger
+                .record(NewObservation::new(PROVIDER, MODEL), now_unix)
+                .unwrap();
+        }
+
+        let destinations = routing_destinations(
+            &fixture.runtime,
+            &effective,
+            harness,
+            DestinationScope::Everything,
+            None,
+        )
+        .unwrap();
+        let destination = destinations
+            .iter()
+            .find(|d| d.is_fresh() && d.launch_profile() == "pool-allowance-profile")
+            .expect("the direct-provider profile must offer its own fresh destination");
+        assert!(
+            destination
+                .burn_forecast()
+                .is_some_and(|forecast| !forecast.exhausts_well_before_reset()),
+            "the fixture's own numbers must land outside the well-before-reset guard, or \
+             nothing below is attributable to this package: {:?}",
+            destination.burn_forecast()
+        );
+
+        let health = observed_provider_health(&fixture.runtime, &effective, &destinations);
+        let credential = destination.backend().credential().clone();
+        match health.pool().allowance(&credential) {
+            Allowance::RequestPool {
+                limit, remaining, ..
+            } => {
+                assert_eq!(
+                    limit,
+                    Some(100),
+                    "the provider's own limit, nothing derived"
+                );
+                assert_eq!(
+                    remaining,
+                    Some(50),
+                    "the provider's own remaining count, nothing derived"
+                );
+            }
+            other => panic!("expected a request pool with a measured remaining count: {other:?}"),
+        }
+
+        let overrides = effective.pairing_overrides();
+        let inputs = RouterInputs {
+            overrides: &overrides,
+            health: health.pool(),
+            now: std::time::Instant::now(),
+            requirements: glasshouse::routing::session::TaskRequirements::default(),
+        };
+        let routed = session_router(&fixture.runtime, &effective, RoutingOverride::none())
+            .choose(RoutingMoment::SessionStart, None, &destinations, &inputs)
+            .expect("one destination with no hard constraint must be chosen");
+        // `choose` also ranks the always-present implied Native profile
+        // (`routing_destinations`' own doc, "the implied Native profile ...
+        // by construction rather than by configuration"), which is not a
+        // request pool and may outscore ours — so this reads *our*
+        // destination's own explanation out of `considered`, not whichever
+        // one won.
+        let (_, explanation) = routed
+            .considered()
+            .iter()
+            .find(|(destination, _)| destination.launch_profile() == "pool-allowance-profile")
+            .expect("our destination must be among the ranked candidates");
+        let pool_term = explanation
+            .contributions()
+            .iter()
+            .find(|c| c.name() == "request-pool cost")
+            .expect("a request-pool destination must always carry this term");
+        assert!(
+            pool_term.magnitude() < 0.0,
+            "a measured remaining count with a live burn forecast must price the term rather \
+             than leave it inert: {}",
+            pool_term.evidence()
+        );
+    }
+
+    /// Required behaviour 2: a `pricing.toml` entry for the pair, with no
+    /// quota reading at all, becomes `Allowance::TokenPriced`, and the
+    /// `request-pool cost` term reads *priced per token*.
+    ///
+    /// Mutation target: drop the `declare_token_priced` call this package
+    /// adds → the allowance assertion below fails, reading `unknown_pool()`
+    /// instead.
+    #[test]
+    fn pool_allowance_1302_531_a_pricing_toml_entry_with_no_quota_reading_becomes_token_priced() {
+        use glasshouse::routing::free::Allowance;
+        use glasshouse::routing::session::{RouterInputs, RoutingMoment, RoutingOverride};
+
+        const PROVIDER: &str = "wire-pool-allowance-token-priced-provider";
+        const MODEL: &str = "pool-allowance-priced-model";
+
+        let fixture = CliFixture::new();
+        let harness = glasshouse::integrations::IntegrationId::ClaudeCode;
+        let user = pool_allowance_test_profile(harness, PROVIDER, MODEL);
+        let effective = EffectiveConfig::new(&user, None);
+
+        std::fs::write(
+            fixture
+                .runtime
+                .paths()
+                .config_dir()
+                .join(glasshouse::provider::pricing::PRICING_FILE_NAME),
+            format!(
+                "[[prices]]\nprovider = \"{PROVIDER}\"\nmodel = \"{MODEL}\"\n\
+                 input_per_million_usd = 3.0\noutput_per_million_usd = 15.0\n"
+            ),
+        )
+        .unwrap();
+
+        let destinations = routing_destinations(
+            &fixture.runtime,
+            &effective,
+            harness,
+            DestinationScope::Everything,
+            None,
+        )
+        .unwrap();
+        let destination = destinations
+            .iter()
+            .find(|d| d.is_fresh() && d.launch_profile() == "pool-allowance-profile")
+            .expect("the direct-provider profile must offer its own fresh destination");
+        assert!(
+            destination.burn_forecast().is_none(),
+            "no quota reading and no ledger rows were seeded; a forecast here would be invented"
+        );
+
+        let health = observed_provider_health(&fixture.runtime, &effective, &destinations);
+        let credential = destination.backend().credential().clone();
+        assert_eq!(
+            health.pool().allowance(&credential),
+            Allowance::TokenPriced,
+            "a priced pair with no quota reading must declare token-priced, never a pool"
+        );
+
+        let overrides = effective.pairing_overrides();
+        let inputs = RouterInputs {
+            overrides: &overrides,
+            health: health.pool(),
+            now: std::time::Instant::now(),
+            requirements: glasshouse::routing::session::TaskRequirements::default(),
+        };
+        let routed = session_router(&fixture.runtime, &effective, RoutingOverride::none())
+            .choose(RoutingMoment::SessionStart, None, &destinations, &inputs)
+            .expect("one destination with no hard constraint must be chosen");
+        // See the request-pool test's own note: the implied Native profile is
+        // also ranked, so this reads our destination's explanation out of
+        // `considered` rather than assuming it won.
+        let (_, explanation) = routed
+            .considered()
+            .iter()
+            .find(|(destination, _)| destination.launch_profile() == "pool-allowance-profile")
+            .expect("our destination must be among the ranked candidates");
+        let pool_term = explanation
+            .contributions()
+            .iter()
+            .find(|c| c.name() == "request-pool cost")
+            .expect("the term is always present, inert or not");
+        assert_eq!(
+            pool_term.magnitude(),
+            0.0,
+            "priced-per-token is never priced by this term"
+        );
+        assert!(
+            pool_term.evidence().contains("priced per token"),
+            "the explanation must say why the term is inert: {}",
+            pool_term.evidence()
+        );
+    }
+
+    /// Required behaviour 3: neither signal — no quota reading, no
+    /// `pricing.toml` entry — leaves `unknown_pool()`, byte-identical to
+    /// this project's behaviour before this package. Pinned so a later
+    /// change cannot invent a count for a credential nothing has read.
+    #[test]
+    fn pool_allowance_1302_531_neither_signal_leaves_the_pool_unknown() {
+        use glasshouse::routing::free::Allowance;
+
+        const PROVIDER: &str = "wire-pool-allowance-unknown-provider";
+        const MODEL: &str = "pool-allowance-unpriced-model";
+
+        let fixture = CliFixture::new();
+        let harness = glasshouse::integrations::IntegrationId::ClaudeCode;
+        let user = pool_allowance_test_profile(harness, PROVIDER, MODEL);
+        let effective = EffectiveConfig::new(&user, None);
+
+        let destinations = routing_destinations(
+            &fixture.runtime,
+            &effective,
+            harness,
+            DestinationScope::Everything,
+            None,
+        )
+        .unwrap();
+        let destination = destinations
+            .iter()
+            .find(|d| d.is_fresh() && d.launch_profile() == "pool-allowance-profile")
+            .expect("the direct-provider profile must offer its own fresh destination");
+
+        let health = observed_provider_health(&fixture.runtime, &effective, &destinations);
+        let credential = destination.backend().credential().clone();
+        assert_eq!(
+            health.pool().allowance(&credential),
+            Allowance::unknown_pool(),
+            "with neither a quota reading nor a price, the allowance must stay exactly what it \
+             was before this package"
         );
     }
 }
