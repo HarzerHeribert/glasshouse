@@ -410,3 +410,37 @@ are now pinned by sysroot in the same commit.
 
 **1908:** Families A, B and C are closed; the box ticks on a green
 `ci-local.sh --macos --linux --windows-vm` of this tree.
+
+---
+
+## 1908 — the Windows leg of the three-leg run, on `785a47f` (2026-09-02)
+
+Run from `.worktrees/gate-1908`, a detached worktree pinned at `785a47f`
+(the tree with Families A, B and C closed and the runner lock), through the
+locked runner: `scripts/ci-local.sh --windows-vm`. Every run compiled the
+tree on the VM (`Compiling glasshouse`), and build and MSRV passed each time.
+
+| run | test leg | failing test | in the other runs |
+|---|---|---|---|
+| 1 | FAIL, 2 targets | `gateway_failure_taxonomy::a_rate_limited_response_changes_the_capacity_band_the_estimator_reports`; `v1_criteria_routing::line_1933_…_falls_back_and_says_so` | both PASSED in run 2 |
+| 2 | FAIL, 1 target | `checkpoint_portability::two_writers_racing_never_stamp_the_same_write_order` | PASSED in run 1 |
+| 3 | FAIL, 2 targets | `evaluation_producers::a_failover_the_domain_term_prevented_is_counted_and_one_it_did_not_is_not`; `gateway_failure_taxonomy::throttle_and_exhausted_quota_are_told_apart_by_headers_not_guessed` | both PASSED in runs 1 and 2 |
+
+No test failed twice; every failure passed in another run of the same tree;
+none is in a PTY/session family (`pty_smoke`, `entitlement_shell_scrub`,
+`events_lifecycle`, `session_*` passed in every run). That is the
+roughly-one-flake-per-run rate `GH-WINDOWS-TEST-BUILD` recorded on 2026-09-02,
+now with five named members across four targets, and `gateway_failure_taxonomy` red in two of three runs with a *different* test each time — the strongest hint of a shared timing assumption in that file. The standing ruling — 1908 ticks only on a
+fully green three-leg run — is kept rather than re-read to fit two runs.
+**Ruling: 1908 HELD.** The PTY/session smoke families passed on all three
+legs of `785a47f` — macOS 128/128 targets, Windows 126/128 three times with
+the two reds never the same — but the line's word is *stable*, and a
+Windows leg that fails a different non-PTY test on every run is not.
+Successor, named and validated: **`GH-WINDOWS-FLAKES`** (Red, Opus high) —
+run each of the five tests ten times on the VM, find the assumption each
+makes about time, ordering or file locking that Windows does not honour, fix
+it in the test or, if it is the product, stop and report; 1908 ticks on the
+next fully green three-leg run. The gate's `lint / script tests` step also
+read FAIL from the worktree it ran in; that is environmental and attributed
+(the same file passes in the main checkout on the same commit) — a Green
+packet, `GH-SCRIPT-TESTS-IN-WORKTREES`, is the fix.
