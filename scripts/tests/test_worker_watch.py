@@ -38,6 +38,21 @@ from pathlib import Path
 WATCH = Path(__file__).resolve().parents[1] / "worker-watch.sh"
 REPO = WATCH.parent.parent
 
+# worker-watch.sh itself never trusts `parents[...]` for "the main checkout"
+# (see its own comment above SCRIPT_DIR/MAIN_COMMON) — it resolves through
+# git-common-dir, which is the real main checkout regardless of which
+# worktree's copy of the script is running. `REPO` above is just "the tree
+# this test file lives in"; from a worker's worktree that is a different
+# directory than where the script actually reads and writes its idle/done
+# markers, so a test that cleaned up under `REPO/.agent-runtime` left real
+# stray fixtures in the main checkout (found: `.agent-runtime/idle/selftest-*`
+# never removed after a worktree run). Resolve the marker root the same way.
+_MAIN_COMMON = subprocess.run(
+    ["git", "-C", str(REPO), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+    check=True, capture_output=True, text=True,
+).stdout.strip()
+MAIN = Path(_MAIN_COMMON).parent
+
 
 def _re(name: str) -> str:
     for line in WATCH.read_text().splitlines():
@@ -188,8 +203,8 @@ def run_lifecycle_integration():
     (fake_bin / "sleep").chmod(0o755)
 
     name = f"selftest-{os.getpid()}"
-    idle_dir = REPO / ".agent-runtime" / "idle"
-    done_dir = REPO / ".agent-runtime" / "done"
+    idle_dir = MAIN / ".agent-runtime" / "idle"
+    done_dir = MAIN / ".agent-runtime" / "done"
     marker = idle_dir / name
     done_file = done_dir / name
     report = Path(tempfile.gettempdir()) / f"ww-report-{os.getpid()}.md"

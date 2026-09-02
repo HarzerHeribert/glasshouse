@@ -19,6 +19,19 @@ import uuid
 
 HOOK = pathlib.Path(__file__).resolve().parents[1] / "hooks" / "coedit-claim-guard.sh"
 REPO = HOOK.parents[2]
+
+# The hook never trusts `parents[...]` for "the main checkout" — it resolves
+# through `git rev-parse --path-format=absolute --git-common-dir` (shared by
+# every worktree of this repo) and takes that path's parent. `REPO` above is
+# just "the tree this test file happens to live in"; from the main checkout
+# the two coincide, but from a worker's worktree they do not, so fixtures
+# written under `REPO/.agent-runtime` land somewhere the hook never looks.
+# Resolve the fixture root the same way the hook resolves its own.
+_COMMON = subprocess.run(
+    ["git", "-C", str(REPO), "rev-parse", "--path-format=absolute", "--git-common-dir"],
+    check=True, capture_output=True, text=True,
+).stdout.strip()
+MAIN = pathlib.Path(_COMMON).parent
 FILE = "crates/glasshouse/src/main.rs"
 
 
@@ -31,20 +44,20 @@ def hook(cwd, file_path, tool="Edit"):
 class ClaimGuard(unittest.TestCase):
     def setUp(self):
         self.name = f"zz-claim-{uuid.uuid4().hex[:6]}"
-        self.wt = REPO / ".worktrees" / self.name
+        self.wt = MAIN / ".worktrees" / self.name
         self.branch = f"claude/{self.name}"
         subprocess.run(
             ["git", "worktree", "add", "-q", str(self.wt), "-b", self.branch, "HEAD"],
-            cwd=REPO, check=True, capture_output=True,
+            cwd=MAIN, check=True, capture_output=True,
         )
-        self.packet = REPO / ".agent-runtime" / f"packet-{self.name}.md"
+        self.packet = MAIN / ".agent-runtime" / f"packet-{self.name}.md"
         self.packet.write_text(f"# PACKET\n\nCOEDIT: {FILE}\n")
 
     def tearDown(self):
-        subprocess.run(["scripts/coedit.sh", "release", FILE], cwd=REPO, capture_output=True)
+        subprocess.run(["scripts/coedit.sh", "release", FILE], cwd=MAIN, capture_output=True)
         self.packet.unlink(missing_ok=True)
-        subprocess.run(["git", "worktree", "remove", "--force", str(self.wt)], cwd=REPO, capture_output=True)
-        subprocess.run(["git", "branch", "-D", self.branch], cwd=REPO, capture_output=True)
+        subprocess.run(["git", "worktree", "remove", "--force", str(self.wt)], cwd=MAIN, capture_output=True)
+        subprocess.run(["git", "branch", "-D", self.branch], cwd=MAIN, capture_output=True)
 
     def claim(self):
         subprocess.run(
@@ -68,7 +81,7 @@ class ClaimGuard(unittest.TestCase):
         self.assertEqual(rc, 0, err)
 
     def test_the_orchestrator_in_the_main_checkout_is_never_gated(self):
-        rc, err = hook(REPO, REPO / FILE)
+        rc, err = hook(MAIN, MAIN / FILE)
         self.assertEqual(rc, 0, err)
 
     def test_a_worktree_with_no_packet_is_never_gated(self):
@@ -78,7 +91,7 @@ class ClaimGuard(unittest.TestCase):
 
     def test_a_subpacket_governs_a_subcontractor_the_same_way(self):
         self.packet.unlink()
-        sub = REPO / ".agent-runtime" / f"subpacket-{self.name}.md"
+        sub = MAIN / ".agent-runtime" / f"subpacket-{self.name}.md"
         sub.write_text(f"# SUBPACKET\n\nCOEDIT: `{FILE}`\n")
         try:
             rc, _ = hook(self.wt, self.wt / FILE)
