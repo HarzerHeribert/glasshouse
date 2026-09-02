@@ -20,6 +20,20 @@ validated and waiting on the commit. Next action: `.agent-runtime/CONTINUATION.m
 
 Last updated: 2026-08-31 (Europe/Berlin)
 
+## Checkpoint — 2026-09-02, batch 81: 1189 / 1332 (89.3%)
+
+Fable 5.1 orchestrator, session `21f45818`. Seven integrations landed and
+pushed (`1fe1d63` … `e12c73e`): fourteen gross closes, four un-ticks on the
+wave-80 audit (1517, 1513, 1822, 1826 — all the "no producer" shape), three
+re-closed the same session. Phases 52 and 53 censused into their first
+ledgers. Wave-82's trailing sweep: 137 targets, zero failures, rustdoc
+clean; wave-81's one red is attributed as a load flake. Live at checkpoint:
+`windows-exit-observation` (Opus, Red; diagnosis complete — the ConPTY
+handshake query goes unanswered in two test wait loops, production untouched;
+VM legs queued), `windows-fixtures` (second green VM run for
+`firewall_bridge` pending), `constraint-reasons` (Amber), `pool-allowance`
+(Amber; closes 1302 and 531 together). Next: `.agent-runtime/CONTINUATION.md`.
+
 ## Checkpoint — 2026-09-02, batch 80 and the Fable 5.1 hand-off: 1179 / 1332 (88.5%)
 
 Twenty boxes closed in one session (Phase 32E 9/10, Phase 35A 10/11, 1945/1955), the twelfth wrongly ticked box found and repaired (1357/1358 — `session_router()` never read the configured weights; practice §90), four censuses written (35A, 56, 33A/32G, and 52/53 running), the Windows build repaired after `dfaf27f` broke it, and the Windows runner fixed for running stale binaries. Four finished worktrees (pairing-prior, windows-test-build, harness-preference, translated-usage-proof) wait behind the wave-81 sweep; four validated packets wait behind them. `.agent-runtime/CONTINUATION.md` has the exact queue, ticks, staged ledger texts and rulings. Parked with the user: how Glasshouse learns a routing decision was good (Phase 51's twelve RC-B lines).

@@ -4805,3 +4805,55 @@ migration ripple is for the *assertion*, not one spelling of it.
   now routine** — three packages appended there in one wave. Resolution is
   mechanical (keep both, duplicate the shared closer once), and `integrate.sh`
   stops at the apply so the hand gate must follow.
+
+## Batch 81 (2026-09-02, mid-morning) — fourteen closes, four honest re-opens, and the "no producer" shape found twice more
+
+Second Fable 5.1 session, inherited hot with two read-only workers live and
+four finished worktrees queued behind a sweep. **Map 1179 → 1189 net;
+gross fourteen closes** (566, 569, 1540, 1333, 1880, 1881, 1883, 1952, 1865,
+1822, 1826, 1517, 1513, 1923), because four ticked boxes were un-ticked on
+the wave-80 audit's evidence and three of them re-closed by the packages
+that gave their readers a caller. Seven integrations (six through
+`integrate.sh`, one by hand after it refused a same-line co-edit), two
+censuses, one audit, one wave sweep.
+
+| package | tier | result |
+|---|---|---|
+| `pairing-prior` (inherited) | Sonnet high, Amber | **566, 569, 1540 closed**; 1923 HELD until its evidence count had a caller |
+| `windows-test-build` (inherited) | Sonnet, Amber | the Windows test build compiles again; no tick |
+| `translated-usage-proof` (inherited) | Sonnet, Green | **1333 closed** on the census reading |
+| `harness-preference` (inherited) | Sonnet high, Amber | **1952 closed** |
+| `recon-52-53` (inherited) | Sonnet high, read-only | eleven lines → five causes; six Cluster Q, two packages named |
+| `audit-wave80` (inherited) | Sonnet high, read-only | 18/20 confirmed; **1517, 1513 re-opened** — the gates' input has no producer anywhere |
+| `relationship-proofs` | Sonnet medium, Green | **1880, 1881, 1883 closed**, tests only |
+| `retrieval-criteria` | Sonnet high, Amber | **1865 closed; 1822, 1826 re-closed** on `glasshouse memory retrievals` |
+| `capability-facts` | Sonnet high, Amber | **1517, 1513 re-closed** on user-declared facts; a `Box::leak` replaced at integration (unbounded under `api serve`) |
+| `pairing-evidence` | Sonnet medium, Green | **1923 closed** |
+| `request-pool-cost` | Sonnet high, Amber | mechanism landed, **1302 HELD** — the allowance it reads has no producer; `pool-allowance` dispatched |
+| `windows-exit-observation`, `windows-fixtures`, `constraint-reasons`, `pool-allowance` | live at checkpoint | — |
+
+**Output per box.** Day total at checkpoint 5.40M output tokens, of which
+this session's share is roughly **0.73M** (4.67M at inherit): about **73k
+per net box, 52k per gross close** — a fifth of batch 80's 125k and far
+under the 250k trigger. The difference is not model quality; it is that
+every package this session closed 1–4 boxes with 1–3 files, and that the
+orchestrator's reading went to decisions (two `Box::leak`/`api serve`-class
+findings, one Phase −1 miss) rather than to re-deriving reports.
+
+**Three findings worth the ledger.**
+
+1. **The "no producer" shape is now sixteen for sixteen.** Every wrongly
+   ticked box found so far was a mechanism proven on a hand-set input whose
+   real input nothing in production supplies. Batch 81 found it twice more
+   *before* ticking — 1302's allowance, and the inherited packet's Phase −1
+   that asked whether a *caller* existed and not whether the *value* did.
+   The question to add to every Phase −1: *what constructs this input in
+   production, with a file and line?*
+2. **`integrate.sh` refuses same-line co-edits and says only "patch does not
+   apply".** Two co-editors appending to the same builder chain and the
+   same test-module tail is the normal outcome of §77 on `main.rs`; the
+   recipe is now in memory and cost one round.
+3. **A worker's stated operational premise is a claim to check.** "Single
+   instance, no daemon" justified a leak; `api serve` is a daemon. The
+   report was accurate about everything it measured and wrong about the one
+   thing it assumed.
