@@ -334,7 +334,13 @@ if [ "$DO_WIN" -eq 1 ]; then
   if rustup target list --installed | grep -q "$TARGET"; then
     WIN_CROSS_RAN=1
     step "windows CROSS-CHECK (compiles only, proves nothing about behaviour)" \
-      cargo check --locked --workspace --target "$TARGET"
+      rustup run stable cargo check --locked --workspace --target "$TARGET"
+    # `rustup run stable`, not bare `cargo`: the guard above asks rustup whether
+    # the target is installed, so the step must use the toolchain rustup
+    # answered about. On this host bare `cargo` is Homebrew's, whose sysroot
+    # has no windows-gnu std, and the step failed with E0463 "can't find crate
+    # for core" -- which reads like a broken dependency (GH-WINDOWS-TEST-BUILD,
+    # 2026-09-02).
   else
     RESULTS+=("SKIP  windows cross-check — rustup target add $TARGET (and brew install mingw-w64)")
   fi
