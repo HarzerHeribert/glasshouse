@@ -570,5 +570,6 @@ commit): `--lib database` and every integration target through `t` green —
 the first Linux run to reach them since the race; the leg's one red was
 `tests/terminal_loss.rs`'s 15-trial hangup test on 1 trial under load, and
 the target alone in the same container passed 4/4 twice (load flake, not
-this change). Windows VM run 10 on `08e0ff2` is recorded in the batch-94
-checkpoint.
+this change). **Windows VM run 10 on `08e0ff2`**: build PASS, test PASS, msrv PASS —
+the lock wait proven on SQLite's `LockFileEx` path, which the verifier had
+read but could not run.
