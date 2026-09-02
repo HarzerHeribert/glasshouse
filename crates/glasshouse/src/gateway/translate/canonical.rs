@@ -73,6 +73,114 @@ pub struct Request {
     /// was asked for at all, which is what a decoder must not silently drop
     /// (see the module doc's *"refused by name, never dropped"*).
     pub cache_requested: bool,
+    /// The harness's own thinking/reasoning request, carried rather than
+    /// refused (`docs/product/design-decisions.md`, *"Carrying effort across
+    /// a translated pairing"*) — `cache_requested`'s sibling: one canonical
+    /// field standing in for a shape Anthropic's `thinking` expresses as a
+    /// token budget and OpenAI's `reasoning_effort` expresses as a word.
+    /// `None` means the harness asked for no thinking at all, which must
+    /// encode identically to a request built before this field existed.
+    pub effort: Option<EffortRequest>,
+}
+
+/// The harness's thinking request, decoder-agnostic: a token budget
+/// (Anthropic's `thinking.budget_tokens`), a word (no decoder sets this
+/// today — see below), or both.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EffortRequest {
+    pub budget_tokens: Option<u64>,
+    pub level: Option<EffortLevel>,
+}
+
+impl EffortRequest {
+    /// The four-word level this request maps to: the harness's own word
+    /// when it set one directly, otherwise the word its token budget falls
+    /// into by [`level_for_budget`]. Anthropic's decoder — the only source
+    /// of [`EffortRequest`] today — always sets `budget_tokens` and never
+    /// `level`, so this is the path every current caller takes; `level` is
+    /// carried on the struct for a harness-side wire that states a word
+    /// directly, which no decoder in this codebase produces yet.
+    pub fn level(&self) -> EffortLevel {
+        self.level
+            .unwrap_or_else(|| level_for_budget(self.budget_tokens.unwrap_or(0)))
+    }
+}
+
+/// The four-word effort ladder every target codec maps onto: OpenAI's
+/// `reasoning_effort` / `reasoning.effort` accept exactly these words among
+/// others (`developers.openai.com/api/docs/guides/reasoning`, fetched
+/// 2026-09-02: *"Supported values are model-dependent and can include
+/// `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`"*) — this
+/// form only ever produces the four this gateway can derive from a token
+/// budget, never the wider or narrower words a model-specific page might
+/// also accept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum EffortLevel {
+    Minimal,
+    Low,
+    Medium,
+    High,
+}
+
+impl EffortLevel {
+    /// The word an OpenAI-shaped wire spells this level with — the same
+    /// spelling on both `reasoning_effort` (Chat Completions) and
+    /// `reasoning.effort` (Responses), per the citation on this type.
+    pub fn as_openai_word(self) -> &'static str {
+        match self {
+            EffortLevel::Minimal => "minimal",
+            EffortLevel::Low => "low",
+            EffortLevel::Medium => "medium",
+            EffortLevel::High => "high",
+        }
+    }
+}
+
+/// The `budget_tokens` boundaries the four-word ladder is cut at, and why
+/// each one sits where it does — from Anthropic's own guidance for manual
+/// `budget_tokens`
+/// (`platform.claude.com/docs/en/build-with-claude/extended-thinking`,
+/// fetched 2026-09-02), the only source that publishes concrete numbers for
+/// this parameter: the API's minimum is 1,024; *"for simple tasks, start
+/// near the 1,024-token minimum"*; *"for complex tasks, start with a larger
+/// budget of 16,000 tokens or more"*; and *"for thinking budgets above 32k,
+/// use batch processing"* because larger requests risk timing out. Neither
+/// OpenAI's nor Gemini's own docs publish a token-to-word table, so the cut
+/// points are Anthropic's own waypoints on the one axis every source and
+/// target here agrees is ordered: more budget is more thinking.
+///
+/// A budget at or below this is [`EffortLevel::Minimal`] — twice the
+/// documented floor, still inside the range the docs call a starting point
+/// for simple tasks.
+pub const EFFORT_MINIMAL_MAX: u64 = 2_048;
+/// A budget at or below this (and above [`EFFORT_MINIMAL_MAX`]) is
+/// [`EffortLevel::Low`] — below the 16,000-token starting point the docs
+/// give for complex tasks, so still short of that range.
+pub const EFFORT_LOW_MAX: u64 = 8_192;
+/// A budget at or below this (and above [`EFFORT_LOW_MAX`]) is
+/// [`EffortLevel::Medium`] — the complex-task range the docs describe,
+/// capped just under the 32,000-token line where the docs say batch
+/// processing is needed to avoid request timeouts.
+pub const EFFORT_MEDIUM_MAX: u64 = 32_000;
+// Anything above `EFFORT_MEDIUM_MAX` is `EffortLevel::High` — the harness
+// asked for more thinking than this four-word ladder can distinguish
+// further, and a mapping never rounds up past it either.
+
+/// `budget_tokens` to the word it maps onto, never rounding up: a value at
+/// or below a threshold gets that threshold's word, so an increase in
+/// budget only ever moves the result to a higher or equal word, and the
+/// ladder saturates at [`EffortLevel::High`] rather than growing without
+/// bound.
+pub fn level_for_budget(budget_tokens: u64) -> EffortLevel {
+    if budget_tokens <= EFFORT_MINIMAL_MAX {
+        EffortLevel::Minimal
+    } else if budget_tokens <= EFFORT_LOW_MAX {
+        EffortLevel::Low
+    } else if budget_tokens <= EFFORT_MEDIUM_MAX {
+        EffortLevel::Medium
+    } else {
+        EffortLevel::High
+    }
 }
 
 impl Request {
@@ -614,6 +722,7 @@ pub(super) mod tests {
             stream: false,
             user: None,
             cache_requested: false,
+            effort: None,
         }
         .normalized();
         let names: Vec<&str> = request.tools.iter().map(|t| t.name.as_str()).collect();
@@ -829,6 +938,42 @@ pub(super) mod tests {
             .expect_err("index 0 is not the open block");
         assert_eq!(refusal.field, "content_block_stop[0]");
         assert!(refusal.reason.contains("not the open one"));
+    }
+
+    #[test]
+    fn level_for_budget_never_rounds_up_and_saturates_at_high() {
+        // At or below the documented floor: the lowest word, never omitted
+        // (2039's (f)).
+        assert_eq!(level_for_budget(0), EffortLevel::Minimal);
+        assert_eq!(level_for_budget(1), EffortLevel::Minimal);
+        assert_eq!(level_for_budget(1_024), EffortLevel::Minimal);
+        assert_eq!(level_for_budget(EFFORT_MINIMAL_MAX), EffortLevel::Minimal);
+        // One token past a boundary moves to the next word, never skipping.
+        assert_eq!(level_for_budget(EFFORT_MINIMAL_MAX + 1), EffortLevel::Low);
+        assert_eq!(level_for_budget(EFFORT_LOW_MAX), EffortLevel::Low);
+        assert_eq!(level_for_budget(EFFORT_LOW_MAX + 1), EffortLevel::Medium);
+        assert_eq!(level_for_budget(EFFORT_MEDIUM_MAX), EffortLevel::Medium);
+        // Above every threshold: High, and nothing higher exists to round
+        // up to.
+        assert_eq!(level_for_budget(EFFORT_MEDIUM_MAX + 1), EffortLevel::High);
+        assert_eq!(level_for_budget(1_000_000), EffortLevel::High);
+    }
+
+    #[test]
+    fn effort_request_level_derives_from_budget_when_no_word_was_set() {
+        let request = EffortRequest {
+            budget_tokens: Some(500),
+            level: None,
+        };
+        assert_eq!(request.level(), EffortLevel::Minimal);
+
+        // A harness-stated word, were one ever decoded, wins over deriving
+        // one from the budget.
+        let request = EffortRequest {
+            budget_tokens: Some(500),
+            level: Some(EffortLevel::High),
+        };
+        assert_eq!(request.level(), EffortLevel::High);
     }
 
     #[test]

@@ -124,6 +124,18 @@ pub enum ReducerErrorKind {
     /// none at all — map line 1999's validation failure.
     Validation,
     Failed(&'static str),
+    /// Phase 58, map line 2029: [`LocalToolReducer`]'s own executable could
+    /// not be started at all.
+    LocalAbsent,
+    /// Phase 58, map line 2029: [`LocalToolReducer`] did not answer inside
+    /// its configured timeout.
+    LocalTimeout,
+    /// Phase 58, map line 2029: [`LocalToolReducer`]'s tool exited non-zero,
+    /// or its reply was not the local contract's shape.
+    LocalFailed,
+    /// Phase 58, map line 2029: [`LocalToolReducer`]'s tool reported a
+    /// `tool_version` that does not prefix-match the configured pin.
+    LocalVersion,
 }
 
 impl fmt::Display for ReducerErrorKind {
@@ -139,6 +151,16 @@ impl fmt::Display for ReducerErrorKind {
                 f.write_str("the reducer's reply named a candidate id it was never given")
             }
             Self::Failed(phrase) => f.write_str(phrase),
+            Self::LocalAbsent => f.write_str("the local reducer's tool could not be started"),
+            Self::LocalTimeout => {
+                f.write_str("the local reducer's tool did not answer inside its timeout")
+            }
+            Self::LocalFailed => f.write_str(
+                "the local reducer's tool exited non-zero or answered outside its contract",
+            ),
+            Self::LocalVersion => {
+                f.write_str("the local reducer's tool version does not match the configured pin")
+            }
         }
     }
 }
@@ -684,6 +706,317 @@ fn is_timeout_kind(kind: std::io::ErrorKind) -> bool {
     )
 }
 
+// ===========================================================================
+// The local out-of-process reducer — Phase 58, map lines 2028-2030. See
+// design-decisions.md's *The local reducer seat* for the boundary this
+// implements: one subprocess per [`Reducer::select`] call, argv only, the
+// contract's JSON on stdin and stdout, and never a compressed-text reply —
+// a local tool answers in verdicts by id, exactly like [`ConfiguredReducer`].
+// ===========================================================================
+
+/// Seconds Claude Code allows the context-firewall hook before abandoning
+/// it. Duplicated from `crate::harness::claude_code`'s own private
+/// `CONTEXT_FIREWALL_HOOK_TIMEOUT_SECONDS` rather than exported across
+/// modules for it — the same call `has_userinfo`'s doc comment in this same
+/// file already makes: the value is small, unlikely to move on its own, and
+/// not worth a `pub(crate)` seam between a harness-registration module and
+/// this one.
+const CONTEXT_FIREWALL_HOOK_TIMEOUT_SECONDS: u32 = 10;
+
+/// [`LocalReducerConfig::timeout_ms`]'s default when unset — the design's
+/// own 4000.
+///
+/// [`LocalReducerConfig::timeout_ms`]: crate::config::firewall::LocalReducerConfig::timeout_ms
+pub const DEFAULT_LOCAL_REDUCER_TIMEOUT_MS: u64 = 4000;
+
+/// Why a [`LocalToolReducer`] could not be built at all — construction-time
+/// configuration problems, distinct from [`ReducerError`], which is about a
+/// call that was attempted. Mirrors [`ConfiguredReducerError`]'s own shape.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum LocalReducerConfigError {
+    #[error("the local reducer `{name}` has no `command`; there is nothing to spawn")]
+    EmptyCommand { name: String },
+    #[error(
+        "the local reducer `{name}`'s timeout_ms ({timeout_ms}) leaves less than two seconds \
+         inside the context-firewall hook's own {hook_timeout_seconds}-second timeout; lower \
+         timeout_ms"
+    )]
+    TimeoutTooLarge {
+        name: String,
+        timeout_ms: u64,
+        hook_timeout_seconds: u32,
+    },
+}
+
+/// The request this module's own contract sends on a local tool's stdin —
+/// design-decisions.md's *"What crosses, and what does not"*: the tool
+/// name, the tool's own query, and the candidates being reduced. Never the
+/// task, the transcript, memory, or a credential — there is no field here
+/// able to carry any of them.
+#[derive(serde::Serialize)]
+struct LocalRequestWire<'a> {
+    version: u32,
+    tool: &'a str,
+    query: Option<&'a str>,
+    candidates: Vec<LocalCandidateWire<'a>>,
+}
+
+#[derive(serde::Serialize)]
+struct LocalCandidateWire<'a> {
+    id: usize,
+    text: &'a str,
+}
+
+/// The reply this module's own contract reads from a local tool's stdout —
+/// `version` is required, exactly like the request's own, so a reply
+/// missing it is already "not the contract" at the parse step.
+#[derive(Debug, Deserialize)]
+struct LocalReplyWire {
+    version: u32,
+    tool_version: String,
+    verdicts: Vec<LocalVerdictWire>,
+}
+
+#[derive(Debug, Deserialize)]
+struct LocalVerdictWire {
+    id: usize,
+    relevance: String,
+    #[serde(default)]
+    reason: String,
+}
+
+/// A local out-of-process tool, asked to select over numbered candidates —
+/// Phase 58, map lines 2028-2030. One subprocess per [`Reducer::select`]
+/// call: argv only (never a shell), the contract's request JSON on stdin,
+/// its reply JSON read from stdout, stderr captured for the debug log and
+/// never forwarded, the environment scrubbed of every entitlement
+/// credential variable, and a per-session scratch directory as its cwd
+/// rather than the project root.
+pub struct LocalToolReducer {
+    name: String,
+    command: Vec<String>,
+    version_pin: Option<String>,
+    timeout: Duration,
+    scratch_dir: std::path::PathBuf,
+    credential_vars: Vec<String>,
+}
+
+impl fmt::Debug for LocalToolReducer {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("LocalToolReducer")
+            .field("name", &self.name)
+            .field("command", &self.command)
+            .field("version_pin", &self.version_pin)
+            .field("timeout", &self.timeout)
+            .finish()
+    }
+}
+
+impl LocalToolReducer {
+    /// Build the named local reducer from its configured shape, or say why
+    /// not. `credential_vars` is the launch's own credential-variable
+    /// filter (`EffectiveConfig::foreign_entitlement_credential_vars`,
+    /// called with `None` so every entitlement's variable is scrubbed — a
+    /// subprocess Glasshouse did not write has no business carrying any
+    /// account's key) — resolved by the caller, exactly
+    /// [`ConfiguredReducer::new`]'s own credential is.
+    pub fn new(
+        name: impl Into<String>,
+        config: &crate::config::firewall::LocalReducerConfig,
+        scratch_dir: impl Into<std::path::PathBuf>,
+        credential_vars: Vec<String>,
+    ) -> Result<Self, LocalReducerConfigError> {
+        let name = name.into();
+        if config.command.is_empty() {
+            return Err(LocalReducerConfigError::EmptyCommand { name });
+        }
+        let timeout_ms = config
+            .timeout_ms
+            .unwrap_or(DEFAULT_LOCAL_REDUCER_TIMEOUT_MS);
+        let floor_ms = u64::from(CONTEXT_FIREWALL_HOOK_TIMEOUT_SECONDS.saturating_sub(2)) * 1000;
+        if timeout_ms > floor_ms {
+            return Err(LocalReducerConfigError::TimeoutTooLarge {
+                name,
+                timeout_ms,
+                hook_timeout_seconds: CONTEXT_FIREWALL_HOOK_TIMEOUT_SECONDS,
+            });
+        }
+        Ok(Self {
+            name,
+            command: config.command.clone(),
+            version_pin: config.version.clone(),
+            timeout: Duration::from_millis(timeout_ms),
+            scratch_dir: scratch_dir.into(),
+            credential_vars,
+        })
+    }
+}
+
+impl Reducer for LocalToolReducer {
+    fn describe(&self) -> String {
+        format!("local:{}", self.name)
+    }
+
+    fn select(&self, request: &ReductionRequest<'_>) -> Result<ReducerAnswer, ReducerError> {
+        if std::fs::create_dir_all(&self.scratch_dir).is_err() {
+            return Err(ReducerError::new(ReducerErrorKind::LocalFailed));
+        }
+
+        let wire_request = LocalRequestWire {
+            version: 1,
+            tool: request.tool_name,
+            query: request.tool_query,
+            candidates: request
+                .candidates
+                .iter()
+                .map(|candidate| LocalCandidateWire {
+                    id: candidate.id,
+                    text: &candidate.text,
+                })
+                .collect(),
+        };
+        let body = serde_json::to_vec(&wire_request)
+            .expect("LocalRequestWire is a plain owned/borrowed shape and always serializes");
+
+        let mut command = std::process::Command::new(&self.command[0]);
+        command
+            .args(&self.command[1..])
+            .current_dir(&self.scratch_dir)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+        for var in &self.credential_vars {
+            command.env_remove(var);
+        }
+
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+                return Err(ReducerError::new(ReducerErrorKind::LocalAbsent));
+            }
+            Err(_) => return Err(ReducerError::new(ReducerErrorKind::LocalFailed)),
+        };
+
+        // Stdin is written and stdout/stderr are drained on their own
+        // threads, concurrently with the child running, so a tool that
+        // interleaves reading and writing (or simply produces more output
+        // than one OS pipe buffer holds) can never deadlock against this
+        // process waiting on a full pipe.
+        let mut stdin = child.stdin.take().expect("stdin was requested piped");
+        let mut stdout = child.stdout.take().expect("stdout was requested piped");
+        let mut stderr = child.stderr.take().expect("stderr was requested piped");
+
+        let stdin_thread = std::thread::spawn(move || {
+            use std::io::Write as _;
+            let _ = stdin.write_all(&body);
+            // `stdin` drops here, closing the pipe so a well-behaved tool
+            // reading to EOF is not left waiting for more input.
+        });
+        let stdout_thread = std::thread::spawn(move || {
+            use std::io::Read as _;
+            let mut buf = Vec::new();
+            let _ = stdout.read_to_end(&mut buf);
+            buf
+        });
+        let stderr_thread = std::thread::spawn(move || {
+            use std::io::Read as _;
+            let mut buf = String::new();
+            let _ = stderr.read_to_string(&mut buf);
+            buf
+        });
+
+        let deadline = std::time::Instant::now() + self.timeout;
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Some(status),
+                Ok(None) => {
+                    if std::time::Instant::now() >= deadline {
+                        break None;
+                    }
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(_) => break None,
+            }
+        };
+
+        let Some(status) = status else {
+            let _ = child.kill();
+            let _ = child.wait();
+            let _ = stdin_thread.join();
+            let _ = stdout_thread.join();
+            let _ = stderr_thread.join();
+            return Err(ReducerError::new(ReducerErrorKind::LocalTimeout));
+        };
+
+        let stdout_bytes = stdout_thread.join().unwrap_or_default();
+        let stderr_text = stderr_thread.join().unwrap_or_default();
+        let _ = stdin_thread.join();
+        if !stderr_text.is_empty() {
+            tracing::debug!(
+                reducer = %self.name,
+                stderr = %stderr_text,
+                "local reducer: stderr captured, never forwarded"
+            );
+        }
+
+        if !status.success() {
+            return Err(ReducerError::new(ReducerErrorKind::LocalFailed));
+        }
+
+        let Ok(reply) = serde_json::from_slice::<LocalReplyWire>(&stdout_bytes) else {
+            return Err(ReducerError::new(ReducerErrorKind::LocalFailed));
+        };
+        if reply.version != 1 {
+            return Err(ReducerError::new(ReducerErrorKind::LocalFailed));
+        }
+
+        if let Some(pin) = &self.version_pin
+            && !reply.tool_version.starts_with(pin.as_str())
+        {
+            let call = ReducerCallInfo {
+                provider: format!("local:{}", self.name),
+                model: reply.tool_version,
+                route: None,
+                input_tokens: None,
+                output_tokens: None,
+                cached_input_tokens: None,
+            };
+            return Err(ReducerError::with_call(
+                ReducerErrorKind::LocalVersion,
+                call,
+            ));
+        }
+
+        let Some(verdicts): Option<Vec<Verdict>> = reply
+            .verdicts
+            .into_iter()
+            .map(|v| {
+                Relevance::parse(&v.relevance).map(|relevance| Verdict {
+                    id: v.id,
+                    relevance,
+                    reason: v.reason,
+                })
+            })
+            .collect()
+        else {
+            return Err(ReducerError::new(ReducerErrorKind::LocalFailed));
+        };
+        if validate(&verdicts, request.candidates).is_err() {
+            return Err(ReducerError::new(ReducerErrorKind::LocalFailed));
+        }
+
+        let call = ReducerCallInfo {
+            provider: format!("local:{}", self.name),
+            model: reply.tool_version,
+            route: None,
+            input_tokens: None,
+            output_tokens: None,
+            cached_input_tokens: None,
+        };
+        Ok(ReducerAnswer { verdicts, call })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -943,5 +1276,68 @@ mod tests {
         ]));
         assert!(!privacy_blocks_reduction(&["src/main.rs".to_owned()]));
         assert!(!privacy_blocks_reduction(&[]));
+    }
+
+    // -----------------------------------------------------------------
+    // `LocalToolReducer` — Phase 58, map lines 2028-2030.
+    // -----------------------------------------------------------------
+
+    fn local_config(command: Vec<&str>) -> crate::config::firewall::LocalReducerConfig {
+        crate::config::firewall::LocalReducerConfig {
+            command: command.into_iter().map(str::to_owned).collect(),
+            version: None,
+            timeout_ms: None,
+        }
+    }
+
+    /// Map lines 2028/OBJECTIVE 1: `timeout_ms` leaving less than two
+    /// seconds inside the hook's own ten-second timeout is refused at
+    /// construction, naming the reducer and the timeout in its message.
+    #[test]
+    fn a_timeout_that_would_leave_less_than_two_seconds_is_refused_at_construction() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = local_config(vec!["/bin/true"]);
+        config.timeout_ms = Some(8001);
+        let err = LocalToolReducer::new("too-slow", &config, dir.path(), Vec::new())
+            .expect_err("8001ms leaves less than two seconds inside a ten-second hook timeout");
+        assert!(matches!(
+            err,
+            LocalReducerConfigError::TimeoutTooLarge { .. }
+        ));
+        assert!(err.to_string().contains("too-slow"));
+        assert!(err.to_string().contains("8001"));
+    }
+
+    /// The floor itself: exactly two seconds of headroom (8000ms of an
+    /// assumed ten-second hook timeout) is accepted, never refused off by
+    /// one.
+    #[test]
+    fn a_timeout_at_exactly_the_floor_is_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut config = local_config(vec!["/bin/true"]);
+        config.timeout_ms = Some(8000);
+        assert!(LocalToolReducer::new("at-the-floor", &config, dir.path(), Vec::new()).is_ok());
+    }
+
+    /// The default (unset `timeout_ms`) is always within the floor,
+    /// whatever the floor is computed from.
+    #[test]
+    fn an_unset_timeout_uses_the_default_and_is_always_accepted() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = local_config(vec!["/bin/true"]);
+        assert!(config.timeout_ms.is_none());
+        assert!(LocalToolReducer::new("default-timeout", &config, dir.path(), Vec::new()).is_ok());
+    }
+
+    /// A table with no `command` at all has nothing to spawn — refused at
+    /// construction, never at spawn time as a confusing "absent" bypass.
+    #[test]
+    fn an_empty_command_is_refused_at_construction() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = local_config(vec![]);
+        let err = LocalToolReducer::new("nothing", &config, dir.path(), Vec::new())
+            .expect_err("an empty command has nothing to spawn");
+        assert!(matches!(err, LocalReducerConfigError::EmptyCommand { .. }));
+        assert!(err.to_string().contains("nothing"));
     }
 }

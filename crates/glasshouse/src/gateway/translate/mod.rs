@@ -335,6 +335,25 @@ pub enum CacheDisposition {
     Stripped(&'static str),
 }
 
+/// What a codec's own wire does with a harness's carried thinking/reasoning
+/// request (capability map line 2039's prerequisite,
+/// `docs/product/design-decisions.md`'s *"Carrying effort across a
+/// translated pairing"*) — [`CacheDisposition`]'s shape, one field later:
+/// a `Carried` wire names its own field and how the level is derived; a
+/// `Stripped` one has no such field at all and never encodes one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EffortDisposition {
+    /// Carried under this wire's own hint field, named, with one sentence on
+    /// how its value is derived.
+    Carried {
+        field: &'static str,
+        note: &'static str,
+    },
+    /// This wire has no equivalent; effort is never encoded, for the stated
+    /// reason.
+    Stripped(&'static str),
+}
+
 /// The per-field rows of one codec — what it refuses, with reasons; what it
 /// ignores by name in a response; and, where the concept applies, what its
 /// encoder does with a prompt-cache marker (`None` for a protocol never
@@ -344,6 +363,7 @@ pub struct FieldRows {
     pub refused: &'static [(&'static str, &'static str)],
     pub ignored: &'static [&'static str],
     pub cache: Option<CacheDisposition>,
+    pub effort: Option<EffortDisposition>,
 }
 
 /// The per-field rows for `protocol`'s codec, or `None` for a protocol with
@@ -353,6 +373,7 @@ pub fn field_rows(protocol: &str) -> Option<FieldRows> {
         refused: codec.refused_fields(),
         ignored: codec.ignored_fields(),
         cache: codec.cache_disposition(),
+        effort: codec.effort_disposition(),
     })
 }
 
@@ -462,6 +483,16 @@ pub(super) trait Codec: Sync {
     /// own, since no pair supported today decodes a cache marker from a
     /// protocol other than Anthropic Messages and then encodes back onto it.
     fn cache_disposition(&self) -> Option<CacheDisposition> {
+        None
+    }
+    /// What this codec's [`Codec::encode_request`] does with a carried
+    /// thinking/reasoning request ([`Request::effort`]) — the pair table's
+    /// per-target answer, mirroring [`Codec::cache_disposition`] exactly.
+    /// `None` is the default for a wire never asked to answer the question —
+    /// Anthropic's own, since no pair supported today decodes an effort
+    /// marker from a protocol other than Anthropic Messages and then encodes
+    /// it back onto Anthropic Messages.
+    fn effort_disposition(&self) -> Option<EffortDisposition> {
         None
     }
 }
@@ -1631,6 +1662,16 @@ mod tests {
             rows.cache, None,
             "Anthropic is never asked to encode a cache marker it did not itself decode"
         );
+        // Carried (GH-EFFORT-CARRY), not refused: `thinking` left
+        // REFUSED_FIELDS when this codec started accepting it.
+        assert!(
+            !rows.refused.iter().any(|(field, _)| *field == "thinking"),
+            "thinking is carried now, not refused"
+        );
+        assert_eq!(
+            rows.effort, None,
+            "Anthropic is never asked to encode an effort marker it did not itself decode"
+        );
         assert!(rows.ignored.contains(&"usage.service_tier"));
         let rows = field_rows("openai-chat").unwrap();
         assert!(rows.refused.iter().any(|(field, _)| *field == "n"));
@@ -1638,6 +1679,13 @@ mod tests {
             rows.cache,
             Some(CacheDisposition::Carried {
                 field: "prompt_cache_key",
+                ..
+            })
+        ));
+        assert!(matches!(
+            rows.effort,
+            Some(EffortDisposition::Carried {
+                field: "reasoning_effort",
                 ..
             })
         ));
@@ -1655,6 +1703,13 @@ mod tests {
                 ..
             })
         ));
+        assert!(matches!(
+            rows.effort,
+            Some(EffortDisposition::Carried {
+                field: "reasoning.effort",
+                ..
+            })
+        ));
         let rows = field_rows("gemini-generate-content").unwrap();
         assert!(
             rows.refused
@@ -1668,6 +1723,17 @@ mod tests {
         assert!(
             matches!(rows.cache, Some(CacheDisposition::Stripped(_))),
             "Gemini has no per-request cache marker to carry the harness's onto"
+        );
+        assert!(
+            matches!(
+                rows.effort,
+                Some(EffortDisposition::Carried {
+                    field: "generationConfig.thinkingConfig.thinkingBudget",
+                    ..
+                })
+            ),
+            "Gemini has a thinking-budget field to carry the harness's effort onto: {:?}",
+            rows.effort
         );
         // ... and `gemini` alone is not a protocol slug.
         assert!(field_rows("gemini").is_none());
@@ -1688,6 +1754,7 @@ mod tests {
             stream,
             user: None,
             cache_requested: false,
+            effort: None,
         }
     }
 

@@ -945,20 +945,21 @@ fn a_request_the_pair_cannot_carry_is_refused_by_name_and_nothing_is_opened_upst
     let fixture = ChatOnlyUpstream::start(Answer::Completion);
     let gateway = start_gateway(upstream_from(&chat_only_provider(&fixture)), None);
 
-    // `cache_control` moved from refused to carried (2014) — this pair's
-    // still-refused field is `thinking`, extended thinking having no OpenAI
-    // Chat equivalent at all.
-    let with_thinking = json!({
+    // `cache_control` moved from refused to carried (2014); `thinking` moved
+    // from refused to carried too (GH-EFFORT-CARRY) — this pair's
+    // still-refused field is now `service_tier`, which has no OpenAI Chat
+    // equivalent at all.
+    let with_service_tier = json!({
         "model": "claude-x",
         "max_tokens": 10,
         "system": [{"type": "text", "text": PLANTED_PROMPT}],
         "messages": [{"role": "user", "content": "hi"}],
-        "thinking": {"type": "enabled", "budget_tokens": 1024}
+        "service_tier": "auto"
     })
     .to_string();
     let response = send_and_read(
         gateway.address(),
-        &messages_request(gateway.token().expose(), &with_thinking),
+        &messages_request(gateway.token().expose(), &with_service_tier),
     );
     let (head, body) = head_and_body(&response);
     assert!(head.starts_with("HTTP/1.1 400"), "{head}");
@@ -970,8 +971,8 @@ fn a_request_the_pair_cannot_carry_is_refused_by_name_and_nothing_is_opened_upst
         message.contains("anthropic-messages->openai-chat"),
         "{message}"
     );
-    assert!(message.contains("`thinking`"), "{message}");
-    assert!(message.contains("no OpenAI Chat equivalent"), "{message}");
+    assert!(message.contains("`service_tier`"), "{message}");
+    assert!(message.contains("no equivalent service tier"), "{message}");
     assert!(
         !message.contains(PLANTED_PROMPT),
         "a refusal names the field and never quotes the request: {message}"
@@ -982,12 +983,10 @@ fn a_request_the_pair_cannot_carry_is_refused_by_name_and_nothing_is_opened_upst
         "a refused request opens nothing upstream"
     );
 
-    // Thinking, top_k, and a future unknown field: each refused by its name.
+    // service_tier, top_k, and a future unknown field: each refused by its
+    // name.
     for (extra, field) in [
-        (
-            r#""thinking": {"type": "enabled", "budget_tokens": 1024}"#,
-            "`thinking`",
-        ),
+        (r#""service_tier": "auto""#, "`service_tier`"),
         (r#""top_k": 3"#, "`top_k`"),
         (r#""some_future_field": 1"#, "`some_future_field`"),
     ] {
@@ -1181,10 +1180,11 @@ fn a_413_refusal_is_readable_by_a_client_still_uploading_its_declared_body() {
 /// The relay rule, narrowed and not repealed: a provider that serves
 /// Anthropic Messages natively — **and** OpenAI Chat, so a supported pair and
 /// both codecs are right there — gets the client's body **untouched**: a body
-/// the codec would refuse (`cache_control`, `thinking`) and would
-/// re-serialise (odd spacing, non-ASCII), with its Anthropic headers, at the
-/// Anthropic route; and the client gets the provider's document verbatim, a
-/// key the codecs refuse included. A gateway that entered a codec for a
+/// the codec would carry rather than send as given (`cache_control`,
+/// `thinking`) and would re-serialise (odd spacing, non-ASCII), with its
+/// Anthropic headers, at the Anthropic route; and the client gets the
+/// provider's document verbatim, a key the codecs refuse included. A gateway
+/// that entered a codec for a
 /// served target sends the fixture a `/v1/chat/completions` body instead,
 /// and fails on the first byte comparison.
 #[test]

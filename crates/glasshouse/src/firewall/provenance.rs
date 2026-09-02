@@ -17,13 +17,25 @@ pub struct SemanticProvenance {
     pub considered: usize,
     /// The bypass reason's stable name, when `applied` is `false`.
     pub reason: Option<String>,
+    /// The reducer's own identity — `"{provider} {model}"` — present
+    /// whenever a call actually completed with a parseable reply (mirrors
+    /// [`super::SemanticOutcome::call`]'s own condition). Phase 58, map line
+    /// 2030: named on the applied line so a reduced result's header says
+    /// which reducer produced it — model-backed and local reducers alike,
+    /// symmetrically.
+    pub reducer: Option<String>,
 }
 
 impl SemanticProvenance {
     fn render(&self) -> String {
         if self.applied {
+            let by = self
+                .reducer
+                .as_deref()
+                .map(|reducer| format!(" by {reducer}"))
+                .unwrap_or_default();
             format!(
-                "[glasshouse context firewall: semantic reduction kept {}/{} candidates]\n",
+                "[glasshouse context firewall: semantic reduction{by} kept {}/{} candidates]\n",
                 self.kept, self.considered
             )
         } else {
@@ -140,10 +152,35 @@ mod tests {
                 kept: 3,
                 considered: 5,
                 reason: None,
+                reducer: None,
             }),
         };
         let rendered = provenance.render();
         assert!(rendered.contains("semantic reduction kept 3/5"));
+    }
+
+    /// Phase 58, map line 2030: named on the applied line so a header can
+    /// say which reducer produced a reduction — the local reducer's own
+    /// shape (`"local:<name> <tool_version>"`), and symmetrically the
+    /// model-backed reducer's own `"<provider> <model>"`.
+    #[test]
+    fn an_applied_semantic_line_names_the_reducer_when_known() {
+        let provenance = Provenance {
+            original_tokens: 9000,
+            forwarded_tokens: 400,
+            retained_candidates: 5,
+            total_candidates: 400,
+            raw_ref: "gh-tool://abc123".to_string(),
+            semantic: Some(SemanticProvenance {
+                applied: true,
+                kept: 3,
+                considered: 5,
+                reason: None,
+                reducer: Some("local:headroom 0.9.3".to_string()),
+            }),
+        };
+        let rendered = provenance.render();
+        assert!(rendered.contains("semantic reduction by local:headroom 0.9.3 kept 3/5"));
     }
 
     /// The bypassed half: the header names the reason, never leaves a
@@ -161,6 +198,7 @@ mod tests {
                 kept: 0,
                 considered: 5,
                 reason: Some("reducer-timed-out".to_string()),
+                reducer: None,
             }),
         };
         let rendered = provenance.render();

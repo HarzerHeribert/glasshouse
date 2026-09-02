@@ -22,6 +22,18 @@ validated and waiting on the commit. Next action: `.agent-runtime/CONTINUATION.m
 
 Last updated: 2026-09-02 (Europe/Berlin)
 
+## Checkpoint — 2026-09-02, batch 88: 1218 / 1347 (90.4%) — Phase 58's producers land, the memory proxy is real, memory is the project's
+
+Session `56821d4d` (Fable 5.1), continued. Five more boxes in wave 93's one
+gate: 2028–2030 (the local reducer seat, from a design note), 1821/1831 (a
+turn-outcome row that needs no route). 2039's producer landed (effort carried
+across a translated pairing); 2040 landed in wave 91. Two user rulings
+recorded in `design-decisions.md`: alpha is a week of daily use away, and
+memory is the project's, not the launch path's — `GH-LAUNCH-BRIEFING` is live.
+Also live: `dispatch-reservation-row` (Red, 1367) and the atomic-write residue.
+Phase 58 stands 13/15 (2019 and 2039 open: a session column, then the shadow
+measurement). Exact next actions: `.agent-runtime/CONTINUATION.md`.
+
 ## Checkpoint — 2026-09-02, batch 87: 1213 / 1347 (90.1%) — Phase 58's first five packages land, the disposable router calls what it chooses, seven worktrees in one gate and an eighth right behind
 
 Session `56821d4d` (Fable 5.1), inherited hot from `14f81d52`. Eleven boxes in

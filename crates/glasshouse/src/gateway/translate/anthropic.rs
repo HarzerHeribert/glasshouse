@@ -17,8 +17,8 @@
 use serde_json::{Map, Value, json};
 
 use super::canonical::{
-    Block, BlockStart, Delta, ImageSource, Message, Request, Response, Role, StopReason,
-    StreamEvent, ToolChoice, ToolDefinition, Unsupported, Usage, json_kind,
+    Block, BlockStart, Delta, EffortRequest, ImageSource, Message, Request, Response, Role,
+    StopReason, StreamEvent, ToolChoice, ToolDefinition, Unsupported, Usage, json_kind,
 };
 use super::fields::{Fields, element};
 use super::stream::{self, SseEvent};
@@ -32,10 +32,6 @@ pub(super) const ENDPOINT: &str = "/messages";
 /// The request fields and block shapes this codec refuses, with the reason
 /// each refusal carries. The pair table's per-field rows for this side.
 pub(super) const REFUSED_FIELDS: &[(&str, &str)] = &[
-    (
-        "thinking",
-        "extended thinking has no OpenAI Chat equivalent; turn it off for this pairing",
-    ),
     (
         "thinking block",
         "a thinking or redacted_thinking block cannot be replayed to an OpenAI Chat model",
@@ -287,7 +283,7 @@ pub(super) fn decode_request(body: &[u8]) -> Result<Request, Unsupported> {
         }
     };
 
-    top.refuse_if_present("thinking", reason("thinking"))?;
+    let effort = decode_thinking(&mut top)?;
     top.refuse_if_present("service_tier", reason("service_tier"))?;
     // Carried (2014), not refused: no home on this wire's own top level in
     // practice (a real Claude Code request never sets it here — every
@@ -314,7 +310,44 @@ pub(super) fn decode_request(body: &[u8]) -> Result<Request, Unsupported> {
         stream,
         user,
         cache_requested,
+        effort,
     })
+}
+
+/// `thinking` decoded as designed (`docs/product/design-decisions.md`,
+/// *"Carrying effort across a translated pairing"*): `enabled` with a budget
+/// is carried as [`EffortRequest`] rather than refused; `disabled` carries
+/// nothing, exactly as a request that never set `thinking` at all; any other
+/// shape — including `adaptive`, which this package does not carry — is
+/// refused by name, as `thinking` itself always was before this change.
+fn decode_thinking(top: &mut Fields) -> Result<Option<EffortRequest>, Unsupported> {
+    let Some(mut thinking) = top.take_object("thinking")? else {
+        return Ok(None);
+    };
+    let kind = thinking.require_string("type")?;
+    match kind.as_str() {
+        "enabled" => {
+            let budget_tokens = thinking.take_u64("budget_tokens")?.ok_or_else(|| {
+                Unsupported::new(
+                    thinking.at("budget_tokens"),
+                    "enabled thinking needs a budget_tokens value",
+                )
+            })?;
+            thinking.finish()?;
+            Ok(Some(EffortRequest {
+                budget_tokens: Some(budget_tokens),
+                level: None,
+            }))
+        }
+        "disabled" => {
+            thinking.finish()?;
+            Ok(None)
+        }
+        other => Err(Unsupported::new(
+            thinking.at("type"),
+            format!("the thinking mode `{other}` is not one this codec carries"),
+        )),
+    }
 }
 
 fn decode_message(value: Value, path: &str, cache: &mut bool) -> Result<Message, Unsupported> {
@@ -1128,6 +1161,10 @@ pub(super) mod tests {
             // *source*), so `false` keeps this fixture's encode/decode
             // round trip exact; carrying is exercised directly below.
             cache_requested: false,
+            // Anthropic's own encoder never re-emits `thinking` from a
+            // carried `effort` either (same scope note as `cache_requested`
+            // above); `None` keeps this fixture's round trip exact.
+            effort: None,
         }
     }
 
@@ -1220,6 +1257,47 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn thinking_enabled_with_a_budget_is_carried_not_refused() {
+        let wire =
+            br#"{"model": "m", "max_tokens": 1, "messages": [{"role": "user", "content": "x"}],
+            "thinking": {"type": "enabled", "budget_tokens": 4096}}"#;
+        let request = decode_request(wire).expect("carried, not refused");
+        assert_eq!(
+            request.effort,
+            Some(EffortRequest {
+                budget_tokens: Some(4096),
+                level: None,
+            })
+        );
+    }
+
+    #[test]
+    fn thinking_disabled_carries_no_effort() {
+        let wire =
+            br#"{"model": "m", "max_tokens": 1, "messages": [{"role": "user", "content": "x"}],
+            "thinking": {"type": "disabled"}}"#;
+        let request = decode_request(wire).expect("disabled thinking still decodes");
+        assert_eq!(request.effort, None);
+    }
+
+    #[test]
+    fn no_thinking_at_all_carries_no_effort() {
+        let wire =
+            br#"{"model": "m", "max_tokens": 1, "messages": [{"role": "user", "content": "x"}]}"#;
+        let request = decode_request(wire).expect("a plain request decodes");
+        assert_eq!(request.effort, None);
+    }
+
+    #[test]
+    fn enabled_thinking_with_no_budget_is_refused() {
+        let wire =
+            br#"{"model": "m", "max_tokens": 1, "messages": [{"role": "user", "content": "x"}],
+            "thinking": {"type": "enabled"}}"#;
+        let refusal = decode_request(wire).expect_err("a budget is required when enabled");
+        assert_eq!(refusal.field, "thinking.budget_tokens");
+    }
+
+    #[test]
     fn every_refused_request_field_is_refused_by_its_name() {
         let base = |extra: &str| {
             format!(
@@ -1227,9 +1305,12 @@ pub(super) mod tests {
             )
         };
         let cases: Vec<(String, &str)> = vec![
+            // `thinking` moved from refused to carried (GH-EFFORT-CARRY);
+            // `thinking: {type: "adaptive"}` is a shape this package does
+            // not carry and stays refused, by the field's own name.
             (
-                base(r#", "thinking": {"type": "enabled", "budget_tokens": 1024}"#),
-                "thinking",
+                base(r#", "thinking": {"type": "adaptive"}"#),
+                "thinking.type",
             ),
             (base(r#", "top_k": 5"#), "top_k"),
             (base(r#", "service_tier": "auto""#), "service_tier"),

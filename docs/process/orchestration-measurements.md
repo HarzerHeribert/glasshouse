@@ -4993,3 +4993,27 @@ Session `56821d4d` (Fable 5.1), inherited hot from `14f81d52` with three workers
 3. **Six co-editors of one file integrate in one gate** when the hunks are region-disjoint: one three-way apply per patch from main, named `git add`s, one `--targeted` run. The co-edit protocol's cost is the serial apply, not a serial gate.
 4. **"Where the provider reports them" can be vacuous for a whole clause.** No translated target reports cache *creation* tokens; 2019's measuring half closed on reads alone and its per-session half is a schema fact (no session column) — the readout shows the ratio per credential and says so.
 5. **A worker's own thin spot is the review's whole budget** (§88). The firewall worker named its untested Local arm; the routed worker named the fixed-temp-name race it inherited; both went straight into the register as Green successors instead of into a re-derivation.
+
+## Batch 88 (2026-09-02, late afternoon) — Phase 58's remaining producers land, the memory proxy becomes real, and the user rules that memory is the project's
+
+Same session as Batch 87 (`56821d4d`). **Map 1213 → 1218** (2028, 2029, 2030, 1821, 1831) in one gate over three worktrees (wave 93) after the memory-export follow-up (wave 91) and one docs commit for a user ruling. The waves 90–91 trailing sweep, run from a detached worktree while the next wave integrated: 149/149 green.
+
+| package | tier | result |
+|---|---|---|
+| `local-reducer` | Sonnet high, Amber | **2028–2030 closed** — the reducer seat takes an installed tool over a stdin/stdout contract; four bypass reasons; the reducer named in header and row; `contrib/headroom-select.py`. 4/4 KILLED. Implemented from a design note written before the packet — the shape that made a subprocess boundary an Amber job |
+| `effort-carry` | Sonnet high, Amber | 2039's **producer**: `Request::effort`, `thinking` carried instead of refused, three encoder mappings pinned to the providers' documentation (one number, Gemini's ceiling, honestly flagged as not re-verified live). 4/4 KILLED. Closes no box by design |
+| `turn-outcome-row` | Sonnet high, Amber | **1821, 1831 closed** — the orchestrator's ruling (b): a `TurnOutcomeObserved` row for every session at the hook's `TurnEnded`, needing no route; the memory proxy joins it; the planted row is gone. 3/3 KILLED, one killed by the routing readers' own tests |
+| `recon-effort-clamp` | Sonnet medium, read-only | 2039 has no effort field anywhere — a clamp or its shadow had no producer; routed to a design note and `effort-carry` in the same afternoon |
+| `memory-export` (wave 91) | Sonnet medium, Amber-light | **2040 closed** after one honest block on a verb my packet had not grepped for |
+
+**The user's rulings today**, both recorded in `design-decisions.md`: the project is alpha-ready in function and what separates it from an alpha is a week of daily use (the *Measure* lines' producers are usage); and **memory is the project's, not the launch path's** — a plain `glasshouse launch` must brief with project memory (`GH-LAUNCH-BRIEFING`, live at this checkpoint, opt-out not opt-in).
+
+**Output per box.** Day total ≈ 13.7M at this checkpoint; this session ≈ 3.8M for **+17 net** (about 225k per net box across both batches).
+
+**Findings worth carrying forward.**
+
+1. **Design-note-first turns a Red-shaped package into an Amber one.** Both the local reducer (a subprocess boundary) and the effort carry (a wire-fidelity change with provider vocabularies) went to Sonnet with a settled design and came back with every mutation killed; the design cost the orchestrator two pages each.
+2. **The Bash tool is zsh.** An unquoted `$FILES` reaches a script as one argument; the wave-91 gate ran "nothing to do" twice before the files were named as words. The wave-90 script worked only because it ran under `bash`.
+3. **A watch that reads a pane cannot tell a long thinking stretch from idle.** Three false alarms on one worker; a report-file Monitor is the honest fallback and the watch's heuristic is a Green fix.
+4. **Grep the verb and the module before naming them in a packet.** `memory export` and `memory/export.rs` were both Phase 50's; the worker blocked correctly the first time and resolved the second collision non-destructively.
+5. **Batch reports into one gate when finishes align.** Three reports within twenty minutes became one 18-file gate instead of three; the wave-92 gate was stopped two minutes in to make that happen.

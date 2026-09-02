@@ -633,3 +633,46 @@ Regression evidence (through the shipped binary and the Unix-socket door):
 State for both: **PARTIALLY VERIFIED** — the explicit halves complete (entry above), the retrieval half of the proxy complete here, the outcome half has no producer on a briefed session. **Successor, named: `GH-TURN-OUTCOME-FOR-BRIEFED-SESSIONS`** — a design ruling first, then Amber: either the door's spawn records the routing decision it embodies (so `record_routing_outcome` has a destination to attribute the turn's outcome to), or the harness-reported turn outcome becomes a row that does not require a routed destination for the memory proxy alone (the proxy's definition is about the *session's* turn, not the *route's*). The register row says which facts decide it.
 
 ---
+
+## Lines 1821 and 1831 CLOSED — 2026-09-02 (`GH-TURN-OUTCOME-ROW`, Amber, Sonnet high): the proxy's two rows finally meet on one session
+
+Implements the orchestrator's ruling (register, *Phase 51's memory proxy*, option (b)): the harness's turn verdict becomes a row that needs no route. `EvaluationKind::TurnOutcomeObserved`, written by `record_turn_outcome` in the hook's `TurnEnded` arm for every session — routed or not — beside `record_routing_outcome`, which is unchanged and still refuses an unrouted session (`routing_outcome::a_session_with_no_routing_decision_records_no_outcome` proves it, and the `route-the-unrouted` mutation is killed by the routing readers' own tests). `usefulness()` (1821) and `prevented_repetition()` (1831) join `MemoryRetrieved.session_id` to the new row; the override signal's clause is untouched. `EVALUATION_KINDS` is thirteen with the pinning test. The proxy test no longer plants anything: a door-spawned session is briefed, its turn ends through the real hook, `RoutingOutcomeObserved` stays empty for it, one `TurnOutcomeObserved` row lands, and the shipped binary prints `proxy useful 1 of 1`. A new test proves a session that is both routed and briefed counts once (its routing row is planted, disclosed at the line, because the door never routes and a CLI launch never briefs — the latter is `GH-LAUNCH-BRIEFING`, live under the user's ruling). 3/3 mutations KILLED; `memory_rating` 10/10, `evaluation_observations` 26/26, `evaluation_producers` 6/6, `tier_outcomes` 2/2, `routing_outcome` 4/4, `--lib evaluation` 6/6, `--lib database` 45/45, targeted blast green.
+
+### Measure how often retrieved memory is actually useful to the receiving agent. (line 1821)
+
+Contract: Given a memory delivered into a session, when that session's harness reports its turn ended, Glasshouse counts the delivery as a proxy hit when the turn completed with no override, failover or retry recorded against it, beside the explicit ratings, while preserving that a session with no turn end counts as unknown and that no session is ever given a routed destination it was not routed to.
+
+State: **COMPLETE** — ruled 2026-09-02. The explicit half (`memory rate`) and the retrieval half (`deliver_memory` with the session id) were already production; this package supplies the outcome half through production rows. The one remaining reach limit — a plain CLI launch is not briefed today — is the user's ruling and `GH-LAUNCH-BRIEFING`, live; the readers need no change when it lands.
+
+Production evidence: `evaluation/mod.rs` — `EvaluationKind::TurnOutcomeObserved`, `record_turn_outcome`, `EvaluationObservations::usefulness`; `main.rs` — the hook's `TurnEnded` arm; `database.rs` — `EVALUATION_KINDS`.
+
+Regression evidence: `memory_rating::a_retrieval_delivered_by_the_briefing_door_into_a_completed_session_counts_as_proxy` (no plant), `memory_rating::a_routed_and_briefed_session_counts_the_proxy_once`, `memory_rating::a_retrieval_delivered_by_the_briefing_door_with_no_turn_end_counts_as_unknown`, `routing_outcome::a_session_with_no_routing_decision_records_no_outcome`.
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| `record_turn_outcome` returns before writing | `skip-the-turn-row` | **killed** | `a_retrieval_delivered_by_the_briefing_door_into_a_completed_session_counts_as_proxy` |
+| `usefulness()` joins `RoutingOutcomeObserved` again | `join-the-routing-row` | **killed** | the same test (the unrouted door session's proxy collapses to 0 of 1) |
+
+> skip-the-turn-row observed: assertion `left == right` failed: [] (memory_rating.rs:730, zero TurnOutcomeObserved rows)
+
+> join-the-routing-row observed: panicked at memory_rating.rs:736 (`proxy useful 1 of 1` absent)
+
+### Measure how often memory prevents repetition of a recorded failed approach. (line 1831)
+
+Contract: Given a failed-approach memory delivered into a session, when that session's turn ends, Glasshouse counts the delivery as a proxy hit under the same rule, over the failed-approach memories retrieved, while preserving the same invariants as 1821.
+
+State: **COMPLETE** — ruled 2026-09-02; the denominator (`memories.kind = 'failed_attempt'` retrievals) was already real; this package changed only which row the completed-turn join reads.
+
+Production evidence: `evaluation/mod.rs` — `EvaluationObservations::prevented_repetition`, `record_turn_outcome`.
+
+Regression evidence: `memory_rating::prevented_repetition_counts_over_retrieved_failed_approach_memories`, `memory_rating::a_retrieval_delivered_by_the_briefing_door_into_a_completed_session_counts_as_proxy`, `routing_outcome::a_session_with_no_routing_decision_records_no_outcome`.
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| `record_turn_outcome` also writes a `RoutingCostClassObserved` row | `route-the-unrouted` | **killed** | `routing_outcome::a_session_with_no_routing_decision_records_no_outcome` (and three more routing-reader tests) |
+
+> route-the-unrouted observed: routing_outcome.rs:469 — an unrouted session now had a cost-class row that must not exist
+
+Recorded limit: macOS only.
+
+---

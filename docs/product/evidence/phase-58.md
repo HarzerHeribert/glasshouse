@@ -225,3 +225,90 @@ Regression evidence (`tests/memory_export.rs`, through the shipped binary): `exp
 Recorded limits, the worker's: the exclude match is exact-line, not a glob engine (Phase 50's own limit); the export's temporary file name carries the pid but no random part (no production caller runs two exports at once); macOS only; the header's timestamp is a Unix second.
 
 ---
+
+## Lines 2028, 2029 and 2030 CLOSED — 2026-09-02 (`GH-LOCAL-REDUCER`, Amber, Sonnet high): the reducer seat takes an installed tool, and every failure of the tool is a bypass
+
+Implements `design-decisions.md`'s *The local reducer seat* as written. `[context_firewall.local_reducers.<name>]` (`command` argv, optional `version` prefix pin, `timeout_ms` default 4000 and refused when it leaves less than two seconds inside the hook's ten) and `[context_firewall].reducer = "local:<name>"` select a `LocalToolReducer` in `disposable_reducer`'s new `local:` branch. One subprocess per reduction: the contract's request on stdin (`tool`, `query`, `candidates` by id — never the task, transcript, memory or a credential; the child's environment scrubbed with the launch's own credential-variable filter, cwd a per-session scratch directory), the reply's verdicts mapped through the same `decide_keep_set` inclusion bias, the forwarded result rebuilt from original candidates by id. Absence, timeout, non-zero exit or an off-contract reply, and a version outside the pin are four `SemanticBypassReason`s (`local-reducer-absent|timeout|failed|version`), each forwarding the deterministic result with the header saying why and the ledger row carrying the reason; the hook always exits 0. `ReducerCallInfo { provider: "local:<name>", model: <tool_version> }` reaches the ledger row and the header now reads `semantic reduction by <provider> <model> kept k/n` for both reducer kinds — the model-backed reducer's header changed to the same shape, its pinned test updated (the one line outside `YOURS`, required by the packet's own `REQUIRED BEHAVIOR` and disclosed). `contrib/headroom-select.py` is the reference shim (verdicts from Headroom's transform: verbatim survivor → relevant, absent → discard, rewritten → uncertain; `tool_version` from `headroom.__version__`), syntax-checked only — Headroom is not installed here, as the design anticipated. 4/4 mutations KILLED; `firewall_local_reducer` 6/6, `firewall_reducer` 9/9, `firewall_bridge` 17/17, `context_firewall` 13/13, `firewall_observability` 16/16, `--lib firewall` 96/96, `--lib config::firewall` 15/15, targeted blast green, rustdoc clean.
+
+**Decisions the design left to the worker, accepted:** the over-large `timeout_ms` is refused at `LocalToolReducer::new` (once per hook invocation, logged, the semantic stage disabled for that invocation) rather than at config load, because `config/mod.rs` was out of scope; an off-contract reply of any shape is `local-reducer-failed`; the scratch directory is the session's own state directory.
+
+### Allow the semantic reducer to be a local out-of-process tool the user installs, selected by configuration beside the model-backed reducer, with the same provenance header, raw preservation, and expansion path. (line 2028)
+
+Contract: Given a configured local tool, when the semantic stage runs, Glasshouse spawns it once per reduction with the candidates on stdin, reads verdicts by id, and rebuilds the forwarded result from the originals exactly as for a model-backed reducer, while preserving the deterministic ladder, the raw store and the expansion path unchanged.
+
+State: **COMPLETE** — ruled 2026-09-02.
+
+Production evidence: `firewall/reducer.rs` — `LocalToolReducer::new`, `LocalToolReducer::select`; `config/firewall.rs` — `LocalReducerConfig`, `ContextFirewallConfig::local_reducer`; `main.rs` — `disposable_reducer` (the `local:` branch), `local_disposable_reducer`.
+
+Regression evidence: `firewall_local_reducer::a_local_reducer_that_answers_the_contract_rebuilds_the_forwarded_result_from_originals`; `firewall::reducer::tests::a_timeout_that_would_leave_less_than_two_seconds_is_refused_at_construction`, `…::an_empty_command_is_refused_at_construction`.
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| `process`: the rebuild from originals → the ladder's own unfiltered text (the closest reachable "forward something other than the rebuilt originals": the trait never exposes a tool's text) | `forward-the-tools-text` | **killed** | `a_local_reducer_that_answers_the_contract_rebuilds_the_forwarded_result_from_originals` |
+| the request's `query` → the task text | `send-the-task` | **killed** | `the_local_reducer_request_never_carries_the_task_or_a_credential_variable` |
+
+> forward-the-tools-text observed: assertion `left == right` failed: exactly the even-indexed half the fake tool marked relevant must survive, rebuilt from the original candidates (kept 10/10)
+
+> send-the-task observed: panicked at tests/firewall_local_reducer.rs:559 (the task-string assertion)
+
+### Treat a local reducer's absence, timeout, or failure as a bypass with a stated reason, never as an error the session sees. (line 2029)
+
+Contract: Given a local reducer that is absent, slow, failing, off-contract or outside its version pin, when the semantic stage attempts it, Glasshouse records the matching bypass reason, forwards the deterministic result unchanged, and the hook exits 0, while preserving that the reason is visible in the header and the ledger row.
+
+State: **COMPLETE** — ruled 2026-09-02.
+
+Production evidence: `firewall/reducer.rs` — `ReducerErrorKind::{LocalAbsent, LocalTimeout, LocalFailed, LocalVersion}`, `LocalToolReducer::select`; `firewall/mod.rs` — `SemanticBypassReason::{LocalAbsent, LocalTimeout, LocalFailed, LocalVersion}` and `From<ReducerErrorKind>`.
+
+Regression evidence: `firewall_local_reducer::a_local_reducer_that_sleeps_past_its_timeout_bypasses_and_the_hook_still_answers`, `…::a_local_reducer_that_prints_garbage_bypasses_as_failed`, `…::an_absent_local_reducer_command_bypasses_as_absent`, `…::a_local_reducer_reporting_an_unpinned_version_bypasses_as_version_mismatch`.
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| the timeout branch panics instead of returning the bypass | `error-instead-of-bypass` | **killed** | `a_local_reducer_that_sleeps_past_its_timeout_bypasses_and_the_hook_still_answers` |
+| the version check → `false` | `ignore-the-pin` | **killed** | `a_local_reducer_reporting_an_unpinned_version_bypasses_as_version_mismatch` |
+
+> error-instead-of-bypass observed: thread 'main' panicked at firewall/reducer.rs:948:13; the hook's exit-0 assertion fails
+
+> ignore-the-pin observed: panicked at tests/firewall_local_reducer.rs:495 (the local-reducer-version assertion)
+
+### Record which reducer produced each reduction, so savings and recall are attributable per reducer. (line 2030)
+
+Contract: Given an applied semantic reduction, when the header and the ledger row are written, Glasshouse names the reducer and its version (a local tool as `local:<name> <tool_version>`, a model-backed one as its provider and model) so savings and recall group by reducer, while preserving the row's other columns.
+
+State: **COMPLETE** — ruled 2026-09-02. Attribution is verified through the ledger row (`provider = "local:fake"`) and the header text; the readout that groups by it is `routing-cost`'s savings section, which groups by purpose today — a per-reducer facet is a Green addition when wanted.
+
+Production evidence: `firewall/reducer.rs` — `LocalToolReducer::select` (the `ReducerCallInfo`); `firewall/provenance.rs` — `SemanticProvenance::reducer`, `render` (the `by <reducer>` segment); `firewall/mod.rs` — `process` (the name built once from the call).
+
+Regression evidence: `firewall_local_reducer::a_local_reducer_that_answers_the_contract_rebuilds_the_forwarded_result_from_originals` (header and row), `firewall::provenance::tests::an_applied_semantic_line_names_the_reducer_when_known`, `firewall_reducer::a_discarded_needle_is_dropped_but_show_still_has_it` (the model-backed header, symmetric).
+
+Recorded limits — the worker's: macOS only for the subprocess lifecycle (spawn, timeout-kill, join); the shim's Headroom API names are unverified against an installed package; an invalid `timeout_ms` fails at the hook, not at config load; `reducer_local_only` with a `local:` reference is asserted by reading, not by a test.
+
+---
+
+## Line 2039's producer landed — 2026-09-02 (`GH-EFFORT-CARRY`, Amber, Sonnet high): effort crosses a translated pairing, so there is now something to measure
+
+Implements `design-decisions.md`'s *Carrying effort across a translated pairing*. `Request::effort: Option<EffortRequest>` (a budget, a four-word `EffortLevel` ladder, and `level_for_budget` with three named thresholds cut at Anthropic's own published waypoints for `budget_tokens` — 1,024 minimum, 16,000 for complex tasks, 32k as the batch-processing line — each stated in the code beside its constant); the Anthropic decoder carries `thinking: {enabled, budget_tokens}` instead of refusing it (`disabled` is no effort; any other shape, including `adaptive`, is refused by name; a `thinking` *block* in content stays refused); OpenAI Chat emits `reasoning_effort`, OpenAI Responses `reasoning.effort` (both from the documented vocabulary, fetched that day), Gemini `generationConfig.thinkingConfig.thinkingBudget` clamped to a conservative ceiling; `EffortDisposition` and `FieldRows.effort` mirror the cache shape. No `thinking` → byte-identical encoding; no mapping rounds up; the relay is untouched. 4/4 mutations KILLED; `gateway_translate_effort` 6/6, `--lib gateway::translate` 82/82, the seven sibling translate suites green with counts, targeted blast green, rustdoc clean. The one refusal test that pinned `thinking` moved onto `service_tier`.
+
+**Two things the worker decided and the orchestrator accepts.** (1) The packet asked for a per-model *stripped* case where a target model is not documented to reason; no per-model capability table exists anywhere and `FieldRows` is protocol-keyed, so the disposition is static per protocol and every target is `Carried` — the provider, not Glasshouse, answers a model that does not reason. A per-model gate is a new decision if ever wanted. (2) Gemini's clamp ceiling (24,576, the 2.5 Flash range) **was not re-verified against a live fetch** — seven `WebFetch` attempts returned the page without its numeric table — and is recorded here as the one unverified number in the package; a browser-driven spot-check is a Green follow-up.
+
+**2039 stays open**, as the packet said it would. What `GH-EFFORT-CLAMP-SHADOW` can now record per translated exchange: whether effort was carried and under which field (`FieldRows.effort`), the mapped level or budget in the recorded outbound request, and `output_tokens`; what it still lacks is a pure tool-resume fixture (none exists) and the join from a harness-turn row to the session's `TurnEnded` verdict — which `GH-TURN-OUTCOME-ROW` (this batch) now writes as a row.
+
+Production evidence: `canonical.rs` — `EffortRequest`, `EffortLevel`, `Request::effort`, `level_for_budget`; `anthropic.rs` — `decode_thinking`; `openai_chat.rs`, `openai_responses.rs`, `gemini.rs` — `encode_request`, `effort_disposition`; `mod.rs` — `EffortDisposition`, `FieldRows::effort`, `Codec::effort_disposition`.
+
+Regression evidence (`tests/gateway_translate_effort.rs`, through the shipped binary against three fixtures): `a_thinking_request_reaches_a_chat_only_entitlement_with_reasoning_effort_at_the_mapped_level`, `…_a_responses_only_entitlement_with_nested_reasoning_effort`, `…_a_gemini_only_entitlement_with_the_budget_carried`, `a_request_with_no_thinking_carries_no_effort_field_on_any_target`, `a_thinking_block_in_message_content_is_still_refused_by_name`, `a_budget_above_every_threshold_is_high_and_a_budget_below_the_lowest_is_still_a_word`; unit: `level_for_budget_never_rounds_up_and_saturates_at_high`, `thinking_enabled_with_a_budget_is_carried_not_refused`, `thinking_disabled_carries_no_effort`, `enabled_thinking_with_no_budget_is_refused`, `field_rows_exist_for_every_codec_and_for_nothing_else`.
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| `decode_thinking`'s enabled branch refuses again | `refuse-thinking-again` | **killed** | `a_thinking_request_reaches_a_chat_only_entitlement_with_reasoning_effort_at_the_mapped_level` |
+| `level_for_budget`: `<=` → `<` at the medium boundary | `round-up` | **killed** | `a_budget_above_every_threshold_is_high_and_a_budget_below_the_lowest_is_still_a_word` |
+| Chat emits `reasoning_effort: medium` unconditionally | `invent-effort` | **killed** | `a_request_with_no_thinking_carries_no_effort_field_on_any_target` |
+| Gemini's `effort_disposition` → `None` | `strip-silently` | **killed** | `field_rows_exist_for_every_codec_and_for_nothing_else` |
+
+> refuse-thinking-again observed: panicked at tests/gateway_translate_effort.rs:638:5: assertion failed: head.starts_with("HTTP/1.1 200")
+
+> round-up observed: a budget exactly at EFFORT_MEDIUM_MAX must stay medium, not round up to high
+
+> invent-effort observed: the encoded document is exactly what this codec wrote before GH-EFFORT-CARRY, with no reasoning_effort key added
+
+> strip-silently observed: panicked at translate/mod.rs:1727:9 (the Carried disposition for Gemini is None)
+
+---

@@ -277,6 +277,29 @@ pub enum EvaluationKind {
     /// two outcomes with no distinguishing column at all — so no single
     /// production column ever meant "a revalidation happened" until this one.
     MemoryRevalidated,
+    /// The harness's own verdict on one turn of **any** session that runs
+    /// the hook — map lines 1821 and 1831's proxy denominator, and the row
+    /// [`Self::RoutingOutcomeObserved`] cannot be for this purpose, because
+    /// that row refuses to write for a session with no routed destination.
+    /// `subject` is `"completed"` or `"failed"`, spelled exactly as
+    /// [`Self::RoutingOutcomeObserved`]'s own vocabulary — the same
+    /// [`crate::events::TurnOutcome`], not a second word for the same fact.
+    ///
+    /// Design ruling, refusal register *"Phase 51's memory proxy — 1821 and
+    /// 1831"*: option (b), because `api::unix::spawn_session` makes no
+    /// routing decision, and writing a routed row for it would fabricate
+    /// one. This row makes no claim about a route at all — it is the
+    /// harness's verdict on the session's turn, full stop.
+    ///
+    /// **Written for every session that reaches the hook's `TurnEnded` arm,
+    /// routed or not.** `main.rs`'s hook handler records this row and then
+    /// [`Self::RoutingOutcomeObserved`] as before — a door-spawned session
+    /// that was never routed gets this row and never a
+    /// `RoutingOutcomeObserved` one; a CLI-launched session gets both. The
+    /// memory-quality readers (1821, 1831) join a session-attributed
+    /// retrieval to this row rather than to the routing row, because the
+    /// proxy's definition is about the *session's* turn, not the *route's*.
+    TurnOutcomeObserved,
 }
 
 /// The `subject` this ledger writes for a destination whose cost class no
@@ -493,6 +516,7 @@ impl EvaluationKind {
             Self::FailoverPrevented => "failover_prevented",
             Self::MemoryRated => "memory_rated",
             Self::MemoryRevalidated => "memory_revalidated",
+            Self::TurnOutcomeObserved => "turn_outcome_observed",
         }
     }
 
@@ -516,6 +540,7 @@ impl EvaluationKind {
             "failover_prevented" => Some(Self::FailoverPrevented),
             "memory_rated" => Some(Self::MemoryRated),
             "memory_revalidated" => Some(Self::MemoryRevalidated),
+            "turn_outcome_observed" => Some(Self::TurnOutcomeObserved),
             _ => None,
         }
     }
@@ -1231,42 +1256,47 @@ impl EvaluationObservations {
 /// §77's reason: a second worker's reader and this one must not be able to
 /// land on the same lines.
 ///
-/// # The proxy's join key, and where its producer stands after
-/// `GH-RETRIEVAL-ATTRIBUTION`
+/// # The proxy's join key, closed by `GH-TURN-OUTCOME-ROW`
 ///
 /// The design decision's proxy for 1821/1831 is *"the retrieving session's
 /// turn ended `Completed` … with no failover, retry, override or early
 /// abandonment recorded against it."* That needs a
 /// [`EvaluationKind::MemoryRetrieved`] row's `session_id` to find "the
-/// retrieving session" at all. `GH-RETRIEVAL-ATTRIBUTION` gives the
-/// launch-time briefing door — `api/unix.rs::deliver_memory` — exactly that:
-/// a successful injection now carries the session it was delivered to.
-/// `main.rs::memory_search_grouped`'s two callers still pass `None`:
-/// `glasshouse memory search` has no session to attribute a person's own
-/// command to, and the machine door's `query_memory` has no session field on
-/// its `Request::QueryMemory` to thread one from at all (that request carries
-/// no `session_id`, unlike `SendMessage` or `RecordAssumption` — see
-/// `query_memory`'s own doc comment; widening the protocol is out of this
-/// package's scope). So one of `record_memory_retrieval`'s two producers
-/// attaches a session today, not both.
+/// retrieving session" at all, and a same-session row saying how its turn
+/// ended. `GH-RETRIEVAL-ATTRIBUTION` gave the launch-time briefing door —
+/// `api/unix.rs::deliver_memory` — the first: a successful injection carries
+/// the session it was delivered to. `main.rs::memory_search_grouped`'s two
+/// callers still pass `None`: `glasshouse memory search` has no session to
+/// attribute a person's own command to, and the machine door's
+/// `query_memory` has no session field on its `Request::QueryMemory` to
+/// thread one from at all.
 ///
-/// **A session-attributed retrieval and a `RoutingOutcomeObserved` row for
-/// the *same* session still cannot both arise from one production launch.**
+/// The second used to be [`EvaluationKind::RoutingOutcomeObserved`], and that
+/// row **never arises for a door-spawned session**:
 /// [`record_routing_outcome`] refuses to write anything for a session with no
-/// prior routed destination, and only `main.rs::launch_session` (the `CLI
-/// glasshouse launch` path) ever calls [`record_routed_session`] — the
+/// prior routed destination, and only `main.rs::launch_session` (the CLI
+/// `glasshouse launch` path) ever calls [`record_routed_session`] — the
 /// door's own `Request::SpawnSession`/`Request::SendMessage`, which is what
-/// actually calls `deliver_memory`, never routes a session at all. So the
-/// proxy's join has a real producer on each side now, but nothing in this
-/// build yet drives both sides for one session; the queries below join on
-/// `session_id` correctly and will count a real proxy hit the day a producer
-/// closes that remaining gap. This is disclosed once here rather than on
-/// every field, and again in this package's own report.
+/// actually calls `deliver_memory`, never routes a session at all. So the two
+/// producers could never meet on one session (refusal register, *"Phase 51's
+/// memory proxy — 1821 and 1831"*).
+///
+/// The queries below join instead on [`EvaluationKind::TurnOutcomeObserved`]
+/// — a row `record_turn_outcome` writes for **every** session that reaches
+/// the hook's `TurnEnded` arm, routed or not. A door-spawned session's turn
+/// end now lands a row on the same session id `deliver_memory` already
+/// attached to its retrieval, so the join has a real producer on both sides
+/// that actually meet. [`EvaluationKind::RoutingOutcomeObserved`] is
+/// unchanged and still feeds the routing readers below; this join no longer
+/// uses it.
 ///
 /// Of the four negative signals the design names — failover, retry,
 /// override, early abandonment — only **override**
 /// ([`EvaluationKind::RoutingOverrideDecided`], `subject = "overridden"`)
-/// has a row shape this ledger can join on a session id at all:
+/// has a row shape this ledger can join on a session id at all, and that row
+/// is written only for a routed (launched) session, so it never suppresses a
+/// door-spawned session's proxy hit — there being no override row to find is
+/// the correct answer for a session an override could never have applied to.
 /// [`EvaluationKind::FailoverPrevented`] carries no `session_id` by its own
 /// design (see that variant's doc comment), no evaluation kind here
 /// observes a "retry", and [`crate::events::TurnOutcome`] has exactly two
@@ -1309,7 +1339,7 @@ impl EvaluationObservations {
                 from,
                 to,
                 EvaluationKind::MemoryRetrieved.as_str(),
-                EvaluationKind::RoutingOutcomeObserved.as_str(),
+                EvaluationKind::TurnOutcomeObserved.as_str(),
                 TURN_COMPLETED,
                 EvaluationKind::RoutingOverrideDecided.as_str(),
                 "overridden",
@@ -1375,7 +1405,7 @@ impl EvaluationObservations {
                 from,
                 to,
                 EvaluationKind::MemoryRetrieved.as_str(),
-                EvaluationKind::RoutingOutcomeObserved.as_str(),
+                EvaluationKind::TurnOutcomeObserved.as_str(),
                 TURN_COMPLETED,
                 EvaluationKind::RoutingOverrideDecided.as_str(),
                 "overridden",
@@ -2715,6 +2745,56 @@ pub fn record_routing_outcome(
     }
 }
 
+/// Record what the harness said about one turn of **any** session that runs
+/// the hook — the producer for [`EvaluationKind::TurnOutcomeObserved`], and
+/// map lines 1821 and 1831's proxy denominator.
+///
+/// Its one caller is `main.rs`'s `glasshouse hook` handler, on the same
+/// `TurnEnded` arm [`record_routing_outcome`] reads — called first, so a
+/// session this ledger has never routed still gets an outcome row.
+///
+/// # Unlike `record_routing_outcome`, this asks no question about routing
+///
+/// [`record_routing_outcome`] refuses to write for a session with no routed
+/// destination because that row is a claim about *the route*. This row
+/// makes no claim about a route at all — it is the harness's verdict on the
+/// session's turn, full stop — so it is written unconditionally, a
+/// door-spawned session (never routed) included. Design ruling: refusal
+/// register, *"Phase 51's memory proxy — 1821 and 1831"*, option (b).
+///
+/// # One handle, opened here, dropped here (practice §65)
+///
+/// Same reasoning as [`record_routing_outcome`]: the hook is a separate
+/// process the harness spawns on every event, and the write shares the one
+/// handle this function opens.
+pub fn record_turn_outcome(
+    runtime: &Runtime,
+    session_id: &str,
+    outcome: crate::events::TurnOutcome,
+    observed_at_unix: i64,
+) {
+    let ledger = match EvaluationObservations::open(runtime) {
+        Ok(ledger) => ledger,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "could not open the evaluation ledger; the turn ended, but its outcome was \
+                 not counted"
+            );
+            return;
+        }
+    };
+    let observation = NewObservation::new(EvaluationKind::TurnOutcomeObserved)
+        .with_subject(turn_subject(outcome))
+        .with_session_id(session_id);
+    if let Err(err) = ledger.record(observation, observed_at_unix) {
+        tracing::warn!(
+            error = %err,
+            "could not record a turn's outcome; the turn ended, but it was not counted"
+        );
+    }
+}
+
 /// Record what the failure-domain term did to one gateway failover's ranking
 /// — the producer for [`EvaluationKind::FailoverPrevented`], **map line
 /// 1851**.
@@ -2878,6 +2958,7 @@ mod tests {
             EvaluationKind::FailoverPrevented,
             EvaluationKind::MemoryRated,
             EvaluationKind::MemoryRevalidated,
+            EvaluationKind::TurnOutcomeObserved,
         ];
         let names: Vec<&str> = declared.iter().map(|kind| kind.as_str()).collect();
         assert_eq!(

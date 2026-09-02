@@ -105,6 +105,18 @@ pub enum SemanticBypassReason {
     Schema,
     Validation,
     Failed,
+    /// The local reducer's own executable could not be started at all —
+    /// Phase 58, map line 2029's `local-reducer-absent`.
+    LocalAbsent,
+    /// The local reducer did not answer inside its configured timeout —
+    /// map line 2029's `local-reducer-timeout`.
+    LocalTimeout,
+    /// The local reducer exited non-zero, or its reply was not the local
+    /// contract's shape — map line 2029's `local-reducer-failed`.
+    LocalFailed,
+    /// The local reducer's reported `tool_version` does not prefix-match
+    /// the configured pin — map line 2029's `local-reducer-version`.
+    LocalVersion,
 }
 
 impl SemanticBypassReason {
@@ -118,6 +130,10 @@ impl SemanticBypassReason {
             Self::Schema => "reducer-schema",
             Self::Validation => "reducer-validation",
             Self::Failed => "reducer-failed",
+            Self::LocalAbsent => "local-reducer-absent",
+            Self::LocalTimeout => "local-reducer-timeout",
+            Self::LocalFailed => "local-reducer-failed",
+            Self::LocalVersion => "local-reducer-version",
         }
     }
 }
@@ -133,6 +149,10 @@ impl From<reducer::ReducerErrorKind> for SemanticBypassReason {
             reducer::ReducerErrorKind::Schema => Self::Schema,
             reducer::ReducerErrorKind::Validation => Self::Validation,
             reducer::ReducerErrorKind::Failed(_) => Self::Failed,
+            reducer::ReducerErrorKind::LocalAbsent => Self::LocalAbsent,
+            reducer::ReducerErrorKind::LocalTimeout => Self::LocalTimeout,
+            reducer::ReducerErrorKind::LocalFailed => Self::LocalFailed,
+            reducer::ReducerErrorKind::LocalVersion => Self::LocalVersion,
         }
     }
 }
@@ -419,6 +439,10 @@ pub fn process(
                 kept: semantic_kept.unwrap_or(0),
                 considered: reduction.candidates.len(),
                 reason: outcome.reason.map(|reason| reason.as_str().to_owned()),
+                reducer: outcome
+                    .call
+                    .as_ref()
+                    .map(|call| format!("{} {}", call.provider, call.model)),
             }),
     };
     let forwarded_text = provenance.prepend_to(&reduced_body);
@@ -808,8 +832,12 @@ mod tests {
                 let semantic = semantic.expect("the gate must have opened");
                 assert!(semantic.applied);
                 assert!(
-                    forwarded_text.contains("semantic reduction kept"),
-                    "the header must say the semantic stage ran: {forwarded_text}"
+                    forwarded_text.contains(
+                        "semantic reduction by fixture-provider \
+                                              fixture-model kept"
+                    ),
+                    "the header must say the semantic stage ran, naming the reducer that \
+                     produced the reduction: {forwarded_text}"
                 );
             }
             other => panic!("expected Reduced, got {other:?}"),

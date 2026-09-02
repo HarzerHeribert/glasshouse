@@ -49,7 +49,9 @@ use super::canonical::{
 };
 use super::fields::{Fields, element};
 use super::stream::{self, SseEvent};
-use super::{CacheDisposition, Codec, StreamDecoder, StreamEncoder, TOOL_ERROR_MARKER};
+use super::{
+    CacheDisposition, Codec, EffortDisposition, StreamDecoder, StreamEncoder, TOOL_ERROR_MARKER,
+};
 
 pub(super) const PROTOCOL: &str = "openai-responses";
 
@@ -168,6 +170,14 @@ const PROMPT_CACHE_KEY_NOTE: &str = "set to the harness's own per-session identi
      `metadata.user_id`, decoded into `Request::user` and already sent to the provider under \
      that name) so repeat requests in the same session route to the same cache; omitted when the \
      harness set no user id, and never derived from a credential or the gateway's own token";
+
+/// [`EffortDisposition::Carried`]'s note for this codec's `reasoning.effort`
+/// (GH-EFFORT-CARRY) — the same vocabulary and citation as OpenAI Chat's
+/// `reasoning_effort` (`openai_chat.rs`'s `EFFORT_NOTE`); this codec nests
+/// the word under `reasoning` rather than writing it as a top-level field.
+const EFFORT_NOTE: &str = "set to the word `level_for_budget` maps the harness's `thinking.budget_tokens` onto \
+     (minimal/low/medium/high, never rounded up), nested under `reasoning.effort`; omitted when \
+     the harness set no thinking at all";
 
 /// Fields ignored by name: informational, never asked for by the caller,
 /// and named here so that ignoring them is a recorded decision.
@@ -290,6 +300,13 @@ impl Codec for OpenAiResponses {
         Some(CacheDisposition::Carried {
             field: "prompt_cache_key",
             note: PROMPT_CACHE_KEY_NOTE,
+        })
+    }
+
+    fn effort_disposition(&self) -> Option<EffortDisposition> {
+        Some(EffortDisposition::Carried {
+            field: "reasoning.effort",
+            note: EFFORT_NOTE,
         })
     }
 }
@@ -523,6 +540,10 @@ pub(super) fn decode_request(body: &[u8]) -> Result<Request, Unsupported> {
         // refused above by name (REFUSED_FIELDS); this codec's own decode
         // never carries a cache hint into the canonical form.
         cache_requested: false,
+        // `reasoning` is refused above by name (REFUSED_FIELDS): a harness
+        // speaking this wire natively is a different direction than the one
+        // this package carries.
+        effort: None,
     })
 }
 
@@ -991,6 +1012,15 @@ pub(super) fn encode_request(request: &Request) -> Vec<u8> {
     // gate caching itself.
     if let Some(key) = request.prompt_cache_key() {
         document.insert("prompt_cache_key".to_owned(), json!(key));
+    }
+    // Carried (GH-EFFORT-CARRY), never invented: only when the harness asked
+    // for thinking at all, and always the word its budget maps to at or
+    // below what was asked — `level_for_budget` never rounds up.
+    if let Some(effort) = &request.effort {
+        document.insert(
+            "reasoning".to_owned(),
+            json!({"effort": effort.level().as_openai_word()}),
+        );
     }
     Value::Object(document).to_string().into_bytes()
 }
@@ -2039,6 +2069,36 @@ mod tests {
         let wire = drop_key(&wire, "prompt_cache_key");
         let decoded = decode_request(&wire).expect("the codec reads what it wrote");
         assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn effort_is_carried_as_nested_reasoning_effort_and_omitted_when_the_harness_asked_for_none() {
+        use super::super::canonical::EffortRequest;
+
+        let mut request = responses_request();
+        request.effort = None;
+        let wire = encode_request(&request);
+        let document: Value = serde_json::from_slice(&wire).unwrap();
+        assert_eq!(
+            document.get("reasoning"),
+            None,
+            "no thinking asked for, no reasoning object emitted"
+        );
+
+        for (budget, word) in [
+            (500u64, "minimal"),
+            (4_096, "low"),
+            (16_000, "medium"),
+            (64_000, "high"),
+        ] {
+            request.effort = Some(EffortRequest {
+                budget_tokens: Some(budget),
+                level: None,
+            });
+            let wire = encode_request(&request);
+            let document: Value = serde_json::from_slice(&wire).unwrap();
+            assert_eq!(document["reasoning"]["effort"], word, "budget {budget}");
+        }
     }
 
     #[test]

@@ -420,8 +420,9 @@ fn a_discarded_needle_is_dropped_but_show_still_has_it() {
         "an explicitly discarded candidate must not survive: {forwarded}"
     );
     assert!(
-        forwarded.contains("semantic reduction kept"),
-        "the provenance header must say the semantic stage ran: {forwarded}"
+        forwarded.contains("semantic reduction by fixture-provider fixture-model kept"),
+        "the provenance header must say the semantic stage ran, naming the reducer that \
+         produced the reduction (Phase 58, map line 2030): {forwarded}"
     );
 
     let raw_ref = extract_raw_ref(forwarded);

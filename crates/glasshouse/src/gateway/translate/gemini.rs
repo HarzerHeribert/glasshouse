@@ -108,12 +108,13 @@
 use serde_json::{Map, Value, json};
 
 use super::canonical::{
-    Block, BlockStart, Delta, ImageSource, Message, Request, Response, Role, StopReason,
-    StreamEvent, ToolChoice, ToolDefinition, Unsupported, Usage, json_kind, parse_tool_input,
+    Block, BlockStart, Delta, EffortLevel, EffortRequest, ImageSource, Message, Request, Response,
+    Role, StopReason, StreamEvent, ToolChoice, ToolDefinition, Unsupported, Usage, json_kind,
+    parse_tool_input,
 };
 use super::fields::{Fields, element};
 use super::stream::{self, SseEvent};
-use super::{CacheDisposition, Claim, Codec, StreamDecoder, StreamEncoder};
+use super::{CacheDisposition, Claim, Codec, EffortDisposition, StreamDecoder, StreamEncoder};
 
 pub(super) const PROTOCOL: &str = "gemini-generate-content";
 
@@ -287,6 +288,44 @@ fn reason(field: &str) -> &'static str {
         .find(|(name, _)| *name == field)
         .map(|(_, reason)| *reason)
         .expect("every refusal named in this file is listed in REFUSED_FIELDS")
+}
+
+/// The ceiling [`thinking_budget`] clamps to (GH-EFFORT-CARRY) — the
+/// tightest of the documented per-model maxima for Gemini's thinking-capable
+/// models (`ai.google.dev/gemini-api/docs/thinking`), so a clamped value
+/// never exceeds any of them: 2.5 Flash and 2.5 Flash-Lite document a range
+/// up to 24,576; 2.5 Pro's own ceiling is higher, at 32,768. Using the
+/// smaller number means this codec never has to read the model name back out
+/// of the path to pick the right ceiling, at the cost of never using 2.5
+/// Pro's full range — a limit worth recording rather than a per-model table
+/// this package does not need to build.
+const GEMINI_THINKING_BUDGET_MAX: u64 = 24_576;
+
+/// [`EffortDisposition::Carried`]'s note for this codec's
+/// `thinkingConfig.thinkingBudget` (GH-EFFORT-CARRY).
+const THINKING_BUDGET_NOTE: &str = "set to the harness's `thinking.budget_tokens`, clamped to \
+     `GEMINI_THINKING_BUDGET_MAX` and never raised; a harness-stated word (no decoder produces \
+     one today) maps to a fraction of that ceiling instead";
+
+/// `effort`'s token budget, clamped down (never up) to
+/// [`GEMINI_THINKING_BUDGET_MAX`] — the numeric field this wire takes
+/// directly, unlike the word-based `reasoning_effort` the two OpenAI codecs
+/// write. A harness-stated word maps to a documented fraction of the
+/// ceiling, for the path no decoder in this codebase exercises today (see
+/// `EffortRequest::level`'s own doc).
+fn thinking_budget(effort: &EffortRequest) -> u64 {
+    match effort.budget_tokens {
+        Some(budget) => budget.min(GEMINI_THINKING_BUDGET_MAX),
+        None => {
+            let fraction = match effort.level() {
+                EffortLevel::Minimal => 0.10,
+                EffortLevel::Low => 0.25,
+                EffortLevel::Medium => 0.50,
+                EffortLevel::High => 1.0,
+            };
+            (GEMINI_THINKING_BUDGET_MAX as f64 * fraction) as u64
+        }
+    }
 }
 
 pub(super) struct Gemini;
@@ -472,6 +511,13 @@ impl Codec for Gemini {
              on decode — neither is a per-request marker a translated request can set, so a \
              harness's cache_control is never encoded onto this wire",
         ))
+    }
+
+    fn effort_disposition(&self) -> Option<EffortDisposition> {
+        Some(EffortDisposition::Carried {
+            field: "generationConfig.thinkingConfig.thinkingBudget",
+            note: THINKING_BUDGET_NOTE,
+        })
     }
 }
 
@@ -709,6 +755,10 @@ pub(super) fn decode_request(body: &[u8]) -> Result<Request, Unsupported> {
         // anyway (`NO_GEMINI_HARNESS`), so this is never asked for from
         // this side.
         cache_requested: false,
+        // `generationConfig.thinkingConfig` is refused above by name
+        // (REFUSED_FIELDS), and no installed harness speaks this wire at the
+        // ingress anyway (`NO_GEMINI_HARNESS`).
+        effort: None,
     })
 }
 
@@ -971,6 +1021,15 @@ pub(super) fn encode_request(request: &Request) -> Vec<u8> {
     }
     if !request.stop.is_empty() {
         generation.insert("stopSequences".to_owned(), json!(request.stop));
+    }
+    // Carried (GH-EFFORT-CARRY), never invented: only when the harness asked
+    // for thinking at all, and always clamped down to
+    // `GEMINI_THINKING_BUDGET_MAX` — never raised past it.
+    if let Some(effort) = &request.effort {
+        generation.insert(
+            "thinkingConfig".to_owned(),
+            json!({"thinkingBudget": thinking_budget(effort)}),
+        );
     }
     if !generation.is_empty() {
         document.insert("generationConfig".to_owned(), Value::Object(generation));
@@ -1550,7 +1609,44 @@ mod tests {
             stream: false,
             user: Some("user_abc".to_owned()),
             cache_requested: false,
+            effort: None,
         }
+    }
+
+    #[test]
+    fn effort_is_carried_as_thinking_budget_clamped_and_omitted_when_the_harness_asked_for_none() {
+        let mut request = tool_round();
+        request.effort = None;
+        let sent = encoded(&request);
+        assert_eq!(
+            sent.get("generationConfig")
+                .and_then(|g| g.get("thinkingConfig")),
+            None,
+            "no thinking asked for, no thinkingConfig emitted"
+        );
+
+        // A budget within range is carried unchanged.
+        request.effort = Some(EffortRequest {
+            budget_tokens: Some(4_096),
+            level: None,
+        });
+        let sent = encoded(&request);
+        assert_eq!(
+            sent["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+            4_096
+        );
+
+        // A budget above the documented ceiling is clamped down, never
+        // raised.
+        request.effort = Some(EffortRequest {
+            budget_tokens: Some(1_000_000),
+            level: None,
+        });
+        let sent = encoded(&request);
+        assert_eq!(
+            sent["generationConfig"]["thinkingConfig"]["thinkingBudget"],
+            GEMINI_THINKING_BUDGET_MAX
+        );
     }
 
     /// The module doc's second decision: a tool result becomes a

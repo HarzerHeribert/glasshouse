@@ -1818,7 +1818,7 @@ Fixed architectural requirements
 Phase 51 — Evaluation hooks
 
 ☐ Measure how many repository exploration operations occur before and after relevant project memory exists.
-☐ Measure how often retrieved memory is actually useful to the receiving agent.
+☑ Measure how often retrieved memory is actually useful to the receiving agent.
 ☑ Measure how often stale or incorrect memory is retrieved.
 ☑ Measure how often an old decision causes an agent to add unnecessary implementation complexity.
 ☑ Measure how often revalidation correctly identifies a decision whose original assumptions no longer hold.
@@ -1828,7 +1828,7 @@ Phase 51 — Evaluation hooks
 ☐ Measure how often one harness successfully continues work from another harness’s checkpoint.
 ☑ Measure how often automatic routing is overridden by the user.
 ☑ Measure how often warm-session reuse is chosen over fresh-session creation.
-☐ Measure how often memory prevents repetition of a recorded failed approach.
+☑ Measure how often memory prevents repetition of a recorded failed approach.
 ☑ Measure memory-extraction cost separately from interactive coding cost.
 ☑ Measure routing-model cost and request consumption separately from interactive coding cost.
 ☑ Measure how often workload-tier classification predicts successful execution without escalation.
@@ -2025,9 +2025,9 @@ Entitlement-aware reduction — a subscription pays in rate limits and context w
 
 A local reducer the user installs — Headroom's compressors are more developed than the deterministic ladder and run locally; use them, do not rewrite them.
 
-☐ Allow the semantic reducer to be a local out-of-process tool the user installs, selected by configuration beside the model-backed reducer, with the same provenance header, raw preservation, and expansion path.
-☐ Treat a local reducer's absence, timeout, or failure as a bypass with a stated reason, never as an error the session sees.
-☐ Record which reducer produced each reduction, so savings and recall are attributable per reducer.
+☑ Allow the semantic reducer to be a local out-of-process tool the user installs, selected by configuration beside the model-backed reducer, with the same provenance header, raw preservation, and expansion path.
+☑ Treat a local reducer's absence, timeout, or failure as a bypass with a stated reason, never as an error the session sees.
+☑ Record which reducer produced each reduction, so savings and recall are attributable per reducer.
 
 A savings readout that is a query, not an estimate.
 

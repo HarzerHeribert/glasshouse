@@ -11,6 +11,7 @@
 //! an absent `reducer` disables the whole semantic stage regardless of mode,
 //! exactly as an absent field did before this field existed at all.
 
+use std::collections::BTreeMap;
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
@@ -230,6 +231,29 @@ impl ContextFirewallOverride {
     }
 }
 
+/// `[context_firewall.local_reducers.<name>]` — Phase 58, map lines
+/// 2028-2030: the launch shape of one installed out-of-process tool the
+/// semantic reducer may select as `reducer = "local:<name>"`. `command` is
+/// argv, never a shell string — the design's own boundary
+/// (design-decisions.md's *The local reducer seat*). `version`, when set,
+/// is prefix-matched against what the tool itself reports as
+/// `tool_version`; a mismatch is a bypass (`local-reducer-version`), never a
+/// silent acceptance. `timeout_ms` defaults to
+/// [`crate::firewall::reducer::DEFAULT_LOCAL_REDUCER_TIMEOUT_MS`] when
+/// unset; a value that would leave less than two seconds inside the
+/// context-firewall hook's own ten-second timeout is refused when the
+/// reducer is built (`LocalToolReducer::new`), not here — this table is a
+/// plain data shape, same as every other field on this type.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalReducerConfig {
+    #[serde(default)]
+    pub command: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+}
+
 /// The `[context_firewall]` table.
 ///
 /// Every field is optional so a layer that never touched this table has
@@ -299,6 +323,12 @@ pub struct ContextFirewallConfig {
     /// thresholds, same fallthrough as [`Self::subscription`].
     #[serde(default, skip_serializing_if = "ContextFirewallOverride::is_unset")]
     local: ContextFirewallOverride,
+    /// `[context_firewall.local_reducers.<name>]` — Phase 58, map lines
+    /// 2028-2030: installed out-of-process tools `reducer = "local:<name>"`
+    /// may select. Keyed by name rather than a list so `local:<name>` names
+    /// exactly one table unambiguously.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    local_reducers: BTreeMap<String, LocalReducerConfig>,
 }
 
 impl ContextFirewallConfig {
@@ -317,6 +347,7 @@ impl ContextFirewallConfig {
             && self.subscription.is_unset()
             && self.metered.is_unset()
             && self.local.is_unset()
+            && self.local_reducers.is_empty()
     }
 
     pub fn mode(&self) -> Option<FirewallMode> {
@@ -388,6 +419,26 @@ impl ContextFirewallConfig {
 
     pub fn set_reducer_local_only(&mut self, value: Option<bool>) -> &mut Self {
         self.reducer_local_only = value;
+        self
+    }
+
+    /// `[context_firewall.local_reducers.<name>]`, by name — the lookup
+    /// `main.rs::disposable_reducer`'s `local:` branch makes, project before
+    /// user, matching every other reducer field's layering.
+    pub fn local_reducer(&self, name: &str) -> Option<&LocalReducerConfig> {
+        self.local_reducers.get(name)
+    }
+
+    pub fn local_reducers(&self) -> &BTreeMap<String, LocalReducerConfig> {
+        &self.local_reducers
+    }
+
+    pub fn set_local_reducer(
+        &mut self,
+        name: impl Into<String>,
+        config: LocalReducerConfig,
+    ) -> &mut Self {
+        self.local_reducers.insert(name.into(), config);
         self
     }
 
@@ -569,6 +620,46 @@ mod tests {
         config.subscription_mut().set_passthrough_tokens(Some(6000));
         config.metered_mut().set_min_semantic_tokens(Some(2000));
         config.local_mut().set_mode(Some(FirewallMode::Aggressive));
+        let json = serde_json::to_string(&config).unwrap();
+        let restored: ContextFirewallConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(config, restored);
+    }
+
+    /// Map line 1992's guarantee, restated once more for the local-reducer
+    /// table: a user who never configured one has no `[context_firewall]`
+    /// table on that name alone, exactly as [`ContextFirewallConfig::reducer`]
+    /// already behaves.
+    #[test]
+    fn setting_only_a_local_reducer_marks_the_table_no_longer_unset() {
+        let mut config = ContextFirewallConfig::default();
+        config.set_local_reducer(
+            "fake",
+            LocalReducerConfig {
+                command: vec!["headroom-select".to_owned()],
+                version: None,
+                timeout_ms: None,
+            },
+        );
+        assert!(!config.is_unset());
+        assert_eq!(
+            config.local_reducer("fake").map(|c| c.command.as_slice()),
+            Some(["headroom-select".to_owned()].as_slice())
+        );
+        assert!(config.local_reducer("missing").is_none());
+    }
+
+    #[test]
+    fn the_local_reducers_table_serializes_to_json_and_back_unchanged() {
+        let mut config = ContextFirewallConfig::default();
+        config.set_reducer(Some("local:fake".to_owned()));
+        config.set_local_reducer(
+            "fake",
+            LocalReducerConfig {
+                command: vec!["headroom-select".to_owned(), "--flag".to_owned()],
+                version: Some("0.9".to_owned()),
+                timeout_ms: Some(3000),
+            },
+        );
         let json = serde_json::to_string(&config).unwrap();
         let restored: ContextFirewallConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(config, restored);

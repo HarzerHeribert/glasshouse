@@ -8057,6 +8057,18 @@ fn disposable_reducer(
 
     let effective = EffectiveConfig::new(user, project);
     let reducer_ref = effective.context_firewall_reducer().value?;
+
+    // Phase 58, map lines 2028-2030: `local:<name>` selects an installed
+    // out-of-process tool from `[context_firewall.local_reducers.<name>]`
+    // instead of routing through `DisposableRouting` at all — a local tool
+    // is local by construction, so `reducer_local_only` is satisfied without
+    // being consulted here, and nothing below this branch (provider/model
+    // candidates, free-resource routing, entitlement job-kind gating) applies
+    // to it. design-decisions.md's *The local reducer seat*.
+    if let Some(name) = reducer_ref.strip_prefix("local:") {
+        return local_disposable_reducer(runtime, user, project, &effective, session_id, name);
+    }
+
     let reducer_model_pin = effective.context_firewall_reducer_model().value;
     let local_only = effective.context_firewall_reducer_local_only().value;
 
@@ -8143,6 +8155,53 @@ fn disposable_reducer(
         Ok(reducer) => Some(Box::new(reducer)),
         Err(err) => {
             tracing::warn!(error = %err, "the configured context-firewall reducer cannot be used");
+            None
+        }
+    }
+}
+
+/// `[context_firewall].reducer = "local:<name>"` — Phase 58, map lines
+/// 2028-2030. Resolves `[context_firewall.local_reducers.<name>]` (project
+/// before user, matching every other reducer field's own layering) into a
+/// [`glasshouse::firewall::reducer::LocalToolReducer`], or logs why not and
+/// leaves the whole semantic stage disabled for this hook invocation — the
+/// same fail-open posture [`disposable_reducer`]'s own `Err` arm already
+/// has. The child's cwd is a scratch directory under this session's own
+/// state, never the project root; its environment is scrubbed of every
+/// entitlement's credential variable via
+/// [`EffectiveConfig::foreign_entitlement_credential_vars`], called with
+/// `None` because a subprocess Glasshouse did not write is not "serving"
+/// any entitlement and has no business carrying any of their keys.
+fn local_disposable_reducer(
+    runtime: &Runtime,
+    user: &UserConfig,
+    project: Option<&ProjectConfig>,
+    effective: &EffectiveConfig,
+    session_id: &str,
+    name: &str,
+) -> Option<Box<dyn glasshouse::firewall::reducer::Reducer>> {
+    use glasshouse::firewall::reducer::LocalToolReducer;
+
+    let config = project
+        .and_then(|p| p.context_firewall().local_reducer(name))
+        .or_else(|| user.context_firewall().local_reducer(name));
+    let Some(config) = config else {
+        tracing::warn!(
+            reducer = name,
+            "the context-firewall reducer names a local tool this project has not configured"
+        );
+        return None;
+    };
+
+    let scratch_dir = runtime
+        .session_dir(session_id)
+        .join("context-firewall-reducer");
+    let credential_vars = effective.foreign_entitlement_credential_vars(None);
+
+    match LocalToolReducer::new(name, config, scratch_dir, credential_vars) {
+        Ok(reducer) => Some(Box::new(reducer)),
+        Err(err) => {
+            tracing::warn!(error = %err, reducer = name, "the configured local reducer cannot be used");
             None
         }
     }
@@ -9183,7 +9242,23 @@ fn report_hook_with(
         // can be torn down by the harness while one is still going. A verdict
         // the harness actually stated must not be lost to work Glasshouse
         // chose to do about it.
+        //
+        // Map lines 1821 and 1831's proxy denominator — a second row, on
+        // every session this arm reaches rather than only routed ones.
+        // `record_routing_outcome` refuses a session with no routed
+        // destination, so a door-spawned session (never routed) would
+        // otherwise record nothing about how its turn went; `record_turn_outcome`
+        // asks no routing question at all. Called first, so a session with no
+        // routing decision still gets its outcome counted before the routed
+        // call below returns early for it. Refusal register, *"Phase 51's
+        // memory proxy — 1821 and 1831"*, ruling (b).
         if let LifecycleEvent::TurnEnded { outcome } = translated {
+            glasshouse::evaluation::record_turn_outcome(
+                runtime,
+                id.as_str(),
+                outcome,
+                glasshouse::evaluation::now_unix(),
+            );
             glasshouse::evaluation::record_routing_outcome(
                 runtime,
                 id.as_str(),
