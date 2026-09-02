@@ -2640,14 +2640,14 @@ pub(crate) enum DatabaseError {
     )]
     EmptyExisting { path: PathBuf },
     #[error(
-        "project database `{path}` is empty (zero bytes) and another Glasshouse \
-         process is holding the write lock on it, but it did not finish creating \
-         the database within {waited:?}. Nothing here has been changed. Wait for \
-         that process to finish or stop it, then try again"
+        "could not publish the newly created project database at `{path}`: its \
+         finished private copy `{private}` could not be linked into place"
     )]
-    CreationWaitTimedOut {
+    Publish {
         path: PathBuf,
-        waited: std::time::Duration,
+        private: PathBuf,
+        #[source]
+        source: std::io::Error,
     },
 }
 
@@ -2679,7 +2679,11 @@ pub(crate) fn open(runtime: &Runtime) -> Result<Connection, DatabaseError> {
     let db_path = runtime.database_path();
     let project_id = runtime.project().id().as_str();
 
-    prepare_file(&db_path)?;
+    // Either the database was already there, or this call created one
+    // privately and published it whole. Whichever it was, what is at
+    // `db_path` from here on is a complete, migrated, project-bound
+    // database — never one in the making.
+    prepare_file(&db_path, project_id)?;
 
     let mut conn = Connection::open_with_flags(
         &db_path,
@@ -2711,11 +2715,13 @@ pub(crate) fn open(runtime: &Runtime) -> Result<Connection, DatabaseError> {
     verify_identity(&conn, &db_path, project_id)?;
 
     // One BEGIN IMMEDIATE transaction from before the first schema statement
-    // until after the project binding: concurrent first launches serialize on
-    // SQLite's write lock instead of racing between "read version" and
-    // "create table" or between "query binding" and "insert binding". Losers
-    // of the lock wait here (bounded by the busy timeout), then see the
-    // winner's committed state and proceed idempotently.
+    // until after the project binding, so that "read version" and
+    // "create table" — and "query binding" and "insert binding" — cannot
+    // interleave with another launcher's. A *first* migration no longer runs
+    // here at all (`prepare_file` ran it on a private file before this path
+    // existed), so what serializes here is only ever an upgrade or a no-op
+    // over an already-complete database, which is what `configure`'s five
+    // second busy timeout is sized for.
     let tx = conn
         .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
         .map_err(|source| DatabaseError::Sql {
@@ -2742,7 +2748,12 @@ fn configure(conn: &Connection, db_path: &Path) -> Result<(), DatabaseError> {
     };
 
     // Bound wait instead of an immediate `database is locked` failure when
-    // another Glasshouse process holds the write lock briefly.
+    // another Glasshouse process holds the write lock briefly. Five seconds is
+    // enough because of what can be behind that lock on this path: an upgrade
+    // or a no-op over a database that is already complete. A *first* migration
+    // — the one unbounded piece of work, growing with every migration this
+    // build gains — never runs on this file; `prepare_file` runs it on a
+    // private copy nobody else can see, and publishes the result whole.
     conn.busy_timeout(std::time::Duration::from_secs(5))
         .map_err(configure_err)?;
 
@@ -2843,49 +2854,6 @@ fn inspect_existing(db_path: &Path) -> Result<Option<fs::Metadata>, DatabaseErro
     Ok(Some(metadata))
 }
 
-/// The statement that takes SQLite's write lock on the database file, and the
-/// one that gives it back. Both are single literals on purpose: this is the
-/// mechanism [`wait_out_a_concurrent_creation`] is built on, so a mutation of
-/// either has exactly one site.
-const TAKE_WRITE_LOCK: &str = "BEGIN IMMEDIATE";
-const RELEASE_WRITE_LOCK: &str = "ROLLBACK";
-
-/// How long a straggler waits for a creator that **already holds the write
-/// lock** to finish migrating and commit.
-///
-/// Deliberately not [`configure`]'s 5 seconds. That timeout covers one
-/// process's turn at a database whose schema is already current — a bounded
-/// handful of statements. This one covers a *first* creation: every migration
-/// this build has, applied in one transaction, on whatever machine and under
-/// whatever load the user's is under at that moment. The old timer here
-/// budgeted 500 ms for that and was overrun by 25 migrations under a loaded
-/// test run, which is the defect this constant's mechanism replaces. There is
-/// no number that is provably enough, so this is a generous outer bound whose
-/// only job is to fail loudly ([`DatabaseError::CreationWaitTimedOut`])
-/// instead of hanging: the *wait itself* is the lock, not this.
-const CREATION_LOCK_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
-
-/// The one thing the write lock cannot see: a sibling that has created the
-/// file and has not yet reached its own `BEGIN IMMEDIATE`.
-///
-/// A creator's file is visible to `stat` from the instant `create_new`
-/// returns, but its write lock is taken a connection-open and two identity
-/// queries later. A straggler that probes the lock inside that window finds it
-/// free and the file empty — indistinguishable, from the file alone, from a
-/// truncated database nobody is creating. So the probe is repeated: the window
-/// is a fixed, tiny stretch of straight-line code (measured in tens of
-/// microseconds), and 400 ms of grace is four orders of magnitude more than
-/// it needs while still refusing a genuinely truncated file promptly — sooner,
-/// in fact, than the 500 ms the timer this replaces spent on every one.
-///
-/// This is **not** the old budget under a new name. The old one had to cover
-/// the creator's whole migration — work that grows with every migration added
-/// and stretches under load, which is exactly why it broke. This one covers
-/// only the creator's next few instructions, and the migration is covered by
-/// [`CREATION_LOCK_WAIT`] on the lock itself.
-const CREATOR_LOCK_GRACE_ATTEMPTS: u32 = 40;
-const CREATOR_LOCK_GRACE_DELAY: std::time::Duration = std::time::Duration::from_millis(10);
-
 /// Inspect the final database path for the case where it is expected to
 /// predate this launch: refuses symlinks and non-regular entries (via
 /// [`inspect_existing`]), and additionally refuses a zero-byte existing
@@ -2895,19 +2863,24 @@ const CREATOR_LOCK_GRACE_DELAY: std::time::Duration = std::time::Duration::from_
 /// caller should create it), `Ok(true)` when an existing regular, nonempty
 /// file is ready to open.
 ///
-/// **Not** the right check for a file [`prepare_file`] just lost an
-/// `AlreadyExists` race to create — that file is legitimately zero bytes
-/// until the winning process's migration commits, and is not the "this used
-/// to hold real data" case this function's empty-file refusal exists for.
-/// That caller uses [`inspect_existing`] directly instead.
+/// **A zero-byte file at this path has exactly one meaning, and it is
+/// "truncated".** Glasshouse never creates a database *here*: a first creation
+/// happens on a private sibling and arrives at this path whole, in one
+/// [`hard link`](publish), with its schema and its project binding already
+/// committed behind it. So there is no such thing as a database in the making
+/// at this path, nothing to wait for, and nothing to tell apart — a zero-byte
+/// file is a database that used to hold this project's sessions, memories and
+/// checkpoints and was truncated by a crashed copy, an interrupted restore or
+/// a disk-full write.
 ///
-/// A zero-byte file found *here* is not automatically that same in-flight
-/// case, though: a straggler among several processes racing this exact
-/// function (see `concurrent_first_bootstraps_serialize_on_one_database`)
-/// can observe a sibling's just-created, not-yet-migrated file the same way.
-/// [`wait_out_a_concurrent_creation`] tells the two apart by taking the same
-/// write lock the creator's migration holds, rather than by guessing how long
-/// a migration takes.
+/// It is therefore refused on the spot, without opening a connection and
+/// without waiting: nothing here reads, writes or locks the file, because a
+/// refusal that touched the file it refused would destroy the evidence the
+/// user needs to recover it, and a refusal that waited would only be
+/// pretending the question is still open. (This is what wave 108's
+/// `wait_out_a_concurrent_creation` existed for, and what the private-file
+/// creation below retired: the two meanings it had to tell apart no longer
+/// both exist.)
 fn check_existing(db_path: &Path) -> Result<bool, DatabaseError> {
     let Some(metadata) = inspect_existing(db_path)? else {
         return Ok(false);
@@ -2915,186 +2888,9 @@ fn check_existing(db_path: &Path) -> Result<bool, DatabaseError> {
     if metadata.len() > 0 {
         return Ok(true);
     }
-    wait_out_a_concurrent_creation(db_path)
-}
-
-/// Decide what a zero-byte database file at `db_path` actually is, by
-/// contending for SQLite's own write lock on it.
-///
-/// A zero-byte file is a valid *empty* SQLite database by specification, so
-/// nothing downstream — not SQLite, not [`migrate`] — would ever notice that
-/// this one used to hold a project's sessions, memories and checkpoints. It
-/// has exactly two possible histories, and they need opposite answers:
-///
-/// * a **concurrent creator** made it moments ago and its migration is still
-///   running, in which case the only correct thing to do is wait and then open
-///   the database it commits;
-/// * a **truncated** database — a crashed copy, an interrupted restore, a
-///   disk-full write — in which case the only correct thing to do is refuse,
-///   because a fresh migration over it would silently replace the user's data
-///   with an empty project.
-///
-/// The file cannot tell them apart; the *lock* can. A creator runs its whole
-/// migration inside one `BEGIN IMMEDIATE` ([`open`]), so for as long as it is
-/// working, SQLite's write lock on that file is held and nobody else can take
-/// it. So: try to take it. Busy means somebody is creating — wait for them,
-/// then open what they committed. Free, with the file still empty, means
-/// nobody is creating and nobody has been, which is the truncated case, and it
-/// is refused. The grace loop covers the one gap in that argument, described
-/// on [`CREATOR_LOCK_GRACE_ATTEMPTS`].
-///
-/// **Nothing here writes to the database file**, which is the invariant the
-/// refusal path depends on: the lock is taken and released without dirtying a
-/// page, and the connection sets `journal_mode = MEMORY` so that not even a
-/// transient `-journal` sidecar is created beside a file we are about to
-/// refuse. Verified by `a_zero_byte_existing_database_is_refused_not_silently_reinitialized`,
-/// which asserts both the length and the absence of sidecars after the refusal.
-///
-/// Portable as written: `BEGIN IMMEDIATE` and `busy_timeout` are SQLite's own
-/// behaviour on every platform it supports. Windows takes the same lock
-/// through `LockFileEx` rather than `fcntl`, and neither this function nor its
-/// callers need a `#[cfg]` to say so.
-fn wait_out_a_concurrent_creation(db_path: &Path) -> Result<bool, DatabaseError> {
-    for _ in 0..CREATOR_LOCK_GRACE_ATTEMPTS {
-        // Cheapest question first, and the one that ends this in the common
-        // case: has the creator committed while we were getting here?
-        match inspect_existing(db_path)? {
-            // Vanished: nothing left to refuse; the caller should create it.
-            None => return Ok(false),
-            Some(metadata) if metadata.len() > 0 => return Ok(true),
-            Some(_) => {}
-        }
-
-        // A non-blocking probe, so that "somebody holds the write lock" is
-        // answered rather than waited on. A creator mid-migration and another
-        // straggler mid-probe both show up here as `SQLITE_BUSY`; they are
-        // told apart below by whether the wait ends with a migrated file.
-        let probe = lock_probe_connection(db_path, std::time::Duration::ZERO)?;
-        match probe.execute_batch(TAKE_WRITE_LOCK) {
-            Ok(()) => {
-                let grown = grew_while_locked(&probe, db_path)?;
-                drop(probe);
-                if grown {
-                    return Ok(true);
-                }
-                // Nobody holds the write lock and the file is still empty.
-                // Either it is truncated, or a creator is inside the window
-                // on `CREATOR_LOCK_GRACE_ATTEMPTS`. Give it that window.
-                std::thread::sleep(CREATOR_LOCK_GRACE_DELAY);
-            }
-            Err(err) if is_busy(&err) => {
-                drop(probe);
-                // Somebody is holding the write lock. Queue behind them on a
-                // connection whose timeout is long enough for a whole first
-                // migration, and read the file again once we are through.
-                let waiter = lock_probe_connection(db_path, CREATION_LOCK_WAIT)?;
-                match waiter.execute_batch(TAKE_WRITE_LOCK) {
-                    Ok(()) => {
-                        let grown = grew_while_locked(&waiter, db_path)?;
-                        drop(waiter);
-                        if grown {
-                            return Ok(true);
-                        }
-                        // The holder let go without committing anything: it
-                        // was another straggler's own probe, or a creator that
-                        // died mid-migration. Neither is evidence about this
-                        // file's history, so take another attempt rather than
-                        // refuse on one observation.
-                        std::thread::sleep(CREATOR_LOCK_GRACE_DELAY);
-                    }
-                    Err(err) if is_busy(&err) => {
-                        return Err(DatabaseError::CreationWaitTimedOut {
-                            path: db_path.to_path_buf(),
-                            waited: CREATION_LOCK_WAIT,
-                        });
-                    }
-                    Err(source) => {
-                        return Err(DatabaseError::Sql {
-                            path: db_path.to_path_buf(),
-                            source,
-                        });
-                    }
-                }
-            }
-            Err(source) => {
-                return Err(DatabaseError::Sql {
-                    path: db_path.to_path_buf(),
-                    source,
-                });
-            }
-        }
-    }
-
-    // Every attempt found the file empty and the write lock free, so no
-    // creator was ever here. A genuinely new project has no file at this path
-    // at all; this one exists and is empty, which is the case that must be
-    // refused rather than migrated over.
     Err(DatabaseError::EmptyExisting {
         path: db_path.to_path_buf(),
     })
-}
-
-/// Re-read the file's length while `conn` holds the write lock, then give the
-/// lock back.
-///
-/// The release is unconditional and is a rollback, never a commit: this
-/// connection exists to *ask a question* about a file Glasshouse may be about
-/// to refuse, and a refusal that modified the file it refused would destroy
-/// the evidence the user needs to recover it.
-fn grew_while_locked(conn: &Connection, db_path: &Path) -> Result<bool, DatabaseError> {
-    let grown = matches!(inspect_existing(db_path)?, Some(metadata) if metadata.len() > 0);
-    conn.execute_batch(RELEASE_WRITE_LOCK)
-        .map_err(|source| DatabaseError::Sql {
-            path: db_path.to_path_buf(),
-            source,
-        })?;
-    Ok(grown)
-}
-
-/// A connection opened purely to contend for the write lock on an existing
-/// zero-byte database file.
-///
-/// Same flags as [`open`]'s — read/write, no `CREATE`, so a file that vanished
-/// since the inspection fails the open rather than being recreated here. Two
-/// differences from [`configure`], both deliberate: the busy timeout is the
-/// caller's (zero to probe, [`CREATION_LOCK_WAIT`] to wait) rather than the
-/// open path's five seconds, and `journal_mode = MEMORY` keeps SQLite from
-/// creating a `-journal` file beside a database this connection will never
-/// write to. The read-only check is [`configure`]'s and is not repeated: a
-/// database this connection cannot lock fails the lock, and the real open
-/// reports the read-only file itself.
-fn lock_probe_connection(
-    db_path: &Path,
-    busy_timeout: std::time::Duration,
-) -> Result<Connection, DatabaseError> {
-    let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_WRITE).map_err(
-        |source| DatabaseError::Open {
-            path: db_path.to_path_buf(),
-            source,
-        },
-    )?;
-    let sql_err = |source| DatabaseError::Sql {
-        path: db_path.to_path_buf(),
-        source,
-    };
-    conn.busy_timeout(busy_timeout).map_err(sql_err)?;
-    // The returned mode is whatever SQLite settled on; asking is the whole
-    // statement, and a database already in WAL mode (Glasshouse creates none)
-    // keeps its own mode without failing this.
-    let _mode: String = conn
-        .query_row("PRAGMA journal_mode = MEMORY", [], |row| row.get(0))
-        .map_err(sql_err)?;
-    Ok(conn)
-}
-
-/// Whether a failure is SQLite's "somebody else holds the lock", which is an
-/// answer here rather than an error.
-fn is_busy(err: &rusqlite::Error) -> bool {
-    matches!(
-        err,
-        rusqlite::Error::SqliteFailure(inner, _)
-            if inner.code == rusqlite::ErrorCode::DatabaseBusy
-    )
 }
 
 /// Human-readable kind of a final-path entry, for error messages.
@@ -3111,24 +2907,63 @@ fn describe_entry(metadata: &fs::Metadata) -> &'static str {
     }
 }
 
-/// Make sure a regular file exists at `db_path`, created owner-only if new,
-/// without following a symlink that may sit at the final component.
+/// The infix that marks a private, in-progress database beside a final one.
+///
+/// The whole name is `<final file name>.tmp-<pid>-<start time>-<nonce>`, with
+/// the start time and the nonce each sixteen lowercase hex digits. Three
+/// things are encoded on purpose:
+///
+/// * the **pid**, so a leftover can be asked about;
+/// * the creator's **process start time** (`ObservedProcess::started_at_ms`,
+///   `0` when this machine would not say), so that a pid answering the probe
+///   can be told apart from *the pid this file was created by* — a recycled
+///   pid is otherwise indistinguishable from a live sibling still working;
+/// * a **nonce**, so that two creations from one process (a test, a hook
+///   subprocess re-entering) cannot collide on the name.
+///
+/// The shape deliberately matches `firewall::store`'s temp files
+/// (`<name>.tmp-<pid>-<hex>`), which is this crate's existing convention for
+/// "mine, in progress, beside the real thing".
+const PRIVATE_INFIX: &str = ".tmp-";
+
+/// Make sure a complete database exists at `db_path`, creating one privately
+/// and publishing it whole if there is none, and without following a symlink
+/// that may sit at the final component.
 ///
 /// Only a definitive `NotFound` from the inspection counts as "absent"; any
-/// other failure is preserved with its source instead of being mistaken for
-/// permission to create the file. If creation loses an `AlreadyExists` race
-/// with another Glasshouse process, the winning file is re-inspected — it
-/// gets no free pass past the symlink refusal.
-fn prepare_file(db_path: &Path) -> Result<(), DatabaseError> {
-    match check_existing(db_path) {
-        Ok(true) => return Ok(()),
-        Ok(false) => {}
-        Err(err) => return Err(err),
+/// other failure — a zero-byte file included, see [`check_existing`] — is
+/// preserved rather than mistaken for permission to create the file.
+///
+/// When the path *is* absent this never creates the file at `db_path`. It
+/// creates `<db_path>.tmp-<pid>-<start>-<nonce>` instead, migrates and binds
+/// **that**, and then publishes it with one hard link ([`publish`]). The
+/// invariant the rest of this module rests on falls out of that: a file at
+/// `db_path` is always a complete, migrated, project-bound database or a
+/// truncated one, and never one in the making. A caller arriving mid-creation
+/// sees no file at all, does its own creation, and one of the two wins the
+/// link; the loser discards its own finished database and opens the winner's,
+/// which is complete by construction.
+///
+/// In a burst of *n* first bootstraps this runs *n* small migrations on *n*
+/// private files rather than making *n* − 1 callers queue on one lock behind a
+/// migration of unbounded length, which is what [`configure`]'s five second
+/// busy timeout used to be a bet against.
+fn prepare_file(db_path: &Path, project_id: &str) -> Result<(), DatabaseError> {
+    if check_existing(db_path)? {
+        return Ok(());
     }
 
-    // Create the file ourselves instead of letting SQLite do it, because
-    // SQLite would use plain `0644 &! umask` — world-readable, which no
-    // project memory ever should be.
+    // Only ever on the path that is about to create one of these itself, so a
+    // launch that finds a database already there never enumerates anything.
+    sweep_abandoned_private_files(db_path);
+
+    let private = private_creation_path(db_path)?;
+
+    // Create the file rather than letting SQLite do it, because SQLite would
+    // use plain `0644 &! umask` — world-readable, which no project memory ever
+    // should be. `create_new` on a name carrying this process's pid and a
+    // fresh nonce cannot collide with a sibling's; if it somehow does, that is
+    // a real error and not a race to absorb.
     let mut options = fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -3136,22 +2971,337 @@ fn prepare_file(db_path: &Path) -> Result<(), DatabaseError> {
         use std::os::unix::fs::OpenOptionsExt;
         options.mode(0o600);
     }
-    match options.open(db_path) {
-        Ok(_) => Ok(()),
-        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-            // Lost the race to a concurrent Glasshouse process creating this
-            // same file right now. That winner's file is legitimately zero
-            // bytes until its migration commits under the write lock both
-            // processes will serialize on in `open` — this is not the
-            // "existing file that used to hold data" case `check_existing`'s
-            // empty-file refusal exists for, so hold the winner only to the
-            // symlink/regular-file checks, not that one.
-            inspect_existing(db_path).map(|_| ())
-        }
-        Err(source) => Err(DatabaseError::Create {
+    options
+        .open(&private)
+        .map_err(|source| DatabaseError::Create {
+            path: private.clone(),
+            source,
+        })?;
+
+    // A test-only seam. On any build without `cfg(test)` — every shipped
+    // binary, and every integration test, which links the library compiled
+    // without it — this line and the hook it calls do not exist at all, so
+    // there is no branch, no thread-local and no state in production. It gives
+    // the stress test below a window in which a private file provably exists
+    // and has provably not been published.
+    #[cfg(test)]
+    hold_private_file(&private);
+
+    if let Err(err) = migrate_privately(&private, project_id) {
+        discard_private_file(&private);
+        return Err(err);
+    }
+
+    publish(&private, db_path)
+}
+
+/// Where this process's private copy of `db_path` goes: beside it, in the same
+/// directory, never in a shared temp directory.
+///
+/// Same directory because the publish is a hard link and a hard link cannot
+/// cross a filesystem — and because a database holding a project's memory has
+/// no business passing through a world-readable `/tmp` even briefly.
+fn private_creation_path(db_path: &Path) -> Result<PathBuf, DatabaseError> {
+    // Failing to name the private file is failing to create the database, and
+    // that is what the user needs to be told; the private name is an
+    // implementation detail of getting there.
+    let create_err = |source| DatabaseError::Create {
+        path: db_path.to_path_buf(),
+        source,
+    };
+    let dir = db_path
+        .parent()
+        .ok_or_else(|| create_err(std::io::Error::other("the database path has no directory")))?;
+    let name = db_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| create_err(std::io::Error::other("the database path has no file name")))?;
+
+    let mut nonce = [0u8; 8];
+    getrandom::fill(&mut nonce).map_err(|source| create_err(std::io::Error::other(source)))?;
+
+    Ok(dir.join(format!(
+        "{name}{PRIVATE_INFIX}{}-{:016x}-{}",
+        std::process::id(),
+        own_start_time_ms() as u64,
+        hex::encode(nonce),
+    )))
+}
+
+/// This process's start time as the liveness probe reports it, or `0` when the
+/// machine would not say.
+///
+/// `0` is a deliberate "unknown" rather than a guess: [`creator_is_gone`]
+/// refuses to sweep a leftover carrying it whenever its pid is live, which
+/// leaks a file in the one case the encoding cannot decide. Sweeping it would
+/// risk deleting a live sibling's work, and that trade is not close.
+fn own_start_time_ms() -> i64 {
+    crate::session::supervision::observe(std::process::id())
+        .map(|observed| observed.started_at_ms)
+        .unwrap_or(0)
+}
+
+/// Run everything [`open`] runs on a brand-new database, on the private file,
+/// and close it again.
+///
+/// The same sequence in the same order as `open`'s, deliberately: there is one
+/// way this project brings a database up, and a second one that drifted would
+/// be exactly the kind of difference nobody notices until a migration behaves
+/// differently on a first launch than on every later one. [`verify_identity`]
+/// passes trivially on a file created moments ago and is run anyway for that
+/// reason.
+fn migrate_privately(private: &Path, project_id: &str) -> Result<(), DatabaseError> {
+    let sql_err = |source| DatabaseError::Sql {
+        path: private.to_path_buf(),
+        source,
+    };
+
+    let mut conn = Connection::open_with_flags(private, OpenFlags::SQLITE_OPEN_READ_WRITE)
+        .map_err(|source| DatabaseError::Open {
+            path: private.to_path_buf(),
+            source,
+        })?;
+    configure(&conn, private)?;
+    verify_identity(&conn, private, project_id)?;
+
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .map_err(sql_err)?;
+    migrate(&tx, private)?;
+    bind_project(&tx, private, project_id)?;
+    tx.commit().map_err(sql_err)?;
+
+    // Load-bearing, not tidiness: Windows refuses to remove or rename a file
+    // while a handle is open on it unless that handle was opened with
+    // FILE_SHARE_DELETE, and SQLite's is not. Both the publish and the
+    // discard that follow remove this file, so the connection goes first.
+    drop(conn);
+    Ok(())
+}
+
+/// Make the finished private database appear at the final path, whole.
+///
+/// [`std::fs::hard_link`] is `link(2)` on unix and `CreateHardLinkW` on
+/// Windows (NTFS); the two paths are siblings, so this is never a cross-volume
+/// link, which is the one thing either call refuses outright. A hard link is
+/// the primitive this whole design turns on: the final directory entry appears
+/// with the full, committed content already behind it, so there is no instant
+/// at which that path exists and is incomplete. It shares the inode, so
+/// removing the private name afterwards leaves the final one intact — with the
+/// `0600` mode the private file was created with, since the mode belongs to
+/// the inode and not to the name.
+///
+/// **Never a rename.** A rename would silently *replace* whatever is at the
+/// final path, and refusing a truncated database rather than overwriting it is
+/// a promise this project keeps ([`DatabaseError::EmptyExisting`]).
+///
+/// `AlreadyExists` is the race signal, and it is `AlreadyExists` on both
+/// platforms: a sibling published first. That sibling's file is a complete
+/// migrated database by construction, so this process discards its own
+/// finished work and lets its caller open the sibling's. Losing here is
+/// ordinary and costs one small migration; it is not an error.
+fn publish(private: &Path, db_path: &Path) -> Result<(), DatabaseError> {
+    let outcome = match fs::hard_link(private, db_path) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => Ok(()),
+        Err(source) => Err(DatabaseError::Publish {
             path: db_path.to_path_buf(),
+            private: private.to_path_buf(),
             source,
         }),
+    };
+    // Whichever way the link went, the private name has done its job. On the
+    // winning path the content survives it, because the final name is now the
+    // second link to the same inode; on the losing path it is this process's
+    // own discarded work; on the failing path it is what the error is about
+    // and leaving it would leak a database file per attempt.
+    discard_private_file(private);
+    outcome
+}
+
+/// Remove a private file and the rollback journal SQLite may have left beside
+/// it, best-effort.
+///
+/// Best-effort on purpose: this runs on the success path, where the content
+/// already survives under the final name, and on error paths, where the error
+/// being reported is the thing that matters. A failure to unlink here leaks a
+/// file that the next bootstrap's sweep will collect.
+fn discard_private_file(private: &Path) {
+    let _ = fs::remove_file(private);
+    let _ = fs::remove_file(journal_beside(private));
+}
+
+/// The rollback journal SQLite creates beside a database while a transaction
+/// is open. Glasshouse never sets `journal_mode`, so every connection it opens
+/// is in SQLite's default rollback mode and `-journal` is the only sidecar
+/// there can be — no `-wal`, no `-shm`.
+fn journal_beside(private: &Path) -> PathBuf {
+    let mut journal = private.as_os_str().to_os_string();
+    journal.push("-journal");
+    PathBuf::from(journal)
+}
+
+/// Remove private creation files beside `db_path` whose creator is provably
+/// gone, and leave every other one exactly where it is.
+///
+/// A creator killed between `create_new` and its publish leaves its private
+/// file (and possibly its `-journal`) behind. Nothing downstream will ever
+/// look at those files again — the name carries a nonce, so the next creation
+/// picks a different one — so they are pure leakage, and collecting them is
+/// the honest thing to do the next time a launch finds no database here.
+///
+/// The dangerous mistake is collecting a file whose creator is *still
+/// working*: that is a live sibling's private database mid-migration, and
+/// deleting it destroys work in flight for no gain. So the question asked here
+/// is not "is this file old" or "does this look abandoned" but "is the process
+/// named in this file's own name gone", answered by the crate's one production
+/// liveness probe ([`crate::session::supervision::observe`], which has a
+/// macOS, a Linux and a Windows arm).
+///
+/// Every failure here is swallowed: a directory that cannot be listed, a file
+/// that cannot be removed, a name that does not parse. None of them is a
+/// reason to refuse to bootstrap a project, and the cost of each is a few
+/// kilobytes.
+fn sweep_abandoned_private_files(db_path: &Path) {
+    let (Some(dir), Some(name)) = (
+        db_path.parent(),
+        db_path.file_name().and_then(|name| name.to_str()),
+    ) else {
+        return;
+    };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let candidate = entry.file_name();
+        let Some(candidate) = candidate.to_str() else {
+            continue;
+        };
+        // Never anything that does not match the pattern exactly. Neighbours
+        // of a database file are a user's business — a backup, an export, a
+        // sidecar from some other tool — and this sweep is not entitled to any
+        // of them.
+        let Some((pid, started_at_ms)) = parse_private_name(name, candidate) else {
+            continue;
+        };
+        match creator_is_gone(pid, started_at_ms) {
+            CreatorLiveness::Working => {}
+            CreatorLiveness::Recycled => {
+                // Provably not the creator: something else answers to that pid
+                // now, so the creator exited without publishing. Worth saying
+                // once, because it means a Glasshouse died mid-creation *and*
+                // the machine has cycled through a whole pid space since.
+                tracing::warn!(
+                    private = %entry.path().display(),
+                    pid,
+                    "removing a private database left by a crashed Glasshouse; \
+                     its process id now belongs to an unrelated process"
+                );
+                discard_private_file(&entry.path());
+            }
+            CreatorLiveness::Gone => discard_private_file(&entry.path()),
+        }
+    }
+}
+
+/// What the liveness probe says about the process named in a private file's
+/// name.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CreatorLiveness {
+    /// The creator is running. Its file is its own; do not touch it. Also the
+    /// answer when the file records no start time (`0`) and something is
+    /// running under its pid, because that pair cannot be told apart from the
+    /// creator and the safe direction is to leak.
+    Working,
+    /// Nothing is running under that pid, or what is there is a zombie —
+    /// which holds nothing, answers nothing, and is never a creator.
+    Gone,
+    /// Something is running under that pid and it is not the process that
+    /// created this file: the pid was recycled. The creator is as gone as
+    /// `Gone`, and this is worth a word in the log.
+    Recycled,
+}
+
+/// Ask the machine about the process a private file names.
+///
+/// The start time is what makes this more than `kill(pid, 0)`. Pids are
+/// recycled, and a leftover that outlives a full turn of the pid space would
+/// otherwise pin itself in place forever behind an unrelated process — the
+/// design note accepted that leak; recording the creator's start time removes
+/// it, because a live pid whose start time is not the recorded one is
+/// *provably* not the creator.
+fn creator_is_gone(pid: u32, started_at_ms: i64) -> CreatorLiveness {
+    match crate::session::supervision::observe(pid) {
+        None => CreatorLiveness::Gone,
+        Some(observed) if !observed.is_live() => CreatorLiveness::Gone,
+        Some(_) if started_at_ms == 0 => CreatorLiveness::Working,
+        Some(observed) if observed.started_at_ms == started_at_ms => CreatorLiveness::Working,
+        Some(_) => CreatorLiveness::Recycled,
+    }
+}
+
+/// Read a private file's name back, or `None` if `candidate` is not one.
+///
+/// Exact, not approximate: the name must be the database's own file name, then
+/// [`PRIVATE_INFIX`], then a decimal pid, then sixteen hex digits of start
+/// time, then sixteen hex digits of nonce, and nothing else. Anything that
+/// does not parse is somebody else's file.
+fn parse_private_name(db_file_name: &str, candidate: &str) -> Option<(u32, i64)> {
+    let suffix = candidate
+        .strip_prefix(db_file_name)?
+        .strip_prefix(PRIVATE_INFIX)?;
+    let mut fields = suffix.split('-');
+    let pid = fields.next()?;
+    let started = fields.next()?;
+    let nonce = fields.next()?;
+    if fields.next().is_some() {
+        return None;
+    }
+    if started.len() != 16 || nonce.len() != 16 {
+        return None;
+    }
+    // `from_str_radix` accepts a leading `+`; these fields never carry one.
+    if !pid.bytes().all(|byte| byte.is_ascii_digit())
+        || !started.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || !nonce.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return None;
+    }
+    Some((
+        pid.parse().ok()?,
+        u64::from_str_radix(started, 16).ok()? as i64,
+    ))
+}
+
+/// A test-only hook, run on the creating thread once its private file exists
+/// and before anything has been written to it.
+///
+/// Thread-local rather than global because the tests that use it need exactly
+/// one thread held while another runs the same code path unheld. Compiled out
+/// entirely of any build without `cfg(test)`.
+#[cfg(test)]
+type PrivateFileHold = Box<dyn FnMut(&Path) + Send>;
+
+#[cfg(test)]
+thread_local! {
+    static PRIVATE_FILE_HOLD: std::cell::RefCell<Option<PrivateFileHold>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Install a hold on this thread. Returns the previous one, if any.
+#[cfg(test)]
+fn install_private_file_hold(hold: PrivateFileHold) -> Option<PrivateFileHold> {
+    PRIVATE_FILE_HOLD.with(|cell| cell.borrow_mut().replace(hold))
+}
+
+/// Run this thread's hold, if it has one. The hook is taken out of the cell
+/// for the duration so that a re-entrant creation cannot double-borrow it.
+#[cfg(test)]
+fn hold_private_file(private: &Path) {
+    let hold = PRIVATE_FILE_HOLD.with(|cell| cell.borrow_mut().take());
+    if let Some(mut hold) = hold {
+        hold(private);
+        PRIVATE_FILE_HOLD.with(|cell| *cell.borrow_mut() = Some(hold));
     }
 }
 
@@ -5719,186 +5869,368 @@ mod tests {
         assert_eq!(bindings, 1);
     }
 
-    /// Everything `open` does to a brand-new database file, run by hand on a
-    /// thread that controls exactly when the write lock is taken and when the
-    /// migration commits.
+    /// The name a private creation file would have if this process made one
+    /// now, with the pid and start time the caller asks for.
     ///
-    /// This is the creator half of the two straggler tests below. It is
-    /// deliberately built out of the production `migrate` and `bind_project`
-    /// rather than a fixture: what the straggler waits for has to be the real
-    /// migration, or the test proves nothing about how long a real one takes.
-    fn create_and_migrate_slowly(
-        db: &Path,
-        project_id: &str,
-        before_lock: std::time::Duration,
-        hold: std::time::Duration,
-        locked: std::sync::mpsc::Sender<()>,
-        created: std::sync::mpsc::Sender<()>,
-    ) {
-        let mut options = std::fs::OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        options
-            .open(db)
-            .expect("the creator must win the create race");
-        assert_eq!(std::fs::metadata(db).unwrap().len(), 0);
-        created.send(()).unwrap();
-
-        // The window between "the file exists" and "its creator holds the
-        // write lock": in production a connection open and two identity
-        // queries, here whatever the caller asks for.
-        std::thread::sleep(before_lock);
-
-        let mut conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_WRITE).unwrap();
-        conn.busy_timeout(std::time::Duration::from_secs(30))
-            .unwrap();
-        let tx = conn
-            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
-            .unwrap();
-        locked.send(()).unwrap();
-
-        // Stand in for a first migration that outlasts any fixed budget a
-        // straggler could have guessed at.
-        std::thread::sleep(hold);
-
-        migrate(&tx, db).unwrap();
-        bind_project(&tx, db, project_id).unwrap();
-        tx.commit().unwrap();
+    /// Built here rather than by calling `private_creation_path` because every
+    /// test below needs to *choose* the pid and start time — that pair is the
+    /// whole subject of the sweep.
+    fn private_file_named(db: &Path, pid: u32, started_at_ms: i64, nonce: u64) -> PathBuf {
+        db.parent().unwrap().join(format!(
+            "{}{PRIVATE_INFIX}{pid}-{:016x}-{nonce:016x}",
+            db.file_name().unwrap().to_str().unwrap(),
+            started_at_ms as u64,
+        ))
     }
 
-    /// The defect this file's `wait_out_a_concurrent_creation` exists for: a
-    /// straggler that finds a sibling's zero-byte file must wait for that
-    /// sibling's migration however long it takes, not for a fixed budget.
+    /// Every private creation file currently sitting beside `db`.
+    fn private_files_beside(db: &Path) -> Vec<String> {
+        let name = db.file_name().unwrap().to_str().unwrap();
+        std::fs::read_dir(db.parent().unwrap())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .filter(|candidate| parse_private_name(name, candidate).is_some())
+            .collect()
+    }
+
+    /// The straggler this module used to have to wait for no longer exists: a
+    /// caller that finds no database creates and migrates its *own* private
+    /// file and races only for the final directory entry. This is what happens
+    /// to the one that loses that race.
     ///
-    /// The creator holds the write lock for two seconds — four times the
-    /// 500 ms the old retry loop allowed — before its migration commits. On
-    /// the old code the straggler refused with `EmptyExisting` inside that
-    /// half second; here it blocks on the lock and opens the migrated
-    /// database the creator commits.
+    /// It is the wave-108 stress test's successor and it pins the same
+    /// property from the other side. There, a creator held one shared file and
+    /// a straggler had to wait however long its migration took; here nothing
+    /// waits, and the question is whether the loser cleans up after itself and
+    /// adopts the winner's database rather than damaging it.
+    ///
+    /// **Deterministic by rendezvous, not by clock.** The creator is held in a
+    /// test-only hook (`install_private_file_hold`, compiled out of every
+    /// non-`cfg(test)` build) from the instant its private file exists until
+    /// this thread has *finished* publishing its own. A fixed sleep would have
+    /// been a bet that the winner finishes inside it — and losing that bet
+    /// silently swaps the two roles and passes anyway, which is §60's vacuous
+    /// pass wearing the opposite face. The `HOLD` below is only a hang guard,
+    /// and the assertion that the creator's file is still unpublished when the
+    /// winner returns is what proves the roles did not swap.
     #[test]
-    fn a_straggler_waits_out_a_creators_whole_migration_instead_of_refusing() {
-        const HOLD: std::time::Duration = std::time::Duration::from_secs(2);
+    fn a_creator_that_loses_the_publish_race_discards_its_own_and_opens_the_winners() {
+        /// Long enough that it never fires, short enough that a broken
+        /// rendezvous fails the test instead of hanging the suite.
+        const HOLD: std::time::Duration = std::time::Duration::from_secs(120);
 
         let tmp = tempfile::tempdir().unwrap();
         let fixture = Fixture::new(tmp.path(), "alpha");
         let db = fixture.runtime.database_path().to_path_buf();
-        let project_id = fixture.runtime.project().id().as_str().to_owned();
+        let base = fixture.base.clone();
+        let root = fixture.runtime.project().root().to_path_buf();
 
         // Back to the state a first launch starts from.
         std::fs::remove_file(&db).unwrap();
 
-        let (locked_tx, locked_rx) = std::sync::mpsc::channel();
-        let (created_tx, _created_rx) = std::sync::mpsc::channel();
+        let (created_tx, created_rx) = std::sync::mpsc::channel::<PathBuf>();
+        let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+
         let creator = {
-            let db = db.clone();
+            let base = base.clone();
+            let root = root.clone();
             std::thread::spawn(move || {
-                create_and_migrate_slowly(
-                    &db,
-                    &project_id,
-                    std::time::Duration::ZERO,
-                    HOLD,
-                    locked_tx,
-                    created_tx,
-                );
+                install_private_file_hold(Box::new(move |private| {
+                    created_tx.send(private.to_path_buf()).unwrap();
+                    let _ = release_rx.recv_timeout(HOLD);
+                }));
+                let cli = Cli::try_parse_from([
+                    "glasshouse",
+                    "--data-dir",
+                    base.join("data").to_str().unwrap(),
+                    "--config-dir",
+                    base.join("config").to_str().unwrap(),
+                ])
+                .unwrap();
+                crate::bootstrap(&cli, &root)
             })
         };
 
-        // Released once the creator holds the write lock, so what is measured
-        // below is the wait for the migration and nothing else.
-        locked_rx.recv().unwrap();
-        let started = std::time::Instant::now();
-        let migrated = fixture
-            .rebootstrap()
-            .expect("a straggler must wait for the creator, not refuse it");
-        let waited = started.elapsed();
-        creator.join().unwrap();
+        // The creator is now holding a private file it has not published.
+        let creators_private = created_rx.recv().unwrap();
+        assert!(
+            creators_private.exists(),
+            "the hook must run with the private file already created"
+        );
+        assert!(
+            !db.exists(),
+            "a creation in flight must be invisible at the final path"
+        );
 
-        assert_eq!(migrated.database_path(), db);
+        // The winner: an ordinary production bootstrap, start to finish, while
+        // the creator is held.
+        let winner = fixture
+            .rebootstrap()
+            .expect("a caller must not be blocked by a sibling mid-creation");
+        assert_eq!(winner.database_path(), db);
+        assert_eq!(schema_version(&db), SUPPORTED_SCHEMA_VERSION);
+
+        // The roles cannot have swapped: the creator's own file is still
+        // sitting there unpublished, so the database now at the final path is
+        // the winner's and not the creator's.
+        assert!(
+            creators_private.exists(),
+            "the creator must still be held; if it published first this test proves nothing"
+        );
+
+        // A mark that only survives if the winner's inode is the one that
+        // stays at the final path. A rename in place of the link would replace
+        // it; nothing legitimate ever can.
+        let marked = Connection::open(&db).unwrap();
+        marked
+            .execute(
+                "INSERT INTO project_metadata (key, value) VALUES ('publish_race_marker', 'winner')",
+                [],
+            )
+            .unwrap();
+        drop(marked);
+        #[cfg(unix)]
+        let winners_inode = {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::metadata(&db).unwrap().ino()
+        };
+
+        release_tx.send(()).unwrap();
+        let creators_runtime = creator
+            .join()
+            .expect("the creator thread panicked")
+            .expect("losing the publish race is ordinary, not an error");
+
+        // Both callers ended up on the one database.
+        assert_eq!(creators_runtime.database_path(), db);
+        assert_eq!(
+            creators_runtime.project().id().as_str(),
+            winner.project().id().as_str()
+        );
+
+        // The loser discarded its own finished database rather than publishing
+        // it over the winner's.
+        assert!(
+            private_files_beside(&db).is_empty(),
+            "the loser must leave no private file behind; found {:?}",
+            private_files_beside(&db)
+        );
+        let final_db = Connection::open(&db).unwrap();
+        let marker: Option<String> = final_db
+            .query_row(
+                "SELECT value FROM project_metadata WHERE key = 'publish_race_marker'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert_eq!(
+            marker.as_deref(),
+            Some("winner"),
+            "the winner's database must still be the one at the final path"
+        );
+        let bindings: i64 = final_db
+            .query_row(
+                "SELECT COUNT(*) FROM project_metadata WHERE key = 'project_id'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(bindings, 1);
+        drop(final_db);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            assert_eq!(
+                std::fs::metadata(&db).unwrap().ino(),
+                winners_inode,
+                "the final path must still be the winner's file, not a replacement"
+            );
+        }
         assert_eq!(schema_version(&db), SUPPORTED_SCHEMA_VERSION);
         assert_eq!(
             stored_project_id(&db),
-            migrated.project().id().as_str(),
-            "the straggler must end up on the creator's database, bound to its own project"
-        );
-
-        // The straggler is released just after the lock is taken, so it sees
-        // very nearly the whole hold. The floor is well above the 500 ms the
-        // old timer budgeted: passing this by waiting *less* than the creator
-        // held would mean the straggler never blocked at all.
-        assert!(
-            waited >= HOLD - std::time::Duration::from_millis(250),
-            "the straggler returned after {waited:?}, which is less than the creator's {HOLD:?} \
-             hold — it cannot have waited on the creator's lock"
+            creators_runtime.project().id().as_str()
         );
     }
 
-    /// The one gap the write lock alone does not cover: a creator's file is
-    /// visible before its creator has taken the lock.
-    ///
-    /// A straggler probing inside that window finds the lock free and the file
-    /// empty — the same two facts a truncated database presents — and refusing
-    /// on that single observation would reintroduce the defect in a narrower
-    /// window. `CREATOR_LOCK_GRACE_ATTEMPTS` is what closes it, and this test
-    /// is what holds that constant to its job: the creator waits 100 ms
-    /// between creating the file and locking it, which is far wider than the
-    /// connection-open the real gap consists of and still well inside the
-    /// grace.
+    /// A creator killed before it published leaves its private file behind,
+    /// and the next bootstrap collects it — but only because its process is
+    /// provably gone.
     #[test]
-    fn a_straggler_released_inside_the_creators_unlocked_window_still_waits() {
-        const BEFORE_LOCK: std::time::Duration = std::time::Duration::from_millis(100);
-        const HOLD: std::time::Duration = std::time::Duration::from_millis(750);
-
+    fn a_private_file_from_a_dead_creator_is_swept_on_the_next_bootstrap() {
         let tmp = tempfile::tempdir().unwrap();
         let fixture = Fixture::new(tmp.path(), "alpha");
         let db = fixture.runtime.database_path().to_path_buf();
-        let project_id = fixture.runtime.project().id().as_str().to_owned();
         std::fs::remove_file(&db).unwrap();
 
-        let (locked_tx, _locked_rx) = std::sync::mpsc::channel();
-        let (created_tx, created_rx) = std::sync::mpsc::channel();
-        let creator = {
-            let db = db.clone();
-            std::thread::spawn(move || {
-                create_and_migrate_slowly(
-                    &db,
-                    &project_id,
-                    BEFORE_LOCK,
-                    HOLD,
-                    locked_tx,
-                    created_tx,
-                );
-            })
-        };
+        // Far above any pid Linux, macOS or Windows hands out, so the liveness
+        // probe answers "nothing there" rather than "I cannot tell".
+        let leftover = private_file_named(&db, 0x3fff_ffff, 1_700_000_000_000, 0xdead_beef);
+        std::fs::write(&leftover, b"a crashed creator's work").unwrap();
+        let journal = journal_beside(&leftover);
+        std::fs::write(&journal, b"and its journal").unwrap();
 
-        // Released the instant the file exists — before any lock is held.
-        created_rx.recv().unwrap();
-        assert_eq!(std::fs::metadata(&db).unwrap().len(), 0);
-        let started = std::time::Instant::now();
-        let migrated = fixture
-            .rebootstrap()
-            .expect("a straggler must not refuse a file whose creator has not locked it yet");
-        let waited = started.elapsed();
-        creator.join().unwrap();
+        // Neighbours that are not private creation files. The sweep is not
+        // entitled to any of these and must not touch one.
+        let dir = db.parent().unwrap();
+        let name = db.file_name().unwrap().to_str().unwrap();
+        let bystanders = [
+            dir.join(format!("{name}.backup")),
+            dir.join(format!(
+                "{name}{PRIVATE_INFIX}notapid-0000000000000000-0000000000000000"
+            )),
+            dir.join(format!("{name}{PRIVATE_INFIX}12345-short-0000000000000000")),
+            dir.join(format!("{name}{PRIVATE_INFIX}12345-0000000000000000")),
+        ];
+        for bystander in &bystanders {
+            std::fs::write(bystander, b"not yours").unwrap();
+        }
 
-        assert_eq!(migrated.database_path(), db);
-        assert_eq!(schema_version(&db), SUPPORTED_SCHEMA_VERSION);
+        fixture.rebootstrap().unwrap();
+
         assert!(
-            waited >= BEFORE_LOCK + HOLD - std::time::Duration::from_millis(250),
-            "the straggler returned after {waited:?}; it cannot have waited out the creator's \
-             {BEFORE_LOCK:?} window plus its {HOLD:?} hold"
+            !leftover.exists(),
+            "a private file whose creator is gone must be collected"
         );
+        assert!(!journal.exists(), "and so must its journal");
+        for bystander in &bystanders {
+            assert!(
+                bystander.exists(),
+                "the sweep touched a file that is not a private creation file: {}",
+                bystander.display()
+            );
+        }
+        assert_eq!(schema_version(&db), SUPPORTED_SCHEMA_VERSION);
+    }
+
+    /// The half that matters more: a private file whose creator is *alive* is
+    /// a sibling's database mid-migration, and deleting it destroys work in
+    /// flight. This test's own process stands in for that sibling.
+    #[test]
+    fn a_private_file_from_a_live_creator_is_left_alone() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let db = fixture.runtime.database_path().to_path_buf();
+        std::fs::remove_file(&db).unwrap();
+
+        let started_at_ms = crate::session::supervision::observe(std::process::id())
+            .expect("this process must be observable to its own liveness probe")
+            .started_at_ms;
+        let live = private_file_named(&db, std::process::id(), started_at_ms, 0x0123_4567);
+        std::fs::write(&live, b"a live sibling's work in progress").unwrap();
+
+        fixture.rebootstrap().unwrap();
+
+        assert!(
+            live.exists(),
+            "a private file whose creator is still running must never be swept"
+        );
+        assert_eq!(
+            std::fs::read(&live).unwrap(),
+            b"a live sibling's work in progress",
+            "and it must be byte-identical"
+        );
+        assert_eq!(schema_version(&db), SUPPORTED_SCHEMA_VERSION);
+    }
+
+    /// The leak the design note accepted and the start time removes: a
+    /// leftover whose pid has been recycled by an unrelated process.
+    ///
+    /// Without the recorded start time this file would pin itself in place
+    /// forever, because a live pid is indistinguishable from a live creator.
+    /// With it, the process answering that pid is *provably* not the one that
+    /// created the file, so the creator is as gone as a pid that answers
+    /// nothing — and the file goes.
+    #[test]
+    fn a_private_file_whose_pid_was_recycled_is_swept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fixture = Fixture::new(tmp.path(), "alpha");
+        let db = fixture.runtime.database_path().to_path_buf();
+        std::fs::remove_file(&db).unwrap();
+
+        // This process's pid, with a start time that is not this process's:
+        // exactly the shape a recycled pid presents.
+        let started_at_ms = crate::session::supervision::observe(std::process::id())
+            .unwrap()
+            .started_at_ms;
+        let recycled = private_file_named(
+            &db,
+            std::process::id(),
+            started_at_ms.wrapping_sub(1_000_000),
+            0x89ab_cdef,
+        );
+        std::fs::write(&recycled, b"a crashed creator, long ago").unwrap();
+
+        fixture.rebootstrap().unwrap();
+
+        assert!(
+            !recycled.exists(),
+            "a leftover whose pid now belongs to another process must be collected"
+        );
+        assert_eq!(schema_version(&db), SUPPORTED_SCHEMA_VERSION);
+    }
+
+    /// The name is the whole contract the sweep reads, so it is pinned
+    /// directly: what parses, what does not, and what the fields mean.
+    #[test]
+    fn a_private_creation_name_parses_only_in_its_exact_shape() {
+        assert_eq!(
+            parse_private_name(
+                "glasshouse.db",
+                "glasshouse.db.tmp-4321-00000000000004d2-0123456789abcdef"
+            ),
+            Some((4321, 1234))
+        );
+        for wrong in [
+            "glasshouse.db",
+            "glasshouse.db-journal",
+            "glasshouse.db.tmp-4321-00000000000004d2",
+            "glasshouse.db.tmp-4321-00000000000004d2-0123456789abcdef-extra",
+            "glasshouse.db.tmp--00000000000004d2-0123456789abcdef",
+            "glasshouse.db.tmp-4321-4d2-0123456789abcdef",
+            "glasshouse.db.tmp-4321-00000000000004d2-0123456789abcdeg",
+            "other.db.tmp-4321-00000000000004d2-0123456789abcdef",
+        ] {
+            assert_eq!(
+                parse_private_name("glasshouse.db", wrong),
+                None,
+                "{wrong} must not parse as a private creation file"
+            );
+        }
+    }
+
+    /// The start time is what tells a recycled pid from the creator, and the
+    /// three answers it produces are what the sweep branches on.
+    #[test]
+    fn a_recycled_pid_is_not_the_creator() {
+        let me = std::process::id();
+        let mine = crate::session::supervision::observe(me)
+            .unwrap()
+            .started_at_ms;
+
+        assert_eq!(creator_is_gone(me, mine), CreatorLiveness::Working);
+        assert_eq!(
+            creator_is_gone(me, mine.wrapping_add(1_000_000)),
+            CreatorLiveness::Recycled,
+            "a live pid whose start time is not the recorded one is provably not the creator"
+        );
+        assert_eq!(
+            creator_is_gone(me, 0),
+            CreatorLiveness::Working,
+            "an unrecorded start time cannot prove anything, so a live pid is left alone"
+        );
+        assert_eq!(creator_is_gone(0x3fff_ffff, 0), CreatorLiveness::Gone);
     }
 
     /// The same field reproduction, four times as contended.
     ///
-    /// Sixteen callers is what the original defect was found at; the wait this
-    /// module now performs is a queue on one lock, so the interesting question
-    /// is whether it still holds when the queue is long enough that nearly
-    /// every caller is a straggler rather than the creator.
+    /// Sixteen callers is what the original defect was found at; creation now
+    /// happens on a private file per caller and they contend only for the
+    /// final directory entry, so the interesting question is whether that
+    /// still holds when sixty-three of the sixty-four lose the link and have
+    /// to discard a finished database each.
     #[test]
     fn concurrent_first_bootstraps_serialize_on_one_database_at_sixty_four_callers() {
         let tmp = tempfile::tempdir().unwrap();
@@ -6159,10 +6491,12 @@ mod tests {
 
     /// A zero-byte database file that is also unwritable.
     ///
-    /// Deciding what a zero-byte file is now means asking SQLite for the write
-    /// lock on it, and a file this process cannot write is a case that answer
-    /// has to survive: the refusal must still be a refusal that names the file,
-    /// and it must not hang waiting for a creator that cannot exist.
+    /// A zero-byte file at the final path is a truncated database whatever its
+    /// permissions say, and this is the case that used to need the most care:
+    /// when deciding meant asking SQLite for the write lock, a file this
+    /// process could not write was a different answer. It no longer decides
+    /// anything by opening the file, so the refusal must name the file, be the
+    /// `EmptyExisting` one, and be immediate.
     #[cfg(unix)]
     #[test]
     fn a_zero_byte_database_that_cannot_be_written_is_still_refused() {
@@ -6187,10 +6521,10 @@ mod tests {
         let msg = format!("{err:#}");
 
         assert!(msg.contains(db.display().to_string().as_str()), "{msg}");
-        // The refusal is the same one a writable empty file gets: the lock
-        // probe finds the lock free and the file still empty, and nothing
-        // else -- not a `Sql` error from the read-only connection, not a
-        // `CreationWaitTimedOut` -- is allowed to stand in for it.
+        // The refusal is the same one a writable empty file gets: a zero-byte
+        // file at the final path is a truncated database, full stop, and
+        // nothing else -- not a `Sql` error from the read-only connection, not
+        // an `Open` failure -- is allowed to stand in for it.
         assert!(
             err.chain().any(|cause| matches!(
                 cause.downcast_ref::<DatabaseError>(),
@@ -6199,10 +6533,10 @@ mod tests {
             "expected EmptyExisting, got: {msg}"
         );
         assert!(
-            waited < CREATION_LOCK_WAIT,
-            "refusing an unwritable empty file took {waited:?}; nothing can be \
-             creating a file this process cannot write, so nothing should be \
-             waited for"
+            waited < PROMPT_REFUSAL,
+            "refusing an unwritable empty file took {waited:?}; the refusal opens \
+             no connection, takes no lock and waits for nothing, so it cannot be \
+             anywhere near {PROMPT_REFUSAL:?}"
         );
         assert_eq!(
             std::fs::metadata(&db).unwrap().len(),
@@ -6258,6 +6592,16 @@ mod tests {
         assert_eq!(std::fs::read(&decoy).unwrap(), b"decoy");
     }
 
+    /// What "immediately" means for the zero-byte refusal, with enough room
+    /// that a loaded machine cannot make it flake.
+    ///
+    /// Two orders of magnitude below the 400 ms grace and the 500 ms timer
+    /// that stood here before, because the refusal now does no I/O beyond the
+    /// `stat` that found the file: no connection is opened, no lock is taken,
+    /// nothing is slept on. If this ever fails, something started waiting
+    /// again.
+    const PROMPT_REFUSAL: std::time::Duration = std::time::Duration::from_millis(100);
+
     #[test]
     fn a_zero_byte_existing_database_is_refused_not_silently_reinitialized() {
         let tmp = tempfile::tempdir().unwrap();
@@ -6270,8 +6614,23 @@ mod tests {
         std::fs::write(&db, []).unwrap();
         assert_eq!(std::fs::metadata(&db).unwrap().len(), 0);
 
+        let started = std::time::Instant::now();
         let err = fixture.rebootstrap().unwrap_err();
+        let waited = started.elapsed();
         let msg = format!("{err:#}");
+
+        assert!(
+            waited < PROMPT_REFUSAL,
+            "refusing a truncated database took {waited:?}; there is nothing left \
+             to wait for at this path, so the refusal must be immediate"
+        );
+        assert!(
+            err.chain().any(|cause| matches!(
+                cause.downcast_ref::<DatabaseError>(),
+                Some(DatabaseError::EmptyExisting { .. })
+            )),
+            "expected EmptyExisting, got: {msg}"
+        );
         assert!(msg.contains("empty"), "{msg}");
         assert!(msg.contains(db.display().to_string().as_str()), "{msg}");
 
@@ -6283,11 +6642,10 @@ mod tests {
             "a refused open must leave the file byte-identical"
         );
 
-        // Nor may it have left anything beside the file. Deciding what a
-        // zero-byte file is now means taking SQLite's write lock on it, and a
-        // connection in the default journal mode creates a `-journal` sidecar
-        // to do that; `lock_probe_connection` asks for `journal_mode = MEMORY`
-        // precisely so that a refusal writes nothing anywhere.
+        // Nor may it have left anything beside the file. The refusal opens no
+        // connection at all now, so there is no `-journal` sidecar to avoid
+        // and no private creation file either — this filter catches both, and
+        // a refusal that started creating one would fail here.
         let leftovers: Vec<String> = std::fs::read_dir(db.parent().unwrap())
             .unwrap()
             .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
