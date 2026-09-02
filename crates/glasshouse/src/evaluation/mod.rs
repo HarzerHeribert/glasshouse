@@ -98,6 +98,17 @@ pub enum EvaluationKind {
     /// nothing records nothing, which is why this ledger counts retrieved
     /// memories rather than retrievals.
     MemoryRetrieved,
+    /// A memory search on a production door matched nothing at all — the
+    /// miss counterpart of [`Self::MemoryRetrieved`], and map line 1865's own
+    /// measurement: *"do not add vector retrieval until FTS5 retrieval
+    /// failures are observed and recorded in real projects."* `subject` is
+    /// the [`RetrievalScope`] the search asked with; there is no `memory_id`,
+    /// because a miss names no memory.
+    ///
+    /// **One row per zero-result search, not one row per query.** A search
+    /// that matched something writes [`Self::MemoryRetrieved`] rows and no
+    /// miss row; the two are mutually exclusive at every door.
+    MemoryRetrievalMiss,
     /// Glasshouse routed one of its own bounded support jobs — memory
     /// extraction today — and this is the rationale it decided on. `subject`
     /// is the [`crate::routing::disposable::JobKind`]'s own name and `detail`
@@ -434,6 +445,7 @@ impl EvaluationKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::MemoryRetrieved => "memory_retrieved",
+            Self::MemoryRetrievalMiss => "memory_retrieval_miss",
             Self::DisposableRouteDecided => "disposable_route_decided",
             Self::RoutingOverrideDecided => "routing_override_decided",
             Self::RoutingContinuationDecided => "routing_continuation_decided",
@@ -454,6 +466,7 @@ impl EvaluationKind {
     pub fn from_stored(value: &str) -> Option<Self> {
         match value {
             "memory_retrieved" => Some(Self::MemoryRetrieved),
+            "memory_retrieval_miss" => Some(Self::MemoryRetrievalMiss),
             "disposable_route_decided" => Some(Self::DisposableRouteDecided),
             "routing_override_decided" => Some(Self::RoutingOverrideDecided),
             "routing_continuation_decided" => Some(Self::RoutingContinuationDecided),
@@ -501,14 +514,16 @@ impl EvaluationOutcome {
     }
 }
 
-/// The `subject` vocabulary for [`EvaluationKind::MemoryRetrieved`]: which of
-/// the two questions the search asked.
+/// The `subject` vocabulary for [`EvaluationKind::MemoryRetrieved`] and
+/// [`EvaluationKind::MemoryRetrievalMiss`]: which of the questions the search
+/// asked, and — for a miss — which door asked it.
 ///
-/// This distinction is load-bearing for map line 1826 rather than decoration.
-/// A search run with `--history` is *asking* for superseded memories, so a
-/// superseded memory in its results is the feature working, not a memory
-/// "incorrectly resurfaced as current guidance". A count that folded the two
-/// together would report the tool's own history command as a defect.
+/// The `Current`/`Historical` distinction is load-bearing for map line 1826
+/// rather than decoration. A search run with `--history` is *asking* for
+/// superseded memories, so a superseded memory in its results is the feature
+/// working, not a memory "incorrectly resurfaced as current guidance". A
+/// count that folded the two together would report the tool's own history
+/// command as a defect.
 ///
 /// It is also the reason `subject` carries a scope here and not the query
 /// text. The query is the user's own words about their project, this ledger
@@ -521,6 +536,16 @@ pub enum RetrievalScope {
     /// `--history`: superseded, rejected, resolved, invalidated, needs-review
     /// and conflicted memories were explicitly asked for.
     Historical,
+    /// The launch-time briefing door ([`crate::memory::inject::briefing`]),
+    /// on a [`EvaluationKind::MemoryRetrievalMiss`] row only — that door
+    /// always searches [`crate::memory::search::SearchScope::Current`], so
+    /// `Current` would be a truthful label for its own search but would fold
+    /// its misses into the CLI/API door's own `current` count. A reader
+    /// asking "which door is missing" needs the two distinguishable, and
+    /// map line 1865's own reasoning is that the briefing door is almost
+    /// certainly the busier of the two — folding it into `current` would
+    /// report the quiet door and hide the busy one.
+    Injection,
 }
 
 impl RetrievalScope {
@@ -528,6 +553,7 @@ impl RetrievalScope {
         match self {
             Self::Current => "current",
             Self::Historical => "historical",
+            Self::Injection => "injection",
         }
     }
 
@@ -1751,6 +1777,48 @@ pub fn record_memory_retrieval<'a>(
     }
 }
 
+/// Record that a memory search on a production door matched nothing at all —
+/// the miss counterpart of [`record_memory_retrieval`], and the producer map
+/// line 1865 needs: *"do not add vector retrieval until FTS5 retrieval
+/// failures are observed and recorded in real projects."*
+///
+/// **This never fails a search or a launch**, for the same reason
+/// [`record_memory_retrieval`] does not: bookkeeping is not allowed to break
+/// the door it is counting. Every error here is a `tracing::warn!` and a
+/// return.
+///
+/// The database handle is opened here, and only here — practice §65's rule
+/// that a resource is acquired where its consumer starts, applied to a door
+/// that returned nothing rather than one that returned something. Every
+/// caller of this function must have already dropped its memory connection
+/// before calling it, for the same reason [`record_memory_retrieval`]'s own
+/// callers do.
+pub fn record_memory_retrieval_miss(
+    runtime: &Runtime,
+    scope: RetrievalScope,
+    observed_at_unix: i64,
+) {
+    let ledger = match EvaluationObservations::open(runtime) {
+        Ok(ledger) => ledger,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "could not open the evaluation ledger; the retrieval miss was \
+                 not counted"
+            );
+            return;
+        }
+    };
+    let observation =
+        NewObservation::new(EvaluationKind::MemoryRetrievalMiss).with_subject(scope.as_str());
+    if let Err(err) = ledger.record(observation, observed_at_unix) {
+        tracing::warn!(
+            error = %err,
+            "could not record a memory retrieval miss"
+        );
+    }
+}
+
 /// Record the rationale behind one disposable-job routing decision — the
 /// producer for [`EvaluationKind::DisposableRouteDecided`].
 ///
@@ -2210,6 +2278,7 @@ mod tests {
     fn every_kind_the_type_can_produce_is_one_the_schema_constant_declares() {
         let declared = [
             EvaluationKind::MemoryRetrieved,
+            EvaluationKind::MemoryRetrievalMiss,
             EvaluationKind::DisposableRouteDecided,
             EvaluationKind::RoutingOverrideDecided,
             EvaluationKind::RoutingContinuationDecided,
@@ -2260,5 +2329,16 @@ mod tests {
         );
         assert_eq!(RetrievalScope::Historical.as_str(), "historical");
         assert_eq!(RetrievalScope::Current.as_str(), "current");
+    }
+
+    /// The briefing door's own scope, distinct from both search scopes so a
+    /// miss row names which door produced it.
+    #[test]
+    fn the_injection_scope_is_its_own_word_not_current() {
+        assert_eq!(RetrievalScope::Injection.as_str(), "injection");
+        assert_ne!(
+            RetrievalScope::Injection.as_str(),
+            RetrievalScope::Current.as_str()
+        );
     }
 }

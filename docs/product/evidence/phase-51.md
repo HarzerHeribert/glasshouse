@@ -508,3 +508,62 @@ Re-closed by `GH-RETRIEVAL-CRITERIA` (dispatched 2026-09-02, `phase-52.md`):
 unresolved and missed counts for a window, giving `stale_retrievals` its
 production caller; the 1826 distinction this entry records — a `--history`
 search is *asking* for superseded memories — is one of its acceptance tests.
+
+---
+
+## 1822 and 1826 — RE-CLOSED 2026-09-02 (`GH-RETRIEVAL-CRITERIA`)
+
+The reader the re-open above asked for exists: `glasshouse memory retrievals --hours N` (`main.rs::memory_retrievals_report`) prints retrieved, stale, stale-under-history, unresolved and missed for the window, and is `stale_retrievals`' first production caller. Mechanism and the 1865 half are in `phase-52.md`'s entry of the same day.
+
+### Measure how often stale or incorrect memory is retrieved. (line 1822)
+
+Contract: phase-51.md's 2026-09-02 re-open: `EvaluationObservations::stale_retrievals` measures how often stale or incorrect memory is retrieved, and now has a production caller (`glasshouse memory retrievals`), re-closing the line the 1276 ruling and practice §90 required re-opening it for.
+
+State: **COMPLETE** — re-closed 2026-09-02. The measure now has a production reader (`memory_retrievals_report`, behind `glasshouse memory retrievals`), which is the caller `stale_retrievals` lacked when the box was un-ticked; the `drop-the-reader` mutation is KILLED through the shipped binary.
+
+Production evidence:
+- `main.rs` — `memory_retrievals_report`
+- `main.rs` — `render_memory_retrievals`
+- `evaluation/mod.rs` — `EvaluationObservations::stale_retrievals (pre-existing, unchanged)`
+
+Regression evidence:
+- `evaluation_observations::glasshouse_memory_retrievals_prints_every_figure_for_the_window`
+- `evaluation_observations::glasshouse_memory_retrievals_on_an_empty_window_prints_zeros_not_an_error`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| same mutation as 1865 above -- the reader is the shared new surface both lines close on | `drop-the-reader` | **killed** | `evaluation_observations::glasshouse_memory_retrievals_keeps_stale_and_stale_under_history_disjoint` |
+
+> drop-the-reader observed: assertion `left == right` failed (at evaluation_observations.rs:630)
+
+Recorded scope limits — stated by the worker, not discovered later:
+- re-closes the same 'reader with zero production callers' defect phase-51.md's 2026-09-02 entry names; the orchestrator's ruling, not this worker's, decides whether the tick is re-applied
+
+---
+
+### Measure how often superseded memories are incorrectly resurfaced as current guidance. (line 1826)
+
+Contract: phase-51.md's 2026-09-02 re-open, 1826's own half: the report distinguishes a --history search's stale hits (stale-under-history) from an unasked-for stale hit (stale), so a --history search is never counted as the defect it exists to avoid.
+
+State: **COMPLETE** — re-closed 2026-09-02. The readout keeps the entry's own argument visible at the one surface a person reads: a `--history` search is asking for superseded memories, so `stale` is printed net of `stale-under-history` (the struct's inclusive count is untouched and its existing test still pins it), and the disjoint pair is the acceptance test that kills `drop-the-reader`.
+
+Production evidence:
+- `main.rs` — `render_memory_retrievals`
+
+Regression evidence:
+- `evaluation_observations::glasshouse_memory_retrievals_keeps_stale_and_stale_under_history_disjoint`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| same mutation as 1865/1822 above | `drop-the-reader` | **killed** | `evaluation_observations::glasshouse_memory_retrievals_keeps_stale_and_stale_under_history_disjoint` |
+
+> drop-the-reader observed: assertion `left == right` failed (at evaluation_observations.rs:630)
+
+Recorded scope limits — stated by the worker, not discovered later:
+- same re-close ruling note as 1822 above
+
+---
+
+---
+
+---

@@ -19,7 +19,7 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`███████████████████████████████████░░░░░` 1183 / 1332 mandatory capabilities (88%)
+`███████████████████████████████████░░░░░` 1186 / 1332 mandatory capabilities (89%)
 
 <details>
 <summary>Per-phase breakdown (66 of 107 phases complete)</summary>
@@ -124,8 +124,8 @@ the authoritative specification and tracks what is done.
 | Phase 48 — CLI ergonomics | 8/8 ✅ |
 | Phase 49 — Configuration | 16/16 ✅ |
 | Phase 50 — Tracked project knowledge as an optional feature | 7/7 ✅ |
-| Phase 51 — Evaluation hooks | 10/37 |
-| Phase 52 — Criteria before adding semantic/vector retrieval | 0/6 |
+| Phase 51 — Evaluation hooks | 12/37 |
+| Phase 52 — Criteria before adding semantic/vector retrieval | 1/6 |
 | Phase 53 — Criteria before adding graph storage | 3/5 |
 | Phase 54 — Criteria before deeper cmux coupling | 4/4 ✅ |
 | Phase 54A — Setup and portability completion criteria | 9/10 |

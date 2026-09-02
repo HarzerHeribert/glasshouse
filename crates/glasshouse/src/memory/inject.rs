@@ -188,14 +188,52 @@ impl Injection {
     }
 }
 
+/// What [`briefing`] decided, distinguishing a retrieval miss from the
+/// search having worked and correctly found nothing new to say.
+///
+/// **This is the whole reason `briefing` returns an enum instead of the
+/// `Option<Injection>` it used to.** Map line 1865's measurement needs a
+/// zero-result search recorded as a miss; a search that found real
+/// candidates and correctly withheld all of them — because this session
+/// already has them — is the feature working, and folding the two into one
+/// `None` would have counted the second as the first.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BriefingOutcome {
+    /// Memory was selected and rendered — deliver it.
+    Injected(Injection),
+    /// The underlying search ([`MemoryStore::search_grouped_for_injection`])
+    /// returned no candidates at all, in either group — a retrieval miss.
+    NothingMatched,
+    /// The search returned candidates, but every one was excluded — already
+    /// sent to this session, not current, an unreaffirmed idea, or beyond
+    /// what fits — leaving nothing to inject. **Not a miss: the search
+    /// worked.**
+    NothingNew,
+}
+
+impl BriefingOutcome {
+    /// The delivered injection, when there is one — the shape a caller that
+    /// only cares about delivery, not about why there was none, already
+    /// wants.
+    pub fn into_injection(self) -> Option<Injection> {
+        match self {
+            Self::Injected(injection) => Some(injection),
+            Self::NothingMatched | Self::NothingNew => None,
+        }
+    }
+}
+
 /// Choose the memories relevant to a routed `task` and render them as one
-/// labelled block, or `None` when there is nothing to say.
+/// labelled block, distinguishing a retrieval miss from a search that
+/// correctly found nothing new — see [`BriefingOutcome`].
 ///
 /// `already_injected` is what this session has already been sent; those
-/// memories are skipped (line 1135). A `None` return is the normal answer for
-/// a project with no memories, a task nothing matches, and a session that
-/// already has everything the task selected — all three of which must leave
-/// the delivery exactly as it was before this module existed.
+/// memories are skipped (line 1135). [`BriefingOutcome::NothingNew`] is the
+/// normal answer for a project with no memories, a task nothing matches
+/// beyond the raw search, and a session that already has everything the task
+/// selected — all three of which must leave the delivery exactly as it was
+/// before this module existed; only a search that matched nothing at all is
+/// [`BriefingOutcome::NothingMatched`].
 ///
 /// # Selection order — line 1131, then 1134
 ///
@@ -257,10 +295,19 @@ pub fn briefing(
     store: &MemoryStore<'_>,
     task: &str,
     already_injected: &HashSet<MemoryId>,
-) -> Result<Option<Injection>, MemoryStoreError> {
+) -> Result<BriefingOutcome, MemoryStoreError> {
     let query: String = task.chars().take(MAX_QUERY_CHARS).collect();
     let grouped =
         store.search_grouped_for_injection(&query, SearchScope::Current, CANDIDATE_LIMIT)?;
+
+    // The retrieval-miss test, made before anything is filtered: a search
+    // that returned no candidates at all is map line 1865's miss, regardless
+    // of what a later, unrelated file-association lookup finds. A search
+    // that returned candidates and had every one filtered out below is a
+    // different thing — the search worked — so this bit is captured now,
+    // before `grouped` is consumed.
+    let text_search_matched_nothing =
+        grouped.invariants_and_constraints.is_empty() && grouped.other.is_empty();
 
     let (failed, rest): (Vec<MemoryRecord>, Vec<MemoryRecord>) = grouped
         .other
@@ -286,7 +333,11 @@ pub fn briefing(
 
     let file_observed = file_observed_memories(store, task, already_injected, &selected)?;
 
-    Ok(render(&selected, &file_observed))
+    Ok(match render(&selected, &file_observed) {
+        Some(injection) => BriefingOutcome::Injected(injection),
+        None if text_search_matched_nothing => BriefingOutcome::NothingMatched,
+        None => BriefingOutcome::NothingNew,
+    })
 }
 
 /// Line 1140: memories this project learned while a task's own named files

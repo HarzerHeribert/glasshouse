@@ -1938,4 +1938,22 @@ pub enum MemoryCommand {
         #[arg(long)]
         dry_run: bool,
     },
+
+    /// How retrieval has been doing over a window — map lines 1822, 1826 and
+    /// 1865's first production reader.
+    ///
+    /// Prints, for the window: how many memories were returned, how many of
+    /// those are stale now (superseded or flagged for review — map line
+    /// 1822), how many of the stale ones came from a search that explicitly
+    /// asked for history with `--history` (map line 1826's distinction —
+    /// those are the tool doing what it was told, not a defect), how many
+    /// returned rows no longer resolve to a memory, and how many searches on
+    /// any production door matched nothing at all (map line 1865). A window
+    /// with no recorded activity prints zeros for every figure, never an
+    /// error.
+    Retrievals {
+        /// How far back to look, in hours.
+        #[arg(long, value_name = "N", default_value_t = 24)]
+        hours: u32,
+    },
 }

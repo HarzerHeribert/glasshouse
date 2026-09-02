@@ -39,13 +39,14 @@ use glasshouse::Runtime;
 use glasshouse::checkpoint::store::{ProjectCheckpoints, StoreError as CheckpointStoreError};
 use glasshouse::checkpoint::{Checkpoint, CheckpointReason, Handoff};
 use glasshouse::config::{self, EffectiveConfig, UserConfig};
+use glasshouse::evaluation::{self, RetrievalScope};
 use glasshouse::events::{
     EventBus, EventLog, EventLogSink, EventSink, GatewayFailure, LifecycleEvent, LoggedEvent,
     MessageOrigin, TurnOutcome,
 };
 use glasshouse::integrations::cmux;
 use glasshouse::launch::HarnessLaunch;
-use glasshouse::memory::inject::{self, Injection};
+use glasshouse::memory::inject::{self, BriefingOutcome, Injection};
 use glasshouse::memory::{FileAssociation, MemoryId, ProjectMemory};
 use glasshouse::policy;
 use glasshouse::session::api::{ApiError, SessionApi};
@@ -1551,8 +1552,8 @@ fn select_memory(
             return None;
         }
     };
-    match inject::briefing(&project.store(), task, &already) {
-        Ok(briefing) => briefing,
+    let outcome = match inject::briefing(&project.store(), task, &already) {
+        Ok(outcome) => Some(outcome),
         Err(err) => {
             tracing::warn!(
                 session = %session,
@@ -1561,6 +1562,25 @@ fn select_memory(
             );
             None
         }
+    };
+    // The memory connection is dropped before the evaluation ledger opens —
+    // practice §65, the same shape `memory_search_grouped` uses — so a miss
+    // recorded below never holds both handles at once.
+    drop(project);
+
+    match outcome {
+        Some(BriefingOutcome::Injected(injection)) => Some(injection),
+        Some(BriefingOutcome::NothingMatched) => {
+            // Map line 1865: this is the launch-time door, and unlike the
+            // already-injected case below, nothing matched at all.
+            evaluation::record_memory_retrieval_miss(
+                runtime,
+                RetrievalScope::Injection,
+                evaluation::now_unix(),
+            );
+            None
+        }
+        Some(BriefingOutcome::NothingNew) | None => None,
     }
 }
 

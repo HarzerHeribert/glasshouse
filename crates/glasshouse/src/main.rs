@@ -562,6 +562,9 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
                     memory_export_tracked(&runtime, *tracked, *include_findings, *dry_run)?
                 );
             }
+            MemoryCommand::Retrievals { hours } => {
+                print!("{}", memory_retrievals_report(&runtime, *hours)?);
+            }
         },
         Some(Command::Checkpoint { command }) => {
             return checkpoint_command(&runtime, command);
@@ -1475,24 +1478,47 @@ fn session_checkpoint_tokens(
 /// does (`api/unix.rs::select_memory`).
 ///
 /// `None` — never `Some(0)` — whenever nothing was actually measured: the
-/// store could not be opened, `briefing` itself failed, or `briefing`
-/// matched nothing. All three degrade to "this component was not counted",
+/// store could not be opened, `briefing` itself failed, or `briefing` found
+/// nothing to inject. All three degrade to "this component was not counted",
 /// never "this component counts as zero" — only
 /// [`glasshouse::routing::Cost::is_free`]'s zero is a fact this build is
 /// certain of.
+///
+/// A [`glasshouse::memory::inject::BriefingOutcome::NothingMatched`] here is
+/// map line 1865's retrieval miss and is recorded as one, at the `injection`
+/// scope — `glasshouse route` is a diagnostic rather than a delivery, but the
+/// search it runs is the same search a real launch would run, and a search
+/// this project's own `glasshouse route` invocations run is real usage.
 fn estimated_project_memory_tokens(runtime: &Runtime, task: &str) -> Option<u64> {
     use glasshouse::memory::ProjectMemory;
+    use glasshouse::memory::inject::BriefingOutcome;
 
     let project = ProjectMemory::open(runtime).ok()?;
-    let injection = glasshouse::memory::inject::briefing(
+    let outcome = glasshouse::memory::inject::briefing(
         &project.store(),
         task,
         &std::collections::HashSet::new(),
     )
-    .ok()??;
-    Some(glasshouse::firewall::estimate::estimate_tokens(
-        injection.text(),
-    ))
+    .ok();
+    // The memory connection is dropped before the evaluation ledger opens —
+    // practice §65, the same shape `memory_search_grouped` uses — so a miss
+    // recorded below never holds both handles at once.
+    drop(project);
+
+    match outcome {
+        Some(BriefingOutcome::Injected(injection)) => Some(
+            glasshouse::firewall::estimate::estimate_tokens(injection.text()),
+        ),
+        Some(BriefingOutcome::NothingMatched) => {
+            glasshouse::evaluation::record_memory_retrieval_miss(
+                runtime,
+                glasshouse::evaluation::RetrievalScope::Injection,
+                glasshouse::evaluation::now_unix(),
+            );
+            None
+        }
+        Some(BriefingOutcome::NothingNew) | None => None,
+    }
 }
 
 /// Map line 1304's checkpoint component of a fresh-session cost estimate:
@@ -10464,16 +10490,27 @@ fn memory_search_grouped(
     // `memory_id` and nothing of the memory itself; whether a memory was stale
     // is read later by joining `memories`, not judged here. This records and
     // never fails: bookkeeping does not get to break a search.
-    glasshouse::evaluation::record_memory_retrieval(
-        runtime,
-        glasshouse::evaluation::RetrievalScope::from_history_flag(history),
-        grouped
-            .invariants_and_constraints
-            .iter()
-            .chain(grouped.other.iter())
-            .map(|record| record.id.as_str()),
-        glasshouse::evaluation::now_unix(),
-    );
+    //
+    // Map line 1865: a search that returned nothing in either group records
+    // one miss row instead — never both, and never neither.
+    if grouped.invariants_and_constraints.is_empty() && grouped.other.is_empty() {
+        glasshouse::evaluation::record_memory_retrieval_miss(
+            runtime,
+            glasshouse::evaluation::RetrievalScope::from_history_flag(history),
+            glasshouse::evaluation::now_unix(),
+        );
+    } else {
+        glasshouse::evaluation::record_memory_retrieval(
+            runtime,
+            glasshouse::evaluation::RetrievalScope::from_history_flag(history),
+            grouped
+                .invariants_and_constraints
+                .iter()
+                .chain(grouped.other.iter())
+                .map(|record| record.id.as_str()),
+            glasshouse::evaluation::now_unix(),
+        );
+    }
 
     Ok(grouped)
 }
@@ -10543,6 +10580,60 @@ fn render_memory_report(
         }
     }
     Ok(out)
+}
+
+/// `glasshouse memory retrievals`: how retrieval has been doing over a
+/// window — map lines 1822 and 1826's own numbers, plus map line 1865's
+/// miss count, giving [`glasshouse::evaluation::EvaluationObservations::stale_retrievals`]
+/// its first production caller (practice §90; `phase-51.md`'s 1822/1826
+/// re-open).
+fn memory_retrievals_report(runtime: &Runtime, hours: u32) -> anyhow::Result<String> {
+    use glasshouse::evaluation::{EvaluationKind, EvaluationObservations};
+
+    let ledger = EvaluationObservations::open(runtime)?;
+    let to = glasshouse::evaluation::now_unix();
+    let from = to - i64::from(hours) * 3600;
+    let counts = ledger.stale_retrievals(from, to)?;
+    let missed = ledger.count(EvaluationKind::MemoryRetrievalMiss, from, to)?;
+    Ok(render_memory_retrievals(
+        runtime.project().id().as_str(),
+        hours,
+        &counts,
+        missed,
+    ))
+}
+
+/// Pure formatting half of [`memory_retrievals_report`].
+///
+/// **`stale` and `stale-under-history` are printed disjoint**, though
+/// [`glasshouse::evaluation::StaleRetrievalCounts`] itself keeps
+/// `stale_under_history` as a subset of `stale` by that struct's own
+/// contract (`stale` counts every stale hit regardless of which scope asked
+/// for it). This is the one place the distinction map line 1826 exists for
+/// is rendered for a person: a superseded memory returned only because
+/// `--history` explicitly asked for it is the tool doing what it was told,
+/// not a defect, so it is printed once, under `stale-under-history`, and
+/// subtracted out of `stale` rather than counted under both.
+fn render_memory_retrievals(
+    project_id: &str,
+    hours: u32,
+    counts: &glasshouse::evaluation::StaleRetrievalCounts,
+    missed: i64,
+) -> String {
+    use std::fmt::Write as _;
+
+    let stale_outside_history = counts.stale - counts.stale_under_history;
+    let mut out = format!("Memory retrievals for project {project_id}, last {hours}h\n\n");
+    let _ = writeln!(out, "  {:<20}{}", "returned", counts.retrievals);
+    let _ = writeln!(out, "  {:<20}{}", "stale", stale_outside_history);
+    let _ = writeln!(
+        out,
+        "  {:<20}{}",
+        "stale-under-history", counts.stale_under_history
+    );
+    let _ = writeln!(out, "  {:<20}{}", "unresolved", counts.unresolved);
+    let _ = writeln!(out, "  {:<20}{}", "missed", missed);
+    out
 }
 
 /// One memory, rendered the way [`memory_report`] prints every result.
@@ -16233,6 +16324,77 @@ mod tests {
             beta.backend(),
             "two profiles of the same harness must resolve to two independent destinations, \
              never collapsed onto one backend"
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // GH-RETRIEVAL-CRITERIA — map line 1865: the briefing door's own miss
+    // -------------------------------------------------------------------------
+
+    /// `estimated_project_memory_tokens` is one of `briefing`'s two
+    /// production callers (the other, `api::unix::select_memory`, is
+    /// unreachable from this binary's own test module — see
+    /// `tests/context_injection.rs` for that door's coverage of `briefing`
+    /// itself). A task that matches nothing records map line 1865's miss
+    /// row, at the `injection` scope that distinguishes this door from the
+    /// CLI/API door's `current`/`historical`.
+    ///
+    /// Deleting the miss-recording arm from `estimated_project_memory_tokens`
+    /// kills this test.
+    #[test]
+    fn a_briefing_that_matches_nothing_records_one_miss_row_under_injection_scope() {
+        let fixture = CliFixture::new();
+
+        assert_eq!(
+            estimated_project_memory_tokens(&fixture.runtime, "an unrelated wombat migration"),
+            None
+        );
+
+        let ledger =
+            glasshouse::evaluation::EvaluationObservations::open(&fixture.runtime).unwrap();
+        let rows = ledger.recent(10).unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(
+            rows[0].kind,
+            glasshouse::evaluation::EvaluationKind::MemoryRetrievalMiss
+        );
+        assert_eq!(rows[0].subject.as_deref(), Some("injection"));
+        assert_eq!(rows[0].memory_id, None);
+    }
+
+    /// The other half of mutation `conflate-outcomes`: a task whose search
+    /// matched something real, but every match was excluded — here, an idea
+    /// nobody has reaffirmed (`inject::is_unreaffirmed_idea`, line 934) — is
+    /// not a miss. The search worked; it correctly withheld what it found.
+    #[test]
+    fn a_briefing_whose_matches_are_all_excluded_records_no_miss_row() {
+        use glasshouse::memory::{MemoryAuthority, MemoryKind, NewMemory, ProjectMemory};
+
+        let fixture = CliFixture::new();
+        ProjectMemory::open(&fixture.runtime)
+            .unwrap()
+            .store()
+            .record(
+                NewMemory::new(
+                    MemoryKind::Finding,
+                    "The kestrel deploy is still experimental.",
+                )
+                .with_authority(Some(MemoryAuthority::Idea)),
+            )
+            .unwrap();
+
+        assert_eq!(
+            estimated_project_memory_tokens(&fixture.runtime, "kestrel deploy"),
+            None,
+            "an unreaffirmed idea is excluded, so there is nothing to measure"
+        );
+
+        let ledger =
+            glasshouse::evaluation::EvaluationObservations::open(&fixture.runtime).unwrap();
+        let rows = ledger.recent(10).unwrap();
+        assert!(
+            rows.is_empty(),
+            "the search matched something real; excluding it is not a retrieval miss: {rows:?}"
         );
     }
 }

@@ -89,3 +89,73 @@ production caller. The briefing door was made a condition rather than a
 recorded limit because it is almost certainly the dominant real-world
 retrieval path; a producer that measured only the CLI door would report the
 quiet door and miss the busy one.
+
+---
+
+## 1865 — CLOSED 2026-09-02 (`GH-RETRIEVAL-CRITERIA`, Amber, Sonnet high) — and 1822, 1826 re-closed with it (`phase-51.md`)
+
+One mechanism, both directions. `EvaluationKind::MemoryRetrievalMiss` and
+`record_memory_retrieval_miss` beside the retrieval producer; a third
+`RetrievalScope`, `Injection`, so the launch-time door is its own word;
+`briefing` returns a `BriefingOutcome` (`Injected`, `NothingMatched`,
+`NothingNew`) so its two callers can tell *the search found nothing* from
+*it found something and rightly withheld all of it*; and
+`glasshouse memory retrievals --hours N` prints returned, stale,
+stale-under-history, unresolved and missed. §65 is kept on every door (the
+memory handle is dropped before the ledger opens; the report names each
+drop). One scope overflow, disclosed: `tests/file_memory_lookup.rs`'s six
+call sites gained `.into_injection()`, no assertion changed.
+
+**Phase 52 stands at 1 of 6.** 1866 waits on this producer's rows; the
+other four are Cluster Q (above).
+
+### Do not add vector retrieval until FTS5 retrieval failures are observed and recorded in real projects. (line 1865)
+
+Contract: Given a memory search that matched nothing, on any production door (the `memory search` command and API query, and the launch-time briefing), when it completes, Glasshouse records one retrieval-miss row in the project's evaluation ledger; and given a reader asking how retrieval has been doing, `glasshouse memory retrievals` prints returned, stale, stale-under-history, unresolved and missed counts for a window.
+
+State: **COMPLETE** — ruled 2026-09-02 against the tick condition recorded above: the miss is written on every production door (the search core shared by the CLI and the API, and both briefing callers), carries scope and no query text, and is read by `glasshouse memory retrievals`; all three mutations are on the decisions the line names and are KILLED through the shipped binary. Two decisions the worker made and disclosed stand as scope, not defects: *nothing matched* is decided from the raw text search before any filter, so an all-excluded briefing is never a miss — and a text-search miss that the path-keyed file-observed route still serves is *not* recorded, because that is evidence a non-semantic mechanism covered it, which is the question this count exists to answer.
+
+Production evidence:
+- `evaluation/mod.rs` — `EvaluationKind::MemoryRetrievalMiss`
+- `evaluation/mod.rs` — `record_memory_retrieval_miss`
+- `evaluation/mod.rs` — `RetrievalScope::Injection`
+- `main.rs` — `memory_search_grouped`
+- `memory/inject.rs` — `BriefingOutcome`
+- `memory/inject.rs` — `briefing`
+- `main.rs` — `estimated_project_memory_tokens`
+- `api/unix.rs` — `select_memory`
+- `cli.rs` — `MemoryCommand::Retrievals`
+- `main.rs` — `memory_retrievals_report`
+- `main.rs` — `render_memory_retrievals`
+
+Regression evidence:
+- `evaluation_observations::a_search_that_returns_nothing_records_one_miss_row_and_nothing_else`
+- `evaluation_observations::a_search_that_matches_leaves_no_miss_row`
+- `evaluation_observations::a_recorded_retrieval_stores_no_memory_content`
+- `evaluation_observations::glasshouse_memory_retrievals_keeps_stale_and_stale_under_history_disjoint`
+- `evaluation_observations::glasshouse_memory_retrievals_prints_every_figure_for_the_window`
+- `evaluation_observations::glasshouse_memory_retrievals_on_an_empty_window_prints_zeros_not_an_error`
+- `main.rs::tests::a_briefing_that_matches_nothing_records_one_miss_row_under_injection_scope`
+- `main.rs::tests::a_briefing_whose_matches_are_all_excluded_records_no_miss_row`
+- `context_injection (15 tests, unchanged, end-to-end proof of select_memory)`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| main.rs: `if grouped...is_empty() && grouped.other.is_empty() {` -> `if false && grouped...is_empty() && grouped.other.is_empty() {` | `skip-state-update` | **killed** | `evaluation_observations::a_search_that_returns_nothing_records_one_miss_row_and_nothing_else` |
+| main.rs render_memory_retrievals: `"stale-under-history", counts.stale_under_history` -> `"stale-under-history", 0` | `drop-the-reader` | **killed** | `evaluation_observations::glasshouse_memory_retrievals_keeps_stale_and_stale_under_history_disjoint` |
+| main.rs estimated_project_memory_tokens: merged `Some(BriefingOutcome::NothingNew) | None => None` into the `NothingMatched` miss-recording arm | `conflate-outcomes` | **killed** | `main.rs::tests::a_briefing_whose_matches_are_all_excluded_records_no_miss_row` |
+
+> skip-state-update observed: assertion `left == right` failed: a zero-result search must leave exactly one row: []
+
+> drop-the-reader observed: assertion `left == right` failed (at evaluation_observations.rs:630)
+
+> conflate-outcomes observed: panicked at crates/glasshouse/src/main.rs:16365:9 (assertion failure: a miss row was recorded for the excluded-but-matched case)
+
+Recorded scope limits — stated by the worker, not discovered later:
+- api/unix.rs::select_memory has no dedicated mutation of its own miss-recording arm (private, unreachable from main.rs's test module); proven end-to-end by tests/context_injection.rs (15 passing) and structurally identical to the mutation-proven main.rs caller
+- estimated_project_memory_tokens records an injection-scope miss on every zero-match `glasshouse route` call, not only real launches
+- stale_retrievals' own struct contract (stale is inclusive of stale_under_history) is unchanged; the reader renders them disjoint by subtraction, not by changing the underlying count
+
+---
+
+---

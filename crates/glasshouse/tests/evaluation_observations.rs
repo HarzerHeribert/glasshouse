@@ -277,19 +277,70 @@ fn the_default_search_records_a_current_scope_and_returns_no_superseded_memory()
 /// A search that matched nothing writes nothing, and opens no database to do
 /// it.
 ///
-/// This ledger counts *retrieved memories*, so an empty result has nothing to
-/// count. Practice §65's rule is the other half: the handle is acquired where
-/// its consumer starts, so the path that has nothing to record does not pay
-/// for a second SQLite handle on any platform.
+/// **Map line 1865, and the primary mutation target for this package.**
+///
+/// This ledger counts *retrieved memories*, so an empty result has no
+/// `MemoryRetrieved` row to write — but a zero-result search on this door is
+/// exactly the event map line 1865 asks to be observed and recorded, so it
+/// leaves one `memory_retrieval_miss` row instead. Practice §65's rule
+/// still holds either way: the handle is acquired where its consumer
+/// starts, and a search that finds nothing pays for exactly one row, never
+/// zero and never both kinds.
+///
+/// Deleting the miss-recording call in `main.rs`'s `memory_search_grouped`
+/// kills this test.
 #[test]
-fn a_search_that_returns_nothing_records_nothing() {
+fn a_search_that_returns_nothing_records_one_miss_row_and_nothing_else() {
     let tmp = tempdir();
     let fixture = Fixture::new(tmp.path(), "alpha");
 
     let report = fixture.memory_search("nothing-matches-this", false);
     assert!(report.contains("No current memories match"));
 
-    assert_eq!(fixture.ledger().recent(10).unwrap(), Vec::new());
+    let rows = fixture.ledger().recent(10).unwrap();
+    assert_eq!(
+        rows.len(),
+        1,
+        "a zero-result search must leave exactly one row: {rows:?}"
+    );
+    assert_eq!(rows[0].kind, EvaluationKind::MemoryRetrievalMiss);
+    assert_eq!(rows[0].subject.as_deref(), Some("current"));
+    assert_eq!(
+        rows[0].memory_id, None,
+        "a miss names no memory — there is none to name"
+    );
+}
+
+/// A search that *does* match leaves retrieved rows and no miss row — the
+/// other half of the mutual exclusion the miss row above pins.
+#[test]
+fn a_search_that_matches_leaves_no_miss_row() {
+    let tmp = tempdir();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+
+    {
+        let memory = fixture.memory();
+        memory
+            .store()
+            .record(NewMemory::new(
+                MemoryKind::Decision,
+                "obsidian indexing runs on commit",
+            ))
+            .unwrap();
+    }
+
+    fixture.memory_search("obsidian", false);
+
+    let rows = fixture.ledger().recent(10).unwrap();
+    assert!(
+        rows.iter()
+            .all(|row| row.kind != EvaluationKind::MemoryRetrievalMiss),
+        "a search that matched something must not also record a miss: {rows:?}"
+    );
+    assert!(
+        rows.iter()
+            .any(|row| row.kind == EvaluationKind::MemoryRetrieved)
+    );
 }
 
 /// **Bookkeeping may not break a search.**
@@ -458,6 +509,9 @@ fn a_recorded_retrieval_stores_no_memory_content() {
     }
 
     fixture.memory_search("malachite", false);
+    // A second search that matches nothing at all — its miss row must carry
+    // no trace of the query text either.
+    fixture.memory_search("wulfenite-unrelated-query", false);
 
     let conn = fixture.db();
     let mut statement = conn
@@ -481,7 +535,11 @@ fn a_recorded_retrieval_stores_no_memory_content() {
         .map(|row| row.unwrap())
         .collect();
 
-    assert_eq!(stored.len(), 1, "the search returned one memory");
+    assert_eq!(
+        stored.len(),
+        2,
+        "one retrieved row and one miss row: {stored:?}"
+    );
     for cell in &stored {
         assert!(
             !cell.contains("malachite deploys"),
@@ -495,6 +553,146 @@ fn a_recorded_retrieval_stores_no_memory_content() {
             !cell.contains("malachite"),
             "the search query reached the evaluation ledger: {cell}"
         );
+        assert!(
+            !cell.contains("wulfenite"),
+            "the second search's query text reached the evaluation ledger: {cell}"
+        );
+    }
+
+    let rows = fixture.ledger().recent(10).unwrap();
+    let miss_rows: Vec<_> = rows
+        .iter()
+        .filter(|row| row.kind == EvaluationKind::MemoryRetrievalMiss)
+        .collect();
+    assert_eq!(miss_rows.len(), 1, "{rows:?}");
+    assert_eq!(miss_rows[0].memory_id, None);
+    assert_eq!(miss_rows[0].detail, None);
+}
+
+// -------------------------------------------------------------------------
+// `glasshouse memory retrievals` — map line 1865's second half: the first
+// production reader for `stale_retrievals`, re-closing 1822 and 1826
+// (practice §90; `phase-51.md`'s 1822/1826 re-open).
+// -------------------------------------------------------------------------
+
+/// Pull one figure's printed value out of `glasshouse memory retrievals`'
+/// plain-text output. `label` is the exact word the report prints at the
+/// start of its line; the number after it is parsed back out.
+fn retrievals_figure(report: &str, label: &str) -> i64 {
+    let line = report
+        .lines()
+        .map(str::trim_start)
+        .find(|line| line.starts_with(label))
+        .unwrap_or_else(|| panic!("`{label}` is missing from the report:\n{report}"));
+    line[label.len()..]
+        .trim()
+        .parse()
+        .unwrap_or_else(|_| panic!("`{label}`'s figure did not parse as a number: {line}"))
+}
+
+/// **Map line 1826's own distinction, printed for a person.** Planting a
+/// superseded memory and searching it with `--history` is asking for
+/// history, so it must not read as a defect: the `stale` figure map line
+/// 1822 is about must read zero, and the hit must show up only under
+/// `stale-under-history`.
+#[test]
+fn glasshouse_memory_retrievals_keeps_stale_and_stale_under_history_disjoint() {
+    let tmp = tempdir();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+
+    {
+        let memory = fixture.memory();
+        let store = memory.store();
+        let superseded = store
+            .record(NewMemory::new(
+                MemoryKind::Decision,
+                "onyx caching was keyed by file path",
+            ))
+            .unwrap();
+        store
+            .set_status(&superseded.id, MemoryStatus::Superseded)
+            .unwrap();
+    }
+
+    fixture.memory_search("onyx", true);
+
+    let output = fixture.run(&["memory", "retrievals"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = String::from_utf8_lossy(&output.stdout).into_owned();
+
+    assert_eq!(retrievals_figure(&report, "returned"), 1);
+    assert_eq!(
+        retrievals_figure(&report, "stale"),
+        0,
+        "a --history search asking for a superseded memory is the tool working, not a \
+         defect:\n{report}"
+    );
+    assert_eq!(retrievals_figure(&report, "stale-under-history"), 1);
+}
+
+/// Every figure the reader prints, over one window: returned, stale,
+/// stale-under-history, unresolved and missed — the last one is this
+/// package's own producer getting its first reader in the same stroke.
+#[test]
+fn glasshouse_memory_retrievals_prints_every_figure_for_the_window() {
+    let tmp = tempdir();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+
+    {
+        let memory = fixture.memory();
+        memory
+            .store()
+            .record(NewMemory::new(
+                MemoryKind::Decision,
+                "jasper builds cache aggressively",
+            ))
+            .unwrap();
+    }
+
+    fixture.memory_search("jasper", false); // one returned row
+    fixture.memory_search("nothing-here-at-all", false); // one miss row
+
+    let output = fixture.run(&["memory", "retrievals"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = String::from_utf8_lossy(&output.stdout).into_owned();
+
+    assert_eq!(retrievals_figure(&report, "returned"), 1);
+    assert_eq!(retrievals_figure(&report, "stale"), 0);
+    assert_eq!(retrievals_figure(&report, "stale-under-history"), 0);
+    assert_eq!(retrievals_figure(&report, "unresolved"), 0);
+    assert_eq!(retrievals_figure(&report, "missed"), 1);
+}
+
+/// A window with no recorded activity at all prints zeros, never an error —
+/// including `--hours 0`, a zero-width window.
+#[test]
+fn glasshouse_memory_retrievals_on_an_empty_window_prints_zeros_not_an_error() {
+    let tmp = tempdir();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+
+    let output = fixture.run(&["memory", "retrievals", "--hours", "0"]);
+    assert!(
+        output.status.success(),
+        "an empty window must succeed, not error: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = String::from_utf8_lossy(&output.stdout).into_owned();
+    for label in [
+        "returned",
+        "stale",
+        "stale-under-history",
+        "unresolved",
+        "missed",
+    ] {
+        assert_eq!(retrievals_figure(&report, label), 0, "{label}:\n{report}");
     }
 }
 

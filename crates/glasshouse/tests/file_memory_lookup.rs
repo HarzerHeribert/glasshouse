@@ -96,7 +96,9 @@ fn a_task_naming_no_observed_file_adds_no_section() {
         ))
         .unwrap();
 
-    let result = briefing(&store, "fix the bug", &HashSet::new()).unwrap();
+    let result = briefing(&store, "fix the bug", &HashSet::new())
+        .unwrap()
+        .into_injection();
     assert!(
         result.is_none(),
         "a task naming no path and matching no text must inject nothing: {result:?}"
@@ -138,6 +140,7 @@ fn briefing_adds_a_section_for_memories_observed_beside_a_named_file() {
     // explained by the path, not by a lucky text match.
     let result = briefing(&store, "add a test for src/parser.rs", &HashSet::new())
         .unwrap()
+        .into_injection()
         .expect("a task naming an observed path must inject something");
 
     assert!(
@@ -213,6 +216,7 @@ fn the_file_observed_section_excludes_memories_already_carried() {
         &already_injected,
     )
     .unwrap()
+    .into_injection()
     .expect("something must still be injected");
 
     assert!(
@@ -292,6 +296,7 @@ fn the_file_observed_section_is_dropped_whole_rather_than_truncated() {
         &HashSet::new(),
     )
     .unwrap()
+    .into_injection()
     .expect("the small primary match alone must still inject something");
 
     assert!(
@@ -348,7 +353,9 @@ fn a_task_naming_more_paths_than_the_bound_never_reaches_the_one_named_last() {
     paths.push("src/zzzlast.rs".to_owned());
     let task = format!("touch {}", paths.join(" "));
 
-    let result = briefing(&store, &task, &HashSet::new()).unwrap();
+    let result = briefing(&store, &task, &HashSet::new())
+        .unwrap()
+        .into_injection();
     if let Some(injection) = result {
         assert!(
             !injection.memories().contains(&beyond_bound),
@@ -387,6 +394,7 @@ fn the_file_observed_records_for_an_in_bounds_task_keep_the_old_order_and_count(
     let task = "touch src/alpha.rs src/bravo.rs src/charlie.rs src/delta.rs";
     let injection = briefing(&store, task, &HashSet::new())
         .unwrap()
+        .into_injection()
         .expect("four observed paths must inject something");
 
     assert_eq!(
