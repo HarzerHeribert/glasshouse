@@ -10,6 +10,15 @@
 //! provenance-header assertions, applied to
 //! `[context_firewall.local_reducers.<name>]` instead of a canned HTTP
 //! endpoint.
+//!
+//! Unix only, and honestly so: every fake tool below is a shebang script
+//! (`#!/bin/sh`, `#!/usr/bin/env python3`) marked executable and spawned as
+//! bare argv, which Windows cannot execute at all. The Windows VM leg found
+//! this file failing to compile on 2026-09-02 (`std::os::unix` and
+//! `set_mode`); the seat itself compiles on Windows, and a Windows-shaped
+//! fake tool (a `.exe` or a `cmd` wrapper) is the recorded gap in
+//! `docs/product/evidence/phase-58.md`, not something this gate hides.
+#![cfg(unix)]
 
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;

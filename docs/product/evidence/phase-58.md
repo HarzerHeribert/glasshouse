@@ -513,3 +513,5 @@ Gates the worker ran (re-run the decisive ones yourself):
 - scripts/blast-radius.sh --targeted crates/glasshouse/src/routing/evidence.rs crates/glasshouse/src/main.rs: every traced target passed
 - cargo doc --no-deps -p glasshouse: clean
 
+
+> **2026-09-02, late evening — a Windows gap on the local reducer seat, recorded rather than hidden.** The wave-100 Windows VM leg (the first VM run since this seat landed) failed to compile `tests/firewall_local_reducer.rs` on Windows: its fake tools are shebang scripts marked executable and spawned as bare argv, which Windows cannot execute. The file is now `#![cfg(unix)]` with the reason in its header. The seat (`firewall::reducer::LocalToolReducer`, `main.rs::disposable_reducer`'s `local:` branch) compiles on Windows and has **no Windows test**; a Windows-shaped fake tool (a `.exe`, or a `cmd` wrapper spawned as argv) is the successor `GH-LOCAL-REDUCER-WINDOWS-FIXTURE` (Green). 2028–2030 stay COMPLETE on their macOS/Linux evidence with this limit stated.
