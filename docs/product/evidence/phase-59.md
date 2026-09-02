@@ -21,3 +21,9 @@ State: **COMPLETE** — ruled 2026-09-03 by the orchestrator. Package `GH-DECOMP
 Limits: a move proves nothing beyond "unchanged"; the comment share is untouched by design (`GH-TRIM-CONFIG` is the separate package). Found by this package and fixed at integration: `blast-radius.sh` mapped a changed file's basename to a `--test` target regardless of directory, so `config/tests/part_a.rs` was looked up as a non-existent integration crate.
 
 ---
+
+### Contributions to line 2047 (the ceiling) — files brought under 2,500 without a line of their own
+
+| package | file | before → after | report |
+|---|---|---|---|
+| `GH-DECOMP-DATABASE` (2026-09-03) | `database.rs` (3,563 production + 3,374 test) | `database/{mod 266, schema 291, bootstrap 499, migrations/{mod 169, v1_to_v13 1160, v14_on 1227}, tests 3379}` | `.agent-runtime/report-decomp-database.md` — 55/55; discharges the grandfathering recorded in `26fb65b` and `b065034` |
