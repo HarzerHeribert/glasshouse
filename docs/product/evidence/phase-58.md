@@ -565,6 +565,10 @@ unwritable-file test pinned only that the message names the path, which
 the outcome: `BEGIN IMMEDIATE` succeeds on a read-only empty database, so
 the loop exhausts and refuses in ~547 ms). The verifier's own A/B/A/B against
 a detached baseline: base red twice, fix green twice; four more fix runs at
-load 24.7 → 40.3, 51/51 each. macOS arm64 at acceptance; the Linux leg and
-the Windows VM run on the integration commit are recorded in the batch-94
+load 24.7 → 40.3, 51/51 each. macOS arm64 at acceptance. **Linux leg on `08e0ff2`** (the integration
+commit): `--lib database` and every integration target through `t` green —
+the first Linux run to reach them since the race; the leg's one red was
+`tests/terminal_loss.rs`'s 15-trial hangup test on 1 trial under load, and
+the target alone in the same container passed 4/4 twice (load flake, not
+this change). Windows VM run 10 on `08e0ff2` is recorded in the batch-94
 checkpoint.
