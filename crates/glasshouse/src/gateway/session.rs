@@ -1736,7 +1736,37 @@ mod tests {
     /// site the accept loop's own build would emit from, not a value handed
     /// back for a test to inspect.
     fn failover_explanation_log(preference_slug: &str) -> String {
-        use std::sync::{Arc, Mutex};
+        use std::sync::{Arc, Mutex, Once};
+
+        // `tracing`'s callsite `Interest` cache is a *process-global* static,
+        // not a per-thread one: the first time the failover-explanation log
+        // line anywhere in this test binary fires, if no subscriber has ever
+        // been registered yet, `tracing_core` permanently caches
+        // `Interest::never()` for that callsite (an empty dispatcher list
+        // folds to "never" — see `tracing_core::callsite::rebuild_callsite_interest`).
+        // Another test in this module (e.g. the real-failover assertions
+        // near this one) can win that race on its own thread before this
+        // helper's `with_default` subscriber ever registers, which is why
+        // the capture comes back empty roughly one run in five under
+        // `cargo test`'s default thread pool. A `with_default` scope cannot
+        // fix this by itself — thread-local scoping only decides who
+        // *receives* an event once interest says to emit one. Registering a
+        // permanent, sufficiently-verbose global default once, before this
+        // helper ever calls into production code, keeps the dispatcher list
+        // non-empty for the rest of the process: any later rebuild
+        // (including the one triggered by installing this helper's own
+        // `with_default` subscriber below) recomputes interest against a
+        // live dispatcher instead of an empty list, so the callsite can
+        // never get stuck at `never` again.
+        static ENSURE_GLOBAL_DISPATCH: Once = Once::new();
+        ENSURE_GLOBAL_DISPATCH.call_once(|| {
+            let _ = tracing::subscriber::set_global_default(
+                tracing_subscriber::fmt()
+                    .with_writer(std::io::sink)
+                    .with_max_level(tracing::Level::TRACE)
+                    .finish(),
+            );
+        });
 
         #[derive(Clone)]
         struct Capture(Arc<Mutex<Vec<u8>>>);
