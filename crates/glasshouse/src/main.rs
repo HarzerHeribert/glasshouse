@@ -4013,6 +4013,10 @@ fn routing_cost_report(runtime: &Runtime, hours: u32) -> anyhow::Result<String> 
     // credential.
     let translation_by_session =
         ledger.session_translation_cache_savings(now_unix, window_seconds)?;
+    // Map line 2039's shadow measurement, gathered beside the two translation
+    // facets above from the same window: the evidence for or against
+    // `GH-EFFORT-CLAMP`, never the clamp itself.
+    let effort_shadow = ledger.effort_shadow(now_unix, window_seconds)?;
     // Fail-soft, the same posture `context_firewall_savings_summary` already
     // takes for `status`: a raw store this build cannot read yet renders as
     // "not counted", never as a hard error for a readout command.
@@ -4034,6 +4038,7 @@ fn routing_cost_report(runtime: &Runtime, hours: u32) -> anyhow::Result<String> 
         bypass_count,
         &translation,
         &translation_by_session,
+        &effort_shadow,
     ))
 }
 
@@ -4056,6 +4061,7 @@ fn routing_cost_report(runtime: &Runtime, hours: u32) -> anyhow::Result<String> 
 /// columns above, the coding-agent group is the one group this build **can**
 /// honestly time, because a first-byte instant is a clock reading rather than
 /// a read of the response body the relay never parses.
+#[allow(clippy::too_many_arguments)]
 fn render_routing_cost(
     project_id: &str,
     hours: u32,
@@ -4064,6 +4070,7 @@ fn render_routing_cost(
     firewall_bypasses: usize,
     translation: &[glasshouse::routing::evidence::TranslationSavings],
     translation_by_session: &[glasshouse::routing::evidence::SessionTranslationSavings],
+    effort_shadow: &glasshouse::routing::evidence::EffortShadow,
 ) -> String {
     let mut out = format!("Routing consumption for project {project_id}, last {hours}h\n");
     if groups.is_empty() {
@@ -4110,6 +4117,7 @@ fn render_routing_cost(
         translation,
         translation_by_session,
     ));
+    out.push_str(&render_effort_shadow_section(effort_shadow));
     out
 }
 
@@ -4219,6 +4227,54 @@ fn render_savings_section(
          count — capability map line 627's, not this package's)\n",
     );
 
+    out
+}
+
+/// Capability map line 2039: the shadow measurement
+/// `docs/product/design-decisions.md`'s *Carrying effort across a translated
+/// pairing* asks for before any clamp is offered, printed after `SAVINGS`
+/// rather than folded into it — line 2039 is its own map line, not one of
+/// 2034's three facets.
+///
+/// [`render_routing_cost`]'s own rule applies here too: a quantity nobody
+/// recorded prints as words, never as a digit and never as `0` — the
+/// `unread` count is the one exception, because it is a real count of rows
+/// this build genuinely read and can name, not an absence.
+fn render_effort_shadow_section(shadow: &glasshouse::routing::evidence::EffortShadow) -> String {
+    let mut out = String::from("\nEFFORT SHADOW\n");
+    if shadow.rows.is_empty() {
+        out.push_str("\n  no translated exchanges recorded in this window\n");
+    } else {
+        for row in &shadow.rows {
+            let effort = row
+                .effort_level
+                .map(glasshouse::routing::evidence::EffortLevel::as_str)
+                .unwrap_or("(no effort recorded)");
+            out.push_str(&format!("\n  {} / {effort}\n", row.turn_shape.as_str()));
+            let median = match row.median_output_tokens {
+                Some(tokens) => tokens.to_string(),
+                None => format!(
+                    "below the sample floor ({} of {} exchanges needed)",
+                    row.sample_count,
+                    glasshouse::routing::evidence::MIN_SAMPLE_FOR_SUMMARY
+                ),
+            };
+            out.push_str(&format!(
+                "    {} exchanges, median output tokens {median}\n",
+                row.sample_count
+            ));
+            out.push_str(&format!(
+                "    verdicts: {} completed, {} failed, {} unverdicted\n",
+                row.completed, row.failed, row.unverdicted
+            ));
+        }
+    }
+    out.push_str(&format!(
+        "\n  unread: {} (rows with no recorded turn shape — relayed, or written before the \
+         column existed)\n",
+        shadow.unread
+    ));
+    out.push_str("\n  a clamp is not offered; this section is the evidence for or against one.\n");
     out
 }
 
@@ -4419,6 +4475,43 @@ fn session_router(
         // one with no rows, yields an empty summary, which the router treats
         // as inert — the ranking every caller saw before this term existed.
         .with_harness_efficiency(harness_efficiency_summary(runtime))
+        // Map line 1301: the comparable-output window is read HERE too, in
+        // the same one constructor, from the same evidence ledger and the
+        // same window `routing_destinations`'s own burn reading uses
+        // (`CLASSIFICATION_EVIDENCE_WINDOW_SECONDS`). A ledger this build
+        // cannot open, or one with no rows for a class, yields no comparable
+        // reading for it, which `expected_marginal_cost` renders as an
+        // honest *unmeasured* — the ranking every caller saw before this
+        // term existed.
+        .with_comparable_output_tokens(comparable_output_tokens(runtime))
+}
+
+/// Map line 1301's reader, at the same site
+/// [`harness_efficiency_summary`] reads from: the routing evidence ledger's
+/// own window, reduced to what [`glasshouse::routing::session::
+/// expected_marginal_cost`] needs — a median output-token size per task
+/// class, never a raw row.
+///
+/// Fail-soft like every ledger read on the launch path (`routing_destinations`'s
+/// own `consumption_in_window` read is the same shape): a ledger that cannot
+/// be opened, or a window read that fails, costs this estimate and nothing
+/// else — never the launch.
+fn comparable_output_tokens(runtime: &Runtime) -> Vec<glasshouse::routing::burn::ClassOutput> {
+    let now_unix = glasshouse::provider::cache::now_unix_seconds();
+    let Ok(ledger) = glasshouse::routing::evidence::EvidenceLedger::open(runtime) else {
+        return Vec::new();
+    };
+    let Ok(rows) = ledger.consumption_in_window(
+        now_unix,
+        glasshouse::routing::evidence::CLASSIFICATION_EVIDENCE_WINDOW_SECONDS,
+    ) else {
+        return Vec::new();
+    };
+    glasshouse::routing::burn::output_tokens_by_class(
+        &rows,
+        now_unix,
+        glasshouse::routing::evidence::CLASSIFICATION_EVIDENCE_WINDOW_SECONDS,
+    )
 }
 
 /// Map line 1952's reader — the same producer and window
@@ -6208,7 +6301,19 @@ fn launch_session(
     // it is still before the harness is spawned, which is before any
     // exchange can arrive.
     if let Some(gateway) = gateway.as_ref() {
-        gateway.routing().serve_session(&record.id);
+        gateway.routing().serve_session(record.id.as_str());
+        // Map line 1301 (`GH-TASK-CLASS-COST-JOIN`): the same routing
+        // decision `record_routing_latency` already read a class off, so
+        // every row this gateway's own `record_routing_observation` writes
+        // from here on can join to it too. `None` for a routing-off launch
+        // or one that classified no task — `classified` is `None` in both,
+        // and the gateway stamps `NULL` exactly as it does when
+        // `serve_session` above is never called at all.
+        gateway.routing().serve_task_class(
+            classified
+                .as_ref()
+                .map(|classified| classified.answer.task_class()),
+        );
     }
     // Line 1467, the fresh half: the session just recorded is the one the
     // next low-risk turn will be in.
@@ -7252,7 +7357,7 @@ fn resolve_resume_overlay(
         Some(failover_prevention_sink(runtime)),
     )?;
     if let Some(gateway) = gateway.as_ref() {
-        gateway.routing().serve_session(session_id);
+        gateway.routing().serve_session(session_id.as_str());
     }
     let resolution = glasshouse::profile::Resolution {
         adapter: selection.adapter(),

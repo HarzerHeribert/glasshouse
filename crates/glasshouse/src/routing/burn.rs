@@ -61,7 +61,7 @@
 //! `crate::shell`'s capacity line print exactly what it printed before this
 //! module existed.
 
-use super::evidence::RoutingObservation;
+use super::evidence::{HARNESS_TURN_PURPOSE, MIN_SAMPLE_FOR_SUMMARY, RoutingObservation};
 use super::request::TaskClass;
 use crate::provider::quota::{Capacity, NativeAmount, UnitScale};
 
@@ -311,6 +311,88 @@ pub fn task_class_request_rates(
                 class,
                 requests_per_hour,
                 rows: of_class.len(),
+            })
+        })
+        .collect()
+}
+
+// ---------------------------------------------------------------------------
+// Map line 1301 (`GH-TASK-CLASS-COST-JOIN`) — output tokens per task class.
+// ---------------------------------------------------------------------------
+
+/// One task class's recent output-token size, for
+/// [`output_tokens_by_class`] — the sibling of [`ClassRate`], read by
+/// `super::session::expected_marginal_cost` instead of by
+/// `super::pressure`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClassOutput {
+    /// Which class. A class with no row in the window at all is in no
+    /// `ClassOutput` — see [`output_tokens_by_class`]'s own doc.
+    pub class: TaskClass,
+    /// How many rows this class contributed, whether or not that clears the
+    /// floor. A caller naming an unmeasured size should still say how many
+    /// rows fell short of it, never a silent absence.
+    pub samples: usize,
+    /// The median output-token count over this class's rows, or `None` when
+    /// `samples` is below [`MIN_SAMPLE_FOR_SUMMARY`] — a size withheld,
+    /// never estimated from too few rows to trust.
+    pub median_output_tokens: Option<f64>,
+}
+
+/// Map line 1301: the output-token half of the join this phase's census
+/// named missing — `docs/product/evidence/phase-32g.md`'s Censused
+/// 2026-09-02 entry. One entry per class with at least one row in the
+/// window that names both a class and an output-token count, in
+/// [`TaskClass::ALL`]'s declaration order; a class with no such row at all
+/// is **absent**, the same convention [`task_class_request_rates`] keeps for
+/// its own rate.
+///
+/// Restricted to `purpose = `[`HARNESS_TURN_PURPOSE`] rows: this is the
+/// gateway's own served-exchange traffic, the same rows
+/// [`super::evidence::NewObservation::with_task_class`]'s own doc names as
+/// what this reader counts — never `record_routing_latency`'s
+/// routing-decision row, which carries a class but no tokens and would only
+/// ever contribute nothing here.
+///
+/// The window is `[now_unix - window_seconds, now_unix]`, read off each
+/// row's own `observed_at_unix` — a plain calendar window rather than
+/// [`live_rows`]'s reset-and-idle-gap boundary, because this reader has no
+/// resource reset to bound against and a caller here passes rows straight
+/// from [`super::evidence::EvidenceLedger::consumption_in_window`] with the
+/// same window already applied at the SQL layer; the second check here is
+/// what lets this function also be exercised directly, over a hand-built
+/// row list, without a ledger in the loop at all.
+pub fn output_tokens_by_class(
+    rows: &[RoutingObservation],
+    now_unix: i64,
+    window_seconds: i64,
+) -> Vec<ClassOutput> {
+    let earliest = now_unix.saturating_sub(window_seconds);
+    TaskClass::ALL
+        .into_iter()
+        .filter_map(|class| {
+            let sizes: Vec<f64> = rows
+                .iter()
+                .filter(|row| {
+                    row.purpose.as_deref() == Some(HARNESS_TURN_PURPOSE)
+                        && row.task_class == Some(class)
+                        && row.observed_at_unix >= earliest
+                        && row.observed_at_unix <= now_unix
+                })
+                .filter_map(|row| row.output_tokens)
+                .map(|tokens| tokens as f64)
+                .collect();
+            if sizes.is_empty() {
+                return None;
+            }
+            let samples = sizes.len();
+            let median_output_tokens = (samples >= MIN_SAMPLE_FOR_SUMMARY)
+                .then(|| median(&sizes))
+                .flatten();
+            Some(ClassOutput {
+                class,
+                samples,
+                median_output_tokens,
             })
         })
         .collect()

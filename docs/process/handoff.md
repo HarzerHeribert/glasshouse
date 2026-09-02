@@ -22,6 +22,20 @@ validated and waiting on the commit. Next action: `.agent-runtime/CONTINUATION.m
 
 Last updated: 2026-09-02 (Europe/Berlin)
 
+## Checkpoint — 2026-09-02, batch 89: 1223 / 1347 (90.8%) — the launch path briefs, a dispatch reserves what it spends, Cluster G's first column, the classifier learns its price
+
+Session `4d589d24` (Fable 5.1), inherited hot from `56821d4d`. Waves 94–97 in
+four gates: 1367 (a per-credential reservation slot claimed by exclusive create),
+2019 (migration 24: `session_id`, `effort_level`, `turn_shape` on the routing
+rows, from the launch and the translate seam; a per-session cache ratio), 1436
+(the `max_marginal_cost` ceiling finally read against a priced candidate); plus
+the user's memory ruling on the launch path, the atomic-write residue and
+`gateway pairs`. Two rulings recorded in `design-decisions.md`: the session
+identity comes from the launch and never from the wire; 1439 compares against
+the user's two existing knobs and invents no exchange rate. Sweeps 92–93, 94–95
+and 96–97 green from detached worktrees. Live at this checkpoint: `classifier-time-price` (1439) and `budget-spend-counter` (1263, 1519).
+Exact next actions: `.agent-runtime/CONTINUATION.md`.
+
 ## Checkpoint — 2026-09-02, batch 88: 1218 / 1347 (90.4%) — Phase 58's producers land, the memory proxy is real, memory is the project's
 
 Session `56821d4d` (Fable 5.1), continued. Five more boxes in wave 93's one

@@ -46,8 +46,8 @@ use crate::routing::interactive::{
     InteractiveRouting, MigrationRefusal, Pin, ProviderFailure, RoutingRecord, SessionActivity,
     StayReason,
 };
+use crate::routing::request::TaskClass;
 use crate::routing::{AssignedModel, Backend, CacheLocality};
-use crate::session::SessionId;
 
 use super::ingress::{Exchange, Framing, Outcome, StreamEnd, TRANSPORT_TIMEOUT_DETAIL};
 use super::upstream::Upstream;
@@ -107,7 +107,22 @@ struct State {
     /// launch tells it (see [`SessionRouting::serve_session`]), and a
     /// gateway nothing has told is a gateway serving no session: its rows
     /// say so with `NULL` rather than an invented id.
-    session_id: Option<SessionId>,
+    ///
+    /// A plain `String`, never `crate::session::SessionId`: this module may
+    /// not name `crate::session` at all (see this file's own module
+    /// documentation and `gateway::tests::
+    /// the_gateway_imports_none_of_the_modules_that_would_make_it_a_harness`),
+    /// so the id crosses into this state as its string and nothing else —
+    /// [`SessionRouting::serve_session`]'s own doc says why.
+    session_id: Option<String>,
+    /// The task class the launch that started this gateway was routed as —
+    /// capability map line 1301 and `crate::database` migration 23's
+    /// `routing_observations.task_class`, this producer's missing join
+    /// (`GH-TASK-CLASS-COST-JOIN`, `docs/product/evidence/phase-32g.md`'s
+    /// Censused 2026-09-02 entry). `None` until a launch tells it (see
+    /// [`SessionRouting::serve_task_class`]), the same honest absence
+    /// [`Self::session_id`] carries for a gateway nothing has told.
+    task_class: Option<TaskClass>,
 }
 
 /// What one finished exchange said about the backend that served it.
@@ -271,8 +286,30 @@ impl SessionRouting {
     /// `metadata.user_id` names an account, not a Glasshouse session — see
     /// `docs/product/design-decisions.md`, *A session identity on the
     /// routing evidence rows*.
-    pub fn serve_session(&self, session_id: &SessionId) {
-        self.lock().session_id = Some(session_id.clone());
+    ///
+    /// `session_id` is a plain `&str`, not `crate::session::SessionId`: this
+    /// module is structurally unable to see the session model at all (this
+    /// file's own module documentation, and `gateway::tests::
+    /// the_gateway_imports_none_of_the_modules_that_would_make_it_a_harness`
+    /// enforces it with a source scan), so the id crosses this boundary as
+    /// its string and nothing else — the caller's own typed id, narrowed at
+    /// the one call.
+    pub fn serve_session(&self, session_id: &str) {
+        self.lock().session_id = Some(session_id.to_owned());
+    }
+
+    /// Capability map line 1301, and `crate::database` migration 23: record
+    /// which task class the launch that started this gateway was routed as,
+    /// so every row `record_routing_observation` writes can join to
+    /// [`crate::routing::burn::output_tokens_by_class`]'s reader the way
+    /// `record_routing_latency`'s own row already does.
+    ///
+    /// [`Self::serve_session`]'s shape exactly: `None` for a launch with no
+    /// routing decision — `main.rs::launch_session` passes nothing when
+    /// routing was off or no task was classified — and a gateway nothing has
+    /// told stamps `NULL`, never an invented class.
+    pub fn serve_task_class(&self, task_class: Option<TaskClass>) {
+        self.lock().task_class = task_class;
     }
 
     /// The backend serving this session, once one has been bound.
@@ -500,11 +537,12 @@ impl SessionRouting {
         // other two are the decoded request's own facts, carried on the
         // exchange from `super::translate::serve` and `None` on every
         // relayed exchange, whose body this gateway never reads.
-        let session_id = self
-            .lock()
-            .session_id
-            .as_ref()
-            .map(|id| id.as_str().to_owned());
+        let session_id = self.lock().session_id.clone();
+        // Map line 1301's missing join: `task_class` has been migration 23's
+        // column since Phase 34C, and this producer is the first to stamp it
+        // on a gateway-served row — `record_routing_latency`'s own row is
+        // the only other writer and is unaffected by this one.
+        let task_class = self.lock().task_class;
 
         let new = NewObservation::new(
             exchange.provider.clone(),
@@ -524,6 +562,7 @@ impl SessionRouting {
         .with_failovers(Some(reading.effect.failovers()))
         .with_retries(Some(0))
         .with_session_id(session_id)
+        .with_task_class(task_class)
         .with_effort_level(exchange.effort)
         .with_turn_shape(exchange.turn_shape)
         // Phase 56: a translated exchange has a parsed response, so its

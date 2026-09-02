@@ -421,3 +421,87 @@ Recorded scope limits — stated by the worker, not discovered later:
 ---
 
 ---
+
+
+---
+
+## Line 1301 CLOSED — 2026-09-02 (`GH-TASK-CLASS-COST-JOIN`, Amber, Sonnet high): the served rows learn the launch's class, and the cost term's evidence states the expected output cost
+
+The join `GH-RECON-33A-32G` named, in the shape the register ruled the same evening: the class rides on the gateway's own state the way the session id does. `SessionRouting::serve_task_class(Option<TaskClass>)` — a separate setter rather than a second parameter, so a caller with a reason to set one fact does not lose the other — is called in `launch_session` at the `serve_session` site with the routed answer's class; `record_routing_observation` stamps `task_class` on every served row (`NewObservation::with_task_class` gains its second production caller). `routing/burn.rs::output_tokens_by_class(rows, now, window) -> Vec<ClassOutput { class, samples, median_output_tokens }>` reads `HARNESS_TURN_PURPOSE` rows with a class and output tokens, the median withheld below `MIN_SAMPLE_FOR_SUMMARY` (returned with its count, never dropped); `main.rs::comparable_output_tokens` reads the window once beside the price table and `session_router` carries it into the router's inputs; `expected_marginal_cost`'s evidence gains `expected_output_cost_evidence`'s sentence — *recent comparable {class} tasks ({n} in the window) produced a median of {m} output tokens, putting expected output cost at roughly ${x}* — or *unmeasured* with the floor or *no task class established*. **The magnitude does not move** (line 1298's precedent, pinned by the fourth mutation).
+
+**The worker's finding, verified against the unmodified binary and accepted:** every real classified task establishes `movement.is_some()` — `RouterAnswer::requirements()` sets `minimum_tier` whenever it sets a classification, and `decide_tier_movement` then always answers — so `expected_marginal_cost`'s known-price arms were unreachable through `glasshouse route --task`; the existing pricing suites exercise them only with no task. The evidence is therefore appended to the tier-established early return as well. This is a fact about Phase 32G's 1298/1299 as shipped: their dollar figure was reachable only for unclassified runs. Recorded here, not re-opened — the contract those lines closed on holds where it was proven.
+
+**Fix-forward carried (practice §39, relayed mid-package):** `gateway/session.rs` had named `crate::session::SessionId` since `GH-OBSERVATION-SESSION-COLUMN`, which the gateway's own scan forbids; `State.session_id` is now `Option<String>`, `serve_session` takes `&str`, both `main.rs` callers pass `.as_str()`, and three call sites in `tests/routing_session_column.rs` moved with it. The whole `gateway` module: 208/208.
+
+### Estimate expected output cost from task tier and recent comparable tasks when useful. (line 1301)
+
+Contract: Given a launch the router classified into a task class and served through a gateway, when that gateway records the session's exchanges, Glasshouse stamps each row with the launch's task class; and given a later routing decision for a metered destination whose class has at least the standing floor of recent comparable rows with output tokens, Glasshouse's expected-marginal-cost evidence states the median output tokens of those rows and the resulting expected output cost at the destination's output rate -- while preserving that below the floor or with no class the evidence says unmeasured and never invents a size, that the term's magnitude is unchanged, that a gateway told no class writes NULL, and that record_routing_latency's own row still carries the class it always has.
+
+State: **COMPLETE** — ruled 2026-09-02 (evening) by the orchestrator after reading `expected_output_cost_evidence` and its two call sites in the worktree. Amber tier: 4/4 mutations KILLED with output (the fourth pins the magnitude at `+0.000`); every target run singly with counts; targeted blast green; the relayed fix-forward carried with the whole `gateway` module quoted green (208/208).
+
+Production evidence:
+- `crates/glasshouse/src/gateway/session.rs` — `SessionRouting::serve_task_class`
+- `crates/glasshouse/src/gateway/session.rs` — `SessionRouting::record_routing_observation`
+- `crates/glasshouse/src/routing/burn.rs` — `output_tokens_by_class`
+- `crates/glasshouse/src/routing/session.rs` — `expected_marginal_cost`
+- `crates/glasshouse/src/routing/session.rs` — `expected_output_cost_evidence`
+- `crates/glasshouse/src/main.rs` — `launch_session (serve_task_class call site)`
+- `crates/glasshouse/src/main.rs` — `comparable_output_tokens`
+- `crates/glasshouse/src/main.rs` — `session_router`
+
+Regression evidence:
+- `task_class_cost_join::a_launched_sessions_classified_task_stamps_its_gateways_served_rows`
+- `task_class_cost_join::record_routing_latencys_own_row_is_unchanged_by_this_package`
+- `task_class_cost_join::rows_above_the_floor_are_cited_with_their_median_and_output_cost`
+- `task_class_cost_join::rows_below_the_floor_read_as_unmeasured_with_the_floor_named`
+- `task_class_cost_join::with_no_task_classified_the_evidence_says_no_class_established`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| crates/glasshouse/src/gateway/session.rs :: remove `.with_task_class(task_class)` from record_routing_observation's builder chain | `never-stamp-class` | **killed** | `task_class_cost_join::a_launched_sessions_classified_task_stamps_its_gateways_served_rows` |
+| crates/glasshouse/src/routing/burn.rs :: `&& row.task_class == Some(class)` -> `&& true` in output_tokens_by_class | `median-ignores-class` | **killed** | `task_class_cost_join::rows_above_the_floor_are_cited_with_their_median_and_output_cost` |
+| crates/glasshouse/src/routing/burn.rs :: `(samples >= MIN_SAMPLE_FOR_SUMMARY)` -> `(true)` | `estimate-below-floor` | **killed** | `task_class_cost_join::rows_below_the_floor_read_as_unmeasured_with_the_floor_named` |
+| crates/glasshouse/src/routing/session.rs :: tier-established branch's Contribution magnitude 0.0 -> -0.5 | `magnitude-moves` | **killed** | `task_class_cost_join::rows_above_the_floor_are_cited_with_their_median_and_output_cost` |
+
+> never-stamp-class observed: assertion `left == right` failed: ... row must carry it: RoutingObservation { ... task_class: None, ... }
+
+> median-ignores-class observed: panicked at crates/glasshouse/tests/task_class_cost_join.rs:774:5 (the median-of-1200 assertion)
+
+> estimate-below-floor observed: panicked at crates/glasshouse/tests/task_class_cost_join.rs:817:5 (the unmeasured-wording assertion)
+
+> magnitude-moves observed: panicked at crates/glasshouse/tests/task_class_cost_join.rs:783:5 (the +0.000 magnitude assertion)
+
+Recorded scope limits — stated by the worker, not discovered later:
+- macOS only; Linux and Windows legs not run for this box
+- no test pins the exact evidence wording independently of which branch (tier-established vs known/unknown-price) produces it
+
+---
+
+## REVIEW — the orchestrator owes an answer to each of these
+
+This section is the point of the generator. Everything above is the
+worker's facts, transcribed. Nothing below is decided.
+
+- **1301** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
+
+**Packet errors the worker reported — read these BEFORE its results.**
+Thirteen consecutive rounds a worker corrected its packet and was right:
+- the FEASIBILITY block implied the output-cost evidence attaches within expected_marginal_cost's known-price match arms; in production every classified task also establishes movement.is_some() (RouterAnswer::requirements() always sets minimum_tier), so those arms are unreachable through glasshouse route --task and the evidence had to be appended to the movement.is_some() early-return branch too -- verified empirically against the unmodified binary before making the change (see report's 'Architectural finding' section)
+- mid-package fix-forward (relayed by the orchestrator, practice §39): crates/glasshouse/src/gateway/session.rs pre-existing code (from GH-OBSERVATION-SESSION-COLUMN) named `crate::session::SessionId`, which gateway::tests::the_gateway_imports_none_of_the_modules_that_would_make_it_a_harness forbids; fixed as directed (State.session_id -> Option<String>, serve_session(&str)), which forced three call-site edits in tests/routing_session_column.rs (not in this packet's YOURS) to keep it compiling
+
+**Files touched outside EXPECTED FILES** — disclosed, not hidden:
+- `crates/glasshouse/tests/routing_session_column.rs` — three serve_session(&served) call sites only compiled against the pre-fix-forward &SessionId signature; updated to served.as_str(), forced by the orchestrator-directed signature change, no other edit to this file
+
+Gates the worker ran (re-run the decisive ones yourself):
+- cargo fmt --all -- --check: clean
+- cargo clippy -p glasshouse --all-targets --all-features -- -D warnings: clean
+- cargo doc --no-deps -p glasshouse: clean
+- cargo test -p glasshouse --test task_class_cost_join: test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+- cargo test -p glasshouse --lib routing::burn: test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 2028 filtered out
+- cargo test -p glasshouse --lib routing::session: test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 2018 filtered out
+- cargo test -p glasshouse --lib gateway::session: test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 2029 filtered out
+- cargo test -p glasshouse --lib gateway (fix-forward, whole module): test result: ok. 208 passed; 0 failed; 0 ignored; 0 measured; 1834 filtered out
+- cargo test -p glasshouse --test routing_burn --test routing_session_column --test routing_score: test result: ok. 7 + 6 + 4 passed; 0 failed
+- cargo test -p glasshouse --test routing_pricing --test route_command: test result: ok. 13 + 43 passed; 0 failed
+- scripts/blast-radius.sh --targeted (all six changed files): every traced target passed; 94 full-trace targets skipped (named)
+

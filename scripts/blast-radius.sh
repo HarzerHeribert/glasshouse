@@ -293,6 +293,10 @@ while read -r hit; do
       # src/gateway/session.rs -> gateway::session ; src/foo.rs -> foo
       m="$(echo "$hit" | sed -E 's#^crates/[^/]+/src/##; s#\.rs$##; s#/mod$##; s#/#::#g')"
       [ "$m" = "lib" ] || FILTERS+=("$m")
+      # A parent module's own `mod tests` (this crate's source-scanning tests)
+      # runs only under the parent's filter, not the child's -- 2026-09-02's
+      # trailing sweep found this red when only `gateway::session` was traced.
+      case "$m" in *::*) FILTERS+=("${m%%::*}") ;; esac
       ;;
   esac
 done < "$HITS_FILE"
@@ -335,6 +339,10 @@ for f in "${FILES[@]}"; do
       tgt="$(most_specific_integration_target "$f")" && [ -n "$tgt" ] && TARGETED_TESTS+=("$tgt")
       m="$(echo "$f" | sed -E 's#^crates/[^/]+/src/##; s#\.rs$##; s#/mod$##; s#/#::#g')"
       [ "$m" = "lib" ] || TARGETED_FILTERS+=("$m")
+      # A parent module's own `mod tests` (this crate's source-scanning tests)
+      # runs only under the parent's filter, not the child's -- 2026-09-02's
+      # trailing sweep found this red when only `gateway::session` was traced.
+      case "$m" in *::*) TARGETED_FILTERS+=("${m%%::*}") ;; esac
       ;;
   esac
 done

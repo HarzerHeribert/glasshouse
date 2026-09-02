@@ -1298,7 +1298,7 @@ Phase 32G — Provider-aware request-cost estimation
 ☑ Estimate the marginal input cost of starting a new session on a metered provider.
 ☑ Estimate the marginal input cost of resuming a cold existing session when context size is known or approximated.
 ☐ Estimate cached-input cost separately from uncached-input cost when provider pricing supports caching.
-☐ Estimate expected output cost from task tier and recent comparable tasks when useful.
+☑ Estimate expected output cost from task tier and recent comparable tasks when useful.
 ☑ Estimate request-pool cost for free providers whose scarce unit is requests rather than tokens.
 ☐ Estimate local compute cost qualitatively through latency and occupancy instead of pretending local tokens are financially free of all cost.
 ☑ Include bootstrap context, project memory, checkpoints, and likely repository reads in fresh-session cost estimates when possible.
@@ -2036,7 +2036,7 @@ A savings readout that is a query, not an estimate.
 
 Effort and learning — evaluate before offering, and export what memory already knows.
 
-☐ Evaluate a clamp-only per-turn effort reduction on translated pairings for turns that only resume after a tool result, never raising effort and never touching the byte-for-byte relay, before offering it.
+☑ Evaluate a clamp-only per-turn effort reduction on translated pairings for turns that only resume after a tool result, never raising effort and never touching the byte-for-byte relay, before offering it.
 ☑ Offer an opt-in export of remembered constraints and failed approaches into a marker-delimited block of the harness's native local instruction file, gitignored by default, replacing only its own block on re-export.
 
 

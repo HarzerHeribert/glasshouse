@@ -438,3 +438,78 @@ Gates the worker ran (re-run the decisive ones yourself):
 - cargo test -p glasshouse --lib database: test result: FAILED. 45 passed; 1 failed -- database::tests::concurrent_first_bootstraps_serialize_on_one_database ONLY, reproduced identically on an unmodified HEAD worktree; green 5/5 in isolation and at --test-threads=1
 - scripts/blast-radius.sh --targeted <all 15 changed files>: exit 1, seventeen targets run one at a time, sixteen green with counts, the seventeenth (--lib database) red on the baseline flake above only; cargo check --tests clean; rustdoc clean; 108 full-trace targets skipped (this is the blocking gate, not the sweep)
 
+
+
+---
+
+## Line 2039 CLOSED — 2026-09-02 (`GH-EFFORT-CLAMP-SHADOW`, Amber, Sonnet high): the shadow measurement is a query over recorded rows, and Phase 58 is complete
+
+Implements the last paragraph of `design-decisions.md`'s *Carrying effort across a translated pairing* on the columns `GH-OBSERVATION-SESSION-COLUMN` landed. `EvidenceLedger::effort_shadow(now, window)` (`routing/evidence.rs`) reads the window's `HARNESS_TURN_PURPOSE` rows with `output_tokens`, joins each by `session_id` to the session's **next** `TurnOutcomeObserved` row (a correlated `SELECT … ORDER BY observed_at ASC LIMIT 1` with `observed_at >= r.observed_at`), and folds them in Rust into `EffortShadowRow { turn_shape, effort_level, sample_count, median_output_tokens, completed, failed, unverdicted }` grouped by `(turn_shape, effort_level)` — the median withheld below `MIN_SAMPLE_FOR_SUMMARY`, the counts honest at any size — beside `EffortShadow.unread`, the rows whose `turn_shape` is `NULL` (relayed, or written before migration 24), which join no group and are never guessed into `prompt`. Two statements rather than one, for a reason stated in the doc comment (an unread row's tokens are as unread as its shape). `routing-cost` prints an `EFFORT SHADOW` section after `SAVINGS` (`main.rs::render_effort_shadow_section`): per group the exchange count, the median or *below the sample floor (k of N exchanges needed)*, and *verdicts: c completed, f failed, u unverdicted*; the unread count with its parenthetical; *no translated exchanges recorded in this window* when empty; and the fixed closing sentence *a clamp is not offered; this section is the evidence for or against one.* The transport `outcome` column is never read — test (c) plants a served 2xx row whose session then failed and the readout says *failed*. Test (f) is end to end through the shipped binary: `glasshouse launch` on a translated fixture with a tool-resume `thinking` request, `glasshouse hook … Stop` for that session, then `routing-cost` shows one `tool-resume / medium` row with a completed verdict.
+
+**What the evidence says today:** nothing yet — the rows come from real use, which the user's ruling names as the next step. The clamp (`GH-EFFORT-CLAMP`, behind a launch-profile switch off by default) is offered only if the shadow's rows show tool-resume turns save output tokens at lower effort without moving the verdict distribution; until then this section is the instrument and the register keeps the successor.
+
+### Evaluate a clamp-only per-turn effort reduction on translated pairings for turns that only resume after a tool result, never raising effort and never touching the byte-for-byte relay, before offering it. (line 2039)
+
+Contract: Given translated exchanges the gateway recorded with a turn shape, an effort level and the provider's output tokens, when `glasshouse routing-cost` is asked, Glasshouse shows an EFFORT SHADOW section that, for tool-resume turns beside prompt turns and per effort level, states the sample count, the median output tokens, and how many of those exchanges' sessions next reported a completed, a failed, or no TurnEnded verdict — while preserving that the ledger's own transport outcome is never read as a verdict, that a row with no turn shape (a relayed exchange, or one written before migration 24) is counted as unread and never as a prompt turn, that a figure nobody recorded prints as words and never as 0, that no effort is ever raised and no clamp is offered or configured.
+
+State: **COMPLETE** — ruled 2026-09-02 (evening) by the orchestrator after reading `EvidenceLedger::effort_shadow` in the worktree: the verdict is a correlated scalar subquery for the session's first `turn_outcome_observed` row at or after the exchange's `observed_at`; `routing_observations.outcome` is never read; a `NULL` or unrecognised `turn_shape` is skipped from every group and counted as unread. Amber tier: 4/4 mutations KILLED with output; every target run singly with counts (the worker refused the packet's own §68-trap command); targeted blast green. The evaluation *is* the readout over recorded rows, the standard 2034 closed on; no clamp exists, is offered or is configurable. **Phase 58 is complete: 15 of 15.**
+
+Production evidence:
+- `src/routing/evidence.rs` — `EffortShadowRow`
+- `src/routing/evidence.rs` — `EffortShadow`
+- `src/routing/evidence.rs` — `EvidenceLedger::effort_shadow`
+- `src/routing/evidence.rs` — `EffortShadowGroup`
+- `src/main.rs` — `routing_cost_report`
+- `src/main.rs` — `render_effort_shadow_section`
+
+Regression evidence:
+- `effort_shadow::groups_by_turn_shape_and_effort_show_the_right_median_and_verdict_counts`
+- `effort_shadow::a_row_with_no_turn_shape_is_counted_as_unread_and_joins_no_group`
+- `effort_shadow::a_served_row_whose_session_later_failed_is_counted_as_failed`
+- `effort_shadow::a_verdict_recorded_before_the_exchange_does_not_count_and_the_exchange_is_unverdicted`
+- `effort_shadow::an_empty_window_prints_the_words_and_a_real_unread_count`
+- `effort_shadow::a_launched_and_hooked_session_shows_one_tool_resume_row_with_a_completed_verdict`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| drop `AND e.session_id = r.session_id` from the verdict subquery in EvidenceLedger::effort_shadow | `join-ignores-session` | **killed** | `effort_shadow::groups_by_turn_shape_and_effort_show_the_right_median_and_verdict_counts` |
+| replace the verdict subquery expression with `r.outcome AS verdict` | `verdict-from-transport-outcome` | **killed** | `effort_shadow::a_served_row_whose_session_later_failed_is_counted_as_failed` |
+| default an undecodable turn_shape to TurnShape::Prompt instead of `continue`-skipping the row | `null-shape-counted-as-prompt` | **killed** | `effort_shadow::a_row_with_no_turn_shape_is_counted_as_unread_and_joins_no_group` |
+| drop `AND e.observed_at >= r.observed_at` from the verdict subquery | `verdict-before-exchange-accepted` | **killed** | `effort_shadow::a_verdict_recorded_before_the_exchange_does_not_count_and_the_exchange_is_unverdicted` |
+
+> join-ignores-session observed: the test FAILED: a verdict from another session's row leaked into a group's completed/failed/unverdicted counts
+
+> verdict-from-transport-outcome observed: panicked at crates/glasshouse/tests/effort_shadow.rs:101:9: routing-cost must succeed (the mutated query, binding an unused ?5, made routing-cost itself fail)
+
+> null-shape-counted-as-prompt observed: panicked at crates/glasshouse/tests/effort_shadow.rs:285:5: the no-turn-shape row appeared inside a `prompt /` group instead of leaving rows empty with unread: 1
+
+> verdict-before-exchange-accepted observed: panicked at crates/glasshouse/tests/effort_shadow.rs:368:5: expected 0 completed, 0 failed, 1 unverdicted but got 1 completed, 0 failed, 0 unverdicted
+
+Recorded scope limits — stated by the worker, not discovered later:
+- the verdict join is an unindexed correlated subquery per row, unmeasured at real volumes (same posture migration 24 itself took)
+- macOS only for this worktree's own run; main.rs carries unrelated cfg(unix/windows) code that makes blast-radius flag the file as platform-conditional
+- row/group ordering (tool-resume before prompt, effort ladder low-to-high with 'no effort' last) is a readability choice the packet did not specify
+
+---
+
+## REVIEW — the orchestrator owes an answer to each of these
+
+This section is the point of the generator. Everything above is the
+worker's facts, transcribed. Nothing below is decided.
+
+- **2039** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
+
+**Packet errors the worker reported — read these BEFORE its results.**
+Thirteen consecutive rounds a worker corrected its packet and was right:
+- the packet's combined ACCEPTANCE TESTS command (`--test savings_readout --test routing_session_column --lib routing::evidence`) runs the `routing::evidence` filter across all three targets and silently selects 0 tests in both integration targets — §68's trap; ran the three targets separately instead (real counts: 3/3, 6/6, 56/56)
+
+Gates the worker ran (re-run the decisive ones yourself):
+- cargo fmt --all -- --check: clean
+- cargo clippy -p glasshouse --all-targets --all-features -- -D warnings: clean
+- cargo test -p glasshouse --test effort_shadow: test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+- cargo test -p glasshouse --test savings_readout: test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+- cargo test -p glasshouse --test routing_session_column: test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+- cargo test -p glasshouse --lib routing::evidence: test result: ok. 56 passed; 0 failed; 0 ignored; 0 measured; 1986 filtered out
+- scripts/blast-radius.sh --targeted crates/glasshouse/src/routing/evidence.rs crates/glasshouse/src/main.rs: every traced target passed
+- cargo doc --no-deps -p glasshouse: clean
+

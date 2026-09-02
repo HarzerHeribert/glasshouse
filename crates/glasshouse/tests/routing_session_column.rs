@@ -791,7 +791,7 @@ fn a_prompt_shaped_request_records_the_prompt_shape_and_no_invented_effort() {
         gateway.upstream(),
     );
     let served = SessionId::new("ses_prompt_shaped");
-    gateway.routing().serve_session(&served);
+    gateway.routing().serve_session(served.as_str());
 
     let response = send_and_read(
         gateway.address(),
@@ -836,7 +836,7 @@ fn a_relayed_exchange_records_the_session_and_neither_request_fact() {
         gateway.upstream(),
     );
     let served = SessionId::new("ses_relayed");
-    gateway.routing().serve_session(&served);
+    gateway.routing().serve_session(served.as_str());
 
     // A body that WOULD have produced a tool-resume shape and a medium
     // effort if anything on this path read it.
@@ -1123,7 +1123,7 @@ fn no_harness_identifier_and_no_credential_reaches_any_row() {
         gateway.upstream(),
     );
     let served = SessionId::new("ses_isolation");
-    gateway.routing().serve_session(&served);
+    gateway.routing().serve_session(served.as_str());
 
     let response = send_and_read(
         gateway.address(),

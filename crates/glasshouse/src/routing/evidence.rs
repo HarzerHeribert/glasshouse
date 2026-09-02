@@ -1311,6 +1311,80 @@ fn median(mut values: Vec<i64>) -> i64 {
     values[values.len() / 2]
 }
 
+/// [`EvidenceLedger::effort_shadow`]'s deterministic ordering key for
+/// [`TurnShape`]: tool-resume first, since that is the shape a clamp would
+/// ever apply to.
+fn turn_shape_rank(turn_shape: TurnShape) -> u8 {
+    match turn_shape {
+        TurnShape::ToolResume => 0,
+        TurnShape::Prompt => 1,
+    }
+}
+
+/// [`EvidenceLedger::effort_shadow`]'s ordering key for
+/// `Option<EffortLevel>`: the ladder's own order, with "no effort carried"
+/// last rather than first — it is not a rung below [`EffortLevel::Minimal`],
+/// it is the absence of the field.
+fn effort_level_rank(effort_level: Option<EffortLevel>) -> i8 {
+    match effort_level {
+        Some(EffortLevel::Minimal) => 0,
+        Some(EffortLevel::Low) => 1,
+        Some(EffortLevel::Medium) => 2,
+        Some(EffortLevel::High) => 3,
+        None => 4,
+    }
+}
+
+/// [`EvidenceLedger::effort_shadow`]'s in-progress accumulator for one
+/// `(turn_shape, effort_level)` group, folded from flat rows before becoming
+/// an [`EffortShadowRow`] — a named type rather than a tuple so the fold in
+/// [`EvidenceLedger::effort_shadow`] reads as fields, not positions.
+struct EffortShadowGroup {
+    turn_shape: TurnShape,
+    effort_level: Option<EffortLevel>,
+    output_tokens: Vec<i64>,
+    completed: usize,
+    failed: usize,
+    unverdicted: usize,
+}
+
+impl EffortShadowGroup {
+    fn new(turn_shape: TurnShape, effort_level: Option<EffortLevel>) -> Self {
+        Self {
+            turn_shape,
+            effort_level,
+            output_tokens: Vec::new(),
+            completed: 0,
+            failed: 0,
+            unverdicted: 0,
+        }
+    }
+
+    fn into_row(self) -> EffortShadowRow {
+        let sample_count = self.output_tokens.len();
+        let median_output_tokens =
+            (sample_count >= MIN_SAMPLE_FOR_SUMMARY).then(|| median(self.output_tokens));
+        EffortShadowRow {
+            turn_shape: self.turn_shape,
+            effort_level: self.effort_level,
+            sample_count,
+            median_output_tokens,
+            completed: self.completed,
+            failed: self.failed,
+            unverdicted: self.unverdicted,
+        }
+    }
+}
+
+/// [`EvidenceLedger::effort_shadow`]'s verdict-subject vocabulary, spelled
+/// once here rather than imported: [`crate::evaluation`]'s own
+/// `TURN_COMPLETED`/`TURN_FAILED` constants are private to that module (see
+/// its `turn_subject`), and the two agreeing is proven end to end by
+/// `tests/effort_shadow.rs`'s launch-and-hook test rather than by a shared
+/// symbol.
+const EFFORT_SHADOW_VERDICT_COMPLETED: &str = "completed";
+const EFFORT_SHADOW_VERDICT_FAILED: &str = "failed";
+
 fn p95(mut values: Vec<i64>) -> i64 {
     values.sort_unstable();
     let index = ((values.len() - 1) * 95) / 100;
@@ -2520,6 +2594,50 @@ impl SessionTranslationSavings {
     pub fn meets_sample_floor(&self) -> bool {
         self.sample_count >= MIN_SAMPLE_FOR_SUMMARY
     }
+}
+
+/// One row of [`EvidenceLedger::effort_shadow`]'s per-`(turn_shape,
+/// effort_level)` breakdown — capability map line 2039: the shadow
+/// measurement `docs/product/design-decisions.md`'s *Carrying effort across a
+/// translated pairing* asks for before any clamp is offered (*"Then the
+/// measurement, then the clamp"*).
+///
+/// `sample_count`, `completed`, `failed` and `unverdicted` are counts and are
+/// honest at any sample size — [`PurposeConsumption`]'s own convention.
+/// `median_output_tokens` is a rate-shaped figure and sits behind the
+/// standing floor every such figure on this ledger does ([`RoutingSummary`]'s
+/// own doc comment): `None` below [`MIN_SAMPLE_FOR_SUMMARY`], never a median
+/// nobody can trust.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffortShadowRow {
+    pub turn_shape: TurnShape,
+    /// `None` is a real group: a translated exchange whose request asked for
+    /// no effort at all, never folded into a rung of the ladder it did not
+    /// carry.
+    pub effort_level: Option<EffortLevel>,
+    pub sample_count: usize,
+    pub median_output_tokens: Option<i64>,
+    /// How many of this group's exchanges had a session whose next
+    /// [`crate::evaluation::EvaluationKind::TurnOutcomeObserved`] row said
+    /// *completed*.
+    pub completed: usize,
+    /// ...said *failed*.
+    pub failed: usize,
+    /// Exchanges whose session recorded no `TurnOutcomeObserved` row at or
+    /// after the exchange — never read from
+    /// [`RoutingObservation::outcome`], which is a transport 2xx proxy and
+    /// never a verdict (see that field's own doc comment).
+    pub unverdicted: usize,
+}
+
+/// [`EvidenceLedger::effort_shadow`]'s result.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffortShadow {
+    pub rows: Vec<EffortShadowRow>,
+    /// Rows in the window whose `turn_shape` is `NULL` — a relayed exchange,
+    /// or one written before migration 24's column existed. Counted, never
+    /// folded into [`TurnShape::Prompt`].
+    pub unread: usize,
 }
 
 /// What this project's ledger holds about one `(provider, model)` **as a
@@ -3759,6 +3877,123 @@ impl EvidenceLedger {
             out.push(row.map_err(sql_err("read one session's translation cache savings"))?);
         }
         Ok(out)
+    }
+
+    /// [`EffortShadow`] — capability map line 2039's shadow measurement: per
+    /// translated exchange this build recorded a turn shape and an
+    /// output-token count for, whether the exchange's session's next
+    /// harness-reported verdict was a completion, a failure, or nothing at
+    /// all. Joined by migration 24's `session_id`, **never** by
+    /// [`RoutingObservation::outcome`] — a transport 2xx proxy, not a
+    /// verdict, per that field's own doc comment.
+    ///
+    /// **Two statements, not one.** The verdict is *the session's next
+    /// [`crate::evaluation::EvaluationKind::TurnOutcomeObserved`] row at or
+    /// after the exchange's `observed_at`* — a correlated "first row at or
+    /// after" lookup expressed as a scalar subquery per candidate row — and
+    /// this reader's median is computed in Rust from the raw sample the way
+    /// every other median on this ledger is, so the classified
+    /// rows are fetched flat, with the verdict subquery inline, and folded
+    /// here rather than in a single `GROUP BY`. [`EffortShadow::unread`] is a
+    /// second, simpler statement over the same window and purpose: a row
+    /// whose `turn_shape` this reader could not decode is never folded into
+    /// either turn shape, so its count comes from a query that does not
+    /// filter on `output_tokens` at all — an unread row's tokens are unread
+    /// for the same reason its shape is.
+    ///
+    /// Only [`HARNESS_TURN_PURPOSE`] rows with `output_tokens IS NOT NULL`
+    /// enter a group.
+    pub fn effort_shadow(
+        &self,
+        now_unix: i64,
+        window_seconds: i64,
+    ) -> Result<EffortShadow, EvidenceLedgerError> {
+        let earliest = now_unix.saturating_sub(window_seconds);
+        let conn = self.lock();
+
+        let unread: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM routing_observations
+                 WHERE project_id = ?1 AND observed_at >= ?2 AND observed_at <= ?3
+                   AND purpose = ?4 AND turn_shape IS NULL",
+                params![self.project_id, earliest, now_unix, HARNESS_TURN_PURPOSE],
+                |row| row.get(0),
+            )
+            .map_err(sql_err("read the effort shadow's unread count"))?;
+
+        let mut statement = conn
+            .prepare(
+                "SELECT r.turn_shape AS turn_shape,
+                        r.effort_level AS effort_level,
+                        r.output_tokens AS output_tokens,
+                        (SELECT e.subject FROM evaluation_observations AS e
+                          WHERE e.kind = ?5
+                            AND e.session_id = r.session_id
+                            AND e.observed_at >= r.observed_at
+                          ORDER BY e.observed_at ASC
+                          LIMIT 1) AS verdict
+                 FROM routing_observations AS r
+                 WHERE r.project_id = ?1 AND r.observed_at >= ?2 AND r.observed_at <= ?3
+                   AND r.purpose = ?4 AND r.output_tokens IS NOT NULL",
+            )
+            .map_err(sql_err("read the effort shadow's classified rows"))?;
+        let mapped = statement
+            .query_map(
+                params![
+                    self.project_id,
+                    earliest,
+                    now_unix,
+                    HARNESS_TURN_PURPOSE,
+                    crate::evaluation::EvaluationKind::TurnOutcomeObserved.as_str(),
+                ],
+                |row| {
+                    let turn_shape_text: Option<String> = row.get("turn_shape")?;
+                    let effort_level_text: Option<String> = row.get("effort_level")?;
+                    let output_tokens: i64 = row.get("output_tokens")?;
+                    let verdict: Option<String> = row.get("verdict")?;
+                    Ok((turn_shape_text, effort_level_text, output_tokens, verdict))
+                },
+            )
+            .map_err(sql_err("read the effort shadow's classified rows"))?;
+
+        let mut groups: std::collections::BTreeMap<(u8, i8), EffortShadowGroup> =
+            std::collections::BTreeMap::new();
+
+        for row in mapped {
+            let (turn_shape_text, effort_level_text, output_tokens, verdict) =
+                row.map_err(sql_err("read one effort shadow row"))?;
+            // A row this build cannot decode a turn shape for — `NULL`, or an
+            // unrecognised future word — is never guessed into a shape: it is
+            // already counted in `unread` above, and grouping it here would
+            // count it twice under a shape it did not carry.
+            let Some(turn_shape) = turn_shape_text.as_deref().and_then(TurnShape::from_stored)
+            else {
+                continue;
+            };
+            let effort_level = effort_level_text
+                .as_deref()
+                .and_then(EffortLevel::from_stored);
+            let key = (turn_shape_rank(turn_shape), effort_level_rank(effort_level));
+            let entry = groups
+                .entry(key)
+                .or_insert_with(|| EffortShadowGroup::new(turn_shape, effort_level));
+            entry.output_tokens.push(output_tokens);
+            match verdict.as_deref() {
+                Some(EFFORT_SHADOW_VERDICT_COMPLETED) => entry.completed += 1,
+                Some(EFFORT_SHADOW_VERDICT_FAILED) => entry.failed += 1,
+                _ => entry.unverdicted += 1,
+            }
+        }
+
+        let rows = groups
+            .into_values()
+            .map(EffortShadowGroup::into_row)
+            .collect();
+
+        Ok(EffortShadow {
+            rows,
+            unread: unread as usize,
+        })
     }
 
     /// [`ClassificationRecord`] for one `(provider, model)` over the last

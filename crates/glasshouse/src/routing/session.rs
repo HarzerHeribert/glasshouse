@@ -61,6 +61,7 @@ use crate::integrations::IntegrationId;
 use crate::provider::pricing::PriceTable;
 use crate::provider::quota::{CapacityBand, RemainingCapacityScore};
 
+use super::burn::ClassOutput;
 use super::capability::{self, ResourceFacts};
 use super::classify::{DurationClass, HardCapability, TaskClassification, WorkloadTier};
 use super::evidence::{CostConfidence, FailureClass, MIN_SAMPLE_FOR_SUMMARY, ObservedCost};
@@ -1609,15 +1610,34 @@ fn expected_marginal_cost(
     destination: &Destination,
     movement: Option<&TierMovement>,
     prices: &PriceTable,
+    task_class: Option<TaskClass>,
+    comparable_output: &[ClassOutput],
 ) -> Contribution {
+    let known_price = destination
+        .backend()
+        .model()
+        .name()
+        .and_then(|model| prices.price_for(destination.backend().provider(), model));
     if movement.is_some() {
-        return Contribution::new(
-            "expected marginal cost",
-            0.0,
+        let mut evidence = String::from(
             "a workload tier is established for this decision, so `cost preference` (line \
              1558) already prices free versus metered here — pricing it twice would double- \
              count the same reading",
         );
+        // Map line 1301: the output half is not `cost_preference`'s reading
+        // and is never priced twice by it, so it is said here even though
+        // the input half's magnitude stands aside for the tier term.
+        if !destination.backend().cost().is_free()
+            && let Some(price) = known_price
+        {
+            evidence.push_str("; ");
+            evidence.push_str(&expected_output_cost_evidence(
+                task_class,
+                comparable_output,
+                price,
+            ));
+        }
+        return Contribution::new("expected marginal cost", 0.0, evidence);
     }
     if destination.backend().cost().is_free() {
         return Contribution::new(
@@ -1629,12 +1649,7 @@ fn expected_marginal_cost(
             ),
         );
     }
-    let known_price = destination
-        .backend()
-        .model()
-        .name()
-        .and_then(|model| prices.price_for(destination.backend().provider(), model));
-    let (magnitude, evidence) = match known_price {
+    let (magnitude, mut evidence) = match known_price {
         Some(price) => match destination.estimated_input_size().total_tokens() {
             // Map line 1298: the rate and this decision's own input-size
             // estimate together become an actual dollar figure. The
@@ -1693,7 +1708,62 @@ fn expected_marginal_cost(
             ),
         ),
     };
+    // Map line 1301, beside the input half above: never moves `magnitude`,
+    // the same precedent line 1298 already set for it.
+    if let Some(price) = known_price {
+        evidence.push_str("; ");
+        evidence.push_str(&expected_output_cost_evidence(
+            task_class,
+            comparable_output,
+            price,
+        ));
+    }
     Contribution::new("expected marginal cost", magnitude, evidence)
+}
+
+/// Map line 1301's evidence half — `GH-TASK-CLASS-COST-JOIN`, joining the
+/// launch's task class (`crate::gateway::session::SessionRouting::
+/// serve_task_class`) with the median output size
+/// [`super::burn::output_tokens_by_class`] read for it — appended to
+/// [`expected_marginal_cost`]'s evidence wherever a price is already known.
+/// **Never moves a magnitude**: this function returns text only, the same
+/// precedent line 1298 set for the input half.
+///
+/// `task_class` is *this decision's* class — the classification
+/// [`RouterAnswer::task_class`] gave it, when one was established; `None`
+/// for a launch or `glasshouse route --task`-less run that classified
+/// nothing, which reads as *no task class established* rather than
+/// borrowing a class nobody named. `comparable_output` is the caller's own
+/// window of [`ClassOutput`] readings; a class this decision names but the
+/// window carries fewer than [`MIN_SAMPLE_FOR_SUMMARY`] rows for — including
+/// none at all — is unmeasured, named with the floor, and never given an
+/// invented size.
+fn expected_output_cost_evidence(
+    task_class: Option<TaskClass>,
+    comparable_output: &[ClassOutput],
+    price: crate::provider::pricing::ModelPrice,
+) -> String {
+    let Some(class) = task_class else {
+        return "expected output size unmeasured (no task class established)".to_owned();
+    };
+    let comparable = comparable_output
+        .iter()
+        .find(|reading| reading.class == class);
+    match comparable.and_then(|reading| reading.median_output_tokens) {
+        Some(median_tokens) => {
+            let samples = comparable.map_or(0, |reading| reading.samples);
+            let cost_usd = median_tokens * price.output_per_million_usd / 1_000_000.0;
+            format!(
+                "recent comparable {class} tasks ({samples} in the window) produced a median \
+                 of {median_tokens:.0} output tokens, putting expected output cost at roughly \
+                 ${cost_usd:.4}"
+            )
+        }
+        None => format!(
+            "expected output size unmeasured (fewer than {MIN_SAMPLE_FOR_SUMMARY} comparable \
+             {class} tasks recorded)"
+        ),
+    }
 }
 
 /// Line 1302: what a request pool's own scarcity is worth, read from
@@ -4396,6 +4466,11 @@ pub struct SessionRouter {
     /// is what every candidate scored before this field existed, and is what
     /// `harness_efficiency` reads as inert.
     harness_efficiency: HarnessEfficiencySummary,
+    /// Map line 1301's other half, as the caller resolved it — see
+    /// [`Self::with_comparable_output_tokens`]. Empty is what every candidate
+    /// saw before this field existed: [`expected_marginal_cost`] renders that
+    /// as an honest *unmeasured*, never as a fabricated size.
+    comparable_output: Vec<ClassOutput>,
 }
 
 impl SessionRouter {
@@ -4493,6 +4568,21 @@ impl SessionRouter {
     #[must_use]
     pub fn with_harness_efficiency(mut self, summary: HarnessEfficiencySummary) -> Self {
         self.harness_efficiency = summary;
+        self
+    }
+
+    /// Map line 1301: the recent comparable-task output-token sizes, as the
+    /// caller resolved them — normally
+    /// `super::burn::output_tokens_by_class` over the same window the price
+    /// table's own caller reads, read once per decision the same way every
+    /// other caller-resolved fact on this router is. Not calling this at all
+    /// keeps an empty `Vec`, which reproduces this router's behaviour before
+    /// this field existed byte-for-byte: `expected_marginal_cost` renders
+    /// every class as *unmeasured*, the same words a class below the
+    /// standing floor gets.
+    #[must_use]
+    pub fn with_comparable_output_tokens(mut self, comparable_output: Vec<ClassOutput>) -> Self {
+        self.comparable_output = comparable_output;
         self
     }
 
@@ -4750,6 +4840,7 @@ impl SessionRouter {
                     &candidate_harnesses,
                     &self.prices,
                     &self.score_weights,
+                    &self.comparable_output,
                 );
                 (destination.clone(), explanation)
             })
@@ -5095,6 +5186,7 @@ fn score(
     candidate_harnesses: &BTreeSet<&str>,
     prices: &PriceTable,
     weights: &ScoreWeights,
+    comparable_output: &[ClassOutput],
 ) -> RoutingExplanation {
     let mut explanation = RoutingExplanation::new();
     if let Some(answer) = &inputs.requirements.classification {
@@ -5167,7 +5259,17 @@ fn score(
     // reading the un-shadowed parameter so it sees `None` exactly when the
     // block above did not run — see `expected_marginal_cost`'s own doc for
     // why the two must never both price a candidate.
-    explanation.push(expected_marginal_cost(destination, movement, prices));
+    explanation.push(expected_marginal_cost(
+        destination,
+        movement,
+        prices,
+        inputs
+            .requirements
+            .classification
+            .as_ref()
+            .map(RouterAnswer::task_class),
+        comparable_output,
+    ));
     // Line 1302, beside the money term it must never be folded into: its own
     // axis, reading the same `inputs.health` `struggling` already reads and
     // the same `burn_forecast` the exhaustion term above already read.
