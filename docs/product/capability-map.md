@@ -1433,7 +1433,7 @@ Phase 34C — Automatic routing-model selection
 ☑ Filter automatic candidates by current provider health.
 ☑ Filter automatic candidates by minimum requests-per-minute headroom when known.
 ☑ Filter automatic candidates by maximum acceptable routing latency.
-☐ Filter automatic candidates by maximum marginal routing cost.
+☑ Filter automatic candidates by maximum marginal routing cost.
 ☑ Prefer currently free candidates after capability and latency requirements are satisfied.
 ☑ Prefer local candidates when they satisfy the configured latency and quality requirements.
 ☐ Prefer a cheap metered model over an unreliable free model when failed routing attempts would cost more time than the price difference.

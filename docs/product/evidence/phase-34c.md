@@ -402,6 +402,7 @@ doing its job on a string literal. Worth knowing for the next packet that quotes
   on the path.
 - **1436** ☐ **REFUSED** — same producer as 1419; `EffectiveConfig::max_router_cost`
   already resolves the ceiling, the missing half is the reading.
+  **→ CLOSED 2026-09-02 (evening), `GH-CLASSIFIER-PRICE-CEILING`; see the entry at the end of this file.**
 - **1439** ☐ **REFUSED** — same producer; once a price exists the comparison is
   *(1 − parsed_fraction) × median latency* against the price difference.
 - **1440** ☐ **REFUSED — producer: a subscription-backed classification candidate.**
@@ -441,3 +442,84 @@ doing its job on a string literal. Worth knowing for the next packet that quotes
   Limit: not validated against configured providers at load — an entry naming an
   unconfigured provider is skipped at walk time with a named reason, like a
   stale pin.
+
+
+---
+
+## Line 1436 CLOSED — 2026-09-02 (`GH-CLASSIFIER-PRICE-CEILING`, Amber, Sonnet high): the classifier's candidates carry a price, and the ceiling the settings surface wrote for months is finally read
+
+`EffectiveConfig::max_router_cost` (`[routing] max_marginal_cost`, micro-USD, default 1 000) had a settings-surface writer and no router reader — the Cluster B shape. Now: `DisposableCandidate::price: Option<ModelPrice>` attached in `main.rs::automatic_classification_choice` by a new `attach_prices` from `PriceTable::load_from_dir(config_dir)` (the same call `session_router` makes; an absent or malformed file leaves every candidate unpriced); `ClassificationPolicy::with_max_marginal_cost_micro_usd` set from the effective ceiling; and in `classification_verdict`, between 1427's locality gate and 1432's reliability floor, a price gate with four arms — *free: the ceiling does not apply*; metered and unpriced: *no entry in pricing.toml — the ceiling is inert; unpriced, not expensive*; metered, priced and over: `Excluded` naming the estimate, the ceiling and map line 1436; under: an admitted note with both figures. **The estimate is a ceiling, stated as one**: `estimated_classification_cost_micro_usd(price)` prices the whole `TASK_TEXT_CEILING_BYTES` on top of `CLASSIFICATION_PROMPT_CONTRACT` at `BYTES_PER_TOKEN_ESTIMATE = 4` plus `CLASSIFICATION_REPLY_TOKENS = 64` of output — so a candidate is excluded only when even the largest permitted call is over the line. `Cost` stays the category; the price is the number; no score term reads it, so no ordering among admitted candidates moves. A ceiling of `0` admits only free candidates, as `RouterCostMicroUsd`'s doc promised.
+
+**Worker corrections, accepted:** `shell::state::format_usd` renders six fraction digits, not four, and lives behind `crate::config` which `routing::disposable` must not depend on — a local `format_micro_usd` on a bare `u64` reproduces the shape; three rustdoc links to private items became code spans.
+
+**What this leaves for 1419 and 1439** (the report's own accounting): 1439's price half now exists on the same candidates its latency half (1435's median) is read from — only the comparison and its ruling remain (`design-decisions.md`, *Preferring a cheap metered classifier over an unreliable free one*); 1419 still lacks a producer for *the premium capacity it protects* and a threshold ruling; 1440 is unaffected because no subscription-backed candidate is ever built.
+
+### Filter automatic candidates by maximum marginal routing cost. (line 1436)
+
+Contract: Given a project whose pricing.toml prices a metered model and whose effective [routing] max_marginal_cost (micro-USD, default 1000) is below what one bounded classification call to that model would cost, when Glasshouse chooses a classifier automatically, Glasshouse excludes that candidate with a reason naming its estimated cost and the ceiling and chooses among the rest -- while preserving that a free candidate is never priced out, that a metered candidate with no price in the table is unpriced (noted, never excluded, exactly as an unmeasured latency is), that a ceiling of zero admits only free candidates, that no ordering among admitted candidates changes, and that glasshouse route's explanation carries the exclusion.
+
+State: **COMPLETE** — ruled 2026-09-02 (evening) by the orchestrator after reading the estimate and the gate in the worktree. Amber tier: 4/4 mutations KILLED with output, every acceptance target run one at a time with counts (the worker caught practice §68's trap in the packet's own combined command and refused it), targeted blast exit 0.
+
+Production evidence:
+- `crates/glasshouse/src/routing/disposable.rs` — `DisposableCandidate::with_price`
+- `crates/glasshouse/src/routing/disposable.rs` — `ClassificationPolicy::with_max_marginal_cost_micro_usd`
+- `crates/glasshouse/src/routing/disposable.rs` — `estimated_classification_cost_micro_usd`
+- `crates/glasshouse/src/routing/disposable.rs` — `classification_verdict`
+- `crates/glasshouse/src/main.rs` — `automatic_classification_choice`
+- `crates/glasshouse/src/main.rs` — `attach_prices`
+
+Regression evidence:
+- `classification_cost_ceiling::an_overpriced_metered_candidate_is_excluded_and_a_cheaper_one_is_chosen`
+- `classification_cost_ceiling::the_default_ceiling_admits_a_model_a_stricter_one_would_exclude`
+- `classification_cost_ceiling::free_and_unpriced_candidates_are_admitted_with_distinct_notes`
+- `classification_cost_ceiling::a_zero_ceiling_admits_only_free_candidates`
+- `classification_cost_ceiling::the_estimate_uses_the_task_text_ceiling_not_zero`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| if estimate > u64::from(ceiling) { -> if false { | `ceiling-ignored` | **killed** | `classification_cost_ceiling::an_overpriced_metered_candidate_is_excluded_and_a_cheaper_one_is_chosen` |
+| candidate.with_price(price) -> candidate.with_price(None) | `price-not-attached` | **killed** | `classification_cost_ceiling::an_overpriced_metered_candidate_is_excluded_and_a_cheaper_one_is_chosen` |
+| match candidate.cost { -> match Cost::Metered { | `free-priced-as-metered` | **killed** | `classification_cost_ceiling::free_and_unpriced_candidates_are_admitted_with_distinct_notes` |
+| CLASSIFICATION_PROMPT_CONTRACT.len() + TASK_TEXT_CEILING_BYTES -> CLASSIFICATION_PROMPT_CONTRACT.len() + 0 | `estimate-uses-actual-text` | **killed** | `classification_cost_ceiling::the_estimate_uses_the_task_text_ceiling_not_zero` |
+
+> ceiling-ignored observed: panicked at crates/glasshouse/tests/classification_cost_ceiling.rs:219:5 (exclusion-note assertion not found); also failed a_zero_ceiling_admits_only_free_candidates at :357
+
+> price-not-attached observed: panicked at crates/glasshouse/tests/classification_cost_ceiling.rs:219:5; also failed a_zero_ceiling_admits_only_free_candidates at :357
+
+> free-priced-as-metered observed: panicked at crates/glasshouse/tests/classification_cost_ceiling.rs:289:5; also failed a_zero_ceiling_admits_only_free_candidates at :351
+
+> estimate-uses-actual-text observed: assertion left == right failed: a known price must give a known micro-USD figure, computed from the task-text ceiling
+
+Recorded scope limits — stated by the worker, not discovered later:
+- estimated_classification_cost_micro_usd is a bytes/4 approximation, not a real tokenizer
+- does not decide 1419 (premium capacity threshold) or 1439 (time-vs-price exchange rate)
+- does not build a subscription-backed candidate for 1440
+- ranking among admitted candidates is untouched -- price is a filter only, not a score term
+
+---
+
+## REVIEW — the orchestrator owes an answer to each of these
+
+This section is the point of the generator. Everything above is the
+worker's facts, transcribed. Nothing below is decided.
+
+- **1436** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
+
+**Packet errors the worker reported — read these BEFORE its results.**
+Thirteen consecutive rounds a worker corrected its packet and was right:
+- shell::state::format_usd renders six fraction digits (micro-USD exact), not four as the packet's OBJECTIVE 4 states (shell/state.rs:4780); reproduced the actual six-decimal shape in a local format_micro_usd instead of importing the config-coupled function
+- the packet's VERIFICATION COMMANDS example (--test A --test B ... --lib routing::disposable) is practice §68's trap: the trailing --lib filter is a global test-name substring filter, so every named --test target reports '0 passed ... N filtered out' under that exact command; ran each target separately (all 84 tests genuinely green)
+
+Gates the worker ran (re-run the decisive ones yourself):
+- cargo fmt --all -- --check: clean
+- cargo clippy -p glasshouse --all-targets --all-features -- -D warnings: clean
+- cargo doc -p glasshouse --no-deps: clean (after fixing 3 private-intra-doc-link errors)
+- cargo test -p glasshouse --test classification_cost_ceiling: test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+- cargo test -p glasshouse --test classification_call: test result: ok. 10 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+- cargo test -p glasshouse --test launch_classification: test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+- cargo test -p glasshouse --test routing_model_config: test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+- cargo test -p glasshouse --test routing_pricing: test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+- cargo test -p glasshouse --test routing_disposable_tier: test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+- cargo test -p glasshouse --lib routing::disposable: test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 2019 filtered out
+- scripts/blast-radius.sh --targeted <3 changed files>: exit 0, every traced target passed
+

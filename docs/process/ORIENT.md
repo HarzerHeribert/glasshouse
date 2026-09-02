@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1220 / 1347 mandatory capabilities (91%)** — 127 open across 37 phases.
+**1221 / 1347 mandatory capabilities (91%)** — 126 open across 37 phases.
 
 ## Where the work is
 
@@ -42,12 +42,12 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 32C | Subscription capacity estimation | **2** | 10 | `1242` |
 | Phase 32D | Normalized remaining-capacity score | **2** | 10 | `1257` |
 | Phase 33 | Resource health | **2** | 13 | `1309` |
+| Phase 34C | Automatic routing-model selection | **2** | 11 | `1429` |
 | Phase 38 | Quota-preserving routing | **2** | 5 | `1604` |
 | Phase 53 | Criteria before adding graph storage | **2** | 3 | `1872` |
 | Phase 28 | File-aware memory lookup | **3** | 2 | `1137` |
 | Phase 32G | Provider-aware request-cost estimation | **3** | 7 | `1296` |
 | Phase 33A | Routing evidence ledger | **3** | 12 | `1327` |
-| Phase 34C | Automatic routing-model selection | **3** | 10 | `1429` |
 | Phase 21E | Decision ladder and conflict handling | **4** | 8 | `907` |
 | Phase 24 | Memory reranking | **5** | 1 | `1082` |
 | Phase 31 | Compaction-aware behavior | **5** | 2 | `1167` |
@@ -161,6 +161,11 @@ these unwrapped.
 - **1323** ☐ Avoid background probing at an aggressive rate that wastes free-request pools.
 - **1325** ☐ Record whether a health observation came from a real task, a retry, a repair attempt, or an explicit probe.
 
+### Phase 34C — Automatic routing-model selection  (2 open, 11 closed)
+
+- **1439** ☐ Prefer a cheap metered model over an unreliable free model when failed routing attempts would cost more time than the price difference.
+- **1440** ☐ Avoid using a scarce premium subscription session as the classifier when a cheaper adequate routing resource exists.
+
 ### Phase 38 — Quota-preserving routing  (2 open, 5 closed)
 
 - **1608** ☐ Prefer cheap resources for simple repository summarization when no valuable warm session already exists.
@@ -188,12 +193,6 @@ these unwrapped.
 - **1331** ☐ Record dispatch time, first-byte time, time to first real token, time to first tool call, and completion time when the protocol exposes them.
 - **1332** ☐ Do not treat whitespace padding, transport keepalives, or reasoning-only deltas as the first generated token.
 - **1334** ☐ Record successful tool rounds, retries, repairs, failovers, and the final user-visible outcome separately.
-
-### Phase 34C — Automatic routing-model selection  (3 open, 10 closed)
-
-- **1436** ☐ Filter automatic candidates by maximum marginal routing cost.
-- **1439** ☐ Prefer a cheap metered model over an unreliable free model when failed routing attempts would cost more time than the price difference.
-- **1440** ☐ Avoid using a scarce premium subscription session as the classifier when a cheaper adequate routing resource exists.
 
 ## Practice sections, by number
 

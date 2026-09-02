@@ -9037,6 +9037,13 @@ fn automatic_classification_choice(
     let candidates =
         disposable_candidates(user, project, effective, &secrets, &telemetry, now_unix);
     let candidates = attach_classification_records(runtime, candidates, now_unix);
+    // Map line 1436's producer: the same `pricing.toml` read `session_router`
+    // already loads from the same config directory. Fail-soft, like that
+    // caller — an absent or malformed file yields an empty table and every
+    // candidate reads as unpriced, never as a fabricated zero.
+    let prices =
+        glasshouse::provider::pricing::PriceTable::load_from_dir(runtime.paths().config_dir());
+    let candidates = attach_prices(candidates, &prices);
     let health = observed_health_of(
         runtime,
         candidates.iter().map(|candidate| {
@@ -9070,11 +9077,12 @@ fn automatic_classification_choice(
                 .as_ref()
                 .map(|pin| pin.to_key()),
         );
-    // Map lines 1427 and 1435: the user's classification requirements,
+    // Map lines 1427, 1435 and 1436: the user's classification requirements,
     // layered like every other `[routing]` value. `max_router_latency_ms`
-    // has a default (2000ms), so the ceiling is always stated; whether it
-    // *applies* to a candidate is decided by whether that candidate has a
-    // measured median — see `routing::disposable::classification_verdict`.
+    // and `max_marginal_cost` both have defaults, so each ceiling is always
+    // stated; whether it *applies* to a candidate is decided by whether that
+    // candidate has a measured median or a known price — see
+    // `routing::disposable::classification_verdict`.
     let routing = DisposableRouting::for_support_work(
         effective.prefer_free_routing().value,
         free_preferences,
@@ -9082,7 +9090,11 @@ fn automatic_classification_choice(
     .with_classification_policy(
         glasshouse::routing::disposable::ClassificationPolicy::new()
             .with_max_latency_ms(Some(effective.max_router_latency().value.get()))
-            .with_local_only(effective.classification_local_only().value),
+            .with_local_only(effective.classification_local_only().value)
+            // Map line 1436: the user's own price ceiling, layered like
+            // every other `[routing]` value and always stated (it has a
+            // default), exactly as `max_router_latency` is above.
+            .with_max_marginal_cost_micro_usd(Some(effective.max_router_cost().value.get())),
     )
     // Capability map line 1577's background half. Automatic classification
     // is the other support job Glasshouse runs on its own behalf, and it
@@ -9482,6 +9494,25 @@ fn attach_classification_records(
                 }
             };
             candidate.with_classification_record(record)
+        })
+        .collect()
+}
+
+/// Attach each candidate's real per-token price from `prices` — capability
+/// map line 1436's producer, `PriceTable::price_for(provider, model)`. A
+/// pair the table names nothing for is left unpriced, exactly as
+/// [`attach_classification_records`] leaves an unmeasured candidate
+/// unmeasured: [`glasshouse::routing::disposable::classification_verdict`]'s
+/// price-ceiling gate reads that as inert, never as a fabricated zero.
+fn attach_prices(
+    candidates: Vec<glasshouse::routing::disposable::DisposableCandidate>,
+    prices: &glasshouse::provider::pricing::PriceTable,
+) -> Vec<glasshouse::routing::disposable::DisposableCandidate> {
+    candidates
+        .into_iter()
+        .map(|candidate| {
+            let price = prices.price_for(candidate.provider(), candidate.model());
+            candidate.with_price(price)
         })
         .collect()
 }

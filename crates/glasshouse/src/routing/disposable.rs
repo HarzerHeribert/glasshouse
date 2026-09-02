@@ -41,15 +41,17 @@ use super::{
     Contribution, Cost, CredentialId, EligibleCandidate, HardConstraint, RoutingExplanation,
     UseReason, apply_hard_constraints,
 };
+use crate::provider::pricing::ModelPrice;
 use crate::provider::quota::{
     CapacityBand, RemainingCapacityScore, ReserveDecision, ReserveDecisionInputs,
     evaluate_reserve_spend,
 };
 use crate::provider::registry::Locality;
 use crate::provider::telemetry::RetainedPick;
-use crate::routing::classify::{TaskClassification, WorkloadTier};
+use crate::routing::classify::{CLASSIFICATION_PROMPT_CONTRACT, TaskClassification, WorkloadTier};
 use crate::routing::evidence::{ClassificationRecord, MIN_SAMPLE_FOR_SUMMARY};
 use crate::routing::pressure::{ReservePolicy, ReserveScope};
+use crate::routing::request::TASK_TEXT_CEILING_BYTES;
 
 /// The kind of bounded internal work a choice is being made for.
 ///
@@ -214,6 +216,15 @@ pub struct DisposableCandidate {
     model: String,
     credential: CredentialId,
     cost: Cost,
+    /// This candidate's real per-token price, when the user's own
+    /// `pricing.toml` names it — capability map line 1436's producer,
+    /// `crate::provider::pricing::PriceTable::price_for`. `None` is
+    /// *unpriced*: a metered candidate nobody has priced, which
+    /// [`classification_verdict`]'s price-ceiling gate treats as inert
+    /// rather than expensive, exactly as an unmeasured latency is. Always
+    /// irrelevant for a [`Cost::Free`] candidate — [`Self::cost`] stays the
+    /// category, this is the number.
+    price: Option<ModelPrice>,
     /// Real capacity data the caller supplied for this candidate — see
     /// [`CandidateCapacity`]. Defaults to nothing known, which
     /// [`DisposableRouting::score`] renders as an honest `0.0` contribution
@@ -251,6 +262,7 @@ impl DisposableCandidate {
             model: model.into(),
             credential,
             cost,
+            price: None,
             capacity: CandidateCapacity::default(),
             locality: None,
             classification: None,
@@ -277,6 +289,19 @@ impl DisposableCandidate {
     pub fn with_capacity(mut self, capacity: CandidateCapacity) -> Self {
         self.capacity = capacity;
         self
+    }
+
+    /// Attach this candidate's real per-token price, when the caller read one
+    /// from `pricing.toml` — capability map line 1436's producer. `None`
+    /// leaves the price-ceiling gate inert for it: unpriced, not expensive.
+    #[must_use]
+    pub fn with_price(mut self, price: Option<ModelPrice>) -> Self {
+        self.price = price;
+        self
+    }
+
+    pub fn price(&self) -> Option<ModelPrice> {
+        self.price
     }
 
     /// State where this candidate's compute runs — capability map lines
@@ -417,6 +442,7 @@ const CLASSIFICATION_PREFERENCE_WEIGHT: f64 = 0.25;
 pub struct ClassificationPolicy {
     max_latency_ms: Option<u32>,
     local_only: bool,
+    max_marginal_cost_micro_usd: Option<u32>,
 }
 
 impl ClassificationPolicy {
@@ -442,6 +468,21 @@ impl ClassificationPolicy {
         self
     }
 
+    /// Capability map line 1436: exclude a metered candidate whose
+    /// [`estimated_classification_cost_micro_usd`] exceeds this many
+    /// millionths of a US dollar. `None` applies no ceiling — the default,
+    /// so every test double that predates this line keeps its exact
+    /// existing behaviour. A free candidate is never affected, and a
+    /// metered candidate with no price is *unpriced*, never excluded by it.
+    #[must_use]
+    pub fn with_max_marginal_cost_micro_usd(
+        mut self,
+        max_marginal_cost_micro_usd: Option<u32>,
+    ) -> Self {
+        self.max_marginal_cost_micro_usd = max_marginal_cost_micro_usd;
+        self
+    }
+
     pub fn max_latency_ms(&self) -> Option<u32> {
         self.max_latency_ms
     }
@@ -449,6 +490,59 @@ impl ClassificationPolicy {
     pub fn local_only(&self) -> bool {
         self.local_only
     }
+
+    pub fn max_marginal_cost_micro_usd(&self) -> Option<u32> {
+        self.max_marginal_cost_micro_usd
+    }
+}
+
+/// Map line 1436: bytes of English prose approximated as one token — the
+/// conventional ratio, conservative for JSON or code (a token there is
+/// usually shorter, so this over-counts, never under-counts, the true
+/// input). The only place in this crate that turns a byte count into a
+/// token estimate.
+const BYTES_PER_TOKEN_ESTIMATE: usize = 4;
+
+/// Map line 1436: a stated upper bound on the classification reply's length
+/// in tokens — the schema is ten flat keys, mostly booleans and short enum
+/// tags (see [`crate::routing::classify::CLASSIFICATION_RESPONSE_SCHEMA`]),
+/// which is a handful of short fields, not a measurement of any real reply.
+const CLASSIFICATION_REPLY_TOKENS: u64 = 64;
+
+/// Map line 1436's estimate: the most one classification call to a model
+/// priced `price` could cost, in millionths of a US dollar.
+///
+/// # This is a ceiling estimate, not a prediction
+///
+/// The input side assumes the whole task-text budget
+/// ([`TASK_TEXT_CEILING_BYTES`]) is spent on top of the fixed prompt
+/// contract ([`CLASSIFICATION_PROMPT_CONTRACT`]), and the output side
+/// assumes the reply uses every one of `CLASSIFICATION_REPLY_TOKENS`. A
+/// candidate is excluded by `classification_verdict` only when even this
+/// largest permitted call would be over the ceiling — a real call, almost
+/// always shorter, could still come in under it.
+///
+/// Bytes become tokens at `BYTES_PER_TOKEN_ESTIMATE` bytes per token.
+/// [`ModelPrice`]'s fields are dollars per **million** tokens, so a token
+/// count times a per-million price is already millionths of a dollar per
+/// token — micro-USD — with no further scaling.
+pub fn estimated_classification_cost_micro_usd(price: ModelPrice) -> u64 {
+    let input_tokens = (CLASSIFICATION_PROMPT_CONTRACT.len() + TASK_TEXT_CEILING_BYTES)
+        .div_ceil(BYTES_PER_TOKEN_ESTIMATE) as u64;
+    let input_micro_usd = input_tokens as f64 * price.input_per_million_usd;
+    let output_micro_usd = CLASSIFICATION_REPLY_TOKENS as f64 * price.output_per_million_usd;
+    (input_micro_usd + output_micro_usd).round() as u64
+}
+
+/// Render exact micro-USD as a compact decimal dollar amount — the same
+/// shape `crate::shell::state::format_usd` renders for a
+/// [`crate::config::RouterCostMicroUsd`], reproduced here on a bare `u64`
+/// because an estimate is not bounded by that type's range and this module
+/// carries no dependency on `crate::config` or `crate::shell`.
+fn format_micro_usd(value: u64) -> String {
+    let dollars = value / 1_000_000;
+    let fraction = value % 1_000_000;
+    format!("${dollars}.{fraction:06}")
 }
 
 /// One candidate's standing against [`ClassificationPolicy`] and the
@@ -465,8 +559,8 @@ enum ClassificationVerdict {
     },
 }
 
-/// Decide whether `candidate` may be asked to classify — the three filters
-/// capability map lines 1427, 1432 and 1435 name, in that order.
+/// Decide whether `candidate` may be asked to classify — the four filters
+/// capability map lines 1427, 1436, 1432 and 1435 name, in that order.
 ///
 /// # The honesty rule, and the one place it is deliberately inverted
 ///
@@ -475,7 +569,10 @@ enum ClassificationVerdict {
 /// than [`CLASSIFICATION_RELIABILITY_MIN_OBSERVATIONS`] outcomes, or with no
 /// median yet, is admitted with a note saying the requirement was inert —
 /// the same rule [`has_no_known_headroom`] applies to capacity, because
-/// turning "nothing measured" into "fails the bar" is a fabrication.
+/// turning "nothing measured" into "fails the bar" is a fabrication. Price
+/// is the same shape once more: a metered candidate with no entry in
+/// `pricing.toml` is *unpriced*, never excluded by the ceiling, exactly
+/// like an unmeasured latency.
 ///
 /// Locality is **not a measurement**: it is a fact the provider registry
 /// states for every provider name, and a caller that attaches none has
@@ -489,7 +586,7 @@ fn classification_verdict(
     policy: &ClassificationPolicy,
     candidate: &DisposableCandidate,
 ) -> ClassificationVerdict {
-    let mut notes = Vec::with_capacity(3);
+    let mut notes = Vec::with_capacity(4);
 
     // Map line 1427, first: a candidate this policy may never send to is
     // excluded before anything about its quality is even considered.
@@ -517,6 +614,57 @@ fn classification_verdict(
                 };
             }
         }
+    }
+
+    // Map line 1436, second: a candidate the user's own price policy
+    // forbids is excluded before its quality is weighed, the same
+    // reasoning 1427's locality gate states above.
+    match candidate.cost {
+        Cost::Free => notes.push(Contribution::new(
+            "price ceiling",
+            0.0,
+            "free — the price ceiling does not apply (map line 1436)".to_owned(),
+        )),
+        Cost::Metered => match policy.max_marginal_cost_micro_usd {
+            None => notes.push(Contribution::new(
+                "price ceiling",
+                0.0,
+                "no maximum marginal cost is configured for this decision (map line 1436)"
+                    .to_owned(),
+            )),
+            Some(ceiling) => match candidate.price {
+                None => notes.push(Contribution::new(
+                    "price ceiling",
+                    0.0,
+                    "unpriced: no entry in pricing.toml — the ceiling is inert; unpriced, not \
+                     expensive (map line 1436)"
+                        .to_owned(),
+                )),
+                Some(price) => {
+                    let estimate = estimated_classification_cost_micro_usd(price);
+                    if estimate > u64::from(ceiling) {
+                        return ClassificationVerdict::Excluded {
+                            reason: format!(
+                                "estimated classification cost {} exceeds the {} price ceiling \
+                                 (map line 1436)",
+                                format_micro_usd(estimate),
+                                format_micro_usd(u64::from(ceiling))
+                            ),
+                        };
+                    }
+                    notes.push(Contribution::new(
+                        "price ceiling",
+                        0.0,
+                        format!(
+                            "estimated classification cost {} is within the {} price ceiling \
+                             (map line 1436)",
+                            format_micro_usd(estimate),
+                            format_micro_usd(u64::from(ceiling))
+                        ),
+                    ));
+                }
+            },
+        },
     }
 
     // Map line 1432.

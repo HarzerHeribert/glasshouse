@@ -3671,3 +3671,18 @@ subprocess boundary and the tool's version pin) → `GH-RECON-EFFORT-CLAMP`
 **What is not done.** No harness identifier on the row. No body read on the relay. No rewrite of existing rows. No clamp: the shadow measures and the clamp is offered only if its rows say the reduction saves output tokens on tool-resume turns without moving the verdict distribution.
 
 **Successors, named:** `GH-OBSERVATION-SESSION-COLUMN` (Red — a migration and a session identity; Opus specialist, high) closes 2019; then `GH-EFFORT-CLAMP-SHADOW` (Amber, Sonnet) closes 2039 and Phase 58.
+
+## Preferring a cheap metered classifier over an unreliable free one — the ruling line 1439 needed, 2026-09-02
+
+**The line.** *"Prefer a cheap metered model over an unreliable free model when failed routing attempts would cost more time than the price difference."* Its refusal was always the same: no price reached the classifier's candidates. `GH-CLASSIFIER-PRICE-CEILING` put one there, and `phase-34c.md` recorded the shape of the comparison — *(1 − parsed_fraction) × median latency* against the price difference — which mixes milliseconds and micro-dollars and so needs an exchange rate nobody should invent in a packet.
+
+**The ruling: no exchange rate.** Glasshouse does not price a person's time. Both quantities are compared against thresholds the user has already stated in their own units, and the preference fires only when both statements are exceeded in the direction the line names:
+
+- A free candidate is **unreliable enough** when its expected wasted time — `(1 − parsed_fraction) × median_ms` over its classification record, both already read for lines 1432 and 1435 — exceeds `[routing] max_router_latency` (`RouterLatencyMs`), the user's own statement of how much routing latency a turn may bear. Below the reliability sample floor the record is *unmeasured* and the preference is inert, as every measurement term here is.
+- A metered candidate is **cheap enough** when `estimated_classification_cost_micro_usd(price)` is at or below `[routing] max_marginal_cost` (`RouterCostMicroUsd`), the user's own statement of what one decision may cost — the same ceiling 1436 excludes on. An unpriced candidate is never *cheap enough*; unpriced is not cheap.
+
+When a free candidate that would otherwise be chosen is unreliable enough and an admitted metered candidate is cheap enough, the metered candidate is preferred, and the explanation says both things with their figures: *"free `<model>` expects `<n>` ms of wasted retries per call, over the `<limit>` ms routing-latency limit; metered `<model>` at ~$`<x>` per call is under the $`<y>` ceiling (map line 1439)"*. Otherwise nothing moves. This is a preference among the metered fallback and the free-tier choice at `choose_for_automatic_classification`'s seam; it never reorders the free selection among free candidates (`scoring_never_reorders…`'s invariant), and it never fires when no metered candidate is priced.
+
+**Why these two knobs and not a third.** A `time_is_worth_usd_per_hour` setting would be a number the user has no way to know and Glasshouse no way to verify. The two existing settings already encode the user's tolerance on each axis, and the line's word *cheap* is relative to the user's ceiling, not to the free model's zero.
+
+**Successor, named:** `GH-CLASSIFIER-TIME-PRICE` (Amber, Sonnet high) — `routing/disposable.rs` only, once the price lands; one preference, two figures in the explanation, tests through the shipped binary with a planted classification record and `pricing.toml`. 1419 is *not* unlocked by this: *the premium capacity it protects* still has no producer at the classification site.
