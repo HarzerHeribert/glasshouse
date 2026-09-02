@@ -65,7 +65,7 @@ use crate::provider::telemetry::RateLimitHeaders;
 use super::http::{self, RequestHead};
 use super::ingress::{Exchange, Framing, Outcome, StreamEnd, Tokens, transport_detail};
 use super::upstream::{Route, Upstream, UpstreamBackend, VERSION_SEGMENT, path_of};
-use canonical::{Request, Response, StreamEvent, Unsupported};
+use canonical::{BlockStart, Delta, Request, Response, StreamEvent, Unsupported};
 use stream::{SseEvent, SseReader};
 
 pub use openai_chat::TOOL_ERROR_MARKER;
@@ -878,12 +878,18 @@ pub(super) fn serve(
         .is_some_and(|value| value.trim_start().starts_with("text/event-stream"));
     let upstream_status = status.as_u16();
 
-    let finish = |outcome: Outcome, status: u16, framing: Framing, tokens: Option<Tokens>| {
+    let finish = |outcome: Outcome,
+                  status: u16,
+                  framing: Framing,
+                  tokens: Option<Tokens>,
+                  first: FirstEvents| {
         (
             Exchange {
                 first_byte_at,
                 framing: Some(framing),
                 tokens,
+                first_token_at: first.first_token_at,
+                first_tool_call_at: first.first_tool_call_at,
                 ..decoded(outcome, status)
             },
             quota.clone(),
@@ -925,6 +931,7 @@ pub(super) fn serve(
                 ended,
             },
             None,
+            FirstEvents::default(),
         );
     }
 
@@ -997,7 +1004,14 @@ pub(super) fn serve(
             }
         }
         return match canonical::accumulate(&gathered) {
-            Ok(response) => deliver_document(out, from, &response, &finish, upstream_status),
+            Ok(response) => deliver_document(
+                out,
+                from,
+                &response,
+                first_byte_at,
+                &finish,
+                upstream_status,
+            ),
             Err(unsupported) => untranslatable(out, from, pair, unsupported, &finish),
         };
     }
@@ -1034,6 +1048,7 @@ pub(super) fn serve(
                     ended: StreamEnd::ClientClosed,
                 },
                 None,
+                FirstEvents::default(),
             );
         }
         for event in &events {
@@ -1048,6 +1063,7 @@ pub(super) fn serve(
                         ended: StreamEnd::ClientClosed,
                     },
                     None,
+                    FirstEvents::default(),
                 );
             }
             written += bytes.len() as u64;
@@ -1055,6 +1071,11 @@ pub(super) fn serve(
         let _ = out.write_all(b"0\r\n\r\n");
         let _ = out.flush();
         let _ = out.shutdown(Shutdown::Both);
+        // The provider never streamed this response at all — `events` is
+        // `Response::as_events`'s own reconstruction — so this is a document
+        // delivery exactly like `deliver_document`'s, just written as an
+        // event sequence instead of one JSON body: the same
+        // `FirstEvents::of_document` derivation applies.
         return finish(
             Outcome::Forwarded {
                 upstream_status,
@@ -1067,12 +1088,80 @@ pub(super) fn serve(
                 ended: StreamEnd::Complete,
             },
             Some(tokens_of(&response)),
+            FirstEvents::of_document(&events, first_byte_at),
         );
     }
-    deliver_document(out, from, &response, &finish, upstream_status)
+    deliver_document(
+        out,
+        from,
+        &response,
+        first_byte_at,
+        &finish,
+        upstream_status,
+    )
 }
 
-type Finish<'a> = &'a dyn Fn(Outcome, u16, Framing, Option<Tokens>) -> (Exchange, RateLimitHeaders);
+type Finish<'a> =
+    &'a dyn Fn(Outcome, u16, Framing, Option<Tokens>, FirstEvents) -> (Exchange, RateLimitHeaders);
+
+/// The 1331/1332 ruling's two clock readings, noted as canonical
+/// [`StreamEvent`]s pass through the seam that already decoded them.
+///
+/// Each field is stamped once and never overwritten, and [`Self::note`]
+/// retains no response text — only whatever instant its `now` closure
+/// returns at the moment a qualifying event is seen. A document delivery (the
+/// provider never streamed, or a stream was gathered into one before
+/// delivery) has no finer boundary to observe than its own `first_byte_at`
+/// — see [`Self::of_document`] — so the streamed path is the only caller that
+/// passes a real wall clock.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct FirstEvents {
+    first_token_at: Option<i64>,
+    first_tool_call_at: Option<i64>,
+}
+
+impl FirstEvents {
+    /// The rule, stated once: the first real token is the first
+    /// [`Delta::Text`] carrying a non-whitespace character, and the first
+    /// tool call is the first [`BlockStart::ToolUse`]. Everything else —
+    /// `Delta::InputJson`, `BlockStart::Text`, a whitespace-only text delta —
+    /// leaves both untouched, and a field already stamped is never restamped.
+    fn note(&mut self, event: &StreamEvent, now: &dyn Fn() -> i64) {
+        match event {
+            StreamEvent::BlockDelta {
+                delta: Delta::Text(text),
+                ..
+            } if self.first_token_at.is_none() && text.chars().any(|c| !c.is_whitespace()) => {
+                self.first_token_at = Some(now());
+            }
+            StreamEvent::BlockStart {
+                block: BlockStart::ToolUse { .. },
+                ..
+            } if self.first_tool_call_at.is_none() => {
+                self.first_tool_call_at = Some(now());
+            }
+            _ => {}
+        }
+    }
+
+    /// What a document delivery records: both instants equal to
+    /// `first_byte_at` when `events` (a real streamed sequence gathered into
+    /// one response, or [`Response::as_events`]'s reconstruction of one that
+    /// never streamed at all) contains a qualifying event, `None` otherwise
+    /// — the protocol exposed no finer boundary than the document's own
+    /// arrival, so there is one rule ([`Self::note`]) and not two, run here
+    /// with a clock that always answers the same instant.
+    fn of_document(events: &[StreamEvent], first_byte_at: Option<i64>) -> Self {
+        let mut first = Self::default();
+        let Some(at) = first_byte_at else {
+            return first;
+        };
+        for event in events {
+            first.note(event, &|| at);
+        }
+        first
+    }
+}
 
 fn tokens_of(response: &Response) -> Tokens {
     Tokens {
@@ -1083,10 +1172,16 @@ fn tokens_of(response: &Response) -> Tokens {
 }
 
 /// A translated document, written whole.
+///
+/// `first_byte_at` is threaded in rather than read off `finish` — the
+/// caller's own capture — because [`FirstEvents::of_document`] needs it to
+/// derive the 1331/1332 pair from `response.as_events()` before `finish`
+/// attaches it to the [`Exchange`].
 fn deliver_document(
     out: &mut TcpStream,
     from: &dyn Codec,
     response: &Response,
+    first_byte_at: Option<i64>,
     finish: Finish<'_>,
     upstream_status: u16,
 ) -> (Exchange, RateLimitHeaders) {
@@ -1105,6 +1200,7 @@ fn deliver_document(
                 ended: StreamEnd::Complete,
             },
             Some(tokens_of(response)),
+            FirstEvents::of_document(&response.as_events(), first_byte_at),
         ),
         Err(_) => finish(
             Outcome::ClientGone,
@@ -1115,6 +1211,7 @@ fn deliver_document(
                 ended: StreamEnd::ClientClosed,
             },
             None,
+            FirstEvents::default(),
         ),
     }
 }
@@ -1148,6 +1245,7 @@ fn untranslatable(
             ended,
         },
         None,
+        FirstEvents::default(),
     )
 }
 
@@ -1164,6 +1262,10 @@ fn stream_events<R: Read>(
     let mut written = 0u64;
     let mut usage = None;
     let mut order = canonical::Order::default();
+    // Line 1331/1332's pair, noted in real time as each canonical event
+    // passes — the one case where `FirstEvents::note` gets a real wall
+    // clock rather than the constant `of_document` feeds it.
+    let mut first_events = FirstEvents::default();
     let client_gone = |written: u64| {
         finish(
             Outcome::ClientGone,
@@ -1174,6 +1276,7 @@ fn stream_events<R: Read>(
                 ended: StreamEnd::ClientClosed,
             },
             None,
+            FirstEvents::default(),
         )
     };
     if write_stream_head(out).is_err() {
@@ -1213,6 +1316,7 @@ fn stream_events<R: Read>(
                             cached: final_usage.cached,
                         });
                     }
+                    first_events.note(event, &crate::provider::cache::now_unix_seconds);
                     let bytes = encoder.encode(event);
                     if bytes.is_empty() {
                         continue;
@@ -1261,6 +1365,7 @@ fn stream_events<R: Read>(
         } else {
             None
         },
+        first_events,
     )
 }
 
@@ -1337,6 +1442,11 @@ fn exchange(
         protocol: Some(pair.slug()),
         host: route.host(),
         first_byte_at: None,
+        // Line 1331/1332's pair: `None` for the same reason as `first_byte_at`
+        // above — this helper serves refusals before any response arrived —
+        // and `finish`'s own struct-update overrides both once one has.
+        first_token_at: None,
+        first_tool_call_at: None,
         framing: None,
         tokens: None,
         // Migration 24's two: `None` here, because this helper serves the
@@ -1500,6 +1610,161 @@ pub(super) mod fields {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Line 1331/1332's rule, fed canonical events directly rather than
+    /// through a decoder: a whitespace-only text delta, a text block start
+    /// with no delta of its own, a tool-input-JSON fragment, then real text,
+    /// then a tool-use block start. Only the last two qualify, each stamps
+    /// once, and nothing already stamped is stamped again.
+    #[test]
+    fn first_events_note_stamps_only_a_real_token_and_a_tool_use_and_never_twice() {
+        use std::cell::Cell;
+
+        let clock = Cell::new(100i64);
+        let now = || {
+            let at = clock.get();
+            clock.set(at + 1);
+            at
+        };
+
+        let mut first = FirstEvents::default();
+        assert_eq!(first.first_token_at, None);
+        assert_eq!(first.first_tool_call_at, None);
+
+        // Whitespace-only text: not a real token.
+        first.note(
+            &StreamEvent::BlockDelta {
+                index: 0,
+                delta: Delta::Text("   \n".to_owned()),
+            },
+            &now,
+        );
+        assert_eq!(first.first_token_at, None, "whitespace must not count");
+
+        // A text block opening with no delta of its own.
+        first.note(
+            &StreamEvent::BlockStart {
+                index: 0,
+                block: BlockStart::Text,
+            },
+            &now,
+        );
+        assert_eq!(first.first_token_at, None);
+        assert_eq!(first.first_tool_call_at, None);
+
+        // A tool-input JSON fragment is not a text delta.
+        first.note(
+            &StreamEvent::BlockDelta {
+                index: 1,
+                delta: Delta::InputJson("{\"command\"".to_owned()),
+            },
+            &now,
+        );
+        assert_eq!(first.first_token_at, None);
+        assert_eq!(first.first_tool_call_at, None);
+
+        // Real text: the first qualifying event.
+        first.note(
+            &StreamEvent::BlockDelta {
+                index: 0,
+                delta: Delta::Text("hello".to_owned()),
+            },
+            &now,
+        );
+        assert_eq!(first.first_token_at, Some(100));
+        assert_eq!(first.first_tool_call_at, None);
+
+        // A tool-use block start: the first qualifying event for its field.
+        first.note(
+            &StreamEvent::BlockStart {
+                index: 1,
+                block: BlockStart::ToolUse {
+                    id: "call_1".to_owned(),
+                    name: "Bash".to_owned(),
+                },
+            },
+            &now,
+        );
+        assert_eq!(first.first_token_at, Some(100));
+        assert_eq!(first.first_tool_call_at, Some(101));
+
+        // Neither restamps on a later qualifying event of its own kind.
+        first.note(
+            &StreamEvent::BlockDelta {
+                index: 0,
+                delta: Delta::Text("more".to_owned()),
+            },
+            &now,
+        );
+        first.note(
+            &StreamEvent::BlockStart {
+                index: 2,
+                block: BlockStart::ToolUse {
+                    id: "call_2".to_owned(),
+                    name: "Read".to_owned(),
+                },
+            },
+            &now,
+        );
+        assert_eq!(
+            first.first_token_at,
+            Some(100),
+            "first token must not restamp"
+        );
+        assert_eq!(
+            first.first_tool_call_at,
+            Some(101),
+            "first tool call must not restamp"
+        );
+    }
+
+    /// [`FirstEvents::of_document`]'s own rule: both instants equal the given
+    /// `first_byte_at` when the event sequence carries a qualifying event,
+    /// `None` when it does not or when `first_byte_at` itself is `None` (a
+    /// document that never reached a provider has no instant to derive from).
+    #[test]
+    fn first_events_of_document_uses_first_byte_at_as_the_only_clock_reading() {
+        let events = vec![
+            StreamEvent::BlockStart {
+                index: 0,
+                block: BlockStart::Text,
+            },
+            StreamEvent::BlockDelta {
+                index: 0,
+                delta: Delta::Text("hi there".to_owned()),
+            },
+            StreamEvent::BlockStart {
+                index: 1,
+                block: BlockStart::ToolUse {
+                    id: "call_1".to_owned(),
+                    name: "Bash".to_owned(),
+                },
+            },
+        ];
+        let first = FirstEvents::of_document(&events, Some(1_700_000_000));
+        assert_eq!(first.first_token_at, Some(1_700_000_000));
+        assert_eq!(first.first_tool_call_at, Some(1_700_000_000));
+
+        let text_only = vec![StreamEvent::BlockDelta {
+            index: 0,
+            delta: Delta::Text("hi".to_owned()),
+        }];
+        let first = FirstEvents::of_document(&text_only, Some(1_700_000_000));
+        assert_eq!(first.first_token_at, Some(1_700_000_000));
+        assert_eq!(first.first_tool_call_at, None);
+
+        let nothing_qualifying = vec![StreamEvent::BlockDelta {
+            index: 0,
+            delta: Delta::Text("   ".to_owned()),
+        }];
+        let first = FirstEvents::of_document(&nothing_qualifying, Some(1_700_000_000));
+        assert_eq!(first.first_token_at, None);
+        assert_eq!(first.first_tool_call_at, None);
+
+        // No `first_byte_at` at all: nothing to derive an instant from.
+        let first = FirstEvents::of_document(&events, None);
+        assert_eq!(first, FirstEvents::default());
+    }
 
     #[test]
     fn every_ordered_pair_appears_exactly_once() {
@@ -1926,6 +2191,7 @@ mod tests {
         status: u16,
         framing: Framing,
         tokens: Option<Tokens>,
+        first: FirstEvents,
     ) -> (Exchange, RateLimitHeaders) {
         (
             Exchange {
@@ -1935,6 +2201,8 @@ mod tests {
                 protocol: None,
                 host: String::new(),
                 first_byte_at: None,
+                first_token_at: first.first_token_at,
+                first_tool_call_at: first.first_tool_call_at,
                 framing: Some(framing),
                 tokens,
                 effort: None,

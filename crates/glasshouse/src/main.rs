@@ -4134,6 +4134,14 @@ fn routing_cost_report(runtime: &Runtime, hours: u32) -> anyhow::Result<String> 
 /// columns above, the coding-agent group is the one group this build **can**
 /// honestly time, because a first-byte instant is a clock reading rather than
 /// a read of the response body the relay never parses.
+///
+/// `GH-STREAM-FIRST-EVENTS` (lines 1331/1332) adds two more such pairs beside
+/// it, `first-token`/`time to first token` and `first-tool-call`/`time to
+/// first tool call`, through the same `render_time_to_first_byte` renderer —
+/// but only a **translated** exchange can ever supply a sample for either:
+/// `crate::gateway::translate` decodes every provider event anyway, so the
+/// instant a qualifying one passes is a clock reading, same as the byte
+/// above; a relayed exchange leaves both `NULL`.
 #[allow(clippy::too_many_arguments)]
 fn render_routing_cost(
     project_id: &str,
@@ -4175,6 +4183,22 @@ fn render_routing_cost(
             out.push_str(&format!(
                 "    time to first byte  : {}\n",
                 render_time_to_first_byte(group.mean_time_to_first_byte_ms)
+            ));
+            out.push_str(&format!(
+                "    first-token samples : {}\n",
+                group.first_token_sample_count
+            ));
+            out.push_str(&format!(
+                "    time to first token : {}\n",
+                render_time_to_first_byte(group.mean_time_to_first_token_ms)
+            ));
+            out.push_str(&format!(
+                "    first-tool-call samples : {}\n",
+                group.first_tool_call_sample_count
+            ));
+            out.push_str(&format!(
+                "    time to first tool call : {}\n",
+                render_time_to_first_byte(group.mean_time_to_first_tool_call_ms)
             ));
         }
     }
@@ -4396,6 +4420,12 @@ fn render_token_count(value: Option<i64>) -> String {
 /// [`glasshouse::routing::evidence::PurposeConsumption::first_byte_sample_count`]
 /// is `0` — see that field's own doc comment — so there is nothing else this
 /// function needs to check.
+///
+/// Despite its name, the shape is generic over any mean-milliseconds column
+/// with the same "sample count zero means `None`" contract, so
+/// `render_routing_cost` also calls it for `mean_time_to_first_token_ms` and
+/// `mean_time_to_first_tool_call_ms` — one renderer for all three timing
+/// pairs rather than three copies of the same match.
 fn render_time_to_first_byte(mean_ms: Option<f64>) -> String {
     match mean_ms {
         Some(ms) => format!("{}ms (mean)", ms.round() as i64),

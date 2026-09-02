@@ -557,6 +557,12 @@ impl SessionRouting {
             Some(reading.completed_at_unix),
         )
         .with_first_byte_at(exchange.first_byte_at)
+        // Line 1331/1332's pair: `translate::serve` derives both from the
+        // canonical events it already had to decode, and `None` on a
+        // relayed exchange (this method's own caller never gives it one),
+        // exactly like `first_byte_at` above.
+        .with_first_token_at(exchange.first_token_at)
+        .with_first_tool_call_at(exchange.first_tool_call_at)
         .with_outcome(outcome)
         .with_failure_class(failure_class)
         .with_failovers(Some(reading.effect.failovers()))
@@ -1172,6 +1178,8 @@ mod tests {
             // No response ever arrived — this outcome exists precisely
             // because the provider could not be reached at all.
             first_byte_at: None,
+            first_token_at: None,
+            first_tool_call_at: None,
             framing: None,
             tokens: None,
             effort: None,
@@ -1224,6 +1232,8 @@ mod tests {
             protocol: Some("anthropic-messages".to_owned()),
             host: String::new(),
             first_byte_at: Some(1_700_000_000),
+            first_token_at: None,
+            first_tool_call_at: None,
             framing: Some(Framing {
                 declared,
                 relayed,

@@ -716,3 +716,105 @@ Recorded scope limits — stated by the worker, not discovered later:
 ---
 
 ---
+
+# Lines 1331 and 1332 — CLOSED 2026-09-02 (`GH-STREAM-FIRST-EVENTS`, Amber, Sonnet high): the two timestamps the seam can honestly supply
+
+The 2026-08-30 ruling above kept 1331 PARTIALLY VERIFIED because the relay
+declines to parse the body that carries a first-token boundary, and *"when
+the protocol exposes them"* is about the protocol, not about what Glasshouse
+chooses to look at. Both halves still hold. What changed is the path: since
+Phase 56 a **translated** exchange is decoded by the seam in order to be
+re-encoded, and the row already carries `tokens`, `effort` and `turn_shape`
+from exactly that decoding. `design-decisions.md` (*First real token and
+first tool call on the translated path*) ruled the two instants the same kind
+of fact on the same path, and wrote 1332's rule on the canonical vocabulary.
+
+**Contract (1331).** Given a translated gateway exchange, when the provider's
+response passes through the seam, Glasshouse records on the exchange's
+routing-observation row the instant of the first text delta carrying a
+non-whitespace character (`first_token_at`) and the instant of the first
+tool-use block start (`first_tool_call_at`), and `glasshouse routing-cost`
+prints a mean time-to-first-token and time-to-first-tool-call per group
+beside its time-to-first-byte — while a relayed exchange writes `NULL` for
+both, as it does for `first_byte_at`'s siblings, and a document response
+records both as its own `first_byte_at` only when the document contains a
+qualifying block.
+
+**Contract (1332).** The first real token is never a whitespace-only delta,
+an SSE transport comment, a provider keepalive event, or a reasoning-only
+delta.
+
+**Production evidence.** `gateway/translate/mod.rs::FirstEvents::note` — one
+rule on `StreamEvent`: the first `Delta::Text` with a non-whitespace
+character stamps `first_token_at` once, the first `BlockStart::ToolUse`
+stamps `first_tool_call_at` once, nothing else touches either and no text is
+retained; called in the streamed loop before each event is encoded;
+`FirstEvents::of_document` runs the same rule over `Response::as_events()`
+with a clock that answers `first_byte_at`, for `deliver_document` and the
+stream-requested-but-document-answered branch (the worker's one deviation
+from the packet's shape, provably equivalent because `canonical::accumulate`
+concatenates deltas without dropping characters — recorded as a packet error
+by the worker, accepted). `gateway/ingress.rs::Exchange` carries both beside
+`first_byte_at`, `None` on every relayed and refused path;
+`gateway/session.rs::record_routing_observation` writes them through
+`NewObservation::with_first_token_at` / `with_first_tool_call_at`
+(`routing/evidence.rs`, beside `with_first_byte_at`, into the two columns
+migration 11 created and nothing had written); `consumption_by_purpose`
+computes the two `COUNT`/`AVG(CASE …)` pairs beside the first-byte pair;
+`main.rs::render_routing_cost` prints four lines through
+`render_time_to_first_byte`, *not recorded* for an untimed group. The 1332
+exclusions at the vocabulary level: an SSE comment is dropped by `SseReader`;
+`ping` decodes to no event (`anthropic.rs`); a thinking or signature delta is
+refused at decode — so `note` can never see a reasoning-only delta, and the
+whitespace check is the one exclusion done by content.
+
+**Regression evidence** (`tests/gateway_first_events.rs`, a raw-socket fake
+upstream and a real `Gateway`, the `anthropic-messages → openai-chat` pair
+`gateway_translate.rs` drives, 5):
+`a_translated_streamed_exchange_notes_first_token_and_first_tool_call_in_order`
+(a keep-alive comment, a whitespace-only delta, a 1.2 s pause, real text, a
+pause, a tool-use block — the three instants ordered with gaps of at least a
+second), `a_translated_stream_with_text_and_no_tool_use_records_no_first_tool_call`,
+`a_relayed_exchange_records_no_first_token_or_first_tool_call`,
+`a_translated_document_with_text_and_a_tool_call_records_both_as_first_byte_at`,
+`a_translated_stream_whose_only_text_is_whitespace_records_no_first_token`;
+unit `gateway::translate::tests::{first_events_note_stamps_only_a_real_token_and_a_tool_use_and_never_twice,
+first_events_of_document_uses_first_byte_at_as_the_only_clock_reading}`;
+`routing_cost::a_row_carrying_first_token_and_first_tool_call_prints_real_figures_and_an_untimed_group_says_so_twice`.
+
+**Mutations** (worker, four, all KILLED, restored byte-identical):
+`whitespace-counts` (the non-whitespace check → `true`) by the whitespace
+test — *a whitespace-only text delta must never count as the first real
+token*; `never-stamped` (the streamed loop's `note` call removed) by the
+ordered test — `first_token_at` was `None`; `tool-call-at-any-block` (the
+`ToolUse` arm widened to any block start) by the no-tool-use test — the
+worker's first attempt dropped the arm's `..` and produced a non-compiling
+mutant that `mutate.sh` reported as a false KILLED (§80's fourth way), re-run
+with the pattern intact; `relay-stamps` (the relay's success `Exchange` given
+`first_token_at: first_byte_at`) by the relayed test — *nothing may be
+invented for it*.
+
+Gates: `gateway_first_events` 5/5, `--lib gateway` **whole** 210/210 (the
+module's source scans run only there), `routing::evidence` 60/60,
+`gateway_translate` 9/9, `gateway_translate_evidence` 2/2, `routing_cost`
+9/9, `blast-radius.sh --targeted` exit 0. Scope overflow, mechanical:
+`tests/routing_economics.rs`'s one `PurposeConsumption` literal gained the
+four fields.
+
+**Recorded limits.** Unix-second resolution, like every timestamp on the
+row — at that resolution *time to first token* is nearly always zero or one,
+honest and nearly useless for comparison; the millisecond offsets Phase 33B's
+TTFC family needs are a schema decision (Cluster G) and the named successor
+**`GH-STREAM-TIMING-MS`** (Red). The socket tests drive one pair; the
+mechanism is pair-agnostic by construction. The `ping` and reasoning-delta
+exclusions hold by construction (decoder facts read, not driven through the
+fixture, whose wire has neither). A mid-stream client disconnect keeps the
+instants already noted rather than discarding them (a fact that happened,
+unlike usage) — untested either way. The stream-requested-but-document branch
+shares `of_document` and has no dedicated test.
+
+State: **COMPLETE** for 1331 (promoted from PARTIALLY VERIFIED) and 1332.
+Phase 33A stands at 14 of 15; 1334 stays open on `tool_rounds` and `repairs`
+(the translated response's tool-use blocks are now countable at the same
+seam — a Green successor, `GH-TOOL-ROUNDS-ON-TRANSLATED`, once the ms
+question is settled or independently of it).

@@ -211,6 +211,10 @@ const OUTPUT_TOKENS: &str = "    output tokens       : ";
 const CACHED_TOKENS: &str = "    cached input tokens : ";
 const FIRST_BYTE_SAMPLES: &str = "    first-byte samples  : ";
 const TIME_TO_FIRST_BYTE: &str = "    time to first byte  : ";
+const FIRST_TOKEN_SAMPLES: &str = "    first-token samples : ";
+const TIME_TO_FIRST_TOKEN: &str = "    time to first token : ";
+const FIRST_TOOL_CALL_SAMPLES: &str = "    first-tool-call samples : ";
+const TIME_TO_FIRST_TOOL_CALL: &str = "    time to first tool call : ";
 
 // ---------------------------------------------------------------------------
 // 1. Attribution: the routing model's own spend, apart from every other row.
@@ -828,5 +832,67 @@ fn an_exchange_that_never_reached_a_provider_records_no_first_byte_and_the_reade
     assert!(
         !rendered.chars().any(|c| c.is_ascii_digit()),
         "\"not recorded\" must never carry a stray digit: {rendered:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 6. GH-STREAM-FIRST-EVENTS (lines 1331/1332): the first-token and
+//    first-tool-call readout lines beside the first-byte pair above.
+// ---------------------------------------------------------------------------
+
+/// A seeded row carrying both `first_token_at` and `first_tool_call_at`
+/// prints real figures for both new lines; a group whose rows never carried
+/// either — the coding-agent shape, until a translated exchange supplies
+/// them — prints "not recorded" for both, exactly as `time to first byte`
+/// already does for an untimed group.
+#[test]
+fn a_row_carrying_first_token_and_first_tool_call_prints_real_figures_and_an_untimed_group_says_so_twice()
+ {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+    let at = now() - 60;
+    let dispatched = at - 5;
+    let completed = at + 5;
+
+    let timed = NewObservation::new("timed-provider", "timed-model")
+        .with_purpose(Some("classification"))
+        .with_timing(Some(dispatched), Some(completed))
+        .with_first_token_at(Some(dispatched + 2))
+        .with_first_tool_call_at(Some(dispatched + 3));
+    fixture.ledger().record(timed, at).unwrap();
+
+    // A real gateway-shaped row: harness-recorded, no purpose, and — like
+    // every relayed exchange, and like every gateway exchange before
+    // GH-STREAM-FIRST-EVENTS translated one — no first_token_at or
+    // first_tool_call_at either.
+    fixture.record_gateway_exchange("gateway-provider", "gateway-model", "claude-code", at);
+
+    let run = fixture.routing_cost(None);
+    assert!(run.status.success(), "stderr: {}", run.stderr);
+
+    let classification = section(&run.stdout, "classification");
+    assert_eq!(value_after(&classification, FIRST_TOKEN_SAMPLES), "1");
+    assert!(
+        value_after(&classification, TIME_TO_FIRST_TOKEN).ends_with("ms (mean)"),
+        "{}",
+        run.stdout
+    );
+    assert_eq!(value_after(&classification, FIRST_TOOL_CALL_SAMPLES), "1");
+    assert!(
+        value_after(&classification, TIME_TO_FIRST_TOOL_CALL).ends_with("ms (mean)"),
+        "{}",
+        run.stdout
+    );
+
+    let coding_agent = section(&run.stdout, "coding-agent (gateway relay)");
+    assert_eq!(value_after(&coding_agent, FIRST_TOKEN_SAMPLES), "0");
+    assert_eq!(
+        value_after(&coding_agent, TIME_TO_FIRST_TOKEN),
+        "not recorded"
+    );
+    assert_eq!(value_after(&coding_agent, FIRST_TOOL_CALL_SAMPLES), "0");
+    assert_eq!(
+        value_after(&coding_agent, TIME_TO_FIRST_TOOL_CALL),
+        "not recorded"
     );
 }

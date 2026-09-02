@@ -672,6 +672,10 @@ fn consumption(
         cached_input_tokens: None,
         first_byte_sample_count: 0,
         mean_time_to_first_byte_ms: None,
+        first_token_sample_count: 0,
+        mean_time_to_first_token_ms: None,
+        first_tool_call_sample_count: 0,
+        mean_time_to_first_tool_call_ms: None,
     }
 }
 

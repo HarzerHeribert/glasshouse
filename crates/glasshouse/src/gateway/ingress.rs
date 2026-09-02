@@ -94,6 +94,19 @@
 //! boundary that stays is the one this module has always kept, and the
 //! source-scan tests in `tests/gateway_failure_taxonomy.rs` hold it.
 //!
+//! # A fifth thing may now be recorded: the first real token and the first tool call
+//!
+//! Capability map lines 1331 and 1332, under the ruling recorded in
+//! `docs/product/design-decisions.md` as *"first real token and first tool
+//! call on the translated path — the 1331/1332 ruling"*. This module still
+//! decodes nothing: [`super::translate`] already decodes every provider
+//! event into its own canonical form in order to re-encode it for the
+//! harness, and a translated [`Exchange`] carries the instant a qualifying
+//! canonical event passed that seam, exactly as it carries `first_byte_at` —
+//! a clock reading, never a byte of the response. A **relayed** exchange
+//! never enters a codec, so it writes `None` for both, the same restraint
+//! `Tokens` already keeps.
+//!
 //! # The relay rule, narrowed and not repealed (Phase 56)
 //!
 //! Capability map lines 1948–1950, under the ruling recorded in
@@ -197,6 +210,16 @@ pub(super) struct Exchange {
     /// provider could not be reached at all. See this module's own "a third
     /// thing may now be recorded" for what this may and may not become.
     pub(super) first_byte_at: Option<i64>,
+    /// The instant the first real generated token passed the seam, on a
+    /// **translated** exchange only — see this module's own "a fifth thing
+    /// may now be recorded". `None` on every relayed exchange (this module
+    /// never decodes one), on every refused exchange, and on a translated
+    /// exchange whose answer never carried one.
+    pub(super) first_token_at: Option<i64>,
+    /// The instant the first tool-use block started, on a **translated**
+    /// exchange only — the same rule and the same `None` cases as
+    /// [`Self::first_token_at`].
+    pub(super) first_tool_call_at: Option<i64>,
     /// How the provider's response was framed and how its stream ended —
     /// `None` on every path where no response arrived, exactly like
     /// `first_byte_at`. See this module's own "a fourth thing may now be
@@ -1071,6 +1094,13 @@ fn exchange(outcome: Outcome, status: u16, upstream: &Upstream, route: Option<&R
         // arrived; [`forward`]'s own three post-response returns override
         // both of these with the real readings via struct-update syntax.
         first_byte_at: None,
+        // Line 1331/1332's pair: the relay never decodes a request, so it
+        // has nothing to derive either of these from and writes `NULL` for
+        // both, exactly like the token counts below — unread, not absent.
+        // `translate::serve` fills them; nothing on this path does, on any
+        // of its returns.
+        first_token_at: None,
+        first_tool_call_at: None,
         framing: None,
         tokens: None,
         // The relay never decodes a request, so it has nothing to derive
@@ -1236,6 +1266,8 @@ mod tests {
                 protocol: Some("anthropic-messages".to_owned()),
                 host: "openrouter.ai".to_owned(),
                 first_byte_at: Some(1_700_000_000),
+                first_token_at: Some(1_700_000_001),
+                first_tool_call_at: Some(1_700_000_002),
                 framing: Some(Framing {
                     declared: Some(4096),
                     relayed: Some(4096),

@@ -47,21 +47,20 @@
 //!   forbidden. `None` on every exchange that never reached a provider at
 //!   all, and on the transport-failure case where one was dialled but never
 //!   answered.
-//! - **`first_token_at`, `first_tool_call_at`: not supplied, at all, by this
-//!   producer.** Not merely unavailable to this round's partition —
-//!   structurally unavailable to the ingress design itself.
-//!   `crate::gateway::ingress`'s own module documentation is explicit that
-//!   `crate::gateway::ingress::Exchange` (private to that module) is
-//!   "structurally incapable of carrying a body," because a pass-through
-//!   gateway that parsed response bytes to find the first real token would be
-//!   a parser of the payload it exists to be unable to read. Line 1332's
-//!   warning against treating "whitespace padding, transport keepalives, or
-//!   reasoning-only deltas" as the first generated token is consequently moot
-//!   for this producer: it never attempts to find one, so it cannot get it
-//!   wrong, and it leaves the column `NULL` rather than fabricate a value.
-//!   **These two boxes stay open.** A component that reads the response
-//!   stream's own framing (the harness adapter, or a body-aware layer this
-//!   project has not built) is what would have to supply them.
+//! - **`first_token_at`, `first_tool_call_at`: supplied by this producer only
+//!   for a *translated* exchange — GH-STREAM-FIRST-EVENTS, closing 1331 and
+//!   1332 for the translated path.** `crate::gateway::translate` already
+//!   decodes every provider event into its own canonical form in order to
+//!   re-encode it for the harness, so the instant a qualifying canonical
+//!   event passes that seam is a clock reading, not a step toward the parse
+//!   this module remains forbidden. Line 1332's exclusions — whitespace
+//!   padding, transport keepalives, reasoning-only deltas — are checked in
+//!   the canonical vocabulary itself (`translate::FirstEvents::note`), not
+//!   per provider, so they cannot drift per codec. A **relayed** exchange
+//!   still leaves both `NULL`: `crate::gateway::ingress::Exchange` (private
+//!   to that module) is still "structurally incapable of carrying a body,"
+//!   and this producer still cannot get the value wrong because it never
+//!   attempts to find one on that path.
 //! - **`tool_rounds`, `repairs`: not supplied.** The gateway serves one HTTP
 //!   request per connection (`crate::gateway::ingress::serve`'s own "why one
 //!   request per connection") and has no notion of a *turn* spanning several
@@ -936,6 +935,26 @@ impl NewObservation {
         self
     }
 
+    /// Line 1331's other two timing columns [`Self::with_timing`] does not
+    /// carry — the instant the first real generated token passed the seam.
+    /// Supplied only by a **translated** exchange, whose seam already decodes
+    /// every canonical event in order to re-encode it for the harness; a
+    /// relayed exchange never enters a codec and passes [`None`], exactly
+    /// like [`Self::with_first_byte_at`]'s own relayed case. See
+    /// `docs/product/design-decisions.md`'s *"first real token and first
+    /// tool call on the translated path — the 1331/1332 ruling"*.
+    pub fn with_first_token_at(mut self, first_token_at_unix: Option<i64>) -> Self {
+        self.first_token_at_unix = first_token_at_unix;
+        self
+    }
+
+    /// [`Self::with_first_token_at`]'s sibling: the instant the first
+    /// tool-use block started, under the same rule and the same `None` case.
+    pub fn with_first_tool_call_at(mut self, first_tool_call_at_unix: Option<i64>) -> Self {
+        self.first_tool_call_at_unix = first_tool_call_at_unix;
+        self
+    }
+
     /// The token counts a provider reported for this turn.
     ///
     /// Three `Option`s rather than a struct, matching [`Self::with_timing`]
@@ -1137,8 +1156,11 @@ pub struct RoutingObservation {
 
 impl RoutingObservation {
     /// The wall-clock duration of this exchange, when both ends were
-    /// recorded — the closest this ledger comes to a latency figure given
-    /// line 1332's own honest gap (see this module's header).
+    /// recorded — the closest this ledger comes to a latency figure at
+    /// second resolution now that a translated exchange also carries
+    /// `first_token_at` and `first_tool_call_at` (see this module's header);
+    /// the honest gap that remains is a **relayed** exchange's alone, which
+    /// still has no producer for either.
     pub fn duration_ms(&self) -> Option<i64> {
         let dispatched = self.dispatched_at_unix?;
         let completed = self.completed_at_unix?;
@@ -2625,6 +2647,21 @@ pub struct PurposeConsumption {
     /// counted in [`Self::first_byte_sample_count`] — `None` when that count
     /// is `0`, never a fabricated duration for a group nothing timed.
     pub mean_time_to_first_byte_ms: Option<f64>,
+    /// [`Self::first_byte_sample_count`]'s sibling for `first_token_at` — a
+    /// real `COUNT(first_token_at)`. Only a **translated** exchange can ever
+    /// supply it (`GH-STREAM-FIRST-EVENTS`, lines 1331/1332), so it is
+    /// honestly `0` for every group whose rows are all relayed.
+    pub first_token_sample_count: usize,
+    /// The mean time to first token, in milliseconds, over exactly the rows
+    /// counted in [`Self::first_token_sample_count`] — `None` when that count
+    /// is `0`, under the same rule as [`Self::mean_time_to_first_byte_ms`].
+    pub mean_time_to_first_token_ms: Option<f64>,
+    /// [`Self::first_byte_sample_count`]'s sibling for `first_tool_call_at`.
+    pub first_tool_call_sample_count: usize,
+    /// The mean time to the first tool call, in milliseconds, over exactly
+    /// the rows counted in [`Self::first_tool_call_sample_count`] — `None`
+    /// when that count is `0`.
+    pub mean_time_to_first_tool_call_ms: Option<f64>,
 }
 
 /// [`EvidenceLedger::translation_cache_savings`]'s result — map line 2034's
@@ -3862,6 +3899,10 @@ impl EvidenceLedger {
     /// **both** `first_byte_at` and `dispatched_at`, and is `NULL` (`None`)
     /// exactly when that count is `0` — SQLite's `AVG` over an empty set is
     /// already `NULL`, so there is no manual zero-guard here either.
+    /// `first_token_sample_count`/`mean_time_to_first_token_ms` and their
+    /// tool-call siblings are the identical pair, copied for
+    /// `first_token_at`/`first_tool_call_at` — `GH-STREAM-FIRST-EVENTS`,
+    /// lines 1331/1332.
     ///
     /// Scoped to this ledger's own `project_id`, like [`Self::observed_identities`]
     /// next door and for the same belt-and-suspenders reason: this reads
@@ -3887,7 +3928,21 @@ impl EvidenceLedger {
                                 WHEN first_byte_at IS NOT NULL AND dispatched_at IS NOT NULL
                                 THEN CAST(first_byte_at - dispatched_at AS REAL) * 1000
                             END
-                        ) AS mean_time_to_first_byte_ms
+                        ) AS mean_time_to_first_byte_ms,
+                        COUNT(first_token_at) AS first_token_sample_count,
+                        AVG(
+                            CASE
+                                WHEN first_token_at IS NOT NULL AND dispatched_at IS NOT NULL
+                                THEN CAST(first_token_at - dispatched_at AS REAL) * 1000
+                            END
+                        ) AS mean_time_to_first_token_ms,
+                        COUNT(first_tool_call_at) AS first_tool_call_sample_count,
+                        AVG(
+                            CASE
+                                WHEN first_tool_call_at IS NOT NULL AND dispatched_at IS NOT NULL
+                                THEN CAST(first_tool_call_at - dispatched_at AS REAL) * 1000
+                            END
+                        ) AS mean_time_to_first_tool_call_ms
                  FROM routing_observations
                  WHERE project_id = ?1 AND observed_at >= ?2 AND observed_at <= ?3
                  GROUP BY purpose, harness_recorded
@@ -4491,6 +4546,8 @@ fn row_to_observation(
 fn row_to_purpose_consumption(row: &Row<'_>) -> rusqlite::Result<PurposeConsumption> {
     let sample_count: i64 = row.get("sample_count")?;
     let first_byte_sample_count: i64 = row.get("first_byte_sample_count")?;
+    let first_token_sample_count: i64 = row.get("first_token_sample_count")?;
+    let first_tool_call_sample_count: i64 = row.get("first_tool_call_sample_count")?;
     Ok(PurposeConsumption {
         purpose: row.get("purpose")?,
         harness_recorded: row.get("harness_recorded")?,
@@ -4500,6 +4557,10 @@ fn row_to_purpose_consumption(row: &Row<'_>) -> rusqlite::Result<PurposeConsumpt
         cached_input_tokens: row.get("cached_input_tokens")?,
         first_byte_sample_count: first_byte_sample_count as usize,
         mean_time_to_first_byte_ms: row.get("mean_time_to_first_byte_ms")?,
+        first_token_sample_count: first_token_sample_count as usize,
+        mean_time_to_first_token_ms: row.get("mean_time_to_first_token_ms")?,
+        first_tool_call_sample_count: first_tool_call_sample_count as usize,
+        mean_time_to_first_tool_call_ms: row.get("mean_time_to_first_tool_call_ms")?,
     })
 }
 
@@ -6068,6 +6129,10 @@ mod correlation_tests {
                 cached_input_tokens: None,
                 first_byte_sample_count: 0,
                 mean_time_to_first_byte_ms: None,
+                first_token_sample_count: 0,
+                mean_time_to_first_token_ms: None,
+                first_tool_call_sample_count: 0,
+                mean_time_to_first_tool_call_ms: None,
             },
             PurposeConsumption {
                 purpose: Some("a-purpose-this-build-does-not-know".to_owned()),
@@ -6078,6 +6143,10 @@ mod correlation_tests {
                 cached_input_tokens: None,
                 first_byte_sample_count: 0,
                 mean_time_to_first_byte_ms: None,
+                first_token_sample_count: 0,
+                mean_time_to_first_token_ms: None,
+                first_tool_call_sample_count: 0,
+                mean_time_to_first_tool_call_ms: None,
             },
         ];
         let overhead = RoutingOverhead::from_consumption(&groups);
@@ -6105,6 +6174,10 @@ mod correlation_tests {
                 cached_input_tokens: None,
                 first_byte_sample_count: 0,
                 mean_time_to_first_byte_ms: None,
+                first_token_sample_count: 0,
+                mean_time_to_first_token_ms: None,
+                first_tool_call_sample_count: 0,
+                mean_time_to_first_tool_call_ms: None,
             },
             PurposeConsumption {
                 purpose: None,
@@ -6115,6 +6188,10 @@ mod correlation_tests {
                 cached_input_tokens: None,
                 first_byte_sample_count: 0,
                 mean_time_to_first_byte_ms: None,
+                first_token_sample_count: 0,
+                mean_time_to_first_token_ms: None,
+                first_tool_call_sample_count: 0,
+                mean_time_to_first_tool_call_ms: None,
             },
             PurposeConsumption {
                 purpose: Some("a-purpose-this-build-does-not-know".to_owned()),
@@ -6125,6 +6202,10 @@ mod correlation_tests {
                 cached_input_tokens: None,
                 first_byte_sample_count: 0,
                 mean_time_to_first_byte_ms: None,
+                first_token_sample_count: 0,
+                mean_time_to_first_token_ms: None,
+                first_tool_call_sample_count: 0,
+                mean_time_to_first_tool_call_ms: None,
             },
         ];
         let overhead = RoutingOverhead::from_consumption(&groups);

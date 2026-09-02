@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1235 / 1347 mandatory capabilities (92%)** — 112 open across 33 phases.
+**1237 / 1347 mandatory capabilities (92%)** — 110 open across 33 phases.
 
 ## Where the work is
 
@@ -30,6 +30,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 30 | Session context metadata | **1** | 7 | `1156` |
 | Phase 32D | Normalized remaining-capacity score | **1** | 11 | `1257` |
 | Phase 32F | Protected quota reserve | **1** | 7 | `1285` |
+| Phase 33A | Routing evidence ledger | **1** | 14 | `1327` |
 | Phase 33C | Failure, quota, and route correlation | **1** | 14 | `1362` |
 | Phase 34B | Routing-model role | **1** | 14 | `1406` |
 | Phase 34C | Automatic routing-model selection | **1** | 12 | `1429` |
@@ -44,7 +45,6 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 38 | Quota-preserving routing | **2** | 5 | `1604` |
 | Phase 53 | Criteria before adding graph storage | **2** | 3 | `1872` |
 | Phase 28 | File-aware memory lookup | **3** | 2 | `1137` |
-| Phase 33A | Routing evidence ledger | **3** | 12 | `1327` |
 | Phase 21E | Decision ladder and conflict handling | **4** | 8 | `907` |
 | Phase 31 | Compaction-aware behavior | **5** | 2 | `1167` |
 | Phase 52 | Criteria before adding semantic/vector retrieval | **5** | 1 | `1858` |
@@ -102,6 +102,10 @@ these unwrapped.
 ### Phase 32F — Protected quota reserve  (1 open, 7 closed)
 
 - **1294** ☐ Avoid moving an almost-complete high-value task to another session solely because a reserve threshold was crossed.
+
+### Phase 33A — Routing evidence ledger  (1 open, 14 closed)
+
+- **1334** ☐ Record successful tool rounds, retries, repairs, failovers, and the final user-visible outcome separately.
 
 ### Phase 33C — Failure, quota, and route correlation  (1 open, 14 closed)
 
@@ -168,12 +172,6 @@ these unwrapped.
 - **1139** ☐ Track file paths explicitly referenced by durable memories when extraction can identify them reliably.
 - **1141** ☐ Prefer constraints, decisions, and failed approaches when retrieving memory for an intended code edit.
 - **1142** ☐ Keep file-aware retrieval advisory and never treat stale memory as stronger evidence than the current source code.
-
-### Phase 33A — Routing evidence ledger  (3 open, 12 closed)
-
-- **1331** ☐ Record dispatch time, first-byte time, time to first real token, time to first tool call, and completion time when the protocol exposes them.
-- **1332** ☐ Do not treat whitespace padding, transport keepalives, or reasoning-only deltas as the first generated token.
-- **1334** ☐ Record successful tool rounds, retries, repairs, failovers, and the final user-visible outcome separately.
 
 ## Practice sections, by number
 
