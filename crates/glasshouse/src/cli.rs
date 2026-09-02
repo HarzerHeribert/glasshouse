@@ -1792,6 +1792,15 @@ pub enum MemoryCommand {
         #[arg(long, value_name = "N",
               default_value_t = crate::memory::search::DEFAULT_SEARCH_LIMIT)]
         limit: usize,
+
+        /// Print the retrieval-and-rerank record a real briefing would build
+        /// for this query — the same record `[memory] retrieval_diagnostics`
+        /// appends to `memory-retrieval.jsonl` — and write nothing.
+        ///
+        /// Ignores `--history` and `--limit`: it runs the exact selection a
+        /// routed task would get, not a broader search.
+        #[arg(long)]
+        explain: bool,
     },
 
     /// Promote or demote a memory's authority class.

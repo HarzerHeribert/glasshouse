@@ -408,7 +408,16 @@ impl ExtractionModel for RoutedModel {
 
     fn complete_observed(&self, prompt: &Prompt) -> Result<ModelReply, ModelError> {
         let client = self.callable()?;
+        // Map line 1539's producer: the wall clock read either side of the
+        // one call this type actually makes, the same
+        // `crate::provider::cache::now_unix_seconds` the gateway's own
+        // timing reads. Read here rather than inside `ConfiguredModel::call`
+        // because this is the seam every production call to a support-work
+        // resource passes through — `ConfiguredModel` has no other caller in
+        // this build to diverge from.
+        let dispatched_at_unix = crate::provider::cache::now_unix_seconds();
         let mut result = client.complete_observed(prompt);
+        let completed_at_unix = crate::provider::cache::now_unix_seconds();
 
         // The credential's *label* onto the call, so the ledger row can say
         // which allowance paid for it (`quota_context`, the column
@@ -419,6 +428,12 @@ impl ExtractionModel for RoutedModel {
             && let Some(call) = &mut reply.call
         {
             call.credential_label = self.credential_label.clone();
+            // A call that never reached the provider has no `ModelCall` to
+            // stamp at all (`ConfiguredModel::call` only builds one on the
+            // parsed-reply path), so this only ever fills a real exchange's
+            // timing — never a guess for a failed one.
+            call.dispatched_at_unix = Some(dispatched_at_unix);
+            call.completed_at_unix = Some(completed_at_unix);
         }
 
         // Line 534's write side, on the only path in this build that produces

@@ -306,6 +306,21 @@ impl Prompt {
         Self(out)
     }
 
+    /// Wrap a prompt the caller assembled itself — a contract, and content
+    /// interleaved with it rather than appended after it in
+    /// [`Self::build`]'s or [`Self::for_request`]'s fixed shape (the
+    /// reranker's candidate list beside its instructions, say).
+    ///
+    /// Scrubbed exactly as [`Self::for_request`] scrubs `request_text`, over
+    /// the **whole** assembled string rather than one field of it: the
+    /// caller may have interleaved untrusted content — a task, a memory
+    /// excerpt — anywhere in `text`, so this constructor is what makes the
+    /// result the type this module's containment argument is about, not the
+    /// caller's assembly.
+    pub fn from_text(text: impl AsRef<str>) -> Self {
+        Self(credentials::scrub(text.as_ref()).text().to_owned())
+    }
+
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -386,6 +401,17 @@ pub struct ModelCall {
     /// spent* without going anywhere near it.
     pub credential_label: Option<String>,
     pub usage: TokenUsage,
+    /// When this call was dispatched, and when it finished — capability map
+    /// line 1539's producer half. [`None`] from any implementation that read
+    /// no clock around its own call; `disposable::RoutedModel::complete_observed`
+    /// is the one production caller that does, using the same
+    /// `crate::provider::cache::now_unix_seconds` the gateway's own timing
+    /// already reads. Two fields rather than a duration, matching
+    /// [`crate::routing::evidence::NewObservation::with_timing`]'s own shape,
+    /// so a row's dispatch and completion can each be `NULL` independently
+    /// rather than a computed span hiding which half is missing.
+    pub dispatched_at_unix: Option<i64>,
+    pub completed_at_unix: Option<i64>,
 }
 
 impl ModelCall {
@@ -393,14 +419,16 @@ impl ModelCall {
     ///
     /// # What it deliberately leaves `NULL`
     ///
-    /// Identity and token counts, and nothing else. `dispatched_at`,
-    /// `completed_at`, `outcome`, `tool_rounds`, `retries`, `repairs`,
-    /// `failovers` and `purpose` are all columns this producer could
-    /// plausibly fill with a nearby number, and each stays unwritten because
-    /// a column filled with the nearest available value is worse than an
-    /// honest `NULL`: a consumer cannot tell the two apart. This exists to
-    /// supply the token counts nothing in this build supplied before, and
-    /// widening it is a separate decision with its own evidence.
+    /// Identity, token counts, and — since [`Self::dispatched_at_unix`] —
+    /// timing, when a caller filled it in. `outcome`, `tool_rounds`,
+    /// `retries`, `repairs`, `failovers` and `purpose` are still columns this
+    /// producer could plausibly fill with a nearby number, and each stays
+    /// unwritten because a column filled with the nearest available value is
+    /// worse than an honest `NULL`: a consumer cannot tell the two apart.
+    /// Timing is the one exception, and only because it is not a nearby
+    /// guess: `disposable::RoutedModel::complete_observed` reads the actual
+    /// clock around the actual call, the same standard the token counts
+    /// already meet.
     pub fn observation(&self) -> crate::routing::evidence::NewObservation {
         crate::routing::evidence::NewObservation::new(&self.provider, &self.model)
             .with_route(self.route.as_deref())
@@ -416,6 +444,7 @@ impl ModelCall {
                 self.usage.output_tokens,
                 self.usage.cached_input_tokens,
             )
+            .with_timing(self.dispatched_at_unix, self.completed_at_unix)
     }
 }
 

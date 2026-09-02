@@ -1436,3 +1436,19 @@ after `memory-reranker` lands, because both edit the `memory` subcommand).
 1757/1766 (a durable rationale), 1760 (a temperature estimate), 1767 (a
 correlation with a sample size) and 1769 (a durable extraction record) are
 unchanged.
+
+## Phase 24 CLOSED — the reranking seat, and 1539 and 1331/1332 with it, 2026-09-02 (night)
+
+Three packages reviewed in one hour, all Amber, all Sonnet high, every report carrying its five artifacts:
+
+| lines | package | what discharged the refusal |
+|---|---|---|
+| **1089, 1090, 1091, 1092, 1094** — Phase 24 complete | `GH-MEMORY-RERANKER` | the register's *no cheap model is wired up* was true until batch 87's routed extraction client; the seat is that client with `JobKind::Reranking` and a strictly parsed id list (`phase-24.md`). 5/5 KILLED. Rows 1090 and 1089/1091/1092 (*no reranker*) in the memory-phases section above are closed by it. |
+| **1539** | `GH-EXPECTED-LATENCY-SCORE` | Cluster M's *no latency reader*: the extraction path now stamps dispatch and completion on its rows and the disposable router scores a median (`phase-35b.md`). 4/4 KILLED. 1267 (local inference's latency and concurrency) is Cluster M's last member and is NOT closed by this — the reader is over support-work rows, not local-inference occupancy. |
+| **1331, 1332** | `GH-STREAM-FIRST-EVENTS` | the 1331 section above asked for *a decision about whether the relay may observe framing*; the ruling (`design-decisions.md`, *First real token and first tool call on the translated path*) is that the **translated** seam already decodes every event and may stamp two instants from it, while the relay's wall stands and writes `NULL` (`phase-33a.md`). 4/4 KILLED. P1b's member 1333 is unchanged; **33B's TTFC family (1347–1352, 1355) now waits on millisecond offsets — `GH-STREAM-TIMING-MS` (Red, Cluster G) — not on the parsing wall.** 1334's `tool_rounds` is countable at the same seam (`GH-TOOL-ROUNDS-ON-TRANSLATED`). |
+
+**Phase 47, Cluster H, re-read the same night:** 1759's producer exists (`GH-RETRIEVED-VIEW` live); 1757 and 1766's producer is one row on the durable sink the 2026-08-30 design chose, written where the launch already records its decision (`GH-ROUTE-RATIONALE-SINK` live; `design-decisions.md`, *The session router's rationale row*). 1760, 1767 and 1769 stay refused on their own missing links.
+
+## The Windows leg had not run since batch 86 — five defects in one evening, 2026-09-02
+
+The first `--windows-vm` run in a day found, in order: a `libc::mktime` that libc does not bind for Windows (wave 100's arm); `libc` itself absent on Windows (a `cfg(unix)`-only dependency); `tests/firewall_local_reducer.rs` naming `std::os::unix` (shebang fake tools — now `#![cfg(unix)]`, gap recorded in `phase-58.md`); an unused import under `-D warnings` in `tests/memory_rating.rs`; and then **178 `thread 'main' has overflowed its stack`** across nearly every shipped-binary command — Windows reserves 1 MiB for the main thread where macOS and Linux reserve 8, and a debug build of `main.rs`'s frames no longer fit. Fixed by `crates/glasshouse/build.rs` emitting an 8 MiB `/STACK` reserve for the bin targets (`82b4db4`); run 4 is the evidence. **The rule that follows: every wave's trailing sweep includes the VM leg, not once a day** — the cost of the gap was five serial fix-forwards, each found only by the next run.

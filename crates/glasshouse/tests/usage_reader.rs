@@ -514,6 +514,8 @@ fn a_call_reporting_nothing_maps_to_an_observation_with_no_counts() {
         route: Some(ROUTE.to_owned()),
         credential_label: None,
         usage: TokenUsage::UNREPORTED,
+        dispatched_at_unix: None,
+        completed_at_unix: None,
     }
     .observation();
 
@@ -558,6 +560,8 @@ fn the_three_counts_reach_the_three_columns_they_belong_in() {
             output_tokens: Some(22),
             cached_input_tokens: Some(33),
         },
+        dispatched_at_unix: None,
+        completed_at_unix: None,
     }
     .observation();
 

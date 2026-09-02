@@ -2801,6 +2801,24 @@ impl ClassificationRecord {
     }
 }
 
+/// What this project's ledger holds about one `(provider, model)` as a
+/// **support-work** resource's measured latency — capability map line 1539,
+/// read from the [`EXTRACTION_PURPOSE`] rows alone.
+/// [`ClassificationRecord`]'s sibling: the same floor and the same
+/// one-second resolution (this module's header, on line 1332's gap), and
+/// deliberately no outcome or parse fields — a disposable support-work call
+/// has nothing to parse as a classification schema, so there is no
+/// reliability axis to carry here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LatencyRecord {
+    /// Rows carrying a duration at all.
+    pub timed: usize,
+    /// The median of those durations, once there are at least
+    /// [`MIN_SAMPLE_FOR_SUMMARY`] of them. `None` below the floor — a
+    /// consumer must read this as *unmeasured*, never as fast.
+    pub median_duration_ms: Option<i64>,
+}
+
 /// Routing-model spend set against everything else — capability map line
 /// 1465 — as one pure reading over
 /// [`EvidenceLedger::consumption_by_purpose`]'s groups, so the arithmetic is
@@ -4179,6 +4197,69 @@ impl EvidenceLedger {
             model: model.to_owned(),
             outcomes_recorded,
             parsed,
+            timed,
+            median_duration_ms,
+        })
+    }
+
+    /// [`LatencyRecord`] for one `(provider, model)` over the last
+    /// `window_seconds` — the reader for capability map line 1539, and
+    /// [`Self::classification_record`]'s sibling over [`EXTRACTION_PURPOSE`]
+    /// rows instead of [`CLASSIFICATION_PURPOSE`] ones: a support-work call's
+    /// own latency says nothing about how it behaves as a classifier, and
+    /// folding the two together would let a slow classifier's rows inflate a
+    /// fast support-work resource's median or the reverse.
+    ///
+    /// Scoped to this ledger's own `project_id`, like every read here that
+    /// is not already keyed by a full identity.
+    pub fn support_work_latency(
+        &self,
+        provider: &str,
+        model: &str,
+        now_unix: i64,
+        window_seconds: i64,
+    ) -> Result<LatencyRecord, EvidenceLedgerError> {
+        let earliest = now_unix.saturating_sub(window_seconds);
+        let observations = {
+            let conn = self.lock();
+            let mut statement = conn
+                .prepare(
+                    "SELECT * FROM routing_observations
+                     WHERE project_id = ?1 AND provider = ?2 AND model = ?3
+                       AND purpose = ?4
+                       AND observed_at >= ?5 AND observed_at <= ?6
+                     ORDER BY observed_at ASC",
+                )
+                .map_err(sql_err("read support-work latency observations"))?;
+            let rows = statement
+                .query_map(
+                    params![
+                        self.project_id,
+                        provider,
+                        model,
+                        EXTRACTION_PURPOSE,
+                        earliest,
+                        now_unix
+                    ],
+                    row_to_observation,
+                )
+                .map_err(sql_err("read support-work latency observations"))?;
+            let mut observations = Vec::new();
+            for row in rows {
+                observations
+                    .push(row.map_err(sql_err("read a support-work latency observation"))??);
+            }
+            observations
+        };
+
+        let durations: Vec<i64> = observations
+            .iter()
+            .filter_map(RoutingObservation::duration_ms)
+            .collect();
+        let timed = durations.len();
+        let median_duration_ms = (timed >= MIN_SAMPLE_FOR_SUMMARY).then(|| median(durations));
+
+        Ok(LatencyRecord {
             timed,
             median_duration_ms,
         })

@@ -75,3 +75,96 @@ review.** A fixture derived from the constant under mutation cannot isolate it.
   gap** in what this file watches.
 - `context_injection.rs` is `#![cfg(unix)]`, consistent with the rest of the
   file and with `phase-27.md`; Windows is not exercised.
+
+## Lines 1089, 1090, 1091, 1092 and 1094 — CLOSED 2026-09-02 (`GH-MEMORY-RERANKER`, Amber, Sonnet high): Phase 24 complete
+
+The phase was refused whole while *no cheap model was wired up in this
+build*; since batch 87 the disposable router calls what it chooses, and
+`design-decisions.md` (*A reranking seat in the disposable router*) put the
+reranker on that seat. This package is the ruling landed — from the packet's
+own objective, because the worker's base predated the note's commit (its
+first packet error, and it was right).
+
+**Contract.** Given a briefing whose lexical search returns ordinary
+candidates and a configured `[memory] rerank_model`, when Glasshouse selects
+memory for a task, Glasshouse sends at most `RERANK_CANDIDATES` (8) of the
+*other* group to that model once and reorders them by the ids it returns —
+invariants and constraints first by authority, currency and the injection
+cap applied after the reorder, omitted ids appended in lexical order (a
+reranker may demote, never hide) — while preserving that with no
+`rerank_model` no model is called and the selection is byte-identical, that
+every failure (no resource, no credential, a refusal, a timeout, an
+unparseable reply, an unknown id) is a bypass with a stated reason and never
+an error the caller sees, and that `[memory] retrieval_diagnostics` writes
+one JSON line per briefing only when on, which `memory search --explain`
+prints for one query without writing.
+
+**Production evidence.**
+- `memory/rerank.rs` (new): `rerank`, `RerankOutcome`, `parse_reply` (strict:
+  an id outside the sent set is a bypass), `RERANK_CANDIDATES`,
+  `EXCERPT_BYTES`, `RERANK_PROMPT_CONTRACT` (task relevance, recency, active
+  status, non-duplication — 1092), `resolve_rerank_model` (the seat: consent,
+  `JobKind::Reranking`, the routed client, a dedicated 6 s timeout),
+  `RetrievalTrace`, `append_diagnostics`, `explain_line`.
+- `memory/inject.rs::briefing_traced` / `select_briefing_traced` — the rerank
+  runs on the whole *other* bucket before its partition into failed attempts
+  and the rest, so authority precedence extends one level down;
+  `is_current`, the already-injected filter and `MAX_INJECTED_MEMORIES` run
+  after the reorder.
+- Both doors: `api/unix.rs::select_memory` (the library seat, because a
+  library door cannot call the binary crate — the worker's second packet
+  error, structural and right) and `main.rs::brief_launch_session`;
+  `main.rs::disposable_rerank_model` is the thin wrapper the note named,
+  beside `disposable_extraction_model`. `memory/extract/mod.rs::Prompt::from_text`
+  scrubs the whole assembled text. `config/mod.rs`: `rerank_model`,
+  `retrieval_diagnostics` (project over user, default off). `cli.rs`:
+  `memory search --explain`.
+
+**Regression evidence** (`tests/memory_reranker.rs`, shipped binary through
+the control-API door and `memory search --explain`, 8):
+`a_reversed_reply_reorders_ordinary_memories_with_a_constraint_still_first`,
+`more_than_the_window_sends_exactly_rerank_candidates_ids`,
+`a_no_rerank_model_configured_leaves_the_block_lexical_and_dials_nothing`,
+`an_unknown_id_bypasses_to_lexical_order_and_diagnostics_record_the_reason`,
+`a_conflicted_memory_is_never_injected_even_when_ranked_first`,
+`a_fixture_that_never_answers_bypasses_within_the_seats_timeout`,
+`diagnostics_off_writes_nothing_and_on_writes_one_line_per_briefing`,
+`memory_search_explain_prints_the_record_and_writes_no_file`; unit
+`memory::rerank` (7, including
+`omitted_ids_follow_in_lexical_order_and_the_window_bounds_what_is_sent` and
+`one_candidate_calls_nothing`); `context_injection` 15/15 unchanged.
+
+**Mutations** (worker, five, all KILLED, restored byte-identical):
+`rerank-without-consent` (the seat falls back to the first free model) by
+`a_no_rerank_model_configured_leaves_the_block_lexical_and_dials_nothing` —
+the fixture was dialled; its first draft SURVIVED on a one-candidate fixture
+that `TooFew` masked, re-seeded and killed (§80); `unknown-id-accepted` by
+`an_unknown_id_bypasses_to_lexical_order_and_diagnostics_record_the_reason`
+— outcome *reordered* where *bypassed* was owed; `currency-delegated` (the
+post-rerank `is_current` filter deleted) by
+`a_conflicted_memory_is_never_injected_even_when_ranked_first`;
+`window-unbounded` by `more_than_the_window_sends_exactly_rerank_candidates_ids`
+— *left: 12, right: 8*; `diagnostics-always` by
+`diagnostics_off_writes_nothing_and_on_writes_one_line_per_briefing`.
+
+**Orchestrator's read before the tick:** the ruling's every rule checked
+against the report and the merged `rerank.rs` — consent, the *other* group
+only, 8, one call and never below two, strict ids, omitted ids appended,
+currency after, the diagnostics file and flag, both doors — all present. Two
+decisions the note left open and the worker made, accepted: a 6 s dedicated
+timeout for a call on every routed task's critical path (a Green follow-up
+may name it in config), and a capped `subject` on each diagnostics candidate
+row so a person can read the record without a second query.
+
+**Recorded limits** (the worker's): no persisted cross-process health or
+request-pacing reservation for this seat (a fresh `FreePool` per call);
+the seat's one candidate carries no capacity, locality or entitlement
+enrichment (inert defaults); `--explain` ignores `--history`/`--limit` by
+design; `memory_retrieval_diagnostics_enabled` exists once in the library and
+once in the binary (the crate boundary); `main.rs::estimated_project_memory_tokens`
+passes no model (a `route` estimate should not spend a call); macOS only.
+Not yet wired: the seat's chooser does not gather budget spend
+(`GH-BUDGET-SPEND-REMAINING-CALLERS`, `phase-32d.md`).
+
+State: **COMPLETE** for 1089, 1090, 1091, 1092 and 1094. **Phase 24 stands
+at 6 of 6.**

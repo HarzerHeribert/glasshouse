@@ -1086,12 +1086,12 @@ Fixed architectural requirements
 - Reranking is a bounded, replaceable stage after deterministic candidate retrieval.
 - It must preserve source provenance and may not turn a low-authority or invalid memory into a binding instruction merely because it is semantically similar.
 
-☐ Allow the top lexical memory candidates to be reranked by a cheap language model.
-☐ Keep reranking optional so memory search still works offline without an LLM.
-☐ Limit reranking to a small candidate set to keep latency and token use low.
-☐ Ask the reranker to optimize for task relevance, recency, active status, and non-duplication.
+☑ Allow the top lexical memory candidates to be reranked by a cheap language model.
+☑ Keep reranking optional so memory search still works offline without an LLM.
+☑ Limit reranking to a small candidate set to keep latency and token use low.
+☑ Ask the reranker to optimize for task relevance, recency, active status, and non-duplication.
 ☑ Return only a small number of high-value memories for automatic prompt injection.
-☐ Record retrieval diagnostics when debug mode is enabled so poor memory selection can be investigated.
+☑ Record retrieval diagnostics when debug mode is enabled so poor memory selection can be investigated.
 
 Phase 25 — Project knowledge view
 
@@ -1536,7 +1536,7 @@ Fixed architectural requirements
 ☑ Include normalized remaining capacity in candidate scoring.
 ☑ Include provider health in candidate scoring.
 ☑ Include expected marginal cost in candidate scoring.
-☐ Include expected latency in candidate scoring.
+☑ Include expected latency in candidate scoring.
 ☑ Include harness-model pairing as an inspectable soft prior for fresh sessions with limited local evidence.
 ☑ Decay the pairing prior as reliable observations accumulate for the exact harness-profile-model-backend combination.
 ☐ Prefer observed success and reliability over same-vendor alignment when evidence is sufficient.

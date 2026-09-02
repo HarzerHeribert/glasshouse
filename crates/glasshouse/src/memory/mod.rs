@@ -47,6 +47,7 @@ pub mod export_local;
 pub mod extract;
 pub mod inject;
 mod policy;
+pub mod rerank;
 pub mod search;
 pub mod snapshot;
 mod store;
@@ -58,6 +59,7 @@ pub use extract::{
     model::{ConfiguredModel, ConfiguredModelError},
 };
 pub use policy::{MemoryRefusal, admit};
+pub use rerank::{RerankOutcome, RetrievalTrace};
 pub use store::{
     AuthorityChange, Classifier, Clock, ConflictResolver, DecisionProvenance, FileAssociation,
     MemoryAuthority, MemoryId, MemoryKind, MemoryRecord, MemoryStatus, MemoryStore,

@@ -5069,3 +5069,23 @@ Session `0c56372c` (Fable 5.1), inherited hot from `4d589d24` with three workers
 4. **A scratch crate that proves a `cfg` arm must mirror the crate's target-conditional dependencies.** The Windows VM leg (run right after the wave-100 sweep) failed the same arm a second time: this crate depends on `libc` only under `cfg(unix)` and on `windows-sys` for Windows, so `libc::tm` cannot be named there at all. The scratch crate had declared `libc` unconditionally and so proved the arm against a crate that does not exist. Fixed forward by declaring `libc` for the Windows target beside `windows-sys`, with the reason in `Cargo.toml`; the VM leg re-run on that tree is wave 100's platform evidence.
 
 **Wave 100's trailing sweep** (`--since 98c9297` from a detached worktree at `1225eb6`): **every traced target passed** (110 `test result` lines, 26 in the parallel lane), worktree removed.
+
+## Batch 91 (2026-09-02, night) — Phase 24 complete, expected latency scored, first token and first tool call on the translated path, and the Windows leg finds the binary cannot start
+
+Session `0c56372c` (Fable 5.1), continued from batch 90. Three workers dispatched by the predecessor and by this session finished within an hour of each other and were integrated as waves 101 (latency + reranker, one gate) and 102 (stream-first-events, its own gate because it holds `gateway/**`): **map 1229 → 1237** once both land.
+
+| package | tier | result |
+|---|---|---|
+| `expected-latency-score` (wave 101) | Sonnet high, Amber | **1539 closed** — `ModelCall` stamps dispatch/completion, `support_work_latency` reads a median over extraction rows, an *expected latency* term in the disposable router's `score()` that never joins the free order. 4/4 KILLED; one packet error (the co-editor's name), two mechanical overflows |
+| `memory-reranker` (wave 101) | Sonnet high, Amber | **1089, 1090, 1091, 1092, 1094 closed — Phase 24 complete.** The seat in the library (a door cannot call the binary crate — the worker's structural correction, right), 8 candidates, strict ids, currency after the reorder, diagnostics on request, `memory search --explain`. 5/5 KILLED; the design note post-dated its base (same as budget's) and the packet's objective sufficed |
+| `stream-first-events` (wave 102) | Sonnet high, Amber | **1331 and 1332 closed** on the translated path — `FirstEvents::note` on canonical events, two migration-11 columns finally written, `routing-cost` prints two more means; `--lib gateway` whole 210/210. 4/4 KILLED, one of them after the worker caught its own non-compiling mutant reported as a false KILLED (§80's fourth way) |
+| Windows, five fix-forwards, no box | orchestrator | `_mktime64`; `libc` for Windows; `firewall_local_reducer.rs` `#![cfg(unix)]`; `memory_rating.rs` import; **`build.rs` with an 8 MiB `/STACK` reserve** after 178 main-thread overflows |
+
+**Output per box.** Day total ≈ 18.5M at wave 101's commit for **+34 net today** (1201 → 1235), about 545k per net box; this session about 1.5M for +10 net so far, under the 250k line for the session, above it for the day. Every dispatch was implementation.
+
+**Findings worth carrying forward.**
+
+1. **A platform leg that runs once a day finds its defects serially.** Five Windows fixes in one evening, each visible only after the previous one; the last (the stack) had been true for an unknown number of commits — nothing between batch 86 and here ran Windows. The trailing sweep now includes the VM leg per wave, from a detached worktree so main stays free.
+2. **Windows' 1 MiB main thread is a real ceiling for a 17,000-line `main.rs` in debug.** The fix is the linker's reserve (no thread, no runtime change), from a build script rather than a tracked `.cargo/config.toml`, because `new-worker.sh` writes an untracked one per worktree and would clobber it.
+3. **A scratch crate must mirror the crate's target-conditional dependencies** (batch 90's lesson, confirmed: the arm type-checked against a `libc` the Windows build did not have).
+4. **Three workers, three packet errors, all right** — two of them the same shape: a design note committed after the worker's base was cut. Cut a worktree from the commit that carries its design note, or say in the packet that the note is younger than the base.

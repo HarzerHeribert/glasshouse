@@ -4486,6 +4486,21 @@ pub struct MemoryConfig {
     /// door-spawned session already does.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     inject_at_launch: Option<bool>,
+    /// Which model may rerank the top lexical memory candidates before
+    /// selection — map line 1089. `None` means no consent was ever given and
+    /// resolves to "no model is ever called", the same shape
+    /// [`UserConfig::memory_extraction_model`] uses for the same reason: this
+    /// is the whole of the consent, and nothing else turns reranking into an
+    /// outbound request. See [`EffectiveConfig::memory_rerank_model`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    rerank_model: Option<ExtractionModelRef>,
+    /// Whether a briefing appends one JSON line describing its retrieval and
+    /// rerank decision to `<state_dir>/memory-retrieval.jsonl` — map line
+    /// 1094. `None` resolves to `false`: diagnostics are off by default, and
+    /// turning them on is an explicit ask. See
+    /// [`EffectiveConfig::memory_retrieval_diagnostics`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    retrieval_diagnostics: Option<bool>,
 }
 
 impl MemoryConfig {
@@ -4494,6 +4509,8 @@ impl MemoryConfig {
     /// their file.
     pub fn is_unset(&self) -> bool {
         self.inject_at_launch.is_none()
+            && self.rerank_model.is_none()
+            && self.retrieval_diagnostics.is_none()
     }
 
     pub fn inject_at_launch(&self) -> Option<bool> {
@@ -4502,6 +4519,24 @@ impl MemoryConfig {
 
     pub fn set_inject_at_launch(&mut self, enabled: Option<bool>) -> &mut Self {
         self.inject_at_launch = enabled;
+        self
+    }
+
+    pub fn rerank_model(&self) -> Option<&ExtractionModelRef> {
+        self.rerank_model.as_ref()
+    }
+
+    pub fn set_rerank_model(&mut self, model: Option<ExtractionModelRef>) -> &mut Self {
+        self.rerank_model = model;
+        self
+    }
+
+    pub fn retrieval_diagnostics(&self) -> Option<bool> {
+        self.retrieval_diagnostics
+    }
+
+    pub fn set_retrieval_diagnostics(&mut self, enabled: Option<bool>) -> &mut Self {
+        self.retrieval_diagnostics = enabled;
         self
     }
 }
@@ -5502,6 +5537,45 @@ impl<'a> EffectiveConfig<'a> {
             return Layered::new(Some(value.clone()), Layer::User);
         }
         Layered::new(None, Layer::Default)
+    }
+
+    /// Which model may rerank the top lexical memory candidates before
+    /// selection — map line 1089, the reranking seat's consent. Project
+    /// first, then user, then [`Layer::Default`] carrying `None`, matching
+    /// [`Self::memory_extraction_model`]'s own layering and for the same
+    /// reason: **`None` is the default and means no model is ever called.**
+    ///
+    /// Lives on [`MemoryConfig`] (the `[memory]` table) rather than as a
+    /// bare top-level key the way [`Self::memory_extraction_model`] does,
+    /// because this is a user-facing product setting reached for by name
+    /// (`[memory] rerank_model`), matching [`Self::inject_memory_at_launch`]'s
+    /// own table.
+    pub fn memory_rerank_model(&self) -> Layered<Option<ExtractionModelRef>> {
+        if let Some(value) = self.project.and_then(|p| p.memory().rerank_model()) {
+            return Layered::new(Some(value.clone()), Layer::Project);
+        }
+        if let Some(value) = self.user.memory().rerank_model() {
+            return Layered::new(Some(value.clone()), Layer::User);
+        }
+        Layered::new(None, Layer::Default)
+    }
+
+    /// Whether a briefing records one JSON line describing its retrieval and
+    /// rerank decision — map line 1094. Project first, then user, then
+    /// [`Layer::Default`] carrying `false`: diagnostics are off unless
+    /// explicitly turned on, matching every other automatic-behaviour
+    /// default's direction of least surprise.
+    pub fn memory_retrieval_diagnostics(&self) -> Layered<bool> {
+        if let Some(value) = self
+            .project
+            .and_then(|p| p.memory().retrieval_diagnostics())
+        {
+            return Layered::new(value, Layer::Project);
+        }
+        if let Some(value) = self.user.memory().retrieval_diagnostics() {
+            return Layered::new(value, Layer::User);
+        }
+        Layered::new(false, Layer::Default)
     }
 
     /// Whether Glasshouse may take a checkpoint automatically at a task
@@ -9044,6 +9118,100 @@ mod tests {
         assert_eq!(
             effective.inject_memory_at_launch(),
             Layered::new(false, Layer::User),
+            "a project that recorded nothing must fall through to the user layer"
+        );
+    }
+
+    /// Map line 1089's consent: `None` unless named, project overrides user —
+    /// the same layering [`EffectiveConfig::memory_extraction_model`] uses
+    /// for the sibling knob.
+    #[test]
+    fn memory_rerank_model_layers_project_over_user_over_default() {
+        let user = UserConfig::default();
+        let effective = EffectiveConfig::new(&user, None);
+        assert_eq!(
+            effective.memory_rerank_model(),
+            Layered::new(None, Layer::Default),
+            "nobody who never configured a rerank model has one"
+        );
+
+        let mut user = UserConfig::default();
+        user.memory_mut()
+            .set_rerank_model(Some(ExtractionModelRef::new(
+                "free-runner",
+                "a-cheap-model",
+            )));
+        let effective = EffectiveConfig::new(&user, None);
+        assert_eq!(
+            effective.memory_rerank_model(),
+            Layered::new(
+                Some(ExtractionModelRef::new("free-runner", "a-cheap-model")),
+                Layer::User
+            )
+        );
+
+        let mut project = ProjectConfig::default();
+        project
+            .memory_mut()
+            .set_rerank_model(Some(ExtractionModelRef::new(
+                "named-runner",
+                "another-model",
+            )));
+        let effective = EffectiveConfig::new(&user, Some(&project));
+        assert_eq!(
+            effective.memory_rerank_model(),
+            Layered::new(
+                Some(ExtractionModelRef::new("named-runner", "another-model")),
+                Layer::Project
+            ),
+            "a project's own choice must win over the user's"
+        );
+
+        let silent_project = ProjectConfig::default();
+        let effective = EffectiveConfig::new(&user, Some(&silent_project));
+        assert_eq!(
+            effective.memory_rerank_model(),
+            Layered::new(
+                Some(ExtractionModelRef::new("free-runner", "a-cheap-model")),
+                Layer::User
+            ),
+            "a project that recorded nothing must fall through to the user layer"
+        );
+    }
+
+    /// Map line 1094: off unless named, project overrides user.
+    #[test]
+    fn memory_retrieval_diagnostics_layers_project_over_user_over_default() {
+        let user = UserConfig::default();
+        let effective = EffectiveConfig::new(&user, None);
+        assert_eq!(
+            effective.memory_retrieval_diagnostics(),
+            Layered::new(false, Layer::Default),
+            "nothing recorded anywhere must resolve to off"
+        );
+
+        let mut user = UserConfig::default();
+        user.memory_mut().set_retrieval_diagnostics(Some(true));
+        let effective = EffectiveConfig::new(&user, None);
+        assert_eq!(
+            effective.memory_retrieval_diagnostics(),
+            Layered::new(true, Layer::User)
+        );
+
+        let mut project = ProjectConfig::default();
+        project.memory_mut().set_retrieval_diagnostics(Some(false));
+        let effective = EffectiveConfig::new(&user, Some(&project));
+        assert_eq!(
+            effective.memory_retrieval_diagnostics(),
+            Layered::new(false, Layer::Project),
+            "a project's explicit off must win over the user's on"
+        );
+
+        let silent_project = ProjectConfig::default();
+        let effective = EffectiveConfig::new(&user, Some(&silent_project));
+        assert_eq!(
+            effective.memory_retrieval_diagnostics(),
+            Layered::new(true, Layer::User),
             "a project that recorded nothing must fall through to the user layer"
         );
     }

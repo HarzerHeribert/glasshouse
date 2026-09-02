@@ -22,6 +22,20 @@ validated and waiting on the commit. Next action: `.agent-runtime/CONTINUATION.m
 
 Last updated: 2026-09-02 (Europe/Berlin)
 
+## Checkpoint — 2026-09-02, batch 91: 1235 / 1347 (91.7%) — Phase 24 complete, expected latency scored, and the Windows leg found the binary could not start
+
+Session `0c56372c` (Fable 5.1), continued. Wave 101: `memory-reranker`
+landed 1089–1092 and 1094 (Phase 24 complete: a reranking seat on the
+disposable router, strict ids, every failure a bypass, diagnostics on
+request) and `expected-latency-score` landed 1539. Wave 102 right behind:
+`stream-first-events` — 1331 and 1332 on the translated path, the design
+ruling that the seam may stamp what it already decodes. The Windows VM leg,
+run for the first time since batch 86, found five defects in one evening,
+the last of them a 1 MiB main-thread stack the binary overflowed on nearly
+every command — fixed with a linker reserve from a build script. Live:
+`retrieved-view` (1759) and `route-rationale-sink` (1757, 1766). Exact next
+actions: `.agent-runtime/CONTINUATION.md`.
+
 ## Checkpoint — 2026-09-02, batch 90: 1229 / 1347 (91.2%) — money is counted against the budget, Phase 35A complete, and a refusal that outlived its blocker
 
 Session `0c56372c` (Fable 5.1), inherited hot from `4d589d24` with three

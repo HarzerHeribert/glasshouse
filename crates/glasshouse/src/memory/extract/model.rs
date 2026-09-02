@@ -373,6 +373,13 @@ impl ConfiguredModel {
                 // know which wrote the row.
                 route: Some(WireProtocol::OpenAiChat.slug().to_owned()),
                 usage,
+                // Not known here either: this layer parses the reply, not
+                // the clock. `RoutedModel::complete_observed`
+                // (`memory/extract/disposable.rs`) is the caller that reads
+                // the wall clock around this whole call and stamps both
+                // fields on the way back out — capability map line 1539.
+                dispatched_at_unix: None,
+                completed_at_unix: None,
             }),
         })
     }

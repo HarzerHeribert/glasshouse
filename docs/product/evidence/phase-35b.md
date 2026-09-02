@@ -707,3 +707,80 @@ Regression evidence:
 > drop-explanation-text observed: panicked at crates/glasshouse/src/routing/session.rs:5271:9 (the evidence().contains("starting assumption") assertion)
 
 ---
+
+## Line 1539 — CLOSED 2026-09-02 (`GH-EXPECTED-LATENCY-SCORE`, Amber, Sonnet high)
+
+*Include expected latency in candidate scoring.* The disposable router's
+candidates now carry a support-work latency record, and `score()` adds an
+*expected latency* contribution in the shape of the classification-latency
+term (1421) — from rows the extraction path now stamps.
+
+**Contract.** Given recent support-work rows for a candidate's `(provider,
+model)` that carry dispatch and completion times, when the disposable router
+scores that candidate, Glasshouse adds an expected-latency contribution that
+prefers a lower median with a bounded magnitude and names the median and the
+sample count — while preserving that a candidate below the sample floor or
+with no timed rows gets an inert contribution saying so, that the free-tier
+selection is never reordered by scoring, that classification's own latency
+term is untouched, and that every extraction call from now on records the
+seconds between its dispatch and completion on its row.
+
+**Production evidence.**
+- Producer: `memory/extract/mod.rs::ModelCall` gains `dispatched_at_unix` /
+  `completed_at_unix` and `observation()` calls `with_timing`; the clock is
+  read in `memory/extract/disposable.rs::RoutedModel::complete_observed`
+  around the call (the one production site; `ConfiguredModel::call` fills
+  `None`, `model.rs`).
+- Reader: `routing/evidence.rs::EvidenceLedger::support_work_latency` and
+  `LatencyRecord { timed, median_duration_ms }` — `classification_record`'s
+  shape over `EXTRACTION_PURPOSE` rows, the same `MIN_SAMPLE_FOR_SUMMARY`
+  floor.
+- Term: `routing/disposable.rs::DisposableCandidate::with_latency`,
+  `LATENCY_PREFERENCE_WEIGHT` (= `CLASSIFICATION_PREFERENCE_WEIGHT`, the
+  same kind of fact at the same weight), the contribution
+  `weight / (1 + median_ms / 1000)` in `score()` — and deliberately **not** in
+  `classification_preferences()`, the sum that orders the free candidates a
+  user has not ranked.
+- Attachment: `main.rs::attach_latency_records` beside
+  `attach_classification_records`, called from `disposable_extraction_model`
+  and `automatic_classification_choice` after their `disposable_candidates`.
+
+**Regression evidence** (`tests/expected_latency.rs`, shipped binary, 7):
+`a_memory_commit_records_dispatched_and_completed_timing_on_its_row`,
+`a_faster_metered_candidate_ranks_higher_among_the_metered_fallback`,
+`the_faster_candidate_still_wins_with_the_medians_swapped_between_providers`,
+`below_the_sample_floor_the_reader_withholds_a_median_and_the_term_says_unmeasured`,
+`a_free_candidates_position_is_unchanged_by_planted_latency`,
+`planted_latency_does_not_join_the_automatic_classification_free_order`,
+`the_expected_latency_terms_magnitude_matches_the_formula_on_fixed_inputs`;
+unit `routing::disposable::tests::{the_expected_latency_term_never_reorders_the_free_selection,
+the_expected_latency_term_uses_classification_latencys_formula_and_weight}`.
+
+**Mutations** (worker, four, all KILLED, restored byte-identical):
+`timing-dropped` (the `with_timing` call removed) by
+`a_memory_commit_records_dispatched_and_completed_timing_on_its_row` — the
+row carried neither timestamp; `median-ignored-in-score` (the term flat) by
+`a_faster_metered_candidate_ranks_higher_among_the_metered_fallback` — the
+first-listed, slower candidate won; `floor-ignored` (the median computed
+below the floor) by
+`below_the_sample_floor_the_reader_withholds_a_median_and_the_term_says_unmeasured`
+— `Some(3000)` where `None` was owed; `free-reordered` (the term pushed into
+`classification_preferences`) by
+`planted_latency_does_not_join_the_automatic_classification_free_order` —
+the lower-median free candidate won.
+
+**Packet error, the worker's, and right:** the packet named
+`budget-spend-counter` as the live co-editor of `main.rs`; by dispatch it was
+`memory-reranker`. Scope overflow, mechanical: `memory/extract/model.rs` and
+`tests/usage_reader.rs` needed the two new `ModelCall` fields as `None`.
+
+**Recorded limits.** One-second resolution, inherited from the row's
+`dispatched_at`/`completed_at` columns — every median is a multiple of 1000
+ms, as classification latency's own term already is; `attach_latency_records`
+opens the ledger a second time per dispatch, matching the existing two-open
+shape. Orchestrator's read before the tick: the `score()` hunk and the free
+loop — the term is in the explanation and the metered ranking, never in the
+free walk.
+
+State: **COMPLETE**. Phase 35B stands at 19 of 25; 1534, 1535/1545, 1542,
+1543/1544 stay refused (the register).

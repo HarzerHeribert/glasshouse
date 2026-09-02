@@ -64,11 +64,27 @@
 
 use std::collections::HashSet;
 
+use super::extract::ExtractionModel;
+use super::rerank::{self, RetrievalTrace};
 use super::search::SearchScope;
 use super::store::{
     FileAssociation, MemoryAuthority, MemoryId, MemoryKind, MemoryRecord, MemoryStore,
     MemoryStoreError,
 };
+
+/// What a caller supplies to have [`briefing`] (through [`briefing_traced`])
+/// or [`select_briefing`] (through [`select_briefing_traced`]) record its own
+/// retrieval and rerank decision — map line 1094.
+///
+/// `None` — the overwhelming default, since `[memory] retrieval_diagnostics`
+/// is off unless a project or user turns it on — costs nothing beyond the
+/// [`RetrievalTrace`] every traced call already builds in memory: no file is
+/// opened and nothing is written. See [`rerank::append_diagnostics`].
+#[derive(Debug, Clone, Copy)]
+pub struct DiagnosticsRequest<'a> {
+    pub runtime: &'a crate::Runtime,
+    pub session: Option<&'a str>,
+}
 
 /// Opens every injected block. Chosen to be unmistakable in a transcript and
 /// impossible for a memory body to reproduce — see `quote`.
@@ -239,16 +255,26 @@ impl BriefingOutcome {
 ///
 /// 1. **Currently active invariants and constraints**, in the order
 ///    [`MemoryStore::search_grouped`] produced them. These are the *active
-///    constraints* line 1131 asks for preferentially.
+///    constraints* line 1131 asks for preferentially, and [`rerank`] never
+///    sees them — see that module's own documentation.
 /// 2. **Failed attempts**, which are line 1131's *relevant failed approaches*
 ///    — the memories whose entire purpose is that an approach is not tried a
 ///    second time.
-/// 3. Everything else the search matched, in its own relevance order.
+/// 3. Everything else the search matched.
 ///
-/// Nothing here re-ranks. The ladder, the decay weighting and the
-/// thin-decision demotion all already ran inside [`MemoryStore::search`]; this
-/// is a stable partition over its output, so an injection can never promote a
-/// memory past a rung its own authority and currency did not earn it.
+/// Groups 2 and 3 are one bucket, [`super::search::RetrievalResult::other`],
+/// until immediately before this partition: [`rerank::rerank`] runs on the
+/// whole bucket first (map lines 1089-1092), in its own lexical order when
+/// `model` is `None` or otherwise inert, and *then* the bucket is split back
+/// into failed attempts and everything else — so a failed attempt still
+/// precedes an ordinary match after reranking, the same *invariants and
+/// constraints first* precedence line 1131 already establishes one level up,
+/// extended one level down. Beyond that one pass, nothing here re-ranks: the
+/// ladder, the decay weighting and the thin-decision demotion all already
+/// ran inside [`MemoryStore::search`], and the two-partition structure is
+/// still a stable arrangement of what that produced, so an injection can
+/// never promote a memory past a rung its own authority and currency did not
+/// earn it.
 ///
 /// # Line 1129 is refused, and here is the evidence
 ///
@@ -295,7 +321,31 @@ pub fn briefing(
     store: &MemoryStore<'_>,
     task: &str,
     already_injected: &HashSet<MemoryId>,
+    model: Option<&dyn ExtractionModel>,
 ) -> Result<BriefingOutcome, MemoryStoreError> {
+    briefing_traced(store, task, already_injected, model, None).map(|(outcome, _)| outcome)
+}
+
+/// [`briefing`], additionally returning the [`RetrievalTrace`] map line 1094
+/// wants recorded — see [`DiagnosticsRequest`]. A trace is always built (it
+/// is cheap: capped subjects and ids, no I/O of its own) so a caller that
+/// only wants the outcome, like [`briefing`] itself, can discard it for
+/// free; `diagnostics` decides only whether [`rerank::append_diagnostics`]
+/// is asked to write it.
+///
+/// One search, never two: `store.search_grouped_for_injection` can move a
+/// candidate to [`super::MemoryStatus::Conflicted`] *during* the very query
+/// that returned it (see this module's own top-level documentation), so a
+/// second call built to satisfy diagnostics would risk a trace that
+/// disagrees with what was actually injected. Every diagnostics field below
+/// is built from the one `grouped` this function already has.
+pub fn briefing_traced(
+    store: &MemoryStore<'_>,
+    task: &str,
+    already_injected: &HashSet<MemoryId>,
+    model: Option<&dyn ExtractionModel>,
+    diagnostics: Option<DiagnosticsRequest<'_>>,
+) -> Result<(BriefingOutcome, RetrievalTrace), MemoryStoreError> {
     let query: String = task.chars().take(MAX_QUERY_CHARS).collect();
     let grouped =
         store.search_grouped_for_injection(&query, SearchScope::Current, CANDIDATE_LIMIT)?;
@@ -309,8 +359,19 @@ pub fn briefing(
     let text_search_matched_nothing =
         grouped.invariants_and_constraints.is_empty() && grouped.other.is_empty();
 
-    let (failed, rest): (Vec<MemoryRecord>, Vec<MemoryRecord>) = grouped
-        .other
+    // Built from borrows, before `other` is moved into `rerank::rerank` —
+    // see `RetrievalTrace::new`'s own documentation for why the order
+    // matters.
+    let diagnostic_candidates =
+        rerank::diagnostics_candidates(&grouped.invariants_and_constraints, &grouped.other);
+
+    let (reordered_other, rerank_outcome) = rerank::rerank(grouped.other, model, task);
+    let reordered_other_ids: Vec<String> = reordered_other
+        .iter()
+        .map(|record| record.id.as_str().to_owned())
+        .collect();
+
+    let (failed, rest): (Vec<MemoryRecord>, Vec<MemoryRecord>) = reordered_other
         .into_iter()
         .partition(|record| record.kind == MemoryKind::FailedAttempt);
 
@@ -333,11 +394,25 @@ pub fn briefing(
 
     let file_observed = file_observed_memories(store, task, already_injected, &selected)?;
 
-    Ok(match render(&selected, &file_observed) {
+    let trace = RetrievalTrace::new(
+        crate::evaluation::now_unix(),
+        diagnostics.as_ref().and_then(|request| request.session),
+        task,
+        diagnostic_candidates,
+        &rerank_outcome,
+        &reordered_other_ids,
+        &selected,
+    );
+    if let Some(request) = &diagnostics {
+        rerank::append_diagnostics(request.runtime, &trace);
+    }
+
+    let outcome = match render(&selected, &file_observed) {
         Some(injection) => BriefingOutcome::Injected(injection),
         None if text_search_matched_nothing => BriefingOutcome::NothingMatched,
         None => BriefingOutcome::NothingNew,
-    })
+    };
+    Ok((outcome, trace))
 }
 
 /// The shared selection `GH-LAUNCH-BRIEFING` reuses: the door's own
@@ -360,10 +435,29 @@ pub fn select_briefing(
     store: &MemoryStore<'_>,
     query: Option<&str>,
     already_injected: &HashSet<MemoryId>,
+    model: Option<&dyn ExtractionModel>,
 ) -> Result<BriefingOutcome, MemoryStoreError> {
     match query {
-        Some(task) => briefing(store, task, already_injected),
+        Some(task) => briefing(store, task, already_injected, model),
         None => standing_set(store, already_injected),
+    }
+}
+
+/// [`select_briefing`], additionally returning the [`RetrievalTrace`] built
+/// along the way — `None` for the standing-set half, which runs no search
+/// and reranks nothing, so there is nothing for a diagnostics reader to see
+/// beyond what [`BriefingOutcome`] already says. See [`briefing_traced`].
+pub fn select_briefing_traced(
+    store: &MemoryStore<'_>,
+    query: Option<&str>,
+    already_injected: &HashSet<MemoryId>,
+    model: Option<&dyn ExtractionModel>,
+    diagnostics: Option<DiagnosticsRequest<'_>>,
+) -> Result<(BriefingOutcome, Option<RetrievalTrace>), MemoryStoreError> {
+    match query {
+        Some(task) => briefing_traced(store, task, already_injected, model, diagnostics)
+            .map(|(outcome, trace)| (outcome, Some(trace))),
+        None => standing_set(store, already_injected).map(|outcome| (outcome, None)),
     }
 }
 

@@ -1556,8 +1556,20 @@ fn select_memory(
             return None;
         }
     };
-    let outcome = match inject::select_briefing(&project.store(), Some(task), &already) {
-        Ok(outcome) => Some(outcome),
+    let rerank_model = glasshouse::memory::rerank::resolve_rerank_model(runtime);
+    let diagnostics =
+        memory_retrieval_diagnostics_enabled(runtime).then_some(inject::DiagnosticsRequest {
+            runtime,
+            session: Some(session.as_str()),
+        });
+    let outcome = match inject::select_briefing_traced(
+        &project.store(),
+        Some(task),
+        &already,
+        rerank_model.as_deref(),
+        diagnostics,
+    ) {
+        Ok((outcome, _trace)) => Some(outcome),
         Err(err) => {
             tracing::warn!(
                 session = %session,
@@ -1586,6 +1598,24 @@ fn select_memory(
         }
         Some(BriefingOutcome::NothingNew) | None => None,
     }
+}
+
+/// `[memory] retrieval_diagnostics`, resolved — map line 1094's gate on
+/// whether [`select_memory`] writes `memory-retrieval.jsonl`. Mirrors
+/// `main.rs::memory_retrieval_diagnostics_enabled`, which this door cannot
+/// call (a separate binary crate); a configuration that cannot be read is
+/// `false`, matching every other automatic-behaviour default's fail-safe
+/// direction on this path.
+fn memory_retrieval_diagnostics_enabled(runtime: &Runtime) -> bool {
+    let Ok(user) = UserConfig::load(runtime.paths()) else {
+        return false;
+    };
+    let Ok(project) = config::load_project_config(runtime.project()) else {
+        return false;
+    };
+    EffectiveConfig::new(&user, project.as_ref())
+        .memory_retrieval_diagnostics()
+        .value
 }
 
 /// Deliver a selected briefing to `session`, and record what it carried.

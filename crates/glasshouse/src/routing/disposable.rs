@@ -49,7 +49,7 @@ use crate::provider::quota::{
 use crate::provider::registry::Locality;
 use crate::provider::telemetry::RetainedPick;
 use crate::routing::classify::{CLASSIFICATION_PROMPT_CONTRACT, TaskClassification, WorkloadTier};
-use crate::routing::evidence::{ClassificationRecord, MIN_SAMPLE_FOR_SUMMARY};
+use crate::routing::evidence::{ClassificationRecord, LatencyRecord, MIN_SAMPLE_FOR_SUMMARY};
 use crate::routing::pressure::{ReservePolicy, ReserveScope};
 use crate::routing::request::TASK_TEXT_CEILING_BYTES;
 
@@ -241,6 +241,12 @@ pub struct DisposableCandidate {
     /// 1422/1432 and 1421/1435. `None` is "nothing was read", and every
     /// filter and preference built on it is inert for that candidate.
     classification: Option<ClassificationRecord>,
+    /// What the evidence ledger recorded about this candidate as a
+    /// **support-work** resource — capability map line 1539,
+    /// `crate::routing::evidence::EvidenceLedger::support_work_latency`'s
+    /// answer. `None` is "nothing was read", and the expected-latency term
+    /// is inert for that candidate.
+    latency: Option<LatencyRecord>,
     /// The entitlement charged for work sent to this candidate's provider,
     /// when a `[entitlements.<name>]` entry names it — map line 1947's
     /// job-kind clause. `main.rs::disposable_candidates` attaches it from
@@ -266,6 +272,7 @@ impl DisposableCandidate {
             capacity: CandidateCapacity::default(),
             locality: None,
             classification: None,
+            latency: None,
             entitlement: None,
         }
     }
@@ -325,12 +332,27 @@ impl DisposableCandidate {
         self
     }
 
+    /// Attach what the evidence ledger recorded about this candidate as a
+    /// support-work resource — capability map line 1539,
+    /// `crate::routing::evidence::EvidenceLedger::support_work_latency`'s
+    /// answer. `None` leaves the expected-latency term inert for it,
+    /// explained as unmeasured.
+    #[must_use]
+    pub fn with_latency(mut self, latency: Option<LatencyRecord>) -> Self {
+        self.latency = latency;
+        self
+    }
+
     pub fn locality(&self) -> Option<Locality> {
         self.locality
     }
 
     pub fn classification_record(&self) -> Option<&ClassificationRecord> {
         self.classification.as_ref()
+    }
+
+    pub fn latency_record(&self) -> Option<&LatencyRecord> {
+        self.latency.as_ref()
     }
 
     pub fn provider(&self) -> &str {
@@ -427,6 +449,15 @@ const REQUESTS_PER_MINUTE_DIMENSION: &str = "requests per minute";
 /// with the user's own order, which `FreePreferences::arrange` applies
 /// after these have been summed.
 const CLASSIFICATION_PREFERENCE_WEIGHT: f64 = 0.25;
+
+/// Capability map line 1539's own weight, for the expected-latency term
+/// [`DisposableRouting::score`] adds beside classification latency's.
+/// Deliberately equal to [`CLASSIFICATION_PREFERENCE_WEIGHT`] rather than a
+/// second number: both terms are the same kind of fact — a measured median
+/// duration, preferred lower — so giving support-work latency a different
+/// weight would claim, with no evidence behind it, that one matters more
+/// than the other.
+const LATENCY_PREFERENCE_WEIGHT: f64 = CLASSIFICATION_PREFERENCE_WEIGHT;
 
 /// The classification-side requirements a candidate must meet before it may
 /// be asked to classify — capability map lines 1427 (local only) and 1435
@@ -2043,6 +2074,47 @@ impl DisposableRouting {
             explanation.push(contribution);
         }
 
+        // Capability map line 1539, beside classification latency's own
+        // term rather than folded into `classification_preferences`: that
+        // list is summed by `choose_for_automatic_classification` to order
+        // the *free* candidates the user has not ranked (map lines 1420,
+        // 1421, 1438), and this term must never join that sum — support-work
+        // latency ranks the metered fallback and informs the winner's
+        // explanation, exactly as design decisions for lines 1537/1538
+        // record, and the free selection stays decided by the user's own
+        // order and availability alone (`scoring_never_reorders_the_existing_free_selection`).
+        explanation.push(
+            match value
+                .latency
+                .as_ref()
+                .and_then(|record| record.median_duration_ms)
+            {
+                Some(median) => {
+                    let timed = value.latency.as_ref().map_or(0, |record| record.timed);
+                    Contribution::new(
+                        "expected latency",
+                        LATENCY_PREFERENCE_WEIGHT / (1.0 + median as f64 / 1000.0),
+                        format!(
+                            "median {median}ms over {timed} timed support-work calls — lower \
+                             is preferred, at classification latency's own weight (map line \
+                             1539)"
+                        ),
+                    )
+                }
+                None => {
+                    let timed = value.latency.as_ref().map_or(0, |record| record.timed);
+                    Contribution::new(
+                        "expected latency",
+                        0.0,
+                        format!(
+                            "no latency figure yet ({timed} of {MIN_SAMPLE_FOR_SUMMARY} timed \
+                             support-work calls) — this preference is inert (map line 1539)"
+                        ),
+                    )
+                }
+            },
+        );
+
         if let (Some(session), true) = (self.reserve_override.granted_session(), reserve.is_some())
         {
             explanation.push(Contribution::new(
@@ -2490,6 +2562,87 @@ mod tests {
             scoring_would_prefer.model(),
             first_choice.model()
         );
+    }
+
+    /// Map line 1539's own words: among free candidates, the expected-latency
+    /// term must never be why one wins. Both candidates carry a latency
+    /// figure — the second listed is the one the term alone would prefer —
+    /// and the winner must still be whichever the user's own order and
+    /// availability name, exactly as
+    /// `scoring_never_reorders_the_existing_free_selection` proves for the
+    /// existing capacity term.
+    #[test]
+    fn the_expected_latency_term_never_reorders_the_free_selection() {
+        let first_choice =
+            free("openrouter", "first-choice-model").with_latency(Some(LatencyRecord {
+                timed: MIN_SAMPLE_FOR_SUMMARY,
+                median_duration_ms: Some(5_000),
+            }));
+        // The term alone would prefer this candidate — its median is far
+        // lower — but it is listed second and the user named neither.
+        let latency_would_prefer =
+            free("openrouter", "latency-would-prefer-model").with_latency(Some(LatencyRecord {
+                timed: MIN_SAMPLE_FOR_SUMMARY,
+                median_duration_ms: Some(0),
+            }));
+
+        let routing = DisposableRouting::for_support_work(true, FreePreferences::new());
+        let choice = routing
+            .choose(
+                JobKind::MemoryExtraction,
+                &[first_choice.clone(), latency_would_prefer.clone()],
+                &FreePool::new(),
+                Instant::now(),
+                None,
+            )
+            .expect("both candidates are free and available");
+
+        assert_eq!(
+            choice.model(),
+            first_choice.model(),
+            "the expected-latency term favors `{}` (lower median), but the free loop must \
+             still return the first available candidate in the order it was handed — the \
+             term ranks the metered fallback and informs the explanation, never the free \
+             selection",
+            latency_would_prefer.model()
+        );
+    }
+
+    /// Unit: the expected-latency term's arithmetic on fixed inputs — the
+    /// same formula and the same weight classification latency's own term
+    /// uses (map line 1421), so a reader who trusts one can trust the other
+    /// without re-deriving it.
+    #[test]
+    fn the_expected_latency_term_uses_classification_latencys_formula_and_weight() {
+        let candidate =
+            metered("openrouter", "a-metered-model").with_latency(Some(LatencyRecord {
+                timed: MIN_SAMPLE_FOR_SUMMARY,
+                median_duration_ms: Some(500),
+            }));
+        let routing = DisposableRouting::for_support_work(true, FreePreferences::new());
+        let choice = routing
+            .choose(
+                JobKind::MemoryExtraction,
+                &[candidate],
+                &FreePool::new(),
+                Instant::now(),
+                None,
+            )
+            .expect("the sole metered candidate is admitted at the default Plenty band");
+
+        let magnitude = choice
+            .explanation()
+            .contributions()
+            .iter()
+            .find(|contribution| contribution.name() == "expected latency")
+            .expect("the term is always rendered, measured or not")
+            .magnitude();
+        let expected = LATENCY_PREFERENCE_WEIGHT / (1.0 + 500.0 / 1000.0);
+        assert!(
+            (magnitude - expected).abs() < 1e-9,
+            "expected {expected}, got {magnitude}"
+        );
+        assert!((expected - CLASSIFICATION_PREFERENCE_WEIGHT / 1.5).abs() < 1e-9);
     }
 
     /// Line 539, the acceptance condition: an automated run finds no free

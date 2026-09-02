@@ -546,11 +546,16 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
                 query,
                 history,
                 limit,
+                explain,
             } => {
-                print!(
-                    "{}",
-                    memory_report(&runtime, &query.join(" "), *history, *limit)?
-                );
+                if *explain {
+                    print!("{}", memory_search_explain(&runtime, &query.join(" "))?);
+                } else {
+                    print!(
+                        "{}",
+                        memory_report(&runtime, &query.join(" "), *history, *limit)?
+                    );
+                }
             }
             MemoryCommand::Promote { id, authority } => {
                 print!("{}", memory_promote(&runtime, id, authority)?);
@@ -1730,10 +1735,14 @@ fn estimated_project_memory_tokens(runtime: &Runtime, task: &str) -> Option<u64>
     use glasshouse::memory::inject::BriefingOutcome;
 
     let project = ProjectMemory::open(runtime).ok()?;
+    // `None`: this is a diagnostic estimate (`glasshouse route`), never a
+    // delivery, and reaching the rerank seat here would spend a real model
+    // call on a number nobody asked to have reranked.
     let outcome = glasshouse::memory::inject::briefing(
         &project.store(),
         task,
         &std::collections::HashSet::new(),
+        None,
     )
     .ok();
     // The memory connection is dropped before the evaluation ledger opens —
@@ -6721,18 +6730,29 @@ fn brief_launch_session(
             return LaunchBriefing::Nothing;
         }
     };
-    let outcome =
-        match inject::select_briefing(&project.store(), query, &std::collections::HashSet::new()) {
-            Ok(outcome) => Some(outcome),
-            Err(err) => {
-                tracing::warn!(
-                    session = %session,
-                    error = %err,
-                    "could not select project memory to brief a launch"
-                );
-                None
-            }
-        };
+    let rerank_model = disposable_rerank_model(runtime, session);
+    let diagnostics =
+        memory_retrieval_diagnostics_enabled(runtime).then_some(inject::DiagnosticsRequest {
+            runtime,
+            session: Some(session.as_str()),
+        });
+    let outcome = match inject::select_briefing_traced(
+        &project.store(),
+        query,
+        &std::collections::HashSet::new(),
+        rerank_model.as_deref(),
+        diagnostics,
+    ) {
+        Ok((outcome, _trace)) => Some(outcome),
+        Err(err) => {
+            tracing::warn!(
+                session = %session,
+                error = %err,
+                "could not select project memory to brief a launch"
+            );
+            None
+        }
+    };
 
     let (injection, binding, failed_attempts) = match outcome {
         Some(BriefingOutcome::Injected(injection)) => {
@@ -8308,7 +8328,7 @@ fn disposable_extraction_model(
         return model;
     }
 
-    let mut candidates = disposable_candidates(
+    let candidates = disposable_candidates(
         &user,
         project.as_ref(),
         &effective,
@@ -8316,6 +8336,10 @@ fn disposable_extraction_model(
         &telemetry,
         now_unix,
     );
+    // Map line 1539's reader half, right after `disposable_candidates`
+    // builds the list — never inside that function itself, which a live
+    // worker is editing this same round.
+    let mut candidates = attach_latency_records(runtime, candidates, now_unix);
     // Added rather than substituted, and only when the configuration did not
     // already yield it: a model named in a provider's `free_models` **and**
     // in `[memory] extraction_model` is one resource, ranked once.
@@ -8565,6 +8589,42 @@ fn disposable_extraction_model(
     );
 
     Box::new(routed)
+}
+
+/// `[memory] rerank_model` resolved into a callable model, for
+/// `brief_launch_session`'s call into [`glasshouse::memory::inject::select_briefing`]
+/// — the extraction seat's four steps for `JobKind::Reranking`, map lines
+/// 1089-1092.
+///
+/// The implementation lives in
+/// [`glasshouse::memory::rerank::resolve_rerank_model`] rather than here:
+/// unlike [`disposable_extraction_model`], this seat is reached from **two**
+/// doors — this file's own [`brief_launch_session`] and
+/// `glasshouse::api::unix::select_memory`, which is a library module that
+/// cannot call anything in this binary crate. Putting the logic in the
+/// library is what lets both doors call the same seat; this is the thin
+/// wrapper that keeps it named beside its sibling here, as the packet asks.
+fn disposable_rerank_model(
+    runtime: &Runtime,
+    _session: &glasshouse::session::SessionId,
+) -> Option<Box<dyn glasshouse::memory::ExtractionModel>> {
+    glasshouse::memory::rerank::resolve_rerank_model(runtime)
+}
+
+/// `[memory] retrieval_diagnostics`, resolved — map line 1094's gate on
+/// whether a briefing writes `memory-retrieval.jsonl`. A configuration that
+/// cannot be read is `false`, matching every other automatic-behaviour
+/// default's fail-safe direction on this path.
+fn memory_retrieval_diagnostics_enabled(runtime: &Runtime) -> bool {
+    let Ok(user) = UserConfig::load(runtime.paths()) else {
+        return false;
+    };
+    let Ok(project) = config::load_project_config(runtime.project()) else {
+        return false;
+    };
+    EffectiveConfig::new(&user, project.as_ref())
+        .memory_retrieval_diagnostics()
+        .value
 }
 
 /// Take the requests other dispatches have already claimed out of what each
@@ -9284,6 +9344,10 @@ fn automatic_classification_choice(
     let candidates =
         disposable_candidates(user, project, effective, &secrets, &telemetry, now_unix);
     let candidates = attach_classification_records(runtime, candidates, now_unix);
+    // Map line 1539's reader half, right after `disposable_candidates` builds
+    // the list `DisposableRouting::score` will rank — never inside that
+    // function itself, which a live worker is editing this same round.
+    let candidates = attach_latency_records(runtime, candidates, now_unix);
     // Map line 1436's producer: the same `pricing.toml` read `session_router`
     // already loads from the same config directory. Fail-soft, like that
     // caller — an absent or malformed file yields an empty table and every
@@ -9741,6 +9805,71 @@ fn attach_classification_records(
                 }
             };
             candidate.with_classification_record(record)
+        })
+        .collect()
+}
+
+/// Read what the evidence ledger holds about each candidate's own median
+/// support-work latency — the reader half of capability map line 1539 — and
+/// attach it, so `DisposableRouting::score`'s expected-latency term acts on
+/// a measured quantity.
+///
+/// Beside [`attach_classification_records`] rather than folded into it: this
+/// reads [`glasshouse::routing::evidence::EXTRACTION_PURPOSE`] rows, not
+/// [`glasshouse::routing::evidence::CLASSIFICATION_PURPOSE`] ones, and it is
+/// called from both dispatch functions that score support-work candidates —
+/// `disposable_extraction_model` has no classification record to attach at
+/// all.
+///
+/// # Opened here, after the candidate list exists (practice §65)
+///
+/// Same posture as [`attach_classification_records`]: nothing is opened for
+/// an empty candidate list, and a ledger or a record that cannot be read
+/// leaves that candidate unmeasured — the term is then inert and says so —
+/// rather than failing the dispatch.
+fn attach_latency_records(
+    runtime: &Runtime,
+    candidates: Vec<glasshouse::routing::disposable::DisposableCandidate>,
+    now_unix: i64,
+) -> Vec<glasshouse::routing::disposable::DisposableCandidate> {
+    use glasshouse::routing::evidence::{CLASSIFICATION_EVIDENCE_WINDOW_SECONDS, EvidenceLedger};
+
+    if candidates.is_empty() {
+        return candidates;
+    }
+    let ledger = match EvidenceLedger::open(runtime) {
+        Ok(ledger) => ledger,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "routing evidence ledger unavailable; every candidate's expected latency ranks \
+                 as unmeasured"
+            );
+            return candidates;
+        }
+    };
+    candidates
+        .into_iter()
+        .map(|candidate| {
+            let record = match ledger.support_work_latency(
+                candidate.provider(),
+                candidate.model(),
+                now_unix,
+                CLASSIFICATION_EVIDENCE_WINDOW_SECONDS,
+            ) {
+                Ok(record) => Some(record),
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        provider = candidate.provider(),
+                        model = candidate.model(),
+                        "could not read a candidate's support-work latency record; it ranks as \
+                         unmeasured"
+                    );
+                    None
+                }
+            };
+            candidate.with_latency(record)
         })
         .collect()
 }
@@ -12457,6 +12586,31 @@ fn memory_report(
 ) -> anyhow::Result<String> {
     let grouped = memory_search_grouped(runtime, query, history, limit, None)?;
     render_memory_report(&grouped, query, history)
+}
+
+/// `glasshouse memory search --explain` — map line 1094's other reader. Runs
+/// the exact selection [`brief_launch_session`] and `api::unix::select_memory`
+/// would run for `query` (`glasshouse::memory::inject::briefing_traced`, the
+/// same seat, the same candidate limit, the same rerank), and prints the
+/// [`glasshouse::memory::RetrievalTrace`] it built — never writes
+/// `memory-retrieval.jsonl`, whatever `[memory] retrieval_diagnostics` says,
+/// because `diagnostics: None` is passed regardless.
+fn memory_search_explain(runtime: &Runtime, query: &str) -> anyhow::Result<String> {
+    use glasshouse::memory::ProjectMemory;
+    use glasshouse::memory::inject;
+    use glasshouse::memory::rerank::explain_line;
+
+    let model = glasshouse::memory::rerank::resolve_rerank_model(runtime);
+    let project = ProjectMemory::open(runtime)?;
+    let (_, trace) = inject::briefing_traced(
+        &project.store(),
+        query,
+        &std::collections::HashSet::new(),
+        model.as_deref(),
+        None,
+    )?;
+    drop(project);
+    Ok(format!("{}\n", explain_line(&trace)))
 }
 
 /// Pure formatting half of [`memory_report`], separated so
