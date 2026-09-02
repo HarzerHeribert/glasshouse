@@ -237,6 +237,38 @@ the unrelated Windows deadlock now being fixed.
 
 ---
 
+### 441 — the Windows run happened, and the store would not open (2026-09-02)
+
+The run the entry above asked for exists now: `ff57ddb`'s three-leg gate
+(`phase-54a.md`, 1908) ran `tests/secret_native.rs` and the `secret::native`
+lib tests on the ARM64 VM, green — **and five of them printed `SKIPPED: the
+native secure store would not open in this session`** (three lib round-trips,
+two integration round-trips: `a_credential_in_the_native_store_is_readable_there_and_invisible_to_the_environment`
+and `deleting_a_credential_that_is_not_there_is_success`). The manifest guard
+and the refusal-shape tests ran for real; the round-trips proved nothing on
+Windows, exactly the case the entry said to treat as the finding rather than
+a formality. So on the VM, under the runner's ssh session as the `glasshouse`
+user, `NativeSecretStore::detect()` refuses to open Windows Credential
+Manager. The test prints the fact and swallows the `keyring::Error` behind
+it, so this ledger cannot yet say why — the honest candidates are the session
+itself (an ssh logon without an interactive token or a loaded user profile is
+the usual reason `CredWrite`/`CredRead` fail on a service-style session) or
+the backend feature not behaving as its type-check promised.
+
+**State unchanged: LOCALLY VERIFIED, box not ticked.** What closes it is now
+one bounded Windows package, `GH-WINDOWS-SECRET-STORE` (Red — secrets on a
+platform): on the VM, run the round-trips with the refusal's `keyring::Error`
+printed rather than swallowed, name the cause, and either make the CI session
+one in which the store opens (an interactive-logon task or the runner
+invoking the target under the user's own logon) or record that the store
+genuinely cannot be reached from a non-interactive session and what the
+product does then; then re-run the round-trips and the entry's mutation `m1`
+on Windows. The measurement harness the flakes worker left on the VM
+(`C:\ci\flake.ps1`, `report-windows-flakes.md` §11) drives single targets
+there.
+
+---
+
 ### Phase 9E — Prefer a Secret Service-compatible keyring on Linux when available (line 442) — REFUSED, premise-invalid
 
 State: **NOT STARTED.** Returned premise-invalid by the worker and accepted by
