@@ -5017,3 +5017,5 @@ Same session as Batch 87 (`56821d4d`). **Map 1213 → 1218** (2028, 2029, 2030, 
 3. **A watch that reads a pane cannot tell a long thinking stretch from idle.** Three false alarms on one worker; a report-file Monitor is the honest fallback and the watch's heuristic is a Green fix.
 4. **Grep the verb and the module before naming them in a packet.** `memory export` and `memory/export.rs` were both Phase 50's; the worker blocked correctly the first time and resolved the second collision non-destructively.
 5. **Batch reports into one gate when finishes align.** Three reports within twenty minutes became one 18-file gate instead of three; the wave-92 gate was stopped two minutes in to make that happen.
+
+**Waves 92–93's trailing sweep** (`scripts/blast-radius.sh --since bfa3242` from a detached worktree at `739b182`, run by the successor session `4d589d24` while the next package was designed): **118/118 green**, twelve minutes, worktree removed.
