@@ -135,10 +135,12 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
+use crate::config::BudgetPeriod;
 use crate::provider::quota::{
     Capacity, CapacityState, KnownPlan, LimitingUnit, LongWindowRequests, NativeAmount, Pool,
     RateCeilings, Reading, ReadingSource,
 };
+use crate::routing::evidence::CredentialCost;
 
 /// Every response-header name this module will read, lowercased.
 ///
@@ -990,6 +992,96 @@ pub fn read_harness_plan(body: &str, observed_at_unix: i64, interface: &str) -> 
     HarnessTelemetry::plan(plan, observed_at_unix, interface)
 }
 
+/// The start of `period`'s current window, given `now_unix` — a pure
+/// function of the clock the caller supplies rather than one that reads the
+/// wall clock itself, the same discipline `provider::resources` documents
+/// for its own reports (`ReportOptions::now_unix`'s own doc: *"this module
+/// has no clock"*).
+///
+/// [`BudgetPeriod::RollingThirtyDays`] needs no zone at all: it is thirty
+/// days of absolute seconds back from `now_unix`.
+/// [`BudgetPeriod::CalendarMonth`] is the first instant of the *local*
+/// calendar month — what a person means by "this month" — read through the
+/// platform's own `localtime_r` (POSIX) / `localtime_s` (the Windows CRT)
+/// and re-normalised with `mktime`. That is the OS's own notion of the local
+/// zone and its DST rules rather than a hand-rolled one: this crate
+/// deliberately carries no date-library dependency for a single conversion
+/// (see `shell::view::format_unix_utc`'s own comment on the same refusal for
+/// UTC rendering), and the OS is the only source of "local" this binary has.
+/// `tm_isdst` is set to `-1` before the `mktime` call so it is re-derived for
+/// the *target* date rather than carried over from `now_unix`'s own DST
+/// state — the one case that could otherwise put the boundary an hour off,
+/// at a DST transition itself. Fails soft to `now_unix` on any libc error,
+/// which makes a budget period start no earlier than "right now" rather than
+/// panicking a report.
+///
+/// **Recorded limit:** a test can only assert this function's *invariants*
+/// (the result is the first of some month at local midnight, at or before
+/// `now_unix`) rather than a fixed absolute timestamp, because the correct
+/// answer depends on the machine's own configured zone.
+pub fn budget_period_start(period: BudgetPeriod, now_unix: i64) -> i64 {
+    match period {
+        BudgetPeriod::RollingThirtyDays => now_unix - 30 * 24 * 60 * 60,
+        BudgetPeriod::CalendarMonth => calendar_month_start_local(now_unix),
+    }
+}
+
+#[cfg(unix)]
+fn calendar_month_start_local(now_unix: i64) -> i64 {
+    // SAFETY: `time` and `broken_down` are local values this function alone
+    // writes; `localtime_r` and `mktime` are POSIX functions taking a valid
+    // pointer to each, which these are.
+    unsafe {
+        let time = now_unix as libc::time_t;
+        let mut broken_down: libc::tm = std::mem::zeroed();
+        if libc::localtime_r(&time, &mut broken_down).is_null() {
+            return now_unix;
+        }
+        broken_down.tm_mday = 1;
+        broken_down.tm_hour = 0;
+        broken_down.tm_min = 0;
+        broken_down.tm_sec = 0;
+        broken_down.tm_isdst = -1;
+        let start = libc::mktime(&mut broken_down);
+        if start == -1 { now_unix } else { start as i64 }
+    }
+}
+
+#[cfg(windows)]
+fn calendar_month_start_local(now_unix: i64) -> i64 {
+    // The UCRT exports no plain `mktime`: its header maps `mktime` onto
+    // `_mktime64`, and the `libc` crate binds `localtime_s` and `time` for
+    // Windows but no `mktime` at all — so the 64-bit symbol is declared here
+    // by its real name. Type-checked for `aarch64-pc-windows-msvc` against
+    // `libc 0.2.189` at integration; it resolves through the same CRT import
+    // library `localtime_s` above does.
+    unsafe extern "C" {
+        fn _mktime64(broken_down: *mut libc::tm) -> i64;
+    }
+    // SAFETY: `time` and `broken_down` are local values this function alone
+    // writes; `localtime_s` and `_mktime64` are CRT functions taking a valid
+    // pointer to each, which these are.
+    unsafe {
+        let time = now_unix as libc::time_t;
+        let mut broken_down: libc::tm = std::mem::zeroed();
+        if libc::localtime_s(&mut broken_down, &time) != 0 {
+            return now_unix;
+        }
+        broken_down.tm_mday = 1;
+        broken_down.tm_hour = 0;
+        broken_down.tm_min = 0;
+        broken_down.tm_sec = 0;
+        broken_down.tm_isdst = -1;
+        let start = _mktime64(&mut broken_down);
+        if start == -1 { now_unix } else { start }
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn calendar_month_start_local(now_unix: i64) -> i64 {
+    now_unix
+}
+
 /// A plan or budget the user entered — capability map line 1233.
 ///
 /// The manual half of the same seam the two readers above cover, and the only
@@ -1003,10 +1095,17 @@ pub fn read_harness_plan(body: &str, observed_at_unix: i64, interface: &str) -> 
 /// is current as of the moment it was loaded, and dating it to the file's
 /// mtime would make an unchanged budget look stale (capability map line 1237)
 /// for no reason.
+///
+/// `spend` is capability map line 1519's own reading — `Some` only when a
+/// caller actually counted spend against the budget's period
+/// (`provider::resources::GatheredTelemetry::gather_budget_spend`) and that
+/// count priced at least one row. Nothing in this crate counts spend against
+/// a budget nobody could count against; see [`CredentialCost::micro_usd`].
 pub fn apply_user_configuration(
     state: CapacityState,
     plan: Option<&str>,
     monthly_budget_micro_usd: Option<u64>,
+    spend: Option<&CredentialCost>,
     observed_at_unix: i64,
 ) -> CapacityState {
     let mut state = state;
@@ -1026,10 +1125,8 @@ pub fn apply_user_configuration(
     if let Some(budget) = monthly_budget_micro_usd
         && state.user_budget().limit().is_readable()
     {
-        // The ceiling is known and the spend against it is not: nothing in
-        // Glasshouse counts money spent, so the remaining half stays
-        // whatever it was. Capability map line 1209 needs both, and this is
-        // the half that exists.
+        // The ceiling is known; whether the remaining half moves depends on
+        // whether anything below actually priced spend against it.
         let ceiling = Capacity::Measured(Reading::new(
             NativeAmount::millionths(budget as i64, "USD"),
             observed_at_unix,
@@ -1038,6 +1135,29 @@ pub fn apply_user_configuration(
         let merged = state.user_budget().limit().clone().prefer(ceiling);
         let pool = state.user_budget().clone().with_limit(merged);
         state = state.with_user_budget(pool);
+
+        // Capability map line 1519's own half: the remaining amount moves
+        // only when a caller counted priced spend against this budget's
+        // period. A budget with no counted spend — no ledger, no
+        // `pricing.toml` entry, every row relayed or unread — leaves the
+        // remaining half exactly as it was, unmeasured, so a resource view
+        // can still say honestly "you set a ceiling and Glasshouse could not
+        // count anything against it" rather than implying a balance.
+        if let Some(spent_micro_usd) = spend.and_then(|spend| spend.micro_usd)
+            && state.user_budget().remaining().is_readable()
+        {
+            let remaining_micro_usd = budget.saturating_sub(spent_micro_usd);
+            let remaining = Capacity::Measured(Reading::new(
+                NativeAmount::millionths(remaining_micro_usd as i64, "USD"),
+                observed_at_unix,
+                ReadingSource::LocalObservation(
+                    "priced spend against the configured budget".to_owned(),
+                ),
+            ));
+            let merged = state.user_budget().remaining().clone().prefer(remaining);
+            let pool = state.user_budget().clone().with_remaining(merged);
+            state = state.with_user_budget(pool);
+        }
     }
 
     state
@@ -2252,6 +2372,7 @@ mod tests {
             CapacityState::unmetered_local(),
             Some("pro"),
             None,
+            None,
             OBSERVED,
         );
         assert!(!configured.plan().is_measured());
@@ -2264,6 +2385,7 @@ mod tests {
         let configured = apply_user_configuration(
             CapacityState::opaque_subscription(),
             Some("pro"),
+            None,
             None,
             OBSERVED,
         );
@@ -2282,7 +2404,7 @@ mod tests {
 
         // And the other order: a manual entry never displaces the harness.
         let harness_first = apply_harness_report(CapacityState::opaque_subscription(), &reported);
-        let then_user = apply_user_configuration(harness_first, Some("pro"), None, OBSERVED);
+        let then_user = apply_user_configuration(harness_first, Some("pro"), None, None, OBSERVED);
         assert_eq!(then_user.plan().value().unwrap().name(), "max");
         assert_eq!(
             then_user.plan().telemetry_class(),
@@ -2405,6 +2527,7 @@ mod tests {
             CapacityState::metered_balance(),
             None,
             Some(10_000_000),
+            None,
             OBSERVED,
         );
         let limit = state.user_budget().limit().value().expect("a ceiling");
@@ -2415,9 +2538,137 @@ mod tests {
             state.user_budget().limit().telemetry_class(),
             Some(TelemetryClass::Manual)
         );
-        // Nothing counts spend, so the remaining half stays unknown rather
-        // than being set equal to the ceiling.
+        // This caller counted no spend, so the remaining half stays unknown
+        // rather than being set equal to the ceiling.
         assert!(!state.user_budget().remaining().is_measured());
+    }
+
+    /// Map line 1519's own half of line 1233: a caller that *did* count
+    /// priced spend against the configured budget moves the remaining half
+    /// — the case the test above deliberately does not exercise.
+    #[test]
+    fn a_configured_budget_with_counted_spend_sets_the_remaining_half() {
+        let spend = CredentialCost {
+            micro_usd: Some(4_000_000),
+            priced_rows: 3,
+            unread_rows: 0,
+            unpriced_rows: 0,
+            account_narrowed: false,
+        };
+        let state = apply_user_configuration(
+            CapacityState::metered_balance(),
+            None,
+            Some(10_000_000),
+            Some(&spend),
+            OBSERVED,
+        );
+        let remaining = state.user_budget().remaining().value().expect("a reading");
+        assert_eq!(remaining.value(), 6_000_000);
+        assert_eq!(remaining.unit(), "USD");
+        assert_eq!(
+            state.user_budget().remaining().telemetry_class(),
+            Some(TelemetryClass::Observed)
+        );
+    }
+
+    /// The spend counted may reach or exceed the budget — the remaining half
+    /// saturates at zero rather than going negative.
+    #[test]
+    fn spend_at_or_over_the_budget_saturates_remaining_at_zero() {
+        let spend = CredentialCost {
+            micro_usd: Some(15_000_000),
+            priced_rows: 1,
+            unread_rows: 0,
+            unpriced_rows: 0,
+            account_narrowed: false,
+        };
+        let state = apply_user_configuration(
+            CapacityState::metered_balance(),
+            None,
+            Some(10_000_000),
+            Some(&spend),
+            OBSERVED,
+        );
+        let remaining = state.user_budget().remaining().value().expect("a reading");
+        assert_eq!(remaining.value(), 0);
+    }
+
+    /// A budget with no priced row at all — `micro_usd: None` — is *unknown
+    /// spend*, never zero spend, so the remaining half stays exactly as
+    /// `None` left it: unmeasured.
+    #[test]
+    fn a_budget_nobody_could_price_leaves_remaining_unmeasured() {
+        let spend = CredentialCost {
+            micro_usd: None,
+            priced_rows: 0,
+            unread_rows: 2,
+            unpriced_rows: 1,
+            account_narrowed: false,
+        };
+        let state = apply_user_configuration(
+            CapacityState::metered_balance(),
+            None,
+            Some(10_000_000),
+            Some(&spend),
+            OBSERVED,
+        );
+        assert!(!state.user_budget().remaining().is_measured());
+    }
+
+    // --- `budget_period_start` ---------------------------------------------
+
+    #[test]
+    fn rolling_thirty_days_is_exactly_thirty_days_of_seconds_back() {
+        let start = budget_period_start(BudgetPeriod::RollingThirtyDays, OBSERVED);
+        assert_eq!(OBSERVED - start, 30 * 24 * 60 * 60);
+    }
+
+    /// The machine's own configured zone decides the exact instant, so this
+    /// can only assert the invariants a calendar-month start must hold —
+    /// see [`budget_period_start`]'s own doc for why a fixed absolute
+    /// timestamp cannot be pinned here.
+    #[test]
+    fn calendar_month_start_is_the_first_of_the_month_at_local_midnight_at_or_before_now() {
+        let now = OBSERVED;
+        let start = budget_period_start(BudgetPeriod::CalendarMonth, now);
+        assert!(
+            start <= now,
+            "the start of this month must not be in the future"
+        );
+
+        // Re-derive the local calendar day of `start` and assert it reads
+        // the first of the month at midnight — the same primitive the
+        // function under test used, applied to its own output, which is
+        // the only zone-independent way to check this.
+        // SAFETY: `time`/`broken_down` are local values this test alone
+        // writes, and `localtime_r`/`localtime_s` take a valid pointer to
+        // each, which these are.
+        #[cfg(unix)]
+        let broken_down = unsafe {
+            let time = start as libc::time_t;
+            let mut broken_down: libc::tm = std::mem::zeroed();
+            assert!(!libc::localtime_r(&time, &mut broken_down).is_null());
+            broken_down
+        };
+        #[cfg(windows)]
+        let broken_down = unsafe {
+            let time = start as libc::time_t;
+            let mut broken_down: libc::tm = std::mem::zeroed();
+            assert_eq!(libc::localtime_s(&mut broken_down, &time), 0);
+            broken_down
+        };
+        #[cfg(any(unix, windows))]
+        {
+            assert_eq!(broken_down.tm_mday, 1);
+            assert_eq!(broken_down.tm_hour, 0);
+            assert_eq!(broken_down.tm_min, 0);
+            assert_eq!(broken_down.tm_sec, 0);
+        }
+
+        // A second call one month's worth of seconds later must not answer
+        // the same instant — the boundary actually moves.
+        let later = budget_period_start(BudgetPeriod::CalendarMonth, now + 32 * 24 * 60 * 60);
+        assert!(later > start);
     }
 
     /// Capability map line 1234, at the seam where it could actually go
@@ -2434,6 +2685,7 @@ mod tests {
             CapacityState::metered_balance(),
             None,
             Some(10_000_000),
+            None,
             OBSERVED,
         );
         let pool = state

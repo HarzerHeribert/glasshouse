@@ -42,6 +42,7 @@ use std::fmt::Write as _;
 
 use crate::config::{EffectiveConfig, Layer, QuotaStaleAfterSeconds};
 use crate::integrations::{IntegrationId, IntegrationKind};
+use crate::provider::pricing::PriceTable;
 use crate::provider::quota::{
     Capacity, CapacityBandThresholds, CapacityState, Freshness, NativeAmount, Pool, TelemetryClass,
     UNKNOWN_TELEMETRY,
@@ -50,9 +51,11 @@ use crate::provider::registry::{ResourceKind, registry};
 use crate::provider::telemetry::{
     GatewayHealthCache, GatewayHealthReading, GatewayQuotaCache, HarnessTelemetry,
     RateLimitHeaders, apply_harness_report, apply_provider_headers, apply_user_configuration,
-    read_harness_plan,
+    budget_period_start, read_harness_plan,
 };
-use crate::routing::evidence::{EvidenceLedger, FailureClass, FailureClassCounts};
+use crate::routing::evidence::{
+    CredentialCost, EvidenceLedger, FailureClass, FailureClassCounts, recent_credential_cost,
+};
 
 /// The status interface of a harness that has one, as a command line
 /// Glasshouse constructs itself.
@@ -222,6 +225,14 @@ pub struct GatheredTelemetry {
     /// count, a cooldown and a remaining-quota reading are three facts, and
     /// none may stand in for another.
     failure_classes: BTreeMap<String, FailureClassCounts>,
+    /// Capability map line 1519's own reading: what the routing evidence
+    /// ledger, priced through `pricing.toml`, counted as spend against each
+    /// provider's configured money budget's own period. A fourth map beside
+    /// the three above for the same reason: a failure count and a priced
+    /// spend are two different facts, and neither may stand in for the
+    /// other. Only providers with `[providers.<name>.quota] budget`
+    /// configured are ever keys here — see [`Self::gather_budget_spend`].
+    budget_spend: BTreeMap<String, CredentialCost>,
 }
 
 /// How far back `glasshouse resources` counts failures by class — capability
@@ -385,6 +396,64 @@ impl GatheredTelemetry {
         self
     }
 
+    /// Record what the routing evidence ledger counted as spend against one
+    /// provider's own money budget, priced through `pricing.toml` — capability
+    /// map line 1519's own seam, independent of every seam above.
+    pub fn with_provider_budget_spend(
+        mut self,
+        provider: impl Into<String>,
+        cost: CredentialCost,
+    ) -> Self {
+        self.budget_spend.insert(provider.into(), cost);
+        self
+    }
+
+    /// Fold in, for every provider with a `[providers.<name>.quota] budget`
+    /// configured, what the ledger counted as priced spend against that
+    /// budget's own period — capability map line 1519's bridge from the
+    /// ledger `main.rs::resources_report` already holds to this report, and
+    /// the reading `observed_capacity` folds into the pool's remaining half.
+    ///
+    /// Fail-soft exactly as [`Self::gather_failure_classes`] and every other
+    /// gather above: a provider whose window cannot be read folds in
+    /// nothing rather than failing the whole report, and the reason is
+    /// logged at debug level. A provider with no budget configured is never
+    /// queried at all — there is nothing to count it against.
+    ///
+    /// **Not yet called from `glasshouse resources`.** See this package's
+    /// report for the one call main.rs's `resources_report` and its
+    /// telemetry builders need, exactly as
+    /// [`Self::gather_failure_classes`]'s own doc records for its own call.
+    pub fn gather_budget_spend(
+        mut self,
+        ledger: &EvidenceLedger,
+        prices: &PriceTable,
+        effective: &EffectiveConfig<'_>,
+        now_unix: i64,
+    ) -> Self {
+        for provider in effective.provider_names() {
+            let Some(budget) = effective.quota_override(&provider).value.budget() else {
+                continue;
+            };
+            let since_unix = budget_period_start(budget.period(), now_unix);
+            let window_seconds = (now_unix - since_unix).max(0);
+            match ledger.observations_in_window(now_unix, window_seconds) {
+                Ok(rows) => {
+                    let cost = recent_credential_cost(&rows, &provider, None, prices, since_unix);
+                    self = self.with_provider_budget_spend(provider, cost);
+                }
+                Err(err) => {
+                    tracing::debug!(
+                        provider = %provider,
+                        error = %err,
+                        "could not count budget spend for the resources report"
+                    );
+                }
+            }
+        }
+        self
+    }
+
     fn for_harness(&self, harness: IntegrationId) -> Option<&HarnessTelemetry> {
         self.harness.get(harness.slug())
     }
@@ -405,6 +474,39 @@ impl GatheredTelemetry {
     /// place a renderer can ask.
     fn for_provider_failure_classes(&self, provider: &str) -> Option<&FailureClassCounts> {
         self.failure_classes.get(provider)
+    }
+
+    /// The priced spend gathered against `provider`'s own money budget, or
+    /// `None` when nothing was gathered for it — either no budget is
+    /// configured, or [`Self::gather_budget_spend`] was never called. Public,
+    /// unlike its three siblings above: `main.rs`'s telemetry builders need
+    /// this reading to decide whether a destination's provider budget is
+    /// exhausted (map line 1519), one layer above what
+    /// [`observed_capacity`] itself folds into a pool.
+    pub fn provider_budget_spend(&self, provider: &str) -> Option<&CredentialCost> {
+        self.budget_spend.get(provider)
+    }
+
+    /// Drop `provider`'s gathered budget spend, if any — for a caller that
+    /// needs `observed_capacity`'s reading for a resource **as if no money
+    /// budget applied to it**, map line 1519's own requirement that a
+    /// free-tier candidate is never excluded by one.
+    ///
+    /// The need is structural, not incidental: `observed_capacity` folds a
+    /// provider's money budget into the *same* `CapacityState` a metered and
+    /// a free candidate of that provider both read `remaining_capacity_score`
+    /// from, and `routing::disposable`'s existing line-1434 "known zero
+    /// headroom" gate does not distinguish which dimension bound that score
+    /// — a free candidate whose provider's budget reads exhausted would
+    /// otherwise be excluded by a fact about money that never applies to it.
+    /// `main.rs::disposable_candidates` is the one caller: it builds a free
+    /// candidate's own capacity against a telemetry value this method has
+    /// stripped, so the exclusion this method exists to prevent cannot
+    /// happen upstream of `routing::disposable`, which this package leaves
+    /// untouched.
+    pub fn without_provider_budget_spend(mut self, provider: &str) -> Self {
+        self.budget_spend.remove(provider);
+        self
     }
 }
 
@@ -443,6 +545,7 @@ pub fn observed_capacity(
             state,
             configured.value.plan(),
             configured.value.budget().map(|b| b.amount_micro_usd()),
+            telemetry.provider_budget_spend(provider),
             now_unix,
         );
     }
@@ -514,7 +617,7 @@ pub fn report(
         out.push('\n');
     }
 
-    render_configuration_note(&mut out, effective);
+    render_configuration_note(&mut out, effective, telemetry);
     out
 }
 
@@ -1082,7 +1185,11 @@ fn pool_has_a_reading(pool: &Pool) -> bool {
 /// plan or a budget is an option, at the moment they are looking at a screen
 /// full of `unknown`. Naming the layer each configured value came from
 /// matches what `glasshouse response` and `glasshouse pairing` already do.
-fn render_configuration_note(out: &mut String, effective: &EffectiveConfig<'_>) {
+fn render_configuration_note(
+    out: &mut String,
+    effective: &EffectiveConfig<'_>,
+    telemetry: &GatheredTelemetry,
+) {
     out.push_str("CONFIGURED QUOTA OVERRIDES\n");
     let mut any = false;
     for name in effective.provider_names() {
@@ -1096,14 +1203,41 @@ fn render_configuration_note(out: &mut String, effective: &EffectiveConfig<'_>) 
             let _ = writeln!(out, "  {name}: plan `{plan}` ({layer})");
         }
         if let Some(budget) = configured.value.budget() {
-            let _ = writeln!(
-                out,
-                "  {name}: budget {}.{:06} USD per {} ({layer}) — Glasshouse does not count \
-                 spend against this",
-                budget.amount_micro_usd() / 1_000_000,
-                budget.amount_micro_usd() % 1_000_000,
-                budget.period().as_str()
-            );
+            let cost = telemetry.provider_budget_spend(&name);
+            let amount = budget.amount_micro_usd();
+            let period = budget.period().as_str();
+            match cost.and_then(|cost| cost.micro_usd.map(|spent| (cost, spent))) {
+                Some((cost, spent)) => {
+                    let remaining = amount.saturating_sub(spent);
+                    let _ = writeln!(
+                        out,
+                        "  {name}: budget {}.{:06} USD per {period} ({layer}) — {}.{:06} USD \
+                         counted spent over {} priced exchanges ({} unread, {} unpriced), \
+                         {}.{:06} USD remaining",
+                        amount / 1_000_000,
+                        amount % 1_000_000,
+                        spent / 1_000_000,
+                        spent % 1_000_000,
+                        cost.priced_rows,
+                        cost.unread_rows,
+                        cost.unpriced_rows,
+                        remaining / 1_000_000,
+                        remaining % 1_000_000,
+                    );
+                }
+                None => {
+                    let unread = cost.map_or(0, |cost| cost.unread_rows);
+                    let unpriced = cost.map_or(0, |cost| cost.unpriced_rows);
+                    let _ = writeln!(
+                        out,
+                        "  {name}: budget {}.{:06} USD per {period} ({layer}) — spend not \
+                         counted ({} exchanges: {unread} unread, {unpriced} unpriced)",
+                        amount / 1_000_000,
+                        amount % 1_000_000,
+                        unread + unpriced,
+                    );
+                }
+            }
         }
         if let Some(age) = configured.value.stale_after() {
             let _ = writeln!(
@@ -2163,10 +2297,11 @@ mod tests {
             rendered.contains("10.000000 USD per calendar month"),
             "{rendered}"
         );
-        // Stated rather than implied: the ceiling is known, the spend is not.
+        // Stated rather than implied: the ceiling is known and nothing was
+        // gathered to count spend against it, so the report says so with the
+        // breakdown rather than implying a balance.
         assert!(
-            rendered.contains("does not count \n                 spend against this")
-                || rendered.contains("does not count"),
+            rendered.contains("spend not counted (0 exchanges: 0 unread, 0 unpriced)"),
             "{rendered}"
         );
     }

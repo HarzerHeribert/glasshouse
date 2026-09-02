@@ -5049,3 +5049,20 @@ Session `4d589d24` (Fable 5.1), inherited hot from `56821d4d` with three workers
 **Wave 98's trailing sweep** (`--since ac068c0` from a detached worktree at `85b743a`, run in the gap before wave 99): **123/123 green** — the `crate::session` red is gone on the merged tree, and the bootstrap flake did not fire this time.
 
 **Wave 99's trailing sweep** (`--since 85b743a` from a detached worktree at `95aa08d`): **66/66 green**, worktree removed.
+
+## Batch 90 (2026-09-02, late evening) — money is counted against the user's budget, and a refusal that outlived its blocker
+
+Session `0c56372c` (Fable 5.1), inherited hot from `4d589d24` with three workers live and the budget worker's report landing in the first ten minutes. Wave 100 was that one worker, integrated alone because the other two were minutes into their turns: **map 1225 → 1229**.
+
+| package | tier | result |
+|---|---|---|
+| `budget-spend-counter` (wave 100) | Sonnet high, Amber | **1263 and 1519 closed, Phase 35A complete**; 1209 closed on the same evidence. `recent_credential_cost` beside `recent_credential_spend`, `budget_period_start`, `apply_user_configuration` takes the spend, `EntitlementRefusal::BudgetExhausted` at `hard_constraint` and `disposable_candidates`, the `resources` wording. 4/4 KILLED; three packet errors, all right (the design note post-dated the worker's base; no `subscription_rules.rs`; no `BudgetPeriod::seconds`); one interaction found by testing rather than reading — a free model inheriting its provider's zeroed budget dimension through the shared `CapacityState` |
+| 1763, no package | orchestrator | ticked on `gateway_failure_taxonomy`'s existing shipped-binary proof (landed for 1365 on 2026-08-31) plus one `mutate.sh` run in the finished worker's worktree: KILLED |
+
+**Output per box.** Day total ≈ 17.7M at this commit for **+28 net today** (1201 → 1229), about 630k per net box across the day's sessions; this session's own share is small for +4 net, because three of the four were the previous session's dispatch landing and the fourth was a re-read of a stale refusal. Still above the 250k line on the day, so dispatches stay implementation.
+
+**Findings worth carrying forward.**
+
+1. **A report's named thin spot was a real defect, and the environment hid it twice.** The worker said its `#[cfg(windows)]` arm was never compiled. `cargo check --target aarch64-pc-windows-msvc` failed on the Homebrew toolchain that owns `PATH` (no target std), then on rustup's toolchain at `ring`'s C build (no Windows SDK). A ten-line scratch crate holding the arm alone against the same `libc 0.2.189` was the decisive check: `libc::mktime` does not exist for Windows. Spend §88's verification exactly where the report points, and prefer the smallest artefact that answers the question over the gate that cannot run.
+2. **A refusal can outlive its blocker when the fix lands under another phase.** 1763's row asked for a ruling `GH-FAILURE-TAXONOMY` made for 1365 two days earlier; nobody re-read 1763. `cluster-b.py` cannot see this shape; reading a phase entry's *what it needs* against the last two days' commits can. 1759 is the next instance (`MemoryRetrieved` rows have carried a session id since wave 94).
+3. **The register's 1331 wall is narrower than it reads.** The relay's refusal to parse bodies stands, but a translated exchange is decoded by the seam regardless — `tokens`, `effort` and `turn_shape` already come from it. First-token and first-tool-call timestamps are the same kind of fact on that path; the design note and `GH-STREAM-FIRST-EVENTS` follow this commit.

@@ -741,6 +741,22 @@ pub enum EntitlementRefusal {
         /// Input plus output tokens observed in the evidence window.
         observed_tokens: u64,
     },
+    /// Map line 1519: the **provider's** own money budget
+    /// (`[providers.<name>.quota] budget`) has been counted as exhausted —
+    /// distinct from [`Self::SpendCeiling`], which is this entitlement's own
+    /// token ceiling. Carries both figures for the same reason
+    /// [`Self::SpendCeiling`] does, plus the period the budget covers.
+    /// Raised only from [`Entitlement::budget_constraint`], which itself
+    /// fires only when [`Entitlement::with_budget_exhausted`] was given
+    /// `Some` — a budget nobody could count against is never this.
+    BudgetExhausted {
+        /// The ceiling the user wrote, in micro-USD.
+        budget_micro_usd: u64,
+        /// The priced spend counted against it, in micro-USD.
+        spent_micro_usd: u64,
+        /// `crate::config::BudgetPeriod::as_str()`.
+        period: &'static str,
+    },
 }
 
 impl std::fmt::Display for EntitlementRefusal {
@@ -757,6 +773,19 @@ impl std::fmt::Display for EntitlementRefusal {
                 f,
                 "any more work — its spend ceiling of {ceiling_tokens} tokens is reached \
                  ({observed_tokens} observed)"
+            ),
+            Self::BudgetExhausted {
+                budget_micro_usd,
+                spent_micro_usd,
+                period,
+            } => write!(
+                f,
+                "any more work — its budget ${}.{:06} per {period} is exhausted: ${}.{:06} \
+                 counted spent",
+                budget_micro_usd / 1_000_000,
+                budget_micro_usd % 1_000_000,
+                spent_micro_usd / 1_000_000,
+                spent_micro_usd % 1_000_000,
             ),
         }
     }
@@ -1211,6 +1240,38 @@ pub struct Entitlement {
     /// facet, and does not change what any score term reads. `None` is
     /// unknown, the same rule as every facet above.
     headroom_estimate: Option<SubscriptionHeadroomEstimate>,
+    /// Map line 1519's fourth-axis sibling: the **provider's own** money
+    /// budget (`[providers.<name>.quota] budget`), read against the priced
+    /// spend counted for it, when both are established. `None` is unknown —
+    /// no budget configured, or nothing could be priced against it — never
+    /// "not exhausted": see [`BudgetExhaustion`] and [`Self::budget_constraint`].
+    /// Unlike [`Self::spend`], this is a fact about the *provider* the
+    /// destination serves rather than about this named entitlement entry, so
+    /// the caller attaches it beside the entitlement rather than deriving it
+    /// from anything here.
+    budget_exhausted: Option<BudgetExhaustion>,
+}
+
+/// A provider's own money budget, once its counted spend is folded in —
+/// capability map line 1519's three facts, carried together because a
+/// refusal is only inspectable next to the ceiling and the spend it was
+/// judged against, the same reason [`HardConstraint::WorkloadTier`] and
+/// [`EntitlementRefusal::SpendCeiling`] both carry their pair.
+///
+/// Constructed only when the spend counted against the budget has reached or
+/// passed it — see `provider::resources::budget_exhausted_for` and its
+/// caller, `main.rs`'s telemetry builders — never for a budget nobody could
+/// count against.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BudgetExhaustion {
+    /// The ceiling the user wrote, in micro-USD.
+    pub budget_micro_usd: u64,
+    /// The priced spend counted against it, in micro-USD.
+    pub spent_micro_usd: u64,
+    /// `crate::config::BudgetPeriod::as_str()` — this module does not depend
+    /// on `crate::config`, so the caller renders the word once rather than
+    /// this type re-deriving it.
+    pub period: &'static str,
 }
 
 impl Entitlement {
@@ -1231,6 +1292,7 @@ impl Entitlement {
             source: EntitlementSource::Unstated,
             spend: None,
             headroom_estimate: None,
+            budget_exhausted: None,
         }
     }
 
@@ -1307,6 +1369,16 @@ impl Entitlement {
         self
     }
 
+    /// Attach the provider's own money-budget exhaustion fact — map line
+    /// 1519. `None` is unknown, the same rule as every facet above: a
+    /// budget nobody could count against attaches nothing, exactly as a
+    /// ceiling nobody wrote refuses nothing in [`Self::spend_constraint`].
+    #[must_use]
+    pub fn with_budget_exhausted(mut self, budget_exhausted: Option<BudgetExhaustion>) -> Self {
+        self.budget_exhausted = budget_exhausted;
+        self
+    }
+
     pub fn name(&self) -> &str {
         &self.name
     }
@@ -1376,6 +1448,29 @@ impl Entitlement {
             refused: EntitlementRefusal::SpendCeiling {
                 ceiling_tokens,
                 observed_tokens: spend.tokens(),
+            },
+        })
+    }
+
+    /// Map line 1519's own refusal, beside [`Self::spend_constraint`]: the
+    /// **provider's** money budget, not this entitlement's own ceiling, has
+    /// been counted as exhausted. Constructed only from
+    /// [`Self::with_budget_exhausted`] having been given `Some` — an
+    /// unattached fact refuses nothing, the same "nobody has said is not
+    /// cannot" rule every other gate here follows. The caller
+    /// (`session::hard_constraint`) is the one place that also checks the
+    /// destination is not a free resource; this method does not know the
+    /// destination's cost.
+    pub fn budget_constraint(&self) -> Result<(), HardConstraint> {
+        let Some(exhausted) = self.budget_exhausted else {
+            return Ok(());
+        };
+        Err(HardConstraint::Entitlement {
+            entitlement: self.name.clone(),
+            refused: EntitlementRefusal::BudgetExhausted {
+                budget_micro_usd: exhausted.budget_micro_usd,
+                spent_micro_usd: exhausted.spent_micro_usd,
+                period: exhausted.period,
             },
         })
     }

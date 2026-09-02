@@ -605,3 +605,41 @@ Three properties of the harness worth carrying to every future TUI contract:
 `1765` was already COMPLETE; this does not change its state. It removes the one
 limit that entry recorded, and it makes every other overlay dispatch arm in
 `shell/mod.rs` testable for the first time.
+
+## 1763 — CLOSED 2026-09-02: the readout landed under Phase 33C's line 1365, and this line was never revisited
+
+The batch-50 refusal above asked for a product decision — *is a non-2xx
+`Forwarded` a gateway failure?* — and `GH-FAILURE-TAXONOMY` (2026-08-31,
+`phase-33c.md`) answered it for line 1365: every exchange records a nine-way
+`failure_class` from status, headers and framing (never body content), and
+`glasshouse resources` prints, per direct provider,
+`failures 24h    cadence throttled N, quota exhausted N, provider unhealthy N —
+of N exchange(s), N served` and `by class        …` — with **no total on
+purpose** (`FailureClassCounts` has none, `render_failure_classes` prints none):
+1365's three figures cannot be summed, which is this line's *instead of one
+unexplained error percentage* clause. Nobody re-read 1763 when that landed.
+
+**Contract.** Given routing observations recorded for a provider in the last
+twenty-four hours, when `glasshouse resources` renders that provider,
+Glasshouse shows its failure counts by class beside the exchanges they are out
+of, while never presenting one summed failure figure or percentage.
+
+**Production.** `provider/resources.rs::render_failure_classes`, from
+`GatheredTelemetry::gather_failure_classes` over
+`EvidenceLedger::failure_classes_by_provider`; caller
+`main.rs::resources_report`.
+
+**Regression** (shipped binary):
+`gateway_failure_taxonomy::resources_renders_cadence_quota_and_health_as_three_figures_with_denominators`
+— rows of three classes planted through the gateway, both lines asserted, and
+the absence of a summed `failures 24h    4` asserted.
+
+**Mutation** (orchestrator, `mutate.sh --allow-dirty` in a worktree at the
+same source): `if !by_class.is_empty()` → `if by_class.is_empty()` (the
+by-class line vanishes) → **KILLED** by that test, panicking at
+`gateway_failure_taxonomy.rs:995`, the `by class` assertion.
+
+State: **COMPLETE**. Phase 47 stands at 9 of 15. 1757, 1760, 1766, 1767 and
+1769 stay Cluster H; **1759's producer now exists** — `MemoryRetrieved` rows
+carry the session id from both doors since wave 94 — and the readout is
+`GH-RETRIEVED-VIEW`'s (see the register).

@@ -702,3 +702,34 @@ Regression evidence:
 Recorded scope limits — stated by the worker, not discovered later:
 - exercises the two producer functions directly, not through the shipped binary's telemetry-fetch path; header-parsing edge cases stay provider/telemetry.rs's own unit-test suite's responsibility
 
+
+## 1209 — CLOSED 2026-09-02, on `GH-BUDGET-SPEND-COUNTER`'s evidence
+
+The refusal table above named the one missing thing — *nothing in the crate
+counts money spent* — and called it a product decision. The decision was
+reversed by `design-decisions.md` (*Counting money spent against the user's
+budget*): money is a read-time product of recorded tokens and `pricing.toml`
+rates, and the budget pool's remaining half is now measured (`phase-32d.md`,
+1263; `phase-35a.md`, 1519).
+
+**Contract.** Given a user-configured spending ceiling, when Glasshouse builds
+a provider's capacity state, Glasshouse tracks the remaining monetary budget as
+its own pool — `CapacityState::user_budget`, limit from the configuration,
+remaining from the counted spend — separate from and beside the provider's own
+request and token pools, while preserving that a budget nobody could count
+against stays *remaining unmeasured* rather than borrowing a figure from
+provider quota.
+
+**Evidence** is the 1263 entry's:
+`budget_spend::priced_rows_under_the_budget_are_counted_and_lower_the_score`
+reads *6.000000 USD remaining* and a band line *bound by user budget* — the
+score can bind on the user-budget dimension only because that pool carries its
+own measured remaining; the pool row itself was proven for 1203 by
+`provider_discovery::a_users_own_monetary_budget_reaches_the_shipped_binarys_capacity_state`;
+the `remaining-not-set` mutation isolates the pool wiring. Independence from
+provider quota is structural: the fixture carries no provider quota telemetry
+at all and the budget pool is the binding dimension regardless.
+
+State: **COMPLETE**. Phase 32A stands at 14 of 21; the seven still open are
+Cluster E — a provider signal that does not arrive (1205, 1206, 1208, 1210,
+1213, 1215, 1216).

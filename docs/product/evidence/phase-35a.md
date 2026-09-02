@@ -646,3 +646,63 @@ to assert the presence, recorded here as the one assertion that changed.
 intersection is handled by construction and has no end-to-end test. No box
 moves on this entry; 1517 and 1513 stay COMPLETE with their limit now fully
 discharged.
+
+## 1519 — CLOSED 2026-09-02 (`GH-BUDGET-SPEND-COUNTER`): Phase 35A complete
+
+Cause 2 above — *the money budget is still not counted* — is discharged by the
+package that closed 1263 (`phase-32d.md`, last entry): money is a read-time
+product of recorded tokens and `pricing.toml` rates, and the budget pool's
+remaining half is measured.
+
+**Contract.** Given a provider with a configured money budget whose priced
+spend has reached or passed it, when Glasshouse ranks destinations for
+`glasshouse route` or builds candidates for its own support work, Glasshouse
+excludes that provider's non-free destinations and candidates, naming the
+budget, the spend and the period in the route explanation — while preserving
+that a free-tier candidate is never excluded by a money budget and that a
+budget nobody could count against excludes nothing.
+
+**Production evidence.**
+- `routing/mod.rs` — `BudgetExhaustion { budget_micro_usd, spent_micro_usd,
+  period }`, one more optional facet on `Entitlement` (`with_budget_exhausted`;
+  `None` is unknown, the rule every facet there follows);
+  `Entitlement::budget_constraint` mirrors `spend_constraint`;
+  `EntitlementRefusal::BudgetExhausted` and its `Display` (*any more work — its
+  budget $X per <period> is exhausted: $Y counted spent*).
+- `routing/session.rs::hard_constraint` — asked beside `spend_constraint`, and
+  only for a destination whose backend cost is not free: the entitlement does
+  not know the destination's cost, the caller does.
+- `main.rs` — `budget_exhausted_for(provider, effective, telemetry)` is `Some`
+  only when a budget and a priced spend are both established and the spend has
+  reached the budget; `routing_entitlement` attaches it for
+  `EntitlementBacking::Provider`; `disposable_candidates` skips a non-free
+  model of an exhausted provider before its candidate exists, and computes a
+  free model's capacity against telemetry with that provider's budget spend
+  stripped (`GatheredTelemetry::without_provider_budget_spend`). That last
+  piece was found by the worker's own test rather than by reading: a provider's
+  `CapacityState` is one value shared by its free and metered models, and the
+  zeroed budget dimension would otherwise have excluded the free candidate
+  through `routing::disposable`'s zero-headroom gate.
+
+**Regression evidence** (shipped binary, `tests/budget_spend.rs`):
+`glasshouse_route_refuses_the_exhausted_destination_by_name`,
+`a_support_work_dispatch_finds_nothing_configured_once_its_only_provider_is_exhausted`
+(through the classification-model-selection report, which shares
+`disposable_candidates` with extraction),
+`a_free_model_on_an_exhausted_provider_is_never_excluded`.
+
+**Mutations.** `exhausted-excludes-nothing` (`entitlement.budget_constraint()?`
+→ `let _ = …`) KILLED by `glasshouse_route_refuses_the_exhausted_destination_by_name`
+— the rejected line vanished from `glasshouse route`; `unpriced-counted-as-zero`
+(an unpriced row joins the priced sum) KILLED by
+`rows_with_no_price_entry_are_uncounted_never_zero`.
+
+**Recorded limits** (the worker's, stated rather than found): the support-work
+exclusion is silent from `DisposableRouting::choose`'s own explanation because
+the excluded candidate never exists to be named — `glasshouse route` carries
+the dollar reason, the disposable path logs it at `debug`; the support-work test
+asserts the generic *nothing configured* outcome rather than the budget sentence
+and drives the classification report rather than `memory commit`;
+`disposable_reducer` is not yet wired (successor in `phase-32d.md`).
+
+State: **COMPLETE**. **Phase 35A stands at 11 of 11.**

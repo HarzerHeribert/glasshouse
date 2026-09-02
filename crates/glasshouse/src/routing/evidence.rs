@@ -160,6 +160,7 @@ use rusqlite::{Connection, OptionalExtension, Row, params};
 use crate::config::pairing::{ObservationSource, ObservedEvidence};
 use crate::database::PROJECT_ID_KEY;
 use crate::harness::pairing::EvidenceKey;
+use crate::provider::pricing::PriceTable;
 use crate::provider::quota::{Confidence, Freshness, Reading, ReadingSource};
 
 /// How many reliable observations a bucket needs before
@@ -2141,6 +2142,117 @@ pub fn recent_credential_spend(
         tokens,
         account_narrowed,
         sample_count,
+    }
+}
+
+/// Map line 1519's own reader, beside [`recent_credential_spend`]: what a
+/// **provider's own money budget** costs, in the currency it is actually
+/// stated in, rather than in tokens.
+///
+/// # Why this reader may answer in money and [`recent_credential_spend`] may
+/// not
+///
+/// [`recent_credential_spend`]'s own doc explains why a *ceiling* is stated
+/// in tokens: `routing_observations.cost_micro_usd` has almost no producer,
+/// so a reader keyed on that column would answer `None` for nearly every
+/// window. This reader does not read that column at all — it multiplies the
+/// same token counts by [`PriceTable::price_for`], the user's own
+/// `pricing.toml`, exactly as `routing::session::expected_marginal_cost`
+/// already does to price one decision. A row this table has no price for is
+/// not silently zero; see [`CredentialCost::unpriced_rows`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CredentialCost {
+    /// The priced rows' cost, summed in micro-USD. `None` exactly when
+    /// [`Self::priced_rows`] is `0` — *nothing could be priced*, which is not
+    /// the same claim as *nothing was spent*, and a caller may judge a
+    /// budget exhausted only against `Some`.
+    pub micro_usd: Option<u64>,
+    /// How many rows contributed to `micro_usd` — carried a token count
+    /// **and** matched a `pricing.toml` entry.
+    pub priced_rows: usize,
+    /// How many rows carried no token count at all — a relayed exchange, or
+    /// one written before token counts existed. Not priced, and not the same
+    /// gap as [`Self::unpriced_rows`].
+    pub unread_rows: usize,
+    /// How many rows carried a token count with no matching `pricing.toml`
+    /// entry — `PriceTable::price_for` answered `None`. Not priced, and not
+    /// the same gap as [`Self::unread_rows`].
+    pub unpriced_rows: usize,
+    /// Whether the rows behind `micro_usd` are the named credential's own
+    /// spend rather than the provider-wide total — [`recent_credential_spend`]'s
+    /// own narrowing rule, applied verbatim.
+    pub account_narrowed: bool,
+}
+
+/// See [`CredentialCost`]. `credential_label` and the narrowing rule are
+/// [`recent_credential_spend`]'s, deliberately verbatim — see that
+/// function's own doc for why. `since_unix` bounds the window this reader
+/// counts, in addition to whatever window the caller already fetched
+/// `observations` over: a caller that fetched a wider window than one
+/// budget's own period (two providers with different `BudgetPeriod`s sharing
+/// one query, say) still gets this budget's own start honoured here rather
+/// than the caller's.
+pub fn recent_credential_cost(
+    observations: &[RoutingObservation],
+    provider: &str,
+    credential_label: Option<&str>,
+    prices: &PriceTable,
+    since_unix: i64,
+) -> CredentialCost {
+    let counted: Vec<&RoutingObservation> = observations
+        .iter()
+        .filter(|row| row.provider == provider)
+        .filter(|row| row.observed_at_unix >= since_unix)
+        .filter(|row| row.outcome.is_some() && row.purpose.as_deref() != Some(CORRELATION_PURPOSE))
+        .collect();
+    let every_row_names_its_account =
+        !counted.is_empty() && counted.iter().all(|row| row.quota_context.is_some());
+    let account_narrowed = match credential_label {
+        Some(_) => every_row_names_its_account,
+        None => false,
+    };
+    let rows: Vec<&&RoutingObservation> = match (account_narrowed, credential_label) {
+        (true, Some(label)) => counted
+            .iter()
+            .filter(|row| row.quota_context.as_deref() == Some(label))
+            .collect(),
+        _ => counted.iter().collect(),
+    };
+
+    let mut unread_rows = 0usize;
+    let mut unpriced_rows = 0usize;
+    let mut priced_rows = 0usize;
+    let mut micro_usd_sum: u64 = 0;
+
+    for row in &rows {
+        if row.input_tokens.is_none() && row.output_tokens.is_none() {
+            unread_rows += 1;
+            continue;
+        }
+        let Some(price) = prices.price_for(provider, &row.model) else {
+            unpriced_rows += 1;
+            continue;
+        };
+        priced_rows += 1;
+        let input = row.input_tokens.unwrap_or(0).max(0) as f64;
+        let output = row.output_tokens.unwrap_or(0).max(0) as f64;
+        let cost_micro_usd = (input * price.input_per_million_usd
+            + output * price.output_per_million_usd)
+            .max(0.0)
+            .round() as u64;
+        micro_usd_sum = micro_usd_sum.saturating_add(cost_micro_usd);
+    }
+
+    CredentialCost {
+        micro_usd: if priced_rows == 0 {
+            None
+        } else {
+            Some(micro_usd_sum)
+        },
+        priced_rows,
+        unread_rows,
+        unpriced_rows,
+        account_narrowed,
     }
 }
 
@@ -6537,5 +6649,136 @@ mod credential_spend_tests {
             recent_credential_spend(&rows, "alpha", Some("alpha/KEY_A")).tokens,
             Some(3)
         );
+    }
+}
+
+/// Map line 1519's spend reader — [`recent_credential_cost`].
+#[cfg(test)]
+mod credential_cost_tests {
+    use super::*;
+
+    fn row(
+        provider: &str,
+        model: &str,
+        observed_at_unix: i64,
+        tokens: Option<(i64, i64)>,
+    ) -> RoutingObservation {
+        RoutingObservation {
+            seq: 0,
+            project_id: "project".to_owned(),
+            observed_at_unix,
+            provider: provider.to_owned(),
+            model: model.to_owned(),
+            route: Some("anthropic-messages".to_owned()),
+            quota_context: None,
+            harness: Some("claude-code".to_owned()),
+            purpose: None,
+            dispatched_at_unix: Some(observed_at_unix - 5),
+            first_byte_at_unix: None,
+            first_token_at_unix: None,
+            first_tool_call_at_unix: None,
+            completed_at_unix: Some(observed_at_unix),
+            input_tokens: tokens.map(|(input, _)| input),
+            output_tokens: tokens.map(|(_, output)| output),
+            cached_input_tokens: None,
+            cost: None,
+            tool_rounds: None,
+            retries: None,
+            repairs: None,
+            failovers: None,
+            outcome: Some(Outcome::Succeeded),
+            failure_class: None,
+            task_class: None,
+            session_id: None,
+            effort_level: None,
+            turn_shape: None,
+            context_state: ContextState::Unknown,
+        }
+    }
+
+    fn priced_table(dir: &std::path::Path) -> PriceTable {
+        std::fs::write(
+            dir.join("pricing.toml"),
+            "[[prices]]\nprovider = \"alpha\"\nmodel = \"m\"\n\
+             input_per_million_usd = 3.0\noutput_per_million_usd = 15.0\n",
+        )
+        .expect("write pricing.toml");
+        PriceTable::load_from_dir(dir)
+    }
+
+    fn temp_dir() -> tempfile::TempDir {
+        tempfile::tempdir().expect("temp pricing dir")
+    }
+
+    /// Two priced rows: `input * input_per_million_usd + output *
+    /// output_per_million_usd`, summed in micro-USD, and the row counts land
+    /// in the right buckets.
+    #[test]
+    fn priced_rows_sum_input_and_output_at_their_own_rates() {
+        let dir = temp_dir();
+        let prices = priced_table(dir.path());
+        let rows = vec![
+            // 1,000,000 input @ $3/M + 1,000,000 output @ $15/M = $18 = 18_000_000 micro-USD.
+            row("alpha", "m", 1_000, Some((1_000_000, 1_000_000))),
+            // 500,000 input @ $3/M + 0 output = $1.5 = 1_500_000 micro-USD.
+            row("alpha", "m", 1_100, Some((500_000, 0))),
+        ];
+        let cost = recent_credential_cost(&rows, "alpha", None, &prices, 0);
+        assert_eq!(cost.micro_usd, Some(19_500_000));
+        assert_eq!(cost.priced_rows, 2);
+        assert_eq!(cost.unread_rows, 0);
+        assert_eq!(cost.unpriced_rows, 0);
+    }
+
+    /// A row with tokens and no `pricing.toml` entry is *unpriced*, and a
+    /// row with no token count at all is *unread* — two different gaps, and
+    /// neither contributes to the sum nor is treated as zero spend.
+    #[test]
+    fn unpriced_and_unread_rows_are_counted_apart_and_never_as_zero() {
+        let dir = temp_dir();
+        let prices = priced_table(dir.path());
+        let rows = vec![
+            row("alpha", "m", 1_000, Some((1_000_000, 0))), // priced: $3.
+            row("alpha", "no-such-model", 1_001, Some((1_000_000, 0))), // unpriced.
+            row("alpha", "m", 1_002, None),                 // unread (relayed).
+        ];
+        let cost = recent_credential_cost(&rows, "alpha", None, &prices, 0);
+        assert_eq!(cost.micro_usd, Some(3_000_000));
+        assert_eq!(cost.priced_rows, 1);
+        assert_eq!(cost.unpriced_rows, 1);
+        assert_eq!(cost.unread_rows, 1);
+    }
+
+    /// `priced_rows == 0` is the one condition that makes `micro_usd`
+    /// `None` — a budget nobody could price against is *unknown* spend,
+    /// never zero, even though this window is not otherwise empty.
+    #[test]
+    fn no_priced_row_leaves_micro_usd_none_even_with_other_rows_present() {
+        let dir = temp_dir();
+        let prices = priced_table(dir.path());
+        let rows = vec![
+            row("alpha", "no-such-model", 1_000, Some((1_000_000, 0))),
+            row("alpha", "m", 1_001, None),
+        ];
+        let cost = recent_credential_cost(&rows, "alpha", None, &prices, 0);
+        assert_eq!(cost.micro_usd, None);
+        assert_eq!(cost.priced_rows, 0);
+        assert_eq!(cost.unpriced_rows, 1);
+        assert_eq!(cost.unread_rows, 1);
+    }
+
+    /// `since_unix` bounds the window this reader counts, independently of
+    /// whatever the caller already fetched.
+    #[test]
+    fn rows_before_since_unix_are_excluded() {
+        let dir = temp_dir();
+        let prices = priced_table(dir.path());
+        let rows = vec![
+            row("alpha", "m", 500, Some((1_000_000, 0))), // before the window.
+            row("alpha", "m", 1_500, Some((1_000_000, 0))), // inside it.
+        ];
+        let cost = recent_credential_cost(&rows, "alpha", None, &prices, 1_000);
+        assert_eq!(cost.priced_rows, 1);
+        assert_eq!(cost.micro_usd, Some(3_000_000));
     }
 }

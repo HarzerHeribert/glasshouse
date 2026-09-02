@@ -289,3 +289,92 @@ None. Every box this package could close reached a caller inside `YOURS`.
 None. Every number cited above (Groq's headers) was copied from the same
 probe file `PACKET-QUOTA-LIVE` already used, and this package's own new
 tests are all offline.
+
+## 1263 — CLOSED 2026-09-02 (`GH-BUDGET-SPEND-COUNTER`, Amber, Sonnet high): the budget pool's remaining half has a production writer
+
+The reconciliation above held this line open on one fact: the only production
+writer of `user_budget` set the pool's *limit* and left *remaining* unmeasured,
+so the score could never move on it. The ruling in `design-decisions.md`
+(*Counting money spent against the user's budget*) made money a read-time
+product of recorded tokens and `pricing.toml` rates; this package is that
+ruling landed.
+
+**Contract.** Given a provider with a configured `[providers.<name>.quota]
+budget` and recorded exchanges in the budget's period that carry token counts
+and a `pricing.toml` price, when Glasshouse builds that provider's capacity
+state, Glasshouse counts the priced spend and sets the budget pool's remaining
+to the budget minus that spend, so the normalized remaining-capacity score falls
+as the pool empties — while preserving that a row with no token count (relayed)
+or no price (absent from `pricing.toml`) is counted as *uncounted* beside the
+figure and never as zero, and that a budget nobody could count against leaves
+remaining unmeasured exactly as before.
+
+**Production evidence.**
+- `routing/evidence.rs::recent_credential_cost` / `CredentialCost` — the reader
+  beside `recent_credential_spend`, its narrowing rule verbatim; `micro_usd` is
+  `None` exactly when no row could be priced.
+- `provider/telemetry.rs::budget_period_start` — the period: the calendar month
+  in local time through the OS's own `localtime` (`localtime_r`/`mktime`; on
+  Windows `localtime_s` and the UCRT's `_mktime64`), rolling thirty days as
+  `now − 30 × 86 400`. `apply_user_configuration` takes the spend and sets
+  `remaining = Measured(budget − spent, saturating at zero)` with
+  `ReadingSource::LocalObservation("priced spend against the configured
+  budget")`, merged through `.prefer()` exactly as the limit is.
+- `provider/resources.rs::GatheredTelemetry::gather_budget_spend` — the gather,
+  fail-soft; `observed_capacity` hands the reading in with no signature change;
+  `render_configuration_note` prints the counted spend, the uncounted breakdown
+  and the remaining, and *Glasshouse does not count spend against this* is gone.
+- Callers: `main.rs::resources_report`, `routing_destinations`,
+  `disposable_extraction_model`, `automatic_classification_choice`.
+- Consumer, unedited: `provider/quota.rs::CapacityState::remaining_capacity_score`
+  over `pools()`, which has included `user_budget` since this phase's first
+  package.
+
+**Regression evidence** (shipped binary, `tests/budget_spend.rs`):
+`priced_rows_under_the_budget_are_counted_and_lower_the_score` (a 10 USD
+budget, 4 USD priced — *4.000000 USD counted spent … 6.000000 USD remaining*
+and the band line *bound by user budget*, score 0.60),
+`rows_with_no_price_entry_are_uncounted_never_zero`,
+`a_relayed_exchange_with_no_token_count_is_uncounted_as_unread`,
+`a_budget_with_no_ledger_rows_leaves_remaining_unmeasured`. Unit:
+`provider::telemetry::tests::{a_configured_budget_with_counted_spend_sets_the_remaining_half,
+spend_at_or_over_the_budget_saturates_remaining_at_zero,
+a_budget_nobody_could_price_leaves_remaining_unmeasured}` and
+`routing::evidence::credential_cost_tests` (four).
+
+**Mutations** (worker, `mutate.sh --allow-dirty`, restored byte-identical):
+`remaining-not-set` (`state = state.with_user_budget(pool)` → `let _ = pool;`)
+KILLED by `priced_rows_under_the_budget_are_counted_and_lower_the_score` — the
+note still printed the right figures and the band line no longer read *bound by
+user budget*, which isolates the pool wiring from the wording;
+`unmeasured-excludes` (an all-unpriced spend treated as a measured 0) KILLED by
+`rows_with_no_price_entry_are_uncounted_never_zero` — *band plenty (score 1.00
+… bound by user budget)* appeared though nothing was priced. The worker's first
+target for that mutation SURVIVED because `glasshouse resources` scores only
+registry-known provider slugs; re-targeted at `openrouter` it killed — recorded
+per §80.
+
+**Orchestrator's verification before the tick.** The decision diff read
+(`hard_constraint`, `budget_constraint`, `budget_exhausted_for`,
+`disposable_candidates`); the design ruling checked against the implementation
+— one departure, the reading's source is `LocalObservation` rather than the
+note's `ReadingSource::Ledger`, which does not exist (the packet said so; the
+note is amended). And the worker's own thin spot — the `#[cfg(windows)]` arm
+of the calendar-month start, never compiled — was cross-checked from the merged
+tree with rustup's toolchain: **it did not compile.** `libc 0.2.189` binds
+`localtime_s` and `time` for Windows and no `mktime` at all (the UCRT header
+maps `mktime` onto `_mktime64`). Fixed forward at integration: the arm declares
+`_mktime64` by its real name, and the corrected function type-checks for
+`aarch64-pc-windows-msvc` in a scratch crate against the same `libc`. A full
+cross-check of the crate is impossible here (`ring`'s C build needs a Windows
+SDK), so the Windows VM leg is owed and trails this wave.
+
+**Recorded limits.** The calendar-month instant is the machine's own zone,
+pinned by invariants rather than a fixed timestamp. `disposable_reducer` (the
+context-firewall reducer's non-`local:` chooser) does not gather budget spend
+yet, and neither will the reranking seat's chooser when it lands — successor
+`GH-BUDGET-SPEND-REMAINING-CALLERS` (Green): the same three-line gather at
+each.
+
+State: **COMPLETE**. Phase 32D stands at 11 of 12; 1267 stays open (no latency
+or concurrency reader for local inference exists).

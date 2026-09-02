@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1225 / 1347 mandatory capabilities (91%)** — 122 open across 35 phases.
+**1229 / 1347 mandatory capabilities (91%)** — 118 open across 34 phases.
 
 ## Where the work is
 
@@ -28,18 +28,17 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 21K | Assumption-aware implementation guardrails | **1** | 42 | `992` |
 | Phase 27 | Context injection | **1** | 10 | `1118` |
 | Phase 30 | Session context metadata | **1** | 7 | `1156` |
+| Phase 32D | Normalized remaining-capacity score | **1** | 11 | `1257` |
 | Phase 32F | Protected quota reserve | **1** | 7 | `1285` |
 | Phase 33C | Failure, quota, and route correlation | **1** | 14 | `1362` |
 | Phase 34B | Routing-model role | **1** | 14 | `1406` |
 | Phase 34C | Automatic routing-model selection | **1** | 12 | `1429` |
-| Phase 35A | Candidate generation | **1** | 10 | `1504` |
 | Phase 37 | Basic session-aware router | **1** | 10 | `1590` |
 | Phase 39 | Gateway-backed disposable jobs | **1** | 8 | `1614` |
 | Phase 9 | Antigravity adapter | **2** | 5 | `330` |
 | Phase 20 | Minimal durable project memory | **2** | 16 | `805` |
 | Phase 21F | Memory retrieval quality | **2** | 9 | `927` |
 | Phase 32C | Subscription capacity estimation | **2** | 10 | `1242` |
-| Phase 32D | Normalized remaining-capacity score | **2** | 10 | `1257` |
 | Phase 32G | Provider-aware request-cost estimation | **2** | 8 | `1296` |
 | Phase 33 | Resource health | **2** | 13 | `1309` |
 | Phase 38 | Quota-preserving routing | **2** | 5 | `1604` |
@@ -51,20 +50,20 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 31 | Compaction-aware behavior | **5** | 2 | `1167` |
 | Phase 52 | Criteria before adding semantic/vector retrieval | **5** | 1 | `1858` |
 | Phase 21G | Memory revalidation | **6** | 3 | `941` |
+| Phase 47 | Observability without spectacle | **6** | 9 | `1750` |
+| Phase 32A | Unified quota and capacity model | **7** | 14 | `1196` |
 | Phase 35B | Candidate scoring | **7** | 18 | `1523` |
-| Phase 47 | Observability without spectacle | **7** | 8 | `1750` |
 | Phase 9K | Harness-aware response profiles | **8** | 29 | `578` |
-| Phase 32A | Unified quota and capacity model | **8** | 13 | `1196` |
 | Phase 33B | Reliability-adjusted agent performance | **10** | 4 | `1345` |
 | Phase 51 | Evaluation hooks | **20** | 17 | `1818` |
 
-**Fully closed (73):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 7, Phase 8, Phase 9A, Phase 9B, Phase 9C, Phase 9D, Phase 9F, Phase 9G, Phase 9I, Phase 9J, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 16, Phase 17, Phase 18, Phase 19, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 21H, Phase 21I, Phase 21J, Phase 22, Phase 23, Phase 25, Phase 26, Phase 29, Phase 32, Phase 32B, Phase 32E, Phase 34, Phase 34A, Phase 34D, Phase 34E, Phase 34F, Phase 35, Phase 35C, Phase 35D, Phase 36, Phase 40, Phase 41, Phase 42, Phase 43, Phase 44, Phase 45, Phase 46, Phase 48, Phase 49, Phase 50, Phase 54, Phase 54A, Phase 55, Phase 56, Phase 56A, Phase 57, Phase 58.
+**Fully closed (74):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 7, Phase 8, Phase 9A, Phase 9B, Phase 9C, Phase 9D, Phase 9F, Phase 9G, Phase 9I, Phase 9J, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 16, Phase 17, Phase 18, Phase 19, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 21H, Phase 21I, Phase 21J, Phase 22, Phase 23, Phase 25, Phase 26, Phase 29, Phase 32, Phase 32B, Phase 32E, Phase 34, Phase 34A, Phase 34D, Phase 34E, Phase 34F, Phase 35, Phase 35A, Phase 35C, Phase 35D, Phase 36, Phase 40, Phase 41, Phase 42, Phase 43, Phase 44, Phase 45, Phase 46, Phase 48, Phase 49, Phase 50, Phase 54, Phase 54A, Phase 55, Phase 56, Phase 56A, Phase 57, Phase 58.
 
 ## The nearly-finished phases, in full
 
 Every phase with **three or fewer** open lines, quoted verbatim. These are
 where a single package finishes a phase, so they are listed here and the
-other ~85 open lines are not.
+other ~83 open lines are not.
 
 For any other phase: `scripts/discover.py --phase <id>` prints its open
 lines and evidence together. **Do not open the 178 KB map to read them.**
@@ -97,6 +96,10 @@ these unwrapped.
 
 - **1158** ☐ Track an estimated context-size value for a session when the harness exposes enough information.
 
+### Phase 32D — Normalized remaining-capacity score  (1 open, 11 closed)
+
+- **1267** ☐ Treat unlimited local inference as high-capacity but still account for measured latency and concurrency.
+
 ### Phase 32F — Protected quota reserve  (1 open, 7 closed)
 
 - **1294** ☐ Avoid moving an almost-complete high-value task to another session solely because a reserve threshold was crossed.
@@ -112,10 +115,6 @@ these unwrapped.
 ### Phase 34C — Automatic routing-model selection  (1 open, 12 closed)
 
 - **1440** ☐ Avoid using a scarce premium subscription session as the classifier when a cheaper adequate routing resource exists.
-
-### Phase 35A — Candidate generation  (1 open, 10 closed)
-
-- **1519** ☐ Exclude candidates whose user-defined spending budget has been exhausted.
 
 ### Phase 37 — Basic session-aware router  (1 open, 10 closed)
 
@@ -144,11 +143,6 @@ these unwrapped.
 
 - **1247** ☐ Reset or re-calibrate an estimator when Glasshouse detects a plan change or materially different quota behavior.
 - **1253** ☐ Preserve historical estimation data so the scheduler can improve over repeated usage.
-
-### Phase 32D — Normalized remaining-capacity score  (2 open, 10 closed)
-
-- **1263** ☐ Lower the score when user-defined spending budget is close to exhaustion.
-- **1267** ☐ Treat unlimited local inference as high-capacity but still account for measured latency and concurrency.
 
 ### Phase 32G — Provider-aware request-cost estimation  (2 open, 8 closed)
 
@@ -262,10 +256,10 @@ to do, and the orchestrator should follow its own rule.
 Newest first, from `docs/process/handoff.md`. Read the top one in full;
 the rest are context you probably do not need.
 
+- Checkpoint — 2026-09-02, batch 90: 1229 / 1347 (91.2%) — money is counted against the budget, Phase 35A complete, and a refusal that outlived its blocker
 - Checkpoint — 2026-09-02, batch 89: 1223 / 1347 (90.8%) — the launch path briefs, a dispatch reserves what it spends, Cluster G's first column, the classifier learns its price
 - Checkpoint — 2026-09-02, batch 88: 1218 / 1347 (90.4%) — Phase 58's producers land, the memory proxy is real, memory is the project's
 - Checkpoint — 2026-09-02, batch 87: 1213 / 1347 (90.1%) — Phase 58's first five packages land, the disposable router calls what it chooses, seven worktrees in one gate and an eighth right behind
-- Checkpoint — 2026-09-02, batch 86: 1201 / 1332 (90.2%) — the translation arc lands end to end, the Windows secret store opens, the outcome question answered
 
 ## Evidence ledger files
 

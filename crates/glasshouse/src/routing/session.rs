@@ -5452,6 +5452,16 @@ fn hard_constraint(
         // ceiling and the spend are BOTH established; see
         // `super::Entitlement::spend_constraint`.
         entitlement.spend_constraint()?;
+        // Map line 1519, asked beside the ceiling above and for the same
+        // reason: the **provider's** own money budget, not this
+        // entitlement's token ceiling, has been counted as exhausted. Gated
+        // on cost here rather than inside the constraint itself, because a
+        // free-tier destination spends nothing against a money budget no
+        // matter which provider serves it — `Entitlement::budget_constraint`
+        // does not know the destination's cost, only `hard_constraint` does.
+        if !destination.backend().cost().is_free() {
+            entitlement.budget_constraint()?;
+        }
         // Line 1953's model half, asked on both passes like the harness
         // half (the destination's model is known independently of any
         // tier), and only when the offered set carries the entitlement axis

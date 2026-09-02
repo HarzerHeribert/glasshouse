@@ -920,6 +920,31 @@ fn pool_entitlements_for<'p>(
         .collect()
 }
 
+/// Map line 1519: whether `provider`'s own `[providers.<name>.quota] budget`
+/// has been counted as exhausted, given what
+/// `provider::resources::GatheredTelemetry::gather_budget_spend` counted
+/// against it. `None` whenever either half is unestablished — no budget
+/// configured, or nothing could be priced against it (an empty ledger, no
+/// `pricing.toml` entry, every row relayed or unread) — never `Some` for a
+/// budget nobody could count against, the same "nobody has said is not
+/// cannot" rule every other entitlement gate in `routing::session` follows.
+fn budget_exhausted_for(
+    provider: &str,
+    effective: &EffectiveConfig<'_>,
+    telemetry: &glasshouse::provider::resources::GatheredTelemetry,
+) -> Option<glasshouse::routing::BudgetExhaustion> {
+    let budget = effective.quota_override(provider).value.budget()?;
+    let spent_micro_usd = telemetry.provider_budget_spend(provider)?.micro_usd?;
+    if spent_micro_usd < budget.amount_micro_usd() {
+        return None;
+    }
+    Some(glasshouse::routing::BudgetExhaustion {
+        budget_micro_usd: budget.amount_micro_usd(),
+        spent_micro_usd,
+        period: budget.period().as_str(),
+    })
+}
+
 /// A resolved entitlement as the router carries it, 56A-2's facets included
 /// — the bridge `ResolvedEntitlement::to_routing` deliberately leaves to
 /// this caller, because the capacity band is derived against the user's own
@@ -928,9 +953,18 @@ fn pool_entitlements_for<'p>(
 fn routing_entitlement(
     resolved: &glasshouse::config::ResolvedEntitlement,
     thresholds: &glasshouse::provider::quota::CapacityBandThresholds,
+    effective: &EffectiveConfig<'_>,
+    telemetry: &glasshouse::provider::resources::GatheredTelemetry,
 ) -> glasshouse::routing::Entitlement {
-    use glasshouse::config::{EntitlementModels, TelemetryScope};
+    use glasshouse::config::{EntitlementBacking, EntitlementModels, TelemetryScope};
     use glasshouse::routing::{EntitlementModelsFacet, EntitlementThrottleFacet};
+
+    let budget_exhausted = match resolved.backing() {
+        EntitlementBacking::Provider(provider) => {
+            budget_exhausted_for(provider, effective, telemetry)
+        }
+        EntitlementBacking::NativeHarness(_) | EntitlementBacking::Unstated => None,
+    };
 
     resolved
         .to_routing()
@@ -952,6 +986,7 @@ fn routing_entitlement(
             }
             EntitlementModels::HarnessDecided => EntitlementModelsFacet::HarnessDecided,
         }))
+        .with_budget_exhausted(budget_exhausted)
 }
 
 /// A pool candidate's backend, carrying **this account's own** credential
@@ -1208,6 +1243,25 @@ fn routing_destinations(
             (Some(observations), Some(consumption))
         });
     let consumption = consumption.as_deref();
+    // Map line 1519: priced spend against every provider's own configured
+    // money budget, for `routing_entitlement`'s `budget_exhausted_for` below
+    // — a third, separate ledger open (practice §65's "one open per read"),
+    // fail-soft exactly as the pair above.
+    let telemetry = match glasshouse::routing::evidence::EvidenceLedger::open(runtime) {
+        Ok(ledger) => {
+            let prices = glasshouse::provider::pricing::PriceTable::load_from_dir(
+                runtime.paths().config_dir(),
+            );
+            telemetry.gather_budget_spend(&ledger, &prices, effective, now_unix)
+        }
+        Err(err) => {
+            tracing::debug!(
+                error = %err,
+                "could not read the routing evidence ledger to count budget spend for routing"
+            );
+            telemetry
+        }
+    };
     let mut entitlement_telemetry = glasshouse::config::EntitlementTelemetry::new(now_unix)
         .with_gateway_quota(&quota_cache)
         .with_model_catalogues(&model_cache);
@@ -1314,7 +1368,12 @@ fn routing_destinations(
         // honestly carries none rather than a guess.
         let matches = pool_entitlements_for(&pool, harness, &profile.backend);
         let entitlement = match matches.as_slice() {
-            [only] => Some(routing_entitlement(only, &band_thresholds)),
+            [only] => Some(routing_entitlement(
+                only,
+                &band_thresholds,
+                effective,
+                &telemetry,
+            )),
             _ => None,
         };
         destinations.push(
@@ -1441,7 +1500,12 @@ fn routing_destinations(
                     )
                     .with_tier_ceiling(ceiling)
                     .with_capability_tier(ceiling)
-                    .with_entitlement(Some(routing_entitlement(resolved, &band_thresholds)))
+                    .with_entitlement(Some(routing_entitlement(
+                        resolved,
+                        &band_thresholds,
+                        effective,
+                        &telemetry,
+                    )))
                     .with_estimated_input_size(fresh_estimated_size)
                     .with_resource_facts(resource_facts)
                     .with_pairing_prior_evidence(pairing_prior_evidence),
@@ -1450,9 +1514,9 @@ fn routing_destinations(
         } else {
             let ceiling = destination_tier_ceiling(effective, &backend, &query);
             let pairing_prior_evidence = pairing_prior_evidence_count(consumption, &backend);
-            let fresh_entitlement = matches
-                .first()
-                .map(|resolved| routing_entitlement(resolved, &band_thresholds));
+            let fresh_entitlement = matches.first().map(|resolved| {
+                routing_entitlement(resolved, &band_thresholds, effective, &telemetry)
+            });
             destinations.push(
                 with_capacity(
                     with_provider_protocols(
@@ -8195,6 +8259,24 @@ fn disposable_extraction_model(
     let telemetry = glasshouse::provider::resources::GatheredTelemetry::new().gather_gateway_quota(
         &glasshouse::provider::telemetry::GatewayQuotaCache::new(runtime.paths()),
     );
+    // Map line 1519: priced spend against every provider's own configured
+    // money budget, for `disposable_candidates`' own exclusion. Fail-soft
+    // exactly as every other gather on this path.
+    let telemetry = match glasshouse::routing::evidence::EvidenceLedger::open(runtime) {
+        Ok(ledger) => {
+            let prices = glasshouse::provider::pricing::PriceTable::load_from_dir(
+                runtime.paths().config_dir(),
+            );
+            telemetry.gather_budget_spend(&ledger, &prices, &effective, now_unix)
+        }
+        Err(err) => {
+            tracing::debug!(
+                error = %err,
+                "could not read the routing evidence ledger to count budget spend for support work"
+            );
+            telemetry
+        }
+    };
 
     let consented = configured_extraction_choice(&effective);
     let configured_candidate = consented.as_ref().and_then(|chosen| {
@@ -8623,6 +8705,32 @@ fn disposable_candidates(
             continue;
         }
         let capacity = disposable_candidate_capacity(&name, effective, telemetry, now_unix);
+        // Map line 1519, for support work: a provider whose own money budget
+        // has been counted as exhausted is excluded here, before a candidate
+        // for it exists at all — `routing::disposable` stays untouched
+        // (classifier-time-price is live there), and a free-tier candidate is
+        // never excluded by a money budget (checked per model below, since
+        // cost is a fact about the model, not the provider). Unlike
+        // `glasshouse route`'s `hard_constraint`, there is no per-destination
+        // explanation to carry the reason into here — a candidate that never
+        // exists cannot be named in one — so this is a recorded limit: an
+        // excluded model does not appear in a disposable choice's rejection
+        // list the way an entitlement job-kind or spend-ceiling refusal does.
+        let budget_exhausted = budget_exhausted_for(&name, effective, telemetry);
+        // A free candidate must not inherit the metered ones' capacity
+        // reading when it was the money budget that zeroed it: `capacity` is
+        // one `CapacityState` per provider, shared by every model of it, and
+        // `routing::disposable`'s existing "known zero headroom" gate (line
+        // 1434) does not distinguish which dimension bound the score — only
+        // that it reads zero. Computed against a telemetry value with this
+        // provider's budget spend stripped, so nothing about money reaches a
+        // free candidate's own capacity at all.
+        let free_capacity = if budget_exhausted.is_some() {
+            let without_budget = telemetry.clone().without_provider_budget_spend(&name);
+            disposable_candidate_capacity(&name, effective, &without_budget, now_unix)
+        } else {
+            capacity.clone()
+        };
         // Map lines 1427 and 1438: where this provider's compute runs, from
         // the one place this build already says so — the registry's
         // local-inference slugs — never from a base URL that happens to
@@ -8661,14 +8769,29 @@ fn disposable_candidates(
                 .iter()
                 .chain(metered_models.iter().filter(|m| !free_models.contains(m)));
             for model in models {
+                let cost = provider_config.cost_of(model);
+                if budget_exhausted.is_some() && !cost.is_free() {
+                    tracing::debug!(
+                        provider = %name,
+                        model = %model,
+                        "excluding a support-work candidate: its provider's money budget is \
+                         counted as exhausted"
+                    );
+                    continue;
+                }
+                let candidate_capacity = if cost.is_free() {
+                    &free_capacity
+                } else {
+                    &capacity
+                };
                 candidates.push(
                     DisposableCandidate::new(
                         name.clone(),
                         model.clone(),
                         credential_id.clone(),
-                        provider_config.cost_of(model),
+                        cost,
                     )
-                    .with_capacity(capacity.clone())
+                    .with_capacity(candidate_capacity.clone())
                     .with_locality(locality)
                     .with_entitlement(entitlement.clone()),
                 );
@@ -9139,6 +9262,25 @@ fn automatic_classification_choice(
     let telemetry = glasshouse::provider::resources::GatheredTelemetry::new().gather_gateway_quota(
         &glasshouse::provider::telemetry::GatewayQuotaCache::new(runtime.paths()),
     );
+    // Map line 1519: priced spend against every provider's own configured
+    // money budget, for `disposable_candidates`' own exclusion. Fail-soft
+    // exactly as every other gather on this path.
+    let telemetry = match glasshouse::routing::evidence::EvidenceLedger::open(runtime) {
+        Ok(ledger) => {
+            let prices = glasshouse::provider::pricing::PriceTable::load_from_dir(
+                runtime.paths().config_dir(),
+            );
+            telemetry.gather_budget_spend(&ledger, &prices, effective, now_unix)
+        }
+        Err(err) => {
+            tracing::debug!(
+                error = %err,
+                "could not read the routing evidence ledger to count budget spend for automatic \
+                 classification-model selection"
+            );
+            telemetry
+        }
+    };
     let candidates =
         disposable_candidates(user, project, effective, &secrets, &telemetry, now_unix);
     let candidates = attach_classification_records(runtime, candidates, now_unix);
@@ -11826,6 +11968,12 @@ fn resources_report(
     // yet renders `unknown` on that line, as the caches do.
     if let Ok(ledger) = glasshouse::routing::evidence::EvidenceLedger::open(runtime) {
         telemetry = telemetry.gather_failure_classes(&ledger, now_unix);
+        // Capability map line 1519: priced spend against every provider's
+        // own configured money budget, from the same ledger, through
+        // `pricing.toml`. Fail-soft exactly as the gather above.
+        let prices =
+            glasshouse::provider::pricing::PriceTable::load_from_dir(runtime.paths().config_dir());
+        telemetry = telemetry.gather_budget_spend(&ledger, &prices, &effective, now_unix);
     }
     if !no_harness {
         telemetry = telemetry.gather_harness_status(now_unix);

@@ -1206,7 +1206,7 @@ Phase 32A — Unified quota and capacity model
 ☐ Track cached-input usage independently when the provider exposes cache telemetry.
 ☑ Track request count independently from token consumption when both can constrain a resource.
 ☐ Track provider credits independently from raw tokens when credits are the actual limiting unit.
-☐ Track remaining monetary budget independently from provider quota when the user has configured a spending ceiling.
+☑ Track remaining monetary budget independently from provider quota when the user has configured a spending ceiling.
 ☐ Track the current quota window start when known.
 ☑ Track the current quota reset time when known.
 ☑ Track rolling-window capacity separately from fixed calendar-window capacity.
@@ -1260,7 +1260,7 @@ Phase 32D — Normalized remaining-capacity score
 ☑ Derive the normalized score from the limiting resource dimension rather than averaging away a hard quota constraint.
 ☑ Lower the score when short-window request capacity is close to exhaustion.
 ☑ Lower the score when token or credit capacity is close to exhaustion.
-☐ Lower the score when user-defined spending budget is close to exhaustion.
+☑ Lower the score when user-defined spending budget is close to exhaustion.
 ☑ Lower the score when a reset is far away relative to the remaining capacity.
 ☑ Increase effective availability when a near-term quota reset makes current conservation less important.
 ☑ Include estimator confidence so low-confidence subscription estimates do not dominate routing decisions.
@@ -1516,7 +1516,7 @@ Fixed architectural requirements
 ☑ Exclude candidates below the classified minimum workload tier.
 ☑ Exclude candidates missing a hard required capability.
 ☑ Exclude candidates whose provider is unavailable or in an authoritative cooldown.
-☐ Exclude candidates whose user-defined spending budget has been exhausted.
+☑ Exclude candidates whose user-defined spending budget has been exhausted.
 ☑ Exclude candidates explicitly disabled or forbidden by user policy.
 ☑ Keep at least one deterministic fallback candidate when a usable native session exists.
 
@@ -1760,7 +1760,7 @@ Fixed architectural requirements
 ☐ Add a debug view showing estimated cache temperature and the evidence used for that estimate.
 ☑ Add a debug view showing quota information and whether it is measured, inferred, or unknown.
 ☑ Add an optional compact route-evidence table showing sample count, TTFC, effective TTFC, TTFT, decode throughput, successful rounds per minute, and observation window when available.
-☐ Show failure counts by class instead of presenting one unexplained error percentage.
+☑ Show failure counts by class instead of presenting one unexplained error percentage.
 ☑ Show whether latency evidence came from warm, cold, or unknown context.
 ☑ Show route health, immediate availability, cadence, quota reset, and failure-domain evidence as separate concepts.
 ☐ Show the strongest measured factors behind the most recent routing decision in concise text.

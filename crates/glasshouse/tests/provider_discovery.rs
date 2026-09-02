@@ -1557,6 +1557,7 @@ fn no_telemetry_reader_can_hand_a_caller_an_error_to_fail_a_session_on() {
         ),
         Some("   "),
         None,
+        None,
         TELEMETRY_OBSERVED,
     );
 

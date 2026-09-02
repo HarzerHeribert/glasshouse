@@ -333,7 +333,7 @@ ranking will keep recommending them.**
 
 | line | missing link |
 |---|---|
-| 1263 | *"Lower the score when user-defined spending budget is close to exhaustion."* The **producer exists** (`QuotaOverride::budget()`, config-loaded and layered) and the **consumer exists** (`remaining_capacity_score` → `normalized()` → `pools()`, which already includes `user_budget`). What is missing is **any count of what has been spent**. `routing/evidence.rs:66` states it: *"`cost_micro_usd`: not supplied."* There is no `SUM(cost…)` anywhere in the tree, and `provider/resources.rs:950` prints the budget to the user with the words **"Glasshouse does not count spend against this"**. "Close to exhaustion" is not computable. The only production writer of `CapacityState::user_budget` is `provider/telemetry.rs:1017`, which merges a *provider-reported* ceiling, not the user's configured budget; `resources.rs:2195` is past that file's `#[cfg(test)]` at `:1281`. ~~**Blocked on Phase 32G (provider-aware request-cost estimation), which is 10 open / 0 closed.**~~ **That sub-clause is STALE (2026-09-01): Phase 32G now stands 6/10, and 1307 closed, so `cost_micro_usd` IS written and round-trips through `EvidenceLedger::recent`. The row's verdict is unchanged and the line stays REFUSED — but for the other reason, and an orchestrator who re-checks only the stale half will package it.** The live blocker is the **relay-path usage reader**, stated in production at `main.rs:8613`: *"`routing_observations` has carried `input_tokens`, `output_tokens` and `cached_input_tokens` since migration 11 and nothing has ever written one: `gateway::ingress` relays a response body it is designed never to parse."* The one writer is `record_extraction_observation` (memory extraction), which is `None` *"for every run under the default configuration"*. `recent_credential_spend` (`routing/evidence.rs:1837`) is real, tested, and has **zero production callers** — it looks exactly like a Cluster B wiring job and is not one: wired today it would sum memory-extraction calls only, which is not the user's spend. This is register row **P1b**'s *"usage reader on the relay path"*, and it needs the `ingress` ruling first. Checked at Phase -1 on 2026-09-01 and **refused before dispatch**. |
+| ~~1263~~ **CLOSED 2026-09-02 (late evening) by `GH-BUDGET-SPEND-COUNTER` — the spend counter exists; see the section at the end of this file.** | *"Lower the score when user-defined spending budget is close to exhaustion."* The **producer exists** (`QuotaOverride::budget()`, config-loaded and layered) and the **consumer exists** (`remaining_capacity_score` → `normalized()` → `pools()`, which already includes `user_budget`). What is missing is **any count of what has been spent**. `routing/evidence.rs:66` states it: *"`cost_micro_usd`: not supplied."* There is no `SUM(cost…)` anywhere in the tree, and `provider/resources.rs:950` prints the budget to the user with the words **"Glasshouse does not count spend against this"**. "Close to exhaustion" is not computable. The only production writer of `CapacityState::user_budget` is `provider/telemetry.rs:1017`, which merges a *provider-reported* ceiling, not the user's configured budget; `resources.rs:2195` is past that file's `#[cfg(test)]` at `:1281`. ~~**Blocked on Phase 32G (provider-aware request-cost estimation), which is 10 open / 0 closed.**~~ **That sub-clause is STALE (2026-09-01): Phase 32G now stands 6/10, and 1307 closed, so `cost_micro_usd` IS written and round-trips through `EvidenceLedger::recent`. The row's verdict is unchanged and the line stays REFUSED — but for the other reason, and an orchestrator who re-checks only the stale half will package it.** The live blocker is the **relay-path usage reader**, stated in production at `main.rs:8613`: *"`routing_observations` has carried `input_tokens`, `output_tokens` and `cached_input_tokens` since migration 11 and nothing has ever written one: `gateway::ingress` relays a response body it is designed never to parse."* The one writer is `record_extraction_observation` (memory extraction), which is `None` *"for every run under the default configuration"*. `recent_credential_spend` (`routing/evidence.rs:1837`) is real, tested, and has **zero production callers** — it looks exactly like a Cluster B wiring job and is not one: wired today it would sum memory-extraction calls only, which is not the user's spend. This is register row **P1b**'s *"usage reader on the relay path"*, and it needs the `ingress` ruling first. Checked at Phase -1 on 2026-09-01 and **refused before dispatch**. |
 | 1267 | Same function, stated in its own doc comment: *"**This build has no latency or concurrency reader anywhere** — nothing in `CapacityState` carries either quantity."* `remaining_capacity_score` returns a fixed high estimate for local inference carrying an explicit "no evidence" note, which is the honest answer and not the line. |
 
 ### Cluster N — a signal constant across the set being ranked *(in-repo: yes, and each has a tripwire)*
@@ -1404,3 +1404,35 @@ Not a map line; a Green fix-forward the batch left behind on purpose. `provider/
 > **2026-09-02, later:** `GH-TURN-OUTCOME-ROW` landed option (b) — `TurnOutcomeObserved` is written for every session at the hook's `TurnEnded`, the memory proxy joins it, **1821 and 1831 are CLOSED** (`phase-51.md`). `GH-EFFORT-CARRY` landed 2039's producer (`phase-58.md`); the shadow measurement it enables needs the harness-turn rows to carry a session id before they can join the turn's verdict — the same Cluster G decision 2019 waits on, now with two lines behind it.
 >
 > **2026-09-02, evening:** designed — `design-decisions.md`, *A session identity on the routing evidence rows — Cluster G's first column*: Glasshouse's own session id (never the wire's `user_id`), handed to the gateway by the launch after the record exists; migration 24 adds `session_id`, `effort_level` and `turn_shape` in migration 23's shape so the shadow needs no second migration. `GH-OBSERVATION-SESSION-COLUMN` (Red) dispatched for 2019; `GH-EFFORT-CLAMP-SHADOW` (Amber) follows for 2039. **2019 CLOSED the same evening** — migration 24 landed with `serve_session` at both doors and the per-session facet in `routing-cost` (`phase-58.md`); Cluster G's *design first* has its first column. 2039's shadow is next. **2039 CLOSED later the same evening** (`GH-EFFORT-CLAMP-SHADOW`): the shadow is a query over recorded rows joined to the session's next harness verdict, printed as `routing-cost`'s EFFORT SHADOW section; **Phase 58 is complete (15/15)**. `GH-EFFORT-CLAMP` stays unbuilt until real rows say a clamp saves output tokens on tool-resume turns without moving the verdicts.
+
+## 1263, 1519 and 1209 CLOSED — the money counter, 2026-09-02 (late evening)
+
+Cluster M's *no spend counter* half is discharged: `GH-BUDGET-SPEND-COUNTER`
+(Amber, Sonnet high) made money a read-time product over the translated rows —
+`recent_credential_cost` beside `recent_credential_spend`, the budget pool's
+remaining measured, `EntitlementRefusal::BudgetExhausted` at both exclusion
+sites (`phase-32d.md`, `phase-35a.md`, `phase-32a.md`). Row 336 (Cluster M,
+1263) and P1b's member 1263 are closed by it; **P1b's remaining members are
+1333 and 1158**, and 1267 (a latency and concurrency reader for local
+inference) is Cluster M's last. **Phase 35A is complete.** The worker's own
+thin spot was real: the `#[cfg(windows)]` calendar-month arm did not compile
+(`libc` binds no `mktime` for Windows) — caught by a cross-check, fixed forward
+to the UCRT's `_mktime64` at integration, Windows VM leg trailing. Residue:
+`disposable_reducer` and the reranking seat's chooser do not gather budget
+spend — `GH-BUDGET-SPEND-REMAINING-CALLERS` (Green, after the reranker lands).
+
+## 1763 CLOSED on 1365's evidence — a refusal that outlived its blocker, 2026-09-02
+
+Cluster H's row for 1763 asked for a ruling on whether a non-2xx `Forwarded`
+counts as a failure; `GH-FAILURE-TAXONOMY` ruled and built it on 2026-08-31 for
+line 1365 (`by class` in `glasshouse resources`, no total on purpose) and
+nobody re-read 1763. Ticked on the existing shipped-binary test plus one
+orchestrator mutation (`phase-47.md`). **The shape: a refusal whose named
+blocker was removed by a package filed under another phase.** Cluster H's 1759
+has it now too — `MemoryRetrieved` rows carry a session id from both doors
+since wave 94 — and its readout is **`GH-RETRIEVED-VIEW`** (Green/Amber-light:
+a query over `EvaluationKind::MemoryRetrieved` by session, printed; dispatch
+after `memory-reranker` lands, because both edit the `memory` subcommand).
+1757/1766 (a durable rationale), 1760 (a temperature estimate), 1767 (a
+correlation with a sample size) and 1769 (a durable extraction record) are
+unchanged.

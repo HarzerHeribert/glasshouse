@@ -22,6 +22,22 @@ validated and waiting on the commit. Next action: `.agent-runtime/CONTINUATION.m
 
 Last updated: 2026-09-02 (Europe/Berlin)
 
+## Checkpoint — 2026-09-02, batch 90: 1229 / 1347 (91.2%) — money is counted against the budget, Phase 35A complete, and a refusal that outlived its blocker
+
+Session `0c56372c` (Fable 5.1), inherited hot from `4d589d24` with three
+workers live. Wave 100: `budget-spend-counter` landed 1263 and 1519 (Phase 35A
+complete — money is a read-time product of recorded tokens and `pricing.toml`
+rates, the budget pool's remaining measured, `BudgetExhausted` at both
+exclusion sites) and, on its evidence, 1209; 1763 ticked on 1365's
+shipped-binary proof plus one orchestrator mutation. The worker's
+`#[cfg(windows)]` calendar-month arm did not compile — `libc` binds no
+`mktime` for Windows — caught by the cross-check its own report asked for and
+fixed forward to `_mktime64` at integration; the Windows VM leg trails. Live:
+`expected-latency-score` (1539) and `memory-reranker` (Phase 24 ×5). Next:
+`GH-STREAM-FIRST-EVENTS` (1331/1332 on the translated path, design note
+first), then `GH-RETRIEVED-VIEW` (1759) and the budget residue after the
+reranker lands. Exact next actions: `.agent-runtime/CONTINUATION.md`.
+
 ## Checkpoint — 2026-09-02, batch 89: 1223 / 1347 (90.8%) — the launch path briefs, a dispatch reserves what it spends, Cluster G's first column, the classifier learns its price
 
 Session `4d589d24` (Fable 5.1), inherited hot from `56821d4d`. Waves 94–97 in
