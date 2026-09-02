@@ -335,15 +335,15 @@ fn two_sessions_with_disjoint_dirty_sets_get_disjoint_file_associations() {
     );
 }
 
-/// Every row this build writes says `observed`, and the vocabulary has no way
-/// to say anything stronger.
+/// A hand-fed extraction writes only `observed` rows.
 ///
-/// The `assert!` on `FileAssociation::from_stored` is the half that matters:
-/// *observed-dirty* is not *explicitly referenced*, and a build that started
-/// writing `referenced` here would be closing capability-map line 1139 on a
-/// producer that does not exist.
+/// `referenced` exists since `GH-FILE-AWARE-MEMORY` (capability-map line
+/// 1139): the extraction model may name paths, kept only when byte-equal to
+/// the session's own `file_touched` set. A chunk built by hand has no such
+/// set, so the observer is the only writer here — and *observed-dirty* is
+/// still not *explicitly referenced*, which is why the two words stay apart.
 #[test]
-fn every_association_this_build_writes_is_observed_and_never_referenced() {
+fn a_hand_fed_extraction_writes_only_observed_associations() {
     let tmp = tempfile::tempdir().unwrap();
     let project = Fixture::new(tmp.path(), "alpha");
 
@@ -363,12 +363,12 @@ fn every_association_this_build_writes_is_observed_and_never_referenced() {
     assert_eq!(
         provenances,
         vec![FileAssociation::Observed.as_str().to_owned()],
-        "this build has exactly one producer and it observes"
+        "a hand-fed chunk has no touched set, so only the observer writes"
     );
     assert_eq!(
         FileAssociation::from_stored("referenced"),
-        None,
-        "`referenced` is line 1139's word and this build must not be able to store it"
+        Some(FileAssociation::Referenced),
+        "`referenced` is line 1139's word and, since its producer landed, a stored value"
     );
 
     // Non-vacuity: the query above found rows at all, and both dirty paths
