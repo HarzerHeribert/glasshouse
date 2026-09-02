@@ -387,7 +387,7 @@ consumer and it is **purely structural**: free versus metered, with a flat
 | line | missing link |
 |---|---|
 | 1298, 1299, 1304 | **No estimated input size at the routing decision point.** `SessionContextFacts` (`routing/session.rs:197`) is the router's own context type and its four fields are `observed_compactions`, `last_task`, `touched_files`, `task_named_paths` — **no size or token field**, and `WarmSession` makes an explicit refusal about accumulated context (`routing/session.rs:137`). `firewall::estimate::estimate_tokens` is public but needs text the router does not hold. A size producer is the blocker for all three. |
-| 1300 | the pricing half is buildable; the **usage** half is not — no cached-input signal exists (`cached_input_tokens` has no setter). Same root as Cluster H's 1760. |
+| 1300 | the pricing half is buildable; the **usage** half is not — no cached-input signal exists (`cached_input_tokens` has no setter). **STALE 2026-09-02 (`GH-RECON-33A-32G`): `with_tokens` sets `cached_input_tokens` and translated exchanges write it; the live blocker is `ModelPrice` having no cached rate, by design — see `phase-32g.md` 2026-09-02, ruling parked.** Same root as Cluster H's 1760. |
 | 1301 | no expected-output-size signal; *"recent comparable tasks"* would have to be turned into a token count nothing measures. |
 | 1302 | same root as Cluster D's **531** — nothing distinguishes a request pool from a token-priced allowance and no `FreePool` outlives one call. |
 | 1303 | latency aggregates exist and have a production reader; **occupancy does not**. Half a signal. |

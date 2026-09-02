@@ -660,3 +660,11 @@ That mutation **is** the regression the arm was added to prevent, so lines
 
 **Phase 33A now stands at 11/15.** 1331-1334 remain blocked on the relay-path
 `ingress` reader — the same blocker as line 1263 — and nothing here changes that.
+
+---
+
+## Censused again 2026-09-02 (`GH-RECON-33A-32G`) — one disposition was stale in the direction that keeps the phase shut
+
+- **1333 — the ledger's *"no producer in this build ever supplies a value"* is STALE.** A translated gateway exchange (`translate::place` → `translate::serve`, a real path whenever the harness's protocol differs from the provider's and a supported pair exists) decodes the canonical response, and `tokens_of` (`gateway/translate/mod.rs:825-831`) hands its `usage` to `record_routing_observation`'s `.with_tokens(...)` (`gateway/session.rs:478-488`) — all three columns, cached included. The relayed majority still writes `NULL`, by design. Nothing proves the translated chain end to end: `conformance.rs` proves the relay's row only. **Successor dispatched: `GH-TRANSLATED-USAGE-PROOF`** (Green, two socket tests: the translated row carries the fixture's exact counts; the relayed row is `NULL` even when the body carried a usage object). **Reading call, made now:** the line says *only when they are actually exposed*; a translated exchange exposes them and a relayed one does not, so the pair of tests — counts where exposed, `NULL` where not — is the line's own claim, and 1333 ticks on it. The production module doc at `routing/evidence.rs:89-93` repeats the stale sentence and is corrected with that package.
+- **1331, 1332 — refused, unchanged, word for word.** `first_token_at`/`first_tool_call_at` still have no builder; the new `Framing` type carries byte counts and stream-end state, not SSE event boundaries, so it cannot say *first real token* without the content read the ingress design forbids. Register row P1b.
+- **1334 — the ledger's PARTIAL is accurate.** `retries` (`gateway/session.rs:474`, a true `0`: `ureq` 3 retries nothing) and `failovers` (`:473`, from `ExchangeEffect`) are written; `tool_rounds` and `repairs` have no concept anywhere in the tree. No successor.

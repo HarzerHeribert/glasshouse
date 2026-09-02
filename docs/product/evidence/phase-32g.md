@@ -310,3 +310,12 @@ auditor checked rather than believed it.
 Note recorded for future auditors, not a gap: `EstimatedInputSize` has no field
 for *"likely repository reads"*, grepped and confirmed absent — so the omission
 this phase's entries record is real rather than asserted.
+
+---
+
+## Censused 2026-09-02 (`GH-RECON-33A-32G`) — two register reasons stale, one join named, one ruling parked
+
+- **1302 — the register's reason is STALE; packageable.** *"Nothing distinguishes a request pool from a token-priced allowance"* — `Allowance::RequestPool` and `is_request_pool()` (`routing/free.rs:78-102`) exist and have zero production callers (Cluster B, not Cluster D). *"No `FreePool` outlives one call"* — `routing/burn.rs` now computes a persisted, request-unit-aware `burn_rate`/`forecast` per `ResourceKey` from ledger rows. **Successor: `GH-REQUEST-POOL-COST`** (Amber, `routing/session.rs`): a term beside `expected_marginal_cost` that, where `is_request_pool()`, prices the scarce unit from the burn reader. **Ruling to carry into the packet:** its own axis (`request-pool cost`), not folded into the money term, and inert whenever 1280's `exhaustion forecast` term is already active for the same resource, so one forecast is never priced twice.
+- **1301 — a missing join, not a missing wire.** `record_routing_latency` writes `task_class` on a row with no tokens; `record_routing_observation` writes tokens on a row with no class; `Assignment` has no `TaskClass` field. **Successor: `GH-TASK-CLASS-COST-JOIN`** (Amber), sequenced after `GH-TRANSLATED-USAGE-PROOF` so the tokens side is proven first. Shape to rule before dispatch: widen `Assignment` with the class, or join the routing-decision row by session and window.
+- **1300 — refused for a different, narrower reason.** The register's *"no cached-input signal exists"* is stale (translated exchanges write `cached_input_tokens`); the live blocker is `ModelPrice` (`provider/pricing.rs:71-75`), which carries input and output rates only, by Cluster H's own deliberate note. **Parked ruling:** whether `pricing.toml` grows an optional `cached_input_per_million_usd` (absent = unknown, no cached estimate) is decided after the translated-usage proof lands and shows the signal is real in production; until then 1300 stays refused for the stated reason.
+- **1303 — refused, unchanged.** No occupancy concept exists anywhere; the latency half is closed elsewhere.
