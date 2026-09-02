@@ -86,3 +86,20 @@ rows.sort(reverse=True)
 print(f"{len(rows)} pub fn(s) defined in production with ZERO in-crate production call sites\n")
 for t,n,loc in rows[:45]:
     print(f"  {t:3d} test call(s)  {n:44s} {loc}")
+
+# 2026-09-02, GH-AUDIT-WAVE79: the filter above (prod==0 and test>0) is
+# blind to a `pub fn` with ZERO callers of any kind, and that is exactly the
+# shape of the twelfth wrongly ticked box -- `SessionRouter::with_score_weights`
+# was built, documented, ticked, and never called by production OR by a test
+# in this crate, so it never appeared here at all. A symbol nothing in `src/`
+# calls is a stronger Cluster B candidate than one a unit test calls, not a
+# weaker one. Listed separately so the two shapes stay distinguishable; a
+# name here may still be called from `crates/glasshouse/tests/` (not scanned)
+# or be a trait/extern surface, so read it as a lead, not a verdict.
+dead = [(n, f"{f.relative_to('crates/glasshouse')}:{i}")
+        for n,(f,i) in defs.items()
+        if n not in skip and prod[n]==0 and test[n]==0]
+dead.sort()
+print(f"\n{len(dead)} pub fn(s) with ZERO in-crate callers of ANY kind (production or test) -- grep each name before believing a tick that rests on it\n")
+for n,loc in dead[:60]:
+    print(f"  {n:44s} {loc}")

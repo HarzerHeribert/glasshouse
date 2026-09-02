@@ -268,6 +268,7 @@ to do, and the orchestrator should follow its own rule.
 - **§87** — size the package by the mechanism, and the six token traps
 - **§88** — trust the process's artifacts, and spend verification on irreversibility
 - **§89** — stage by pathspec, always; the hook refuses the sweep
+- **§90** — a "recorded limit" that says the tests bypass the real path is the defect, not a footnote
 
 ## Recent checkpoints
 

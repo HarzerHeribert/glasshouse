@@ -4312,3 +4312,48 @@ for 25 minutes because the packet said to); and `coedit-claim-guard.sh` (a
 declared co-edit is not editable until it is claimed). The pattern is §22's:
 every one of these was already written down, and every one was broken
 anyway.
+
+## §90 — a "recorded limit" that says the tests bypass the real path is the defect, not a footnote
+
+**What happened.** Batch 79 ticked 1357 and 1358 (configurable score
+weights). The evidence entry recorded two KILLED mutations and, under
+*Recorded limits*, one sentence: *"the acceptance tests call `provider_health`
+and `quota_pressure` directly rather than driving a full
+`SessionRouter::choose`."* An independent audit the next morning asked the
+question that sentence answers and nobody had asked: **does anything drive
+the real path?** `SessionRouter::with_score_weights` had zero call sites of
+any kind — its only occurrence in the crate was its own definition — and
+`session_router()`, the sole production constructor, never chained it. Every
+router the shipped binary built scored with the defaults regardless of what a
+user configured. Both recorded mutations were genuinely KILLED, by tests on a
+path the binary never takes. Twelfth wrongly ticked box; same shape as the
+other eleven.
+
+**The rule.** When a report or a ledger entry says, in any wording, *"the
+tests call the scorer / builder / policy directly rather than through the
+production entry point"*, that is §36's question answered in the negative and
+it blocks the tick. Treat it exactly like a SURVIVED mutation: the missing
+test is the one that drives the production constructor or entry point and
+asserts the configured value changed a real decision. In this case that test
+was 96 lines, took the auditor one turn, and was red on the tree that had
+ticked the box.
+
+**The tool note, because the script was trusted.** `scripts/cluster-b.py`'s
+row filter was `prod == 0 and test > 0`: it finds a mechanism unit tests call
+and production does not. A `pub fn` with **no callers of any kind** never
+appeared in its output — not below the cutoff, not at all — and that is the
+stronger Cluster B shape, not the weaker one. It now prints a second list for
+exactly that. But the check that found this was `grep -rn 'with_score_weights('`
+returning one line, and that grep is owed for every builder a package adds
+before its box is ticked: *is the thing you built called from the path the
+user takes?* A script is a lead; the grep on the name is the check.
+
+**Where the audit's judgement was right and kept.** The same audit found one
+SURVIVED mutation of its own on 1546's `main.rs` glue — a single-field
+passthrough into `adopt_observed` that no test in the binary watched — and
+judged it a coverage gap rather than a defect, because both ends it joins
+were proven by real round trips and the line has no logic to get wrong. The
+orchestrator agreed, wrote the missing test, and left the tick. The
+distinction is whether the *mechanism* is unreachable (re-open) or one *line
+of an otherwise proven join* is unwatched (add the test). Say which in the
+ledger.
