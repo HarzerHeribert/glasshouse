@@ -822,6 +822,34 @@ pub struct ProviderConfig {
     /// it, because [`ProviderConfig::free_models`] is checked first.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     metered_models: Vec<String>,
+    /// Whether this provider's protocols carry tool calls — capability map
+    /// line 1513's tool-semantics half, and the producer
+    /// [`ProviderConfig::to_provider`] applies to every
+    /// [`crate::provider::ProtocolSupport`] this provider serves.
+    ///
+    /// `None` (the default) leaves every protocol's `tool_calls` exactly as
+    /// its own template declares — every built-in template's own answer is
+    /// [`crate::harness::Declared::Unverified`] — so a provider nobody has
+    /// said anything about excludes nothing new. `Some(value)` is the
+    /// user's own word: [`ProviderConfig::to_provider`] turns it into
+    /// [`crate::harness::Declared::verified`], citing the `[providers.<name>]`
+    /// table it came from — the user, having read their own provider's
+    /// documentation, is the verifier here, exactly as a `--help` line is
+    /// the verifier for an adapter's own declarations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<bool>,
+    /// Per-model resource facts the user has declared for this provider —
+    /// capability map line 1517's producer, keyed by the same model
+    /// identifier [`ProviderConfig::model_ceilings`] uses, and read through
+    /// [`ProviderConfig::resource_facts_of`].
+    ///
+    /// A model absent from this map, or an axis absent from its own table,
+    /// stays [`crate::harness::Declared::Unverified`] — the same "nobody has
+    /// said" rule [`ProviderConfig::model_ceilings`]'s own doc states, and
+    /// for the same reason: an empty declaration must never read as an
+    /// established absence.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    model_facts: BTreeMap<String, ConfiguredModelFacts>,
     /// The highest workload tier the user is willing to trust an individual
     /// model on this provider with — capability map line 1796, and the one
     /// production producer of [`crate::routing::session::Destination::with_tier_ceiling`].
@@ -2981,6 +3009,70 @@ impl StoredCredentialRef {
     }
 }
 
+/// One model's declared resource facts, as stored under
+/// `[providers.<name>.model_facts.<model>]` — the serialisable, per-axis
+/// mirror of [`crate::routing::capability::ResourceFacts`]'s seven axes.
+///
+/// Every field optional and independent: `None` on an axis means the user
+/// has not declared it, exactly as an absent model in
+/// [`ProviderConfig::model_facts`] means the same thing one level up. See
+/// [`ProviderConfig::resource_facts_of`], the only place these become a
+/// [`crate::routing::capability::ResourceFacts`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfiguredModelFacts {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub code_edit: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shell_tool_use: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub browser_use: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub large_context: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fast_cheap_analysis: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repository_review: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mcp: Option<bool>,
+}
+
+/// Which configuration table a user-declared fact came from — the two
+/// places a fact can be written.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeclaredIn {
+    /// `[providers.<name>] tool_calls = …`
+    ProviderToolCalls,
+    /// `[providers.<name>.model_facts.<model>] <axis> = …`
+    ModelFacts,
+}
+
+/// Turn a user's config-time declaration into the `'static` evidence
+/// [`crate::harness::Declared::verified`] requires: four literals, one per
+/// (layer, table) pair, and **no allocation**. The provider and model names
+/// are deliberately not in the text. `Declared`'s evidence is `&'static str`
+/// everywhere it is constructed, and the alternative — leaking a formatted
+/// string per resolved fact — is unbounded in `glasshouse api serve`, which
+/// answers `RecommendRoute` requests for as long as it runs and resolves
+/// configuration for each one. The destination a reason is printed beside
+/// already names its provider and model, so the text stays re-checkable
+/// without repeating them.
+fn declared_from_config(layer: Layer, table: DeclaredIn) -> &'static str {
+    match (layer, table) {
+        (Layer::Project, DeclaredIn::ProviderToolCalls) => {
+            "declared as tool_calls in the project config's [providers] table"
+        }
+        (Layer::User | Layer::Default, DeclaredIn::ProviderToolCalls) => {
+            "declared as tool_calls in the user config's [providers] table"
+        }
+        (Layer::Project, DeclaredIn::ModelFacts) => {
+            "declared in the project config's [providers.*.model_facts] table"
+        }
+        (Layer::User | Layer::Default, DeclaredIn::ModelFacts) => {
+            "declared in the user config's [providers.*.model_facts] table"
+        }
+    }
+}
+
 impl ProviderConfig {
     pub fn new(template: impl Into<String>) -> Self {
         Self {
@@ -2992,6 +3084,8 @@ impl ProviderConfig {
             enabled: true,
             free_models: Vec::new(),
             metered_models: Vec::new(),
+            tool_calls: None,
+            model_facts: BTreeMap::new(),
             model_ceilings: BTreeMap::new(),
             model_capabilities: BTreeMap::new(),
             prompt_transform: None,
@@ -3094,6 +3188,87 @@ impl ProviderConfig {
     pub fn set_metered_models(&mut self, models: Vec<String>) -> &mut Self {
         self.metered_models = models;
         self
+    }
+
+    /// Whether this provider's protocols carry tool calls, as the user
+    /// declared it — `None` when nobody has. See the field's own doc.
+    pub fn tool_calls(&self) -> Option<bool> {
+        self.tool_calls
+    }
+
+    pub fn set_tool_calls(&mut self, tool_calls: Option<bool>) -> &mut Self {
+        self.tool_calls = tool_calls;
+        self
+    }
+
+    /// Overlay [`ProviderConfig::tool_calls`] onto every protocol `provider`
+    /// declares — [`ProviderConfig::to_provider`]'s own doc explains why
+    /// this is a step its caller takes rather than something that method
+    /// does itself: the evidence string needs `layer`, which a `Provider`
+    /// resolved from a bare template has no way to supply.
+    ///
+    /// `None` (nobody declared) touches nothing, leaving whatever
+    /// `to_provider` already produced — the template's own `Unverified` on
+    /// every real provider today. `Some(value)` overrides every protocol's
+    /// `tool_calls` with [`crate::harness::Declared::verified`], citing
+    /// `layer` and the `[providers]` table exactly as
+    /// [`ProviderConfig::resource_facts_of`]'s reason does one level down.
+    pub fn declare_tool_calls(&self, provider: &mut crate::provider::Provider, layer: Layer) {
+        if let Some(declared) = self.tool_calls {
+            let reason = declared_from_config(layer, DeclaredIn::ProviderToolCalls);
+            for protocol in &mut provider.protocols {
+                protocol.tool_calls = crate::harness::Declared::verified(declared, reason);
+            }
+        }
+    }
+
+    /// The per-model resource facts the user configured — map line 1517.
+    /// See [`ProviderConfig::resource_facts_of`] for how a lookup by model
+    /// name reads these.
+    pub fn model_facts(&self) -> &BTreeMap<String, ConfiguredModelFacts> {
+        &self.model_facts
+    }
+
+    pub fn set_model_facts(&mut self, facts: BTreeMap<String, ConfiguredModelFacts>) -> &mut Self {
+        self.model_facts = facts;
+        self
+    }
+
+    /// `model`'s declared resource facts on this provider — map line 1517's
+    /// producer, turning [`ProviderConfig::model_facts`]'s per-axis
+    /// `Option<bool>`s into [`crate::routing::capability::ResourceFacts`]'s
+    /// `Declared<bool>`s. `layer` is which configuration layer is asking,
+    /// for the evidence string's own `[providers.*.model_facts]` table.
+    ///
+    /// A model absent from [`ProviderConfig::model_facts`] answers
+    /// [`crate::routing::capability::ResourceFacts::UNVERIFIED`] outright.
+    /// An axis absent from a present model's table stays
+    /// [`crate::harness::Declared::Unverified`] on that axis alone — a
+    /// missing key never upgrades to `Verified`.
+    pub fn resource_facts_of(
+        &self,
+        model: &str,
+        layer: Layer,
+    ) -> crate::routing::capability::ResourceFacts {
+        use crate::routing::capability::ResourceFacts;
+
+        let Some(config) = self.model_facts.get(model) else {
+            return ResourceFacts::UNVERIFIED;
+        };
+        let reason = declared_from_config(layer, DeclaredIn::ModelFacts);
+        let axis = |value: Option<bool>| match value {
+            Some(v) => crate::harness::Declared::verified(v, reason),
+            None => crate::harness::Declared::Unverified,
+        };
+        ResourceFacts {
+            code_edit: axis(config.code_edit),
+            shell_tool_use: axis(config.shell_tool_use),
+            browser_use: axis(config.browser_use),
+            large_context: axis(config.large_context),
+            fast_cheap_analysis: axis(config.fast_cheap_analysis),
+            repository_review: axis(config.repository_review),
+            mcp: axis(config.mcp),
+        }
     }
 
     /// The per-model workload-tier ceilings the user configured — map line
@@ -3238,6 +3413,15 @@ impl ProviderConfig {
     /// protocol. Likewise, a non-empty [`ProviderConfig::credential_env`]
     /// replaces the template's own credential names rather than adding to
     /// them.
+    ///
+    /// **Does not apply [`ProviderConfig::tool_calls`].** That declaration
+    /// needs the configuration *layer* this entry was read from, for its
+    /// evidence string, and this method's callers outside this module have
+    /// no layer to give it — so the override is applied one layer up, in
+    /// [`EffectiveConfig::configured_provider`], the one caller that reads
+    /// this entry with a layer already in hand. Every other caller of this
+    /// method sees exactly what it saw before [`ProviderConfig::tool_calls`]
+    /// existed.
     pub fn to_provider(
         &self,
         name: &str,
@@ -5934,6 +6118,36 @@ impl<'a> EffectiveConfig<'a> {
         Layered::new(crate::routing::Cost::Metered, Layer::Default)
     }
 
+    /// `model`'s declared resource facts on `provider` — map line 1517's
+    /// producer, read from the layer that configures the provider (project
+    /// over user), exactly as [`EffectiveConfig::model_cost`] and
+    /// [`EffectiveConfig::model_ceiling`] read beside it.
+    ///
+    /// [`crate::routing::capability::ResourceFacts::UNVERIFIED`] when
+    /// neither layer configures the provider, or when the configuring layer
+    /// declares no facts for this model — both are *not established*, the
+    /// same "nobody has said" reading [`EffectiveConfig::model_ceiling`]'s
+    /// own doc gives a `None` ceiling.
+    pub fn model_facts(
+        &self,
+        provider: &str,
+        model: &str,
+    ) -> Layered<crate::routing::capability::ResourceFacts> {
+        if let Some(config) = self.project.and_then(|p| p.providers().get(provider)) {
+            return Layered::new(
+                config.resource_facts_of(model, Layer::Project),
+                Layer::Project,
+            );
+        }
+        if let Some(config) = self.user.providers().get(provider) {
+            return Layered::new(config.resource_facts_of(model, Layer::User), Layer::User);
+        }
+        Layered::new(
+            crate::routing::capability::ResourceFacts::UNVERIFIED,
+            Layer::Default,
+        )
+    }
+
     /// The highest workload tier `model` on `provider` is established to
     /// serve — map line 1796, read from the layer that configures the
     /// provider (project over user), exactly as
@@ -6141,7 +6355,8 @@ impl<'a> EffectiveConfig<'a> {
             });
         };
 
-        let provider = config.to_provider(name)?;
+        let mut provider = config.to_provider(name)?;
+        config.declare_tool_calls(&mut provider, layer);
         Ok(Layered::new(provider, layer))
     }
 
@@ -9473,5 +9688,260 @@ mod tests {
              merging into it — the same replace-not-merge rule `credential_env` follows"
         );
         drop(project_root);
+    }
+
+    // --- GH-CAPABILITY-FACTS: map lines 1517 and 1513 -----------------------
+
+    /// A missing `tool_calls` key must leave `declare_tool_calls`'s output
+    /// byte-identical to before the field existed — the census's mutation
+    /// (`upgrade-by-association`) is a missing key upgrading to
+    /// `Verified{true}`, and this is the test that must fail it.
+    #[test]
+    fn a_missing_tool_calls_key_leaves_the_templates_declaration_untouched() {
+        let config = ProviderConfig::new("openrouter");
+        let mut provider = config
+            .to_provider("probe")
+            .expect("a known template must resolve");
+        let before = provider.clone();
+        config.declare_tool_calls(&mut provider, Layer::User);
+
+        assert_eq!(
+            provider, before,
+            "a `ProviderConfig` whose `tool_calls` is `None` must leave `declare_tool_calls`'s \
+             output untouched"
+        );
+        for protocol in &provider.protocols {
+            assert_eq!(
+                protocol.tool_calls,
+                crate::harness::Declared::Unverified,
+                "the openrouter template's own tool_calls declaration must survive \
+                 untouched when nobody configured tool_calls"
+            );
+        }
+    }
+
+    /// `Some(false)` becomes `Declared::Verified { value: false, .. }` on
+    /// every protocol the provider serves, citing the layer and the exact
+    /// `[providers.<name>]` table the declaration came from.
+    #[test]
+    fn a_declared_tool_calls_false_becomes_verified_absent_with_a_layer_reason() {
+        let mut config = ProviderConfig::new("openrouter");
+        config.set_tool_calls(Some(false));
+        let mut provider = config
+            .to_provider("probe")
+            .expect("a known template must resolve");
+        config.declare_tool_calls(&mut provider, Layer::Project);
+
+        assert!(
+            !provider.protocols.is_empty(),
+            "the openrouter template must declare at least one protocol for this to prove \
+             anything"
+        );
+        for protocol in &provider.protocols {
+            match protocol.tool_calls {
+                crate::harness::Declared::Verified { value, evidence } => {
+                    assert!(!value, "a declared `Some(false)` must verify absent");
+                    assert!(
+                        evidence.contains("project config") && evidence.contains("[providers]"),
+                        "the evidence must name the layer and the [providers] table: {evidence:?}"
+                    );
+                }
+                crate::harness::Declared::Unverified => {
+                    panic!("a declared tool_calls value must not stay Unverified")
+                }
+            }
+        }
+    }
+
+    /// `Some(true)` becomes `Declared::Verified { value: true, .. }` — the
+    /// same producer, the other declared value.
+    #[test]
+    fn a_declared_tool_calls_true_becomes_verified_present_with_a_layer_reason() {
+        let mut config = ProviderConfig::new("openrouter");
+        config.set_tool_calls(Some(true));
+        let mut provider = config
+            .to_provider("probe")
+            .expect("a known template must resolve");
+        config.declare_tool_calls(&mut provider, Layer::User);
+
+        for protocol in &provider.protocols {
+            assert_eq!(
+                protocol.tool_calls,
+                crate::harness::Declared::verified(
+                    true,
+                    declared_from_config(Layer::User, DeclaredIn::ProviderToolCalls)
+                ),
+                "a declared `Some(true)` must verify present, citing the user layer and the \
+                 [providers.probe] table"
+            );
+        }
+    }
+
+    /// `resource_facts_of`: an axis absent from a declared model's table
+    /// stays `Unverified` — a missing key must never upgrade to `Verified`,
+    /// the same rule `tool_calls` follows above.
+    #[test]
+    fn an_axis_absent_from_a_declared_models_table_stays_unverified() {
+        let mut config = ProviderConfig::new("openrouter");
+        config.set_model_facts(BTreeMap::from([(
+            "small".to_owned(),
+            ConfiguredModelFacts {
+                shell_tool_use: Some(false),
+                ..Default::default()
+            },
+        )]));
+
+        let facts = config.resource_facts_of("small", Layer::User);
+        assert_eq!(
+            facts.shell_tool_use,
+            crate::harness::Declared::verified(
+                false,
+                declared_from_config(Layer::User, DeclaredIn::ModelFacts)
+            )
+        );
+        assert_eq!(
+            facts.code_edit,
+            crate::harness::Declared::Unverified,
+            "an axis the user never set on a declared model must stay Unverified, not \
+             upgrade because a sibling axis was declared"
+        );
+        assert_eq!(facts.browser_use, crate::harness::Declared::Unverified);
+        assert_eq!(facts.large_context, crate::harness::Declared::Unverified);
+        assert_eq!(
+            facts.fast_cheap_analysis,
+            crate::harness::Declared::Unverified
+        );
+        assert_eq!(
+            facts.repository_review,
+            crate::harness::Declared::Unverified
+        );
+        assert_eq!(facts.mcp, crate::harness::Declared::Unverified);
+    }
+
+    /// [`EffectiveConfig::model_facts`]: layered project-over-user exactly as
+    /// [`EffectiveConfig::model_cost`] and [`EffectiveConfig::model_ceiling`]
+    /// resolve beside it, and the three shapes of *not established* that
+    /// must never read as an established absence: an unnamed model, an
+    /// unconfigured provider, and a provider that declares no facts at all.
+    #[test]
+    fn model_facts_is_layered_and_unverified_where_nobody_declared_a_fact() {
+        use crate::routing::capability::ResourceFacts;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("workspace");
+        std::fs::create_dir_all(&root).unwrap();
+        let project_root = test_project(&root);
+
+        let mut user = UserConfig::default();
+        let mut user_alpha = ProviderConfig::new("openrouter");
+        user_alpha.set_model_facts(BTreeMap::from([(
+            "small".to_owned(),
+            ConfiguredModelFacts {
+                shell_tool_use: Some(false),
+                ..Default::default()
+            },
+        )]));
+        user.providers_mut().set("alpha", user_alpha);
+        // A configured provider that declares no facts at all.
+        user.providers_mut()
+            .set("beta", ProviderConfig::new("openrouter"));
+
+        let effective = EffectiveConfig::new(&user, None);
+        let small = effective.model_facts("alpha", "small");
+        assert_eq!(small.layer, Layer::User);
+        assert_eq!(
+            small.value.shell_tool_use,
+            crate::harness::Declared::verified(
+                false,
+                declared_from_config(Layer::User, DeclaredIn::ModelFacts)
+            )
+        );
+        assert_eq!(
+            small.value.code_edit,
+            crate::harness::Declared::Unverified,
+            "an undeclared axis on a declared model stays Unverified"
+        );
+        assert_eq!(
+            effective.model_facts("alpha", "unnamed").value,
+            ResourceFacts::UNVERIFIED,
+            "a model nobody declared facts for is not established, not absent"
+        );
+        assert_eq!(
+            effective.model_facts("beta", "small").value,
+            ResourceFacts::UNVERIFIED,
+            "a provider that declares no facts states nothing about any of its models"
+        );
+        assert_eq!(
+            effective.model_facts("nowhere", "small"),
+            Layered::new(ResourceFacts::UNVERIFIED, Layer::Default),
+            "a provider nobody configured is not a provider anybody declared facts for"
+        );
+
+        // The project layer replaces the user's map for that provider,
+        // exactly as `model_ceiling` resolves beside it.
+        let mut project = ProjectConfig::default();
+        let mut project_alpha = ProviderConfig::new("openrouter");
+        project_alpha.set_model_facts(BTreeMap::from([(
+            "small".to_owned(),
+            ConfiguredModelFacts {
+                shell_tool_use: Some(true),
+                ..Default::default()
+            },
+        )]));
+        project.providers_mut().set("alpha", project_alpha);
+        let effective = EffectiveConfig::new(&user, Some(&project));
+        let small = effective.model_facts("alpha", "small");
+        assert_eq!(small.layer, Layer::Project);
+        assert_eq!(
+            small.value.shell_tool_use,
+            crate::harness::Declared::verified(
+                true,
+                declared_from_config(Layer::Project, DeclaredIn::ModelFacts)
+            )
+        );
+        drop(project_root);
+    }
+
+    /// [`EffectiveConfig::configured_provider`]: a project-layer `tool_calls`
+    /// declaration wins over a user-layer one for the same provider name —
+    /// the same project-over-user precedence
+    /// [`EffectiveConfig::model_cost`] and [`EffectiveConfig::model_facts`]
+    /// apply beside it.
+    #[test]
+    fn configured_provider_layers_tool_calls_project_over_user() {
+        let mut user = UserConfig::default();
+        let mut user_alpha = ProviderConfig::new("openrouter");
+        user_alpha.set_tool_calls(Some(false));
+        user.providers_mut().set("alpha", user_alpha);
+
+        let mut project = ProjectConfig::default();
+        let mut project_alpha = ProviderConfig::new("openrouter");
+        project_alpha.set_tool_calls(Some(true));
+        project.providers_mut().set("alpha", project_alpha);
+
+        let effective = EffectiveConfig::new(&user, Some(&project));
+        let resolved = effective
+            .configured_provider("alpha")
+            .expect("a configured provider must resolve");
+        assert_eq!(resolved.layer, Layer::Project);
+        for protocol in &resolved.value.protocols {
+            match protocol.tool_calls {
+                crate::harness::Declared::Verified { value, evidence } => {
+                    assert!(
+                        value,
+                        "the project layer's `tool_calls = true` must win over the user \
+                         layer's `false`"
+                    );
+                    assert!(
+                        evidence.contains("project"),
+                        "the evidence must attribute the winning declaration to the \
+                         project layer: {evidence:?}"
+                    );
+                }
+                crate::harness::Declared::Unverified => {
+                    panic!("the project layer's declared tool_calls must not read as Unverified")
+                }
+            }
+        }
     }
 }

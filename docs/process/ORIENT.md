@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1186 / 1332 mandatory capabilities (89%)** — 146 open across 41 phases.
+**1188 / 1332 mandatory capabilities (89%)** — 144 open across 41 phases.
 
 ## Where the work is
 
@@ -32,6 +32,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 32F | Protected quota reserve | **1** | 7 | `1285` |
 | Phase 34B | Routing-model role | **1** | 14 | `1406` |
 | Phase 34E | Router economics | **1** | 8 | `1461` |
+| Phase 35A | Candidate generation | **1** | 10 | `1504` |
 | Phase 37 | Basic session-aware router | **1** | 10 | `1590` |
 | Phase 39 | Gateway-backed disposable jobs | **1** | 8 | `1614` |
 | Phase 54A | Setup and portability completion criteria | **1** | 9 | `1897` |
@@ -49,7 +50,6 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 33A | Routing evidence ledger | **3** | 12 | `1327` |
 | Phase 33C | Failure, quota, and route correlation | **3** | 12 | `1362` |
 | Phase 34C | Automatic routing-model selection | **3** | 10 | `1429` |
-| Phase 35A | Candidate generation | **3** | 8 | `1504` |
 | Phase 21E | Decision ladder and conflict handling | **4** | 8 | `907` |
 | Phase 32G | Provider-aware request-cost estimation | **4** | 6 | `1296` |
 | Phase 56 | Harness–subscription decoupling: choose the harness, route the subscription and model | **4** | 8 | `1941` |
@@ -118,6 +118,10 @@ these unwrapped.
 ### Phase 34E — Router economics  (1 open, 8 closed)
 
 - **1469** ☐ Cache recent classification results for semantically identical task starts when safe.
+
+### Phase 35A — Candidate generation  (1 open, 10 closed)
+
+- **1519** ☐ Exclude candidates whose user-defined spending budget has been exhausted.
 
 ### Phase 37 — Basic session-aware router  (1 open, 10 closed)
 
@@ -204,12 +208,6 @@ these unwrapped.
 - **1436** ☐ Filter automatic candidates by maximum marginal routing cost.
 - **1439** ☐ Prefer a cheap metered model over an unreliable free model when failed routing attempts would cost more time than the price difference.
 - **1440** ☐ Avoid using a scarce premium subscription session as the classifier when a cheaper adequate routing resource exists.
-
-### Phase 35A — Candidate generation  (3 open, 8 closed)
-
-- **1513** ☐ Generate fresh gateway-backed session candidates only as installed-harness launch profiles whose protocol, model, tool semantics, and capability requirements match.
-- **1517** ☐ Exclude candidates missing a hard required capability.
-- **1519** ☐ Exclude candidates whose user-defined spending budget has been exhausted.
 
 ## Practice sections, by number
 

@@ -500,3 +500,97 @@ that declares the absence — and stay honest: a user-declared fact is
 `Verified` because the user verified it, with the reason stored beside it.
 
 **Phase 35A stands at 8 of 11.** 1519 stays refused (Cluster M).
+
+---
+
+## 1517 and 1513 — RE-CLOSED 2026-09-02 (`GH-CAPABILITY-FACTS`, Amber, Sonnet high): the gates have a producer
+
+The re-open above asked for a declared producer, and the user's own
+configuration is the one honest source: `[providers.<name>] tool_calls =
+<bool>` and `[providers.<name>.model_facts.<model>] <axis> = <bool>` (one
+optional bool per `ResourceFacts` axis), layered project-over-user the way
+`model_cost` is, recorded as `Declared::verified(value, <reason>)` because the
+user verified it, and never upgrading a missing key. `configured_provider`
+applies `declare_tool_calls`; `routing_destinations`' fresh loop calls
+`with_resource_facts(effective.model_facts(provider, model))`. Four
+shipped-binary tests in `tests/routing_candidates.rs` — the first in that
+file to spawn the binary; the packet's claim that it already did was wrong,
+and the worker said so.
+
+**One change at integration, by the orchestrator.** The worker built each
+reason string with `Box::leak`, arguing the binary is *single instance, no
+daemon*. It is not: `glasshouse api serve` answers `RecommendRoute` requests
+for as long as it runs and resolves configuration for each, so the leak was
+unbounded there. Replaced with four static literals keyed by layer and
+table (`declared_from_config(layer, DeclaredIn)`), the names dropped from the
+text because the destination the reason is printed beside already carries
+them; `name` left both functions' signatures with it. Config tests 102/102
+and the `upgrade-by-association` mutation re-run KILLED after the change
+(`panicked at config/mod.rs:9802:9`).
+
+**Phase 35A stands at 10 of 11 again.** 1519 stays refused (Cluster M).
+
+### Exclude candidates missing a hard required capability. (line 1517)
+
+Contract: Given a configured model the user has declared lacks a resource capability, when Glasshouse generates and gates fresh candidates for a task that needs that capability, it excludes the destination by name, while preserving that an undeclared model stays Unverified and is never excluded, and that the declaration is recorded as verified by the user, with the config layer it came from as its reason.
+
+State: **COMPLETE** — re-closed 2026-09-02. The line's words are *exclude*, and exclusion is proven through the shipped binary against a fixture config that declares the absence, with the producer, the wiring and the no-upgrade rule each killed by a mutation. The contract's *says which declared fact excluded it* clause is NOT met and is recorded as the limit below: `HardConstraint::Capability` carries no axis or evidence, so the `route` explanation prints only the constraint's kind. Successor named: `GH-CONSTRAINT-REASONS` (Amber) — widen `HardConstraint::ToolSemantics` and `::Capability` to carry the axis and its `Declared` evidence, threaded from `is_adequate`/`hard_constraint` in `routing/mod.rs` and `routing/session.rs`, the two files this package was forbidden.
+
+Production evidence:
+- `crates/glasshouse/src/config/mod.rs` — `ProviderConfig::model_facts, ProviderConfig::resource_facts_of, EffectiveConfig::model_facts`
+- `crates/glasshouse/src/main.rs` — `routing_destinations (fresh-destination loop's resource_facts computation and .with_resource_facts calls)`
+- `crates/glasshouse/src/routing/session.rs` — `Destination::with_resource_facts, ResourceCapabilities::describe/prefer, is_adequate (unchanged, finished; this package supplies its input)`
+
+Regression evidence:
+- `routing_candidates::shipped_binary::a_declared_shell_tool_use_false_excludes_that_models_destination`
+- `routing_candidates::shipped_binary::an_undeclared_model_stays_unverified_and_is_never_excluded`
+- `config::tests::an_axis_absent_from_a_declared_models_table_stays_unverified`
+- `config::tests::model_facts_is_layered_and_unverified_where_nobody_declared_a_fact`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| main.rs: remove the .with_resource_facts(resource_facts) call in routing_destinations' single-entitlement branch | `skip-state-update` | **killed** | `routing_candidates::shipped_binary::a_declared_shell_tool_use_false_excludes_that_models_destination` |
+| config/mod.rs resource_facts_of's axis closure: None => Declared::Unverified -> None => Declared::verified(true, reason) | `upgrade-by-association` | **killed** | `config::tests::an_axis_absent_from_a_declared_models_table_stays_unverified` |
+
+> skip-state-update observed: panicked at crates/glasshouse/tests/routing_candidates.rs:505:9: a model declared `shell_tool_use = false` must exclude the destination it backs when the task needs shell execution; test result: FAILED. 0 passed; 1 failed
+
+> upgrade-by-association observed: assertion `left == right` failed: ...; left: Verified { value: true, evidence: "declared in the user config's [providers.*.model_facts] table" } right: Unverified
+
+Recorded scope limits — stated by the worker, not discovered later:
+- the exclusion mechanism is proven end to end through the shipped binary; the CLI's rejected-destination explanation does NOT yet name which declared fact excluded it (BEHAVIORAL CONTRACT's "and says which declared fact excluded it" clause) -- see 'Bullet 3 not met' in the report body. HardConstraint::Capability carries no axis payload today, so even the axis (not just the evidence) is unavailable to a caller.
+
+---
+
+### Generate fresh gateway-backed session candidates only as installed-harness launch profiles whose protocol, model, tool semantics, and capability requirements match. (line 1513)
+
+Contract: Generate fresh gateway-backed session candidates only as installed-harness launch profiles whose protocol, model, tool semantics, and capability requirements match -- this package's share is the tool-semantics and capability clauses (the protocol clause was already proven; see phase-35a.md).
+
+State: **COMPLETE** — re-closed 2026-09-02. The tool-semantics clause now has a real producer (`[providers.<name>] tool_calls = false`, applied in `configured_provider` so `to_provider`'s three other callers see byte-identical behaviour), the capability clause rides 1517's, and the protocol clause was never implicated. Same recorded limit and successor as 1517 for the explanation text.
+
+Production evidence:
+- `crates/glasshouse/src/config/mod.rs` — `ProviderConfig::tool_calls, ProviderConfig::declare_tool_calls, EffectiveConfig::configured_provider`
+- `crates/glasshouse/src/config/pairing.rs` — `EffectiveConfig::pairing_queries / tool_semantics (unchanged, read-only; this package supplies its input)`
+- `crates/glasshouse/src/main.rs` — `destination_backend -> session_pairing -> pairing.tool_semantics() -> Backend::tools()`
+- `crates/glasshouse/src/routing/session.rs` — `hard_constraint's ToolSemantics::KnownAbsent arm (unchanged, finished)`
+
+Regression evidence:
+- `routing_candidates::shipped_binary::a_declared_tool_calls_false_excludes_the_destination_1517`
+- `routing_candidates::shipped_binary::tool_calls_absent_from_configuration_ranks_exactly_as_before_the_producer_existed`
+- `config::tests::a_declared_tool_calls_false_becomes_verified_absent_with_a_layer_reason`
+- `config::tests::a_declared_tool_calls_true_becomes_verified_present_with_a_layer_reason`
+- `config::tests::a_missing_tool_calls_key_leaves_the_templates_declaration_untouched`
+- `config::tests::configured_provider_layers_tool_calls_project_over_user`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| config/mod.rs declare_tool_calls: if let Some(declared) = self.tool_calls -> if false { let declared = self.tool_calls.unwrap_or_default(); | `drop-the-producer` | **killed** | `routing_candidates::shipped_binary::a_declared_tool_calls_false_excludes_the_destination_1517` |
+
+> drop-the-producer observed: panicked at crates/glasshouse/tests/routing_candidates.rs:444:9: a provider declared `tool_calls = false` must exclude the destination it backs when the task needs tool calls; test result: FAILED. 0 passed; 1 failed
+
+Recorded scope limits — stated by the worker, not discovered later:
+- same CLI-explanation gap as 1517 -- ToolSemantics carries no evidence at all by construction (routing/mod.rs's own doc: it never sees a Declared, only the verdict), discarded in the READ-ONLY config/pairing.rs conversion. Fixing this needs routing/mod.rs and routing/session.rs, both FORBIDDEN to this packet.
+- the protocol clause of 1513 is untouched by this package (already LOCALLY VERIFIED per phase-35a.md)
+
+---
+
+---

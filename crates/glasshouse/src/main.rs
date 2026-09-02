@@ -1040,6 +1040,7 @@ fn routing_destinations(
     scope: DestinationScope<'_>,
     task: Option<&str>,
 ) -> anyhow::Result<Vec<glasshouse::routing::session::Destination>> {
+    use glasshouse::profile::BackendResource;
     use glasshouse::routing::session::{Destination, EstimatedInputSize, SessionContextFacts};
 
     let now_unix = glasshouse::provider::cache::now_unix_seconds();
@@ -1262,6 +1263,24 @@ fn routing_destinations(
         let (backend, protocols, wire_protocol) = destination_backend(effective, &profile, None);
         let query = destination_capability_query(harness, &profile.name, wire_protocol);
         let capacity = destination_capacity(&profile, effective, &telemetry, now_unix, consumption);
+        // Map line 1517's producer: model-declared resource facts, read only
+        // for a `DirectProvider` destination whose model name is known — the
+        // same narrowing `destination_backend`'s own `Cost::Free` lookup
+        // above applies to `model_cost`. Every other destination (`Native`,
+        // `GlasshouseGateway`, or a harness-default model with no name)
+        // keeps `ResourceFacts::UNVERIFIED`, exactly what every destination
+        // carried before this producer existed. Computed once here, before
+        // the entitlement branch below, because the provider and model this
+        // reads never change across `backend_for_entitlement`'s per-account
+        // rebuild — only the credential does.
+        let resource_facts = match &profile.backend {
+            BackendResource::DirectProvider { provider } => backend
+                .model()
+                .name()
+                .map(|model_name| effective.model_facts(provider, model_name).value)
+                .unwrap_or(glasshouse::routing::capability::ResourceFacts::UNVERIFIED),
+            _ => glasshouse::routing::capability::ResourceFacts::UNVERIFIED,
+        };
         // 56A line 1953 — the entitlement axis. One entry backing this
         // profile's resource (or none) keeps exactly the single candidate,
         // and the id, this function has always built. Several entries
@@ -1294,7 +1313,8 @@ fn routing_destinations(
                     .with_tier_ceiling(ceiling)
                     .with_capability_tier(ceiling)
                     .with_entitlement(Some(routing_entitlement(resolved, &band_thresholds)))
-                    .with_estimated_input_size(fresh_estimated_size),
+                    .with_estimated_input_size(fresh_estimated_size)
+                    .with_resource_facts(resource_facts),
                 );
             }
         } else {
@@ -1319,7 +1339,8 @@ fn routing_destinations(
                 .with_tier_ceiling(ceiling)
                 .with_capability_tier(ceiling)
                 .with_entitlement(fresh_entitlement)
-                .with_estimated_input_size(fresh_estimated_size),
+                .with_estimated_input_size(fresh_estimated_size)
+                .with_resource_facts(resource_facts),
             );
         }
     }
