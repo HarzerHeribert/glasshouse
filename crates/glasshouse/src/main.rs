@@ -651,8 +651,15 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
                     memory_rate(&runtime, id, *verdict, session.as_deref(), note.as_deref())?
                 );
             }
-            MemoryCommand::Retrievals { hours } => {
-                print!("{}", memory_retrievals_report(&runtime, *hours)?);
+            MemoryCommand::Retrievals {
+                hours,
+                session,
+                limit,
+            } => {
+                print!(
+                    "{}",
+                    memory_retrievals_report(&runtime, *hours, session.as_deref(), *limit)?
+                );
             }
         },
         Some(Command::Checkpoint { command }) => {
@@ -5893,6 +5900,15 @@ fn launch_session(
                 routed_tier(classified.as_ref()),
                 observed_at,
             );
+            // Map lines 1757 and 1766, on the same instant: the rationale
+            // behind the destination this row just attributed.
+            glasshouse::evaluation::record_session_route(
+                runtime,
+                routed.chosen().id(),
+                routed.chosen().id(),
+                routed.explanation(),
+                observed_at,
+            );
             // Line 1467: the session this work landed on is the sticky one.
             remember_classification(&sticky_cache, classified.as_ref(), routed.chosen().id());
             // Line 1716, on the path that migrates. Taken before
@@ -6504,6 +6520,15 @@ fn launch_session(
             routed_cost_class(&user, project.as_ref(), routed.chosen()),
             routing_evidence_for(&health, routed.chosen(), observed_at),
             routed_tier(classified.as_ref()),
+            observed_at,
+        );
+        // Map lines 1757 and 1766, on the same instant: the rationale
+        // behind the destination this row just attributed.
+        glasshouse::evaluation::record_session_route(
+            runtime,
+            record.id.as_str(),
+            routed.chosen().id(),
+            routed.explanation(),
             observed_at,
         );
     }
@@ -12697,10 +12722,26 @@ fn render_memory_report(
 /// miss count, giving [`glasshouse::evaluation::EvaluationObservations::stale_retrievals`]
 /// its first production caller (practice §90; `phase-51.md`'s 1822/1826
 /// re-open).
-fn memory_retrievals_report(runtime: &Runtime, hours: u32) -> anyhow::Result<String> {
+fn memory_retrievals_report(
+    runtime: &Runtime,
+    hours: u32,
+    session: Option<&str>,
+    limit: usize,
+) -> anyhow::Result<String> {
     use glasshouse::evaluation::{EvaluationKind, EvaluationObservations};
 
     let ledger = EvaluationObservations::open(runtime)?;
+
+    if let Some(session_id) = session {
+        let rows = ledger.retrievals_for_session(session_id, limit)?;
+        let project = glasshouse::memory::ProjectMemory::open(runtime)?;
+        return Ok(render_session_retrievals(
+            session_id,
+            &rows,
+            &project.store(),
+        ));
+    }
+
     let to = glasshouse::evaluation::now_unix();
     let from = to - i64::from(hours) * 3600;
     let counts = ledger.stale_retrievals(from, to)?;
@@ -12721,6 +12762,56 @@ fn memory_retrievals_report(runtime: &Runtime, hours: u32) -> anyhow::Result<Str
         &revalidation_accuracy,
         &challenge_accuracy,
     ))
+}
+
+/// `glasshouse memory retrievals --session <id>`: which memories were
+/// retrieved for one routed task — map line 1759. One line per row, newest
+/// first, the memory's current kind and one-line summary when
+/// [`glasshouse::memory::MemoryStore::get`] still finds it, and a marked line
+/// rather than an error when it does not.
+fn render_session_retrievals(
+    session_id: &str,
+    rows: &[glasshouse::evaluation::EvaluationObservation],
+    store: &glasshouse::memory::MemoryStore<'_>,
+) -> String {
+    use std::fmt::Write as _;
+
+    if rows.is_empty() {
+        return format!("no memory was retrieved for session {session_id}\n");
+    }
+
+    let mut out = format!(
+        "Memory retrievals for session {session_id} ({} row{})\n\n",
+        rows.len(),
+        if rows.len() == 1 { "" } else { "s" }
+    );
+    for row in rows {
+        let scope = row.subject.as_deref().unwrap_or("(no scope)");
+        let memory_id = row.memory_id.as_deref().unwrap_or("(no memory id)");
+        let found = row
+            .memory_id
+            .as_deref()
+            .map(glasshouse::memory::MemoryId::new)
+            .and_then(|id| store.get(&id).ok().flatten());
+        match found {
+            Some(record) => {
+                let _ = writeln!(
+                    out,
+                    "{}  {memory_id}  scope={scope}  {} {}",
+                    row.observed_at,
+                    record.kind,
+                    one_line(&record.body)
+                );
+            }
+            None => {
+                let _ = writeln!(
+                    out,
+                    "{memory_id}  scope={scope}  (memory no longer present)"
+                );
+            }
+        }
+    }
+    out
 }
 
 /// Pure formatting half of [`memory_retrievals_report`].
@@ -13976,7 +14067,53 @@ fn status_report(runtime: &Runtime) -> anyhow::Result<String> {
         }
     }
 
+    let _ = writeln!(out, "{}", last_routing_decision_line(runtime));
+
     Ok(out)
+}
+
+/// `status`'s one-line summary of the newest routed launch — map line 1766:
+/// the destination and its three largest contributions by absolute
+/// magnitude, ties kept in recorded order, fewer printed when fewer exist.
+/// *none recorded* for a project with no routed launch yet.
+fn last_routing_decision_line(runtime: &Runtime) -> String {
+    let row = glasshouse::evaluation::EvaluationObservations::open(runtime)
+        .ok()
+        .and_then(|ledger| ledger.latest_session_route().ok())
+        .flatten();
+    let Some(row) = row else {
+        return "last routing decision: none recorded".to_owned();
+    };
+
+    let destination = row.subject.as_deref().unwrap_or("-");
+    let mut contributions = row
+        .detail
+        .as_deref()
+        .map(glasshouse::evaluation::route_contributions)
+        .unwrap_or_default();
+    contributions.sort_by(|a, b| b.magnitude.abs().total_cmp(&a.magnitude.abs()));
+    let factors: Vec<String> = contributions
+        .iter()
+        .take(3)
+        .map(|contribution| format!("{} {:+.3}", contribution.name, contribution.magnitude))
+        .collect();
+    let factors_part = if factors.is_empty() {
+        String::new()
+    } else {
+        format!(" — {}", factors.join(", "))
+    };
+    let session: String = row
+        .session_id
+        .as_deref()
+        .unwrap_or("-")
+        .chars()
+        .take(12)
+        .collect();
+
+    format!(
+        "last routing decision: {destination}{factors_part} ({}, session {session})",
+        format_age(row.observed_at)
+    )
 }
 
 /// Map line 2006's savings figure: an honest aggregate over every entry the
@@ -14593,7 +14730,58 @@ fn session_detail(runtime: &Runtime, session: &str) -> anyhow::Result<String> {
     drop(store);
     drop(sessions);
     out.push_str(&assumption_section(runtime, &id));
+    out.push_str(&routing_rationale_section(runtime, &id));
     Ok(out)
+}
+
+/// `sessions show`'s `routing rationale` block, map line 1757 — the
+/// session's newest [`glasshouse::evaluation::EvaluationKind::SessionRouteDecided`]
+/// row, one line per contribution, in recorded order.
+///
+/// `-` for a session with no row — started before this build recorded one,
+/// or spawned through the machine door, which is not routed — matching
+/// every other field [`session_detail`] prints for nothing recorded. An
+/// explanation with no contributions still has a row, so the heading prints
+/// and no contribution line follows: the decision happened even when
+/// nothing weighed in.
+fn routing_rationale_section(runtime: &Runtime, id: &glasshouse::session::SessionId) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::new();
+    let mut line = |label: &str, value: &str| {
+        let _ = writeln!(out, "{label:<19}{value}");
+    };
+
+    let row = glasshouse::evaluation::EvaluationObservations::open(runtime)
+        .ok()
+        .and_then(|ledger| ledger.session_route_for(id.as_str()).ok())
+        .flatten();
+    let Some(row) = row else {
+        line("routing rationale", "-");
+        return out;
+    };
+
+    line("routing rationale", row.subject.as_deref().unwrap_or("-"));
+    let contributions = row
+        .detail
+        .as_deref()
+        .map(glasshouse::evaluation::route_contributions)
+        .unwrap_or_default();
+    let width = contributions
+        .iter()
+        .map(|contribution| contribution.name.len())
+        .max()
+        .unwrap_or(0);
+    for contribution in &contributions {
+        line(
+            "",
+            &format!(
+                "  {:<width$}  {:+.3}  {}",
+                contribution.name, contribution.magnitude, contribution.evidence
+            ),
+        );
+    }
+    out
 }
 
 /// How many open premises `glasshouse sessions show` lists before it says

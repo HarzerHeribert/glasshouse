@@ -2114,5 +2114,14 @@ pub enum MemoryCommand {
         /// How far back to look, in hours.
         #[arg(long, value_name = "N", default_value_t = 24)]
         hours: u32,
+
+        /// List which memories were retrieved for this session instead of
+        /// the windowed report — map line 1759's debug view.
+        #[arg(long, value_name = "ID")]
+        session: Option<String>,
+
+        /// Bound the session listing. Only applies with `--session`.
+        #[arg(long, value_name = "N", default_value_t = 20)]
+        limit: usize,
     },
 }

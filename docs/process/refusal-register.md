@@ -1456,3 +1456,12 @@ The first `--windows-vm` run in a day found, in order: a `libc::mktime` that lib
 ## 1625 CLOSED — a tripwire fired in the trailing sweep and was ruled, not re-armed, 2026-09-02 (night)
 
 `tests/disposable_interface.rs` asserted that no production reranking caller existed (Cluster Q, `GH-PROVE-IT-39`); the reranking seat landed in wave 101 and the waves 101–102 sweep failed the test by name — the mechanism worked. Ruled closed on the four seats' own shipped-binary proofs, the tripwire inverted into a four-caller census (`phase-39.md`). **Phase 39 is complete.** The shape to keep: a tripwire that fires is a ruling owed, and the sweep is where tripwires fire — the reranker's targeted gate never traced this file.
+
+## Cluster H, three rows closed in one night — 1759, 1757, 1766 (2026-09-02, night)
+
+| line | package | what discharged it |
+|---|---|---|
+| 1759 | `GH-RETRIEVED-VIEW` (Amber-light) | the producer had existed since wave 94 (`MemoryRetrieved` rows with a session id from both doors); the view is `memory retrievals --session <id>` (`phase-47.md`). 3/3 KILLED. |
+| 1757, 1766 | `GH-ROUTE-RATIONALE-SINK` (Amber) | the session router's explanation, in hand at both `record_routed_session` sites, is one `SessionRouteDecided` row on the 2026-08-30 sink; `sessions show` prints the block, `status` the strongest three (`phase-47.md`). 4/4 KILLED, one after the worker strengthened a test a reversed sort had passed. The evaluation module's own pinning test forbids serde — the JSON is hand-written; and `database.rs`'s kind list gained the variant at integration. |
+
+**Cluster H now holds 1760, 1767 and 1769 only** — a cache-temperature estimate that does not exist, a correlation nothing computes, a durable extraction record. The 2026-08-30 scoping (*0 WOULD CLOSE, 5 NEEDS MORE*) is discharged for the five it named except 1763's sibling 1769; the sink paid for three boxes and a fourth (1763) on an earlier package.

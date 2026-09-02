@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1238 / 1347 mandatory capabilities (92%)** — 109 open across 32 phases.
+**1241 / 1347 mandatory capabilities (92%)** — 106 open across 32 phases.
 
 ## Where the work is
 
@@ -44,12 +44,12 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 38 | Quota-preserving routing | **2** | 5 | `1604` |
 | Phase 53 | Criteria before adding graph storage | **2** | 3 | `1872` |
 | Phase 28 | File-aware memory lookup | **3** | 2 | `1137` |
+| Phase 47 | Observability without spectacle | **3** | 12 | `1750` |
 | Phase 21E | Decision ladder and conflict handling | **4** | 8 | `907` |
 | Phase 31 | Compaction-aware behavior | **5** | 2 | `1167` |
 | Phase 52 | Criteria before adding semantic/vector retrieval | **5** | 1 | `1858` |
 | Phase 21G | Memory revalidation | **6** | 3 | `941` |
 | Phase 35B | Candidate scoring | **6** | 19 | `1523` |
-| Phase 47 | Observability without spectacle | **6** | 9 | `1750` |
 | Phase 32A | Unified quota and capacity model | **7** | 14 | `1196` |
 | Phase 9K | Harness-aware response profiles | **8** | 29 | `578` |
 | Phase 33B | Reliability-adjusted agent performance | **10** | 4 | `1345` |
@@ -61,7 +61,7 @@ closures are usually at the top. Open the map at the line number given.
 
 Every phase with **three or fewer** open lines, quoted verbatim. These are
 where a single package finishes a phase, so they are listed here and the
-other ~77 open lines are not.
+other ~71 open lines are not.
 
 For any other phase: `scripts/discover.py --phase <id>` prints its open
 lines and evidence together. **Do not open the 178 KB map to read them.**
@@ -167,6 +167,12 @@ these unwrapped.
 - **1139** ☐ Track file paths explicitly referenced by durable memories when extraction can identify them reliably.
 - **1141** ☐ Prefer constraints, decisions, and failed approaches when retrieving memory for an intended code edit.
 - **1142** ☐ Keep file-aware retrieval advisory and never treat stale memory as stronger evidence than the current source code.
+
+### Phase 47 — Observability without spectacle  (3 open, 12 closed)
+
+- **1760** ☐ Add a debug view showing estimated cache temperature and the evidence used for that estimate.
+- **1767** ☐ Show correlations with their sample size and confidence instead of implying precise independence from sparse data.
+- **1769** ☐ Add a debug view showing memory-extraction inputs and outputs when explicitly enabled.
 
 ## Practice sections, by number
 

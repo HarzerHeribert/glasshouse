@@ -300,6 +300,22 @@ pub enum EvaluationKind {
     /// retrieval to this row rather than to the routing row, because the
     /// proxy's definition is about the *session's* turn, not the *route's*.
     TurnOutcomeObserved,
+    /// Why a launch's session-boundary routing chose the destination it did
+    /// — map lines 1757 and 1766, design decision *"The session router's
+    /// rationale row"*. `subject` is the chosen destination id; `detail` is
+    /// the winning [`crate::routing::RoutingExplanation`]'s contributions as
+    /// a compact JSON array of `{name, magnitude, evidence}`, in the
+    /// explanation's own order — structured, not rendered text, because
+    /// 1766 ranks by magnitude and a rendered string cannot be ranked.
+    ///
+    /// **Recorded beside [`Self::RoutingCostClassObserved`] and
+    /// [`Self::RoutingEvidenceObserved`], at the same instant with the same
+    /// `session_id`.** It records the decision the launch actually made,
+    /// never a recomputed explanation — the batch-50 refusal's own words,
+    /// *"the factors of a decision that was never made."* An explanation
+    /// with no contributions still writes a row, `detail` `"[]"`: the
+    /// decision happened even when nothing weighed in.
+    SessionRouteDecided,
 }
 
 /// The `subject` this ledger writes for a destination whose cost class no
@@ -517,6 +533,7 @@ impl EvaluationKind {
             Self::MemoryRated => "memory_rated",
             Self::MemoryRevalidated => "memory_revalidated",
             Self::TurnOutcomeObserved => "turn_outcome_observed",
+            Self::SessionRouteDecided => "session_route_decided",
         }
     }
 
@@ -541,6 +558,7 @@ impl EvaluationKind {
             "memory_rated" => Some(Self::MemoryRated),
             "memory_revalidated" => Some(Self::MemoryRevalidated),
             "turn_outcome_observed" => Some(Self::TurnOutcomeObserved),
+            "session_route_decided" => Some(Self::SessionRouteDecided),
             _ => None,
         }
     }
@@ -1196,6 +1214,42 @@ impl EvaluationObservations {
         let rows = statement
             .query_map(params![kind.as_str(), limit as i64], read_observation_row)
             .map_err(sql_err("read evaluation observations of one kind"))?;
+        collect_observations(rows)
+    }
+
+    /// [`Self::recent_of_kind`] narrowed further, to one session — map line
+    /// 1759's debug view: which memories were retrieved for a routed task,
+    /// the task being the session the retrieval was attributed to.
+    ///
+    /// [`crate::evaluation::record_memory_retrieval`] only calls
+    /// [`NewObservation::with_session_id`] when its caller knows one, so a
+    /// retrieval recorded with no session id is never returned here — a
+    /// stated limit of the view, not a defect of this reader.
+    pub fn retrievals_for_session(
+        &self,
+        session_id: &str,
+        limit: usize,
+    ) -> Result<Vec<EvaluationObservation>, EvaluationError> {
+        let conn = self.lock();
+        let mut statement = conn
+            .prepare(&format!(
+                "SELECT {OBSERVATION_COLUMNS}
+                   FROM evaluation_observations
+                  WHERE kind = ?1 AND session_id = ?2
+                  ORDER BY seq DESC
+                  LIMIT ?3"
+            ))
+            .map_err(sql_err("read a session's evaluation observations"))?;
+        let rows = statement
+            .query_map(
+                params![
+                    EvaluationKind::MemoryRetrieved.as_str(),
+                    session_id,
+                    limit as i64
+                ],
+                read_observation_row,
+            )
+            .map_err(sql_err("read a session's evaluation observations"))?;
         collect_observations(rows)
     }
 
@@ -2421,6 +2475,123 @@ pub fn record_disposable_route(
     }
 }
 
+/// Encode `explanation`'s contributions as a compact JSON array of
+/// `{"name", "magnitude", "evidence"}`, by hand.
+///
+/// **No general-purpose serializer here, deliberately.** This module's own
+/// header says so: *"no `export`, no `to_json`, no `write_to`, no
+/// serialization of an observation to anything outside the process"* — map
+/// line 1856's other half, structural rather than advisory, and this
+/// module's own pinning test fails the build the moment such a dependency
+/// reappears here. `detail` is still a JSON string, because 1766 needs to
+/// rank contributions by magnitude and a rendered sentence cannot be ranked
+/// — but this ledger writes it itself rather than reaching for a crate
+/// whose surface is far wider than one array of three fields.
+fn encode_route_contributions(explanation: &crate::routing::RoutingExplanation) -> String {
+    let mut out = String::from("[");
+    for (index, contribution) in explanation.contributions().iter().enumerate() {
+        if index > 0 {
+            out.push(',');
+        }
+        out.push_str("{\"name\":");
+        push_json_string(&mut out, contribution.name());
+        out.push_str(",\"magnitude\":");
+        push_json_number(&mut out, contribution.magnitude());
+        out.push_str(",\"evidence\":");
+        push_json_string(&mut out, contribution.evidence());
+        out.push('}');
+    }
+    out.push(']');
+    out
+}
+
+/// A JSON number cannot spell NaN or an infinity; a routing score never
+/// produces either, but a value that somehow did degrades to `0` rather
+/// than writing a `detail` [`route_contributions`] could not parse back.
+fn push_json_number(out: &mut String, value: f64) {
+    if value.is_finite() {
+        out.push_str(&value.to_string());
+    } else {
+        out.push('0');
+    }
+}
+
+/// A JSON string literal, escaped by hand — the same six escapes
+/// [`route_contributions`]'s reader decodes.
+fn push_json_string(out: &mut String, value: &str) {
+    out.push('"');
+    for ch in value.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+}
+
+/// Record why a launch's session-boundary routing chose the destination it
+/// did — the producer for [`EvaluationKind::SessionRouteDecided`], map lines
+/// 1757 and 1766.
+///
+/// Its callers are `main.rs::launch_session`'s same two routed exits
+/// [`record_routed_session`] has — called right beside it, with the same
+/// `session_id` and the same `observed_at_unix`.
+///
+/// **This never fails a launch**, exactly as [`record_routed_session`] does
+/// not: it is on a person's own command path and a rationale row is not
+/// worth a session.
+///
+/// # What is stored
+///
+/// `subject` is `destination_id`. `detail` is `explanation.contributions()`
+/// as a compact JSON array of `{name, magnitude, evidence}`, in the
+/// explanation's own order — built through this module's own
+/// `encode_route_contributions`, never through `routing`'s own
+/// [`crate::routing::RoutingExplanation::render`], because 1766 ranks by
+/// magnitude and a rendered string cannot be ranked. An explanation with no
+/// contributions still writes a row, `detail` `"[]"`: the decision happened
+/// even when nothing weighed in.
+pub fn record_session_route(
+    runtime: &Runtime,
+    session_id: &str,
+    destination_id: &str,
+    explanation: &crate::routing::RoutingExplanation,
+    observed_at_unix: i64,
+) {
+    let detail = encode_route_contributions(explanation);
+
+    let observation = NewObservation::new(EvaluationKind::SessionRouteDecided)
+        .with_subject(destination_id)
+        .with_session_id(session_id)
+        .with_detail(detail);
+
+    let ledger = match EvaluationObservations::open(runtime) {
+        Ok(ledger) => ledger,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "could not open the evaluation ledger; the session is routed, but its rationale \
+                 was not recorded"
+            );
+            return;
+        }
+    };
+    if let Err(err) = ledger.record(observation, observed_at_unix) {
+        tracing::warn!(
+            error = %err,
+            "could not record a session's routing rationale; the session is routed, but its \
+             rationale will not be shown"
+        );
+    }
+}
+
 /// Record one launch's session-boundary routing decision — the producer for
 /// [`EvaluationKind::RoutingOverrideDecided`] and
 /// [`EvaluationKind::RoutingContinuationDecided`], map lines 1829 and 1830.
@@ -2563,6 +2734,244 @@ impl EvaluationObservations {
             window: (from, to),
         })
     }
+
+    /// The newest [`EvaluationKind::SessionRouteDecided`] row for one
+    /// session — [`Self::recent_of_kind`] narrowed by `session_id` too, for
+    /// `sessions show`'s `routing rationale` block, map line 1757.
+    ///
+    /// `Ok(None)` is a session with no row — started before this build, or
+    /// spawned through the machine door, which is not routed — and the
+    /// caller renders that as `-`, never as an error.
+    pub fn session_route_for(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<EvaluationObservation>, EvaluationError> {
+        let conn = self.lock();
+        let mut statement = conn
+            .prepare(&format!(
+                "SELECT {OBSERVATION_COLUMNS}
+                   FROM evaluation_observations
+                  WHERE kind = ?1 AND session_id = ?2
+                  ORDER BY seq DESC
+                  LIMIT 1"
+            ))
+            .map_err(sql_err("read a session's routing rationale"))?;
+        let rows = statement
+            .query_map(
+                params![EvaluationKind::SessionRouteDecided.as_str(), session_id],
+                read_observation_row,
+            )
+            .map_err(sql_err("read a session's routing rationale"))?;
+        Ok(collect_observations(rows)?.into_iter().next())
+    }
+
+    /// The newest [`EvaluationKind::SessionRouteDecided`] row in the
+    /// project, for `status`'s one-line summary, map line 1766.
+    ///
+    /// `Ok(None)` is a project with no routed launch yet, rendered as
+    /// *none recorded*.
+    pub fn latest_session_route(&self) -> Result<Option<EvaluationObservation>, EvaluationError> {
+        Ok(self
+            .recent_of_kind(EvaluationKind::SessionRouteDecided, 1)?
+            .into_iter()
+            .next())
+    }
+}
+
+/// One contribution decoded from a [`EvaluationKind::SessionRouteDecided`]
+/// row's `detail`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecordedContribution {
+    pub name: String,
+    pub magnitude: f64,
+    pub evidence: String,
+}
+
+/// Parse a [`EvaluationKind::SessionRouteDecided`] row's `detail` back into
+/// [`RecordedContribution`]s, in the order they were recorded.
+///
+/// **Tolerates a malformed or absent `detail` by returning an empty list.**
+/// This is a reader dressing up a row for a person, not a validator: a row
+/// damaged some other way should render as "no factors" rather than crash
+/// `sessions show` or `status`.
+///
+/// Hand-written, like this module's own `encode_route_contributions` that
+/// writes what this reads — this module's own header keeps a
+/// general-purpose serializer out of this file entirely, and its pinning
+/// test enforces that.
+pub fn route_contributions(detail: &str) -> Vec<RecordedContribution> {
+    parse_route_contributions(detail).unwrap_or_default()
+}
+
+/// A position in `detail`, addressed by `char` rather than by byte, so a
+/// multi-byte character in a contribution's evidence never splits — the
+/// small price of collecting into a `Vec<char>` up front, paid once per row
+/// this reader ever decodes.
+struct JsonCursor {
+    chars: Vec<char>,
+    pos: usize,
+}
+
+impl JsonCursor {
+    fn new(s: &str) -> Self {
+        JsonCursor {
+            chars: s.chars().collect(),
+            pos: 0,
+        }
+    }
+
+    fn peek(&self) -> Option<char> {
+        self.chars.get(self.pos).copied()
+    }
+
+    fn bump(&mut self) -> Option<char> {
+        let c = self.peek();
+        if c.is_some() {
+            self.pos += 1;
+        }
+        c
+    }
+
+    fn skip_ws(&mut self) {
+        while matches!(self.peek(), Some(c) if c.is_whitespace()) {
+            self.pos += 1;
+        }
+    }
+
+    fn expect(&mut self, want: char) -> Option<()> {
+        if self.peek() == Some(want) {
+            self.pos += 1;
+            Some(())
+        } else {
+            None
+        }
+    }
+}
+
+fn parse_json_string(cursor: &mut JsonCursor) -> Option<String> {
+    cursor.expect('"')?;
+    let mut out = String::new();
+    loop {
+        match cursor.bump()? {
+            '"' => return Some(out),
+            '\\' => match cursor.bump()? {
+                '"' => out.push('"'),
+                '\\' => out.push('\\'),
+                '/' => out.push('/'),
+                'n' => out.push('\n'),
+                'r' => out.push('\r'),
+                't' => out.push('\t'),
+                'u' => {
+                    let mut hex = String::with_capacity(4);
+                    for _ in 0..4 {
+                        hex.push(cursor.bump()?);
+                    }
+                    out.push(char::from_u32(u32::from_str_radix(&hex, 16).ok()?)?);
+                }
+                _ => return None,
+            },
+            other => out.push(other),
+        }
+    }
+}
+
+fn parse_json_number(cursor: &mut JsonCursor) -> Option<f64> {
+    let start = cursor.pos;
+    if cursor.peek() == Some('-') {
+        cursor.pos += 1;
+    }
+    while matches!(cursor.peek(), Some(c) if c.is_ascii_digit()) {
+        cursor.pos += 1;
+    }
+    if cursor.peek() == Some('.') {
+        cursor.pos += 1;
+        while matches!(cursor.peek(), Some(c) if c.is_ascii_digit()) {
+            cursor.pos += 1;
+        }
+    }
+    if matches!(cursor.peek(), Some('e') | Some('E')) {
+        cursor.pos += 1;
+        if matches!(cursor.peek(), Some('+') | Some('-')) {
+            cursor.pos += 1;
+        }
+        while matches!(cursor.peek(), Some(c) if c.is_ascii_digit()) {
+            cursor.pos += 1;
+        }
+    }
+    if cursor.pos == start {
+        return None;
+    }
+    cursor.chars[start..cursor.pos]
+        .iter()
+        .collect::<String>()
+        .parse::<f64>()
+        .ok()
+}
+
+fn parse_route_contribution_object(cursor: &mut JsonCursor) -> Option<RecordedContribution> {
+    cursor.expect('{')?;
+    let mut name = None;
+    let mut magnitude = None;
+    let mut evidence = None;
+    loop {
+        cursor.skip_ws();
+        if cursor.peek() == Some('}') {
+            cursor.pos += 1;
+            break;
+        }
+        let key = parse_json_string(cursor)?;
+        cursor.skip_ws();
+        cursor.expect(':')?;
+        cursor.skip_ws();
+        match key.as_str() {
+            "name" => name = Some(parse_json_string(cursor)?),
+            "evidence" => evidence = Some(parse_json_string(cursor)?),
+            "magnitude" => magnitude = Some(parse_json_number(cursor)?),
+            // A field this reader does not name yet: skip its value, a
+            // string or a number, rather than refusing the whole row for a
+            // field it does not need.
+            _ if cursor.peek() == Some('"') => {
+                parse_json_string(cursor)?;
+            }
+            _ => {
+                parse_json_number(cursor)?;
+            }
+        }
+        cursor.skip_ws();
+        match cursor.bump()? {
+            ',' => continue,
+            '}' => break,
+            _ => return None,
+        }
+    }
+    Some(RecordedContribution {
+        name: name?,
+        magnitude: magnitude?,
+        evidence: evidence?,
+    })
+}
+
+fn parse_route_contributions(detail: &str) -> Option<Vec<RecordedContribution>> {
+    let mut cursor = JsonCursor::new(detail);
+    cursor.skip_ws();
+    cursor.expect('[')?;
+    cursor.skip_ws();
+    let mut out = Vec::new();
+    if cursor.peek() == Some(']') {
+        cursor.pos += 1;
+        return Some(out);
+    }
+    loop {
+        cursor.skip_ws();
+        out.push(parse_route_contribution_object(&mut cursor)?);
+        cursor.skip_ws();
+        match cursor.bump()? {
+            ',' => continue,
+            ']' => break,
+            _ => return None,
+        }
+    }
+    Some(out)
 }
 
 /// Seconds since the Unix epoch, the way every other store in this crate reads
@@ -2959,6 +3368,7 @@ mod tests {
             EvaluationKind::MemoryRated,
             EvaluationKind::MemoryRevalidated,
             EvaluationKind::TurnOutcomeObserved,
+            EvaluationKind::SessionRouteDecided,
         ];
         let names: Vec<&str> = declared.iter().map(|kind| kind.as_str()).collect();
         assert_eq!(

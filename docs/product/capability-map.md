@@ -1754,16 +1754,16 @@ Fixed architectural requirements
 - Telemetry exists for diagnosis, routing, reliability analysis, and product evaluation rather than token-spend gamification.
 - Raw token counts, cost, TTFT, TTFC, throughput, errors, outages, and correlations remain measurable, while inferred quality conclusions remain labeled as derived evidence.
 
-☐ Add a debug view showing why the router chose a session or resource.
+☑ Add a debug view showing why the router chose a session or resource.
 ☑ Add a debug view showing recent lifecycle events for a session.
-☐ Add a debug view showing which memories were retrieved for a routed task.
+☑ Add a debug view showing which memories were retrieved for a routed task.
 ☐ Add a debug view showing estimated cache temperature and the evidence used for that estimate.
 ☑ Add a debug view showing quota information and whether it is measured, inferred, or unknown.
 ☑ Add an optional compact route-evidence table showing sample count, TTFC, effective TTFC, TTFT, decode throughput, successful rounds per minute, and observation window when available.
 ☑ Show failure counts by class instead of presenting one unexplained error percentage.
 ☑ Show whether latency evidence came from warm, cold, or unknown context.
 ☑ Show route health, immediate availability, cadence, quota reset, and failure-domain evidence as separate concepts.
-☐ Show the strongest measured factors behind the most recent routing decision in concise text.
+☑ Show the strongest measured factors behind the most recent routing decision in concise text.
 ☐ Show correlations with their sample size and confidence instead of implying precise independence from sparse data.
 ☑ Keep lifetime token and spend totals out of the default project overview and never present them as achievement counters.
 ☐ Add a debug view showing memory-extraction inputs and outputs when explicitly enabled.

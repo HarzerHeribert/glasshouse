@@ -818,3 +818,52 @@ Phase 33A stands at 14 of 15; 1334 stays open on `tool_rounds` and `repairs`
 (the translated response's tool-use blocks are now countable at the same
 seam — a Green successor, `GH-TOOL-ROUNDS-ON-TRANSLATED`, once the ms
 question is settled or independently of it).
+
+# Line 1334 — CLOSED 2026-09-02 (`GH-TOOL-ROUNDS-ON-TRANSLATED`, Amber, Sonnet high): Phase 33A complete
+
+`GH-FAILURE-TAXONOMY` left this line open on `tool_rounds` and `repairs`, *a
+turn structure and a body this layer cannot see*. The relay still cannot; the
+translated seam decodes both halves of every exchange, and
+`design-decisions.md` (*Tool rounds and repairs on the translated path*)
+defined the two counts on what it decodes.
+
+**Contract.** Given a translated gateway exchange, when it is recorded,
+Glasshouse writes the number of tool-use blocks in the response as
+`tool_rounds` and the number of `is_error` tool results in the request as
+`repairs` — `0` when the seam looked and found none — beside the `retries`,
+`failovers` and `outcome` already recorded, each its own column; while a
+relayed or refused exchange writes `NULL` for both and nothing here judges
+success beyond the block counts the protocol names (*successful* is the
+reader's subtraction, rounds begun minus repairs, never a stored column).
+
+**Production evidence.** `translate/canonical.rs::Request::error_tool_results`
+beside the `turn_shape` derivation; `translate/mod.rs::FirstEvents` gains
+`tool_uses`, incremented on every `BlockStart::ToolUse` in `note` (the
+instant is stamped once, the count grows; `of_document` inherits it),
+`serve` computes `repairs` where the request is decoded, `finish` carries
+`tool_rounds: Some(first.tool_uses)`; `ingress.rs::Exchange` carries both,
+`None` on the relay and on refusal; `gateway/session.rs::record_routing_observation`
+writes them through `NewObservation::with_tool_rounds` / `with_repairs`
+(`routing/evidence.rs`, beside `with_retries` — the builders were the gap;
+the columns date from migration 11 and the header's *not supplied* bullet is
+rewritten).
+
+**Regression evidence** (`tests/gateway_tool_rounds.rs`, shipped `Gateway`
+through a raw-socket fake upstream, 4):
+`a_translated_stream_with_two_tool_calls_and_one_error_result_counts_both`,
+`a_translated_document_with_one_tool_call_and_no_error_result_counts_both`,
+`a_translated_stream_with_no_tool_use_counts_zero`,
+`a_relayed_exchange_records_no_tool_rounds_or_repairs`.
+
+**Mutations** (worker, restored byte-identical): `rounds-never-counted` (the
+increment removed) KILLED by the two counting tests; `errors-not-counted`
+(`is_error: true` → `false` in the request count) KILLED — *the one
+is_error: true tool result must be counted*; `relay-counts` (the relay's
+`Exchange` given `Some(0)`) KILLED — *nothing may be invented for it*.
+
+**Recorded limits.** An exchange whose request decoded but never reached a
+response writes `repairs: Some` with `tool_rounds: None` — handled by
+construction (the sums are per column), not driven through a socket; one
+protocol pair drives the tests, as for the first-events package.
+
+State: **COMPLETE**. **Phase 33A stands at 15 of 15.**

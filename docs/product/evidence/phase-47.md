@@ -643,3 +643,132 @@ State: **COMPLETE**. Phase 47 stands at 9 of 15. 1757, 1760, 1766, 1767 and
 1769 stay Cluster H; **1759's producer now exists** — `MemoryRetrieved` rows
 carry the session id from both doors since wave 94 — and the readout is
 `GH-RETRIEVED-VIEW`'s (see the register).
+
+## 1759 — CLOSED 2026-09-02 (`GH-RETRIEVED-VIEW`, Amber-light, Sonnet medium): the retrieved set is recorded, so the view is one query
+
+The batch-50 refusal above said *the retrieved set is never recorded*. Since
+wave 94 (`GH-LAUNCH-BRIEFING`) every memory delivered to a session from
+either door is a `MemoryRetrieved` row carrying the session id — the
+producer landed under Phase 27's contract, and this line was never revisited
+(the same shape as 1763 above). This package is the reader.
+
+**Contract.** Given `MemoryRetrieved` rows recorded with a session id, when a
+user runs `glasshouse memory retrievals --session <id>`, Glasshouse lists that
+session's retrieved memories newest first — memory id, the instant, the
+retrieval scope, and the memory's current kind and one-line summary when the
+memory still exists — bounded by `--limit`, while preserving that the
+existing windowed report is byte-identical without `--session`, that a
+session with no rows prints *no memory was retrieved for session <id>* rather
+than an error, and that another project's rows are never read.
+
+**Production evidence.** `evaluation/mod.rs::EvaluationObservations::retrievals_for_session`
+(beside `recent_of_kind`, `WHERE kind = ?1 AND session_id = ?2 ORDER BY seq
+DESC LIMIT ?3`, project-scoped as its siblings); `cli.rs::MemoryCommand::Retrievals`
+gains `--session` and `--limit` (default 20); `main.rs::memory_retrievals_report`
+branches on `--session` before touching the windowed readers and
+`render_session_retrievals` prints one line per row, *(memory no longer
+present)* for a memory `MemoryStore::get` cannot resolve. Its data today:
+the launch briefing's two doors and the machine door's `deliver_memory`.
+
+**Regression evidence** (`tests/evaluation_observations.rs`, shipped binary,
+rows planted through the production `record_memory_retrieval`):
+`glasshouse_memory_retrievals_session_lists_only_that_sessions_rows_newest_first`,
+`glasshouse_memory_retrievals_session_marks_an_unresolved_memory_without_erroring`,
+`glasshouse_memory_retrievals_session_with_no_rows_prints_a_sentence`,
+`glasshouse_memory_retrievals_session_respects_limit`; the three existing
+windowed-report tests, unmodified, prove the no-session path unchanged.
+
+**Mutations** (worker, three, all KILLED, restored byte-identical):
+`session-filter-dropped` (the `AND session_id = ?2` removed) — session-b's
+row leaked into session-a's listing; `oldest-first` (`DESC` → `ASC`, the find
+string widened to the whole statement so the file's other three orderings
+stayed untouched) — the ordering assertion; `missing-memory-errors` (the
+unresolved arm made a panic) — the child process panicked and the test's
+exit-status assertion failed.
+
+**Packet error, the worker's, and right:** the packet's test (b) said *a
+memory deleted after retrieval*; the store has no delete, so the unresolved
+row is a memory id never recorded — the same `get → None` path.
+
+**Recorded limits.** A retrieval recorded with no session id (the CLI's own
+`memory search` today) is not listed by this view; `observed_at` prints as
+raw unix seconds because no person-facing instant formatter exists in the
+crate (searched) — a wording follow-up, not a defect; an unknown session id
+and a session with no retrievals print the same sentence, as every other
+`session_id`-keyed reader treats ids.
+
+State: **COMPLETE**. Phase 47 stands at 10 of 15; 1757 and 1766 are
+`GH-ROUTE-RATIONALE-SINK`'s (live); 1760, 1767, 1769 stay Cluster H.
+
+## 1757 and 1766 — CLOSED 2026-09-02 (`GH-ROUTE-RATIONALE-SINK`, Amber, Sonnet high): the session router's rationale on the durable sink
+
+The batch-50 refusal above named the missing link exactly: `RoutingExplanation`
+had no durable sink, and recomputing one in a view would render *the factors
+of a decision that was never made*. The durable sink chosen on 2026-08-30 took
+the disposable router's rationale first and claimed no box; this package puts
+the **session** router's on it, at the two moments the launch already records
+its decision (`design-decisions.md`, *The session router's rationale row*).
+
+**Contract (1757).** Given a launch that routed, fresh or continued, when the
+launch records its decision, Glasshouse also records the decision's
+explanation as one `SessionRouteDecided` row against the session — subject
+the destination id, detail the contributions as `{name, magnitude, evidence}`
+— so that `sessions show <id>` lists every contribution with its signed
+magnitude and evidence, while a session with no row shows `-` and no task
+text reaches the row.
+
+**Contract (1766).** Given the newest such row, when `glasshouse status`
+runs, Glasshouse prints that decision's destination and its three largest
+contributions by absolute magnitude on one line, ties in recorded order, or
+*none recorded*.
+
+**Production evidence.** `evaluation/mod.rs::EvaluationKind::SessionRouteDecided`;
+`record_session_route` beside `record_disposable_route`, same fail-soft
+shape; `EvaluationObservations::session_route_for` / `latest_session_route`;
+`route_contributions` (tolerant, `[]` on anything malformed). The detail is
+encoded and decoded by a hand-written encoder and char-cursor parser scoped
+to that one array shape — **the worker's first packet correction, and
+right**: the module's own pinning test
+(`the_evaluation_module_has_no_path_out_of_the_project`, map line 1856)
+forbids `serde_json` and `serde::Serialize` in the file, so the packet's
+*serializable mirror* could not be serde. `main.rs::launch_session` calls
+`record_session_route` after each of its two `record_routed_session` calls;
+`routing_rationale_section` in `session_detail`; `last_routing_decision_line`
+in `status_report`.
+
+**Regression evidence** (`tests/route_rationale.rs`, shipped binary, the
+launch fixture of `evaluation_observations.rs`, 6):
+`a_fresh_launch_shows_a_rationale_route_also_names`,
+`status_lists_at_most_three_factors_by_absolute_magnitude`,
+`an_unrouted_session_shows_a_dash`, `a_project_with_no_launches_shows_none_recorded`,
+`a_continued_launch_records_its_rationale_against_the_continued_session`,
+`the_task_text_never_reaches_a_rationale_rows_detail`.
+
+**Mutations** (worker, four, all KILLED, restored byte-identical):
+`fresh-site-dropped` and `continued-site-dropped` (each producer call
+removed) by the fresh and the continued test respectively — *one rationale
+row per launch*; `subject-blank` by the status test — *status must name the
+second launch's own destination*; `weakest-first` (the sort reversed)
+**SURVIVED the worker's first test**, which checked only that the three
+selected were non-increasing — a routing explanation carries several
+legitimate `0.0` informational contributions, so a reversed sort can select
+three ties and pass — strengthened to compare against the row's own full
+list independently sorted, then KILLED (§80's reading rule, followed).
+
+**Corrections at integration, the orchestrator's.** The worker could not
+touch `database.rs` (forbidden): `EVALUATION_KINDS` and the pinning test
+`every_kind_the_type_can_produce_is_one_the_schema_constant_declares` did not
+know the new kind; both gained it in wave 103's integration, gated with
+`--lib database` and `--lib evaluation`. The worker's third correction — a
+fresh launch's destination id is a profile slug, never a session id — is
+recorded as the reason test (b) compares against
+`RoutingCostClassObserved`'s own detail.
+
+**Recorded limits.** `route_contributions`'s malformed-input tolerance has no
+dedicated unit test (nothing but its own producer writes the column); the
+view is the CLI (1762/1764's precedent), the shell's session view does not
+draw the row; macOS only.
+
+State: **COMPLETE** for 1757 and 1766. Phase 47 stands at 12 of 15; 1760,
+1767 and 1769 stay Cluster H on their own missing links (a temperature
+estimate, a correlation, a durable extraction record).

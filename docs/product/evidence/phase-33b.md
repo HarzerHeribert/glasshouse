@@ -313,3 +313,41 @@ Two rules already in this project would each have caught it independently and
 neither was applied: *"once a grep names a file, run its tests"* (§79), and the
 integrator's own obligation to read what `integrate.sh` prints. The gate is
 mechanisable and the discipline is not, so mechanise it.
+
+## Line 1350 — CLOSED 2026-09-02 (`GH-TOOL-ROUNDS-ON-TRANSLATED`, Amber, Sonnet high): rounds per minute of serving time, printed as what it is
+
+The census above filed 1350 under Cluster L — *TTFC/TTFT/decode-throughput/
+rounds-per-minute symbols do not exist in the tree at all* — behind the
+relay's parsing wall. The wall stands for relayed rows; the translated seam
+counts tool-use blocks as they pass (`phase-33a.md`, 1334), and the reader
+is a sum.
+
+**Contract.** Given routing observations that carry `tool_rounds`, when
+`glasshouse routing-cost` renders a group, Glasshouse prints the rounds
+begun, the repairs, and rounds per minute over the group's summed exchange
+durations — *not recorded* for a group with no counted row — as an
+outcome-adjacent measure printed beside the latency figures and never folded
+into a score (1355's own rule).
+
+**Production evidence.** `routing/evidence.rs::PurposeConsumption`
+gains `tool_rounds`, `repairs`, `serving_seconds` (`SUM`s, `None` on an
+all-`NULL` group) and `tool_rounds_per_minute()`; `consumption_by_purpose`'s
+SQL and row reader; `main.rs::render_routing_cost` → `render_tool_rounds`
+(`tool rounds : N begun, M repairs, R.RR/min over Ss served`).
+
+**Regression evidence.**
+`routing_cost::two_seeded_rows_print_summed_rounds_repairs_and_a_real_per_minute_rate`
+(rounds 2 and 1, repairs 1 and 0, 60 s each → *3 begun, 1 repairs, 1.50/min
+over 120s served*; an untimed group *not recorded*). **Mutation**
+`per-second-not-minute` (the `× 60` dropped) KILLED — *0.03/min* where
+*1.50/min* was owed.
+
+**Recorded limit.** A group whose rows carry `tool_rounds` but no
+dispatch/completion pair renders *not recorded* by construction; not driven
+directly. The serving time is seconds-resolution until `GH-STREAM-TIMING-MS`
+lands (`design-decisions.md`, *Millisecond offsets on the routing row*).
+
+State: **COMPLETE**. Phase 33B stands at 5 of 14; 1347, 1348, 1349, 1355
+wait on the millisecond columns (their readouts are `GH-STREAM-TIMING-MS`'s),
+1351/1352 on the term after them, 1353/1359 packaged separately, 1354 half,
+1356/1360 Cluster P/Q.

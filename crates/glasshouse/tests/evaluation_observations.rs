@@ -697,6 +697,205 @@ fn glasshouse_memory_retrievals_on_an_empty_window_prints_zeros_not_an_error() {
 }
 
 // -------------------------------------------------------------------------
+// 1759 — `glasshouse memory retrievals --session <id>`
+// -------------------------------------------------------------------------
+
+/// Two sessions' rows, planted through the real producer
+/// [`glasshouse::evaluation::record_memory_retrieval`] rather than a raw
+/// `INSERT`: `--session A` lists only A's rows, newest first, with the
+/// memory's current kind and one-line summary.
+#[test]
+fn glasshouse_memory_retrievals_session_lists_only_that_sessions_rows_newest_first() {
+    let tmp = tempdir();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+
+    let (first, second) = {
+        let memory = fixture.memory();
+        let store = memory.store();
+        let first = store
+            .record(NewMemory::new(
+                MemoryKind::Decision,
+                "quartz caches by hash",
+            ))
+            .unwrap();
+        let second = store
+            .record(NewMemory::new(
+                MemoryKind::Decision,
+                "quartz retries on timeout",
+            ))
+            .unwrap();
+        (first, second)
+    };
+
+    glasshouse::evaluation::record_memory_retrieval(
+        &fixture.runtime,
+        RetrievalScope::Current,
+        [first.id.as_str()],
+        Some("session-a"),
+        1_000,
+    );
+    glasshouse::evaluation::record_memory_retrieval(
+        &fixture.runtime,
+        RetrievalScope::Current,
+        [second.id.as_str()],
+        Some("session-a"),
+        2_000,
+    );
+    glasshouse::evaluation::record_memory_retrieval(
+        &fixture.runtime,
+        RetrievalScope::Current,
+        [first.id.as_str()],
+        Some("session-b"),
+        3_000,
+    );
+
+    let output = fixture.run(&["memory", "retrievals", "--session", "session-a"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = String::from_utf8_lossy(&output.stdout).into_owned();
+
+    assert!(
+        report.contains(second.id.as_str()) && report.contains(first.id.as_str()),
+        "both of session-a's rows must be listed:\n{report}"
+    );
+    assert!(
+        !report.contains("session-b"),
+        "session-b's own row must not leak into session-a's listing:\n{report}"
+    );
+    let second_pos = report.find(second.id.as_str()).unwrap();
+    let first_pos = report.find(first.id.as_str()).unwrap();
+    assert!(
+        second_pos < first_pos,
+        "newest (second, observed_at=2000) must print before first (observed_at=1000):\n{report}"
+    );
+    assert!(
+        report.contains("decision") || report.to_lowercase().contains("decision"),
+        "the memory's current kind must print:\n{report}"
+    );
+}
+
+/// A row whose `memory_id` no longer resolves in `memories` — the same
+/// unresolved shape [`glasshouse::evaluation::EvaluationObservations::stale_retrievals`]
+/// already counts for the windowed report — prints a marked line rather than
+/// an error.
+#[test]
+fn glasshouse_memory_retrievals_session_marks_an_unresolved_memory_without_erroring() {
+    let tmp = tempdir();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+
+    glasshouse::evaluation::record_memory_retrieval(
+        &fixture.runtime,
+        RetrievalScope::Current,
+        ["never-recorded"],
+        Some("session-c"),
+        1_000,
+    );
+
+    let output = fixture.run(&["memory", "retrievals", "--session", "session-c"]);
+    assert!(
+        output.status.success(),
+        "an unresolved memory id must not error: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(
+        report.contains("never-recorded") && report.contains("memory no longer present"),
+        "an unresolved row must be marked, not omitted or erroring:\n{report}"
+    );
+}
+
+/// `--session` with no rows for that session prints the *no memory was
+/// retrieved* sentence, exit 0 — never an error and never an empty table.
+#[test]
+fn glasshouse_memory_retrievals_session_with_no_rows_prints_a_sentence() {
+    let tmp = tempdir();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+
+    let output = fixture.run(&["memory", "retrievals", "--session", "no-such-session"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(
+        report.contains("no memory was retrieved for session no-such-session"),
+        "{report}"
+    );
+}
+
+/// `--limit` bounds the session listing.
+#[test]
+fn glasshouse_memory_retrievals_session_respects_limit() {
+    let tmp = tempdir();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+
+    let (first, second) = {
+        let memory = fixture.memory();
+        let store = memory.store();
+        let first = store
+            .record(NewMemory::new(
+                MemoryKind::Decision,
+                "garnet indexes eagerly",
+            ))
+            .unwrap();
+        let second = store
+            .record(NewMemory::new(MemoryKind::Decision, "garnet retries once"))
+            .unwrap();
+        (first, second)
+    };
+
+    glasshouse::evaluation::record_memory_retrieval(
+        &fixture.runtime,
+        RetrievalScope::Current,
+        [first.id.as_str()],
+        Some("session-d"),
+        1_000,
+    );
+    glasshouse::evaluation::record_memory_retrieval(
+        &fixture.runtime,
+        RetrievalScope::Current,
+        [second.id.as_str()],
+        Some("session-d"),
+        2_000,
+    );
+
+    let output = fixture.run(&[
+        "memory",
+        "retrievals",
+        "--session",
+        "session-d",
+        "--limit",
+        "1",
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let report = String::from_utf8_lossy(&output.stdout).into_owned();
+    assert!(
+        report.contains(second.id.as_str()),
+        "the newest row must be the one kept under --limit 1:\n{report}"
+    );
+    assert!(
+        !report.contains(first.id.as_str()),
+        "--limit 1 must bound the listing to one row:\n{report}"
+    );
+}
+
+// Without `--session`, `memory retrievals` is unchanged: asserted on the
+// three existing windowed-report tests above
+// (`glasshouse_memory_retrievals_keeps_stale_and_stale_under_history_disjoint`,
+// `glasshouse_memory_retrievals_prints_every_figure_for_the_window`,
+// `glasshouse_memory_retrievals_on_an_empty_window_prints_zeros_not_an_error`),
+// which run this same binary with no `--session` flag and still pass
+// unmodified — no new test is added for this clause.
+
+// -------------------------------------------------------------------------
 // Retention — part of migration 15's contract, not a follow-up
 // -------------------------------------------------------------------------
 
