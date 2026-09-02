@@ -72,42 +72,164 @@ case "$ci_mode" in
     ;;
 esac
 
-if [[ ! -f "$ci_repo/Cargo.toml" ]]; then
-  print -u2 "Glasshouse repository not found at $ci_repo"
-  exit 2
-fi
-if [[ ! -s "$ci_key" ]]; then
-  print -u2 "Windows CI SSH key not found at $ci_key"
-  exit 2
-fi
-if [[ ! -r "$ci_lease_file" ]]; then
-  print -u2 "VMware DHCP lease file is not readable: $ci_lease_file"
-  exit 2
+# GLASSHOUSE_CI_DRY_RUN=1 is for `scripts/tests/test_windows_ci_lock.sh`: it
+# stubs the VM key/lease/reachability lookup and replaces the scp/ssh upload
+# sequence with a `sleep 3` and an echo, so the lock can be exercised without
+# a real VM. When it is unset the path below is byte-identical to before.
+ci_dry_run=0
+if [[ -n "${GLASSHOUSE_CI_DRY_RUN:-}" ]]; then
+  ci_dry_run=1
 fi
 
-ci_ip="$({
-  awk -v guest="$ci_guest_name" '
-    /^lease [0-9.]+ \{/ { address = $2 }
-    $0 ~ "client-hostname \\\"" guest "\\\";" { print address }
-  ' "$ci_lease_file"
-} | tail -n 1)"
+if (( ci_dry_run )); then
+  print "GLASSHOUSE_CI_DRY_RUN=1: skipping VM key/lease/reachability checks."
+  ci_ip="dry-run"
+  ci_endpoint="dry-run"
+  ci_ssh_options=()
+else
+  if [[ ! -f "$ci_repo/Cargo.toml" ]]; then
+    print -u2 "Glasshouse repository not found at $ci_repo"
+    exit 2
+  fi
+  if [[ ! -s "$ci_key" ]]; then
+    print -u2 "Windows CI SSH key not found at $ci_key"
+    exit 2
+  fi
+  if [[ ! -r "$ci_lease_file" ]]; then
+    print -u2 "VMware DHCP lease file is not readable: $ci_lease_file"
+    exit 2
+  fi
 
-if [[ -z "$ci_ip" ]]; then
-  print -u2 "No VMware DHCP lease found for $ci_guest_name"
-  exit 2
+  ci_ip="$({
+    awk -v guest="$ci_guest_name" '
+      /^lease [0-9.]+ \{/ { address = $2 }
+      $0 ~ "client-hostname \\\"" guest "\\\";" { print address }
+    ' "$ci_lease_file"
+  } | tail -n 1)"
+
+  if [[ -z "$ci_ip" ]]; then
+    print -u2 "No VMware DHCP lease found for $ci_guest_name"
+    exit 2
+  fi
+
+  ci_endpoint="glasshouse@$ci_ip"
+  ci_ssh_options=(
+    -i "$ci_key"
+    -o BatchMode=yes
+    -o ConnectTimeout=10
+  )
+
+  if ! ssh "${ci_ssh_options[@]}" "$ci_endpoint" "exit 0"; then
+    print -u2 "Windows CI VM is not reachable at $ci_ip. Start it in VMware Fusion and retry."
+    exit 2
+  fi
 fi
 
-ci_endpoint="glasshouse@$ci_ip"
-ci_ssh_options=(
-  -i "$ci_key"
-  -o BatchMode=yes
-  -o ConnectTimeout=10
-)
+# ---------------------------------------------------------------------------
+# LOCK — only one archive-upload-and-run sequence at a time.
+#
+# The VM has exactly one CI source tree (C:\ci\glasshouse). Two overlapping
+# runs raced to replace it and the second failed fast with "Could not replace
+# CI source tree" rather than queueing — see phase-54a.md's 2026-09-02 entry.
+# macOS has no `flock`, so this is a `mkdir` lock: `mkdir` is atomic on every
+# filesystem this runs on, unlike a lock *file*, which a naive
+# `[[ -e ]] && ... ; touch` check would race on.
+#
+# The trap below only ever removes this LOCAL directory — it never touches
+# the VM, and it is never signalled at the remote end, so a run that is
+# actually executing on the VM is never killed by another invocation timing
+# out or being interrupted (practice §72).
+readonly ci_lock_dir="${XDG_CACHE_HOME:-$HOME/.cache}/glasshouse-windows-ci.lock"
+ci_lock_held=0
 
-if ! ssh "${ci_ssh_options[@]}" "$ci_endpoint" "exit 0"; then
-  print -u2 "Windows CI VM is not reachable at $ci_ip. Start it in VMware Fusion and retry."
-  exit 2
-fi
+ci_lock_holder_line() {
+  local holder_pid holder_info
+  holder_pid="$(cat "$ci_lock_dir/pid" 2>/dev/null || true)"
+  holder_info="$(cat "$ci_lock_dir/started" 2>/dev/null || true)"
+  print -r -- "held by pid ${holder_pid:-?} (${holder_info:-unknown, started unknown})"
+}
+
+acquire_ci_lock() {
+  mkdir -p "${ci_lock_dir:h}"
+  local waited=0
+  local holder_pid
+  while ! mkdir "$ci_lock_dir" 2>/dev/null; do
+    holder_pid="$(cat "$ci_lock_dir/pid" 2>/dev/null || true)"
+    if [[ -n "$holder_pid" ]] && ! kill -0 "$holder_pid" 2>/dev/null; then
+      print "Reclaiming stale lock: pid $holder_pid is not running."
+      rm -rf "$ci_lock_dir"
+      continue
+    fi
+    if [[ -n "${GLASSHOUSE_CI_NO_WAIT:-}" ]]; then
+      print -u2 "waiting for the VM: $(ci_lock_holder_line)"
+      exit 2
+    fi
+    if (( waited % 60 == 0 )); then
+      print "waiting for the VM: $(ci_lock_holder_line)"
+    fi
+    sleep 15
+    (( waited += 15 ))
+  done
+  print -r -- "$$" > "$ci_lock_dir/pid"
+  print -r -- "$ci_mode, started $(date '+%Y-%m-%d %H:%M:%S')" > "$ci_lock_dir/started"
+  ci_lock_held=1
+}
+
+release_ci_lock() {
+  if (( ci_lock_held )); then
+    rm -rf "$ci_lock_dir"
+    ci_lock_held=0
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# VM-IDLE CHECK — this local lock is necessary but not sufficient.
+#
+# A peer can drive cargo directly over ssh on the VM without ever running
+# this script, and cargo.exe/rustc.exe keep running there after that peer's
+# local process exits. So on top of the local lock above, also wait for the
+# VM itself to report no cargo.exe/rustc.exe in `tasklist`, on two
+# consecutive samples 30 seconds apart, before touching the CI source tree.
+# Like the local lock, this only ever WAITS or fails fast — it never signals
+# anything on the VM (practice §72).
+ci_vm_tasklist() {
+  if (( ci_dry_run )); then
+    cat "${GLASSHOUSE_CI_DRY_RUN_TASKLIST:-/dev/null}" 2>/dev/null || true
+  else
+    ssh "${ci_ssh_options[@]}" "$ci_endpoint" 'tasklist' 2>/dev/null || true
+  fi
+}
+
+ci_vm_busy_line() {
+  print -r -- "cargo.exe or rustc.exe is still running on the VM"
+}
+
+ci_vm_busy() {
+  ci_vm_tasklist | grep -qiE '(^|[^A-Za-z])(cargo|rustc)\.exe'
+}
+
+wait_for_vm_idle() {
+  local idle_streak=0
+  while (( idle_streak < 2 )); do
+    if ci_vm_busy; then
+      idle_streak=0
+      if [[ -n "${GLASSHOUSE_CI_NO_WAIT:-}" ]]; then
+        print -u2 "waiting for the VM: $(ci_vm_busy_line)"
+        exit 2
+      fi
+      print "waiting for the VM: $(ci_vm_busy_line)"
+      sleep 30
+    else
+      (( idle_streak += 1 ))
+      if (( idle_streak < 2 )); then
+        sleep 30
+      fi
+    fi
+  done
+}
+
+acquire_ci_lock
+wait_for_vm_idle
 
 ci_temp_dir="$(mktemp -d /tmp/glasshouse-windows-ci.XXXXXX)"
 if [[ "$ci_temp_dir" != /tmp/glasshouse-windows-ci.* ]]; then
@@ -124,44 +246,59 @@ cleanup_ci_archive() {
     rmdir "$ci_temp_dir"
   fi
 }
-trap cleanup_ci_archive EXIT INT TERM
+ci_cleanup_all() {
+  cleanup_ci_archive
+  release_ci_lock
+}
+trap ci_cleanup_all EXIT INT TERM
 
-print "Packaging $ci_repo ..."
-(
-  cd "$ci_repo"
-  git ls-files --cached --others --exclude-standard -z |
-    while IFS= read -r -d '' ci_path; do
-      if [[ -e "$ci_path" || -L "$ci_path" ]]; then
-        printf '%s\0' "$ci_path"
-      fi
-    done |
-    COPYFILE_DISABLE=1 tar --no-mac-metadata --null -czf "$ci_archive" -T -
-)
+if (( ci_dry_run )); then
+  print "GLASSHOUSE_CI_DRY_RUN=1: stubbing package/upload/install with sleep 3."
+  sleep 3
+  print "dry-run: would package $ci_repo, scp to $ci_endpoint, and install."
+else
+  print "Packaging $ci_repo ..."
+  (
+    cd "$ci_repo"
+    git ls-files --cached --others --exclude-standard -z |
+      while IFS= read -r -d '' ci_path; do
+        if [[ -e "$ci_path" || -L "$ci_path" ]]; then
+          printf '%s\0' "$ci_path"
+        fi
+      done |
+      COPYFILE_DISABLE=1 tar --no-mac-metadata --null -czf "$ci_archive" -T -
+  )
 
-print "Synchronizing source to Windows ARM64 ($ci_ip)..."
-scp "${ci_ssh_options[@]}" "$ci_archive" "${ci_endpoint}:glasshouse-source.tar.gz"
+  print "Synchronizing source to Windows ARM64 ($ci_ip)..."
+  scp "${ci_ssh_options[@]}" "$ci_archive" "${ci_endpoint}:glasshouse-source.tar.gz"
 
-# The VM-side runner and installer are versioned here, under
-# scripts/dev/windows/, not on the VM — see that directory's own history for
-# why. Ship the copy this checkout has on every run, so the VM never drifts
-# from a file nobody reviewed.
-ci_runner_dir="$ci_repo/scripts/dev/windows"
-if [[ ! -f "$ci_runner_dir/run-glasshouse-ci.cmd" || ! -f "$ci_runner_dir/install-source.ps1" ]]; then
-  print -u2 "Missing $ci_runner_dir/{run-glasshouse-ci.cmd,install-source.ps1}"
-  exit 2
+  # The VM-side runner and installer are versioned here, under
+  # scripts/dev/windows/, not on the VM — see that directory's own history for
+  # why. Ship the copy this checkout has on every run, so the VM never drifts
+  # from a file nobody reviewed.
+  ci_runner_dir="$ci_repo/scripts/dev/windows"
+  if [[ ! -f "$ci_runner_dir/run-glasshouse-ci.cmd" || ! -f "$ci_runner_dir/install-source.ps1" ]]; then
+    print -u2 "Missing $ci_runner_dir/{run-glasshouse-ci.cmd,install-source.ps1}"
+    exit 2
+  fi
+  scp "${ci_ssh_options[@]}" \
+    "$ci_runner_dir/run-glasshouse-ci.cmd" \
+    "$ci_runner_dir/install-source.ps1" \
+    "${ci_endpoint}:C:/ci/"
+
+  ssh "${ci_ssh_options[@]}" "$ci_endpoint" \
+    'powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\ci\install-source.ps1'
 fi
-scp "${ci_ssh_options[@]}" \
-  "$ci_runner_dir/run-glasshouse-ci.cmd" \
-  "$ci_runner_dir/install-source.ps1" \
-  "${ci_endpoint}:C:/ci/"
-
-ssh "${ci_ssh_options[@]}" "$ci_endpoint" \
-  'powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\ci\install-source.ps1'
 
 print "Running Windows ARM64 CI mode: $ci_mode"
-# `-n` redirects the remote command's standard input from /dev/null. Without it
-# the far side inherits THIS driver's stdin over the ssh channel, so a test that
-# drains stdin waits for an end of file that never comes when the gate is run
-# from a terminal. macOS already passes `< /dev/null` and the Linux leg runs
-# `docker run` without `-i`; this is the third leg finally saying the same thing.
-ssh -n "${ci_ssh_options[@]}" "$ci_endpoint" "C:\\ci\\run-glasshouse-ci.cmd $ci_mode"
+if (( ci_dry_run )); then
+  print -r -- "dry-run: would run C:\\ci\\run-glasshouse-ci.cmd $ci_mode over ssh."
+else
+  # `-n` redirects the remote command's standard input from /dev/null. Without
+  # it the far side inherits THIS driver's stdin over the ssh channel, so a
+  # test that drains stdin waits for an end of file that never comes when the
+  # gate is run from a terminal. macOS already passes `< /dev/null` and the
+  # Linux leg runs `docker run` without `-i`; this is the third leg finally
+  # saying the same thing.
+  ssh -n "${ci_ssh_options[@]}" "$ci_endpoint" "C:\\ci\\run-glasshouse-ci.cmd $ci_mode"
+fi
