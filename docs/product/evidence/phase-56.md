@@ -1,5 +1,7 @@
 # Capability evidence — phase 56
 
+> **Renamed 2026-09-02 (batch 92):** `tests/v1_criteria_setup.rs` is now `tests/v1_criteria_first_run.rs` and `tests/dispatch_reservation.rs` is now `tests/launch_reservation.rs` — Windows' installer detection refused to start any binary whose name contains *setup* or *patch* (error 740), so neither had ever run on the VM leg. Test names quoted below are unchanged; only the file (and so the `--test` target) moved.
+
 **This file is the evidence entry for Phase 56 AND for Phase 56A.** They are
 kept together because 56A refined 56 the same day and their entries
 interleave — `scripts/check-evidence-coverage.py` reads headings, so this

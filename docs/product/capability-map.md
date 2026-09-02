@@ -1244,7 +1244,7 @@ Phase 32C — Subscription capacity estimation
 ☑ Support subscriptions whose providers expose only opaque product limits rather than raw token budgets.
 ☑ Estimate subscription headroom from observed accepted requests, token usage when visible, throttling events, reset behavior, and historical sessions.
 ☑ Maintain a separate estimator per provider plan and authenticated account context.
-☐ Reset or re-calibrate an estimator when Glasshouse detects a plan change or materially different quota behavior.
+☑ Reset or re-calibrate an estimator when Glasshouse detects a plan change or materially different quota behavior.
 ☑ Learn observed reset windows from throttling recovery when the provider does not expose an explicit reset timestamp.
 ☑ Distinguish short-window pressure such as a multi-hour usage window from longer weekly or monthly pressure when evidence allows.
 ☑ Represent estimated subscription headroom as a range or confidence-weighted percentage when exact usage cannot be known.

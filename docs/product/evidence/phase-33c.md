@@ -1,5 +1,7 @@
 # Capability evidence — phase 33C
 
+> **Renamed 2026-09-02 (batch 92):** `tests/v1_criteria_setup.rs` is now `tests/v1_criteria_first_run.rs` and `tests/dispatch_reservation.rs` is now `tests/launch_reservation.rs` — Windows' installer detection refused to start any binary whose name contains *setup* or *patch* (error 740), so neither had ever run on the VM leg. Test names quoted below are unchanged; only the file (and so the `--test` target) moved.
+
 Split from the single evidence ledger this project used to keep at the repository root (see `docs/product/evidence/README.md` for the full index and the entry template / evidence rules that used to precede it).
 
 ### Phase 33C — failure, quota, and route correlation

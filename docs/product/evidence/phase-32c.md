@@ -135,3 +135,68 @@ persists a prior plan reading to detect a change against (Cluster H), and
 1253's *"so the scheduler can improve"* has no consumer while nothing scores
 on the estimate (Cluster D). **Phase 32C therefore stands at 10/12, and its
 remainder is blocked rather than merely open.**
+
+## 1247 — CLOSED 2026-09-02 (`GH-ESTIMATOR-RESET`, Amber, Sonnet high): the quota-behaviour half has a producer, and the line is an *or*
+
+**The line.** *Reset or re-calibrate an estimator when Glasshouse detects a
+plan change or materially different quota behavior.* The refusal above stood
+on the plan half — nothing persists a prior plan reading — and read the line
+as needing both. It is an *or*: a materially different quota behaviour is
+observable without any plan signal, from the gateway's own captured
+rate-limit headers, and that half is what this package proves. The plan half
+stays out of scope with no producer (`CapacityState::plan(...)` has no
+production caller; design note *Re-calibrating the headroom estimator when
+the quota regime changes* and the register's Cluster H row).
+
+**Contract.** Given a provider whose gateway-captured rate-limit headers
+state a ceiling (`limit`, `window_seconds` or `token_limit`) and a later
+exchange whose headers state a different ceiling, when the gateway persists
+the later reading, Glasshouse records that instant as the provider's regime
+change (`regime_changed_at_unix` in the quota cache file), every headroom
+estimate for that provider is thereafter derived only from routing
+observations at or after it, and the `entitlements` line says *limits
+changed <age>* — while preserving that `remaining`, `reset` or
+`retry_after` moving alone is never a regime change, that a first reading
+records none, that a cache file written before the field existed reads as
+no change recorded and estimates over the whole window, and that rows before
+the change are neither deleted nor relabelled.
+
+**Production.** `provider/telemetry.rs :: stated_ceiling_changed` (the
+comparison — a ceiling absent on either side is never evidence of change),
+`GatewayQuotaCache::try_store` (records the instant on a change, carries the
+earlier instant forward otherwise), `GatewayQuotaCache::regime_changed_at`
+(the reader); `config/mod.rs :: ResolvedEntitlement::populate_provider_facets`
+(the floor — `filter`, so a `None` floor keeps every row — and the
+`since_unix` stamp on the returned estimate);
+`routing/evidence.rs :: SubscriptionHeadroomEstimate::since_unix`;
+`main.rs :: entitlement_facets` (the render, through `format_age`).
+
+**Regression** (`tests/estimator_reset.rs`, 5/5, the first through a real
+gateway on a loopback stub): a stated-ceiling change is detected and the
+instant carried forward across an unchanged third exchange; the pool moving
+alone records none; a field absent on either side never compares; the floor
+keeps only rows at or after the change and the shipped binary's line says
+*limits changed*; a pre-field cache file loads as no change and estimates the
+whole window.
+
+**Mutations, 4/4 KILLED** (worker's `mutate.sh`, restores byte-identical):
+`never-detected` (the comparison → `false`), `remaining-counts` (`remaining`
+added to the compared ceilings), `floor-dropped` (the filter → keep all),
+`instant-not-carried` (an unchanged ceiling → `None`) — each named test's
+failure text quoted in `.agent-runtime/report-estimator-reset.md`.
+
+**Two open decisions the worker made, accepted:** a sibling accessor
+`regime_changed_at(provider)` rather than widening `load`/`load_all`'s
+tuples (a production caller in `provider/resources.rs` destructures the
+triple); the caller pre-filters and stamps `since_unix` after the call
+rather than threading a parameter through `estimate_subscription_headroom`'s
+twenty test call sites.
+
+**Recorded limits** (the worker's): only `limit`, `window_seconds` and
+`token_limit` are compared — a change in a window's *meaning* with the same
+numbers is unobservable from headers; `since_unix` is set by the
+estimator's one production caller and a second caller would have to do the
+same; `load_all` is unchanged; macOS only (no `#[cfg]` in the diff).
+
+State: **COMPLETE** on the line's quota-behaviour disjunct. Phase 32C stands
+at 11 of 12; 1253 stays refused (Cluster D).

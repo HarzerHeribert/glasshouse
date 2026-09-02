@@ -1,5 +1,7 @@
 # Phase 57 — Context firewall: tool-output compaction between harness and model
 
+> **Renamed 2026-09-02 (batch 92):** `tests/v1_criteria_setup.rs` is now `tests/v1_criteria_first_run.rs` and `tests/dispatch_reservation.rs` is now `tests/launch_reservation.rs` — Windows' installer detection refused to start any binary whose name contains *setup* or *patch* (error 740), so neither had ever run on the VM leg. Test names quoted below are unchanged; only the file (and so the `--test` target) moved.
+
 Opened 2026-09-01 from the user's instruction of record (the full spec is
 summarized in the map's phase rationale and the architecture is recorded in
 `docs/product/design-decisions.md` §Phase 57). No line is closed yet.

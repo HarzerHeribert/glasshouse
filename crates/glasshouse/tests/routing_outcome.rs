@@ -168,7 +168,7 @@ impl Fixture {
             .stdin
             .as_mut()
             .expect("stdin was piped")
-            .write_all(b"{\"prompt\":\"unread\"}")
+            .write_all(b"{\"prompt\":\"PROMPT-MARKER-7f3a9c\"}")
             .expect("write the hook payload");
         let output = child.wait_with_output().expect("the hook must exit");
         assert!(
@@ -321,7 +321,12 @@ fn a_completed_turn_records_the_outcome_against_the_decision_that_routed_it() {
             .flatten()
         {
             assert!(
-                !cell.contains("unread") && !cell.contains(&base),
+                // The marker is a token no vocabulary can contain: the session
+                // router's rationale row (`SessionRouteDecided`, wave 103)
+                // legitimately says "an unread resource is neither preferred
+                // nor withheld", and the plain word `unread` this test planted
+                // before that row existed matched it in the trailing sweep.
+                !cell.contains("PROMPT-MARKER-7f3a9c") && !cell.contains(&base),
                 "a routing row carries ids and vocabulary words only — never the prompt the \
                  hook was handed, and never a filesystem path: `{cell}`"
             );

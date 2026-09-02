@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1243 / 1347 mandatory capabilities (92%)** — 104 open across 31 phases.
+**1244 / 1347 mandatory capabilities (92%)** — 103 open across 31 phases.
 
 ## Where the work is
 
@@ -28,6 +28,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 21K | Assumption-aware implementation guardrails | **1** | 42 | `992` |
 | Phase 27 | Context injection | **1** | 10 | `1118` |
 | Phase 30 | Session context metadata | **1** | 7 | `1156` |
+| Phase 32C | Subscription capacity estimation | **1** | 11 | `1242` |
 | Phase 32D | Normalized remaining-capacity score | **1** | 11 | `1257` |
 | Phase 32F | Protected quota reserve | **1** | 7 | `1285` |
 | Phase 33C | Failure, quota, and route correlation | **1** | 14 | `1362` |
@@ -37,7 +38,6 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 9 | Antigravity adapter | **2** | 5 | `330` |
 | Phase 20 | Minimal durable project memory | **2** | 16 | `805` |
 | Phase 21F | Memory retrieval quality | **2** | 9 | `927` |
-| Phase 32C | Subscription capacity estimation | **2** | 10 | `1242` |
 | Phase 32G | Provider-aware request-cost estimation | **2** | 8 | `1296` |
 | Phase 33 | Resource health | **2** | 13 | `1309` |
 | Phase 38 | Quota-preserving routing | **2** | 5 | `1604` |
@@ -93,6 +93,10 @@ these unwrapped.
 
 - **1158** ☐ Track an estimated context-size value for a session when the harness exposes enough information.
 
+### Phase 32C — Subscription capacity estimation  (1 open, 11 closed)
+
+- **1253** ☐ Preserve historical estimation data so the scheduler can improve over repeated usage.
+
 ### Phase 32D — Normalized remaining-capacity score  (1 open, 11 closed)
 
 - **1267** ☐ Treat unlimited local inference as high-capacity but still account for measured latency and concurrency.
@@ -131,11 +135,6 @@ these unwrapped.
 
 - **932** ☐ Penalize memories whose assumptions conflict with current repository state.
 - **939** ☐ Record false-positive or harmful memory retrievals so the retrieval policy can be evaluated.
-
-### Phase 32C — Subscription capacity estimation  (2 open, 10 closed)
-
-- **1247** ☐ Reset or re-calibrate an estimator when Glasshouse detects a plan change or materially different quota behavior.
-- **1253** ☐ Preserve historical estimation data so the scheduler can improve over repeated usage.
 
 ### Phase 32G — Provider-aware request-cost estimation  (2 open, 8 closed)
 

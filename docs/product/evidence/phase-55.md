@@ -1,5 +1,7 @@
 # Capability evidence — phase 55
 
+> **Renamed 2026-09-02 (batch 92):** `tests/v1_criteria_setup.rs` is now `tests/v1_criteria_first_run.rs` and `tests/dispatch_reservation.rs` is now `tests/launch_reservation.rs` — Windows' installer detection refused to start any binary whose name contains *setup* or *patch* (error 740), so neither had ever run on the VM leg. Test names quoted below are unchanged; only the file (and so the `--test` target) moved.
+
 Split from the single evidence ledger this project used to keep at the repository root (see `docs/product/evidence/README.md` for the full index and the entry template / evidence rules). Phase 55 — the V1 completion definition — is a list of *"Consider V1 usable when …"* criteria over phases the map already records as closed. Each entry below is a tripwire test named after its criterion, driving the shipped binary or the exact production seam the underlying phase's own entry names, with one KILLED mutation on that seam. The underlying phase's entry remains the proof of the mechanism; these entries prove the criterion still holds on the tree as shipped.
 
 ### Lines 1930–1937 — routing, quota, reserve, guardrail and explanation criteria
