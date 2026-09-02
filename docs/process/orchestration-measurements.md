@@ -4857,3 +4857,35 @@ findings, one Phase −1 miss) rather than to re-deriving reports.
    instance, no daemon" justified a leak; `api serve` is a daemon. The
    report was accurate about everything it measured and wrong about the one
    thing it assumed.
+
+## Batches 82–84 (2026-09-02, late morning) — three more boxes, the Windows families all closed, and the runner learned to queue
+
+Same session as Batch 81. **Map 1189 → 1192** (1302, 531, 1469), seven
+integrations (`c539938` … `31dcec5`), one census, wave-83 sweep 102/102
+green, and 1908's three-leg gate started on `785a47f` with the board empty
+on purpose.
+
+| package | tier | result |
+|---|---|---|
+| `constraint-reasons` | Sonnet medium, Amber | the rejected line names the failing axis and quotes the declared fact; tool semantics still evidence-less (recorded) |
+| `windows-fixtures` | Sonnet medium, Amber | Families B and C: two test-fixture defects (cmd.exe parentheses, TOML path), green on the VM twice |
+| `pool-allowance` | Sonnet high, Amber | **1302, 531 closed** — the router's pool records a provider's exposed request quota, separately from token-priced |
+| `windows-exit-observation` | Opus 5 high, Red | Family A: the unanswered ConPTY handshake in two test loops; two VM legs green, mutation killed on the VM; found the `rustc` pin `ci-local.sh` still lacked |
+| `vm-runner-lock` | Sonnet medium, Green | local `mkdir` lock + VM-side idle check; 18 stubbed assertions, two real concurrent builds serialised |
+| `recon-1469` | Sonnet high, read-only | the line's only honest home is a third file-based cache; successor named and dispatched the same hour |
+| `classification-cache` | Sonnet high, Amber | **1469 closed**, Phase 34E complete; the worker's dropped connection cost one nudge, no work |
+
+**Output per box.** Day total 6.42M at this checkpoint; this session ≈
+1.75M (from 4.67M at inherit) for **+13 net, 17 gross** across batches
+81–84 — about **135k per net box**, up from 73k at the Batch 81 mark because
+the four Windows and runner packages moved no box (1908 waits on a fully
+green leg) while costing three VM-driven workers. Still under the 250k
+trigger; the Windows work was the block behind a box that had been open
+since 2026-08-27.
+
+**What the Windows leg taught.** (1) Three families, three different
+causes, none in production code: an unanswered terminal handshake, a cmd.exe
+parser quirk, a TOML escape. (2) A local `pgrep` cannot see a peer's cargo
+on the VM; the runner now asks the VM. (3) Every VM run still carries about
+one flake in a non-PTY test, never the same one twice — the next Red packet
+if run 3 is not clean. (4) `rustup run stable` does not pin `rustc`.

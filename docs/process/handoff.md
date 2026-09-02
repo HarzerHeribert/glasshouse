@@ -20,6 +20,18 @@ validated and waiting on the commit. Next action: `.agent-runtime/CONTINUATION.m
 
 Last updated: 2026-08-31 (Europe/Berlin)
 
+## Checkpoint — 2026-09-02, batches 82–84: 1192 / 1332 (89.5%)
+
+Same Fable 5.1 session (`21f45818`). Seven more integrations (`c539938` …
+`31dcec5`): 1302, 531 and 1469 closed; all three Windows test families closed
+on the VM with mutations run on the platform; the VM runner queues (local
+lock + VM-side idle check); `ci-local.sh` pins the toolchain's `rustc`.
+1908's three-leg gate is running on `785a47f` from `.worktrees/gate-1908`
+with the board empty on purpose — the Windows leg carries a one-flake-per-run
+rate in non-PTY tests (two runs, no repeat), run 3 decides. Details in
+`.agent-runtime/CONTINUATION.md`; numbers in `orchestration-measurements.md`
+(Batches 82–84).
+
 ## Checkpoint — 2026-09-02, batch 81: 1189 / 1332 (89.3%)
 
 Fable 5.1 orchestrator, session `21f45818`. Seven integrations landed and
