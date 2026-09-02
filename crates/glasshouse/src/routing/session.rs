@@ -64,7 +64,7 @@ use crate::provider::quota::{CapacityBand, RemainingCapacityScore};
 use super::capability::{self, ResourceFacts};
 use super::classify::{DurationClass, HardCapability, TaskClassification, WorkloadTier};
 use super::evidence::{CostConfidence, FailureClass, MIN_SAMPLE_FOR_SUMMARY, ObservedCost};
-use super::free::{FreePool, FreeResource};
+use super::free::{Allowance, FreePool, FreeResource};
 use super::pressure::{
     self, Alternatives, CapacityFacts, PressureInputs, ReservePolicies, ReserveScope,
 };
@@ -1233,6 +1233,29 @@ const METERED_COST_PREFERENCE: f64 = -0.1;
 /// bound against.
 const EXPECTED_MARGINAL_COST_PENALTY: f64 = -0.1;
 
+/// Phase 32G line 1302: the name every `request_pool_cost` contribution
+/// carries, named once so a reader and a mutation both spell it the same way.
+const REQUEST_POOL_COST_TERM: &str = "request-pool cost";
+
+/// Line 1302's ceiling magnitude — strictly below
+/// [`super::pressure::EXHAUSTION_FORECAST_PENALTY`]'s `-0.7`. That term owns
+/// the case this one is inert for (a forecast that will not survive to its
+/// reset — `phase-32g.md`'s 1302 entry: "one forecast is priced once"), so
+/// this term prices the milder case beside it — a pool spending fast but
+/// still expected to make its reset — and must never outweigh the term that
+/// fires when the outlook is actually worse. Also strictly below warm
+/// affinity's `1.5` ceiling, per the packet.
+const REQUEST_POOL_COST_PENALTY: f64 = -0.5;
+
+/// The reference horizon [`request_pool_cost`]'s curve treats as
+/// "comfortably plenty" — the point at which the magnitude has fallen to half
+/// [`REQUEST_POOL_COST_PENALTY`]. Not a claim about any provider's reset:
+/// that reasoning belongs to [`super::burn::WELL_BEFORE_RESET_FRACTION`]
+/// alone. Twelve hours, chosen against a working day: a pool projected to
+/// last a full session's length is barely priced, and one projected to run
+/// dry within an hour or two is priced near the ceiling.
+const REQUEST_POOL_COST_HALF_LIFE_HOURS: f64 = 12.0;
+
 // ---------------------------------------------------------------------------
 // The contributions. One public function each, so a mutation can zero
 // exactly one of them.
@@ -1671,6 +1694,84 @@ fn expected_marginal_cost(
         ),
     };
     Contribution::new("expected marginal cost", magnitude, evidence)
+}
+
+/// Line 1302: what a request pool's own scarcity is worth, read from
+/// [`Allowance`]'s remaining count and [`Destination::burn_forecast`]'s
+/// persisted rate — never recomputed from ledger rows, and never folded into
+/// `expected_marginal_cost`'s magnitude: a reader sees two terms, one for
+/// money and one for a scarce unit money does not price.
+///
+/// # Its own axis, never 1280's twice
+///
+/// [`super::pressure::exhaustion_forecast_pressure`] already prices the case
+/// where a resource will not make it to its reset. This term is inert
+/// whenever [`super::burn::ExhaustionForecast::exhausts_well_before_reset`]
+/// says that term is already carrying the penalty for this destination's
+/// resource — `phase-32g.md`'s 1302 entry: one forecast, priced once. What is
+/// left for this term is the case beside it: a pool that will make its reset
+/// but is being spent fast enough to be worth naming.
+///
+/// # Inert, and says so, in three cases
+///
+/// - the allowance is [`Allowance::TokenPriced`] — "how many requests are
+///   left" has no answer for a resource priced per token, and pricing it
+///   anyway is exactly the conflation `free.rs`'s own module doc warns
+///   against;
+/// - the pool's remaining count is not yet known, or the destination carries
+///   no burn forecast at all (too few rows, no measured remaining amount, or
+///   a non-positive rate — see [`super::burn::forecast`]);
+/// - the forecast already exhausts well before the reset, which is the case
+///   above.
+pub fn request_pool_cost(destination: &Destination, pool: &FreePool) -> Contribution {
+    let allowance = pool.allowance(destination.backend().credential());
+    if !allowance.is_request_pool() {
+        return Contribution::new(
+            REQUEST_POOL_COST_TERM,
+            0.0,
+            "inert: this destination's allowance is priced per token, not by a request pool",
+        );
+    }
+    let Allowance::RequestPool { remaining, .. } = allowance else {
+        unreachable!("`is_request_pool` just confirmed this allowance is a request pool");
+    };
+    let Some(remaining) = remaining else {
+        return Contribution::new(
+            REQUEST_POOL_COST_TERM,
+            0.0,
+            "inert: this is a request pool, but its remaining count is not yet known",
+        );
+    };
+    let Some(forecast) = destination.burn_forecast() else {
+        return Contribution::new(
+            REQUEST_POOL_COST_TERM,
+            0.0,
+            format!(
+                "inert: {remaining} requests remain on this request pool, but no burn rate is \
+                 known for it yet"
+            ),
+        );
+    };
+    if forecast.exhausts_well_before_reset() {
+        return Contribution::new(
+            REQUEST_POOL_COST_TERM,
+            0.0,
+            "inert: the exhaustion forecast term already prices this resource's scarcity — \
+             pricing it here too would price the same forecast twice",
+        );
+    }
+    let hours = (forecast.seconds_to_exhaustion as f64 / 3600.0).max(0.0);
+    let magnitude = REQUEST_POOL_COST_PENALTY * REQUEST_POOL_COST_HALF_LIFE_HOURS
+        / (REQUEST_POOL_COST_HALF_LIFE_HOURS + hours);
+    Contribution::new(
+        REQUEST_POOL_COST_TERM,
+        magnitude,
+        format!(
+            "request pool has {remaining} requests remaining at an estimated {:.1} \
+             requests/hour — about {hours:.1}h left at the current rate, over {} observations",
+            forecast.requests_per_hour, forecast.rows
+        ),
+    )
 }
 
 /// Map line 1307: the marginal input cost this decision actually used, as a
@@ -5067,6 +5168,10 @@ fn score(
     // block above did not run — see `expected_marginal_cost`'s own doc for
     // why the two must never both price a candidate.
     explanation.push(expected_marginal_cost(destination, movement, prices));
+    // Line 1302, beside the money term it must never be folded into: its own
+    // axis, reading the same `inputs.health` `struggling` already reads and
+    // the same `burn_forecast` the exhaustion term above already read.
+    explanation.push(request_pool_cost(destination, inputs.health));
     explanation
 }
 
@@ -5996,6 +6101,262 @@ mod hard_constraint_tests {
             !routed.render_overview().contains("rejected"),
             "no rejected section renders when nothing is excluded"
         );
+    }
+}
+
+/// Line 1302, driven through `SessionRouter::choose`, the real production
+/// path — `GH-REQUEST-POOL-COST`'s acceptance tests.
+#[cfg(test)]
+mod request_pool_cost_tests {
+    use super::*;
+    use crate::routing::burn::ExhaustionForecast;
+    use crate::routing::free::PoolReading;
+    use crate::routing::{AssignedModel, Cost, CredentialId};
+    use crate::secret::SecretRef;
+
+    /// A fresh destination on its own provider (so its credential, and thus
+    /// its `Allowance`, never collides with another destination's), free of
+    /// charge — the money axis is not what these tests differ in.
+    fn destination(id: &str) -> Destination {
+        Destination::fresh(
+            id,
+            IntegrationId::ClaudeCode,
+            "profile",
+            Backend::new(
+                format!("{id}-provider"),
+                "anthropic-messages",
+                AssignedModel::named("a-model"),
+                CredentialId::new(
+                    format!("{id}-provider"),
+                    SecretRef::Environment {
+                        var: format!("{}_KEY", id.to_uppercase()),
+                    },
+                ),
+                Cost::Free,
+                ToolSemantics::Verified,
+            ),
+            None,
+        )
+    }
+
+    fn routed_with(health: &FreePool, destinations: &[Destination]) -> Routed {
+        let overrides = pairing::PairingOverrides::default();
+        let router_inputs = RouterInputs {
+            overrides: &overrides,
+            health,
+            now: Instant::now(),
+            requirements: TaskRequirements::default(),
+        };
+        SessionRouter::new()
+            .choose(
+                RoutingMoment::SessionStart,
+                None,
+                destinations,
+                &router_inputs,
+            )
+            .expect("a non-empty candidate set is always routed")
+    }
+
+    fn term<'a>(routed: &'a Routed, destination: &str) -> &'a Contribution {
+        routed
+            .considered()
+            .iter()
+            .find(|(d, _)| d.id() == destination)
+            .unwrap_or_else(|| panic!("`{destination}` was not ranked"))
+            .1
+            .contributions()
+            .iter()
+            .find(|c| c.name() == REQUEST_POOL_COST_TERM)
+            .unwrap_or_else(|| panic!("`{destination}` carried no `{REQUEST_POOL_COST_TERM}` term"))
+    }
+
+    /// A pool spending fast (rate and remaining known, not forecast to
+    /// exhaust well before its reset — here, no reset is known at all) scores
+    /// lower than an otherwise identical token-priced destination, and names
+    /// the pool, the count and the rate.
+    #[test]
+    fn a_request_pool_spending_fast_scores_lower_than_a_token_priced_twin() {
+        let pool_dest = destination("pool");
+        let token_dest = destination("token");
+
+        let mut health = FreePool::new();
+        health.record_pool(
+            pool_dest.backend().credential(),
+            &PoolReading {
+                limit: Some(1_000),
+                remaining: Some(40),
+                resets_in: None,
+            },
+            Instant::now(),
+        );
+        health.declare_token_priced(token_dest.backend().credential());
+
+        let pool_dest = pool_dest.with_burn_forecast(Some(ExhaustionForecast {
+            requests_per_hour: 20.0,
+            seconds_to_exhaustion: 7_200,
+            survives_until_reset: None,
+            seconds_until_reset: None,
+            rows: 12,
+        }));
+
+        let routed = routed_with(&health, &[pool_dest.clone(), token_dest.clone()]);
+
+        let pool_term = term(&routed, "pool");
+        let token_term = term(&routed, "token");
+
+        assert!(
+            pool_term.magnitude() < 0.0,
+            "a fast-spending pool must cost something: {pool_term:?}"
+        );
+        assert!(
+            pool_term.magnitude() > REQUEST_POOL_COST_PENALTY,
+            "bounded: {pool_term:?}"
+        );
+        assert!(
+            pool_term.magnitude() > -1.5,
+            "must stay below warm affinity: {pool_term:?}"
+        );
+        assert_eq!(token_term.magnitude(), 0.0);
+        assert!(token_term.evidence().contains("inert"), "{token_term:?}");
+
+        assert!(
+            pool_term.evidence().contains("request pool"),
+            "{}",
+            pool_term.evidence()
+        );
+        assert!(
+            pool_term.evidence().contains("40"),
+            "must name the remaining count: {}",
+            pool_term.evidence()
+        );
+        assert!(
+            pool_term.evidence().contains("20.0"),
+            "must name the rate: {}",
+            pool_term.evidence()
+        );
+
+        assert_eq!(
+            routed.chosen().id(),
+            "token",
+            "the request-pool destination is the only one this term prices, so it must \
+             score lower:\n{}",
+            routed.render_overview()
+        );
+    }
+
+    /// The forecast term already prices a resource forecast to exhaust well
+    /// before its reset — this term must read `0.0` and say the forecast term
+    /// already prices it, and no destination may carry both magnitudes
+    /// non-zero.
+    #[test]
+    fn inert_when_the_exhaustion_forecast_term_already_prices_the_resource() {
+        let pool_dest = destination("early");
+
+        let mut health = FreePool::new();
+        health.record_pool(
+            pool_dest.backend().credential(),
+            &PoolReading {
+                limit: Some(1_000),
+                remaining: Some(40),
+                resets_in: None,
+            },
+            Instant::now(),
+        );
+
+        let pool_dest = pool_dest.with_burn_forecast(Some(ExhaustionForecast {
+            requests_per_hour: 40.0,
+            seconds_to_exhaustion: 1_000,
+            survives_until_reset: Some(false),
+            seconds_until_reset: Some(3_000),
+            rows: 60,
+        }));
+
+        let routed = routed_with(&health, std::slice::from_ref(&pool_dest));
+
+        let pool_cost = term(&routed, "early");
+        assert_eq!(pool_cost.magnitude(), 0.0);
+        assert!(
+            pool_cost.evidence().contains("already prices"),
+            "{}",
+            pool_cost.evidence()
+        );
+
+        let (_, explanation) = routed
+            .considered()
+            .iter()
+            .find(|(d, _)| d.id() == "early")
+            .expect("destination was ranked");
+        let forecast_term = explanation
+            .contributions()
+            .iter()
+            .find(|c| c.name() == "exhaustion forecast")
+            .expect("the exhaustion forecast term is always pushed");
+        assert_ne!(
+            forecast_term.magnitude(),
+            0.0,
+            "the forecast term must be the one carrying the penalty here"
+        );
+        assert!(
+            !(pool_cost.magnitude() != 0.0 && forecast_term.magnitude() != 0.0),
+            "one forecast must never be priced by both terms at once"
+        );
+    }
+
+    /// Token-priced, or nothing established about the pool: `0.0`, inert
+    /// text, and a ranking byte-identical to what it was before this term
+    /// existed.
+    #[test]
+    fn token_priced_or_unknown_is_inert_and_ranking_is_unchanged() {
+        let a = destination("a");
+        let b = destination("b");
+
+        // Neither credential is ever touched: `FreePool::allowance` answers
+        // `Allowance::unknown_pool()` for both, which has no remaining count
+        // established.
+        let health = FreePool::new();
+        let routed = routed_with(&health, &[a.clone(), b.clone()]);
+
+        let a_term = term(&routed, "a");
+        assert_eq!(a_term.magnitude(), 0.0);
+        assert!(a_term.evidence().contains("inert"), "{}", a_term.evidence());
+
+        let total_a = routed
+            .considered()
+            .iter()
+            .find(|(d, _)| d.id() == "a")
+            .unwrap()
+            .1
+            .total();
+        let total_b = routed
+            .considered()
+            .iter()
+            .find(|(d, _)| d.id() == "b")
+            .unwrap()
+            .1
+            .total();
+        assert_eq!(
+            total_a,
+            total_b,
+            "with nothing established on either, nothing separates them:\n{}",
+            routed.render_overview()
+        );
+
+        // And an explicit token-priced declaration is inert the same way,
+        // even with a burn forecast attached — a token budget is never asked
+        // how many requests are left.
+        let mut token_health = FreePool::new();
+        token_health.declare_token_priced(a.backend().credential());
+        let a_token_priced = a.clone().with_burn_forecast(Some(ExhaustionForecast {
+            requests_per_hour: 20.0,
+            seconds_to_exhaustion: 7_200,
+            survives_until_reset: None,
+            seconds_until_reset: None,
+            rows: 12,
+        }));
+        let routed = routed_with(&token_health, &[a_token_priced]);
+        let a_term = term(&routed, "a");
+        assert_eq!(a_term.magnitude(), 0.0);
+        assert!(a_term.evidence().contains("token"), "{}", a_term.evidence());
     }
 }
 

@@ -319,3 +319,58 @@ this phase's entries record is real rather than asserted.
 - **1301 — a missing join, not a missing wire.** `record_routing_latency` writes `task_class` on a row with no tokens; `record_routing_observation` writes tokens on a row with no class; `Assignment` has no `TaskClass` field. **Successor: `GH-TASK-CLASS-COST-JOIN`** (Amber), sequenced after `GH-TRANSLATED-USAGE-PROOF` so the tokens side is proven first. Shape to rule before dispatch: widen `Assignment` with the class, or join the routing-decision row by session and window.
 - **1300 — refused for a different, narrower reason.** The register's *"no cached-input signal exists"* is stale (translated exchanges write `cached_input_tokens`); the live blocker is `ModelPrice` (`provider/pricing.rs:71-75`), which carries input and output rates only, by Cluster H's own deliberate note. **Parked ruling:** whether `pricing.toml` grows an optional `cached_input_per_million_usd` (absent = unknown, no cached estimate) is decided after the translated-usage proof lands and shows the signal is real in production; until then 1300 stays refused for the stated reason.
 - **1303 — refused, unchanged.** No occupancy concept exists anywhere; the latency half is closed elsewhere.
+
+---
+
+## 1302 — mechanism landed, HELD OPEN 2026-09-02 (`GH-REQUEST-POOL-COST`, Amber, Sonnet high)
+
+`routing/session.rs::request_pool_cost`, pushed from `score()` beside the
+money term on its own axis: for a request-pool allowance with a known
+remaining count and a burn forecast that does *not* already exhaust well
+before reset, a bounded negative magnitude
+(`REQUEST_POOL_COST_PENALTY = -0.5`, strictly below the forecast term's
+`-0.7` and warm affinity's `1.5`) that grows as time-to-exhaustion shrinks
+(`PENALTY · 12h / (12h + hours)`), naming the count, the rate and the words
+*request pool*. Inert and saying so for a token-priced allowance, an unknown
+count, no burn rate, or an active exhaustion forecast — one forecast is
+priced once. `is_request_pool` has its first production caller. `free.rs`
+untouched: `FreePool::allowance` was already `pub` and the enum's fields are
+visible from `session.rs`.
+
+### Estimate request-pool cost for free providers whose scarce unit is requests rather than tokens. (line 1302)
+
+Contract: Given a destination whose allowance is a request pool, when Glasshouse ranks it, it prices the scarcity of that pool's requests from the persisted burn rate and remaining count as a qualitative cost, saying so — while contributing nothing, and saying so, for a token-priced allowance, for a pool with no burn rate, and whenever the exhaustion-forecast term is already active for the same resource, so one forecast is never priced twice.
+
+State: **PARTIALLY VERIFIED — HELD, not ticked.** Ruled 2026-09-02. The term is on the real ranking path, both mutations are KILLED through `SessionRouter::choose`, and it is inert and says so in every case the ruling named. Its input is not: `FreePool::allowance` answers `unknown_pool()` (a request pool with `remaining: None`) for every credential the router sees, because nothing in production calls `record_pool` with a provider's remaining-requests reading or `declare_token_priced` for a per-token price — `observe()` writes `Some(0)` only on a rate-limit answer, and the router's pool is rebuilt per call from `adopt_observed`, which carries health and no allowance. So on the shipped path the term always reads *inert: … remaining count is not yet known*. The packet's Phase −1 (inherited, spot-checked by two orchestrators) named `is_request_pool`'s missing caller as the only gap and did not ask whether the allowance's *value* had a producer; it does not, and that is the same shape that re-opened 1517 and 1513 this morning. Successor, named: `GH-POOL-ALLOWANCE` — at the router's pool construction, `record_pool` from the gateway quota cache's remaining-requests reading (the join the 1280 audit traced) and `declare_token_priced` where the price table prices the pair per token; 1302 ticks then, and so does 531, whose refusal named exactly this producer and this consumer.
+
+Production evidence:
+- `crates/glasshouse/src/routing/session.rs` — `request_pool_cost`
+- `crates/glasshouse/src/routing/session.rs` — `score (the push, beside expected_marginal_cost)`
+- `crates/glasshouse/src/routing/free.rs` — `Allowance::is_request_pool (now has a production caller)`
+- `crates/glasshouse/src/routing/free.rs` — `FreePool::allowance (existing pub accessor, reused)`
+- `crates/glasshouse/src/routing/session.rs` — `Destination::burn_forecast (existing pub accessor, reused)`
+
+Regression evidence:
+- `routing::session::request_pool_cost_tests::a_request_pool_spending_fast_scores_lower_than_a_token_priced_twin`
+- `routing::session::request_pool_cost_tests::inert_when_the_exhaustion_forecast_term_already_prices_the_resource`
+- `routing::session::request_pool_cost_tests::token_priced_or_unknown_is_inert_and_ranking_is_unchanged`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| Contribution::new(REQUEST_POOL_COST_TERM, magnitude, ...) -> Contribution::new(REQUEST_POOL_COST_TERM, 0.0, ...) | `zero-the-magnitude` | **killed** | `routing::session::request_pool_cost_tests::a_request_pool_spending_fast_scores_lower_than_a_token_priced_twin` |
+| if forecast.exhausts_well_before_reset() { -> if false && forecast.exhausts_well_before_reset() { | `drop-the-double-pricing-guard` | **killed** | `routing::session::request_pool_cost_tests::inert_when_the_exhaustion_forecast_term_already_prices_the_resource` |
+
+> zero-the-magnitude observed: panicked at crates/glasshouse/src/routing/session.rs:6207:9: a fast-spending pool must cost something: Contribution { name: "request-pool cost", magnitude: 0.0, evidence: "request pool has 40 requests remaining at an estimated 20.0 requests/hour — about 2.0h left at the current rate, over 12 observations" }
+
+> drop-the-double-pricing-guard observed: panicked at crates/glasshouse/src/routing/session.rs:6277:9: assertion `left == right` failed
+  left: -0.48868778280542985
+ right: 0.0
+
+Recorded scope limits — stated by the worker, not discovered later:
+- the magnitude's half-life (12h) and ceiling (-0.5) are reasoned constants, not derived from a measured distribution of real request pools
+- Allowance::RequestPool.remaining and the exhaustion forecast's own remaining reading (via CapacityState) are two different producers that this term does not reconcile; each of the three inert branches covers either one being absent
+- no end-to-end gateway-response-to-ranking exercise for this term specifically; tested at the same level (direct FreePool construction) as every sibling term in this module's own test suite
+
+---
+
+---
