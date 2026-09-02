@@ -19,10 +19,10 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`███████████████████████████████████░░░░░` 1149 / 1332 mandatory capabilities (86%)
+`██████████████████████████████████░░░░░░` 1159 / 1332 mandatory capabilities (87%)
 
 <details>
-<summary>Per-phase breakdown (61 of 107 phases complete)</summary>
+<summary>Per-phase breakdown (65 of 107 phases complete)</summary>
 
 | Phase | Done |
 |---|---|
@@ -37,7 +37,7 @@ the authoritative specification and tracks what is done.
 | Phase 4 — Generic PTY session runtime | 12/12 ✅ |
 | Phase 5 — Native terminal embedding | 8/8 ✅ |
 | Phase 6 — Harness adapter interface | 13/13 ✅ |
-| Phase 7 — Claude Code adapter | 9/10 |
+| Phase 7 — Claude Code adapter | 10/10 ✅ |
 | Phase 8 — Codex adapter | 10/10 ✅ |
 | Phase 9 — Antigravity adapter | 5/7 |
 | Phase 9A — Harness launch profiles | 26/26 ✅ |
@@ -82,21 +82,21 @@ the authoritative specification and tracks what is done.
 | Phase 26 — Memory query for agents | 6/6 ✅ |
 | Phase 27 — Context injection | 10/11 |
 | Phase 28 — File-aware memory lookup | 2/5 |
-| Phase 29 — Memory commits | 7/8 |
+| Phase 29 — Memory commits | 8/8 ✅ |
 | Phase 30 — Session context metadata | 7/8 |
 | Phase 31 — Compaction-aware behavior | 2/7 |
 | Phase 32 — Resource registry | 12/12 ✅ |
 | Phase 32A — Unified quota and capacity model | 13/21 |
-| Phase 32B — Quota telemetry sources | 13/14 |
-| Phase 32C — Subscription capacity estimation | 6/12 |
+| Phase 32B — Quota telemetry sources | 14/14 ✅ |
+| Phase 32C — Subscription capacity estimation | 10/12 |
 | Phase 32D — Normalized remaining-capacity score | 10/12 |
 | Phase 32E — Burn rate and exhaustion forecasting | 0/10 |
 | Phase 32F — Protected quota reserve | 7/8 |
-| Phase 32G — Provider-aware request-cost estimation | 0/10 |
+| Phase 32G — Provider-aware request-cost estimation | 6/10 |
 | Phase 33 — Resource health | 13/15 |
-| Phase 33A — Routing evidence ledger | 10/15 |
-| Phase 33B — Reliability-adjusted agent performance | 0/14 |
-| Phase 33C — Failure, quota, and route correlation | 11/15 |
+| Phase 33A — Routing evidence ledger | 11/15 |
+| Phase 33B — Reliability-adjusted agent performance | 4/14 |
+| Phase 33C — Failure, quota, and route correlation | 12/15 |
 | Phase 34 — Capability registry | 10/10 ✅ |
 | Phase 34A — Workload tiers | 10/10 ✅ |
 | Phase 34B — Routing-model role | 14/15 |
@@ -106,7 +106,7 @@ the authoritative specification and tracks what is done.
 | Phase 34F — Model capability and tier calibration | 11/11 ✅ |
 | Phase 35 — Lightweight task classification | 14/14 ✅ |
 | Phase 35A — Candidate generation | 1/11 |
-| Phase 35B — Candidate scoring | 16/25 |
+| Phase 35B — Candidate scoring | 17/25 |
 | Phase 35C — Capacity-aware tier escalation and downgrade | 9/9 ✅ |
 | Phase 35D — Routing under subscription pressure | 8/8 ✅ |
 | Phase 36 — Session affinity | 8/8 ✅ |
@@ -132,7 +132,7 @@ the authoritative specification and tracks what is done.
 | Phase 55 — V1 completion definition | 21/23 |
 | Phase 56 — Harness–subscription decoupling: choose the harness, route the subscription and model | 5/12 |
 | Phase 56A — Entitlement pool and subscription broker: several accounts, one scheduler | 13/13 ✅ |
-| Phase 57 — Context firewall: tool-output compaction between harness and model | 17/27 |
+| Phase 57 — Context firewall: tool-output compaction between harness and model | 27/27 ✅ |
 
 </details>
 <!-- progress:end -->

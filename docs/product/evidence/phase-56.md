@@ -835,3 +835,73 @@ launch is native," which batch 70a's 372 closure made conditional — each now
 states its native premise explicitly (automatic routing off, or the native
 entitlement as the only candidate where continuation itself needs the router
 on). 15/15, 10/10 twice each after the fix.
+
+---
+
+# Phase 56 censused 2026-09-02 — seven open lines, four causes, and the pairing-prior refusal was scoped to the wrong type
+
+`GH-RECON-56` (Sonnet high, read-only; report kept at
+`.agent-runtime/report-recon-56.md`), the orchestrator verified its decisive
+claims against `2edce1b` before writing this.
+
+| line | cause | verdict |
+|---|---|---|
+| 1945, 1955 | **1** — already true from the profile architecture, never proven | **packageable (Green, proof-only)** — `GH-DECOUPLE-PROOFS`, dispatched |
+| 1948, 1950, 1956 | **2** — unchanged since the T2b entry above: `apply_gateway` still refuses before consulting `translate::lookup`; T3 (Gemini) unbuilt | open, same successors (`GH-GATEWAY-TRANSLATE-LAUNCH`, `GH-GATEWAY-TRANSLATE-T3`) |
+| 1954 | **3** — unchanged: `pool_entitlements_for` returns `Vec::new()` for a gateway-backed destination, so *never charge* cannot be enforced or announced on that path | open, same successor (bounded Amber on `gateway/session.rs`) |
+| 1952 | **4** — the efficiency producer (1951) exists; `RouterInputs` has no field for it and `score()` no term | **packageable (Amber)** — `GH-HARNESS-PREFERENCE` |
+
+**Cause 1.** `Command::Launch` takes `harness` and `--profile` as independent
+arguments (`cli.rs:360-395`); `LaunchProfile` carries `harness`, `backend`
+and `model` as three fields; `EffectiveConfig::launch_profile` only checks the
+stored harness matches (`config/mod.rs:5099-5105`) and `destination_backend`
+resolves backend and model from the profile alone. For 1955,
+`launch_profile` short-circuits on the native name *before* any config layer
+is read (`:5075-5079`), and other profiles are a name-keyed map lookup, so a
+new entry cannot mutate an existing one. Neither claim has a test framed as
+its line; the adversarial `[profiles.native]` shadow case is untested.
+
+**Cause 4.** `outcomes_by_tier_and_harness` and `request_stats_by_harness`
+(line 1951, COMPLETE) are read by exactly one production caller,
+`harness_efficiency_section`, which prints them in `glasshouse route`'s report
+and never hands them to the router. `route_recommendation` already iterates
+every enabled harness *because* the user has not chosen one
+(`main.rs:3971-3972`) — line 1952's precondition, implemented for ranking and
+not fed the data. Package: a handle beside `pool: &EntitlementPoolView` (the
+same shape), one `harness efficiency` term in `score()` gated at
+`MIN_SAMPLE_FOR_SUMMARY`, naming the harness and why.
+
+## The question the orchestrator added, and its answer decides four lines outside this phase
+
+**Can one `routing_destinations` output hold destinations of different
+`PairingClass`? Yes.** The fresh-destination loop (`main.rs:1237-1308`)
+iterates every enabled launch profile for the one harness the call is scoped
+to, and `destination_backend` → `session_pairing(effective, profile)` builds
+the `PairingQuery` from **that profile's own `model`**
+(`main.rs:11241-11254`: `Some(model) => AssignedModel::named(model), None =>
+HarnessDefault`). Two enabled profiles of one harness with different models —
+a native profile beside a `DirectProvider { provider: "openrouter" }` profile
+with a non-Anthropic model — resolve to different classes and land in the same
+`Vec<Destination>`. `routing/session.rs` already computes exactly this per
+destination: `classify_destination` (`:4859`) builds the query from
+`destination.backend().model()` and is called from `hard_constraint` for its
+protocol fit; `score()` never calls `.class()` on it.
+
+**Why the standing refusal of 566/569 does not apply here.** `phase-9j.md`'s
+constancy proof, and its tripwire
+`routing::interactive::tests::the_native_pairing_prior_is_constant_across_a_real_session_start_candidate_set`
+(re-run by the census, green), are about `routing::interactive`'s
+`UpstreamBackend`, which *"has no model field"* and takes one model for the
+whole set at `SessionRouting::bind`. `routing::session`'s own `Backend`
+carries a model resolved per profile — the opposite of the type the proof
+covers. `routing/session.rs`'s module header (`:30-35`) cites the 9J entry as
+if it covered this router; it does not. **Ruling:** the refusal stands for
+`routing::interactive` (do not touch it or its tripwire) and is **lifted for
+`routing::session`**: 566, 569, 1540 and 1923 are one Amber package,
+`GH-PAIRING-PRIOR` — a soft, inspectable `pairing prior` term in `score()`
+from `classify_destination(...).class().is_vendor_native()`, bounded below
+warm affinity (569) and decaying as observed evidence accumulates (1923,
+1541's own rule). Caveat the census stated: no populated real configuration
+with two enabled profiles of one harness was observed; the architecture
+permits it and the package's own acceptance test is the first to exercise it
+end to end.

@@ -468,3 +468,20 @@ contribution `0.0`. Two later contributions falsified it: a vendor-native
 candidate's prior is 1.0 under `NoObservations`, and
 `failure_domain_contribution` returns −1.0 for a shared domain. Outside the two
 lines; someone should correct it deliberately.
+
+---
+
+## 2026-09-02 — the constancy proof is scoped to `routing::interactive`, and 566/569 are packageable through the session router
+
+The refusal above is right about the type it examined:
+`routing::interactive`'s `UpstreamBackend` has no model field, so its
+candidate sets cannot vary on the vendor axis, and the tripwire keeps that
+true. It was then cited by `routing/session.rs`'s module header as covering
+the session router, and it does not: `routing::session::Destination`'s
+`Backend` carries a model resolved per launch profile
+(`main.rs::destination_backend` → `session_pairing`, `main.rs:11241-11254`),
+so a set with two enabled profiles of one harness can hold a `VendorNative`
+destination beside a non-native one. `GH-RECON-56` found it; `phase-56.md`'s
+2026-09-02 entry has the path. **566 and 569 leave Cluster E for
+`routing::session` only**, packaged with 1540 and 1923 as `GH-PAIRING-PRIOR`.
+Nothing here changes for `routing::interactive`; do not edit its tripwire.
