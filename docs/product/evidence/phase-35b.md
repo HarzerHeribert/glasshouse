@@ -663,3 +663,23 @@ cache, not a table.
 looks exactly like a real coverage gap:** *a mutation on a non-`pub` item needs
 its killing test in the same crate. Check the mutated item's visibility when
 writing the MUTATION section, and list that source file under EXPECTED FILES.*
+
+### 2026-09-02, later — the binary's own glue line is now watched
+
+`GH-AUDIT-WAVE79` re-ran both recorded mutations (both KILLED again, same
+tests, same failure text) and added one of its own on the real `main.rs` call
+site: `reading.cooldown_cause,` → `None,` at the `adopt_observed` call inside
+`observed_health_of`. It **SURVIVED** the binary's own suite — every cadence
+test drove `health_readings_for` or `adopt_observed` directly, and the one
+line joining them in this binary had no test. The auditor judged it a coverage
+gap rather than a defect (a single-field passthrough, both ends proven by real
+JSON round trips) and did not re-open; the orchestrator agreed and closed the
+gap instead:
+`main.rs::tests::observed_health_of_hands_the_persisted_cooldown_cause_to_the_pool`
+stores a `GatewayHealthReading` with `cooldown_cause: Some(Declared)` through
+the real `GatewayHealthCache`, runs `observed_health_of`, and asserts the pool
+reports `Declared`. The same mutation now reads:
+
+| mutation | vocabulary | result | observed |
+|---|---|---|---|
+| `observed_health_of` passes `None` for the persisted cause | `glue-drops-cause` | **killed** | `panicked at crates/glasshouse/src/main.rs:15658:9` |

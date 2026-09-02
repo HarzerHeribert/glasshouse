@@ -236,6 +236,47 @@ zero-caller symbol.**
 on 1357's mutations proving an override reaches a real decision, and they did
 not.
 
+## RE-CLOSED 2026-09-02 — one line in `session_router()`, and the tripwire is the acceptance test
+
+**Production:** `main.rs::session_router` now chains
+`.with_score_weights(effective.score_weights().value)` — the resolved
+project-over-user-over-default `ScoreWeights`, read in the one constructor
+every real ranking path goes through (`glasshouse route`, `launch`, the
+control door). Nothing else changed; the config layer was already right.
+
+**Regression:** `main.rs::tests::a_configured_score_weight_reaches_the_real_session_router`
+— the audit's tripwire, unchanged in substance. It builds two routers with the
+real `session_router()` from a default `EffectiveConfig` and from one carrying
+`health_failure_penalty: -50.0`, ranks the same one-failure destination
+through `SessionRouter::choose`, and asserts the totals differ. Red on
+`a79b276`; green with the line.
+
+    test tests::a_configured_score_weight_reaches_the_real_session_router ... ok
+    test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 63 filtered out
+
+| mutation | vocabulary | result | observed |
+|---|---|---|---|
+| the wire hands the router `ScoreWeights::default()` instead of the resolved value | `wire-ignores-config` | **killed** | `panicked at crates/glasshouse/src/main.rs:15614:9` — identical totals with and without the override |
+
+This is the mutation the original entry could not run: it is the defect
+itself, reproduced on the path the shipped binary takes. The two earlier
+mutations still stand for what they prove — the scorer reads the weight it is
+handed, and the defaults are pinned — and this one proves the handing.
+
+**1358** re-ticks with it, on the same reasoning as before: the shipped
+weights are overridable by configuration *on a real decision*, so they are a
+starting policy and not a universal constant. Its framing half is unchanged
+(the doc comments on `ScoreWeights` and `ScoreWeightsConfig`).
+
+Gate, hand-run because the wave-80 sweep held the tree's gate lock:
+`cargo test -p glasshouse --bin glasshouse` — `65 passed; 0 failed`;
+`cargo check -p glasshouse --tests` clean; `cargo clippy --all-targets
+--all-features -D warnings` clean.
+
+**Phase 33B stands at 4/14 again.** The lesson is in the reopen entry above;
+the practice note is §36 applied to a footnote, and the tool note is that
+`cluster-b.py` cannot see a zero-caller symbol.
+
 ---
 
 # A gate gap this package exposed, and it is the orchestrator's error

@@ -1354,8 +1354,8 @@ Phase 33B — Reliability-adjusted agent performance
 ☐ Count empty completions, unusable tool calls, stream aborts, and apparently successful but non-actionable turns as distinct unsuccessful outcomes.
 ☐ Keep raw TTFC, effective TTFC, TTFT, throughput, and rounds per minute visible separately rather than collapsing them into one performance headline.
 ☐ Avoid comparing TTFC across tasks with materially different tool requirements unless the comparison is explicitly normalized or segmented.
-☐ Allow configurable scoring weights and preserve the exact inputs and terms used for every important routing score.
-☐ Treat the OX gateway scoring model as implementation evidence and a configurable starting policy rather than a universal Glasshouse constant.
+☑ Allow configurable scoring weights and preserve the exact inputs and terms used for every important routing score.
+☑ Treat the OX gateway scoring model as implementation evidence and a configurable starting policy rather than a universal Glasshouse constant.
 ☑ Fall back to coarser process-level latency and outcome observations when a native subscription harness exposes no structured token or tool events.
 ☐ Never infer precise TTFC or token timing from terminal text when the adapter cannot distinguish protocol events reliably.
 

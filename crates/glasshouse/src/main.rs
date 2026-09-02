@@ -3919,6 +3919,15 @@ fn session_router(
     glasshouse::routing::session::SessionRouter::with_override(user_override)
         .with_reserve_policies(effective.reserve_policies())
         .with_reserve_override_sessions(effective.reserve_override_sessions().value)
+        // Map lines 1357/1358: the configured score weights are read HERE,
+        // in the one constructor every real ranking goes through. Until
+        // 2026-09-02 this line did not exist: `[routing.score_weights]`
+        // parsed, layered and round-tripped correctly and changed no routing
+        // decision, because nothing ever handed the resolved value to the
+        // router (`with_score_weights` had zero callers of any kind). An
+        // audit's tripwire through this constructor found it; that test is
+        // now the acceptance test below.
+        .with_score_weights(effective.score_weights().value)
         // Map lines 1305/1306: the price metadata is read HERE, from the one
         // function every ranking path already goes through, so a user's
         // `pricing.toml` reaches the path that acts and the path that reports
@@ -15514,6 +15523,168 @@ mod tests {
             "with no task text, nothing needs tool calls, so nothing is rejected on that \
              ground: {:?}",
             routed.rejected()
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Lines 1357/1358: a `[routing.score_weights]` override must reach the
+    // router `glasshouse route`/`launch` actually build — `session_router()`
+    // — not merely `provider_health`/`quota_pressure` called by hand. This
+    // is the one place that can prove it, because `session_router` is
+    // private to this binary. Written by GH-AUDIT-WAVE79 as a tripwire: it
+    // was RED against the tree that had ticked both lines, because the
+    // constructor never called `with_score_weights`. The mutation that keeps
+    // it honest is deleting that one line from `session_router`.
+    // -----------------------------------------------------------------------
+    #[test]
+    fn a_configured_score_weight_reaches_the_real_session_router() {
+        use glasshouse::config::{EffectiveConfig, UserConfig};
+        use glasshouse::integrations::IntegrationId;
+        use glasshouse::routing::free::{FreePool, FreeResource};
+        use glasshouse::routing::session::{
+            Destination, RouterInputs, RoutingMoment, RoutingOverride, ScoreWeights,
+            TaskRequirements,
+        };
+        use glasshouse::routing::{AssignedModel, Backend, Cost, CredentialId, ToolSemantics};
+        use glasshouse::secret::SecretRef;
+        use std::time::Instant;
+
+        let fixture = CliFixture::new();
+
+        let mut user = UserConfig::default();
+        let overridden = ScoreWeights {
+            health_failure_penalty: -50.0,
+            ..ScoreWeights::default()
+        };
+        user.routing_mut()
+            .set_score_weights(Some(overridden.into()));
+        let effective_overridden = EffectiveConfig::new(&user, None);
+        assert_eq!(
+            effective_overridden.score_weights().value,
+            overridden,
+            "premise: the config layer resolves the override correctly"
+        );
+        let default_user = UserConfig::default();
+        let effective_default = EffectiveConfig::new(&default_user, None);
+
+        fn backend() -> Backend {
+            Backend::new(
+                "anthropic",
+                "anthropic-messages",
+                AssignedModel::named("claude-opus-4"),
+                CredentialId::new(
+                    "anthropic",
+                    SecretRef::Environment {
+                        var: "ANTHROPIC_API_KEY".to_owned(),
+                    },
+                ),
+                Cost::Metered,
+                ToolSemantics::Verified,
+            )
+        }
+        let dest = Destination::fresh(
+            "dest-1",
+            IntegrationId::ClaudeCode,
+            "default",
+            backend(),
+            None,
+        );
+        let resource = FreeResource::new(
+            dest.backend().credential().clone(),
+            dest.backend().model().label(),
+        );
+        let mut health = FreePool::new();
+        // One observed failure: `provider_health`'s additive term is
+        // non-zero here, so a weight change is visible in the total.
+        health.adopt_observed(&resource, 1, None, None, false);
+
+        let overrides = glasshouse::harness::pairing::PairingOverrides::from_parts(
+            "no configuration",
+            std::collections::BTreeMap::new(),
+            std::collections::BTreeMap::new(),
+        );
+        let inputs = RouterInputs {
+            overrides: &overrides,
+            health: &health,
+            now: Instant::now(),
+            requirements: TaskRequirements::default(),
+        };
+
+        let router_default = session_router(
+            &fixture.runtime,
+            &effective_default,
+            RoutingOverride::none(),
+        );
+        let routed_default = router_default
+            .choose(
+                RoutingMoment::SessionStart,
+                None,
+                std::slice::from_ref(&dest),
+                &inputs,
+            )
+            .expect("one destination offered");
+
+        let router_overridden = session_router(
+            &fixture.runtime,
+            &effective_overridden,
+            RoutingOverride::none(),
+        );
+        let routed_overridden = router_overridden
+            .choose(RoutingMoment::SessionStart, None, &[dest], &inputs)
+            .expect("one destination offered");
+
+        assert_ne!(
+            routed_default.explanation().total(),
+            routed_overridden.explanation().total(),
+            "lines 1357/1358: `session_router()` — the constructor `glasshouse route`/`launch` \
+             actually call — produced the identical total ({}) whether or not \
+             `[routing.score_weights]` was configured, so the configured weights are not \
+             reaching the router that makes real decisions.",
+            routed_default.explanation().total()
+        );
+    }
+
+    // Line 1546's glue in THIS binary: `observed_health_of` must hand the
+    // persisted `cooldown_cause` to `FreePool::adopt_observed` unchanged.
+    // Both halves it connects were already mutation-proven in their own
+    // modules; this exact passthrough was not, and GH-AUDIT-WAVE79's
+    // mutation of it (`reading.cooldown_cause` -> `None`) SURVIVED the
+    // binary's own suite. Now it does not.
+    #[test]
+    fn observed_health_of_hands_the_persisted_cooldown_cause_to_the_pool() {
+        use glasshouse::provider::telemetry::{GatewayHealthCache, GatewayHealthReading};
+        use glasshouse::routing::free::{CooldownCause, FreeResource};
+        use glasshouse::routing::{AssignedModel, CredentialId};
+        use glasshouse::secret::SecretRef;
+
+        let fixture = CliFixture::new();
+        let credential = CredentialId::new(
+            "anthropic",
+            SecretRef::Environment {
+                var: "ANTHROPIC_API_KEY".to_owned(),
+            },
+        );
+        let resource = FreeResource::new(
+            credential.clone(),
+            AssignedModel::named("claude-opus-4").label(),
+        );
+        let now_unix = glasshouse::provider::cache::now_unix_seconds();
+        let reading = GatewayHealthReading {
+            credential_label: credential.label().to_owned(),
+            model: resource.model().to_owned(),
+            consecutive_failures: 0,
+            cooling_down_until_unix: Some(now_unix + 600),
+            cooldown_cause: Some(CooldownCause::Declared),
+            credential_rejected: false,
+        };
+        GatewayHealthCache::new(fixture.runtime.paths()).store("anthropic", &[reading], now_unix);
+
+        let observed = observed_health_of(&fixture.runtime, [resource.clone()]);
+        assert_eq!(
+            observed.pool.health(&resource).cooldown_cause(),
+            Some(CooldownCause::Declared),
+            "line 1546: the provider-declared cause persisted by the gateway must reach the \
+             router's pool through this binary's own adoption loop, not be dropped on the way"
         );
     }
 
