@@ -505,3 +505,28 @@ could see `database is locked`. The workload that showed it is the test's;
 whether any production path writes one project database from two processes at
 once is a recon (`GH-SQLITE-CONTENTION-RECON`), and WAL, a longer timeout, or a
 bounded retry in `CheckpointStore::save` are product decisions after it.
+
+---
+
+## Line 1908 — CLOSED 2026-09-02 on a three-leg green run of `ff57ddb`
+
+(line 1908)
+
+Contract: Given the merged tree, when the local gate runs its macOS, Linux and native-Windows legs (`scripts/ci-local.sh --macos --linux --windows-vm`, the runner the user ruled is the one this line names), every PTY/session smoke test passes on all three — while preserving that a red on any leg is attributed with two runs before it is called a flake.
+
+State: **COMPLETE** — ruled 2026-09-02. The run was made on `ff57ddb`, the commit that landed the last Windows family (the two flake causes, entry above), from a detached worktree with nothing else building on this machine: **macOS** build, test **128/128 targets**, MSRV 1.88 — PASS; **Linux** (container) build+test **128/128 targets**, clippy, MSRV 1.88 — PASS; **Windows ARM64 VM** build, test **128/128 targets** (lib 1959/1959, two compiles on the VM: build and test modes), MSRV — PASS (the runner's log shows `Compiling glasshouse`, so the VM tested this tree). Thirteen local steps PASS, no SKIP. The three families the first Windows test run named on 2026-09-02 are each closed above with a mutation on the platform, and the five rotating flakes of `785a47f` are closed as two test-side causes in the entry above — this is the first run of this tree with every leg green and nothing attributed.
+
+Production evidence:
+- `scripts/ci-local.sh` — the three legs; the Windows cross-check pins the toolchain's rustc (`9b9a6db`)
+- `scripts/dev/glasshouse-windows-ci` — the VM runner, with its queue lock (`785a47f`)
+
+Regression evidence:
+- the full `cargo test --workspace` on each leg, as the gate runs it; `tests/pty_smoke.rs`, `tests/entitlement_shell_scrub.rs`, `tests/events_lifecycle.rs` are the PTY/session smoke families the line names, and each ran on all three legs
+- `scripts/tests/test_no_single_read_stubs.py` — the tripwire that keeps the stub cause from returning
+
+Recorded scope limits:
+- the Windows leg is one ARM64 VM driven from this machine, not a GitHub-hosted runner; `.github/workflows/ci.yml` is `workflow_dispatch`-only by user ruling and was not run
+- the local legs ran before the Windows leg rather than concurrently with it (a local cargo load beside the Linux container leg reads as a PTY failure, practice §40); the three legs are one tree, not one wall-clock run
+- *stable* is claimed for this tree on one three-leg run after the flake causes were fixed and measured 40/40 and 120/120 on the VM; the next Windows red, if any, is attributed per target with two runs (§34) before it is called anything
+
+---

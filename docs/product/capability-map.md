@@ -1905,7 +1905,7 @@ Phase 54A — Setup and portability completion criteria
 ☑ Consider gateway mode usable when two concurrent Glasshouse instances can run isolated local gateways without port or credential collisions.
 ☑ Consider provider setup usable when OpenRouter, one generic OpenAI-compatible endpoint, and one generic Anthropic-compatible endpoint can be configured and tested.
 ☑ Consider free-pool support usable when at least one configured zero-cost or free-tier model can perform a disposable Glasshouse support job.
-☐ Consider cross-platform support stable only after PTY/session smoke tests pass on macOS, Linux, and native Windows CI runners.
+☑ Consider cross-platform support stable only after PTY/session smoke tests pass on macOS, Linux, and native Windows CI runners.
 
 Phase 55 — V1 completion definition
 
