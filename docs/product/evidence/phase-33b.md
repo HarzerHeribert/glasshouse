@@ -194,6 +194,48 @@ redesign, which is the next packet's Phase -1.
 **Phase 33B now stands at 4/14.** Cause A's eight remain with the `ingress`
 ruling; Cause D's two stay Cluster P.
 
+## REOPENED 2026-09-02 — both lines un-ticked; the "recorded limit" was the defect
+
+`GH-AUDIT-WAVE79`, an independent Sonnet audit of the five ticks in `9f513d9`
+and `40ae89d`, found that **`SessionRouter::with_score_weights`
+(`routing/session.rs:4223`) had zero call sites of any kind** — its only
+occurrence in the crate was its own definition. `session_router()`
+(`main.rs:3914`), the sole production constructor of `SessionRouter`, chained
+`with_override … with_price_table` and never the weights, so every router the
+shipped binary built scored with `ScoreWeights::default()` regardless of what a
+user configured. The config layer (`EffectiveConfig::score_weights`,
+`config/mod.rs:5576`) was correct; nothing read its output.
+
+Three independent proofs, all reproduced by the orchestrator before un-ticking:
+
+- `grep -rn 'with_score_weights('` — one hit, the definition.
+- A tripwire test through the real constructor
+  (`main.rs::tests::a_configured_score_weight_reaches_the_real_session_router`):
+  a `health_failure_penalty: -50.0` override against a default of `-0.3`, one
+  observed failure, real `session_router()` both times — **identical totals**
+  (`left: -0.4, right: -0.4`). Red on `a79b276`.
+- A mutation on `SessionRouter::choose` itself — `&self.score_weights,` →
+  `&ScoreWeights::default(),` — **SURVIVED** the entire `routing_policy` suite
+  (`37 passed; 0 failed`), which holds 1357's own acceptance tests. They call
+  `provider_health`/`quota_pressure` by hand, so they cannot see whether the
+  router uses its field.
+
+**The "recorded limit" above — *"the acceptance tests call `provider_health`
+and `quota_pressure` directly rather than driving a full
+`SessionRouter::choose`"* — was the load-bearing defect filed as a footnote.**
+Practice §36's question was not asked: does a caller *exercise* the policy? The
+two recorded mutations were genuinely KILLED, by tests on a path the shipped
+binary never takes. This is the twelfth wrongly ticked box in the project and
+the shape is the same as the other eleven, with one twist worth recording:
+`cluster-b.py` could not have found it, because its row filter
+(`prod==0 and test>0`) hides a symbol with no callers of any kind. **A grep for
+the builder's name is the check; the script is not sufficient for a
+zero-caller symbol.**
+
+1358 falls with 1357: its behavioural half rests, by this entry's own words,
+on 1357's mutations proving an override reaches a real decision, and they did
+not.
+
 ---
 
 # A gate gap this package exposed, and it is the orchestrator's error
