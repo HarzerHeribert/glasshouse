@@ -146,6 +146,16 @@ if [ -d "$WT/.git" ] || [ -f "$WT/.git" ]; then
     sz="$(du -sh "$WT/target" 2>/dev/null | cut -f1)"
     rm -rf "$WT/target" && echo "reclaimed $sz of build output from $NAME's worktree"
   fi
+  # The per-name build cache new-worker.sh gave this worker
+  # (~/.cache/glasshouse-worker-targets/<name>) is the same hazard again, one
+  # directory over: 59 of them held 156 GB on 2026-09-02 and the Linux gate leg
+  # failed three steps at once with ENOSPC. A closed worker's cache is dead
+  # weight; a re-dispatch under the same name pays one cold build.
+  CACHE="$HOME/.cache/glasshouse-worker-targets/$NAME"
+  if [ -d "$CACHE" ]; then
+    sz="$(du -sh "$CACHE" 2>/dev/null | cut -f1)"
+    rm -rf "$CACHE" && echo "reclaimed $sz of build cache from $CACHE"
+  fi
   VOL="glasshouse-ci-home-$(cd "$WT" 2>/dev/null && printf '%s' "$PWD" | shasum | cut -c1-12)"
   if docker volume rm "$VOL" >/dev/null 2>&1; then
     echo "removed this worktree's Linux build volume ($VOL)"

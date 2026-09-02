@@ -131,8 +131,10 @@ fi
 # NAME rather than living inside its worktree, so a second-ever dispatch under
 # the same name -- and every rebuild inside one dispatch -- reuses artifacts
 # instead of cold-building (today's default: ~10+ min per fresh worktree).
-# `close-worker.sh` removes the worktree but never this directory; reclaim it
-# explicitly with `scripts/reap-worktrees.sh --reap-caches`. Only reached past
+# `close-worker.sh` removes it with the pane (since 2026-09-02: 59 of them
+# held 156 GB and the Linux gate leg failed with ENOSPC); a cache that
+# outlived its pane is reclaimed with `scripts/reap-worktrees.sh
+# --reap-caches`. Only reached past
 # the --print-prompt short-circuit above, so a prompt-only invocation stays
 # side-effect-free.
 #
