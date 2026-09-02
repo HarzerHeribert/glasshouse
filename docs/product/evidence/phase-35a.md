@@ -130,3 +130,208 @@ passes. Co-edited with `GH-BURN-FORECAST` on both files (§77).
 `GH-BURN-FORECAST` on `main.rs`.
 
 **1519** stays refused.
+
+---
+
+# Cause 3 — CLOSED 2026-09-02 (`GH-CANDIDATE-PROOFS`, Green, tests only)
+
+Seven lines, nine tests, zero production lines changed, every census mutation
+KILLED with its killing test named and its failure text quoted. Six tick in
+this commit; **1513 stays open** until `GH-CANDIDATE-GEN` lands its capability
+arm and the gateway-backed capability test with it. The worker read
+`burn-forecast`'s `main.rs` diff once at finalization (§77) and adapted
+nothing: the peer's edits are inside `routing_destinations`'s body and the
+capacity helpers, and its tests call only signatures.
+
+### Generate routing candidates from relevant existing sessions before considering fresh sessions. (line 1511)
+
+Contract: Given a project with one existing session and the implied Native profile, when routing_destinations builds its candidate vector, existing sessions occupy earlier indices than every fresh destination, while no production behaviour changes.
+
+State: **COMPLETE** — ruled 2026-09-02. The test drives `routing_destinations` on a real project store and the mutation reversed the passes; proof-only, no production change.
+
+Production evidence:
+- `crates/glasshouse/src/main.rs` — `routing_destinations`
+
+Regression evidence:
+- `main.rs::tests::routing_destinations_generates_existing_sessions_before_fresh_ones_1511`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| built fresh destinations into a separate `fresh_destinations` vec inside the offered-profile loop and changed the final `Ok(destinations)` to `Ok(fresh_destinations.into_iter().chain(destinations).collect())` | `reorder-generation-passes` | **killed** | `main.rs::tests::routing_destinations_generates_existing_sessions_before_fresh_ones_1511` |
+
+> reorder-generation-passes observed: assertion `existing_index < fresh_index` failed: existing sessions must be generated before fresh ones
+
+Recorded scope limits — stated by the worker, not discovered later:
+- proves generation order only; the tiebreaker effect on SessionRouter::choose itself is documented at session.rs:4314-4315 and not separately re-derived here
+
+---
+
+### Generate fresh native-subscription session candidates from enabled harness launch profiles. (line 1512)
+
+Contract: Given a project with only the implied Native profile enabled, when routing_destinations builds fresh candidates, a fresh Native-backed destination for the harness exists, while no production behaviour changes.
+
+State: **COMPLETE** — ruled 2026-09-02. Proof-only.
+
+Production evidence:
+- `crates/glasshouse/src/main.rs` — `routing_destinations`
+- `crates/glasshouse/src/main.rs` — `destination_backend`
+
+Regression evidence:
+- `main.rs::tests::routing_destinations_offers_a_fresh_native_destination_from_the_enabled_profile_1512`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| for name in offered { -> for name in offered { if name == glasshouse::profile::NATIVE_PROFILE_NAME { continue; } | `skip-native-in-generation-loop` | **killed** | `main.rs::tests::routing_destinations_offers_a_fresh_native_destination_from_the_enabled_profile_1512` |
+
+> skip-native-in-generation-loop observed: panic: the enabled implied Native profile must offer a fresh destination for this harness (the .find() returned None)
+
+---
+
+### Generate fresh gateway-backed session candidates only as installed-harness launch profiles whose protocol, model, tool semantics, and capability requirements match. (line 1513)
+
+Contract: Given a destination whose backend's protocol the harness cannot speak (no translation pair) or whose tool semantics are established absent while the task needs tool calls, when SessionRouter applies its hard constraints, that destination is excluded before scoring, while a compatible sibling is chosen, and while no production behaviour changes.
+
+State: **PARTIALLY VERIFIED** — ruled 2026-09-02. Protocol and tool-semantics halves proven through the real gate; the capability half is line 1517's arm (`GH-CANDIDATE-GEN`) and this line ticks with it, citing that package's gateway-backed capability test.
+
+Production evidence:
+- `crates/glasshouse/src/routing/session.rs` — `hard_constraint`
+- `crates/glasshouse/src/routing/session.rs` — `classify_destination`
+
+Regression evidence:
+- `tests/routing_candidates.rs::a_protocol_incompatible_destination_is_excluded_before_scoring_1513`
+- `tests/routing_candidates.rs::a_tool_incompatible_destination_is_excluded_when_the_task_needs_tool_calls_1513`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| if classify_destination(...).protocol_fit() == ProtocolFit::Incompatible -> if false && classify_destination(...).protocol_fit() == ProtocolFit::Incompatible | `drop-protocol-hard-constraint` | **killed** | `tests/routing_candidates.rs::a_protocol_incompatible_destination_is_excluded_before_scoring_1513` |
+| if inputs.requirements.needs_tool_calls && ... == KnownAbsent -> if false && inputs.requirements.needs_tool_calls && ... == KnownAbsent | `drop-tool-semantics-hard-constraint` | **killed** | `tests/routing_candidates.rs::a_tool_incompatible_destination_is_excluded_when_the_task_needs_tool_calls_1513` |
+
+> drop-protocol-hard-constraint observed: assertion left == right failed: the protocol-incompatible destination must be hard-refused, not scored
+
+> drop-tool-semantics-hard-constraint observed: assertion left == right failed (HardConstraint::ToolSemantics expected, refused list was empty)
+
+Recorded scope limits — stated by the worker, not discovered later:
+- the capability half (line 1517, GH-CANDIDATE-GEN) is out of scope per the packet and not proven here
+
+---
+
+### Never generate a direct API or gateway endpoint as a first-class interactive session candidate without an owning installed harness. (line 1514)
+
+Contract: Given a harness with no configured executable and no candidate name resolvable on PATH, when session::select::select_with resolves it for the acting (launch) path, selection fails with SelectionError::NotInstalled before routing_destinations is ever called, while no production behaviour changes.
+
+State: **COMPLETE** — ruled 2026-09-02, on the acting path. The report-only `glasshouse route` ranking of a config-enabled, not-installed harness is recorded as a limit in the census entry above and is not this line's subject: nothing is generated as a session candidate there.
+
+Production evidence:
+- `crates/glasshouse/src/session/select.rs` — `select_with`
+- `crates/glasshouse/src/session/select.rs` — `resolve_executable`
+
+Regression evidence:
+- `session/select.rs::tests::an_uninstalled_harness_is_refused_before_any_routing_candidate_could_exist_1514`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| Err(SelectionError::NotInstalled { id }) -> resolve_configured(Path::new("/bypassed-installed-check")).map(|executable| (executable, ExecutableSource::Path { name: "bypassed".to_owned() })).map_err(|_| SelectionError::NotInstalled { id }) | `bypass-installed-check` | **killed** | `session/select.rs::tests::an_uninstalled_harness_is_refused_before_any_routing_candidate_could_exist_1514` |
+
+> bypass-installed-check observed: panic in the test's no_configured_lookup guard: "has no configured executable to resolve" — the mutated code reached the configured resolver instead of cleanly refusing
+
+Recorded scope limits — stated by the worker, not discovered later:
+- proof scoped to the acting (launch) path; the report-only `glasshouse route` gap (route_recommendation ranking a config-enabled-but-not-installed harness) is a recorded limit per the census, not addressed
+- ResolvedExecutable has no public constructor outside platform::exec's real resolvers, so the mutation's KILLED verdict comes from a panic in the test's own guard rather than from a fabricated successful executable reaching a routing candidate directly
+
+---
+
+### Generate disposable-job candidates for tasks that do not need a first-class interactive session. (line 1515)
+
+Contract: Given a configured provider naming both a free and a metered model with a resolvable credential, when disposable_candidates builds candidates, one DisposableCandidate exists per named model for that provider, while no production behaviour changes.
+
+State: **COMPLETE** — ruled 2026-09-02. Proof-only.
+
+Production evidence:
+- `crates/glasshouse/src/main.rs` — `disposable_candidates`
+
+Regression evidence:
+- `main.rs::tests::disposable_candidates_builds_one_per_configured_free_and_metered_model_1515`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| the function's final `candidates` return value replaced with `Vec::new()` | `empty-disposable-candidates` | **killed** | `main.rs::tests::disposable_candidates_builds_one_per_configured_free_and_metered_model_1515` |
+
+> empty-disposable-candidates observed: assert!(models.contains(&"free-model-1515")) failed: models was empty
+
+---
+
+### Exclude candidates explicitly disabled or forbidden by user policy. (line 1520)
+
+Contract: Given a profile disabled by user policy, that profile never reaches routing_destinations's generated set; given a destination backed by an entitlement whose rules deny its harness, SessionRouter excludes it (not merely scores it lower); while no production behaviour changes in either case.
+
+State: **COMPLETE** — ruled 2026-09-02. Both mechanisms proven; the disposable-side job-kind/metered axes stay covered by Phase 35B's own suite and are not re-derived here.
+
+Production evidence:
+- `crates/glasshouse/src/main.rs` — `routing_destinations`
+- `crates/glasshouse/src/routing/mod.rs` — `Entitlement::constraint`
+- `crates/glasshouse/src/routing/session.rs` — `hard_constraint`
+
+Regression evidence:
+- `main.rs::tests::routing_destinations_excludes_a_disabled_profile_before_generation_1520`
+- `tests/routing_candidates.rs::a_destination_backed_by_a_harness_denying_entitlement_is_excluded_not_scored_1520`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| .filter(|name| effective.profile_enabled(name).value) removed from the profile_names() pipeline | `bypass-profile-enabled-filter` | **killed** | `main.rs::tests::routing_destinations_excludes_a_disabled_profile_before_generation_1520` |
+| Entitlement::constraint's match on self.rules.refusal(...) replaced with an unconditional Ok(()) | `bypass-entitlement-constraint` | **killed** | `tests/routing_candidates.rs::a_destination_backed_by_a_harness_denying_entitlement_is_excluded_not_scored_1520` |
+
+> bypass-profile-enabled-filter observed: assert! failed: a profile disabled by user policy must never reach generation
+
+> bypass-entitlement-constraint observed: assertion left == right failed: a candidate whose entitlement forbids this harness must be excluded, not merely disfavoured by scoring
+
+Recorded scope limits — stated by the worker, not discovered later:
+- the disposable-side entitlement axes (job_constraint, permits_metered in disposable.rs) are a third mechanism the recon named but the packet scoped this file's 1520 test to the interactive SessionRouter path; not separately proven here
+
+---
+
+### Keep at least one deterministic fallback candidate when a usable native session exists. (line 1521)
+
+Contract: Given a user config entry attempting to disable the implied Native profile by name, EffectiveConfig::profile_enabled still answers true for it, and a Destination built from it survives SessionRouter::choose end to end against a task with no tier requirement, while no production behaviour changes.
+
+State: **COMPLETE** — ruled 2026-09-02, for a task with no tier requirement — the boundary the line's own word *usable* draws.
+
+Production evidence:
+- `crates/glasshouse/src/config/mod.rs` — `EffectiveConfig::profile_enabled`
+- `crates/glasshouse/src/routing/session.rs` — `hard_constraint`
+- `crates/glasshouse/src/routing/session.rs` — `SessionRouter::choose`
+
+Regression evidence:
+- `tests/routing_candidates.rs::the_native_profile_survives_as_a_deterministic_fallback_end_to_end_1521`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| profile_enabled's `if name == NATIVE_PROFILE_NAME { return Layered::new(true, Layer::Default); }` short-circuit removed | `consult-table-for-native` | **killed** | `tests/routing_candidates.rs::the_native_profile_survives_as_a_deterministic_fallback_end_to_end_1521` |
+
+> consult-table-for-native observed: assert! failed on profile_enabled(NATIVE_PROFILE_NAME).value, because the planted [profiles.native] enabled=false entry was now consulted
+
+Recorded scope limits — stated by the worker, not discovered later:
+- proven only for a task with no tier requirement, per the packet's own instruction — a Native profile whose resolved model's ceiling is below a classified minimum tier is not claimed to survive by this line
+
+---
+
+## REVIEW — the orchestrator owes an answer to each of these
+
+This section is the point of the generator. Everything above is the
+worker's facts, transcribed. Nothing below is decided.
+
+- **1511** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
+- **1512** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
+- **1513** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
+- **1514** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
+- **1515** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
+- **1520** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
+- **1521** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
+
+Gates the worker ran (re-run the decisive ones yourself):
+- cargo test -p glasshouse --bin glasshouse routing_destinations: ok. 5 passed; 0 failed
+- cargo test -p glasshouse --bin glasshouse disposable_candidates_builds_one_per_configured: ok. 1 passed; 0 failed
+- cargo test -p glasshouse --lib session::select: ok. 16 passed; 0 failed
+- cargo test -p glasshouse --test routing_candidates: ok. 4 passed; 0 failed
+- cargo clippy -p glasshouse --all-targets --all-features -- -D warnings: clean
+- scripts/blast-radius.sh --targeted crates/glasshouse/src/main.rs crates/glasshouse/src/session/select.rs crates/glasshouse/tests/routing_candidates.rs: every traced target passed
+

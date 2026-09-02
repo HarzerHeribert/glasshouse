@@ -1508,17 +1508,17 @@ Fixed architectural requirements
 - Candidate generation applies hard compatibility and policy constraints before scoring.
 - A backend without an owning installed harness, required protocol, required tools, or security compatibility is not a valid interactive candidate regardless of price or capacity.
 
-☐ Generate routing candidates from relevant existing sessions before considering fresh sessions.
-☐ Generate fresh native-subscription session candidates from enabled harness launch profiles.
+☑ Generate routing candidates from relevant existing sessions before considering fresh sessions.
+☑ Generate fresh native-subscription session candidates from enabled harness launch profiles.
 ☐ Generate fresh gateway-backed session candidates only as installed-harness launch profiles whose protocol, model, tool semantics, and capability requirements match.
-☐ Never generate a direct API or gateway endpoint as a first-class interactive session candidate without an owning installed harness.
-☐ Generate disposable-job candidates for tasks that do not need a first-class interactive session.
+☑ Never generate a direct API or gateway endpoint as a first-class interactive session candidate without an owning installed harness.
+☑ Generate disposable-job candidates for tasks that do not need a first-class interactive session.
 ☑ Exclude candidates below the classified minimum workload tier.
 ☐ Exclude candidates missing a hard required capability.
 ☐ Exclude candidates whose provider is unavailable or in an authoritative cooldown.
 ☐ Exclude candidates whose user-defined spending budget has been exhausted.
-☐ Exclude candidates explicitly disabled or forbidden by user policy.
-☐ Keep at least one deterministic fallback candidate when a usable native session exists.
+☑ Exclude candidates explicitly disabled or forbidden by user policy.
+☑ Keep at least one deterministic fallback candidate when a usable native session exists.
 
 Phase 35B — Candidate scoring
 

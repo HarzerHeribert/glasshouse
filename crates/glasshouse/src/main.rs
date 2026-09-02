@@ -15970,4 +15970,174 @@ mod tests {
              regression `04060da` must reproduce exactly"
         );
     }
+
+    /// Map line 1511: `routing_destinations` builds its vector in two
+    /// passes — existing sessions first (`main.rs:1093-1195`), fresh
+    /// destinations second (`:1198-1308`) — and `SessionRouter::choose`
+    /// treats vector order as its own tiebreaker
+    /// (`routing/session.rs:4314-4315`). This drives the real generator and
+    /// asserts the existing session's position precedes every fresh one;
+    /// the census's mutation (reverse the two passes) puts the fresh
+    /// destination first instead.
+    #[test]
+    fn routing_destinations_generates_existing_sessions_before_fresh_ones_1511() {
+        let fixture = CliFixture::new();
+        let sessions = ProjectSessions::open(&fixture.runtime).unwrap();
+        sessions
+            .store()
+            .create(NewSession::embedded("claude-code"))
+            .unwrap();
+
+        let user = UserConfig::load(fixture.runtime.paths()).unwrap();
+        let project = config::load_project_config(fixture.runtime.project()).unwrap();
+        let effective = EffectiveConfig::new(&user, project.as_ref());
+        let destinations = routing_destinations(
+            &fixture.runtime,
+            &effective,
+            glasshouse::integrations::IntegrationId::ClaudeCode,
+            DestinationScope::Everything,
+            None,
+        )
+        .unwrap();
+
+        let existing_index = destinations
+            .iter()
+            .position(|d| !d.is_fresh())
+            .expect("the session created above must offer an existing destination");
+        let fresh_index = destinations
+            .iter()
+            .position(|d| d.is_fresh())
+            .expect("at least the implied Native profile offers a fresh destination");
+        assert!(
+            existing_index < fresh_index,
+            "existing sessions must be generated before fresh ones: existing at \
+             {existing_index}, fresh at {fresh_index}"
+        );
+    }
+
+    /// Map line 1512: the fresh-destination loop (`main.rs:1237-1308`) builds
+    /// one `Destination` per *enabled* profile, and the implied Native
+    /// profile is always in that enabled set
+    /// (`EffectiveConfig::profile_enabled`, `config/mod.rs:5045-5048`). A
+    /// project with no other profiles configured must still offer a fresh
+    /// Native destination — the census's mutation (skip Native profiles in
+    /// the generation loop) leaves no fresh destination at all here.
+    #[test]
+    fn routing_destinations_offers_a_fresh_native_destination_from_the_enabled_profile_1512() {
+        let fixture = CliFixture::new();
+        let user = UserConfig::load(fixture.runtime.paths()).unwrap();
+        let project = config::load_project_config(fixture.runtime.project()).unwrap();
+        let effective = EffectiveConfig::new(&user, project.as_ref());
+        let harness = glasshouse::integrations::IntegrationId::ClaudeCode;
+
+        let destinations = routing_destinations(
+            &fixture.runtime,
+            &effective,
+            harness,
+            DestinationScope::Everything,
+            None,
+        )
+        .unwrap();
+
+        let native = destinations
+            .iter()
+            .find(|d| d.is_fresh() && d.backend().provider() == harness.slug())
+            .expect(
+                "the enabled implied Native profile must offer a fresh destination for this \
+                 harness",
+            );
+        assert_eq!(
+            native.launch_profile(),
+            glasshouse::profile::NATIVE_PROFILE_NAME,
+            "the fresh Native destination must carry the implied Native profile's own name"
+        );
+    }
+
+    /// Map line 1515: `disposable_candidates` builds one `DisposableCandidate`
+    /// per configured provider's free and metered models
+    /// (`main.rs:6901-6960`). The census's mutation (make the function
+    /// return empty when free/metered models are configured) leaves a
+    /// configured provider with no candidate at all.
+    #[test]
+    fn disposable_candidates_builds_one_per_configured_free_and_metered_model_1515() {
+        const VAR: &str = "GLASSHOUSE_TEST_ONLY_1515_CANDIDATE_KEY";
+        // SAFETY: `VAR` is unique to this test and removed again below.
+        unsafe {
+            std::env::set_var(VAR, "sk-fabricated-test-value-not-a-real-credential");
+        }
+
+        let fixture = CliFixture::new();
+        let mut user = UserConfig::load(fixture.runtime.paths()).unwrap();
+        let mut provider = glasshouse::config::ProviderConfig::new("openai-compatible");
+        provider.set_credential_env(vec![VAR.to_owned()]);
+        provider.set_free_models(vec!["free-model-1515".to_owned()]);
+        provider.set_metered_models(vec!["metered-model-1515".to_owned()]);
+        user.providers_mut().set("test-provider-1515", provider);
+        user.save(fixture.runtime.paths()).unwrap();
+
+        let user = UserConfig::load(fixture.runtime.paths()).unwrap();
+        let effective = EffectiveConfig::new(&user, None);
+        let secrets = glasshouse::secret::native::PreferNativeSecretStore::detect();
+        let telemetry = glasshouse::provider::resources::GatheredTelemetry::new();
+        let now_unix = glasshouse::provider::cache::now_unix_seconds();
+
+        let candidates =
+            disposable_candidates(&user, None, &effective, &secrets, &telemetry, now_unix);
+
+        unsafe {
+            std::env::remove_var(VAR);
+        }
+
+        let models: Vec<&str> = candidates
+            .iter()
+            .filter(|candidate| candidate.provider() == "test-provider-1515")
+            .map(|candidate| candidate.model())
+            .collect();
+        assert!(
+            models.contains(&"free-model-1515"),
+            "a configured free model must produce a candidate: {models:?}"
+        );
+        assert!(
+            models.contains(&"metered-model-1515"),
+            "a configured metered model must produce a candidate: {models:?}"
+        );
+    }
+
+    /// Map line 1520's generation-time half: a disabled profile never reaches
+    /// the offered set at all (`main.rs:1233`,
+    /// `.filter(|name| effective.profile_enabled(name).value)`), so no
+    /// `Destination` is ever built for it. The census's mutation (bypass
+    /// this filter) would let a disabled profile reach generation.
+    #[test]
+    fn routing_destinations_excludes_a_disabled_profile_before_generation_1520() {
+        let fixture = CliFixture::new();
+        let harness = glasshouse::integrations::IntegrationId::ClaudeCode;
+        let mut user = UserConfig::load(fixture.runtime.paths()).unwrap();
+        let mut profile = glasshouse::config::ProfileConfig::new(harness);
+        profile.set_enabled(false);
+        user.profiles_mut().set("disabled-profile-1520", profile);
+        user.save(fixture.runtime.paths()).unwrap();
+
+        let user = UserConfig::load(fixture.runtime.paths()).unwrap();
+        let effective = EffectiveConfig::new(&user, None);
+        let destinations = routing_destinations(
+            &fixture.runtime,
+            &effective,
+            harness,
+            DestinationScope::Everything,
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            !destinations
+                .iter()
+                .any(|d| d.launch_profile() == "disabled-profile-1520"),
+            "a profile disabled by user policy must never reach generation: {:?}",
+            destinations
+                .iter()
+                .map(|d| d.launch_profile())
+                .collect::<Vec<_>>()
+        );
+    }
 }

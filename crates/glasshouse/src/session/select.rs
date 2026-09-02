@@ -765,6 +765,39 @@ mod tests {
         assert!(err.to_string().contains("could not be resolved"), "{err}");
     }
 
+    /// Map line 1514 (acting path): `resolve_executable` (`:554-586`) is
+    /// asked before `launch_session` ever calls `routing_destinations`, and
+    /// a harness with no configured executable and no candidate name found
+    /// on `PATH` is refused with `SelectionError::NotInstalled` — never a
+    /// resolved executable a routing candidate could then be built from. The
+    /// census's mutation (bypass this check and fabricate a resolved
+    /// executable) would let a not-installed harness's candidates reach
+    /// generation.
+    #[test]
+    fn an_uninstalled_harness_is_refused_before_any_routing_candidate_could_exist_1514() {
+        let user = UserConfig::default();
+
+        let err = select_with(
+            Some("claude-code"),
+            EffectiveConfig::new(&user, None),
+            no_configured_lookup("no path is configured for this harness"),
+            |name| {
+                Err(ResolveError::NotFound {
+                    name: name.to_owned(),
+                })
+            },
+        )
+        .unwrap_err();
+
+        match err {
+            SelectionError::NotInstalled { id } => {
+                assert_eq!(id, IntegrationId::ClaudeCode);
+            }
+            other => panic!("expected NotInstalled, got {other:?}"),
+        }
+        assert!(err.to_string().contains("is not installed"), "{err}");
+    }
+
     #[test]
     fn automatic_selection_picks_a_sole_enabled_harness() {
         let tmp = tempfile::tempdir().unwrap();
