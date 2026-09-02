@@ -4741,3 +4741,67 @@ The rule's practical consequence today: **investigation dispatches are
 permitted** — ~100k is well under the 250k gate — which is why `recon-33b` (a
 read-only census of the largest never-investigated phase) went out beside an
 implementation package rather than waiting behind it.
+
+## Batch 80 (2026-09-02, morning) — twenty boxes, three phases nearly emptied, a twelfth wrongly ticked box, and the Windows leg does not build
+
+First session on `claude-fable-5-1[1m]`. **Map 1159 -> 1179** (1357/1358
+re-opened and re-closed inside the window, so the gross is 22). Five
+integrations, two censuses, one audit, one fix-forward, one cross-platform run.
+
+| package | tier | result |
+|---|---|---|
+| `burn-forecast` | Opus 5 high, Red | **1274, 1277–1283 closed** (Phase 32E 8/10); 1276 HELD — reader with zero production callers |
+| `class-rate-surface` | Sonnet medium, Green | **1276 closed** — the reader's first caller, gated at the surface |
+| `candidate-proofs` | Sonnet medium, Green | **1511, 1512, 1514, 1515, 1520, 1521 closed** — seven proof-only lines, seven KILLED mutations |
+| `candidate-gen` | Sonnet high, Amber | **1517, 1518, 1513 closed** (Phase 35A 10/11) — two gate arms; two pre-existing fixture families re-ruled |
+| `decouple-proofs` | Sonnet medium, Green | **1945, 1955 closed** |
+| `audit-wave79` | Sonnet high, read-only | 1546/1353/1359 confirmed; **1357/1358 re-opened** — `session_router()` never called `with_score_weights` |
+| `recon-35a`, `recon-56` | Sonnet high, read-only | Phase 35A and Phase 56 censused; both named their packages the same day and both packages closed boxes within hours |
+| 1908 run | `ci-local.sh --macos --linux --windows-vm` | macOS green after attribution, Linux green, **Windows does not compile** (`dfaf27f`, `api::mute` under `cfg(unix)` called unconditionally) — `windows-test-build` is live |
+
+**Output per net closed box, measured:** `usage-snapshot.py --glasshouse
+--since 2026-09-02` at the class-rate integration read ~1.13M output for the
+main checkout and ~1.4M across the worker directories — **~2.5M for +20 net,
+~125k per box**, inside the healthy band (57k–126k) and a quarter of the
+250k gate.
+
+### The four findings worth carrying forward
+
+**1. A "recorded limit" that says the tests bypass the real path is the
+defect (§90).** The 1357 entry filed *"the acceptance tests call the scorers
+directly rather than driving `SessionRouter::choose`"* as a footnote; the
+audit asked §36's question and found `with_score_weights` had zero callers of
+any kind. The fix was one line; the audit's tripwire became the acceptance
+test. `cluster-b.py` could not have found it (its filter hid zero-caller
+symbols) and now lists them.
+
+**2. A census pays the same day.** Two censuses (33B, 32E) paid last session;
+two more (35A, 56) paid this one — 35A went from no ledger entry to 10/11 in
+under six hours, through one Amber and one Green package the census scoped.
+The pattern is now four for four: *the census names the package, the package
+is dispatched the same session, the boxes close.* Investigation that ends in a
+dispatch is not trap 1.
+
+**3. A refusal can be scoped to the wrong type.** 566/569 were refused on a
+constancy proof about `routing::interactive`'s model-less `UpstreamBackend`
+and cited by `routing/session.rs` as covering the session router, whose
+destinations carry a per-profile model. The recon's added question found it;
+`GH-PAIRING-PRIOR` (four boxes) is live. **A refusal names the type it
+examined, or it will be applied to one it did not.**
+
+**4. The targeted gate's own compile step found stragglers twice.** Migration
+23's ripple included a schema census in `session::store` and a bare-literal
+version pin that no `version, 22` grep matched — both caught by
+`blast-radius.sh --targeted`, both fixed by the worker. The grep for a
+migration ripple is for the *assertion*, not one spelling of it.
+
+### Two operational notes
+
+- **Claude Code 2.1.258 starts slower than `new-worker.sh` waits**: every
+  dispatch printed "DID NOT ACCEPT" with the prompt sitting in the box. Poll
+  for the banner, then one Enter (memory updated). The script's wait should
+  grow.
+- **Adjacent-addition conflicts at the end of `main.rs`'s test module are
+  now routine** — three packages appended there in one wave. Resolution is
+  mechanical (keep both, duplicate the shared closer once), and `integrate.sh`
+  stops at the apply so the hand gate must follow.

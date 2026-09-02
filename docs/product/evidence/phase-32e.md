@@ -469,3 +469,59 @@ Gates the worker ran (re-run the decisive ones yourself):
 - The pre-existing red the packet named (gateway::session::tests::observe_exchange_scores_a_real_failover_against_the_configured_preference) did NOT appear in any of the four --targeted runs. Not chased.
 - co-edit §77: coedit.sh diff run once each on routing/session.rs, routing/mod.rs and main.rs at finalization. No peer hunk overlapped mine and nothing needed adapting; all three released with coedit.sh done, and main.rs's barrier is now OPEN for the orchestrator.
 
+---
+
+# 1276 — CLOSED 2026-09-02 (`GH-CLASS-RATE-SURFACE`, Green, Sonnet medium): the held line gets its caller
+
+`build_project_overview_capacity` now calls `task_class_request_rates` over
+the rows it already reads and prints one hedged line — *requests by task class
+(recent, estimated)* — for every class with at least `MIN_ROWS_FOR_BURN_RATE`
+live rows. Two KILLED mutations: drop the call, and drop the gate. The
+no-forecast and empty-ledger lines are pinned byte-identical.
+
+### Maintain a short moving average of requests consumed per task class. (line 1276)
+
+Contract: Given routed requests recorded over a window, when a reader asks how much of each task class is being consumed, Glasshouse answers with a robust rolling per-class request rate built from the class each decision actually recorded, printing a class only when it has at least MIN_ROWS_FOR_BURN_RATE live rows, while naming no class for a row whose producer ran no classifier.
+
+State: **COMPLETE** — ruled 2026-09-02. The reader's first production caller. The orchestrator's packet claimed the reader gated at `MIN_ROWS_FOR_BURN_RATE`; it does not, and the worker said so — so the gate lives at the surface, on the `rows` count `ClassRate` already carries, with its own KILLED mutation. A rate from one row is not something a person should read as a moving average.
+
+Production evidence:
+- `src/shell/mod.rs` — `build_project_overview_capacity`
+
+Regression evidence:
+- `shell::project_overview_capacity_tests::a_class_with_recent_rows_prints_a_hedged_line_and_an_absent_class_prints_nothing`
+- `shell::project_overview_capacity_tests::a_class_below_the_minimum_row_count_does_not_print_even_though_the_reader_would_name_it`
+- `shell::project_overview_capacity_tests::an_empty_ledger_prints_the_capacity_overview_byte_identical_to_before`
+- `shell::project_overview_capacity_tests::a_resource_with_no_forecast_prints_exactly_what_it_printed_before`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| task_class_request_rates(rows, now_unix, None) call replaced with a hardcoded empty Vec<ClassRate> (push nothing) | `skip-state-update` | **killed** | `shell::project_overview_capacity_tests::a_class_with_recent_rows_prints_a_hedged_line_and_an_absent_class_prints_nothing` |
+| .filter(|rate| rate.rows >= crate::routing::burn::MIN_ROWS_FOR_BURN_RATE) replaced with .filter(|_rate| true) | `remove-validation` | **killed** | `shell::project_overview_capacity_tests::a_class_below_the_minimum_row_count_does_not_print_even_though_the_reader_would_name_it` |
+
+> skip-state-update observed: panicked at crates/glasshouse/src/shell/mod.rs:4543:32: no task-class line in []
+
+> remove-validation observed: panicked at crates/glasshouse/src/shell/mod.rs:4612:9 (the !class_line.contains("investigation") assertion)
+
+Recorded scope limits — stated by the worker, not discovered later:
+- The MIN_ROWS_FOR_BURN_RATE gate on printed classes is enforced in shell/mod.rs, not in task_class_request_rates itself -- routing/burn.rs's reader still names a class from a single row; a future direct caller of the reader elsewhere would need its own gate.
+- Does not re-prove task_class_request_rates's own median/windowing correctness -- that is burn.rs's own mutation suite, per the original packet.
+- No Windows/Linux run for this change; the file is flagged platform-conditional for pre-existing unrelated code, not this diff.
+
+---
+
+## REVIEW — the orchestrator owes an answer to each of these
+
+This section is the point of the generator. Everything above is the
+worker's facts, transcribed. Nothing below is decided.
+
+- **1276** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
+
+Gates the worker ran (re-run the decisive ones yourself):
+- cargo test -p glasshouse --lib shell::project_overview_capacity_tests: ok. 14 passed; 0 failed
+- cargo test -p glasshouse --lib shell::: ok. 302 passed; 0 failed
+- cargo clippy -p glasshouse --all-targets --all-features -- -D warnings: clean
+- scripts/blast-radius.sh --targeted crates/glasshouse/src/shell/mod.rs: every traced target passed
+
+
+**Phase 32E stands at 9 of 10.** 1275 stays with register row P1b.

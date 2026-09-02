@@ -1527,7 +1527,7 @@ fn build_project_overview_capacity(runtime: &Runtime) -> Vec<String> {
         })
         .ok();
 
-    providers
+    let mut lines: Vec<String> = providers
         .into_iter()
         .map(|provider| {
             let kind = ResourceKind::from_direct_provider(&provider);
@@ -1560,7 +1560,37 @@ fn build_project_overview_capacity(runtime: &Runtime) -> Vec<String> {
                 forecast,
             )
         })
-        .collect()
+        .collect();
+
+    // Line 1276: the same rows the forecasts above already opened, read
+    // once more for the moving average per task class. Absent entirely,
+    // never a zero, when no class has enough live rows — the same
+    // fail-soft shape the per-resource lines above already use.
+    //
+    // `task_class_request_rates` itself has no row-count floor (it names a
+    // class the moment it has one live row) — gated here at
+    // `MIN_ROWS_FOR_BURN_RATE`, the same minimum `burn_rate` already
+    // enforces for the per-resource line above, using the `rows` count each
+    // `ClassRate` already carries rather than widening the reader.
+    if let Some(rows) = consumption.as_ref() {
+        let rates = crate::routing::burn::task_class_request_rates(rows, now_unix, None);
+        let printable: Vec<_> = rates
+            .iter()
+            .filter(|rate| rate.rows >= crate::routing::burn::MIN_ROWS_FOR_BURN_RATE)
+            .collect();
+        if !printable.is_empty() {
+            let by_class = printable
+                .iter()
+                .map(|rate| format!("{} ~{:.1}/h", rate.class.as_str(), rate.requests_per_hour))
+                .collect::<Vec<_>>()
+                .join(" · ");
+            lines.push(format!(
+                "  requests by task class (recent, estimated)  {by_class}"
+            ));
+        }
+    }
+
+    lines
 }
 
 /// Map line 1661: the routing model currently selected to classify work, and
@@ -4478,6 +4508,149 @@ mod project_overview_capacity_tests {
         );
         assert!(lines[0].contains("82%"), "{lines:?}");
         assert!(lines[0].contains("[measured]"), "{lines:?}");
+    }
+
+    /// Line 1276's production caller. `task_class_request_rates` names a
+    /// class the moment it has at least one live row
+    /// (`routing::burn::task_class_rates_name_only_the_classes_that_have_rows`
+    /// plants six and gets a rate back) — there is no
+    /// `MIN_ROWS_FOR_BURN_RATE` gate on this reader, unlike
+    /// [`crate::routing::burn::burn_rate`]. So this plants a class with rows
+    /// and a class with none, real timestamps through the real ledger
+    /// (practice §35), and asserts the populated class's line and the
+    /// missing class's absence.
+    #[test]
+    fn a_class_with_recent_rows_prints_a_hedged_line_and_an_absent_class_prints_nothing() {
+        use crate::routing::evidence::{EvidenceLedger, NewObservation};
+        use crate::routing::request::TaskClass;
+
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+
+        let mut user = UserConfig::load(runtime.paths()).unwrap();
+        let provider = crate::config::ProviderConfig::new("openai-compatible");
+        user.providers_mut()
+            .set("overview-capacity-test-provider", provider);
+        user.save(runtime.paths()).unwrap();
+
+        let now_unix = crate::provider::cache::now_unix_seconds();
+        let ledger = EvidenceLedger::open(&runtime).unwrap();
+        for i in 0..12 {
+            ledger
+                .record(
+                    NewObservation::new("glasshouse", "session-router")
+                        .with_harness(Some("claude-code"))
+                        .with_task_class(Some(TaskClass::Question)),
+                    now_unix - 3600 + i * 60,
+                )
+                .unwrap();
+        }
+
+        let lines = build_project_overview_capacity(&runtime);
+        let class_line = lines
+            .iter()
+            .find(|line| line.contains("requests by task class"))
+            .unwrap_or_else(|| panic!("no task-class line in {lines:?}"));
+        assert!(class_line.contains("recent"), "{class_line}");
+        assert!(class_line.contains("estimated"), "{class_line}");
+        assert!(class_line.contains("question"), "{class_line}");
+        assert!(class_line.contains("/h"), "{class_line}");
+        assert!(
+            !class_line.contains("code modification"),
+            "a class with no rows must not appear: {class_line}"
+        );
+    }
+
+    /// The orchestrator's follow-up decision: `task_class_request_rates`
+    /// itself has no row-count floor, so a class with too few rows to be a
+    /// meaningful moving average must be gated in this module, at the same
+    /// `MIN_ROWS_FOR_BURN_RATE` the per-resource burn rate line already
+    /// enforces. Three rows of one class, twelve of another — only the
+    /// twelve-row class may print.
+    #[test]
+    fn a_class_below_the_minimum_row_count_does_not_print_even_though_the_reader_would_name_it() {
+        use crate::routing::evidence::{EvidenceLedger, NewObservation};
+        use crate::routing::request::TaskClass;
+
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+
+        let mut user = UserConfig::load(runtime.paths()).unwrap();
+        let provider = crate::config::ProviderConfig::new("openai-compatible");
+        user.providers_mut()
+            .set("overview-capacity-test-provider", provider);
+        user.save(runtime.paths()).unwrap();
+
+        let now_unix = crate::provider::cache::now_unix_seconds();
+        let ledger = EvidenceLedger::open(&runtime).unwrap();
+        // 3 rows is below `MIN_ROWS_FOR_BURN_RATE` (8); 12 is above it.
+        for i in 0..3 {
+            ledger
+                .record(
+                    NewObservation::new("glasshouse", "session-router")
+                        .with_harness(Some("claude-code"))
+                        .with_task_class(Some(TaskClass::Investigation)),
+                    now_unix - 3600 + i * 60,
+                )
+                .unwrap();
+        }
+        for i in 0..12 {
+            ledger
+                .record(
+                    NewObservation::new("glasshouse", "session-router")
+                        .with_harness(Some("claude-code"))
+                        .with_task_class(Some(TaskClass::CodeModification)),
+                    now_unix - 3600 + i * 60,
+                )
+                .unwrap();
+        }
+
+        let lines = build_project_overview_capacity(&runtime);
+        let class_line = lines
+            .iter()
+            .find(|line| line.contains("requests by task class"))
+            .unwrap_or_else(|| panic!("no task-class line in {lines:?}"));
+        assert!(class_line.contains("code modification"), "{class_line}");
+        assert!(
+            !class_line.contains("investigation"),
+            "a class with fewer than MIN_ROWS_FOR_BURN_RATE rows must not print, \
+             even though the reader itself would have named it: {class_line}"
+        );
+    }
+
+    /// The other half of line 1276's contract: an empty ledger prints
+    /// **exactly** what the overview printed before this line's call was
+    /// wired in — byte-identical, not merely "no task-class words".
+    #[test]
+    fn an_empty_ledger_prints_the_capacity_overview_byte_identical_to_before() {
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+
+        let mut user = UserConfig::load(runtime.paths()).unwrap();
+        let provider = crate::config::ProviderConfig::new("openai-compatible");
+        user.providers_mut()
+            .set("overview-capacity-test-provider", provider);
+        user.save(runtime.paths()).unwrap();
+
+        let now_unix = crate::provider::cache::now_unix_seconds();
+        crate::provider::telemetry::GatewayQuotaCache::new(runtime.paths()).store(
+            "overview-capacity-test-provider",
+            &crate::provider::telemetry::RateLimitHeaders::read(vec![
+                ("x-ratelimit-limit-requests", "100"),
+                ("x-ratelimit-remaining-requests", "82"),
+            ]),
+            now_unix,
+        );
+
+        let lines = build_project_overview_capacity(&runtime);
+        assert_eq!(lines.len(), 1, "{lines:?}");
+        assert!(
+            lines[0].contains("overview-capacity-test-provider"),
+            "{lines:?}"
+        );
+        assert!(lines[0].contains("82%"), "{lines:?}");
+        assert!(lines[0].contains("[measured]"), "{lines:?}");
+        assert!(
+            !lines[0].contains("task class"),
+            "no ledger rows means no task-class line, unchanged from before: {lines:?}"
+        );
     }
 }
 

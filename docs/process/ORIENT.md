@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1178 / 1332 mandatory capabilities (88%)** — 154 open across 42 phases.
+**1179 / 1332 mandatory capabilities (89%)** — 153 open across 42 phases.
 
 ## Where the work is
 
@@ -28,6 +28,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 21K | Assumption-aware implementation guardrails | **1** | 42 | `992` |
 | Phase 27 | Context injection | **1** | 10 | `1118` |
 | Phase 30 | Session context metadata | **1** | 7 | `1156` |
+| Phase 32E | Burn rate and exhaustion forecasting | **1** | 9 | `1272` |
 | Phase 32F | Protected quota reserve | **1** | 7 | `1285` |
 | Phase 34B | Routing-model role | **1** | 14 | `1406` |
 | Phase 34E | Router economics | **1** | 8 | `1461` |
@@ -42,7 +43,6 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 21F | Memory retrieval quality | **2** | 9 | `927` |
 | Phase 32C | Subscription capacity estimation | **2** | 10 | `1242` |
 | Phase 32D | Normalized remaining-capacity score | **2** | 10 | `1257` |
-| Phase 32E | Burn rate and exhaustion forecasting | **2** | 8 | `1272` |
 | Phase 33 | Resource health | **2** | 13 | `1309` |
 | Phase 38 | Quota-preserving routing | **2** | 5 | `1604` |
 | Phase 55 | V1 completion definition | **2** | 21 | `1910` |
@@ -103,6 +103,10 @@ these unwrapped.
 ### Phase 30 — Session context metadata  (1 open, 7 closed)
 
 - **1158** ☐ Track an estimated context-size value for a session when the harness exposes enough information.
+
+### Phase 32E — Burn rate and exhaustion forecasting  (1 open, 9 closed)
+
+- **1275** ☐ Maintain a short moving average of token consumption per task class.
 
 ### Phase 32F — Protected quota reserve  (1 open, 7 closed)
 
@@ -166,11 +170,6 @@ these unwrapped.
 
 - **1263** ☐ Lower the score when user-defined spending budget is close to exhaustion.
 - **1267** ☐ Treat unlimited local inference as high-capacity but still account for measured latency and concurrency.
-
-### Phase 32E — Burn rate and exhaustion forecasting  (2 open, 8 closed)
-
-- **1275** ☐ Maintain a short moving average of token consumption per task class.
-- **1276** ☐ Maintain a short moving average of requests consumed per task class.
 
 ### Phase 33 — Resource health  (2 open, 13 closed)
 
