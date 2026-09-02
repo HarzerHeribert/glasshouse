@@ -20,7 +20,33 @@ validated and waiting on the commit. Next action: `.agent-runtime/CONTINUATION.m
 > here is a product requirement. Capability requirements live only in
 > `docs/product/capability-map.md`.
 
-Last updated: 2026-09-02 (Europe/Berlin)
+Last updated: 2026-09-02, late night (Europe/Berlin)
+
+## Checkpoint — 2026-09-02, batch 94: 1264 / 1347 (93.9%) — the bootstrap race closed under independent verification, ten accepted lines land, Phases 33C and 34B complete, and Phase 28's producer found in Phase 57's hook
+
+Session `1ee4f96b` (Fable 5.1), inherited hot from `221d1dd9`. Wave 108
+lands the Red fix for the bootstrap race that failed every module-level
+`--lib database` run under load: the straggler waits on SQLite's own write
+lock instead of a 500 ms timer, with an independent Opus verifier's ACCEPT
+that answered the packet's WAL question by measurement and found the report's
+wrong bound, the `create_new` loser's remaining 5 s bet, and a test weaker
+than its claim (the variant assertion was added at integration). Wave 109
+lands the ten lines accepted before the handoff: the responsiveness terms
+(1351, 1352, 1355, 1542, 1543, 1544, 1845, 1850 — one reader over migration
+25's millisecond columns) and the last lines of Phases 33C and 34B (1366:
+provider cadence learned from throttle spacing; 1419: the premium capacity a
+classifier protects). Windows VM run 9 on `ad2e8f5` passed all three legs.
+The register's Phase 28 refusal — *the extraction input carries no prose* —
+was re-read against the tree: Phase 57's context firewall registers a
+`PostToolUse` hook with a wildcard matcher, so every edit's path already
+reaches a Glasshouse subprocess; the design (design-decisions, last section)
+records it as a `file_touched` lifecycle event through migration 26, a
+verbatim guard on the extraction model's answer, `referenced` associations,
+an edit-intent kind preference inside the ladder, and a commit-order
+freshness label. `GH-FILE-AWARE-MEMORY` (Red, Opus 5 high; 1139, 1141, 1142
+— completes Phase 28) dispatches on this commit. Parked with the user: whether
+the memory-rating ruling applies to routing decisions (unblocks 1834, 1835,
+1837, 1846, 1852). Exact next actions: `.agent-runtime/CONTINUATION.md`.
 
 ## Checkpoint — 2026-09-03, batch 93: 1254 / 1347 (93.1%) — the Windows leg fully green, migration 25's millisecond offsets, Phase 47 complete, and the board repackaged by mechanism
 

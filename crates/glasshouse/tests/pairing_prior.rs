@@ -857,3 +857,206 @@ fn a_session_start_explanation_names_every_signal_and_no_credential_value() {
          it:\n{rendered}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// `GH-RESPONSIVENESS-TERMS` — map line 1542: observed pairing reliability
+// replaces the same-vendor prior once enough local observations exist. This
+// is `session.rs`'s own "pairing prior"/"observed pairing reliability"
+// terms — a sibling mechanism to `config::pairing`'s "native-pairing prior"
+// tested above, reached the same way `tests/routing_score.rs`'s
+// responsiveness tests reach it: through `SessionRouter::choose`, the only
+// public door onto these private term functions.
+// ---------------------------------------------------------------------------
+
+use glasshouse::routing::evidence::RouteResponsiveness;
+use glasshouse::routing::free::FreePool;
+use glasshouse::routing::session::{
+    Destination, RouterInputs, RoutingMoment, SessionRouter, TaskRequirements,
+};
+use std::time::Instant;
+
+fn session_pairing_prior_backend(model: &str, var: &str) -> Backend {
+    Backend::new(
+        "anthropic",
+        "anthropic-messages",
+        AssignedModel::named(model),
+        CredentialId::new(
+            "anthropic",
+            SecretRef::Environment {
+                var: var.to_owned(),
+            },
+        ),
+        Cost::Metered,
+        ToolSemantics::Verified,
+    )
+}
+
+/// A vendor-native pairing (`claude-code` operating a `claude-*` model —
+/// the same combination `the_prior_is_never_a_filter_even_when_the_preference_is_off`
+/// classifies `VendorNative` above) with `evidence` local observations and
+/// an observed failure rate of `p`, `sample` of them carrying a known
+/// outcome.
+fn vendor_native_with_reliability(
+    id: &str,
+    var: &str,
+    evidence: u32,
+    p: f64,
+    sample: usize,
+) -> Destination {
+    Destination::fresh(
+        id,
+        IntegrationId::ClaudeCode,
+        "default",
+        session_pairing_prior_backend("claude-fable-5", var),
+        None,
+    )
+    .with_pairing_prior_evidence(evidence)
+    .with_route_responsiveness(Some(RouteResponsiveness {
+        raw_ttfc_ms: None,
+        raw_ttfc_sample: 0,
+        failure_rate: Some(p),
+        failure_rate_sample: sample,
+        rounds_per_minute: None,
+        rounds_per_minute_sample: 0,
+    }))
+}
+
+fn only_contribution(
+    routed: &glasshouse::routing::session::Routed,
+    name: &str,
+) -> glasshouse::routing::Contribution {
+    routed
+        .explanation()
+        .contributions()
+        .iter()
+        .find(|c| c.name() == name)
+        .unwrap_or_else(|| panic!("the explanation must always carry `{name}`"))
+        .clone()
+}
+
+/// **Line 1542, the failing side.** At `PAIRING_PRIOR_EVIDENCE_THRESHOLD`
+/// (5) or more local observations, `pairing_prior` itself has already
+/// yielded to `0.0` — proved above,
+/// `the_prior_contribution_decays_to_zero_as_observations_accumulate`'s
+/// sibling fact for `session.rs`'s own term. With an observed failure rate
+/// of 60% over those same observations, `observed_pairing_reliability` is
+/// what has replaced it, and it is negative: `(1 - 0.6 - 0.5) * 0.4 = -0.04`.
+#[test]
+fn observed_pairing_reliability_is_negative_for_an_unreliable_pairing() {
+    let overrides = no_overrides();
+    let health = FreePool::new();
+    let now = Instant::now();
+    let inputs = RouterInputs {
+        overrides: &overrides,
+        health: &health,
+        now,
+        requirements: TaskRequirements::default(),
+    };
+    let destination = vendor_native_with_reliability("unreliable", "UNRELIABLE_KEY", 5, 0.6, 5);
+
+    let routed = SessionRouter::new()
+        .choose(RoutingMoment::SessionStart, None, &[destination], &inputs)
+        .expect("a destination was offered");
+
+    let prior = only_contribution(&routed, "pairing prior");
+    assert_eq!(
+        prior.magnitude(),
+        0.0,
+        "at 5 observations the prior has already yielded: {}",
+        prior.evidence()
+    );
+    let reliability = only_contribution(&routed, "observed pairing reliability");
+    assert!(
+        reliability.magnitude() < 0.0,
+        "a 60% failure rate must score negative: {}",
+        reliability.evidence()
+    );
+    assert!(
+        (reliability.magnitude() - (-0.04)).abs() < 1e-9,
+        "{}",
+        reliability.magnitude()
+    );
+}
+
+/// **Line 1542, the ceiling side.** Zero observed failures over the same
+/// evidence count scores positive and at most `PAIRING_PRIOR` (0.2) — the
+/// term can replace the prior's starting assumption, never exceed the
+/// magnitude the prior itself would have given a fresh session.
+///
+/// The `±PAIRING_PRIOR` clamp itself cannot be proved here: for any real
+/// failure rate `p ∈ [0, 1]`, `(1 - p - 0.5) * 0.4` already stays inside
+/// `[-0.2, 0.2]` — the formula's own range coincides with the ceiling, so
+/// the clamp never actually fires on production data. See the next test,
+/// which feeds the term a value no real observation could produce, for the
+/// mutation this one cannot kill.
+#[test]
+fn observed_pairing_reliability_is_positive_and_bounded_by_the_prior_for_a_reliable_pairing() {
+    let overrides = no_overrides();
+    let health = FreePool::new();
+    let now = Instant::now();
+    let inputs = RouterInputs {
+        overrides: &overrides,
+        health: &health,
+        now,
+        requirements: TaskRequirements::default(),
+    };
+    let destination = vendor_native_with_reliability("reliable", "RELIABLE_KEY", 5, 0.0, 5);
+
+    let routed = SessionRouter::new()
+        .choose(RoutingMoment::SessionStart, None, &[destination], &inputs)
+        .expect("a destination was offered");
+
+    let reliability = only_contribution(&routed, "observed pairing reliability");
+    assert!(
+        reliability.magnitude() > 0.0,
+        "zero observed failures must score positive: {}",
+        reliability.evidence()
+    );
+    // `session::PAIRING_PRIOR` is private; 0.2 is its value, asserted
+    // exactly (not merely bounded) because at `p = 0.0` the raw formula
+    // already equals the ceiling — see the mutation note above.
+    assert!(
+        (reliability.magnitude() - 0.2).abs() < 1e-9,
+        "the term must never exceed what the prior itself gave a fresh session (0.2): {}",
+        reliability.magnitude()
+    );
+}
+
+/// **The clamp itself, proved with a value no real observation produces.**
+/// `RouteResponsiveness::failure_rate` is always the output of
+/// `failure_rate_aggregate`, a genuine fraction in `[0, 1]` — but nothing in
+/// the *type* enforces that, and this term's own defensiveness (`.clamp(...)`
+/// rather than trusting the formula) is exactly the guard that matters if a
+/// future producer ever hands it something else. A `RouteResponsiveness`
+/// built directly, the way this test file already does, can carry a
+/// `failure_rate` of `-2.0` — no real ledger row could ever produce that,
+/// and the formula's raw output there is `(1 - (-2.0) - 0.5) * 0.4 = 1.0`,
+/// five times `PAIRING_PRIOR`.
+///
+/// Mutation target `reliability-over-prior`: removing the `±PAIRING_PRIOR`
+/// clamp must fail this test.
+#[test]
+fn observed_pairing_reliability_never_exceeds_the_prior_even_for_an_out_of_range_failure_rate() {
+    let overrides = no_overrides();
+    let health = FreePool::new();
+    let now = Instant::now();
+    let inputs = RouterInputs {
+        overrides: &overrides,
+        health: &health,
+        now,
+        requirements: TaskRequirements::default(),
+    };
+    let destination =
+        vendor_native_with_reliability("out-of-range", "OUT_OF_RANGE_KEY", 5, -2.0, 5);
+
+    let routed = SessionRouter::new()
+        .choose(RoutingMoment::SessionStart, None, &[destination], &inputs)
+        .expect("a destination was offered");
+
+    let reliability = only_contribution(&routed, "observed pairing reliability");
+    assert!(
+        (reliability.magnitude() - 0.2).abs() < 1e-9,
+        "the raw formula gives 1.0 here; the clamp must bring it back to 0.2: {}",
+        reliability.magnitude()
+    );
+}

@@ -1348,11 +1348,11 @@ Phase 33B — Reliability-adjusted agent performance
 ☑ Keep TTFT as a separate measure of generation responsiveness rather than presenting it as agent productivity.
 ☑ Keep decode tokens per second as a model-serving characteristic rather than presenting it as task progress.
 ☑ Track successful tool rounds per minute of serving time as an outcome-adjacent agent-system measure.
-☐ Define effective TTFC as observed TTFC divided by one minus the relevant failure probability when enough observations exist.
-☐ Use reliability-adjusted latency in route comparison so a fast route that frequently fails is not ranked as genuinely fast.
+☑ Define effective TTFC as observed TTFC divided by one minus the relevant failure probability when enough observations exist.
+☑ Use reliability-adjusted latency in route comparison so a fast route that frequently fails is not ranked as genuinely fast.
 ☑ Keep an additive failure penalty available because a failed turn can also stop a harness, lose user attention, or require recovery beyond elapsed time.
 ☐ Count empty completions, unusable tool calls, stream aborts, and apparently successful but non-actionable turns as distinct unsuccessful outcomes.
-☐ Keep raw TTFC, effective TTFC, TTFT, throughput, and rounds per minute visible separately rather than collapsing them into one performance headline.
+☑ Keep raw TTFC, effective TTFC, TTFT, throughput, and rounds per minute visible separately rather than collapsing them into one performance headline.
 ☐ Avoid comparing TTFC across tasks with materially different tool requirements unless the comparison is explicitly normalized or segmented.
 ☑ Allow configurable scoring weights and preserve the exact inputs and terms used for every important routing score.
 ☑ Treat the OX gateway scoring model as implementation evidence and a configurable starting policy rather than a universal Glasshouse constant.
@@ -1363,7 +1363,7 @@ Phase 33C — Failure, quota, and route correlation
 
 ☑ Classify failures at least as throttle, exhausted quota, upstream 5xx, timeout, stream abort, empty completion, credential failure, request incompatibility, or unknown.
 ☑ Keep temporary cadence throttling separate from exhausted long-window quota and from provider health failures.
-☐ Learn or parse provider cadence separately from Retry-After remainder values when evidence permits.
+☑ Learn or parse provider cadence separately from Retry-After remainder values when evidence permits.
 ☑ Reserve known paced capacity at dispatch so concurrent workers do not all consume the same apparent allowance.
 ☑ Avoid retrying a paced route in place when the current cadence makes the retry predictably unavailable.
 ☑ Reduce or suppress active probes when probing would consume a material fraction of a scarce request pool.
@@ -1416,7 +1416,7 @@ Fixed architectural requirements
 ☑ Allow the routing model to be a local model.
 ☑ Allow GPT-5.6 Luna or another inexpensive fast model to be configured for the routing-model role when available to the user.
 ☑ Never hard-code GPT-5.6 Luna or any other specific model as a mandatory routing dependency.
-☐ Prefer a routing model whose marginal decision cost is materially lower than the premium capacity it protects.
+☑ Prefer a routing model whose marginal decision cost is materially lower than the premium capacity it protects.
 ☑ Prefer a routing model with sufficient requests per minute to avoid becoming the scheduler bottleneck.
 ☑ Prefer a routing model with low enough latency that routing does not make interactive use feel slower than direct harness use.
 ☑ Prefer a routing model that reliably returns the required structured classification schema.
@@ -1539,9 +1539,9 @@ Fixed architectural requirements
 ☑ Include expected latency in candidate scoring.
 ☑ Include harness-model pairing as an inspectable soft prior for fresh sessions with limited local evidence.
 ☑ Decay the pairing prior as reliable observations accumulate for the exact harness-profile-model-backend combination.
-☐ Prefer observed success and reliability over same-vendor alignment when evidence is sufficient.
-☐ Prefer effective TTFC over raw TTFC for tool-using gateway routes when reliability evidence is sufficient.
-☐ Include successful tool rounds per minute as supporting evidence without treating it as a universal quality score.
+☑ Prefer observed success and reliability over same-vendor alignment when evidence is sufficient.
+☑ Prefer effective TTFC over raw TTFC for tool-using gateway routes when reliability evidence is sufficient.
+☑ Include successful tool rounds per minute as supporting evidence without treating it as a universal quality score.
 ☐ Include cache affinity and the distinction between warm, cold, and unknown observations.
 ☑ Include current cadence availability separately from general route health.
 ☑ Include failure-domain diversity when ranking fallback and failover candidates.
@@ -1842,12 +1842,12 @@ Phase 51 — Evaluation hooks
 ☐ Measure false alarms, unnecessary pauses, verification overhead, reviewer cost, and cases where the guardrail increases over-planning.
 ☐ Compare guardrails disabled, advisory, and risk-gated modes on comparable tasks.
 ☐ Measure whether fresh-session or cross-harness verification contributes independent evidence rather than agreement alone.
-☐ Measure native versus cross-vendor harness-model pairings by task success, usable tool calls, repair loops, effective TTFC, reliability, and user overrides.
+☑ Measure native versus cross-vendor harness-model pairings by task success, usable tool calls, repair loops, effective TTFC, reliability, and user overrides.
 ☐ Measure how quickly local pairing evidence becomes more predictive than the initial same-vendor prior.
 ☐ Measure output-token reduction, time to actionable information, profile overrides, missing caveats, and additional steering for each response profile.
 ☐ Measure response-profile effects separately by harness-model pairing and application mechanism.
 ☑ Measure routing latency added before interactive task execution.
-☐ Measure whether effective TTFC predicts usable agent turns better than raw TTFC, TTFT, or decode throughput.
+☑ Measure whether effective TTFC predicts usable agent turns better than raw TTFC, TTFT, or decode throughput.
 ☑ Measure how often failure-domain evidence prevents a failover onto the same unhealthy upstream.
 ☑ Measure how often nominally different routes provide separate quota capacity but not independent failure resilience.
 ☐ Measure how much scarce capacity is consumed by probes and whether passive observations can replace them.

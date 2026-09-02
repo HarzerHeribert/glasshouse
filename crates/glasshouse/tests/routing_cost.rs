@@ -30,7 +30,7 @@ use rusqlite::Connection;
 use glasshouse::gateway::{Route, Upstream};
 use glasshouse::integrations::IntegrationId;
 use glasshouse::profile::{BackendResource, LaunchProfile};
-use glasshouse::routing::evidence::{EvidenceLedger, NewObservation, ObservationQuery};
+use glasshouse::routing::evidence::{EvidenceLedger, NewObservation, ObservationQuery, Outcome};
 use glasshouse::routing::{AssignedModel, CredentialId};
 use glasshouse::secret::{EnvironmentSecretStore, Secret, SecretRef, SecretStore};
 use glasshouse::{Cli, Runtime, bootstrap};
@@ -222,6 +222,9 @@ const FIRST_TOOL_CALL_SAMPLES: &str = "    first-tool-call samples : ";
 const TIME_TO_FIRST_TOOL_CALL: &str = "    TTFC (tool-using responsiveness) : ";
 const DECODE_RATE: &str = "    decode tokens/s (model serving) : ";
 const TOOL_ROUNDS: &str = "    tool rounds         : ";
+/// `GH-RESPONSIVENESS-TERMS`, line 1355's fifth figure — its own line,
+/// directly after [`TIME_TO_FIRST_TOOL_CALL`], never merged into it.
+const EFFECTIVE_TTFC: &str = "    effective TTFC (reliability-adjusted) : ";
 
 // ---------------------------------------------------------------------------
 // 1. Attribution: the routing model's own spend, apart from every other row.
@@ -786,7 +789,7 @@ fn a_real_relayed_exchange_records_first_byte_at_between_dispatch_and_completion
     assert_eq!(value_after(&coding_agent, FIRST_BYTE_SAMPLES), "1");
     let rendered = value_after(&coding_agent, TIME_TO_FIRST_BYTE);
     assert!(
-        rendered.ends_with("ms (mean)") && rendered != "not recorded",
+        rendered.contains("ms (mean)") && rendered != "not recorded",
         "a timed row must render a real reading, not the absence phrase: {rendered:?}"
     );
 }
@@ -884,14 +887,14 @@ fn a_row_carrying_first_token_and_first_tool_call_prints_real_figures_and_an_unt
     // marked for what it is.
     assert_eq!(
         value_after(&classification, TIME_TO_FIRST_TOKEN),
-        "2000ms (mean) (seconds only)",
+        "2000ms (mean) (seconds only) (0 of 1 measured)",
         "{}",
         run.stdout
     );
     assert_eq!(value_after(&classification, FIRST_TOOL_CALL_SAMPLES), "1");
     assert_eq!(
         value_after(&classification, TIME_TO_FIRST_TOOL_CALL),
-        "3000ms (mean) (seconds only)",
+        "3000ms (mean) (seconds only) (0 of 1 measured)",
         "{}",
         run.stdout
     );
@@ -1023,19 +1026,19 @@ fn seeded_millisecond_offsets_print_ttfc_ttft_and_a_decode_rate_without_the_seco
     assert_eq!(value_after(&measured, FIRST_TOOL_CALL_SAMPLES), "0");
     assert_eq!(
         value_after(&measured, TIME_TO_FIRST_TOOL_CALL),
-        "3000ms (mean)",
+        "3000ms (mean) (2 of 0 measured)",
         "{}",
         run.stdout
     );
     assert_eq!(
         value_after(&measured, TIME_TO_FIRST_TOKEN),
-        "1450ms (mean)",
+        "1450ms (mean) (2 of 0 measured)",
         "{}",
         run.stdout
     );
     assert_eq!(
         value_after(&measured, TIME_TO_FIRST_BYTE),
-        "120ms (mean)",
+        "120ms (mean) (2 of 0 measured)",
         "{}",
         run.stdout
     );
@@ -1049,13 +1052,13 @@ fn seeded_millisecond_offsets_print_ttfc_ttft_and_a_decode_rate_without_the_seco
     let legacy = section(&run.stdout, "legacy");
     assert_eq!(
         value_after(&legacy, TIME_TO_FIRST_TOOL_CALL),
-        "3000ms (mean) (seconds only)",
+        "3000ms (mean) (seconds only) (0 of 1 measured)",
         "a group whose rows predate migration 25 must say so: {}",
         run.stdout
     );
     assert_eq!(
         value_after(&legacy, TIME_TO_FIRST_TOKEN),
-        "2000ms (mean) (seconds only)"
+        "2000ms (mean) (seconds only) (0 of 1 measured)"
     );
     assert_eq!(
         value_after(&legacy, DECODE_RATE),
@@ -1143,4 +1146,89 @@ fn no_line_of_the_routing_cost_readout_carries_two_of_the_four_figures() {
             "the group must carry no collapsed figure named {forbidden:?}: {classification}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// `GH-RESPONSIVENESS-TERMS` — line 1355's fifth figure: effective TTFC, its
+// own line directly after the raw TTFC line.
+// ---------------------------------------------------------------------------
+
+/// Five rows clearing both halves of the formula — `MIN_SAMPLE_FOR_SUMMARY`
+/// of `first_tool_call_ms` and of a known outcome — print a real effective
+/// TTFC on its own line: `1000ms / (1 - 0.0) = 1000ms`, on the line directly
+/// after `TTFC`, never merged into it.
+///
+/// Mutation target `headline-merged`: appending the effective figure onto
+/// the `TTFC` line itself must fail this test.
+#[test]
+fn five_reliable_rows_print_a_real_effective_ttfc_on_its_own_line() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+    let at = now() - 60;
+
+    for i in 0..5 {
+        let row = NewObservation::new("timed-provider", "timed-model")
+            .with_purpose(Some("classification"))
+            .with_timing(Some(at - 10), Some(at))
+            .with_first_tool_call_ms(Some(1_000))
+            .with_outcome(Outcome::Succeeded);
+        fixture.ledger().record(row, at - i).unwrap();
+    }
+
+    let run = fixture.routing_cost(None);
+    assert!(run.status.success(), "stderr: {}", run.stderr);
+
+    let measured = section(&run.stdout, "classification");
+    assert!(
+        value_after(&measured, TIME_TO_FIRST_TOOL_CALL).starts_with("1000ms"),
+        "{}",
+        run.stdout
+    );
+    assert_eq!(
+        value_after(&measured, EFFECTIVE_TTFC),
+        "1000ms (mean)",
+        "a perfectly reliable route's effective TTFC equals its raw TTFC: {}",
+        run.stdout
+    );
+
+    // Never on the TTFC line itself.
+    for line in run.stdout.lines() {
+        if line.starts_with(TIME_TO_FIRST_TOOL_CALL.trim_end()) {
+            assert!(
+                !line.contains("effective"),
+                "the effective figure must never share the raw TTFC's line: {line:?}"
+            );
+        }
+    }
+}
+
+/// A group with raw TTFC but no recorded outcome at all clears one half of
+/// the formula and not the other — effective TTFC prints `(below floor)`,
+/// never a fabricated number and never `not recorded` (which is reserved for
+/// a group with no raw TTFC to begin with — see the `legacy`/mixed cases in
+/// `seeded_millisecond_offsets_print_ttfc_ttft_and_a_decode_rate_without_the_seconds_marker`).
+#[test]
+fn a_group_below_the_reliability_floor_prints_effective_ttfc_as_below_floor() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+    let at = now() - 60;
+
+    for i in 0..5 {
+        let row = NewObservation::new("timed-provider", "timed-model")
+            .with_purpose(Some("classification"))
+            .with_timing(Some(at - 10), Some(at))
+            .with_first_tool_call_ms(Some(1_000));
+        fixture.ledger().record(row, at - i).unwrap();
+    }
+
+    let run = fixture.routing_cost(None);
+    assert!(run.status.success(), "stderr: {}", run.stderr);
+
+    let measured = section(&run.stdout, "classification");
+    assert_eq!(
+        value_after(&measured, EFFECTIVE_TTFC),
+        "(below floor)",
+        "{}",
+        run.stdout
+    );
 }

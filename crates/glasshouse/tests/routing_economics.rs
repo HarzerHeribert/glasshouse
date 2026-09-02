@@ -684,6 +684,8 @@ fn consumption(
         tool_rounds: None,
         repairs: None,
         serving_seconds: None,
+        failure_rate_sample: 0,
+        failure_rate: None,
     }
 }
 

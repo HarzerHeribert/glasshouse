@@ -204,6 +204,9 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
                 None => match classify_with_routing_model(
                     &runtime,
                     &glasshouse::routing::request::RouterRequest::for_text(&request),
+                    // Line 1419: `glasshouse classify` has chosen no launch
+                    // profile — there is nothing here to protect.
+                    None,
                 ) {
                     ClassificationAttempt::NotConfigured => None,
                     ClassificationAttempt::Answered(classification) => {
@@ -1346,6 +1349,10 @@ fn routing_destinations(
         // is scored by the same local evidence as a fresh one under the same
         // provider and model.
         let pairing_prior_evidence = pairing_prior_evidence_count(consumption, &backend);
+        // Lines 1351/1352/1542/1543/1544's producer, read off the same
+        // in-scope `backend` and `consumption` the pairing-prior evidence
+        // above just used.
+        let route_responsiveness = route_responsiveness_for(consumption, &backend);
         // Phase 56 line 1954's producer: the entitlement this session's
         // profile charges, so a rule the user has since written applies to
         // continuing it exactly as it applies to starting a fresh one. When
@@ -1382,7 +1389,8 @@ fn routing_destinations(
             .with_session_context(context)
             .with_entitlement(entitlement)
             .with_estimated_input_size(estimated_size)
-            .with_pairing_prior_evidence(pairing_prior_evidence),
+            .with_pairing_prior_evidence(pairing_prior_evidence)
+            .with_route_responsiveness(route_responsiveness),
         );
     }
     drop(checkpoints);
@@ -1471,6 +1479,7 @@ fn routing_destinations(
                 let backend = backend_for_entitlement(&backend, resolved);
                 let ceiling = destination_tier_ceiling(effective, &backend, &query);
                 let pairing_prior_evidence = pairing_prior_evidence_count(consumption, &backend);
+                let route_responsiveness = route_responsiveness_for(consumption, &backend);
                 destinations.push(
                     with_capacity(
                         with_provider_protocols(
@@ -1495,12 +1504,14 @@ fn routing_destinations(
                     )))
                     .with_estimated_input_size(fresh_estimated_size)
                     .with_resource_facts(resource_facts)
-                    .with_pairing_prior_evidence(pairing_prior_evidence),
+                    .with_pairing_prior_evidence(pairing_prior_evidence)
+                    .with_route_responsiveness(route_responsiveness),
                 );
             }
         } else {
             let ceiling = destination_tier_ceiling(effective, &backend, &query);
             let pairing_prior_evidence = pairing_prior_evidence_count(consumption, &backend);
+            let route_responsiveness = route_responsiveness_for(consumption, &backend);
             let fresh_entitlement = matches.first().map(|resolved| {
                 routing_entitlement(resolved, &band_thresholds, effective, &telemetry)
             });
@@ -1523,7 +1534,8 @@ fn routing_destinations(
                 .with_entitlement(fresh_entitlement)
                 .with_estimated_input_size(fresh_estimated_size)
                 .with_resource_facts(resource_facts)
-                .with_pairing_prior_evidence(pairing_prior_evidence),
+                .with_pairing_prior_evidence(pairing_prior_evidence)
+                .with_route_responsiveness(route_responsiveness),
             );
         }
     }
@@ -1548,6 +1560,23 @@ fn pairing_prior_evidence_count(
     rows.iter()
         .filter(|row| row.provider == backend.provider() && row.model == backend.model().label())
         .count() as u32
+}
+
+/// Lines 1351/1352/1542/1543/1544's producer: this backend's own responsiveness
+/// and reliability reading, over the same `consumption` rows and the same
+/// `(provider, model)` filter [`pairing_prior_evidence_count`] already
+/// applies. `None` when no ledger was read, matching that function's own
+/// `consumption: None` case.
+fn route_responsiveness_for(
+    consumption: Option<&[glasshouse::routing::evidence::RoutingObservation]>,
+    backend: &glasshouse::routing::Backend,
+) -> Option<glasshouse::routing::evidence::RouteResponsiveness> {
+    let rows: Vec<glasshouse::routing::evidence::RoutingObservation> = consumption?
+        .iter()
+        .filter(|row| row.provider == backend.provider() && row.model == backend.model().label())
+        .cloned()
+        .collect();
+    Some(glasshouse::routing::evidence::RouteResponsiveness::from_observations(&rows))
 }
 
 /// Whether a launch under `profile` would get past `glasshouse::profile::resolve`'s
@@ -2965,6 +2994,22 @@ fn observed_provider_health(
         GatheredTelemetry::new().gather_gateway_quota(&GatewayQuotaCache::new(runtime.paths()));
     let price_table =
         glasshouse::provider::pricing::PriceTable::load_from_dir(runtime.paths().config_dir());
+    // Capability map line 1366's *learn* half: read once for every
+    // destination this call covers, fail-soft exactly like every other
+    // ledger open on this path — an unreadable ledger simply leaves the
+    // learner with nothing to learn from, the same honest "no cadence is
+    // known" a fresh project already reads today.
+    let throttle_rows = glasshouse::routing::evidence::EvidenceLedger::open(runtime)
+        .ok()
+        .and_then(|ledger| {
+            ledger
+                .observations_in_window(
+                    now_unix,
+                    glasshouse::routing::evidence::CLASSIFICATION_EVIDENCE_WINDOW_SECONDS,
+                )
+                .ok()
+        })
+        .unwrap_or_default();
 
     for destination in destinations {
         let backend = destination.backend();
@@ -2991,12 +3036,38 @@ fn observed_provider_health(
                 .seconds_until_reset(now_unix)
                 .filter(|seconds| *seconds > 0)
                 .map(|seconds| std::time::Duration::from_secs(seconds as u64));
+            // Capability map line 1366: a stated window always wins, and a
+            // learned one is only ever asked for when neither a window nor a
+            // reset was stated — `is_exhausted` would otherwise have nothing
+            // to reason from once `remaining` reaches zero.
+            let stated_window = telemetry.stated_pool_window(provider);
+            let (window, resets_in) = if resets_in.is_none() && stated_window.is_none() {
+                match glasshouse::routing::free::learned_window(&throttle_rows, provider, now_unix)
+                {
+                    Some((window, last_throttle)) => {
+                        let seconds = match window {
+                            glasshouse::routing::free::Window::Learned { seconds, .. } => seconds,
+                            glasshouse::routing::free::Window::Stated { .. } => {
+                                unreachable!("learned_window only ever returns Window::Learned")
+                            }
+                        };
+                        let candidate = last_throttle + i64::from(seconds) - now_unix;
+                        let resets_in = (candidate > 0)
+                            .then(|| std::time::Duration::from_secs(candidate as u64));
+                        (Some(window), resets_in)
+                    }
+                    None => (None, resets_in),
+                }
+            } else {
+                (stated_window, resets_in)
+            };
             health.pool.record_pool(
                 credential,
                 &PoolReading {
                     limit,
                     remaining,
                     resets_in,
+                    window,
                 },
                 now,
             );
@@ -3479,6 +3550,9 @@ fn route_outcomes_section(runtime: &Runtime) -> String {
     let from = to - ROUTE_OUTCOME_WINDOW_DAYS * 24 * 60 * 60;
     let by_class = ledger.route_outcomes_by(EvaluationKind::RoutingCostClassObserved, from, to);
     let by_pairing = ledger.route_outcomes_by_pairing_class(from, to);
+    // Map line 1845's other five quantities, joined by session id — the
+    // register's *"three producers, not a join"* is now a join.
+    let pairing_responsiveness = ledger.pairing_class_responsiveness(from, to);
     let by_evidence = ledger.route_outcomes_by(EvaluationKind::RoutingEvidenceObserved, from, to);
     // Map line 1834. The bucket is the tier *with* its escalation, which is
     // what makes "did this tier succeed without escalation" a comparison
@@ -3489,22 +3563,29 @@ fn route_outcomes_section(runtime: &Runtime) -> String {
     // session id — see `EvaluationKind::FailoverPrevented`.
     let preventions = ledger.counts_by_subject(EvaluationKind::FailoverPrevented, from, to);
 
-    let (by_class, by_pairing, by_evidence, by_tier, preventions) =
-        match (by_class, by_pairing, by_evidence, by_tier, preventions) {
-            (Ok(class), Ok(pairing), Ok(evidence), Ok(tier), Ok(preventions)) => {
-                (class, pairing, evidence, tier, preventions)
-            }
-            (Err(err), ..)
-            | (_, Err(err), ..)
-            | (_, _, Err(err), ..)
-            | (_, _, _, Err(err), _)
-            | (_, _, _, _, Err(err)) => {
-                // `WindowNotRetained` is the honest one: retention trimmed rows
-                // this window reaches back past, and a smaller number would be a
-                // fabrication. It is reported, not rounded away.
-                return format!("{header}\n  {err}\n");
-            }
-        };
+    let (by_class, by_pairing, pairing_responsiveness, by_evidence, by_tier, preventions) = match (
+        by_class,
+        by_pairing,
+        pairing_responsiveness,
+        by_evidence,
+        by_tier,
+        preventions,
+    ) {
+        (Ok(class), Ok(pairing), Ok(responsiveness), Ok(evidence), Ok(tier), Ok(preventions)) => {
+            (class, pairing, responsiveness, evidence, tier, preventions)
+        }
+        (Err(err), ..)
+        | (_, Err(err), ..)
+        | (_, _, Err(err), ..)
+        | (_, _, _, Err(err), ..)
+        | (_, _, _, _, Err(err), _)
+        | (_, _, _, _, _, Err(err)) => {
+            // `WindowNotRetained` is the honest one: retention trimmed rows
+            // this window reaches back past, and a smaller number would be a
+            // fabrication. It is reported, not rounded away.
+            return format!("{header}\n  {err}\n");
+        }
+    };
 
     if by_class.is_empty() {
         // Map line 1851 is still printed here. A prevention row carries no
@@ -3523,10 +3604,13 @@ fn route_outcomes_section(runtime: &Runtime) -> String {
     out.push_str("\n  by cost class\n");
     out.push_str(&render_route_outcome_rows(&by_class));
     out.push_str(
-        "\n  by pairing class (task success only; line 1845's other five \
-                  quantities have no producer in this build)\n",
+        "\n  by pairing class (task success, usable tool calls, repair loops, effective TTFC, \
+         reliability, user overrides — map line 1845)\n",
     );
-    out.push_str(&render_route_outcome_rows(&by_pairing));
+    out.push_str(&render_pairing_class_rows(
+        &by_pairing,
+        &pairing_responsiveness,
+    ));
     out.push_str(
         "\n  by evidence held about the destination when it was chosen (`observed` is a row \
          written before staleness was measured, never re-labelled)\n",
@@ -4094,6 +4178,96 @@ fn render_route_outcome_line(counts: &glasshouse::evaluation::RouteOutcomeCounts
     }
 }
 
+/// Map line 1845, the whole line: task success (from `by_pairing`, the same
+/// [`glasshouse::evaluation::RouteOutcomeCounts`] every other bucket table on
+/// this section renders) beside the five quantities the session-id join
+/// (`responsiveness`) supplies — usable tool calls, repair loops, effective
+/// TTFC, reliability, user overrides. Each figure prints *not enough* below
+/// [`glasshouse::routing::evidence::MIN_SAMPLE_FOR_SUMMARY`] with its own
+/// sample, per the ruling; a bucket `by_pairing` named that the
+/// responsiveness join never reached prints *not enough* on all five rather
+/// than a fabricated number.
+fn render_pairing_class_rows(
+    by_pairing: &[glasshouse::evaluation::RouteOutcomeCounts],
+    responsiveness: &[glasshouse::evaluation::PairingClassResponsiveness],
+) -> String {
+    if by_pairing.is_empty() {
+        return "    (nothing recorded)\n".to_owned();
+    }
+    let mut out = String::new();
+    for counts in by_pairing {
+        out.push_str(&format!(
+            "    {}\n      task success            : {}\n",
+            counts.bucket,
+            render_route_outcome_line(counts)
+        ));
+        let five = responsiveness
+            .iter()
+            .find(|row| row.bucket == counts.bucket);
+        out.push_str(&format!(
+            "      usable tool calls       : {}\n",
+            render_share(
+                five.and_then(|row| row.usable_tool_calls),
+                five.map_or(0, |row| row.usable_tool_calls_sample),
+            )
+        ));
+        out.push_str(&format!(
+            "      repair loops            : {}\n",
+            render_mean(
+                five.and_then(|row| row.repair_loops),
+                five.map_or(0, |row| row.repair_loops_sample),
+            )
+        ));
+        out.push_str(&format!(
+            "      effective TTFC          : {}\n",
+            match five.and_then(|row| row.effective_ttfc_ms) {
+                Some(ms) => format!(
+                    "{}ms (mean, {} rows)",
+                    ms.round() as i64,
+                    five.map_or(0, |row| row.effective_ttfc_sample)
+                ),
+                None => "not enough evidence".to_owned(),
+            }
+        ));
+        out.push_str(&format!(
+            "      reliability             : {}\n",
+            render_share(
+                five.and_then(|row| row.reliability),
+                five.map_or(0, |row| row.reliability_sample),
+            )
+        ));
+        out.push_str(&format!(
+            "      user overrides          : {}\n",
+            render_share(
+                five.and_then(|row| row.user_overrides),
+                five.map_or(0, |row| row.user_overrides_sample as usize),
+            )
+        ));
+    }
+    out
+}
+
+/// A fraction printed as a percentage with its sample, or *not enough
+/// evidence* below [`glasshouse::routing::evidence::MIN_SAMPLE_FOR_SUMMARY`]
+/// — [`render_pairing_class_rows`]'s shared renderer for `usable tool
+/// calls`, `reliability` and `user overrides`, all three of which are the
+/// same shape: a share of a sample, never a raw count alone.
+fn render_share(fraction: Option<f64>, sample: usize) -> String {
+    match fraction {
+        Some(fraction) => format!("{:.1}% (over {sample} rows)", fraction * 100.0),
+        None => "not enough evidence".to_owned(),
+    }
+}
+
+/// A plain mean with its sample — [`render_share`]'s sibling for `repair
+/// loops`, which is a count per row rather than a fraction.
+fn render_mean(mean: Option<f64>, sample: usize) -> String {
+    match mean {
+        Some(mean) => format!("{mean:.2} (over {sample} rows)"),
+        None => "not enough evidence".to_owned(),
+    }
+}
+
 /// `glasshouse routing-cost` — capability map line 1464: what Glasshouse's
 /// own routing model has spent, in tokens and requests, apart from every
 /// other row this project's evidence ledger holds.
@@ -4123,6 +4297,10 @@ fn routing_cost_report(runtime: &Runtime, hours: u32) -> anyhow::Result<String> 
     // facets above from the same window: the evidence for or against
     // `GH-EFFORT-CLAMP`, never the clamp itself.
     let effort_shadow = ledger.effort_shadow(now_unix, window_seconds)?;
+    // Map line 1850, gathered beside the effort shadow from the same window:
+    // whether effective TTFC separates usable turns from unusable ones
+    // better than the other three responsiveness figures.
+    let separation = ledger.responsiveness_separation(now_unix, window_seconds)?;
     // Fail-soft, the same posture `context_firewall_savings_summary` already
     // takes for `status`: a raw store this build cannot read yet renders as
     // "not counted", never as a hard error for a readout command.
@@ -4145,6 +4323,7 @@ fn routing_cost_report(runtime: &Runtime, hours: u32) -> anyhow::Result<String> 
         &translation,
         &translation_by_session,
         &effort_shadow,
+        &separation,
     ))
 }
 
@@ -4224,6 +4403,7 @@ fn render_routing_cost(
     translation: &[glasshouse::routing::evidence::TranslationSavings],
     translation_by_session: &[glasshouse::routing::evidence::SessionTranslationSavings],
     effort_shadow: &glasshouse::routing::evidence::EffortShadow,
+    separation: &glasshouse::routing::evidence::SeparationReport,
 ) -> String {
     let mut out = format!("Routing consumption for project {project_id}, last {hours}h\n");
     if groups.is_empty() {
@@ -4256,7 +4436,8 @@ fn render_routing_cost(
                 "    time to first byte  : {}\n",
                 render_latency_ms(
                     group.mean_time_to_first_byte_ms,
-                    group.first_byte_ms_sample_count
+                    group.first_byte_ms_sample_count,
+                    group.first_byte_sample_count,
                 )
             ));
             // Line 1347 is the ordering as much as the label: TTFC leads the
@@ -4271,8 +4452,16 @@ fn render_routing_cost(
                 "    TTFC (tool-using responsiveness) : {}\n",
                 render_latency_ms(
                     group.mean_time_to_first_tool_call_ms,
-                    group.first_tool_call_ms_sample_count
+                    group.first_tool_call_ms_sample_count,
+                    group.first_tool_call_sample_count,
                 )
+            ));
+            // 1355's fifth figure, GH-RESPONSIVENESS-TERMS: never merged
+            // into the TTFC line above it — its own line, right after, `not
+            // recorded` or `(below floor)` per group.
+            out.push_str(&format!(
+                "    effective TTFC (reliability-adjusted) : {}\n",
+                render_effective_ttfc(group)
             ));
             out.push_str(&format!(
                 "    first-token samples : {}\n",
@@ -4282,7 +4471,8 @@ fn render_routing_cost(
                 "    TTFT (generation responsiveness) : {}\n",
                 render_latency_ms(
                     group.mean_time_to_first_token_ms,
-                    group.first_token_ms_sample_count
+                    group.first_token_ms_sample_count,
+                    group.first_token_sample_count,
                 )
             ));
             out.push_str(&format!(
@@ -4308,6 +4498,7 @@ fn render_routing_cost(
         translation_by_session,
     ));
     out.push_str(&render_effort_shadow_section(effort_shadow));
+    out.push_str(&render_responsiveness_separation(separation));
     out
 }
 
@@ -4526,7 +4717,12 @@ fn render_time_to_first_byte(mean_ms: Option<f64>) -> String {
     }
 }
 
-/// [`render_time_to_first_byte`] plus migration 25's honesty marker.
+/// [`render_time_to_first_byte`] plus migration 25's honesty marker and the
+/// independent verifier's own finding on the Red package
+/// (`docs/product/evidence/phase-33b.md`'s 1347/1348/1349 entry): the count
+/// printed beside a mixed group's mean must be the count of rows the mean
+/// was *actually measured from*, not the seconds-resolution count above it
+/// on the readout, which a mixed group's mean is not honestly described by.
 ///
 /// The mean a group carries is computed over both kinds of row — the
 /// measured `*_ms` offset where one exists, the second-resolution difference
@@ -4534,17 +4730,27 @@ fn render_time_to_first_byte(mean_ms: Option<f64>) -> String {
 /// in the group carried a measured offset, *(seconds only)* is appended:
 /// the number is real, and it is a one-second clock rounded into
 /// milliseconds, which for a time-to-first-token is very nearly always `0`
-/// or `1000`. A group with even one measured row prints no marker, because
-/// the mean is then a mixture and the count beside it is the honest
-/// statement of how much of one.
+/// or `1000`. Every group with a figure at all — mixed or fully measured —
+/// additionally gets `(N of M measured)`: `ms_sample_count` of
+/// `total_sample_count`, so a reader can tell a mean over five measured rows
+/// apart from one over five where only two were.
 ///
 /// *not recorded* is never marked: there is no figure to qualify.
-fn render_latency_ms(mean_ms: Option<f64>, ms_sample_count: usize) -> String {
+fn render_latency_ms(
+    mean_ms: Option<f64>,
+    ms_sample_count: usize,
+    total_sample_count: usize,
+) -> String {
     let rendered = render_time_to_first_byte(mean_ms);
-    if mean_ms.is_some() && ms_sample_count == 0 {
-        return format!("{rendered} (seconds only)");
+    if mean_ms.is_none() {
+        return rendered;
     }
-    rendered
+    let seconds_only_marker = if ms_sample_count == 0 {
+        " (seconds only)"
+    } else {
+        ""
+    };
+    format!("{rendered}{seconds_only_marker} ({ms_sample_count} of {total_sample_count} measured)")
 }
 
 /// Capability map line 1349, rendered: decode tokens per second, **as a
@@ -4585,6 +4791,57 @@ fn render_tool_rounds(group: &glasshouse::routing::evidence::PurposeConsumption)
         .unwrap_or_else(|| "not recorded".to_owned());
     format!("{rounds} begun, {repairs} repairs, {per_minute} over {serving_seconds}s served")
 }
+
+/// Line 1355's fifth figure, `GH-RESPONSIVENESS-TERMS`: reliability-adjusted
+/// TTFC, printed on its own line directly after the raw `TTFC` line and
+/// never merged into it. `not recorded` when the group carries no raw TTFC
+/// at all; `(below floor)` when it does but
+/// [`glasshouse::routing::evidence::PurposeConsumption::effective_ttfc_ms`]
+/// still answers `None` — too few measured rows on either half of the
+/// formula, or a failure rate that could not be computed.
+fn render_effective_ttfc(group: &glasshouse::routing::evidence::PurposeConsumption) -> String {
+    if group.mean_time_to_first_tool_call_ms.is_none() {
+        return "not recorded".to_owned();
+    }
+    match group.effective_ttfc_ms() {
+        Some(ms) => format!("{}ms (mean)", ms.round() as i64),
+        None => "(below floor)".to_owned(),
+    }
+}
+
+/// Map line 1850, printed at the end of `routing-cost`: whether effective
+/// TTFC separates usable agent turns from unusable ones better than raw
+/// TTFC, TTFT or decode tokens per second. *Separates*, never *predicts* —
+/// this is a comparison of medians over exchanges with a harness-reported
+/// verdict, not a claim of causation.
+fn render_responsiveness_separation(
+    separation: &glasshouse::routing::evidence::SeparationReport,
+) -> String {
+    let mut out = String::from("\nresponsiveness vs usable turns (1850):\n");
+    for row in &separation.rows {
+        match row.separation() {
+            Some(fraction) => out.push_str(&format!(
+                "  {:<15} : separates {:.1}% ({} usable, {} unusable turns)\n",
+                row.measure,
+                fraction * 100.0,
+                row.usable_sample,
+                row.unusable_sample
+            )),
+            None => out.push_str(&format!(
+                "  {:<15} : not enough evidence ({} usable, {} unusable turns; \
+                 {MIN_SAMPLE_SEPARATION} needed on each side)\n",
+                row.measure, row.usable_sample, row.unusable_sample
+            )),
+        }
+    }
+    out
+}
+
+/// [`render_responsiveness_separation`]'s own floor, named for the message
+/// rather than repeating the number — [`glasshouse::routing::evidence::MIN_SAMPLE_FOR_SUMMARY`]
+/// verbatim, the same floor [`SeparationMeasure::separation`] itself gates
+/// on.
+const MIN_SAMPLE_SEPARATION: usize = glasshouse::routing::evidence::MIN_SAMPLE_FOR_SUMMARY;
 
 /// The three spellings `glasshouse route --moment` accepts and the control
 /// door's `recommend_route` answers in, written down exactly once.
@@ -4934,6 +5191,10 @@ fn route_recommendation(
             health: health.pool(),
             sticky: None,
             text_cache: None,
+            // Line 1419: this report has not chosen a launch profile — it
+            // ranks across every harness — so there is no protected capacity
+            // to name.
+            protected_capacity_price: None,
         },
     );
     let inputs = RouterInputs {
@@ -5070,6 +5331,12 @@ struct RoutingClassificationSite<'a> {
     /// `route`'s own comment says it always asks rather than reusing, and a
     /// diagnostic that answers from yesterday's cache is not a diagnostic.
     text_cache: Option<&'a ClassificationTextCache>,
+    /// Capability map line 1419: the per-token price of the destination this
+    /// launch lands on when classification does nothing — `Some` only on
+    /// the path that acts (`launch_session`), and only when that launch's
+    /// own fresh destination names a priced backend. `None` everywhere else,
+    /// including every report: there is no chosen launch profile to protect.
+    protected_capacity_price: Option<glasshouse::provider::pricing::ModelPrice>,
 }
 
 /// Deterministic heuristics' answer for `text`, with the reason they answered.
@@ -5213,7 +5480,11 @@ fn classify_for_routing(
                         });
                         match text_cached {
                             Some(answer) => answer,
-                            None => match classify_with_routing_model(runtime, &request) {
+                            None => match classify_with_routing_model(
+                                runtime,
+                                &request,
+                                site.protected_capacity_price,
+                            ) {
                                 ClassificationAttempt::NotConfigured => {
                                     heuristic_answer(text, HeuristicReason::NoRoutingModel)
                                 }
@@ -5872,6 +6143,31 @@ fn launch_session(
         // the health of a provider is not a fact this launch can observe about a
         // session it has not started yet.
         let health = observed_provider_health(runtime, &effective, &destinations);
+        // Capability map line 1419: the destination this launch lands on
+        // when classification does nothing — `fresh_profile`'s own fresh
+        // destination among the ones just built (`fresh_profile` is always
+        // concrete: it falls back to the implied Native profile above), read
+        // through the same `pricing.toml` `session_router` prices
+        // `expected_marginal_cost` from. A profile whose backend is a
+        // harness's own sign-in, or that names no model, or that
+        // `pricing.toml` does not price, leaves this `None` — inert, never
+        // guessed (`design-decisions.md`, *"The premium capacity a
+        // classifier protects"*).
+        let protected_capacity_prices =
+            glasshouse::provider::pricing::PriceTable::load_from_dir(runtime.paths().config_dir());
+        let protected_capacity_price = destinations
+            .iter()
+            .find(|destination| {
+                destination.is_fresh() && destination.launch_profile() == fresh_profile
+            })
+            .and_then(|destination| {
+                destination
+                    .backend()
+                    .model()
+                    .name()
+                    .map(|model| (destination.backend().provider(), model))
+            })
+            .and_then(|(provider, model)| protected_capacity_prices.price_for(provider, model));
         // Phase 34D, on the path that acts: what the work *is* decides what the
         // destination must be able to do. `None` — no `--task` — hands the
         // router `TaskRequirements::default()` and asks nothing, which is this
@@ -5890,6 +6186,7 @@ fn launch_session(
                 health: health.pool(),
                 sticky: Some(&sticky_cache),
                 text_cache: Some(&text_cache),
+                protected_capacity_price,
             },
         );
         let inputs = glasshouse::routing::session::RouterInputs {
@@ -9549,17 +9846,22 @@ fn automatic_classification_model(
     project: Option<&ProjectConfig>,
     effective: &EffectiveConfig<'_>,
     request_text: &str,
+    protected_capacity_price: Option<glasshouse::provider::pricing::ModelPrice>,
 ) -> Result<ClassifierRef, String> {
     // The tier this job's own demand implies, from the request itself. This
     // is `RoutedModel::new_for_request`'s fifth link, made by the one
     // `JobKind` its doc comment says the constructor was waiting for — a
     // request, not a transcript of a finished turn.
     let requirement = glasshouse::routing::classify::classify_heuristically(request_text);
-    let choice =
-        automatic_classification_choice(runtime, user, project, effective, Some(&requirement))
-            .map_err(|reason| {
-                format!("no resource is available to classify this request: {reason}")
-            })?;
+    let choice = automatic_classification_choice(
+        runtime,
+        user,
+        project,
+        effective,
+        Some(&requirement),
+        protected_capacity_price,
+    )
+    .map_err(|reason| format!("no resource is available to classify this request: {reason}"))?;
 
     Ok(ClassifierRef {
         provider: choice.provider().to_owned(),
@@ -9607,6 +9909,10 @@ fn automatic_classification_choice(
     project: Option<&ProjectConfig>,
     effective: &EffectiveConfig<'_>,
     classification: Option<&glasshouse::routing::classify::TaskClassification>,
+    // Capability map line 1419: the premium capacity this decision
+    // protects, when the caller has one — see `RoutingClassificationSite`'s
+    // own doc for who does and does not.
+    protected_capacity_price: Option<glasshouse::provider::pricing::ModelPrice>,
 ) -> Result<
     glasshouse::routing::disposable::DisposableChoice,
     glasshouse::routing::disposable::NoResource,
@@ -9702,7 +10008,10 @@ fn automatic_classification_choice(
             // Map line 1436: the user's own price ceiling, layered like
             // every other `[routing]` value and always stated (it has a
             // default), exactly as `max_router_latency` is above.
-            .with_max_marginal_cost_micro_usd(Some(effective.max_router_cost().value.get())),
+            .with_max_marginal_cost_micro_usd(Some(effective.max_router_cost().value.get()))
+            // Map line 1419: the premium capacity this decision protects,
+            // when the caller named one.
+            .with_protected_capacity_price(protected_capacity_price),
     )
     // Capability map line 1577's background half. Automatic classification
     // is the other support job Glasshouse runs on its own behalf, and it
@@ -9766,6 +10075,9 @@ fn automatic_classification_choice(
 fn classify_with_routing_model(
     runtime: &Runtime,
     request: &glasshouse::routing::request::RouterRequest,
+    // Capability map line 1419: the launch's own protected capacity, when
+    // this call is on the path that acts — see `RoutingClassificationSite`.
+    protected_capacity_price: Option<glasshouse::provider::pricing::ModelPrice>,
 ) -> ClassificationAttempt {
     use glasshouse::config::RoutingModelResolution;
 
@@ -9799,6 +10111,7 @@ fn classify_with_routing_model(
             project.as_ref(),
             &effective,
             request.task_text(),
+            protected_capacity_price,
         ),
     };
     let first = match first {
@@ -12751,7 +13064,9 @@ fn render_routing_model(
             // policy used before a classification existed to ask. A request
             // invented here to fill the argument would make the reported pick
             // depend on words nobody typed.
-            match automatic_classification_choice(runtime, user, project, effective, None) {
+            // Line 1419: this report has chosen no launch profile either —
+            // there is nothing here to protect.
+            match automatic_classification_choice(runtime, user, project, effective, None, None) {
                 Ok(choice) => {
                     let _ = writeln!(
                         out,

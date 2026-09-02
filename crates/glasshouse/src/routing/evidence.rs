@@ -2853,6 +2853,18 @@ pub struct PurposeConsumption {
     /// [`Self::tool_rounds_per_minute`], independent of whether those same
     /// rows counted a tool round.
     pub serving_seconds: Option<i64>,
+    /// How many of this group's rows carry a known outcome
+    /// (`succeeded`/`failed`) — the same test `failure_rate_aggregate`
+    /// applies to a raw slice, computed here in SQL over the group instead.
+    /// Line 1351's own rate floor sits behind [`Self::failure_rate`], not
+    /// this count, which is honest at any size.
+    pub failure_rate_sample: usize,
+    /// The fraction of [`Self::failure_rate_sample`] that failed —
+    /// [`MIN_SAMPLE_FOR_SUMMARY`]'s standing rate floor applied here as it is
+    /// everywhere else on this ledger: `None` below it, never a rate nobody
+    /// should trust. 1351's *purpose's failure rate*, the second half of
+    /// [`Self::effective_ttfc_ms`].
+    pub failure_rate: Option<f64>,
 }
 
 impl PurposeConsumption {
@@ -2895,6 +2907,28 @@ impl PurposeConsumption {
             return None;
         }
         Some(output_tokens as f64 * 1000.0 / decode_ms as f64)
+    }
+
+    /// Line 1351: effective TTFC, `mean_time_to_first_tool_call_ms` divided
+    /// by one minus this group's own failure rate — the fifth figure line
+    /// 1355 names, on a `PurposeConsumption` group rather than a single
+    /// route. `None` unless both halves clear [`MIN_SAMPLE_FOR_SUMMARY`]
+    /// (the TTFC figure's own [`Self::first_tool_call_ms_sample_count`], and
+    /// [`Self::failure_rate_sample`] behind [`Self::failure_rate`]) and the
+    /// failure rate is below 100% — never a clamped number.
+    /// [`RouteResponsiveness::effective_ttfc_ms`] is the same formula over a
+    /// raw observation slice; this is its `PurposeConsumption`-shaped
+    /// sibling.
+    pub fn effective_ttfc_ms(&self) -> Option<f64> {
+        if self.first_tool_call_ms_sample_count < MIN_SAMPLE_FOR_SUMMARY {
+            return None;
+        }
+        let raw = self.mean_time_to_first_tool_call_ms?;
+        let p = self.failure_rate?;
+        if p >= 1.0 {
+            return None;
+        }
+        Some(raw / (1.0 - p))
     }
 }
 
@@ -3074,6 +3108,78 @@ pub struct EffortShadow {
     /// or one written before migration 24's column existed. Counted, never
     /// folded into [`TurnShape::Prompt`].
     pub unread: usize,
+}
+
+/// [`EvidenceLedger::responsiveness_separation`]'s result — capability map
+/// line 1850, one row per responsiveness figure.
+#[derive(Debug, Clone, PartialEq)]
+pub struct SeparationReport {
+    /// Always exactly four, in the order line 1355 names them: raw TTFC,
+    /// effective TTFC, TTFT, decode tokens/s.
+    pub rows: Vec<SeparationMeasure>,
+}
+
+/// One figure's separation between usable and unusable agent turns —
+/// map line 1850. *Separates*, never *predicts*: this is a comparison of
+/// medians, not a claim of causation.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct SeparationMeasure {
+    pub measure: &'static str,
+    pub usable_sample: usize,
+    pub unusable_sample: usize,
+    median_usable: Option<f64>,
+    median_unusable: Option<f64>,
+    median_all: Option<f64>,
+}
+
+impl SeparationMeasure {
+    fn new(measure: &'static str, usable: Vec<f64>, unusable: Vec<f64>) -> Self {
+        let usable_sample = usable.len();
+        let unusable_sample = unusable.len();
+        let all: Vec<f64> = usable.iter().chain(unusable.iter()).copied().collect();
+        let median_usable = (usable_sample >= MIN_SAMPLE_FOR_SUMMARY).then(|| median_f64(usable));
+        let median_unusable =
+            (unusable_sample >= MIN_SAMPLE_FOR_SUMMARY).then(|| median_f64(unusable));
+        let median_all = (!all.is_empty()).then(|| median_f64(all));
+        Self {
+            measure,
+            usable_sample,
+            unusable_sample,
+            median_usable,
+            median_unusable,
+            median_all,
+        }
+    }
+
+    pub fn median_usable(&self) -> Option<f64> {
+        self.median_usable
+    }
+
+    pub fn median_unusable(&self) -> Option<f64> {
+        self.median_unusable
+    }
+
+    /// `|median_unusable - median_usable| / median_all` — map line 1850's
+    /// own formula. `None` when either side is below
+    /// [`MIN_SAMPLE_FOR_SUMMARY`] ("not enough" on that side, per the
+    /// ruling) or `median_all` is exactly `0.0`, never a divide-by-zero.
+    pub fn separation(&self) -> Option<f64> {
+        let usable = self.median_usable?;
+        let unusable = self.median_unusable?;
+        let all = self.median_all?;
+        if all == 0.0 {
+            return None;
+        }
+        Some((unusable - usable).abs() / all)
+    }
+}
+
+fn median_f64(mut values: Vec<f64>) -> f64 {
+    values.sort_by(|a, b| {
+        a.partial_cmp(b)
+            .expect("no NaN enters this ledger's figures")
+    });
+    values[values.len() / 2]
 }
 
 /// What this project's ledger holds about one `(provider, model)` **as a
@@ -4278,7 +4384,10 @@ impl EvidenceLedger {
                                 WHEN completed_at IS NOT NULL AND dispatched_at IS NOT NULL
                                 THEN completed_at - dispatched_at
                             END
-                        ) AS serving_seconds
+                        ) AS serving_seconds,
+                        COUNT(CASE WHEN outcome IN ('succeeded', 'failed') THEN 1 END)
+                            AS failure_rate_sample,
+                        SUM(CASE WHEN outcome = 'failed' THEN 1 ELSE 0 END) AS failed_count
                  FROM routing_observations
                  WHERE project_id = ?1 AND observed_at >= ?2 AND observed_at <= ?3
                  GROUP BY purpose, harness_recorded
@@ -4501,6 +4610,164 @@ impl EvidenceLedger {
                 }
             })
             .collect())
+    }
+
+    /// Capability map line 1850: whether effective TTFC separates usable
+    /// agent turns from unusable ones better than raw TTFC, TTFT or decode
+    /// tokens per second — one [`SeparationMeasure`] per figure.
+    ///
+    /// Scoped to [`HARNESS_TURN_PURPOSE`] rows, the same restriction
+    /// [`Self::translation_cache_savings`] applies for the same reason: only
+    /// a translated exchange ever carries `first_tool_call_ms`,
+    /// `first_token_ms` or a tool round to measure at all. The usable-turn
+    /// verdict is [`Self::effort_shadow`]'s own subquery — the session's next
+    /// [`crate::evaluation::EvaluationKind::TurnOutcomeObserved`] row at or
+    /// after the exchange — never [`RoutingObservation::outcome`], which is a
+    /// transport 2xx proxy and not a verdict (see that field's own doc
+    /// comment). An exchange whose session recorded no such row is excluded
+    /// from every measure here, not folded into either side.
+    ///
+    /// **Effective TTFC is attached per row from its own route**, not
+    /// computed per exchange: a single exchange carries no failure rate of
+    /// its own, so each row's contribution to that measure is its
+    /// `(provider, model)`'s [`RouteResponsiveness::effective_ttfc_ms`] over
+    /// this same window, computed once per route and read off for every row
+    /// that route served. Raw TTFC, TTFT and decode tokens/s are each row's
+    /// own figure.
+    pub fn responsiveness_separation(
+        &self,
+        now_unix: i64,
+        window_seconds: i64,
+    ) -> Result<SeparationReport, EvidenceLedgerError> {
+        let earliest = now_unix.saturating_sub(window_seconds);
+        let rows: Vec<(RoutingObservation, Option<String>)> = {
+            let conn = self.lock();
+            let mut statement = conn
+                .prepare(
+                    "SELECT r.*,
+                            (SELECT e.subject FROM evaluation_observations AS e
+                              WHERE e.kind = ?5
+                                AND e.session_id = r.session_id
+                                AND e.observed_at >= r.observed_at
+                              ORDER BY e.observed_at ASC
+                              LIMIT 1) AS verdict
+                     FROM routing_observations AS r
+                     WHERE r.project_id = ?1 AND r.observed_at >= ?2 AND r.observed_at <= ?3
+                       AND r.purpose = ?4
+                     ORDER BY r.observed_at ASC",
+                )
+                .map_err(sql_err(
+                    "read observations for the responsiveness separation",
+                ))?;
+            let mapped = statement
+                .query_map(
+                    params![
+                        self.project_id,
+                        earliest,
+                        now_unix,
+                        HARNESS_TURN_PURPOSE,
+                        crate::evaluation::EvaluationKind::TurnOutcomeObserved.as_str(),
+                    ],
+                    |row| {
+                        let verdict: Option<String> = row.get("verdict")?;
+                        Ok((row_to_observation(row)?, verdict))
+                    },
+                )
+                .map_err(sql_err(
+                    "read observations for the responsiveness separation",
+                ))?;
+            let mut rows = Vec::new();
+            for row in mapped {
+                let (observation, verdict) =
+                    row.map_err(sql_err("read one responsiveness-separation row"))?;
+                rows.push((observation?, verdict));
+            }
+            rows
+        };
+
+        let mut by_route: std::collections::BTreeMap<(String, String), Vec<RoutingObservation>> =
+            std::collections::BTreeMap::new();
+        for (observation, _) in &rows {
+            by_route
+                .entry((observation.provider.clone(), observation.model.clone()))
+                .or_default()
+                .push(observation.clone());
+        }
+        let route_effective_ttfc: std::collections::BTreeMap<(String, String), Option<f64>> =
+            by_route
+                .into_iter()
+                .map(|(key, group)| {
+                    let ttfc = RouteResponsiveness::from_observations(&group).effective_ttfc_ms();
+                    (key, ttfc)
+                })
+                .collect();
+
+        let mut usable = Vec::new();
+        let mut unusable = Vec::new();
+        for (observation, verdict) in &rows {
+            match verdict.as_deref() {
+                Some(EFFORT_SHADOW_VERDICT_COMPLETED) => usable.push(observation),
+                Some(EFFORT_SHADOW_VERDICT_FAILED) => unusable.push(observation),
+                _ => {}
+            }
+        }
+
+        let raw_ttfc = |side: &[&RoutingObservation]| -> Vec<f64> {
+            side.iter()
+                .filter_map(|o| o.first_tool_call_ms)
+                .map(|ms| ms as f64)
+                .collect()
+        };
+        let effective_ttfc = |side: &[&RoutingObservation]| -> Vec<f64> {
+            side.iter()
+                .filter_map(|o| {
+                    route_effective_ttfc
+                        .get(&(o.provider.clone(), o.model.clone()))
+                        .copied()
+                        .flatten()
+                })
+                .collect()
+        };
+        let ttft = |side: &[&RoutingObservation]| -> Vec<f64> {
+            side.iter()
+                .filter_map(|o| o.first_token_ms)
+                .map(|ms| ms as f64)
+                .collect()
+        };
+        let decode_rate = |side: &[&RoutingObservation]| -> Vec<f64> {
+            side.iter()
+                .filter_map(|o| {
+                    let output_tokens = o.output_tokens?;
+                    let first_token_ms = o.first_token_ms?;
+                    let completed_ms = o.completed_ms?;
+                    if completed_ms < first_token_ms {
+                        return None;
+                    }
+                    let decode_ms = completed_ms - first_token_ms;
+                    if decode_ms <= 0 {
+                        return None;
+                    }
+                    Some(output_tokens as f64 * 1000.0 / decode_ms as f64)
+                })
+                .collect()
+        };
+
+        Ok(SeparationReport {
+            rows: vec![
+                SeparationMeasure::new("raw TTFC", raw_ttfc(&usable), raw_ttfc(&unusable)),
+                SeparationMeasure::new(
+                    "effective TTFC",
+                    effective_ttfc(&usable),
+                    effective_ttfc(&unusable),
+                ),
+                SeparationMeasure::new("TTFT", ttft(&usable), ttft(&unusable)),
+                SeparationMeasure::new(
+                    "decode tokens/s",
+                    decode_rate(&usable),
+                    decode_rate(&unusable),
+                ),
+            ],
+        })
     }
 
     /// [`TranslationSavings`] for every `(route, quota_context)` this ledger
@@ -4996,6 +5263,100 @@ fn failure_rate_aggregate(observations: &[RoutingObservation]) -> Option<Aggrega
     ))
 }
 
+/// Effective TTFC (map line 1351) and its two supporting readings, computed
+/// over any slice of routing observations the caller has already scoped to
+/// the route it wants scored. This function does no filtering or grouping of
+/// its own — the caller's slice **is** the scope, which is what lets one
+/// function serve two callers: [`crate::routing::session::Destination`]'s
+/// own reading over one `(provider, model)` pairing
+/// (`GH-RESPONSIVENESS-TERMS` objective 2), and map line 1845's per-pairing-
+/// class join over every row a session's class served
+/// (`crate::evaluation`'s reader).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RouteResponsiveness {
+    /// Mean `first_tool_call_ms` over the rows carrying one. Never a seconds
+    /// fallback — 1347's own millisecond resolution is the point, and a
+    /// mixed-resolution mean would misstate the very quantity this reads.
+    pub raw_ttfc_ms: Option<f64>,
+    pub raw_ttfc_sample: usize,
+    /// The scope's transport-level failure rate — `failure_rate_aggregate`
+    /// verbatim, `None` below [`MIN_SAMPLE_FOR_SUMMARY`].
+    pub failure_rate: Option<f64>,
+    pub failure_rate_sample: usize,
+    /// Rounds begun ÷ minutes served, over rows carrying both a round count
+    /// and a dispatch/completion pair — 1350's rate, recomputed from raw
+    /// rows here rather than read off [`PurposeConsumption`], because this
+    /// scope (one route, or one pairing class) is neither of that reader's
+    /// two groupings.
+    pub rounds_per_minute: Option<f64>,
+    pub rounds_per_minute_sample: usize,
+}
+
+impl RouteResponsiveness {
+    pub fn from_observations(observations: &[RoutingObservation]) -> Self {
+        let ttfc_values: Vec<f64> = observations
+            .iter()
+            .filter_map(|o| o.first_tool_call_ms)
+            .map(|ms| ms as f64)
+            .collect();
+        let raw_ttfc_sample = ttfc_values.len();
+        let raw_ttfc_ms = (!ttfc_values.is_empty())
+            .then(|| ttfc_values.iter().sum::<f64>() / ttfc_values.len() as f64);
+
+        let failure = failure_rate_aggregate(observations);
+        let failure_rate_sample = failure
+            .as_ref()
+            .map(AggregateReading::sample_count)
+            .unwrap_or(0);
+        let failure_rate = failure.as_ref().map(|reading| *reading.value());
+
+        let mut rounds_sum: i64 = 0;
+        let mut serving_seconds_sum: i64 = 0;
+        let mut rounds_per_minute_sample = 0usize;
+        for observation in observations {
+            if let (Some(rounds), Some(dispatched), Some(completed)) = (
+                observation.tool_rounds,
+                observation.dispatched_at_unix,
+                observation.completed_at_unix,
+            ) {
+                rounds_sum += rounds;
+                serving_seconds_sum += completed - dispatched;
+                rounds_per_minute_sample += 1;
+            }
+        }
+        let rounds_per_minute = (rounds_per_minute_sample > 0 && serving_seconds_sum > 0)
+            .then(|| rounds_sum as f64 * 60.0 / serving_seconds_sum as f64);
+
+        Self {
+            raw_ttfc_ms,
+            raw_ttfc_sample,
+            failure_rate,
+            failure_rate_sample,
+            rounds_per_minute,
+            rounds_per_minute_sample,
+        }
+    }
+
+    /// Map line 1351: `raw_ttfc_ms / (1 - failure_rate)`, defined only when
+    /// both the TTFC sample and the failure-rate sample meet
+    /// [`MIN_SAMPLE_FOR_SUMMARY`] and the failure rate is below 100% —
+    /// `None` otherwise, never a clamped number.
+    pub fn effective_ttfc_ms(&self) -> Option<f64> {
+        if self.raw_ttfc_sample < MIN_SAMPLE_FOR_SUMMARY {
+            return None;
+        }
+        if self.failure_rate_sample < MIN_SAMPLE_FOR_SUMMARY {
+            return None;
+        }
+        let raw = self.raw_ttfc_ms?;
+        let p = self.failure_rate?;
+        if p >= 1.0 {
+            return None;
+        }
+        Some(raw / (1.0 - p))
+    }
+}
+
 fn failure_class_counts(observations: &[RoutingObservation]) -> FailureClassCounts {
     let mut counts = FailureClassCounts::default();
     for observation in observations {
@@ -5004,7 +5365,11 @@ fn failure_class_counts(observations: &[RoutingObservation]) -> FailureClassCoun
     counts
 }
 
-fn row_to_observation(
+/// `pub(crate)`: [`crate::evaluation`]'s map-line-1845 join reads
+/// `routing_observations` directly (the same database file, a second
+/// connection — see that module's own doc comment) and reuses this row
+/// decoder rather than re-deriving [`RoutingObservation`]'s parsing.
+pub(crate) fn row_to_observation(
     row: &Row<'_>,
 ) -> rusqlite::Result<Result<RoutingObservation, EvidenceLedgerError>> {
     let seq: i64 = row.get("seq")?;
@@ -5175,6 +5540,19 @@ fn row_to_purpose_consumption(row: &Row<'_>) -> rusqlite::Result<PurposeConsumpt
         tool_rounds: row.get("tool_rounds")?,
         repairs: row.get("repairs")?,
         serving_seconds: row.get("serving_seconds")?,
+        failure_rate_sample: {
+            let failure_rate_sample: i64 = row.get("failure_rate_sample")?;
+            failure_rate_sample as usize
+        },
+        failure_rate: {
+            let failure_rate_sample: i64 = row.get("failure_rate_sample")?;
+            if failure_rate_sample as usize >= MIN_SAMPLE_FOR_SUMMARY {
+                let failed_count: i64 = row.get("failed_count")?;
+                Some(failed_count as f64 / failure_rate_sample as f64)
+            } else {
+                None
+            }
+        },
     })
 }
 
@@ -5610,6 +5988,8 @@ mod tests {
                 tool_rounds: None,
                 repairs: None,
                 serving_seconds: None,
+                failure_rate_sample: 0,
+                failure_rate: None,
             }
         }
 
@@ -6909,6 +7289,8 @@ mod correlation_tests {
                 tool_rounds: None,
                 repairs: None,
                 serving_seconds: None,
+                failure_rate_sample: 0,
+                failure_rate: None,
             },
             PurposeConsumption {
                 purpose: Some("a-purpose-this-build-does-not-know".to_owned()),
@@ -6931,6 +7313,8 @@ mod correlation_tests {
                 tool_rounds: None,
                 repairs: None,
                 serving_seconds: None,
+                failure_rate_sample: 0,
+                failure_rate: None,
             },
         ];
         let overhead = RoutingOverhead::from_consumption(&groups);
@@ -6970,6 +7354,8 @@ mod correlation_tests {
                 tool_rounds: None,
                 repairs: None,
                 serving_seconds: None,
+                failure_rate_sample: 0,
+                failure_rate: None,
             },
             PurposeConsumption {
                 purpose: None,
@@ -6992,6 +7378,8 @@ mod correlation_tests {
                 tool_rounds: None,
                 repairs: None,
                 serving_seconds: None,
+                failure_rate_sample: 0,
+                failure_rate: None,
             },
             PurposeConsumption {
                 purpose: Some("a-purpose-this-build-does-not-know".to_owned()),
@@ -7014,6 +7402,8 @@ mod correlation_tests {
                 tool_rounds: None,
                 repairs: None,
                 serving_seconds: None,
+                failure_rate_sample: 0,
+                failure_rate: None,
             },
         ];
         let overhead = RoutingOverhead::from_consumption(&groups);

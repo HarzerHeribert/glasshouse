@@ -469,11 +469,21 @@ const LATENCY_PREFERENCE_WEIGHT: f64 = CLASSIFICATION_PREFERENCE_WEIGHT;
 /// fills them from the layered `[routing]` configuration for the automatic
 /// classification path and nowhere else, so memory extraction and every
 /// other [`JobKind`] keep exactly the behaviour they had.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct ClassificationPolicy {
     max_latency_ms: Option<u32>,
     local_only: bool,
     max_marginal_cost_micro_usd: Option<u32>,
+    /// Capability map line 1419: the per-token price of the destination a
+    /// task lands on when classification does nothing — the launch
+    /// profile's own backend, priced through `pricing.toml`, and `None`
+    /// when that backend is a harness's own sign-in or otherwise unpriced.
+    /// `main.rs::classify_for_routing` is the only production caller that
+    /// ever has one to give: every diagnostic path (`glasshouse resources`,
+    /// `glasshouse classify`, `glasshouse route`) has not chosen a launch
+    /// profile and passes `None`, which leaves the comparison inert rather
+    /// than guessed from a plan name.
+    protected_capacity_price: Option<ModelPrice>,
 }
 
 impl ClassificationPolicy {
@@ -524,6 +534,22 @@ impl ClassificationPolicy {
 
     pub fn max_marginal_cost_micro_usd(&self) -> Option<u32> {
         self.max_marginal_cost_micro_usd
+    }
+
+    /// Capability map line 1419: the premium capacity this classification
+    /// protects, priced. `None` leaves the *protected capacity* term inert
+    /// — see `classification_verdict`.
+    #[must_use]
+    pub fn with_protected_capacity_price(
+        mut self,
+        protected_capacity_price: Option<ModelPrice>,
+    ) -> Self {
+        self.protected_capacity_price = protected_capacity_price;
+        self
+    }
+
+    pub fn protected_capacity_price(&self) -> Option<ModelPrice> {
+        self.protected_capacity_price
     }
 }
 
@@ -588,6 +614,68 @@ enum ClassificationVerdict {
     Excluded {
         reason: String,
     },
+}
+
+/// Capability map line 1419: whether `candidate`'s own estimated
+/// classification cost is materially lower than the premium capacity
+/// `policy` protects — the destination a task lands on when classification
+/// does nothing (`design-decisions.md`, *"The premium capacity a classifier
+/// protects"*). `+1.0` at or under one tenth of that cost, a bounded
+/// negative magnitude above it, `0.0` with a reason when either side cannot
+/// be compared. **Never excludes** — that is the 1436 ceiling's job, right
+/// above this term's call site in [`classification_verdict`]; this term
+/// only orders.
+fn protected_capacity_note(
+    policy: &ClassificationPolicy,
+    candidate: &DisposableCandidate,
+) -> Contribution {
+    const NAME: &str = "protected capacity";
+    if candidate.cost == Cost::Free {
+        return Contribution::new(
+            NAME,
+            0.0,
+            "free — protects everything it is asked to (map line 1419)".to_owned(),
+        );
+    }
+    let Some(protected_price) = policy.protected_capacity_price else {
+        return Contribution::new(
+            NAME,
+            0.0,
+            "the launch's destinations are unpriced — nothing to compare against (map line 1419)"
+                .to_owned(),
+        );
+    };
+    let Some(candidate_price) = candidate.price else {
+        return Contribution::new(NAME, 0.0, "unpriced candidate (map line 1419)".to_owned());
+    };
+    let candidate_cost = estimated_classification_cost_micro_usd(candidate_price);
+    let protected_cost = estimated_classification_cost_micro_usd(protected_price);
+    let ratio = candidate_cost as f64 / protected_cost as f64;
+    if ratio <= 0.1 {
+        Contribution::new(
+            NAME,
+            1.0,
+            format!(
+                "estimated classification cost {} is {:.1}% of the protected destination's {} \
+                 — materially lower (map line 1419)",
+                format_micro_usd(candidate_cost),
+                ratio * 100.0,
+                format_micro_usd(protected_cost)
+            ),
+        )
+    } else {
+        Contribution::new(
+            NAME,
+            -(ratio - 0.1).min(1.0),
+            format!(
+                "estimated classification cost {} is {:.1}% of the protected destination's {} \
+                 — not materially lower (map line 1419)",
+                format_micro_usd(candidate_cost),
+                ratio * 100.0,
+                format_micro_usd(protected_cost)
+            ),
+        )
+    }
 }
 
 /// Decide whether `candidate` may be asked to classify — the four filters
@@ -697,6 +785,12 @@ fn classification_verdict(
             },
         },
     }
+
+    // Map line 1419, right after the 1436 ceiling: whether this candidate's
+    // own estimated call is materially cheaper than the premium capacity it
+    // protects — an *ordering* note, never an exclusion; only the 1436
+    // ceiling above excludes on price.
+    notes.push(protected_capacity_note(policy, candidate));
 
     // Map line 1432.
     match candidate.classification.as_ref() {
@@ -1805,25 +1899,38 @@ impl DisposableRouting {
             });
         }
 
-        // Capability map lines 1420, 1421 and 1438: among the candidates the
-        // user has *not* placed in an explicit free-resource order, the
-        // classification preferences decide the order `choose`'s free loop
-        // walks. A stable sort on the preference total, so two candidates
-        // nothing is known about keep the caller's order exactly as before —
-        // and `FreePreferences::arrange` re-sorts by the user's own order
-        // afterwards, so a ranked candidate is never moved by this. The
-        // scoring invariant `choose` documents therefore still holds: it
-        // consults no score to pick a free winner; the order it is handed
-        // is what changed.
-        admitted.sort_by(|(left, _), (right, _)| {
-            let of = |candidate: &DisposableCandidate| {
+        // Capability map lines 1420, 1421, 1438 and 1419: among the
+        // candidates the user has *not* placed in an explicit free-resource
+        // order, the classification preferences decide the order `choose`'s
+        // free loop walks. A stable sort on the preference total, so two
+        // candidates nothing is known about keep the caller's order exactly
+        // as before — and `FreePreferences::arrange` re-sorts by the user's
+        // own order afterwards, so a ranked candidate is never moved by
+        // this. The scoring invariant `choose` documents therefore still
+        // holds: it consults no score to pick a free winner; the order it is
+        // handed is what changed.
+        //
+        // `notes` — the same `Vec<Contribution>` `classification_verdict`
+        // just built for this candidate — is summed in alongside
+        // `classification_preferences` rather than left for the explanation
+        // alone: every requirement note in it is a fixed `0.0` except the
+        // 1419 *protected capacity* term, which is the one note in that list
+        // ruled to carry a real magnitude (`design-decisions.md`, *"The
+        // premium capacity a classifier protects"* — *"this line only
+        // orders"*). Summing the whole `notes` list rather than picking that
+        // term out by name costs nothing today (every sibling note is
+        // `0.0`) and asks nothing of a future note beyond the same
+        // convention.
+        admitted.sort_by(|(left, left_notes), (right, right_notes)| {
+            let of = |candidate: &DisposableCandidate, notes: &[Contribution]| {
                 self.classification_preferences(candidate)
                     .iter()
+                    .chain(notes)
                     .map(Contribution::magnitude)
                     .sum::<f64>()
             };
-            of(right)
-                .partial_cmp(&of(left))
+            of(right, right_notes)
+                .partial_cmp(&of(left, left_notes))
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         let candidates: Vec<DisposableCandidate> = admitted

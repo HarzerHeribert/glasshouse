@@ -701,3 +701,13 @@ Not a state change. `GH-TURN-OUTCOME-ROW` closed both lines above with the verdi
 State: **COMPLETE** for 1836, 1855 (token half) and 1854 (sparse and stale). Phase 51 stands at 20 of 37.
 
 > **2026-09-03, the wave-107 trailing sweep:** `tests/entitlement_broker.rs`'s two view tests read each account's block by position — name, facets, `served:` — and the 1836 line, joined into the facets string with a newline, had landed between them. The targeted gate never traced that file. Fixed forward in `main.rs`: `headroom_replay_facet` is its own line, printed after `served:` by `entitlements` and as the facets line's continuation by `status`; `phase51_joins`'s own assertions are `contains` and stand. The 1836 evidence above is unchanged.
+
+## 1845 and 1850 — CLOSED 2026-09-03 (`GH-RESPONSIVENESS-TERMS`, Amber, Sonnet high): the pairing-class join and the separation readout
+
+**1845.** The *by pairing class* block of the route-outcomes section (`main.rs :: route_outcomes_section`) drops its *task success only* caveat and prints, per pairing class, task success (as before), usable tool calls (the share of the class's routing rows with `tool_rounds > 0`), repair loops (mean `repairs` per row carrying one), effective TTFC (`RouteResponsiveness` over the class's rows), reliability (`1 − p`), and user overrides (`RoutingOverrideDecided` rows with subject `overridden`, read from `sessions.pairing_class` — the field `route_outcomes_by_pairing_class` already joins through), each with its sample and *not enough* below the floor. The register's *three producers, not a join* stood in August; the producers landed in waves 102–106 and this is the join.
+
+**1850.** `EvidenceLedger::responsiveness_separation`: for each of raw TTFC, effective TTFC, TTFT and decode tokens/s over exchanges with a usable-turn verdict (`effort_shadow`'s subquery — the session's next `TurnOutcomeObserved` at or after the exchange), the median among usable and among unusable turns and `|median_unusable − median_usable| / median_all` as the separation, printed per measure with both sample counts under `responsiveness vs usable turns (1850):` in `routing-cost` — *separates*, never *predicts*. `usable-verdict-ignored` KILLED (the first attempt, redirecting only the catch-all arm, SURVIVED and the test was strengthened — §80).
+
+Gates and limits: the `phase-33b.md` entry for this package. Scope overflow: `tests/routing_economics.rs` (two `PurposeConsumption` fields), `tests/routing_outcome.rs` (the pairing block's text changed by the caveat's removal).
+
+State: **COMPLETE** for 1845 and 1850. Phase 51 stands at 22 of 37.

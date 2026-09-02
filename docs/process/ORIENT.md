@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1254 / 1347 mandatory capabilities (93%)** — 93 open across 30 phases.
+**1264 / 1347 mandatory capabilities (94%)** — 83 open across 28 phases.
 
 ## Where the work is
 
@@ -32,8 +32,6 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 32C | Subscription capacity estimation | **1** | 11 | `1242` |
 | Phase 32D | Normalized remaining-capacity score | **1** | 11 | `1257` |
 | Phase 32F | Protected quota reserve | **1** | 7 | `1285` |
-| Phase 33C | Failure, quota, and route correlation | **1** | 14 | `1362` |
-| Phase 34B | Routing-model role | **1** | 14 | `1406` |
 | Phase 34C | Automatic routing-model selection | **1** | 12 | `1429` |
 | Phase 37 | Basic session-aware router | **1** | 10 | `1590` |
 | Phase 9 | Antigravity adapter | **2** | 5 | `330` |
@@ -43,23 +41,23 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 38 | Quota-preserving routing | **2** | 5 | `1604` |
 | Phase 53 | Criteria before adding graph storage | **2** | 3 | `1872` |
 | Phase 28 | File-aware memory lookup | **3** | 2 | `1137` |
+| Phase 33B | Reliability-adjusted agent performance | **3** | 11 | `1345` |
+| Phase 35B | Candidate scoring | **3** | 22 | `1523` |
 | Phase 21E | Decision ladder and conflict handling | **4** | 8 | `907` |
 | Phase 31 | Compaction-aware behavior | **5** | 2 | `1167` |
 | Phase 52 | Criteria before adding semantic/vector retrieval | **5** | 1 | `1858` |
 | Phase 21G | Memory revalidation | **6** | 3 | `941` |
-| Phase 33B | Reliability-adjusted agent performance | **6** | 8 | `1345` |
-| Phase 35B | Candidate scoring | **6** | 19 | `1523` |
 | Phase 32A | Unified quota and capacity model | **7** | 14 | `1196` |
 | Phase 9K | Harness-aware response profiles | **8** | 29 | `578` |
-| Phase 51 | Evaluation hooks | **17** | 20 | `1818` |
+| Phase 51 | Evaluation hooks | **15** | 22 | `1818` |
 
-**Fully closed (78):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 7, Phase 8, Phase 9A, Phase 9B, Phase 9C, Phase 9D, Phase 9F, Phase 9G, Phase 9I, Phase 9J, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 16, Phase 17, Phase 18, Phase 19, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 21H, Phase 21I, Phase 21J, Phase 22, Phase 23, Phase 24, Phase 25, Phase 26, Phase 29, Phase 32, Phase 32B, Phase 32E, Phase 33A, Phase 34, Phase 34A, Phase 34D, Phase 34E, Phase 34F, Phase 35, Phase 35A, Phase 35C, Phase 35D, Phase 36, Phase 39, Phase 40, Phase 41, Phase 42, Phase 43, Phase 44, Phase 45, Phase 46, Phase 47, Phase 48, Phase 49, Phase 50, Phase 54, Phase 54A, Phase 55, Phase 56, Phase 56A, Phase 57, Phase 58.
+**Fully closed (80):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 7, Phase 8, Phase 9A, Phase 9B, Phase 9C, Phase 9D, Phase 9F, Phase 9G, Phase 9I, Phase 9J, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 16, Phase 17, Phase 18, Phase 19, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 21H, Phase 21I, Phase 21J, Phase 22, Phase 23, Phase 24, Phase 25, Phase 26, Phase 29, Phase 32, Phase 32B, Phase 32E, Phase 33A, Phase 33C, Phase 34, Phase 34A, Phase 34B, Phase 34D, Phase 34E, Phase 34F, Phase 35, Phase 35A, Phase 35C, Phase 35D, Phase 36, Phase 39, Phase 40, Phase 41, Phase 42, Phase 43, Phase 44, Phase 45, Phase 46, Phase 47, Phase 48, Phase 49, Phase 50, Phase 54, Phase 54A, Phase 55, Phase 56, Phase 56A, Phase 57, Phase 58.
 
 ## The nearly-finished phases, in full
 
 Every phase with **three or fewer** open lines, quoted verbatim. These are
 where a single package finishes a phase, so they are listed here and the
-other ~64 open lines are not.
+other ~50 open lines are not.
 
 For any other phase: `scripts/discover.py --phase <id>` prints its open
 lines and evidence together. **Do not open the 178 KB map to read them.**
@@ -108,14 +106,6 @@ these unwrapped.
 
 - **1294** ☐ Avoid moving an almost-complete high-value task to another session solely because a reserve threshold was crossed.
 
-### Phase 33C — Failure, quota, and route correlation  (1 open, 14 closed)
-
-- **1366** ☐ Learn or parse provider cadence separately from Retry-After remainder values when evidence permits.
-
-### Phase 34B — Routing-model role  (1 open, 14 closed)
-
-- **1419** ☐ Prefer a routing model whose marginal decision cost is materially lower than the premium capacity it protects.
-
 ### Phase 34C — Automatic routing-model selection  (1 open, 12 closed)
 
 - **1440** ☐ Avoid using a scarce premium subscription session as the classifier when a cheaper adequate routing resource exists.
@@ -159,6 +149,18 @@ these unwrapped.
 - **1139** ☐ Track file paths explicitly referenced by durable memories when extraction can identify them reliably.
 - **1141** ☐ Prefer constraints, decisions, and failed approaches when retrieving memory for an intended code edit.
 - **1142** ☐ Keep file-aware retrieval advisory and never treat stale memory as stronger evidence than the current source code.
+
+### Phase 33B — Reliability-adjusted agent performance  (3 open, 11 closed)
+
+- **1354** ☐ Count empty completions, unusable tool calls, stream aborts, and apparently successful but non-actionable turns as distinct unsuccessful outcomes.
+- **1356** ☐ Avoid comparing TTFC across tasks with materially different tool requirements unless the comparison is explicitly normalized or segmented.
+- **1360** ☐ Never infer precise TTFC or token timing from terminal text when the adapter cannot distinguish protocol events reliably.
+
+### Phase 35B — Candidate scoring  (3 open, 22 closed)
+
+- **1534** ☐ Include context quality in candidate scoring.
+- **1535** ☐ Include prompt-cache temperature in candidate scoring.
+- **1545** ☐ Include cache affinity and the distinction between warm, cold, and unknown observations.
 
 ## Practice sections, by number
 
@@ -240,10 +242,10 @@ to do, and the orchestrator should follow its own rule.
 Newest first, from `docs/process/handoff.md`. Read the top one in full;
 the rest are context you probably do not need.
 
+- Checkpoint — 2026-09-02, batch 94: 1264 / 1347 (93.9%) — the bootstrap race closed under independent verification, ten accepted lines land, Phases 33C and 34B complete, and Phase 28's producer found in Phase 57's hook
 - Checkpoint — 2026-09-03, batch 93: 1254 / 1347 (93.1%) — the Windows leg fully green, migration 25's millisecond offsets, Phase 47 complete, and the board repackaged by mechanism
 - Checkpoint — 2026-09-02, batch 92: 1243 / 1347 (92.3%) — Phase 33A complete, rounds per minute printed as what it is, and the Windows leg's stack reserve holds
 - Checkpoint — 2026-09-02, batch 91: 1235 / 1347 (91.7%) — Phase 24 complete, expected latency scored, and the Windows leg found the binary could not start
-- Checkpoint — 2026-09-02, batch 90: 1229 / 1347 (91.2%) — money is counted against the budget, Phase 35A complete, and a refusal that outlived its blocker
 
 ## Evidence ledger files
 

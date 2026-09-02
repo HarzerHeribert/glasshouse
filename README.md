@@ -19,10 +19,10 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`███████████████████████████████████░░░░░` 1201 / 1347 mandatory capabilities (89%)
+`█████████████████████████████████████░░░` 1264 / 1347 mandatory capabilities (93%)
 
 <details>
-<summary>Per-phase breakdown (71 of 108 phases complete)</summary>
+<summary>Per-phase breakdown (80 of 108 phases complete)</summary>
 
 | Phase | Done |
 |---|---|
@@ -69,7 +69,7 @@ the authoritative specification and tracks what is done.
 | Phase 21C — Validity conditions and invalidation | 11/11 ✅ |
 | Phase 21D — Memory age and relevance decay | 9/9 ✅ |
 | Phase 21E — Decision ladder and conflict handling | 8/12 |
-| Phase 21F — Memory retrieval quality | 9/11 |
+| Phase 21F — Memory retrieval quality | 10/11 |
 | Phase 21G — Memory revalidation | 3/9 |
 | Phase 21H — Simplicity-first implementation policy | 10/10 ✅ |
 | Phase 21I — Production-aware implementation checks | 11/11 ✅ |
@@ -77,7 +77,7 @@ the authoritative specification and tracks what is done.
 | Phase 21K — Assumption-aware implementation guardrails | 42/43 |
 | Phase 22 — Memory lifecycle and supersession | 9/9 ✅ |
 | Phase 23 — Memory full-text search | 7/7 ✅ |
-| Phase 24 — Memory reranking | 1/6 |
+| Phase 24 — Memory reranking | 6/6 ✅ |
 | Phase 25 — Project knowledge view | 10/10 ✅ |
 | Phase 26 — Memory query for agents | 6/6 ✅ |
 | Phase 27 — Context injection | 10/11 |
@@ -86,33 +86,33 @@ the authoritative specification and tracks what is done.
 | Phase 30 — Session context metadata | 7/8 |
 | Phase 31 — Compaction-aware behavior | 2/7 |
 | Phase 32 — Resource registry | 12/12 ✅ |
-| Phase 32A — Unified quota and capacity model | 13/21 |
+| Phase 32A — Unified quota and capacity model | 14/21 |
 | Phase 32B — Quota telemetry sources | 14/14 ✅ |
-| Phase 32C — Subscription capacity estimation | 10/12 |
-| Phase 32D — Normalized remaining-capacity score | 10/12 |
-| Phase 32E — Burn rate and exhaustion forecasting | 9/10 |
+| Phase 32C — Subscription capacity estimation | 11/12 |
+| Phase 32D — Normalized remaining-capacity score | 11/12 |
+| Phase 32E — Burn rate and exhaustion forecasting | 10/10 ✅ |
 | Phase 32F — Protected quota reserve | 7/8 |
-| Phase 32G — Provider-aware request-cost estimation | 7/10 |
+| Phase 32G — Provider-aware request-cost estimation | 8/10 |
 | Phase 33 — Resource health | 13/15 |
-| Phase 33A — Routing evidence ledger | 12/15 |
-| Phase 33B — Reliability-adjusted agent performance | 4/14 |
-| Phase 33C — Failure, quota, and route correlation | 12/15 |
+| Phase 33A — Routing evidence ledger | 15/15 ✅ |
+| Phase 33B — Reliability-adjusted agent performance | 11/14 |
+| Phase 33C — Failure, quota, and route correlation | 15/15 ✅ |
 | Phase 34 — Capability registry | 10/10 ✅ |
 | Phase 34A — Workload tiers | 10/10 ✅ |
-| Phase 34B — Routing-model role | 14/15 |
-| Phase 34C — Automatic routing-model selection | 10/13 |
+| Phase 34B — Routing-model role | 15/15 ✅ |
+| Phase 34C — Automatic routing-model selection | 12/13 |
 | Phase 34D — Router request schema | 13/13 ✅ |
 | Phase 34E — Router economics | 9/9 ✅ |
 | Phase 34F — Model capability and tier calibration | 11/11 ✅ |
 | Phase 35 — Lightweight task classification | 14/14 ✅ |
-| Phase 35A — Candidate generation | 10/11 |
-| Phase 35B — Candidate scoring | 18/25 |
+| Phase 35A — Candidate generation | 11/11 ✅ |
+| Phase 35B — Candidate scoring | 22/25 |
 | Phase 35C — Capacity-aware tier escalation and downgrade | 9/9 ✅ |
 | Phase 35D — Routing under subscription pressure | 8/8 ✅ |
 | Phase 36 — Session affinity | 8/8 ✅ |
 | Phase 37 — Basic session-aware router | 10/11 |
 | Phase 38 — Quota-preserving routing | 5/7 |
-| Phase 39 — Gateway-backed disposable jobs | 8/9 |
+| Phase 39 — Gateway-backed disposable jobs | 9/9 ✅ |
 | Phase 40 — Fresh-session handoff | 9/9 ✅ |
 | Phase 41 — Project overview | 15/15 ✅ |
 | Phase 42 — External control API | 13/13 ✅ |
@@ -120,11 +120,11 @@ the authoritative specification and tracks what is done.
 | Phase 44 — User control and override | 9/9 ✅ |
 | Phase 45 — Failure handling | 9/9 ✅ |
 | Phase 46 — Security and contamination tests | 8/8 ✅ |
-| Phase 47 — Observability without spectacle | 8/15 |
+| Phase 47 — Observability without spectacle | 15/15 ✅ |
 | Phase 48 — CLI ergonomics | 8/8 ✅ |
 | Phase 49 — Configuration | 16/16 ✅ |
 | Phase 50 — Tracked project knowledge as an optional feature | 7/7 ✅ |
-| Phase 51 — Evaluation hooks | 14/37 |
+| Phase 51 — Evaluation hooks | 22/37 |
 | Phase 52 — Criteria before adding semantic/vector retrieval | 1/6 |
 | Phase 53 — Criteria before adding graph storage | 3/5 |
 | Phase 54 — Criteria before deeper cmux coupling | 4/4 ✅ |
@@ -133,7 +133,7 @@ the authoritative specification and tracks what is done.
 | Phase 56 — Harness–subscription decoupling: choose the harness, route the subscription and model | 12/12 ✅ |
 | Phase 56A — Entitlement pool and subscription broker: several accounts, one scheduler | 13/13 ✅ |
 | Phase 57 — Context firewall: tool-output compaction between harness and model | 27/27 ✅ |
-| Phase 58 — Context economy: cache-stable translation, entitlement-aware reduction, and a measured token budget | 0/15 |
+| Phase 58 — Context economy: cache-stable translation, entitlement-aware reduction, and a measured token budget | 15/15 ✅ |
 
 </details>
 <!-- progress:end -->

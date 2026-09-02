@@ -784,3 +784,15 @@ free walk.
 
 State: **COMPLETE**. Phase 35B stands at 19 of 25; 1534, 1535/1545, 1542,
 1543/1544 stay refused (the register).
+
+## 1542, 1543 and 1544 — CLOSED 2026-09-03 (`GH-RESPONSIVENESS-TERMS`, Amber, Sonnet high): observed reliability over the prior, effective over raw TTFC, rounds per minute as supporting evidence
+
+**1542.** The refusal above asked for a reliability signal independent of `task_success_rate`; the transport-level failure rate (`failure_rate_aggregate`, from `RoutingObservation::outcome`) is that signal. `routing/session.rs :: observed_pairing_reliability`: `(1 − p − 0.5) × 0.4` clamped to `±PAIRING_PRIOR`, active only when the pairing's local evidence count ≥ `PAIRING_PRIOR_EVIDENCE_THRESHOLD` (where `pairing_prior` already yields to `0.0`) and the failure-rate sample ≥ `MIN_SAMPLE_FOR_SUMMARY` — observed reliability replaces the same-vendor prior and can at most equal what the prior gave. `reliability-over-prior` (the clamp dropped) KILLED by `pairing_prior::observed_pairing_reliability_never_exceeds_the_prior_even_for_an_…`. Recorded limit: with `p ∈ [0, 1]` the formula's own range never reaches the clamp — the clamp is the ceiling's statement, not a live branch.
+
+**1543.** The `responsiveness (effective TTFC)` term (1352's entry in `phase-33b.md`) scores gateway routes for tool-using work on effective, not raw, TTFC, and only when reliability evidence clears the floor.
+
+**1544.** `tool rounds per minute`, a `Contribution` bounded to `±0.25` — a quarter of a full term, its evidence text saying *supporting evidence, not a quality score*; inert below the floor. `rounds-unbounded` (the clamp dropped) KILLED by `routing_score::tool_rounds_per_minute_never_outranks_a_candidate_a_full_term_ahead`.
+
+Per-destination readings reach the router through `Destination::with_route_responsiveness`, computed at the three destination sites in `main.rs` from the rows the launch path already holds. Gates and limits: see the `phase-33b.md` entry above. **Not extended, by instruction:** `ObservedEvidenceSource` (no production caller).
+
+State: **COMPLETE** for 1542, 1543 and 1544. Phase 35B stands at 22 of 25 (1534, 1535, 1545 refused — no source in this build).

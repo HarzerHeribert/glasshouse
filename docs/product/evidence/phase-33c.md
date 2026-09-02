@@ -788,3 +788,13 @@ Gates the worker ran (re-run the decisive ones yourself):
 - cargo test -p glasshouse --bin glasshouse: test result: ok. 81 passed; 0 failed
 - adjacent suites, all green: classification_call 10, support_work_debug 9, support_work_economy 33, firewall_reducer 3, memory_extract 4, precompact_memory 15, routing_evidence 2, provider_resources_probe 13
 
+
+## 1366 — CLOSED 2026-09-03 (`GH-LAST-LINES-33C-34B`, Amber, Sonnet high): a cadence learned when no header states one — Phase 33C complete
+
+**Design:** `design-decisions.md`, *Provider cadence learned when no header states it*. The *parse* half was already production (the quota cache's `limit`/`remaining`/`reset`/`window_seconds` become the free pool's `Allowance::RequestPool`, kept apart from `declared_wait_remaining`, the Retry-After remainder). The *learn* half: `routing/free.rs :: Window::{Stated { seconds }, Learned { seconds, sample }}` on `PoolReading` and `Allowance::RequestPool`, copied by `record`; `free.rs :: learned_window` — a pure function over the rows the launch path already loads: the provider's `FailureClass::Throttle` rows (the packet said `CadenceThrottled`; corrected), the **median** of consecutive intervals at `MIN_SAMPLE_FOR_SUMMARY`; `main.rs :: observed_provider_health` sets `resets_in` from the last throttle plus the window when headers gave neither a window nor a reset. A stated window always wins; nothing is written back to the quota cache; `cadence_availability`'s evidence sentence names the provenance (*window stated by the provider (Ns)* / *learned from K throttles (Ns)*), which `glasshouse route` prints unconditionally.
+
+**Mutations** `median-is-last`, `learned-over-stated`, `learner-below-floor` KILLED (`tests/last_lines_33c_34b.rs`, 14/14). **Recorded limit, ruled acceptable:** `resources` and `entitlements` render request pools from `provider::resources::CapacityState`, a pipeline structurally separate from `FreePool` — neither reads `Allowance`, so neither prints the window's provenance; bridging them is a self-contained Green follow-up (`GH-POOL-PROVENANCE-IN-REPORTS`: call `observed_provider_health` from both reports, or a parallel learner in `CapacityState`). The line closes on the router's own reading of the learned cadence, which is where the cadence is used.
+
+Gates: `--lib routing` 286/286, classification_cost_ceiling 5/5, entitlement_pool 27/27, subscription_pressure 18/18, routing_score 4/4, route_command 43/43, classification_call 10/10, classification_time_price 6/6, launch_classification 24/24; targeted blast exit 0. Report: `.agent-runtime/report-last-lines-33c-34b.md`.
+
+State: **COMPLETE**. **Phase 33C stands at 15 of 15.**

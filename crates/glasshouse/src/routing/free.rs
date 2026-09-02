@@ -79,6 +79,10 @@ pub enum Allowance {
         limit: Option<u32>,
         remaining: Option<u32>,
         resets_at: Option<Instant>,
+        /// Capability map line 1366: the cadence behind this pool, when one
+        /// is known — a provider's own `window_seconds`, or, absent that,
+        /// the ledger's own learned interval. See [`Window`].
+        window: Option<Window>,
     },
     /// Priced per token. There is no pool to count down, and asking this
     /// variant "how many requests are left" has no answer, which is the
@@ -94,6 +98,7 @@ impl Allowance {
             limit: None,
             remaining: None,
             resets_at: None,
+            window: None,
         }
     }
 
@@ -132,6 +137,7 @@ impl Allowance {
             limit,
             remaining,
             resets_at,
+            window,
         } = self
         else {
             return;
@@ -145,7 +151,61 @@ impl Allowance {
         if let Some(after) = reading.resets_in {
             *resets_at = Some(now + after);
         }
+        if let Some(stated) = reading.window {
+            *window = Some(stated);
+        }
     }
+}
+
+/// Capability map line 1366's *learn* half: the median interval between
+/// consecutive [`super::evidence::FailureClass::Throttle`] rows for
+/// `provider`, when at least [`super::evidence::MIN_SAMPLE_FOR_SUMMARY`] of
+/// them are in `rows` — fewer, and the honest answer is "unproven, not
+/// unreliable", the same shape every other measurement in this build keeps.
+///
+/// A pure fold: `rows` is whatever window of the evidence ledger the caller
+/// already read (this function opens nothing itself), and `now_unix` is used
+/// only to discard a row whose clock is somehow ahead of the caller's own —
+/// defensive, not a filter this build expects to matter.
+///
+/// Returns the learned window together with the most recent throttle's own
+/// timestamp, so a caller with no stated `reset` can derive one:
+/// `resets_at = last_throttle + window`.
+pub fn learned_window(
+    rows: &[super::evidence::RoutingObservation],
+    provider: &str,
+    now_unix: i64,
+) -> Option<(Window, i64)> {
+    let mut throttled_at: Vec<i64> = rows
+        .iter()
+        .filter(|row| row.provider == provider)
+        .filter(|row| row.failure_class == Some(super::evidence::FailureClass::Throttle))
+        .map(|row| row.observed_at_unix)
+        .filter(|&observed_at| observed_at <= now_unix)
+        .collect();
+    if throttled_at.len() < super::evidence::MIN_SAMPLE_FOR_SUMMARY {
+        return None;
+    }
+    throttled_at.sort_unstable();
+    let last_throttle = *throttled_at
+        .last()
+        .expect("length checked against the floor above");
+
+    let mut intervals: Vec<i64> = throttled_at
+        .windows(2)
+        .map(|pair| pair[1] - pair[0])
+        .collect();
+    intervals.sort_unstable();
+    let sample = intervals.len();
+    let mid = sample / 2;
+    let median = if sample % 2 == 1 {
+        intervals[mid]
+    } else {
+        (intervals[mid - 1] + intervals[mid]) / 2
+    };
+    let seconds = u32::try_from(median.max(0)).unwrap_or(u32::MAX);
+
+    Some((Window::Learned { seconds, sample }, last_throttle))
 }
 
 /// What one real response said about the request pool behind the credential
@@ -159,6 +219,29 @@ pub struct PoolReading {
     pub limit: Option<u32>,
     pub remaining: Option<u32>,
     pub resets_in: Option<Duration>,
+    /// The cadence a provider stated, when it stated one — capability map
+    /// line 1366's *parse* half, kept apart from [`Self::resets_in`] because
+    /// a window and a reset are different statements a provider can make
+    /// independently. `None` here never blocks [`learned_window`] from
+    /// filling [`Allowance::RequestPool`]'s own `window` — only a `Some`
+    /// here does, because a stated window always wins over a learned one.
+    pub window: Option<Window>,
+}
+
+/// Capability map line 1366: the cadence behind a request pool, and where it
+/// came from. Never guessed — a provider's own header, or the ledger's own
+/// throttle history — and every reader that prints one says which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Window {
+    /// The provider's own `window_seconds` header.
+    Stated { seconds: u32 },
+    /// The median interval between `sample` consecutive
+    /// [`super::evidence::FailureClass::Throttle`] rows for this provider,
+    /// over whatever window of the evidence ledger the caller read — see
+    /// [`learned_window`]. Never persisted: a fresh read every time nothing
+    /// stated is missing, so a window that stops recurring stops being
+    /// claimed.
+    Learned { seconds: u32, sample: usize },
 }
 
 /// What one real unit of work told us about a resource.
@@ -959,6 +1042,7 @@ mod tests {
                 limit: Some(50),
                 remaining: Some(0),
                 resets_in: Some(Duration::from_secs(60)),
+                window: None,
             },
             now,
         );
@@ -993,6 +1077,7 @@ mod tests {
                 limit: None,
                 remaining: Some(2),
                 resets_at: None,
+                window: None,
             }
         );
 

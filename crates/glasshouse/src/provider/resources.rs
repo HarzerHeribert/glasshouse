@@ -462,6 +462,21 @@ impl GatheredTelemetry {
         self.providers.get(provider)
     }
 
+    /// Capability map line 1366's *parse* half, for
+    /// `main.rs::observed_provider_health`'s [`crate::routing::free::PoolReading`]:
+    /// `provider`'s own `window_seconds` header, when it stated one — never
+    /// derived, never guessed. `None` covers both "no reading gathered for
+    /// this provider" and "a reading was gathered, and it said nothing about
+    /// a window" alike, which is exactly what leaves the door open for a
+    /// learned window to fill it in.
+    pub fn stated_pool_window(&self, provider: &str) -> Option<crate::routing::free::Window> {
+        let (headers, _) = self.for_provider(provider)?;
+        let seconds = headers.window_seconds()?;
+        Some(crate::routing::free::Window::Stated {
+            seconds: u32::try_from(seconds).ok()?,
+        })
+    }
+
     /// Every resource's health gathered for `provider`, or an empty slice
     /// when nothing has been observed — capability map line 1324's "never
     /// invent a reading" half, at the one place a renderer can ask.

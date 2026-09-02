@@ -65,7 +65,7 @@ use super::burn::ClassOutput;
 use super::capability::{self, ResourceFacts};
 use super::classify::{DurationClass, HardCapability, TaskClassification, WorkloadTier};
 use super::evidence::{CostConfidence, FailureClass, MIN_SAMPLE_FOR_SUMMARY, ObservedCost};
-use super::free::{Allowance, FreePool, FreeResource};
+use super::free::{Allowance, FreePool, FreeResource, Window};
 use super::pressure::{
     self, Alternatives, CapacityFacts, PressureInputs, ReservePolicies, ReserveScope,
 };
@@ -526,6 +526,13 @@ pub struct Destination {
     /// starting prior until a follow-up package reads
     /// `crate::routing::evidence`'s own counts and attaches them here.
     pairing_prior_evidence: u32,
+    /// Map lines 1351/1352/1542/1543/1544: this destination's own
+    /// responsiveness and reliability reading, attached via
+    /// [`Self::with_route_responsiveness`]. `None` for a destination whose
+    /// caller read no ledger, or whose backend names no configured provider
+    /// — the honest floor on which `responsiveness`, `tool_round_rate` and
+    /// `observed_pairing_reliability` are all inert.
+    route_responsiveness: Option<super::evidence::RouteResponsiveness>,
 }
 
 impl Destination {
@@ -590,6 +597,7 @@ impl Destination {
             entitlement: None,
             estimated_input_size: EstimatedInputSize::UNESTIMATED,
             pairing_prior_evidence: 0,
+            route_responsiveness: None,
         }
     }
 
@@ -773,6 +781,26 @@ impl Destination {
 
     pub fn pairing_prior_evidence(&self) -> u32 {
         self.pairing_prior_evidence
+    }
+
+    /// Attach this destination's own responsiveness and reliability reading
+    /// — map lines 1351/1352/1542/1543/1544, computed by the caller from
+    /// `crate::routing::evidence::RouteResponsiveness::from_observations`
+    /// over the launch's own `consumption` slice, filtered to this
+    /// destination's `(provider, model)`. `None` — the default — is what
+    /// every destination carries until a caller attaches a real reading, on
+    /// which every one of the three terms this feeds is inert and says so.
+    #[must_use]
+    pub fn with_route_responsiveness(
+        mut self,
+        route_responsiveness: Option<super::evidence::RouteResponsiveness>,
+    ) -> Self {
+        self.route_responsiveness = route_responsiveness;
+        self
+    }
+
+    pub fn route_responsiveness(&self) -> Option<&super::evidence::RouteResponsiveness> {
+        self.route_responsiveness.as_ref()
     }
 
     /// The stable identifier a user names in an override, and the one a
@@ -1373,6 +1401,245 @@ pub fn pairing_prior(destination: &Destination, inputs: &RouterInputs<'_>) -> Co
              session with little local evidence, not a quality claim",
             destination.harness().slug(),
             destination.backend().model().label(),
+        ),
+    )
+}
+
+/// Line 1544: rounds per minute is supporting evidence, never a quality
+/// score — clamped to a quarter of a full term's own `[-1.0, 1.0]` range, so
+/// it can nudge a close decision but never outrank a full term on its own.
+const TOOL_ROUNDS_MAGNITUDE_CEILING: f64 = 0.25;
+
+/// Line 1542: the observed-reliability term's own ceiling — it may at most
+/// equal what [`PAIRING_PRIOR`] gave, never exceed the starting assumption
+/// it replaces.
+const OBSERVED_RELIABILITY_MAGNITUDE_CEILING: f64 = PAIRING_PRIOR;
+
+/// Whether this decision is tool-using work, and the reason — map line
+/// 1352's own gate: TTFC is the responsiveness measure for tool-using agent
+/// work, and a workload that is neither classified as one nor showing recent
+/// tool activity on the session in hand is never scored on it.
+///
+/// Two tests, either sufficient: [`TaskRequirements::needs_tool_calls`] —
+/// the classifier's own tool-using verdict
+/// (`super::request::TaskClassification::requirements`'s
+/// `needs_tool_calls: !hard_capabilities.is_empty()`, the same field
+/// [`hard_constraint`] already gates a rejection on) — **or** the current
+/// destination's own recent rows already carry a tool round, which is direct
+/// evidence of tool use on this exact session even when no fresh
+/// classification is in hand (a resumption, or `TaskRequirements::default()`).
+fn tool_using_reason(
+    inputs: &RouterInputs<'_>,
+    current: Option<&Destination>,
+) -> Option<&'static str> {
+    if inputs.requirements.needs_tool_calls {
+        return Some("the classified task needs tool calls");
+    }
+    let current_session_used_tools = current
+        .and_then(Destination::route_responsiveness)
+        .is_some_and(|reading| reading.rounds_per_minute_sample > 0);
+    if current_session_used_tools {
+        return Some("the current session's recent rows already carry a tool round");
+    }
+    None
+}
+
+/// Lines 1351/1352/1543: reliability-adjusted latency in route comparison —
+/// a fast route that frequently fails is not ranked as genuinely fast.
+///
+/// Inert (`0.0`, naming why) for a workload that is not tool-using
+/// ([`tool_using_reason`]), for a destination with no attached
+/// [`Destination::route_responsiveness`], and for one whose effective TTFC
+/// [`RouteResponsiveness::effective_ttfc_ms`] answers `None` — below
+/// [`MIN_SAMPLE_FOR_SUMMARY`] on either half, or a failure rate at or above
+/// 100%. Otherwise the candidate set's best (lowest) effective TTFC scores
+/// `+1.0` and every other candidate scales by `best / own` — a route twice
+/// as slow scores `0.5` — never negative, because a slower route is worth
+/// less, not a defect to penalise past zero.
+fn responsiveness(
+    destination: &Destination,
+    inputs: &RouterInputs<'_>,
+    current: Option<&Destination>,
+    best_effective_ttfc_ms: Option<f64>,
+) -> Contribution {
+    const TERM: &str = "responsiveness (effective TTFC)";
+    let Some(reason) = tool_using_reason(inputs, current) else {
+        return Contribution::new(
+            TERM,
+            0.0,
+            "inert: this is not tool-using work — neither the classified task class nor the \
+             current session's recent rows show tool use",
+        );
+    };
+    let Some(reading) = destination.route_responsiveness() else {
+        return Contribution::new(
+            TERM,
+            0.0,
+            format!("inert: no responsiveness reading attached to this destination ({reason})"),
+        );
+    };
+    let Some(own_effective_ttfc_ms) = reading.effective_ttfc_ms() else {
+        return Contribution::new(
+            TERM,
+            0.0,
+            format!(
+                "inert: effective TTFC unmeasured for this route — {} rows carry a raw TTFC, {} \
+                 rows carry a known outcome, and {MIN_SAMPLE_FOR_SUMMARY} of each are needed \
+                 ({reason})",
+                reading.raw_ttfc_sample, reading.failure_rate_sample,
+            ),
+        );
+    };
+    // `best_effective_ttfc_ms` is computed over the same candidates this
+    // destination is being scored among, so `own_effective_ttfc_ms` is
+    // always one of its own inputs and the ratio below is always in
+    // `(0.0, 1.0]` — this candidate can score `1.0` (it IS the best) but
+    // never negative, matching the objective's own rule.
+    let Some(best) = best_effective_ttfc_ms else {
+        return Contribution::new(
+            TERM,
+            0.0,
+            format!(
+                "inert: no candidate in this decision has a measured effective TTFC ({reason})"
+            ),
+        );
+    };
+    let magnitude = best / own_effective_ttfc_ms;
+    Contribution::new(
+        TERM,
+        magnitude,
+        format!(
+            "{reason}: raw TTFC {:.0}ms, effective TTFC {own_effective_ttfc_ms:.0}ms at an \
+             observed failure rate of {:.1}% (over {} rows) against the candidate set's best \
+             effective TTFC of {best:.0}ms",
+            reading.raw_ttfc_ms.unwrap_or_default(),
+            reading.failure_rate.unwrap_or_default() * 100.0,
+            reading.failure_rate_sample,
+        ),
+    )
+}
+
+/// Map line 1350's rate, priced as supporting evidence — never a full term,
+/// never a substitute for [`responsiveness`], and printed inert whenever
+/// [`PurposeConsumption::tool_rounds_per_minute`]'s own reasons for
+/// withholding apply here too: no rows carrying both a round count and a
+/// dispatch/completion pair.
+///
+/// [`PurposeConsumption::tool_rounds_per_minute`]: super::evidence::PurposeConsumption::tool_rounds_per_minute
+fn tool_round_rate(destination: &Destination) -> Contribution {
+    const TERM: &str = "tool rounds per minute";
+    let Some(reading) = destination.route_responsiveness() else {
+        return Contribution::new(
+            TERM,
+            0.0,
+            "inert: no responsiveness reading attached to this destination — supporting \
+             evidence, not a quality score",
+        );
+    };
+    let Some(rate) = reading.rounds_per_minute else {
+        return Contribution::new(
+            TERM,
+            0.0,
+            format!(
+                "inert: fewer than {MIN_SAMPLE_FOR_SUMMARY} rows carrying both a tool round and \
+                 a dispatch/completion pair — supporting evidence, not a quality score"
+            ),
+        );
+    };
+    let magnitude = rate.clamp(
+        -TOOL_ROUNDS_MAGNITUDE_CEILING,
+        TOOL_ROUNDS_MAGNITUDE_CEILING,
+    );
+    Contribution::new(
+        TERM,
+        magnitude,
+        format!(
+            "{rate:.2} successful tool rounds/min over {} rows — supporting evidence, not a \
+             quality score",
+            reading.rounds_per_minute_sample
+        ),
+    )
+}
+
+/// Lines 1542/1923: observed pairing reliability replaces the same-vendor
+/// prior once enough local observations exist — the term
+/// [`pairing_prior`] itself says it yields to at
+/// [`PAIRING_PRIOR_EVIDENCE_THRESHOLD`].
+///
+/// Inert for a non-vendor-native pairing (the prior never applied to it
+/// either) and for a pairing below [`PAIRING_PRIOR_EVIDENCE_THRESHOLD`] local
+/// observations (the starting prior is still active — this term has nothing
+/// to replace yet). Once both gates clear **and** the attached
+/// [`RouteResponsiveness::failure_rate`] itself meets
+/// [`MIN_SAMPLE_FOR_SUMMARY`], the magnitude is `(1 - p - 0.5) * 0.4` clamped
+/// to `±PAIRING_PRIOR` — so a perfectly reliable pairing (`p = 0`) scores
+/// `+0.2`, matching what the prior itself gave a fresh session, and this
+/// term can never exceed that ceiling.
+fn observed_pairing_reliability(
+    destination: &Destination,
+    inputs: &RouterInputs<'_>,
+) -> Contribution {
+    const TERM: &str = "observed pairing reliability";
+    let pairing = classify_destination(destination, inputs.overrides);
+    let class = pairing.class();
+    if !class.is_vendor_native() {
+        return Contribution::new(
+            TERM,
+            0.0,
+            format!(
+                "`{}` operating `{}` is a {class} pairing — inert: not a vendor-native pairing, \
+                 the same axis the pairing prior is inert on",
+                destination.harness().slug(),
+                destination.backend().model().label(),
+            ),
+        );
+    }
+    let observed = destination.pairing_prior_evidence();
+    if observed < PAIRING_PRIOR_EVIDENCE_THRESHOLD {
+        return Contribution::new(
+            TERM,
+            0.0,
+            format!(
+                "inert: only {observed} local observations for this pairing — fewer than \
+                 {PAIRING_PRIOR_EVIDENCE_THRESHOLD}, so the starting prior is still active and \
+                 there is nothing yet to replace it with"
+            ),
+        );
+    }
+    let Some(reading) = destination.route_responsiveness() else {
+        return Contribution::new(
+            TERM,
+            0.0,
+            "inert: no responsiveness reading attached to this destination, though \
+             {observed} local observations exist for the pairing",
+        );
+    };
+    let Some(p) = reading.failure_rate else {
+        return Contribution::new(
+            TERM,
+            0.0,
+            format!(
+                "inert: fewer than {MIN_SAMPLE_FOR_SUMMARY} rows carry a known outcome for this \
+                 route — the prior has yielded (0.0 at {observed} observations) but there is not \
+                 yet an independent reliability signal to replace it with"
+            ),
+        );
+    };
+    let magnitude = ((1.0 - p - 0.5) * 0.4).clamp(
+        -OBSERVED_RELIABILITY_MAGNITUDE_CEILING,
+        OBSERVED_RELIABILITY_MAGNITUDE_CEILING,
+    );
+    Contribution::new(
+        TERM,
+        magnitude,
+        format!(
+            "`{}` operating `{}` is a {class} pairing with {observed} local observations and an \
+             observed failure rate of {:.1}% (over {} rows) — this replaces the pairing prior, \
+             which has already yielded at this evidence count",
+            destination.harness().slug(),
+            destination.backend().model().label(),
+            p * 100.0,
+            reading.failure_rate_sample,
         ),
     )
 }
@@ -2693,12 +2960,28 @@ pub fn cadence_availability(
     );
     let health = pool.health(&resource);
 
+    // Capability map line 1366: which cadence, if any, this destination's
+    // pool is holding, and where it came from — a stated window always wins
+    // and a learned one names its own sample, so a reader can tell the two
+    // apart rather than trusting a number with no provenance.
+    let window_provenance = match pool.allowance(destination.backend().credential()) {
+        Allowance::RequestPool {
+            window: Some(Window::Stated { seconds }),
+            ..
+        } => format!("; window stated by the provider ({seconds}s)"),
+        Allowance::RequestPool {
+            window: Some(Window::Learned { seconds, sample }),
+            ..
+        } => format!("; window learned from {sample} throttles ({seconds}s)"),
+        _ => String::new(),
+    };
+
     match health.declared_wait_remaining(now) {
         Some(remaining) => Contribution::new(
             "cadence availability",
             CADENCE_DECLARED_WAIT_PENALTY,
             format!(
-                "`{}` is inside a {}s wait its own provider declared",
+                "`{}` is inside a {}s wait its own provider declared{window_provenance}",
                 destination.backend().credential().label(),
                 remaining.as_secs()
             ),
@@ -2708,7 +2991,7 @@ pub fn cadence_availability(
             0.0,
             format!(
                 "no provider-declared wait is in effect for `{}` — not a cadence claim, the \
-                 absence of one",
+                 absence of one{window_provenance}",
                 destination.backend().credential().label()
             ),
         ),
@@ -4808,6 +5091,19 @@ impl SessionRouter {
             .iter()
             .map(|destination| destination.harness().slug())
             .collect();
+        // Line 1352's own comparison: the lowest (best) effective TTFC
+        // among the candidates this decision is actually choosing between —
+        // computed once here, the same shape `candidate_harnesses` above
+        // already takes, so `responsiveness` scales every candidate against
+        // the field it is being compared within rather than an absolute
+        // constant.
+        let best_effective_ttfc_ms: Option<f64> = candidates
+            .iter()
+            .filter_map(Destination::route_responsiveness)
+            .filter_map(super::evidence::RouteResponsiveness::effective_ttfc_ms)
+            .fold(None, |best: Option<f64>, ttfc| {
+                Some(best.map_or(ttfc, |current_best: f64| current_best.min(ttfc)))
+            });
         let mut scored: Vec<(Destination, RoutingExplanation)> = candidates
             .iter()
             .enumerate()
@@ -4841,6 +5137,7 @@ impl SessionRouter {
                     &self.prices,
                     &self.score_weights,
                     &self.comparable_output,
+                    best_effective_ttfc_ms,
                 );
                 (destination.clone(), explanation)
             })
@@ -5187,6 +5484,7 @@ fn score(
     prices: &PriceTable,
     weights: &ScoreWeights,
     comparable_output: &[ClassOutput],
+    best_effective_ttfc_ms: Option<f64>,
 ) -> RoutingExplanation {
     let mut explanation = RoutingExplanation::new();
     if let Some(answer) = &inputs.requirements.classification {
@@ -5233,6 +5531,19 @@ fn score(
         &inputs.requirements,
         candidate_harnesses,
     ));
+    // Lines 1351/1352/1542/1543/1544, beside `harness_efficiency`: the
+    // destination's own responsiveness and reliability reading, computed
+    // over the candidate set already in hand here (`best_effective_ttfc_ms`)
+    // and over this destination's own attached
+    // `Destination::route_responsiveness`.
+    explanation.push(responsiveness(
+        destination,
+        inputs,
+        current,
+        best_effective_ttfc_ms,
+    ));
+    explanation.push(tool_round_rate(destination));
+    explanation.push(observed_pairing_reliability(destination, inputs));
     explanation.push(prompt_cache_state(destination, current));
     explanation.push(quota_pressure(destination, weights));
     // Phase 35D, lines 1570–1577: the band the quota reading falls in, and
@@ -6418,6 +6729,7 @@ mod request_pool_cost_tests {
                 limit: Some(1_000),
                 remaining: Some(40),
                 resets_in: None,
+                window: None,
             },
             Instant::now(),
         );
@@ -6491,6 +6803,7 @@ mod request_pool_cost_tests {
                 limit: Some(1_000),
                 remaining: Some(40),
                 resets_in: None,
+                window: None,
             },
             Instant::now(),
         );

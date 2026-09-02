@@ -440,13 +440,30 @@ fn free_and_metered_route_success_is_reported_with_denominators() {
     );
     assert!(
         normalised.contains(
-            "unknown : 2 of 3 reported turns completed; 3 sessions routed, 1 with no turn end \
-             reported"
+            "unknown task success : 2 of 3 reported turns completed; 3 sessions routed, 1 \
+             with no turn end reported"
         ),
         "nothing has attributed this fixture's model, so its pairing class is honestly \
          `unknown` — and line 1845's ratio must print under that bucket rather than being \
          folded into a neighbouring one:\n{printed}"
     );
+    // `GH-RESPONSIVENESS-TERMS`, map line 1845's other five quantities: this
+    // fixture's rows carry no tool rounds, no ms offsets and no override, so
+    // every one of the five is honestly *not enough evidence*, never a
+    // fabricated number.
+    for label in [
+        "usable tool calls",
+        "repair loops",
+        "effective TTFC",
+        "reliability",
+        "user overrides",
+    ] {
+        assert!(
+            normalised.contains(&format!("{label} : not enough evidence")),
+            "{label} must print `not enough evidence` on this fixture's rows, not a fabricated \
+             number:\n{printed}"
+        );
+    }
 }
 
 /// **Acceptance 4.** A session Glasshouse never routed gets no outcome, and

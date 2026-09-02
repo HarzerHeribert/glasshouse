@@ -224,6 +224,26 @@ def render() -> str:
     return "\n".join(L) + "\n"
 
 
+PROGRESS = os.path.join(os.path.dirname(os.path.abspath(__file__)), "progress.py")
+
+
+def readme_progress(check: bool) -> int:
+    """Regenerate (or check) README.md's progress block alongside ORIENT.md.
+
+    The block has the failure mode ORIENT.md was built to avoid: one writer
+    (`scripts/progress.py`) and a check that lived only in `ci-local.sh`'s
+    lint lane, which the trailing sweeps run from a detached worktree and
+    whose failures were written off as environmental. Batch 94 found the
+    README showing 1201 while the map stood at 1264, nine batches later,
+    because the user looked. It rides on this script because this is the
+    step every orchestrator actually runs after a map change and checks at
+    every checkpoint.
+    """
+    import subprocess
+    argv = [sys.executable, PROGRESS] + (["--check"] if check else [])
+    return subprocess.run(argv, cwd=REPO).returncode
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--check", action="store_true",
@@ -246,13 +266,13 @@ def main() -> int:
             print("orient: ORIENT.md is stale — run scripts/orient.py")
             return 1
         print("orient: ORIENT.md is current")
-        return 0
+        return readme_progress(check=True)
     with open(OUT, "w", encoding="utf-8") as fh:
         fh.write(text)
     approx = len(text) // 4
     print(f"orient: wrote {os.path.relpath(OUT, REPO)} "
           f"({len(text)} bytes, ~{approx} tokens)")
-    return 0
+    return readme_progress(check=False)
 
 
 if __name__ == "__main__":

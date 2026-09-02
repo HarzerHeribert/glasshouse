@@ -416,6 +416,7 @@ mod boundaries {
                 limit: Some(10),
                 remaining: Some(0),
                 resets_in: Some(window),
+                window: None,
             },
             now,
         );
