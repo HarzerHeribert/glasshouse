@@ -523,3 +523,78 @@ Gates the worker ran (re-run the decisive ones yourself):
 - cargo test -p glasshouse --lib routing::disposable: test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 2019 filtered out
 - scripts/blast-radius.sh --targeted <3 changed files>: exit 0, every traced target passed
 
+
+
+---
+
+## Line 1439 CLOSED — 2026-09-02 (`GH-CLASSIFIER-TIME-PRICE`, Amber, Sonnet high): a preference that the worker first proved could never fire, re-ruled and then real
+
+**The first ruling was vacuous, and the worker's proof is the reason to record it.** `design-decisions.md`'s *Preferring a cheap metered classifier over an unreliable free one* first said *unreliable enough* meant expected wasted time — `(1 − parsed) × median` — over `max_router_latency`. But wasted time is never more than the median, and line 1435 already excludes a candidate whose median exceeds that same limit (with 1432's 80 % parse floor, an admitted free candidate wastes at most a fifth of the limit by construction). So the rule could fire only on a candidate the verdict had already removed: an account of an exclusion, never a preference. The worker's first implementation (report `…-v1-superseded`) built a seam over the pre-admission list to make it observable at all; the orchestrator withdrew it and amended the ruling the same evening: **the comparison is between two times** — the free candidate's expected wasted retry time against the **metered candidate's own median classification latency** over the same record floor — with *cheap enough* unchanged (estimated call cost at or below `max_marginal_cost`), asked over the **admitted** list only, so what it prefers passed every other gate and, when it fires, the choice changes. `max_router_latency` plays no part.
+
+**What landed** (`routing/disposable.rs`): `time_price_preference(policy, free, metered)` reads both candidates' `ClassificationRecord`s — either missing, below `CLASSIFICATION_RELIABILITY_MIN_OBSERVATIONS`, or without a median → inert with a note naming which; `wasted_ms = (1 − parsed/outcomes) × free_median` compared to `metered_median`; then the cost half. `cheapest_priced_metered` picks the cheapest admitted priced metered candidate (ties by order). `DisposableRouting::time_price_seam` asks the rule about the free candidate `choose` would pick from the admitted list, **before** the retained-pick reuse, so a retained free pick whose inputs now fire is overridden; the *time versus price* contribution (magnitude 0, both figures and both limits in the `why`) rides whichever choice is made. **The worker's second finding, accepted:** because both candidates come from the admitted list, the metered candidate's `estimate ≤ ceiling` is exactly 1436's admission, so the rule's own over-ceiling arm is unreachable in production and the reachable cost-side inert path is the unconfigured ceiling (*no maximum marginal cost is configured — no candidate is cheap enough*); test (c) and the cost mutation target that path, and the redundant arm stays for the function's own contract.
+
+### Prefer a cheap metered model over an unreliable free model when failed routing attempts would cost more time than the price difference. (line 1439)
+
+Contract: Given automatic classification with a free candidate whose classification record shows a parsed fraction and a median latency over the sample floor, and an admitted priced metered candidate whose own classification record shows a median latency over the same floor, when the free candidate's expected wasted time -- (1 - parsed_fraction) x median_ms -- exceeds the metered candidate's own median classification latency, and the metered candidate's estimated call cost is at or below the effective [routing] max_marginal_cost, Glasshouse chooses the metered candidate and its explanation names both figures with map line 1439 -- while preserving that nothing moves when either condition fails or either candidate's record is unmeasured, below the floor, or without a median, that [routing] max_router_latency plays no part (that stays 1435's alone), that the free selection is never reordered among free candidates, that every existing exclusion still applies first, and that the retained pick (1441/1442) is honoured as before unless this preference newly fires.
+
+State: **COMPLETE** — ruled 2026-09-02 (late evening) by the orchestrator, on the AMENDED rule and after reading `time_price_preference` and `time_price_seam` in the worktree. Amber tier: 4/4 mutations KILLED against the amended comparison with output; every target run singly with counts; targeted blast green; test (e) proves the preference changes a real decision through the shipped binary (a retained free pick overridden once the metered candidate's own record measured). The first ruling's vacuity is recorded above so nobody re-derives it.
+
+Production evidence:
+- `crates/glasshouse/src/routing/disposable.rs` — `time_price_preference`
+- `crates/glasshouse/src/routing/disposable.rs` — `cheapest_priced_metered`
+- `crates/glasshouse/src/routing/disposable.rs` — `DisposableRouting::time_price_seam`
+- `crates/glasshouse/src/routing/disposable.rs` — `DisposableRouting::choose_for_automatic_classification`
+
+Regression evidence:
+- `classification_time_price::an_unreliable_free_candidate_is_passed_over_for_a_faster_cheap_metered_one`
+- `classification_time_price::a_free_candidate_is_kept_when_its_wasted_time_is_within_the_metered_candidates_own_latency`
+- `classification_time_price::a_free_candidate_is_kept_when_no_marginal_cost_ceiling_is_configured`
+- `classification_time_price::a_free_candidate_below_the_sample_floor_is_treated_as_unmeasured_by_the_preference`
+- `classification_time_price::a_parsed_fraction_of_one_wastes_zero_time`
+- `classification_time_price::a_retained_free_pick_whose_inputs_now_fire_the_rule_is_overridden_and_not_reused`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| if wasted_ms <= metered_median_ms { -> if false { | `always-prefer-metered` | **killed** | `classification_time_price::a_free_candidate_is_kept_when_its_wasted_time_is_within_the_metered_candidates_own_latency (and a_parsed_fraction_of_one_wastes_zero_time)` |
+| let Some(max_cost) = policy.max_marginal_cost_micro_usd else { -> let Some(max_cost) = Some(policy.max_marginal_cost_micro_usd.unwrap_or(u32::MAX)) else { | `ignore-the-cost-ceiling` | **killed** | `classification_time_price::a_free_candidate_is_kept_when_no_marginal_cost_ceiling_is_configured` |
+| if free_record.outcomes_recorded < CLASSIFICATION_RELIABILITY_MIN_OBSERVATIONS { -> if false { | `floor-ignored` | **killed** | `classification_time_price::a_free_candidate_below_the_sample_floor_is_treated_as_unmeasured_by_the_preference` |
+| let wasted_ms = ((1.0 - fraction) * free_median_ms as f64).round() as i64; -> let wasted_ms = free_median_ms; | `wasted-time-uses-median-alone` | **killed** | `classification_time_price::a_free_candidate_is_kept_when_its_wasted_time_is_within_the_metered_candidates_own_latency (and three others)` |
+
+> always-prefer-metered observed: assertion left == right failed: a parsed fraction of 1.0 wastes no time ... free alpha-model expects 0ms of wasted retries per call, over metered beta-model's own 1ms median classification latency; metered beta-model at ~$0.000007 per call is under the $1.000000 ceiling
+
+> ignore-the-cost-ceiling observed: assertion left == right failed: with no cost ceiling configured, no candidate is ever cheap enough ... metered beta-model at ~$0.000007 per call is under the $4294.967295 ceiling (retargeted from the estimate > max_cost line, which is unreachable once both candidates come from the admitted list -- see report body)
+
+> floor-ignored observed: the 'unmeasured: 2 of 3 ... fewer than the 5 needed' assertion no longer matched -- the mutated code fell through to the no-median branch instead
+
+> wasted-time-uses-median-alone observed: four of the six tests failed at once -- every test whose figure depends on the (1 - fraction) factor
+
+Recorded scope limits — stated by the worker, not discovered later:
+- time_price_preference's own estimate > max_cost comparison is unreachable through its only caller (cheapest_priced_metered only ever returns admitted, hence already-cheap-enough, candidates); kept for the function's own caller-independent correctness, not exercised by production traffic
+- the metered candidate's own entitlement job-constraint (map line 1947) and the protected-reserve/headroom gates (map lines 1434, 1550) are not independently re-checked by this preference -- inherited automatically now, since both candidates come from the same classification-admitted list choose's own hard-constraint and headroom filtering already produced
+- does not decide 1419 (premium capacity threshold) or 1440 (no subscription-backed classification candidate exists in this build)
+
+---
+
+## REVIEW — the orchestrator owes an answer to each of these
+
+This section is the point of the generator. Everything above is the
+worker's facts, transcribed. Nothing below is decided.
+
+- **1439** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
+
+**Packet errors the worker reported — read these BEFORE its results.**
+Thirteen consecutive rounds a worker corrected its packet and was right:
+- Test (c)'s literal packet wording ('metered over the cost ceiling -> free kept') is unconstructible once both candidates in the comparison must be classification-admitted: an admitted metered candidate's estimate <= ceiling is exactly map line 1436's own admission condition, so an over-ceiling admitted metered candidate cannot exist. Built test (c) around the still-valid 'a None ceiling means no candidate is cheap enough' inert path instead, and retargeted the ignore-the-cost-ceiling mutation at that reachable check.
+
+Gates the worker ran (re-run the decisive ones yourself):
+- cargo fmt --all -- --check: clean
+- cargo clippy -p glasshouse --all-targets --all-features -- -D warnings: clean
+- cargo test -p glasshouse --test classification_time_price: test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+- cargo test -p glasshouse --test classification_cost_ceiling: test result: ok. 5 passed; 0 failed
+- cargo test -p glasshouse --test classification_call: test result: ok. 10 passed; 0 failed
+- cargo test -p glasshouse --test launch_classification: test result: ok. 24 passed; 0 failed
+- cargo test -p glasshouse --test routing_model_config: test result: ok. 5 passed; 0 failed
+- cargo test -p glasshouse --lib routing::disposable: test result: ok. 20 passed; 0 failed; 2022 filtered out
+- cargo test -p glasshouse --test routing_economics (extra, not in packet list): test result: ok. 22 passed; 0 failed
+- scripts/blast-radius.sh --targeted crates/glasshouse/src/routing/disposable.rs crates/glasshouse/tests/classification_time_price.rs: every traced target passed
+

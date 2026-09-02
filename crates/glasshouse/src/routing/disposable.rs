@@ -767,6 +767,183 @@ fn classification_verdict(
     ClassificationVerdict::Admitted { notes }
 }
 
+/// One evaluation of map line 1439's preference — [`time_price_preference`]'s
+/// own return value, so a caller can tell "the candidate is switching" from
+/// "nothing changed, and here is why" without parsing [`Contribution::evidence`]'s
+/// prose.
+enum TimePricePreference {
+    /// Both conditions held: the free candidate is unreliable enough and the
+    /// metered candidate is cheap enough.
+    Fires(Contribution),
+    /// At least one condition failed, or a measurement or a price is
+    /// missing; the contribution's own text says which.
+    Inert(Contribution),
+}
+
+impl TimePricePreference {
+    fn inert(evidence: String) -> Self {
+        Self::Inert(Contribution::new("time versus price", 0.0, evidence))
+    }
+}
+
+/// Map line 1439 — `design-decisions.md`'s *"Preferring a cheap metered
+/// classifier over an unreliable free one"*, amended 2026-09-02: prefer
+/// `metered` over `free` when `free`'s expected wasted retry time — `(1 -
+/// parsed_fraction) * median_ms` over its own classification record, above
+/// the reliability sample floor — **exceeds `metered`'s own median
+/// classification latency**, also above the floor and read from `metered`'s
+/// own [`ClassificationRecord`], and `metered`'s estimated call cost is at
+/// or below `policy`'s marginal-cost ceiling. `[routing] max_router_latency`
+/// plays no part here — that knob stays 1435's alone. No exchange rate
+/// between milliseconds and micro-dollars exists here or anywhere else in
+/// this build: the comparison this rule actually makes is between two
+/// *times*, and the cost half is still checked only against a ceiling the
+/// user stated in their own currency.
+///
+/// # Why the first version of this rule (comparing against `max_router_latency`) was withdrawn
+///
+/// `free`'s expected wasted time is at most `median_ms`, for any parsed
+/// fraction in `[0, 1]`. Comparing that wasted time against the same
+/// `max_router_latency` [`classification_verdict`]'s 1435 gate excludes on
+/// meant this rule could only ever fire on a candidate 1435 (and, below the
+/// 80% floor, 1432) had already excluded from
+/// [`DisposableRouting::choose_for_automatic_classification`]'s admitted
+/// list — an account of an exclusion, never a preference that could change a
+/// choice. Comparing `free`'s wasted time against `metered`'s **own**
+/// measured latency has no such relationship to either gate: both times come
+/// from candidates that pass 1432/1435/1436 on their own terms, so this rule
+/// can fire on a candidate the router was genuinely about to choose.
+fn time_price_preference(
+    policy: &ClassificationPolicy,
+    free: &DisposableCandidate,
+    metered: &DisposableCandidate,
+) -> TimePricePreference {
+    let Some(free_record) = free.classification.as_ref() else {
+        return TimePricePreference::inert(format!(
+            "no classification history was read for free {} — the time-versus-price preference \
+             is inert; unmeasured, not unreliable (map line 1439)",
+            free.model()
+        ));
+    };
+    if free_record.outcomes_recorded < CLASSIFICATION_RELIABILITY_MIN_OBSERVATIONS {
+        return TimePricePreference::inert(format!(
+            "unmeasured: {} of {} classification calls parsed for free {}, fewer than the {} \
+             needed before the time-versus-price preference applies (map line 1439)",
+            free_record.parsed,
+            free_record.outcomes_recorded,
+            free.model(),
+            CLASSIFICATION_RELIABILITY_MIN_OBSERVATIONS
+        ));
+    }
+    let Some(free_median_ms) = free_record.median_duration_ms else {
+        return TimePricePreference::inert(format!(
+            "no median classification latency yet for free {} — the time-versus-price \
+             preference is inert; unmeasured, not unreliable (map line 1439)",
+            free.model()
+        ));
+    };
+    let Some(metered_median_ms) = metered
+        .classification
+        .as_ref()
+        .and_then(|record| record.median_duration_ms)
+    else {
+        return TimePricePreference::inert(format!(
+            "no median classification latency yet for metered {} — the time-versus-price \
+             preference is inert; unmeasured, not unreliable (map line 1439)",
+            metered.model()
+        ));
+    };
+    let fraction = free_record
+        .parsed_fraction()
+        .expect("outcomes_recorded is at least the minimum, so above zero");
+    let wasted_ms = ((1.0 - fraction) * free_median_ms as f64).round() as i64;
+
+    if wasted_ms <= metered_median_ms {
+        return TimePricePreference::inert(format!(
+            "free {} expects {wasted_ms}ms of wasted retries per call, within metered {}'s own \
+             {metered_median_ms}ms median classification latency (map line 1439)",
+            free.model(),
+            metered.model()
+        ));
+    }
+
+    let Some(max_cost) = policy.max_marginal_cost_micro_usd else {
+        return TimePricePreference::inert(format!(
+            "free {} expects {wasted_ms}ms of wasted retries per call, over metered {}'s own \
+             {metered_median_ms}ms median classification latency, but no maximum marginal cost \
+             is configured (map line 1439)",
+            free.model(),
+            metered.model()
+        ));
+    };
+    let Some(price) = metered.price() else {
+        return TimePricePreference::inert(format!(
+            "free {} expects {wasted_ms}ms of wasted retries per call, over metered {}'s own \
+             {metered_median_ms}ms median classification latency, but metered {} is unpriced — \
+             unpriced is never cheap enough (map line 1439)",
+            free.model(),
+            metered.model(),
+            metered.model()
+        ));
+    };
+    let estimate = estimated_classification_cost_micro_usd(price);
+    if estimate > u64::from(max_cost) {
+        return TimePricePreference::inert(format!(
+            "free {} expects {wasted_ms}ms of wasted retries per call, over metered {}'s own \
+             {metered_median_ms}ms median classification latency, but metered {} at {} is over \
+             the {} cost ceiling (map line 1439)",
+            free.model(),
+            metered.model(),
+            metered.model(),
+            format_micro_usd(estimate),
+            format_micro_usd(u64::from(max_cost))
+        ));
+    }
+
+    TimePricePreference::Fires(Contribution::new(
+        "time versus price",
+        0.0,
+        format!(
+            "free {} expects {wasted_ms}ms of wasted retries per call, over metered {}'s own \
+             {metered_median_ms}ms median classification latency; metered {} at ~{} per call is \
+             under the {} ceiling (map line 1439)",
+            free.model(),
+            metered.model(),
+            metered.model(),
+            format_micro_usd(estimate),
+            format_micro_usd(u64::from(max_cost))
+        ),
+    ))
+}
+
+/// Map line 1439: the cheapest priced metered candidate among the ones
+/// [`classification_verdict`] has already admitted — so whatever this
+/// preference prefers has passed every other gate — ties broken by the
+/// admitted list's own order (`Iterator::min_by_key` keeps the first of
+/// equal elements, matching every other free-vs-metered tie-break in this
+/// module).
+///
+/// `None` when [`MeteredUse`] withholds metered spending entirely — a
+/// withheld policy has no metered candidate this preference may ever choose,
+/// so there is nothing to compare the free candidate's reliability against —
+/// or when nothing admitted and metered is priced.
+fn cheapest_priced_metered<'a>(
+    admitted_candidates: &'a [DisposableCandidate],
+    metered_use: &MeteredUse,
+) -> Option<&'a DisposableCandidate> {
+    if !metered_use.permits_metered() {
+        return None;
+    }
+    admitted_candidates
+        .iter()
+        .filter(|candidate| !candidate.cost().is_free() && candidate.price().is_some())
+        .min_by_key(|candidate| {
+            estimated_classification_cost_micro_usd(
+                candidate.price().expect("filtered to priced candidates"),
+            )
+        })
+}
+
 /// The resource one disposable job was routed to, and why.
 ///
 /// **No public fields, and no conversion to or from
@@ -1633,6 +1810,45 @@ impl DisposableRouting {
                 .unwrap_or_default()
         };
 
+        // Map line 1439, ahead of the retained-pick reuse below
+        // (design-decisions.md, "Preferring a cheap metered classifier over
+        // an unreliable free one", amended 2026-09-02): ask whether the free
+        // candidate this policy would otherwise prefer — from this same
+        // classification-admitted `candidates` list, so what it prefers has
+        // already passed every other gate — is unreliable enough relative to
+        // the cheapest admitted metered candidate's own measured latency,
+        // and that metered candidate cheap enough, to switch. Evaluated
+        // before the retained-pick check so that a *retained* free pick
+        // whose inputs now fire this rule is overridden rather than
+        // silently reused — map lines 1441/1442 are about health, not about
+        // this preference, and a pick this rule would no longer make is not
+        // "still healthy" in the sense that matters here.
+        let time_price = self.time_price_seam(candidates, pool, now, classification);
+        if let Some((contribution, Some(metered))) = &time_price {
+            let mut explanation = RoutingExplanation::new();
+            explanation.push(contribution.clone());
+            let mut choice = self.choice(
+                JobKind::Classification,
+                metered,
+                UseReason::Fallback,
+                explanation,
+            );
+            for note in notes_for(&choice).into_iter().chain(exclusions.clone()) {
+                choice.explanation.push(note);
+            }
+            let pick = RetainedPick {
+                provider: choice.provider().to_owned(),
+                model: choice.model().to_owned(),
+                chosen_at_unix: now_unix,
+            };
+            return Ok(AutomaticClassificationDecision::Fresh(choice, pick));
+        }
+        // Inert (or never asked): carried forward and attached to whichever
+        // choice — retained or freshly ranked — is made below, so the
+        // explanation names the condition that kept this preference from
+        // firing exactly as it would if it had.
+        let inert_time_price_note = time_price.map(|(contribution, _)| contribution);
+
         if let Some(pick) = &retained {
             let age = now_unix.saturating_sub(pick.chosen_at_unix);
             let within_window = (0..AUTOMATIC_CLASSIFICATION_STICKY_WINDOW_SECONDS).contains(&age);
@@ -1660,6 +1876,9 @@ impl DisposableRouting {
                          line 1442); DisposableRouting::score did not run for this decision"
                     ),
                 ));
+                if let Some(contribution) = &inert_time_price_note {
+                    explanation.push(contribution.clone());
+                }
                 let mut choice =
                     self.choice(JobKind::Classification, candidate, reason, explanation);
                 for contribution in notes_for(&choice).into_iter().chain(exclusions) {
@@ -1676,6 +1895,9 @@ impl DisposableRouting {
             now,
             classification,
         )?;
+        if let Some(contribution) = inert_time_price_note {
+            choice.explanation.push(contribution);
+        }
         for contribution in notes_for(&choice).into_iter().chain(exclusions) {
             choice.explanation.push(contribution);
         }
@@ -1685,6 +1907,48 @@ impl DisposableRouting {
             chosen_at_unix: now_unix,
         };
         Ok(AutomaticClassificationDecision::Fresh(choice, pick))
+    }
+
+    /// Map line 1439's seam, amended 2026-09-02: evaluate
+    /// [`time_price_preference`] against whichever free candidate this
+    /// policy would pick from `admitted_candidates` — the
+    /// classification-admitted list
+    /// [`Self::choose_for_automatic_classification`] already built, so what
+    /// this preference prefers has passed every other gate — and the
+    /// cheapest priced metered candidate [`cheapest_priced_metered`] finds
+    /// in that same admitted list.
+    ///
+    /// `None` when there is nothing to ask: no free candidate would be
+    /// picked at all (`Self::choose` on the admitted list errored, or its
+    /// winner is metered already), or no metered candidate is priced and
+    /// permitted.
+    fn time_price_seam<'a>(
+        &self,
+        admitted_candidates: &'a [DisposableCandidate],
+        pool: &FreePool,
+        now: Instant,
+        classification: Option<&TaskClassification>,
+    ) -> Option<(Contribution, Option<&'a DisposableCandidate>)> {
+        let natural = self
+            .choose(
+                JobKind::Classification,
+                admitted_candidates,
+                pool,
+                now,
+                classification,
+            )
+            .ok()?;
+        if !natural.cost().is_free() {
+            return None;
+        }
+        let free = admitted_candidates.iter().find(|candidate| {
+            candidate.provider() == natural.provider() && candidate.model() == natural.model()
+        })?;
+        let metered = cheapest_priced_metered(admitted_candidates, &self.metered)?;
+        match time_price_preference(&self.classification_policy, free, metered) {
+            TimePricePreference::Fires(contribution) => Some((contribution, Some(metered))),
+            TimePricePreference::Inert(contribution) => Some((contribution, None)),
+        }
     }
 
     /// Score one eligible candidate — map line 1530: every input this policy

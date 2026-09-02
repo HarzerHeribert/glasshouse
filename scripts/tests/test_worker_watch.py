@@ -95,6 +95,8 @@ BUSY = {
         "⠹ Working… (3m 2s)",
     "an elapsed timer with a glyph nobody has listed yet":
         "◐ Doing something new… (42s · ↓ 1.2k tokens)",
+    "a resumed worker mid-turn after a relayed correction (2026-09-02 false nag)":
+        "✻ Mulling… (1m 34s · ↓ 8.4k tokens)",
 }
 
 IDLE = {
@@ -144,6 +146,24 @@ BUSY_SCREEN = (
     "Tip: Use /help for more information\n"
     "❯ \n"
     "  ✻ Flowing… (12s)\n"
+    "  Sonnet 5 · high  · worker            5h 21% 3h01m\n"
+    "  ░░░░░░░░░░░░░░░░░░░░░░░░╎░░░ 0% · 0/1M            ~$0.00"
+)
+
+# A quiet-looking pane, but ALREADY started (unlike TRULY_NEVER_STARTED_SCREEN)
+# -- used to drive a worker to WORKER DONE rather than WORKER NEVER STARTED.
+ALREADY_STARTED_QUIET_SCREEN = (
+    "⏺ Done. Report written.\n"
+    "❯ \n"
+    "  Sonnet 5 · high  · worker            5h 21% 3h01m\n"
+    "  ░░░░░░░░░░░░░░░░░░░░░░░░╎░░░ 0% · 0/1M            ~$0.00"
+)
+
+# The 2026-09-02 capture: a worker resumed after being announced DONE, mid-turn.
+RESUMED_BUSY_SCREEN = (
+    "Tip: Use /help for more information\n"
+    "❯ \n"
+    "  ✻ Mulling… (1m 34s · ↓ 8.4k tokens)\n"
     "  Sonnet 5 · high  · worker            5h 21% 3h01m\n"
     "  ░░░░░░░░░░░░░░░░░░░░░░░░╎░░░ 0% · 0/1M            ~$0.00"
 )
@@ -277,6 +297,99 @@ def run_lifecycle_integration():
     return failures, all_lines
 
 
+def run_done_retraction_integration():
+    """Drives the REAL worker-watch.sh through: busy (so ever_started latches
+    and the worker is not classified NEVER STARTED) -> quiet twice -> WORKER
+    DONE -> resumed busy (the 2026-09-02 capture) -> retraction NOTE and no
+    further STILL UNACKNOWLEDGED within two nag periods -> quiet again ->
+    WORKER DONE fires a second time.
+    """
+    failures = []
+    all_lines = []
+    fake_bin = Path(tempfile.mkdtemp(prefix="ww-fakebin-done-"))
+    screen_file = fake_bin / "screen.txt"
+    screen_file.write_text(BUSY_SCREEN)
+
+    (fake_bin / "cmux").write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = "read-screen" ]; then cat "{screen}" 2>/dev/null; fi\n'
+        "exit 0\n".format(screen=screen_file)
+    )
+    (fake_bin / "cmux").chmod(0o755)
+    (fake_bin / "sleep").write_text("#!/bin/sh\nexec /bin/sleep 0.05\n")
+    (fake_bin / "sleep").chmod(0o755)
+
+    name = f"selftest-done-{os.getpid()}"
+    idle_dir = MAIN / ".agent-runtime" / "idle"
+    done_dir = MAIN / ".agent-runtime" / "done"
+    marker = idle_dir / name
+    done_file = done_dir / name
+    report = Path(tempfile.gettempdir()) / f"ww-report-done-{os.getpid()}.md"
+
+    env = dict(os.environ)
+    env["PATH"] = f"{fake_bin}:{env['PATH']}"
+
+    # Short nag (1s) so "no further STILL UNACKNOWLEDGED within two nag
+    # periods" is a fast, bounded check rather than a long sleep.
+    proc = subprocess.Popen(
+        ["bash", str(WATCH), name, "test-surface", str(report), "1"],
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, env=env,
+    )
+    try:
+        # Prove it started (busy), then go quiet-but-already-started twice to
+        # reach WORKER DONE rather than WORKER NEVER STARTED.
+        screen_file.write_text(ALREADY_STARTED_QUIET_SCREEN)
+        if not _wait_for(proc, all_lines, "WORKER DONE", 10):
+            failures.append("WORKER DONE did not fire for an already-started, now-quiet worker")
+            return failures, all_lines
+
+        # The worker is resumed (a relayed correction) and goes busy again --
+        # must retract, not keep nagging STILL UNACKNOWLEDGED.
+        screen_file.write_text(RESUMED_BUSY_SCREEN)
+        if not _wait_for(proc, all_lines, "is busy again after being announced DONE", 10):
+            failures.append(
+                "the DONE announcement did not retract once the pane went "
+                "busy again after a resume"
+            )
+            return failures, all_lines
+
+        # No STILL UNACKNOWLEDGED for two nag periods (nag=1s) while busy.
+        deadline = time.time() + 2.5
+        while time.time() < deadline:
+            line = _readline_timeout(proc.stdout, deadline)
+            if line is None:
+                continue
+            if line == "":
+                break
+            all_lines.append(line.rstrip("\n"))
+            if "STILL UNACKNOWLEDGED" in line:
+                failures.append(
+                    f"STILL UNACKNOWLEDGED fired after retraction while still "
+                    f"busy: {line.strip()!r}"
+                )
+                break
+
+        if not failures:
+            # Genuinely quiet again -- WORKER DONE must fire a second time.
+            screen_file.write_text(ALREADY_STARTED_QUIET_SCREEN)
+            if not _wait_for(proc, all_lines, "WORKER DONE", 10):
+                failures.append(
+                    "after retraction, a worker gone quiet again did not "
+                    "re-announce WORKER DONE"
+                )
+    finally:
+        proc.terminate()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+        marker.unlink(missing_ok=True)
+        done_file.unlink(missing_ok=True)
+        shutil.rmtree(fake_bin, ignore_errors=True)
+
+    return failures, all_lines
+
+
 def main() -> int:
     failures = []
 
@@ -332,6 +445,11 @@ def main() -> int:
 
     lifecycle_failures, lifecycle_lines = run_lifecycle_integration()
     failures.extend(lifecycle_failures)
+
+    done_failures, done_lines = run_done_retraction_integration()
+    failures.extend(done_failures)
+    lifecycle_failures = lifecycle_failures + done_failures
+    lifecycle_lines = lifecycle_lines + done_lines
 
     if failures:
         print(f"test_worker_watch: {len(failures)} failure(s)", file=sys.stderr)

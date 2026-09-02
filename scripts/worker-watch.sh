@@ -311,9 +311,11 @@ while true; do
       echo "acknowledged: worker '$NAME' ticked off; watch ending"
       exit 0
     fi
-    # A never-started worker can be re-sent its prompt. If it starts
-    # producing, the stale announcement is dropped and normal watching
-    # resumes — otherwise a fixed misfire nags forever as if nothing changed.
+    # A never-started worker can be re-sent its prompt, and a worker already
+    # announced DONE can be resumed by the orchestrator (a relayed correction,
+    # practice §39) — both kinds retract on busy. If it starts producing, the
+    # stale announcement is dropped and normal watching resumes — otherwise a
+    # fixed misfire, or a resumed worker, nags forever as if nothing changed.
     # One read here serves both this check and the message below it.
     ann_screen="$(cmux read-screen --surface "$SURFACE" 2>/dev/null)"
     if [ "$announced_kind" = "never-started" ] && is_busy_screen "$ann_screen"; then
@@ -323,6 +325,18 @@ while true; do
       ever_started=1
       rm -f "$MARKER"
       echo "NOTE  '$NAME' started producing output after being flagged NEVER STARTED — resuming normal watch"
+      continue
+    fi
+    # 2026-09-02: a worker resumed after WORKER DONE (a relayed correction)
+    # went BUSY again, but only the NEVER STARTED kind re-checked busy-ness —
+    # so the watch kept nagging STILL UNACKNOWLEDGED with the worker's last
+    # words from before the resume, about a worker it could see working.
+    if [ "$announced_kind" = "done" ] && is_busy_screen "$ann_screen"; then
+      announced=0
+      announced_kind=""
+      quiet=0
+      rm -f "$MARKER"
+      echo "NOTE  '$NAME' is busy again after being announced DONE — retracting; resuming normal watch"
       continue
     fi
     now=$(date +%s)

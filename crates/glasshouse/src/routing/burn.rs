@@ -45,10 +45,13 @@
 //! is offered only from rows whose `input_tokens`/`output_tokens` are
 //! already `Some` — written by a *translated* gateway exchange, which parsed
 //! its own response for its own reasons — and is [`None`] otherwise. Line
-//! 1275, token consumption per task class from the relay path, is refused
-//! and is not attempted here: `crate::gateway::ingress` remains structurally
-//! unable to carry a token count, and this module inventing one from a
-//! ratio would be exactly the fabrication the phase's own ruling forbids.
+//! 1275, token consumption per task class, is now served the same way: since
+//! `GH-TASK-CLASS-COST-JOIN` every served row of a classified launch carries
+//! its `task_class`, and since Phase 56 a translated exchange carries its
+//! token counts, so [`task_class_request_rates`] can read a token rate over
+//! rows that exist. `crate::gateway::ingress` remains structurally unable to
+//! carry a token count, and a relayed row stays uncounted for exactly that
+//! reason — this module still never invents one from a ratio.
 //!
 //! # A forecast that is not known is absent, never a number
 //!
@@ -275,6 +278,15 @@ pub struct ClassRate {
     /// should show this too — a rate over three rows is a different claim
     /// from a rate over three hundred.
     pub rows: usize,
+    /// Line 1275: tokens per hour for this class, from
+    /// `token_rate_per_hour` over the same live, per-class rows — `None`
+    /// when none of them carries a token count, the same convention
+    /// [`BurnRate::tokens_per_hour`] keeps for one resource.
+    pub tokens_per_hour: Option<f64>,
+    /// How many of this class's rows carried a token count — never gated by
+    /// [`MIN_ROWS_FOR_BURN_RATE`] here, so a caller can apply that floor to
+    /// the token figure independently of the request figure.
+    pub token_rows: usize,
 }
 
 /// Line 1276: a short moving average of requests consumed per task class.
@@ -289,6 +301,10 @@ pub struct ClassRate {
 /// The average is a [`median`] of per-[`BUCKET_SECONDS`] counts — line
 /// 1281's robust statistic, not an arithmetic mean over raw per-request
 /// sizes.
+///
+/// Line 1275 rides along on the same per-class rows: each `ClassRate` also
+/// carries a token rate, `None` when none of the class's rows carries a
+/// count — see `token_rate_per_hour`.
 pub fn task_class_request_rates(
     rows: &[RoutingObservation],
     now_unix: i64,
@@ -307,13 +323,49 @@ pub fn task_class_request_rates(
                 return None;
             }
             let requests_per_hour = median_rate_per_hour(&of_class, now_unix)?;
+            let (tokens_per_hour, token_rows) = token_rate_per_hour(&of_class, now_unix);
             Some(ClassRate {
                 class,
                 requests_per_hour,
                 rows: of_class.len(),
+                tokens_per_hour,
+                token_rows,
             })
         })
         .collect()
+}
+
+/// The token half of [`burn_rate`] and [`task_class_request_rates`], in one
+/// place so the two readings cannot drift: the sum of `input_tokens` plus
+/// `output_tokens` over the rows that carry either, divided by the span
+/// those rows cover — never bucketed or medianed, because a token total is
+/// not a per-request count that a single burst could distort the way line
+/// 1281 is about.
+///
+/// `(None, 0)` when no row in `rows` carries a token count. The count
+/// returned alongside is always the number of rows the sum rests on, whether
+/// or not that clears any floor a caller applies — [`burn_rate`] does not
+/// gate on it, and [`task_class_request_rates`]'s caller in
+/// `crate::shell::build_project_overview_capacity` gates the per-class token
+/// figure on it the same way it already gates the per-class request figure.
+fn token_rate_per_hour(rows: &[&RoutingObservation], now_unix: i64) -> (Option<f64>, usize) {
+    let measured: Vec<&RoutingObservation> = rows
+        .iter()
+        .copied()
+        .filter(|row| row.input_tokens.is_some() || row.output_tokens.is_some())
+        .collect();
+    if measured.is_empty() {
+        return (None, 0);
+    }
+    let span = span_seconds(&measured, now_unix);
+    let total: i64 = measured
+        .iter()
+        .map(|row| row.input_tokens.unwrap_or(0) + row.output_tokens.unwrap_or(0))
+        .sum();
+    (
+        Some(total as f64 * SECONDS_PER_HOUR / span as f64),
+        measured.len(),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -477,21 +529,7 @@ pub fn burn_rate(
 
     // Tokens, only where a row already carried them. A row with neither
     // field contributes nothing; a row with one contributes that one.
-    let measured: Vec<&RoutingObservation> = matched
-        .iter()
-        .copied()
-        .filter(|row| row.input_tokens.is_some() || row.output_tokens.is_some())
-        .collect();
-    let tokens_per_hour = if measured.is_empty() {
-        None
-    } else {
-        let span = span_seconds(&measured, now_unix);
-        let total: i64 = measured
-            .iter()
-            .map(|row| row.input_tokens.unwrap_or(0) + row.output_tokens.unwrap_or(0))
-            .sum();
-        Some(total as f64 * SECONDS_PER_HOUR / span as f64)
-    };
+    let (tokens_per_hour, _) = token_rate_per_hour(&matched, now_unix);
 
     Some(BurnRate {
         requests_per_hour,
@@ -1111,6 +1149,64 @@ mod tests {
         let rates = task_class_request_rates(&rows, NOW, None);
         assert_eq!(rates.len(), 1);
         assert_eq!(rates[0].rows, 9);
+    }
+
+    /// **Line 1275's killer.** A class whose rows all carry token counts
+    /// gets a token rate; a class whose rows carry none gets `None` — never
+    /// a `0` a caller could mistake for a genuinely idle class.
+    #[test]
+    fn task_class_rates_carry_a_token_rate_only_where_rows_carry_tokens() {
+        let mut tokened = steady("p", 12, 120, 0, Some(TaskClass::CodeModification));
+        for row in &mut tokened {
+            row.input_tokens = Some(100);
+            row.output_tokens = Some(50);
+        }
+        let mut rows = tokened;
+        rows.extend(steady("p", 8, 120, 0, Some(TaskClass::Question)));
+        rows.sort_by_key(|r| r.observed_at_unix);
+
+        let rates = task_class_request_rates(&rows, NOW, None);
+        let by_class = |class: TaskClass| {
+            rates
+                .iter()
+                .find(|rate| rate.class == class)
+                .unwrap_or_else(|| panic!("{class:?} missing from {rates:?}"))
+        };
+
+        let tokened_rate = by_class(TaskClass::CodeModification);
+        assert!(
+            tokened_rate
+                .tokens_per_hour
+                .is_some_and(|value| value > 0.0),
+            "every row of this class carries tokens: {tokened_rate:?}"
+        );
+        assert_eq!(tokened_rate.token_rows, 12);
+
+        let untokened_rate = by_class(TaskClass::Question);
+        assert_eq!(
+            untokened_rate.tokens_per_hour, None,
+            "no row of this class carries a token count, so the rate is absent, not zero"
+        );
+        assert_eq!(untokened_rate.token_rows, 0);
+    }
+
+    /// Mixed rows within one class: only the token-carrying rows contribute
+    /// to that class's token rate, and the class's request rate is
+    /// unaffected either way.
+    #[test]
+    fn task_class_rates_token_axis_counts_only_the_counted_rows_of_its_own_class() {
+        let mut rows = steady("p", 12, 120, 0, Some(TaskClass::ShellWork));
+        for row in rows.iter_mut().take(5) {
+            row.input_tokens = Some(40);
+            row.output_tokens = Some(10);
+        }
+
+        let rates = task_class_request_rates(&rows, NOW, None);
+        assert_eq!(rates.len(), 1);
+        let rate = &rates[0];
+        assert_eq!(rate.rows, 12, "the request count is unaffected by tokens");
+        assert_eq!(rate.token_rows, 5, "only the five rows that carry tokens");
+        assert!(rate.tokens_per_hour.is_some_and(|value| value > 0.0));
     }
 
     /// A zero or negative burn rate is "no forecast", not an infinity and

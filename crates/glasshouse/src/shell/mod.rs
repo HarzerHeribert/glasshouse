@@ -1579,9 +1579,32 @@ fn build_project_overview_capacity(runtime: &Runtime) -> Vec<String> {
             .filter(|rate| rate.rows >= crate::routing::burn::MIN_ROWS_FOR_BURN_RATE)
             .collect();
         if !printable.is_empty() {
+            // Line 1275: the same rows, and the same floor — a class's
+            // token figure is gated at `MIN_ROWS_FOR_BURN_RATE` on
+            // `token_rows`, independently of whether the request figure
+            // above cleared it, and prints `tokens not counted` rather than
+            // a fabricated `0 tok/h` below that floor or with no
+            // token-carrying row at all.
             let by_class = printable
                 .iter()
-                .map(|rate| format!("{} ~{:.1}/h", rate.class.as_str(), rate.requests_per_hour))
+                .map(|rate| {
+                    let tokens = if rate.token_rows >= crate::routing::burn::MIN_ROWS_FOR_BURN_RATE
+                    {
+                        format!(
+                            "~{:.0} tok/h",
+                            rate.tokens_per_hour.expect(
+                                "token_rows at or above the floor means tokens_per_hour is Some"
+                            )
+                        )
+                    } else {
+                        "tokens not counted".to_owned()
+                    };
+                    format!(
+                        "{} ~{:.1}/h, {tokens}",
+                        rate.class.as_str(),
+                        rate.requests_per_hour
+                    )
+                })
                 .collect::<Vec<_>>()
                 .join(" · ");
             lines.push(format!(
@@ -4730,6 +4753,180 @@ mod project_overview_capacity_tests {
             !has_class_line,
             "MIN_ROWS_FOR_BURN_RATE - 1 rows must not be enough to print: {lines:?}"
         );
+    }
+
+    /// **Line 1275.** A class whose rows all carry token counts, and clear
+    /// the same floor as the request figure, prints a token-per-hour
+    /// figure beside its request rate.
+    #[test]
+    fn a_class_with_token_carrying_rows_prints_a_token_figure() {
+        use crate::routing::evidence::{EvidenceLedger, NewObservation};
+        use crate::routing::request::TaskClass;
+
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+
+        let mut user = UserConfig::load(runtime.paths()).unwrap();
+        let provider = crate::config::ProviderConfig::new("openai-compatible");
+        user.providers_mut()
+            .set("overview-capacity-test-provider", provider);
+        user.save(runtime.paths()).unwrap();
+
+        let now_unix = crate::provider::cache::now_unix_seconds();
+        let ledger = EvidenceLedger::open(&runtime).unwrap();
+        for i in 0..12 {
+            ledger
+                .record(
+                    NewObservation::new("glasshouse", "session-router")
+                        .with_harness(Some("claude-code"))
+                        .with_task_class(Some(TaskClass::CodeModification))
+                        .with_tokens(Some(100), Some(50), None),
+                    now_unix - 3600 + i * 60,
+                )
+                .unwrap();
+        }
+
+        let lines = build_project_overview_capacity(&runtime);
+        let class_line = lines
+            .iter()
+            .find(|line| line.contains("requests by task class"))
+            .unwrap_or_else(|| panic!("no task-class line in {lines:?}"));
+        assert!(class_line.contains("tok/h"), "{class_line}");
+        assert!(!class_line.contains("tokens not counted"), "{class_line}");
+    }
+
+    /// The other half: a class seeded without any token count clears the
+    /// request floor but shows the words, never a fabricated `0 tok/h`.
+    #[test]
+    fn a_class_seeded_without_tokens_shows_tokens_not_counted() {
+        use crate::routing::evidence::{EvidenceLedger, NewObservation};
+        use crate::routing::request::TaskClass;
+
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+
+        let mut user = UserConfig::load(runtime.paths()).unwrap();
+        let provider = crate::config::ProviderConfig::new("openai-compatible");
+        user.providers_mut()
+            .set("overview-capacity-test-provider", provider);
+        user.save(runtime.paths()).unwrap();
+
+        let now_unix = crate::provider::cache::now_unix_seconds();
+        let ledger = EvidenceLedger::open(&runtime).unwrap();
+        for i in 0..12 {
+            ledger
+                .record(
+                    NewObservation::new("glasshouse", "session-router")
+                        .with_harness(Some("claude-code"))
+                        .with_task_class(Some(TaskClass::CodeModification)),
+                    now_unix - 3600 + i * 60,
+                )
+                .unwrap();
+        }
+
+        let lines = build_project_overview_capacity(&runtime);
+        let class_line = lines
+            .iter()
+            .find(|line| line.contains("requests by task class"))
+            .unwrap_or_else(|| panic!("no task-class line in {lines:?}"));
+        assert!(class_line.contains("tokens not counted"), "{class_line}");
+        assert!(!class_line.contains("tok/h"), "{class_line}");
+    }
+
+    /// The token floor's low edge: exactly `MIN_ROWS_FOR_BURN_RATE`
+    /// token-carrying rows is enough to print the figure.
+    #[test]
+    fn a_class_with_exactly_the_minimum_token_row_count_prints_the_token_figure() {
+        use crate::routing::evidence::{EvidenceLedger, NewObservation};
+        use crate::routing::request::TaskClass;
+
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+
+        let mut user = UserConfig::load(runtime.paths()).unwrap();
+        let provider = crate::config::ProviderConfig::new("openai-compatible");
+        user.providers_mut()
+            .set("overview-capacity-test-provider", provider);
+        user.save(runtime.paths()).unwrap();
+
+        let now_unix = crate::provider::cache::now_unix_seconds();
+        let ledger = EvidenceLedger::open(&runtime).unwrap();
+        for i in 0..crate::routing::burn::MIN_ROWS_FOR_BURN_RATE {
+            ledger
+                .record(
+                    NewObservation::new("glasshouse", "session-router")
+                        .with_harness(Some("claude-code"))
+                        .with_task_class(Some(TaskClass::CodeModification))
+                        .with_tokens(Some(100), Some(50), None),
+                    now_unix - 3600 + (i as i64) * 60,
+                )
+                .unwrap();
+        }
+
+        let lines = build_project_overview_capacity(&runtime);
+        let class_line = lines
+            .iter()
+            .find(|line| line.contains("requests by task class"))
+            .unwrap_or_else(|| panic!("no task-class line in {lines:?}"));
+        assert!(
+            class_line.contains("tok/h"),
+            "exactly MIN_ROWS_FOR_BURN_RATE token rows must be enough to print: {class_line}"
+        );
+    }
+
+    /// The token floor's high edge: one row short of `MIN_ROWS_FOR_BURN_RATE`
+    /// token-carrying rows shows the words instead, even though the request
+    /// figure — seeded above its own floor with untokened rows filling the
+    /// rest — still prints.
+    #[test]
+    fn a_class_with_one_fewer_than_the_minimum_token_row_count_shows_tokens_not_counted() {
+        use crate::routing::evidence::{EvidenceLedger, NewObservation};
+        use crate::routing::request::TaskClass;
+
+        let (_data, _workspace, runtime) = bootstrapped_runtime();
+
+        let mut user = UserConfig::load(runtime.paths()).unwrap();
+        let provider = crate::config::ProviderConfig::new("openai-compatible");
+        user.providers_mut()
+            .set("overview-capacity-test-provider", provider);
+        user.save(runtime.paths()).unwrap();
+
+        let now_unix = crate::provider::cache::now_unix_seconds();
+        let ledger = EvidenceLedger::open(&runtime).unwrap();
+        let token_rows = crate::routing::burn::MIN_ROWS_FOR_BURN_RATE - 1;
+        for i in 0..token_rows {
+            ledger
+                .record(
+                    NewObservation::new("glasshouse", "session-router")
+                        .with_harness(Some("claude-code"))
+                        .with_task_class(Some(TaskClass::CodeModification))
+                        .with_tokens(Some(100), Some(50), None),
+                    now_unix - 3600 + (i as i64) * 60,
+                )
+                .unwrap();
+        }
+        // Fill the request figure's own floor with untokened rows so the
+        // request rate prints regardless of the token boundary this test
+        // pins.
+        for i in token_rows..(token_rows + crate::routing::burn::MIN_ROWS_FOR_BURN_RATE) {
+            ledger
+                .record(
+                    NewObservation::new("glasshouse", "session-router")
+                        .with_harness(Some("claude-code"))
+                        .with_task_class(Some(TaskClass::CodeModification)),
+                    now_unix - 3600 + (i as i64) * 60,
+                )
+                .unwrap();
+        }
+
+        let lines = build_project_overview_capacity(&runtime);
+        let class_line = lines
+            .iter()
+            .find(|line| line.contains("requests by task class"))
+            .unwrap_or_else(|| panic!("no task-class line in {lines:?}"));
+        assert!(
+            class_line.contains("tokens not counted"),
+            "MIN_ROWS_FOR_BURN_RATE - 1 token rows must not be enough to print a figure: \
+             {class_line}"
+        );
+        assert!(!class_line.contains("tok/h"), "{class_line}");
     }
 }
 

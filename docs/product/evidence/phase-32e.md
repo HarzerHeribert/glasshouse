@@ -521,3 +521,65 @@ Two tests in `shell::project_overview_capacity_tests` seed exactly
 `MIN_ROWS_FOR_BURN_RATE` rows (the class prints) and one fewer (it does
 not); the audit's `off-by-one-boundary` mutation is now KILLED
 (`panicked at shell/mod.rs:4690`). Tests only; the tick above stands.
+
+
+---
+
+## Line 1275 CLOSED — 2026-09-02 (`GH-TOKEN-RATE-PER-CLASS`, Amber-light, Sonnet medium): the per-class average gains its token axis, and Phase 32E is complete
+
+The relay wall that refused this line still stands — a relayed exchange carries no token count and never will — but since Phase 56 a translated exchange does, and since `GH-TASK-CLASS-COST-JOIN` (`85b743a`) every served row of a classified launch carries its `task_class`. So `routing/burn.rs::ClassRate` gains `tokens_per_hour: Option<f64>` and `token_rows`, computed in `task_class_request_rates` over each class's own live rows that carry a count by a new shared `token_rate_per_hour` — `burn_rate`'s token half extracted, and `burn_rate` rewritten to call it, so the per-resource and per-class figures share one arithmetic. `shell::build_project_overview_capacity`'s line reads `<class> ~<r>/h, ~<t> tok/h` when the class's token rows clear `MIN_ROWS_FOR_BURN_RATE`, and `<class> ~<r>/h, tokens not counted` otherwise — never a `0`. The module doc's relay-wall paragraph now says which rows serve 1275 and which stay uncounted. `status_report` does not print the overview, so no binary test was owed; the proof is in-crate at the reader and the renderer.
+
+### Maintain a short moving average of token consumption per task class. (line 1275)
+
+Contract: Given recent routing evidence rows that carry both a task class and a token count, when the project overview's capacity lines are built, Glasshouse shows, beside each class's requests-per-hour figure, a short moving average of tokens per hour for that class, while a class whose rows carry no token count shows 'tokens not counted' and never a 0, the relay's unread rows never contribute a token figure, the sample floor that gates the requests figure gates the token figure the same way, and nothing here parses a response body.
+
+State: **COMPLETE** — ruled 2026-09-02 (late evening) by the orchestrator. Amber-light: 3/3 mutations KILLED with output (the class-filter mutation survived its first, single-class fixture and was re-targeted to the two-class test — recorded, not hidden); gates with counts; targeted blast green including `--lib routing` 278 and `--lib shell` 314. The estimator is `burn_rate`'s own sum-over-span token method, extracted into one helper so the per-resource and per-class figures cannot drift — the same *short moving average* 1276 and 1280 already mean. **Phase 32E is complete: 10 of 10.**
+
+Production evidence:
+- `crates/glasshouse/src/routing/burn.rs` — `ClassRate::{tokens_per_hour,token_rows}`
+- `crates/glasshouse/src/routing/burn.rs` — `token_rate_per_hour`
+- `crates/glasshouse/src/routing/burn.rs` — `task_class_request_rates`
+- `crates/glasshouse/src/shell/mod.rs` — `build_project_overview_capacity`
+
+Regression evidence:
+- `routing::burn::tests::task_class_rates_carry_a_token_rate_only_where_rows_carry_tokens`
+- `routing::burn::tests::task_class_rates_token_axis_counts_only_the_counted_rows_of_its_own_class`
+- `shell::project_overview_capacity_tests::a_class_with_token_carrying_rows_prints_a_token_figure`
+- `shell::project_overview_capacity_tests::a_class_seeded_without_tokens_shows_tokens_not_counted`
+- `shell::project_overview_capacity_tests::a_class_with_exactly_the_minimum_token_row_count_prints_the_token_figure`
+- `shell::project_overview_capacity_tests::a_class_with_one_fewer_than_the_minimum_token_row_count_shows_tokens_not_counted`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| .filter(|row| row.input_tokens.is_some() || row.output_tokens.is_some()) -> .filter(|row| true) in token_rate_per_hour (burn.rs) | `tokens-from-unread-rows` | **killed** | `shell::project_overview_capacity_tests::a_class_seeded_without_tokens_shows_tokens_not_counted` |
+| token_rate_per_hour(&of_class, now_unix) -> token_rate_per_hour(&live, now_unix) in task_class_request_rates (burn.rs) | `class-filter-dropped` | **killed** | `routing::burn::tests::task_class_rates_carry_a_token_rate_only_where_rows_carry_tokens` |
+| if rate.token_rows >= crate::routing::burn::MIN_ROWS_FOR_BURN_RATE -> if true in build_project_overview_capacity (shell/mod.rs) | `floor-ignored-for-tokens` | **killed** | `shell::project_overview_capacity_tests::a_class_with_one_fewer_than_the_minimum_token_row_count_shows_tokens_not_counted` |
+
+> tokens-from-unread-rows observed: assertion failure at crates/glasshouse/src/shell/mod.rs:4830 -- the class line printed a tok/h figure instead of tokens not counted
+
+> class-filter-dropped observed: assertion failure at crates/glasshouse/src/routing/burn.rs:1186 -- no row of this class carries a token count, so the rate is absent, not zero
+
+> floor-ignored-for-tokens observed: assertion failure at crates/glasshouse/src/shell/mod.rs:4924 -- a class one row short of the token floor printed a tok/h figure
+
+Recorded scope limits — stated by the worker, not discovered later:
+- token_rate_per_hour is a plain sum-over-span, not bucketed/medianed -- matches burn_rate's actual pre-existing token arithmetic, which the packet said to copy exactly
+- ClassRate::tokens_per_hour itself carries no MIN_ROWS_FOR_BURN_RATE floor; the floor is applied only at the shell call site via token_rows, so any other future caller of task_class_request_rates must apply it too
+- class-filter-dropped's first-choice single-class test does not kill it; the two-class test does (recorded, not hidden)
+
+---
+
+## REVIEW — the orchestrator owes an answer to each of these
+
+This section is the point of the generator. Everything above is the
+worker's facts, transcribed. Nothing below is decided.
+
+- **1275** — verdict `closed`. Re-run one decisive mutation yourself, then rule (§79: a worker's packet does not bind the integrator).
+
+Gates the worker ran (re-run the decisive ones yourself):
+- cargo fmt --all -- --check: clean
+- cargo clippy -p glasshouse --all-targets --all-features -- -D warnings: clean, exit 0
+- cargo test -p glasshouse --lib routing::burn: test result: ok. 16 passed; 0 failed; 0 ignored; 0 measured; 2032 filtered out
+- cargo test -p glasshouse --lib shell::project_overview_capacity_tests: test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 2028 filtered out
+- cargo test -p glasshouse --test routing_burn: test result: ok. 7 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out
+- scripts/blast-radius.sh --targeted crates/glasshouse/src/routing/burn.rs crates/glasshouse/src/shell/mod.rs: every traced target passed (cargo test --lib routing 278 passed; cargo test --lib shell 314 passed; cargo doc --no-deps clean)
+
