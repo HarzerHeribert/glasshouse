@@ -283,10 +283,10 @@ to do, and the orchestrator should follow its own rule.
 Newest first, from `docs/process/handoff.md`. Read the top one in full;
 the rest are context you probably do not need.
 
+- Checkpoint — 2026-09-02, the Fable 5.1 → Fable 5.1 hand-off at 1192 / 1332 (89.5%)
 - Checkpoint — 2026-09-02, batches 82–84: 1192 / 1332 (89.5%)
 - Checkpoint — 2026-09-02, batch 81: 1189 / 1332 (89.3%)
 - Checkpoint — 2026-09-02, batch 80 and the Fable 5.1 hand-off: 1179 / 1332 (88.5%)
-- Checkpoint — 2026-08-31, batches 59–61 and the Opus → Fable hand-off: 1040 / 1305 (79%)
 
 ## Evidence ledger files
 

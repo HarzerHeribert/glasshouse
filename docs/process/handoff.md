@@ -20,6 +20,18 @@ validated and waiting on the commit. Next action: `.agent-runtime/CONTINUATION.m
 
 Last updated: 2026-08-31 (Europe/Berlin)
 
+## Checkpoint — 2026-09-02, the Fable 5.1 → Fable 5.1 hand-off at 1192 / 1332 (89.5%)
+
+Session `21f45818` hands off hot at 75% context with 1908 one integration and
+one gate away: `GH-WINDOWS-FLAKES` (Red) found the five Windows flakes were two
+causes, neither product (a stub server closing on unread bytes; a test's
+five-second busy-timeout assumption), measured 40/40 and 120/120 on the VM
+after against 33/40 and 51/119 before, and ran the first two fully green
+Windows test legs this project has had; `GH-WINDOWS-STUB-DRAIN` (Green) fixed
+the last two stub copies and added a tripwire. Also landed since batch 84:
+1276's boundary test, the worktree-safe script tests, the runner's build-cache
+reclaim, and the ledger cleanup. Exact next actions: `.agent-runtime/CONTINUATION.md`.
+
 ## Checkpoint — 2026-09-02, batches 82–84: 1192 / 1332 (89.5%)
 
 Same Fable 5.1 session (`21f45818`). Seven more integrations (`c539938` …
