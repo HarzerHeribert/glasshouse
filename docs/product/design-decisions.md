@@ -3453,3 +3453,62 @@ not stretch even single-statement writes. A tripwire test over transaction
 shapes was considered and declined: a structural scan of `src/` for
 multi-row loops cannot fail for a real reason, and a test that cannot fail
 for a real reason is the shape §65 warns about.
+
+## Phase 51, the memory half of RC-B: an explicit rating when given, a labelled proxy otherwise — user ruling 2026-09-02
+
+**The question, as parked.** The 2026-08-31 ruling above answered the *routing*
+half of the register's RC-B with the one signal that is not a proxy — the
+harness's own `TurnEnded` verdict — and left the *memory* half (1821, 1823,
+1824, 1825, 1831) open: *"a completed turn says nothing about whether a memory
+helped … a future ruling must find a signal that is the agent's own statement,
+not a correlation."* The orchestrator parked the question to the user with four
+options (explicit signal only; observable proxy only; both; neither).
+
+**The user's answer, verbatim:** *"Both: explicit rating when given, the
+labelled proxy otherwise."*
+
+**What that decides.**
+
+1. **The explicit signal is a rating command, and it is the agent's or the
+   user's own statement.** `glasshouse memory rate <memory-id> <verdict>
+   [--session <id>] [--note <text>]`, beside `memory challenge` and `memory
+   resolve`, recorded as its own evaluation observation (kind `memory_rated`,
+   outcome the verdict) and never an edit of the retrieval row it judges. The
+   verdict vocabulary is closed and each word is one map line's own quantity:
+   `useful` / `not-useful` (1821), `prevented-repetition` (1831),
+   `caused-complexity` (1823), `revalidation-correct` /
+   `revalidation-wrong` (1824), `challenge-justified` /
+   `challenge-unjustified` (1825). A harness can issue it as a tool call at the
+   end of a task; a person can issue it afterwards. Unrated stays unrated.
+2. **The proxy exists only where an observation actually bears on the
+   question, and it is labelled `proxy` in every reader.** For *was the
+   retrieved memory useful* (1821) and *did it prevent repeating a failed
+   approach* (1831), the proxy is: the retrieving session's turn ended
+   `Completed` by the harness's own verdict (the 08-31 mechanism) with no
+   failover, retry, override or early abandonment recorded against it. That is
+   a correlation, and the reader says so with the word `proxy` beside the count,
+   never merged into the explicit count. For 1823, 1824 and 1825 — whether a
+   decision *caused* complexity, whether a revalidation was *correct*, whether
+   a challenge was *justified* — no observation in the build bears on the
+   question, so there is no proxy: the reader prints explicit ratings and
+   `unknown`, with the denominator, and nothing else.
+3. **Nothing is inferred from silence.** A memory retrieved into a session that
+   never reported a turn end is `unknown`; `unknown` is its own bucket in every
+   ratio, printed with its denominator — the standing rule from the routing
+   half, kept.
+4. **No migration.** The evaluation table's `kind` and `outcome` columns are
+   text; the new kind and verdicts are new strings, read back by the same
+   `from_stored` that refuses what it does not know. The proxy is computed by
+   readers from rows that already exist (`memory_retrieved` rows joined to the
+   session's `routing_outcome_observed` rows) and is never stored, so a later
+   change to what counts as a proxy changes every past reading consistently.
+
+**Validity condition.** This holds while the harness's turn verdict is the only
+outcome the build observes. The day an agent's own statement about a memory
+arrives through a hook rather than a command, it becomes an explicit rating
+with a different `source`, not a proxy, and the vocabulary above is what it
+maps onto.
+
+Package: `GH-MEMORY-RATING` (Amber): the command, the kind and verdicts, the
+recorder, and the readers for the five lines with `explicit / proxy / unknown`
+and denominators.
