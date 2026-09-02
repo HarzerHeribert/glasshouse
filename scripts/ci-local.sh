@@ -333,13 +333,21 @@ if [ "$DO_WIN" -eq 1 ]; then
   TARGET=x86_64-pc-windows-gnu
   if rustup target list --installed | grep -q "$TARGET"; then
     WIN_CROSS_RAN=1
-    step "windows CROSS-CHECK (compiles only, proves nothing about behaviour)" \
-      rustup run stable cargo check --locked --workspace --target "$TARGET"
-    # `rustup run stable`, not bare `cargo`: the guard above asks rustup whether
+    # The toolchain's OWN cargo and rustc, pinned by sysroot -- not `rustup run
+    # stable cargo`, and not bare `cargo`. The guard above asks rustup whether
     # the target is installed, so the step must use the toolchain rustup
-    # answered about. On this host bare `cargo` is Homebrew's, whose sysroot
-    # has no windows-gnu std, and the step failed with E0463 "can't find crate
-    # for core" -- which reads like a broken dependency (GH-WINDOWS-TEST-BUILD,
+    # answered about; but `rustup run stable` only puts the toolchain's cargo
+    # first, and cargo then shells out to whichever `rustc` is on PATH -- on
+    # this host Homebrew's, whose sysroot has no windows-gnu std, so the step
+    # still failed with E0463 "can't find crate for core" after the first fix
+    # (GH-WINDOWS-EXIT-OBSERVATION, 2026-09-02, measured: `rustup run stable
+    # sh -c 'command -v rustc'` printed /opt/homebrew/bin/rustc). Pinning
+    # RUSTC beside cargo is what makes the target's std visible.
+    WIN_TC="$(rustup run stable rustc --print sysroot)/bin"
+    step "windows CROSS-CHECK (compiles only, proves nothing about behaviour)" \
+      env RUSTC="$WIN_TC/rustc" "$WIN_TC/cargo" check --locked --workspace --target "$TARGET"
+    # The earlier note, kept for the history it records: bare `cargo` is
+    # Homebrew's, and E0463 reads like a broken dependency (GH-WINDOWS-TEST-BUILD,
     # 2026-09-02).
   else
     RESULTS+=("SKIP  windows cross-check — rustup target add $TARGET (and brew install mingw-w64)")

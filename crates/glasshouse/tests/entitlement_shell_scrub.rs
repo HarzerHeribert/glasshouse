@@ -90,6 +90,20 @@ impl Fixture {
     /// Spawn `launch` through `SessionRuntime::start` — the same call both
     /// shell launch sites make on `live` — and wait for the fake harness to
     /// exit and dump its own environment.
+    ///
+    /// `answer_terminal_queries` is in the loop because it is in every
+    /// production tick — `shell::run`'s and `main.rs`'s headless launch loop
+    /// both call it — and on Windows it is not a nicety. ConPTY sends
+    /// `ESC[6n` on the pty's own output while bringing the pseudo-console up
+    /// and **does not let the child start** until something replies;
+    /// Glasshouse is the terminal here, so nothing else can. A loop that only
+    /// polls for exits models an owner of a `SessionRuntime` that cannot
+    /// exist, and the harness it is waiting for has not run a single line.
+    /// Measured on the Windows ARM64 CI VM: without this call all three
+    /// spawning tests in this file sat their full 20-second deadline and
+    /// failed with *"the fake harness never exited"* (`1 passed; 3 failed`,
+    /// `finished in 60.13s`); with it they pass. Same reason, same shape, as
+    /// `tests/events_lifecycle.rs`'s and `session::api`'s `drive`.
     fn run(&self, launch: &HarnessLaunch<'_>) -> String {
         let mut live = SessionRuntime::new();
         let id = SessionId::new("test-entitlement-shell-scrub");
@@ -98,6 +112,7 @@ impl Fixture {
 
         let deadline = Instant::now() + Duration::from_secs(20);
         loop {
+            live.answer_terminal_queries();
             if live
                 .poll_exits()
                 .into_iter()

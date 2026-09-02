@@ -360,3 +360,53 @@ has no queue.
 
 **1908 stays open** until the three-leg `ci-local.sh --macos --linux
 --windows-vm` is green on a tree carrying both Windows packages.
+
+---
+
+## Family A closed on the VM — 2026-09-02 (`GH-WINDOWS-EXIT-OBSERVATION`, Opus 5 high, Red); 1908 waits only on the three-leg run
+
+**Neither link the packet named was the failing one; the harness never
+started.** On Windows, ConPTY writes a cursor-position query (`ESC[6n`) onto
+the pty's own output while bringing the pseudo-console up and does not let
+the child execute until something replies. Glasshouse is the terminal for a
+session it holds, so the reply comes from
+`SessionRuntime::answer_terminal_queries`, which every production tick calls
+beside `poll_exits` (`shell::run`, `main.rs`'s headless loop, `api/unix.rs`'s
+tick). The two failing wait loops — `shell/mod.rs`'s scrub tests and
+`tests/entitlement_shell_scrub.rs`'s `Fixture::run` — called only
+`poll_exits`, so `cmd.exe` sat in the handshake for the full 20-second
+deadline. `session/api.rs:598-612` had already measured exactly this on the
+same VM; every other Windows-enabled exit-wait in the suite answers the
+handshake first, and the census confirmed the two loops were the only
+exceptions. The exit-observation arm (`poll_exits` → `PtyProcess::try_wait`
+→ `WinChild::is_complete`) is correct and was ruled out in source on two
+hypotheses (handle closed by the job object; `.cmd` handed to
+`CreateProcessW` directly).
+
+**The change:** `live.answer_terminal_queries();` first in both loops, with
+the reason beside it. Two files, 27 lines, no production line. Unix is
+byte-identical structurally: the queue is filled only by a query parsed from
+the child's output, and the `#!/bin/sh` fixtures emit none.
+
+**Evidence on the VM:** reproduced first on the unmodified tree
+(`1 passed; 3 failed … finished in 60.13s` — three tests sitting out a
+20-second deadline each). Then two consecutive full `test` legs, both
+compiled (`Compiling glasshouse`, ~2 min): `--lib` 1934 passed, 0 failed;
+`entitlement_shell_scrub` 4 passed, 0 failed; the scrub test present by name
+in both. Remaining reds were Families B/C (closed the same day, above) and
+the census's flake family. **Mutation on the platform:** revert the two
+calls, compile on the VM, run — `FAILED. 0 passed; 1 failed … 20.08s` and
+`1 passed; 3 failed … 60.16s`, the original sentence; restore proven by hash
+and the VM re-synced to the fixed tree.
+
+**Two findings the orchestrator acted on.** (a) A local
+`pgrep -f glasshouse-windows-ci` cannot see a peer driving cargo over direct
+ssh; two of this worker's legs died to that (*could not parse/generate dep
+info*), and the check that works is `tasklist | findstr cargo.exe rustc.exe`
+on the VM, idle twice 30 s apart — folded into `GH-VM-RUNNER-LOCK`. (b)
+`scripts/ci-local.sh`'s Windows cross-check still resolved Homebrew's
+`rustc` under `rustup run stable`; the toolchain's own `rustc` and `cargo`
+are now pinned by sysroot in the same commit.
+
+**1908:** Families A, B and C are closed; the box ticks on a green
+`ci-local.sh --macos --linux --windows-vm` of this tree.

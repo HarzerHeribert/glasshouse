@@ -6308,8 +6308,20 @@ mod shell_entitlement_scrub_tests {
             .expect("one session was recorded")
             .id;
 
+        // `answer_terminal_queries` is in the loop because it is in the
+        // production tick this test is standing in for — `shell::run` calls
+        // it beside `poll_exits` a few hundred lines above. On Windows it is
+        // not a nicety: ConPTY sends `ESC[6n` on the pty's own output while
+        // bringing the pseudo-console up and does not let the child start
+        // until something replies, and Glasshouse is the terminal for an
+        // embedded session, so nothing else can. Without this call the fake
+        // harness has not run a single line by the deadline, and this test
+        // fails on the Windows ARM64 CI VM with "the fake harness never
+        // exited" — measured, not assumed. Same reason as
+        // `tests/events_lifecycle.rs`'s `drive`.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
         loop {
+            live.answer_terminal_queries();
             if live
                 .poll_exits()
                 .into_iter()
