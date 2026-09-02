@@ -563,6 +563,29 @@ run_target() {                     # run_target <label> <cargo args...>
 
 if [ "$TARGETED" -eq 1 ]; then
   echo
+  # ---- compile the LIBRARY'S OWN test module first, because nothing below does.
+  #
+  # 2026-09-02: `9f513d9` reached main with `cargo check --tests` broken -- a
+  # four-argument straggler inside `routing/session.rs`'s `#[cfg(test)]` block
+  # after `FreePool::adopt_observed` grew a fifth argument. The targeted gate
+  # was green: every target it runs is an integration-test binary, and those
+  # compile the library WITHOUT `cfg(test)`, so a compile error inside the
+  # lib's own test module is invisible to all of them. `integrate.sh` gained
+  # the same check the same day, but other flows call `--targeted` directly
+  # (a worker's own gate, a fix-forward), and a green here must mean the same
+  # thing everywhere. Seconds against a warm target directory; blocking, not
+  # advisory -- a warning changed nothing on the day it was needed.
+  printf '\033[1m=== cargo check --tests (the lib'"'"'s own test module; no integration target compiles it) ===\033[0m\n'
+  if ! cargo check -p glasshouse --tests --quiet; then
+    echo
+    echo "blast-radius: the library's own test module does not compile."
+    echo "  This is usually a signature change with a straggler in a #[cfg(test)]"
+    echo "  block -- no integration-test binary compiles that code, so only this"
+    echo "  check sees it. A green target list below would not have meant anything."
+    exit 1
+  fi
+  echo "  cargo check --tests: clean"
+  echo
   printf '\033[1m=== --targeted: distance-zero targets only ===\033[0m\n'
   if [ "$TARGETED_LIB" -eq 1 ]; then
     for fl in "${TARGETED_FILTERS[@]}"; do

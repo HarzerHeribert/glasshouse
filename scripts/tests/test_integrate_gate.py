@@ -20,10 +20,15 @@ import sys
 from pathlib import Path
 
 INTEGRATE = Path(__file__).resolve().parents[2] / "scripts" / "integrate.sh"
+BLAST = Path(__file__).resolve().parents[2] / "scripts" / "blast-radius.sh"
 
 
 def _source() -> str:
     return INTEGRATE.read_text(encoding="utf-8")
+
+
+def _blast_source() -> str:
+    return BLAST.read_text(encoding="utf-8")
 
 
 def test_integrate_checks_the_libs_own_test_module() -> None:
@@ -60,6 +65,34 @@ def test_the_check_is_blocking_not_advisory() -> None:
         "the lib-test compile check must abort integrate.sh, not warn. "
         "The failure it guards was pushed to main by an integrator who read "
         "a green summary."
+    )
+
+
+def test_blast_radius_targeted_checks_the_libs_own_test_module() -> None:
+    """The same hole existed in `blast-radius.sh --targeted`, which other
+    flows call directly without going through `integrate.sh` -- a worker's
+    own gate, a fix-forward worker. A green there must mean the same thing
+    it means in integrate.sh, so the check lives in both."""
+    src = _blast_source()
+    assert "cargo check -p glasshouse --tests" in src, (
+        "blast-radius.sh --targeted no longer compiles the library's own "
+        "test module; every target it runs is an integration-test binary "
+        "and none of them compiles the lib with cfg(test). See 9f513d9."
+    )
+
+
+def test_blast_radius_check_runs_before_the_targeted_targets_and_blocks() -> None:
+    src = _blast_source()
+    check = src.find("cargo check -p glasshouse --tests")
+    targets = src.find("--targeted: distance-zero targets only")
+    assert check != -1 and targets != -1, "one of the two targeted-gate steps is missing"
+    assert check < targets, (
+        "the lib-test compile check must run BEFORE --targeted's target list, "
+        "so a broken test build fails loudly instead of hiding behind green targets"
+    )
+    window = src[check:][:900]
+    assert re.search(r"\bexit 1\b", window), (
+        "the lib-test compile check in blast-radius.sh must abort, not warn"
     )
 
 
