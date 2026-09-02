@@ -5047,3 +5047,5 @@ Session `4d589d24` (Fable 5.1), inherited hot from `56821d4d` with three workers
 6. **The checked-in map index had drifted since Phase 58's insertion this morning** (229 experimental lines shifted by +35; `scripts/map-index.py --check` and `test_map_index.py` red all day, noticed only when a scripts worker ran the whole suite). Verified no record cites an old experimental ID as a map ID (every hit was a source line number), blessed the numbering with `--update` at wave 98's commit. The blast radius never runs the script tests; `ci-local.sh`'s lint leg would have.
 
 **Wave 98's trailing sweep** (`--since ac068c0` from a detached worktree at `85b743a`, run in the gap before wave 99): **123/123 green** — the `crate::session` red is gone on the merged tree, and the bootstrap flake did not fire this time.
+
+**Wave 99's trailing sweep** (`--since 85b743a` from a detached worktree at `95aa08d`): **66/66 green**, worktree removed.
