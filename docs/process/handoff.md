@@ -22,7 +22,7 @@ validated and waiting on the commit. Next action: `.agent-runtime/CONTINUATION.m
 
 Last updated: 2026-09-02 (Europe/Berlin)
 
-## Checkpoint — 2026-09-02, batch 93: 1248 / 1347 (92.6%) — the Windows leg fully green, migration 25's millisecond offsets, retrieval feedback per scope, and the board repackaged by mechanism
+## Checkpoint — 2026-09-03, batch 93: 1254 / 1347 (93.1%) — the Windows leg fully green, migration 25's millisecond offsets, Phase 47 complete, and the board repackaged by mechanism
 
 Session `221d1dd9` (Fable 5.1), continued. Wave 105 landed 1247 (Phase 32C
 11/12 — the headroom estimator re-calibrates at a quota regime change), the
@@ -38,7 +38,10 @@ verifier accepted the Red diff; 1355 stays open on its *effective TTFC*
 clause). The user ruled tonight that packages be sized by mechanism: Phase 51
 joins (1836, 1854, 1855) and Phase 47's last three (1760, 1767, 1769) are
 live; responsiveness terms (1351, 1352, 1542, 1543, 1544, 1845, 1850) is
-validated and next; 1366 and 1419 are designed. Exact next actions:
+live; wave 107 lands the first two (1836, 1854, 1855; 1760, 1767, 1769 —
+Phase 47 complete); 1366 + 1419 are live as one package; the bootstrap race
+that failed every module-level run under load has a Red worker replacing its
+500 ms timer with SQLite's own lock. Exact next actions:
 `.agent-runtime/CONTINUATION.md`.
 
 ## Checkpoint — 2026-09-02, batch 92: 1243 / 1347 (92.3%) — Phase 33A complete, rounds per minute printed as what it is, and the Windows leg's stack reserve holds

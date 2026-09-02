@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1248 / 1347 mandatory capabilities (93%)** — 99 open across 31 phases.
+**1254 / 1347 mandatory capabilities (93%)** — 93 open across 30 phases.
 
 ## Where the work is
 
@@ -43,7 +43,6 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 38 | Quota-preserving routing | **2** | 5 | `1604` |
 | Phase 53 | Criteria before adding graph storage | **2** | 3 | `1872` |
 | Phase 28 | File-aware memory lookup | **3** | 2 | `1137` |
-| Phase 47 | Observability without spectacle | **3** | 12 | `1750` |
 | Phase 21E | Decision ladder and conflict handling | **4** | 8 | `907` |
 | Phase 31 | Compaction-aware behavior | **5** | 2 | `1167` |
 | Phase 52 | Criteria before adding semantic/vector retrieval | **5** | 1 | `1858` |
@@ -52,15 +51,15 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 35B | Candidate scoring | **6** | 19 | `1523` |
 | Phase 32A | Unified quota and capacity model | **7** | 14 | `1196` |
 | Phase 9K | Harness-aware response profiles | **8** | 29 | `578` |
-| Phase 51 | Evaluation hooks | **20** | 17 | `1818` |
+| Phase 51 | Evaluation hooks | **17** | 20 | `1818` |
 
-**Fully closed (77):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 7, Phase 8, Phase 9A, Phase 9B, Phase 9C, Phase 9D, Phase 9F, Phase 9G, Phase 9I, Phase 9J, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 16, Phase 17, Phase 18, Phase 19, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 21H, Phase 21I, Phase 21J, Phase 22, Phase 23, Phase 24, Phase 25, Phase 26, Phase 29, Phase 32, Phase 32B, Phase 32E, Phase 33A, Phase 34, Phase 34A, Phase 34D, Phase 34E, Phase 34F, Phase 35, Phase 35A, Phase 35C, Phase 35D, Phase 36, Phase 39, Phase 40, Phase 41, Phase 42, Phase 43, Phase 44, Phase 45, Phase 46, Phase 48, Phase 49, Phase 50, Phase 54, Phase 54A, Phase 55, Phase 56, Phase 56A, Phase 57, Phase 58.
+**Fully closed (78):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 7, Phase 8, Phase 9A, Phase 9B, Phase 9C, Phase 9D, Phase 9F, Phase 9G, Phase 9I, Phase 9J, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 16, Phase 17, Phase 18, Phase 19, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 21H, Phase 21I, Phase 21J, Phase 22, Phase 23, Phase 24, Phase 25, Phase 26, Phase 29, Phase 32, Phase 32B, Phase 32E, Phase 33A, Phase 34, Phase 34A, Phase 34D, Phase 34E, Phase 34F, Phase 35, Phase 35A, Phase 35C, Phase 35D, Phase 36, Phase 39, Phase 40, Phase 41, Phase 42, Phase 43, Phase 44, Phase 45, Phase 46, Phase 47, Phase 48, Phase 49, Phase 50, Phase 54, Phase 54A, Phase 55, Phase 56, Phase 56A, Phase 57, Phase 58.
 
 ## The nearly-finished phases, in full
 
 Every phase with **three or fewer** open lines, quoted verbatim. These are
 where a single package finishes a phase, so they are listed here and the
-other ~67 open lines are not.
+other ~64 open lines are not.
 
 For any other phase: `scripts/discover.py --phase <id>` prints its open
 lines and evidence together. **Do not open the 178 KB map to read them.**
@@ -161,12 +160,6 @@ these unwrapped.
 - **1141** ☐ Prefer constraints, decisions, and failed approaches when retrieving memory for an intended code edit.
 - **1142** ☐ Keep file-aware retrieval advisory and never treat stale memory as stronger evidence than the current source code.
 
-### Phase 47 — Observability without spectacle  (3 open, 12 closed)
-
-- **1760** ☐ Add a debug view showing estimated cache temperature and the evidence used for that estimate.
-- **1767** ☐ Show correlations with their sample size and confidence instead of implying precise independence from sparse data.
-- **1769** ☐ Add a debug view showing memory-extraction inputs and outputs when explicitly enabled.
-
 ## Practice sections, by number
 
 `docs/process/orchestration-practice.md` is ~176 KB. **Read sections by
@@ -247,7 +240,7 @@ to do, and the orchestrator should follow its own rule.
 Newest first, from `docs/process/handoff.md`. Read the top one in full;
 the rest are context you probably do not need.
 
-- Checkpoint — 2026-09-02, batch 93: 1248 / 1347 (92.6%) — the Windows leg fully green, migration 25's millisecond offsets, retrieval feedback per scope, and the board repackaged by mechanism
+- Checkpoint — 2026-09-03, batch 93: 1254 / 1347 (93.1%) — the Windows leg fully green, migration 25's millisecond offsets, Phase 47 complete, and the board repackaged by mechanism
 - Checkpoint — 2026-09-02, batch 92: 1243 / 1347 (92.3%) — Phase 33A complete, rounds per minute printed as what it is, and the Windows leg's stack reserve holds
 - Checkpoint — 2026-09-02, batch 91: 1235 / 1347 (91.7%) — Phase 24 complete, expected latency scored, and the Windows leg found the binary could not start
 - Checkpoint — 2026-09-02, batch 90: 1229 / 1347 (91.2%) — money is counted against the budget, Phase 35A complete, and a refusal that outlived its blocker

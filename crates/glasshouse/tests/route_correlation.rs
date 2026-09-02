@@ -230,6 +230,20 @@ fn the_route_command_prints_every_pairs_sample_size_before_any_correlation() {
         ),
         "a measured pair prints its sample size before its confidence:\n{stdout}"
     );
+    // A structural check beside the fixed-string one above: find each figure
+    // by its own text rather than assuming the surrounding phrasing never
+    // moves, so a future rewording of the sentence cannot make this
+    // assertion pass for the wrong reason.
+    let sample_size_at = stdout
+        .find("10 of 10 overlapping observations")
+        .expect("the measured pair's sample size must be printed");
+    let confidence_at = stdout
+        .find("correlation 1.00")
+        .expect("the measured pair's confidence must be printed");
+    assert!(
+        sample_size_at < confidence_at,
+        "the sample size must be printed before the confidence it qualifies, not after:\n{stdout}"
+    );
     assert!(
         stdout.contains(
             "a/the-model and c/the-model: insufficient evidence — 2 of the 5 overlapping \
@@ -237,6 +251,13 @@ fn the_route_command_prints_every_pairs_sample_size_before_any_correlation() {
         ),
         "a pair below the minimum prints the count and says what the router does with it:\n\
          {stdout}"
+    );
+    // The insufficient-evidence line names both figures the packet asks
+    // for: the observed sample and the floor it fell short of.
+    assert!(
+        stdout.contains("insufficient evidence — 2 of the 5 overlapping"),
+        "the insufficient-evidence line must name the observed sample (2) and the required \
+         floor (5) together:\n{stdout}"
     );
     assert!(
         !stdout.contains("d/the-model"),

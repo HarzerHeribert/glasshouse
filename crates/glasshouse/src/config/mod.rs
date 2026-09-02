@@ -4530,6 +4530,15 @@ pub struct MemoryConfig {
     /// [`EffectiveConfig::memory_retrieval_diagnostics`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     retrieval_diagnostics: Option<bool>,
+    /// Whether an extraction run appends one JSON line describing its
+    /// inputs and outputs to `<state_dir>/memory-extraction.jsonl` — map
+    /// line 1769. `None` resolves to `false`, the same off-by-default
+    /// direction [`Self::retrieval_diagnostics`] takes and for the same
+    /// reason: this is a debugging surface, not something a project should
+    /// pay to write on every extraction run unless it asked. See
+    /// [`EffectiveConfig::memory_extraction_diagnostics`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    extraction_diagnostics: Option<bool>,
 }
 
 impl MemoryConfig {
@@ -4540,6 +4549,7 @@ impl MemoryConfig {
         self.inject_at_launch.is_none()
             && self.rerank_model.is_none()
             && self.retrieval_diagnostics.is_none()
+            && self.extraction_diagnostics.is_none()
     }
 
     pub fn inject_at_launch(&self) -> Option<bool> {
@@ -4566,6 +4576,15 @@ impl MemoryConfig {
 
     pub fn set_retrieval_diagnostics(&mut self, enabled: Option<bool>) -> &mut Self {
         self.retrieval_diagnostics = enabled;
+        self
+    }
+
+    pub fn extraction_diagnostics(&self) -> Option<bool> {
+        self.extraction_diagnostics
+    }
+
+    pub fn set_extraction_diagnostics(&mut self, enabled: Option<bool>) -> &mut Self {
+        self.extraction_diagnostics = enabled;
         self
     }
 }
@@ -5602,6 +5621,24 @@ impl<'a> EffectiveConfig<'a> {
             return Layered::new(value, Layer::Project);
         }
         if let Some(value) = self.user.memory().retrieval_diagnostics() {
+            return Layered::new(value, Layer::User);
+        }
+        Layered::new(false, Layer::Default)
+    }
+
+    /// Whether an extraction run records one JSON line describing its
+    /// inputs and outputs — map line 1769. Project first, then user, then
+    /// [`Layer::Default`] carrying `false`, matching
+    /// [`Self::memory_retrieval_diagnostics`]'s own layering and its own
+    /// off-by-default direction.
+    pub fn memory_extraction_diagnostics(&self) -> Layered<bool> {
+        if let Some(value) = self
+            .project
+            .and_then(|p| p.memory().extraction_diagnostics())
+        {
+            return Layered::new(value, Layer::Project);
+        }
+        if let Some(value) = self.user.memory().extraction_diagnostics() {
             return Layered::new(value, Layer::User);
         }
         Layered::new(false, Layer::Default)
@@ -9242,6 +9279,52 @@ mod tests {
             effective.memory_retrieval_diagnostics(),
             Layered::new(true, Layer::User),
             "a project that recorded nothing must fall through to the user layer"
+        );
+    }
+
+    /// Map line 1769: off unless named, project overrides user, independent
+    /// of [`EffectiveConfig::memory_retrieval_diagnostics`]'s own flag.
+    #[test]
+    fn memory_extraction_diagnostics_layers_project_over_user_over_default() {
+        let user = UserConfig::default();
+        let effective = EffectiveConfig::new(&user, None);
+        assert_eq!(
+            effective.memory_extraction_diagnostics(),
+            Layered::new(false, Layer::Default),
+            "nothing recorded anywhere must resolve to off"
+        );
+
+        let mut user = UserConfig::default();
+        user.memory_mut().set_extraction_diagnostics(Some(true));
+        let effective = EffectiveConfig::new(&user, None);
+        assert_eq!(
+            effective.memory_extraction_diagnostics(),
+            Layered::new(true, Layer::User)
+        );
+
+        let mut project = ProjectConfig::default();
+        project.memory_mut().set_extraction_diagnostics(Some(false));
+        let effective = EffectiveConfig::new(&user, Some(&project));
+        assert_eq!(
+            effective.memory_extraction_diagnostics(),
+            Layered::new(false, Layer::Project),
+            "a project's explicit off must win over the user's on"
+        );
+
+        let silent_project = ProjectConfig::default();
+        let effective = EffectiveConfig::new(&user, Some(&silent_project));
+        assert_eq!(
+            effective.memory_extraction_diagnostics(),
+            Layered::new(true, Layer::User),
+            "a project that recorded nothing must fall through to the user layer"
+        );
+
+        // Independent of the retrieval flag: turning extraction diagnostics
+        // on must not turn retrieval diagnostics on too.
+        assert_eq!(
+            effective.memory_retrieval_diagnostics(),
+            Layered::new(false, Layer::Default),
+            "the two diagnostics knobs must not leak into each other"
         );
     }
 

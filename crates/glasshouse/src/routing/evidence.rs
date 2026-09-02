@@ -2898,6 +2898,59 @@ impl PurposeConsumption {
     }
 }
 
+/// [`EvidenceLedger::headroom_replay`]'s result — map line 1836, replaying
+/// [`estimate_subscription_headroom`] against every throttle or exhaustion a
+/// provider recorded, using only the rows that preceded it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct HeadroomReplayCounts {
+    /// The replayed estimate's band was [`HeadroomBand::Low`] or
+    /// [`HeadroomBand::Exhausted`] — the estimator would have warned.
+    pub warned: usize,
+    /// The replayed estimate's band was [`HeadroomBand::Moderate`] or
+    /// [`HeadroomBand::Ample`] — the estimator would have missed it.
+    pub missed: usize,
+    /// [`estimate_subscription_headroom`] returned [`None`]: fewer rows
+    /// came before this throttle than the estimator could read anything
+    /// from at all.
+    pub unestimable: usize,
+    /// The median seconds from a throttle to this provider's first
+    /// [`Outcome::Succeeded`] row after it — `None` when no throttle in the
+    /// window was ever followed by one.
+    pub observed_reset_lag_median_seconds: Option<i64>,
+    /// How many throttles [`Self::observed_reset_lag_median_seconds`] is a
+    /// median over.
+    pub observed_reset_lag_sample_count: usize,
+}
+
+impl HeadroomReplayCounts {
+    /// [`Self::warned`] + [`Self::missed`] + [`Self::unestimable`] — every
+    /// throttle or exhaustion this replay scored, the denominator
+    /// [`MIN_SAMPLE_FOR_SUMMARY`] gates the whole reading on.
+    pub fn throttles(&self) -> usize {
+        self.warned + self.missed + self.unestimable
+    }
+}
+
+/// [`EvidenceLedger::output_estimate_accuracy`]'s result — map line 1855's
+/// token half, one row per task class that carries at least one
+/// [`crate::evaluation::EvaluationKind::RoutingConsumptionEstimated`] row in
+/// the window.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OutputEstimateAccuracy {
+    /// The task class word the estimate row's own `subject` carries —
+    /// [`crate::routing::request::TaskClass::as_str`].
+    pub task_class: String,
+    /// The median of *actual ÷ estimated* output tokens, `None` below
+    /// [`MIN_SAMPLE_FOR_SUMMARY`] measured ratios.
+    pub median_ratio: Option<f64>,
+    /// How many sessions [`Self::median_ratio`] is a median over — an
+    /// estimate row this reader could match to a summed actual.
+    pub sample_count: usize,
+    /// Sessions with an estimate row and no matching routing row (or one
+    /// carrying no `output_tokens`) yet — never counted as a zero ratio.
+    pub pending: usize,
+}
+
 /// [`EvidenceLedger::translation_cache_savings`]'s result — map line 2034's
 /// translation facet, one row per `(route, quota_context)` that carries at
 /// least one [`HARNESS_TURN_PURPOSE`] row with `input_tokens` in the window.
@@ -4245,6 +4298,211 @@ impl EvidenceLedger {
         Ok(out)
     }
 
+    /// **Map line 1836.** Replays [`estimate_subscription_headroom`] against
+    /// every throttle or exhaustion this provider recorded in the window,
+    /// using only the rows that came *before* it — never the estimator's
+    /// live inputs. `credential_label`, `seconds_until_reset` and
+    /// `recent_session_count` are always absent here: this replay has no
+    /// account narrowing to apply and no gateway-quota-cache reading to
+    /// hand in, and pretending otherwise would score the estimator against
+    /// evidence it never actually had at that moment. `estimate_subscription_headroom`
+    /// itself is not modified; this calls it once per throttle.
+    ///
+    /// Paired with the *observed reset lag*: this ledger records no
+    /// provider-stated wait ([`RoutingObservation`] carries no
+    /// `retry_after`/reset field — that reading lives only in the gateway's
+    /// quota-cache file, a different store [`Self`] does not open), so the
+    /// only honest reset figure is the one actually observed — from a
+    /// throttle at `t` to this provider's first [`Outcome::Succeeded`] row
+    /// after `t`, in the same window.
+    pub fn headroom_replay(
+        &self,
+        provider: &str,
+        now_unix: i64,
+        window_seconds: i64,
+    ) -> Result<HeadroomReplayCounts, EvidenceLedgerError> {
+        let rows = self.observations_in_window(now_unix, window_seconds)?;
+        let provider_rows: Vec<&RoutingObservation> =
+            rows.iter().filter(|row| row.provider == provider).collect();
+
+        let mut warned = 0usize;
+        let mut missed = 0usize;
+        let mut unestimable = 0usize;
+        let mut reset_lags: Vec<i64> = Vec::new();
+
+        for row in &provider_rows {
+            if !matches!(
+                row.failure_class,
+                Some(FailureClass::Throttle) | Some(FailureClass::ExhaustedQuota)
+            ) {
+                continue;
+            }
+            let t = row.observed_at_unix;
+            let prior: Vec<RoutingObservation> = provider_rows
+                .iter()
+                .filter(|candidate| candidate.observed_at_unix < t)
+                .map(|candidate| (*candidate).clone())
+                .collect();
+            match estimate_subscription_headroom(&prior, provider, None, t, None, None) {
+                Some(estimate) => match estimate.band {
+                    HeadroomBand::Low | HeadroomBand::Exhausted => warned += 1,
+                    HeadroomBand::Moderate | HeadroomBand::Ample => missed += 1,
+                },
+                None => unestimable += 1,
+            }
+            if let Some(recovery) = provider_rows
+                .iter()
+                .filter(|candidate| candidate.observed_at_unix > t)
+                .find(|candidate| candidate.outcome == Some(Outcome::Succeeded))
+            {
+                reset_lags.push(recovery.observed_at_unix - t);
+            }
+        }
+
+        let observed_reset_lag_sample_count = reset_lags.len();
+        let observed_reset_lag_median_seconds = if reset_lags.is_empty() {
+            None
+        } else {
+            Some(median(reset_lags))
+        };
+
+        Ok(HeadroomReplayCounts {
+            warned,
+            missed,
+            unestimable,
+            observed_reset_lag_median_seconds,
+            observed_reset_lag_sample_count,
+        })
+    }
+
+    /// **Map line 1855, the token half.** Joins each
+    /// [`crate::evaluation::EvaluationKind::RoutingConsumptionEstimated`]
+    /// row in the window to the sum of `output_tokens` over this project's
+    /// own routing rows carrying the same `session_id`, at or after the
+    /// estimate row's own `observed_at` — the actual consumption the
+    /// launch's estimate was a prediction *of*.
+    ///
+    /// # Why this reads across two tables from one connection
+    ///
+    /// [`crate::evaluation::EvaluationObservations`] and this ledger wrap
+    /// separate [`Connection`]s onto the **same** project database file —
+    /// [`Self::effort_shadow`] already reads `evaluation_observations` this
+    /// way, correlating a routing row to the session's next harness verdict.
+    /// This reader is that precedent's mirror image: here
+    /// `evaluation_observations` (kind
+    /// [`crate::evaluation::EvaluationKind::RoutingConsumptionEstimated`])
+    /// is the driving table and `routing_observations` is summed per match,
+    /// but it is the same one-file, one-query join, scoped by
+    /// [`Self::project_id`] on both sides rather than opening a second
+    /// ledger handle for a read this connection can already serve.
+    ///
+    /// A session with an estimate row and **no** matching routing row (or
+    /// one whose `output_tokens` are all still `NULL`) has an unknown
+    /// actual, never a fabricated zero — [`Self::consumption_by_purpose`]'s
+    /// own rule for an absent sum. [`Self::output_estimate_accuracy`]
+    /// reports it as *pending*.
+    fn estimate_pairs(
+        &self,
+        now_unix: i64,
+        window_seconds: i64,
+    ) -> Result<Vec<(String, f64, Option<f64>)>, EvidenceLedgerError> {
+        let earliest = now_unix.saturating_sub(window_seconds);
+        let conn = self.lock();
+        let mut statement = conn
+            .prepare(
+                "SELECT e.subject,
+                        e.detail,
+                        (SELECT SUM(r.output_tokens) FROM routing_observations r
+                           WHERE r.project_id = ?1
+                             AND r.session_id = e.session_id
+                             AND r.observed_at >= e.observed_at
+                             AND r.observed_at <= ?4
+                             AND r.output_tokens IS NOT NULL) AS actual_sum
+                 FROM evaluation_observations e
+                 WHERE e.project_id = ?1
+                   AND e.kind = ?5
+                   AND e.observed_at >= ?2 AND e.observed_at <= ?4
+                   AND e.session_id IS NOT NULL
+                 ORDER BY e.subject, e.observed_at ASC",
+            )
+            .map_err(sql_err("read routing-consumption estimate pairs"))?;
+        let rows = statement
+            .query_map(
+                params![
+                    self.project_id,
+                    earliest,
+                    now_unix,
+                    now_unix,
+                    crate::evaluation::EvaluationKind::RoutingConsumptionEstimated.as_str(),
+                ],
+                |row| {
+                    let subject: String = row.get(0)?;
+                    let detail: Option<String> = row.get(1)?;
+                    let actual_sum: Option<i64> = row.get(2)?;
+                    Ok((subject, detail, actual_sum))
+                },
+            )
+            .map_err(sql_err("read routing-consumption estimate pairs"))?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (subject, detail, actual_sum) =
+                row.map_err(sql_err("read one routing-consumption estimate pair"))?;
+            let Some(estimated) = detail.as_deref().and_then(|text| text.parse::<f64>().ok())
+            else {
+                continue;
+            };
+            out.push((subject, estimated, actual_sum.map(|tokens| tokens as f64)));
+        }
+        Ok(out)
+    }
+
+    /// **Map line 1855, the token half, rendered per task class.** The
+    /// median of *actual ÷ estimated* output tokens over sessions whose
+    /// launch recorded an estimate (`Self::estimate_pairs`), grouped by
+    /// the task class the estimate names — `None` below
+    /// [`MIN_SAMPLE_FOR_SUMMARY`] measured ratios, never a median guessed
+    /// from too few of them, exactly as every other median on this ledger
+    /// withholds.
+    pub fn output_estimate_accuracy(
+        &self,
+        now_unix: i64,
+        window_seconds: i64,
+    ) -> Result<Vec<OutputEstimateAccuracy>, EvidenceLedgerError> {
+        let pairs = self.estimate_pairs(now_unix, window_seconds)?;
+        let mut by_class: std::collections::BTreeMap<String, (Vec<i64>, usize)> =
+            std::collections::BTreeMap::new();
+        for (subject, estimated, actual) in pairs {
+            let entry = by_class.entry(subject).or_default();
+            match actual {
+                Some(actual) if estimated > 0.0 => {
+                    // Scaled by 1000 and rounded so the fractional ratio can
+                    // share this module's integer `median`, the same way
+                    // every other ratio here is computed in Rust rather than
+                    // in SQL.
+                    let scaled = ((actual / estimated) * 1000.0).round() as i64;
+                    entry.0.push(scaled);
+                }
+                _ => entry.1 += 1,
+            }
+        }
+        Ok(by_class
+            .into_iter()
+            .map(|(task_class, (mut ratios, pending))| {
+                let sample_count = ratios.len();
+                let median_ratio = (sample_count >= MIN_SAMPLE_FOR_SUMMARY).then(|| {
+                    ratios.sort_unstable();
+                    median(std::mem::take(&mut ratios)) as f64 / 1000.0
+                });
+                OutputEstimateAccuracy {
+                    task_class,
+                    median_ratio,
+                    sample_count,
+                    pending,
+                }
+            })
+            .collect())
+    }
+
     /// [`TranslationSavings`] for every `(route, quota_context)` this ledger
     /// holds at least one translated row for, within one window — map line
     /// 2034's translation facet, and [`consumption_by_purpose`]'s sibling
@@ -4345,6 +4603,60 @@ impl EvidenceLedger {
             out.push(row.map_err(sql_err("read one session's translation cache savings"))?);
         }
         Ok(out)
+    }
+
+    /// [`Self::session_translation_cache_savings`] narrowed to one session
+    /// and with no time window — capability map line 1760's evidence half:
+    /// `sessions show <id> --debug` reads this to show what providers
+    /// actually reported on this session's own translated exchanges, beside
+    /// the router's own `prompt-cache state` estimate at launch
+    /// ([`crate::routing::session::prompt_cache_state`]).
+    ///
+    /// A whole-session reading rather than a windowed one, deliberately:
+    /// unlike [`Self::session_translation_cache_savings`]'s report over
+    /// *recent* activity, one session's own exchanges are a bounded set
+    /// already, and windowing them by recency would silently drop a
+    /// session's earliest turns from its own evidence.
+    ///
+    /// `Ok(None)` is *no translated exchange has reported cached-input
+    /// tokens for this session* — a session started before migration 24, a
+    /// session served only by relayed exchanges (which never carry
+    /// `input_tokens`, this module's own header), or a session with no
+    /// exchanges at all. Never a session with a zero share: a session that
+    /// warmed nothing still has a `sample_count` and a real `0%`, and this
+    /// return is reserved for having nothing to report at all.
+    pub fn cached_share_for_session(
+        &self,
+        session_id: &str,
+    ) -> Result<Option<SessionTranslationSavings>, EvidenceLedgerError> {
+        let conn = self.lock();
+        let (sample_count, input_tokens, cached_input_tokens): (i64, i64, i64) = conn
+            .query_row(
+                "SELECT COUNT(*) AS sample_count,
+                        COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                        COALESCE(SUM(cached_input_tokens), 0) AS cached_input_tokens
+                 FROM routing_observations
+                 WHERE project_id = ?1 AND session_id = ?2
+                   AND purpose = ?3 AND input_tokens IS NOT NULL",
+                params![self.project_id, session_id, HARNESS_TURN_PURPOSE],
+                |row| {
+                    Ok((
+                        row.get("sample_count")?,
+                        row.get("input_tokens")?,
+                        row.get("cached_input_tokens")?,
+                    ))
+                },
+            )
+            .map_err(sql_err("read a session's cached-input share"))?;
+        if sample_count == 0 {
+            return Ok(None);
+        }
+        Ok(Some(SessionTranslationSavings {
+            session_id: Some(session_id.to_owned()),
+            sample_count: sample_count as usize,
+            input_tokens,
+            cached_input_tokens,
+        }))
     }
 
     /// [`EffortShadow`] — capability map line 2039's shadow measurement: per

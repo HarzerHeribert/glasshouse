@@ -1634,6 +1634,15 @@ pub enum SessionCommand {
     Show {
         /// The session, or the leading part of its identifier.
         session: String,
+
+        /// Also print the prompt-cache estimate view (map line 1760): the
+        /// router's own `prompt-cache state` estimate at launch, read back
+        /// from this session's newest recorded rationale, beside the
+        /// evidence this project's ledger holds about cached-input tokens
+        /// on this session's own translated exchanges. An estimate and its
+        /// evidence, never a measurement of the provider's own cache.
+        #[arg(long)]
+        debug: bool,
     },
 
     /// Give a session a name of your own.

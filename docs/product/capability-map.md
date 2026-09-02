@@ -1757,16 +1757,16 @@ Fixed architectural requirements
 ☑ Add a debug view showing why the router chose a session or resource.
 ☑ Add a debug view showing recent lifecycle events for a session.
 ☑ Add a debug view showing which memories were retrieved for a routed task.
-☐ Add a debug view showing estimated cache temperature and the evidence used for that estimate.
+☑ Add a debug view showing estimated cache temperature and the evidence used for that estimate.
 ☑ Add a debug view showing quota information and whether it is measured, inferred, or unknown.
 ☑ Add an optional compact route-evidence table showing sample count, TTFC, effective TTFC, TTFT, decode throughput, successful rounds per minute, and observation window when available.
 ☑ Show failure counts by class instead of presenting one unexplained error percentage.
 ☑ Show whether latency evidence came from warm, cold, or unknown context.
 ☑ Show route health, immediate availability, cadence, quota reset, and failure-domain evidence as separate concepts.
 ☑ Show the strongest measured factors behind the most recent routing decision in concise text.
-☐ Show correlations with their sample size and confidence instead of implying precise independence from sparse data.
+☑ Show correlations with their sample size and confidence instead of implying precise independence from sparse data.
 ☑ Keep lifetime token and spend totals out of the default project overview and never present them as achievement counters.
-☐ Add a debug view showing memory-extraction inputs and outputs when explicitly enabled.
+☑ Add a debug view showing memory-extraction inputs and outputs when explicitly enabled.
 ☑ Keep diagnostic views optional and do not turn them into the normal user experience.
 ☑ Prefer inspectable text and tables over animated knowledge-graph visualizations.
 
@@ -1833,7 +1833,7 @@ Phase 51 — Evaluation hooks
 ☑ Measure routing-model cost and request consumption separately from interactive coding cost.
 ☑ Measure how often workload-tier classification predicts successful execution without escalation.
 ☑ Measure how often a low-cost or free route succeeds compared with the premium route it displaced.
-☐ Measure the accuracy of estimated subscription headroom against observed throttling and resets.
+☑ Measure the accuracy of estimated subscription headroom against observed throttling and resets.
 ☐ Measure how often protected quota remains available for high-tier tasks when needed.
 ☐ Measure how often a critical assumption is refuted before broad implementation versus after substantial edits.
 ☐ Measure elapsed time, tool rounds, and changed-file churn between the first unsupported premise and its correction.
@@ -1851,8 +1851,8 @@ Phase 51 — Evaluation hooks
 ☑ Measure how often failure-domain evidence prevents a failover onto the same unhealthy upstream.
 ☑ Measure how often nominally different routes provide separate quota capacity but not independent failure resilience.
 ☐ Measure how much scarce capacity is consumed by probes and whether passive observations can replace them.
-☐ Measure how often sparse, stale, or incorrectly segmented evidence causes a poor routing decision.
-☐ Measure estimated versus actual marginal token or request consumption when telemetry permits.
+☑ Measure how often sparse, stale, or incorrectly segmented evidence causes a poor routing decision.
+☑ Measure estimated versus actual marginal token or request consumption when telemetry permits.
 ☑ Keep evaluation data local and project-scoped unless the user explicitly exports it.
 
 Phase 52 — Criteria before adding semantic/vector retrieval

@@ -19,6 +19,7 @@ use std::process::Command;
 use clap::Parser;
 
 use glasshouse::evaluation::{EvaluationKind, EvaluationObservations};
+use glasshouse::routing::evidence::{EvidenceLedger, HARNESS_TURN_PURPOSE, NewObservation};
 use glasshouse::session::{NewSession, ProjectSessions};
 use glasshouse::{Cli, Runtime, bootstrap};
 
@@ -503,4 +504,144 @@ fn the_task_text_never_reaches_a_rationale_rows_detail() {
             "a rationale row's detail must never carry the task text; got: {detail}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Map line 1760: the cache-temperature debug view.
+// ---------------------------------------------------------------------------
+
+/// **Acceptance (a) and (c).** `sessions show <id> --debug` prints the
+/// router's own `prompt-cache state` estimate beside the cached-input share
+/// this project's ledger holds over the session's own translated
+/// exchanges; without `--debug` the report is byte-identical to the
+/// existing one.
+#[test]
+fn sessions_show_debug_prints_the_cache_estimate_and_its_evidence() {
+    let tmp = tempdir();
+    let fixture = LaunchFixture::new(tmp.path());
+
+    let launched = fixture.glasshouse(&["launch", "claude-code", "--headless"]);
+    assert!(
+        launched.status.success(),
+        "the launch must succeed:\n{}",
+        LaunchFixture::both_streams(&launched)
+    );
+    let sessions = fixture.session_ids();
+    assert_eq!(sessions.len(), 1, "one fresh launch, one session");
+    let id = sessions[0].clone();
+
+    // Two translated exchanges on this session, 2 cached of 3 input tokens
+    // each — a 40% share over the pair (4 cached of 6 input tokens), never
+    // seen by the router's own estimate, which was made at launch, before
+    // either exchange happened.
+    let ledger = EvidenceLedger::open(&fixture.runtime).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64;
+    for _ in 0..2 {
+        ledger
+            .record(
+                NewObservation::new("anthropic", "claude")
+                    .with_route(Some("anthropic-messages"))
+                    .with_session_id(Some(id.clone()))
+                    .with_purpose(Some(HARNESS_TURN_PURPOSE))
+                    .with_tokens(Some(3), None, Some(2)),
+                now,
+            )
+            .unwrap();
+    }
+
+    // A second session's rows, planted so a reader that dropped the
+    // `session_id` filter would leak into the first session's evidence: a
+    // very different sample count (5, not 2) and a very different share
+    // (0%, not 40%). If either figure below moved, this session's own
+    // reader read someone else's rows.
+    let other_session = NewSession::embedded("claude-code");
+    let sessions_store = ProjectSessions::open(&fixture.runtime).unwrap();
+    let other_id = sessions_store.store().create(other_session).unwrap().id;
+    drop(sessions_store);
+    for _ in 0..5 {
+        ledger
+            .record(
+                NewObservation::new("anthropic", "claude")
+                    .with_route(Some("anthropic-messages"))
+                    .with_session_id(Some(other_id.as_str().to_owned()))
+                    .with_purpose(Some(HARNESS_TURN_PURPOSE))
+                    .with_tokens(Some(9), None, Some(0)),
+                now,
+            )
+            .unwrap();
+    }
+
+    let without_debug = fixture.glasshouse(&["sessions", "show", &id]);
+    assert!(
+        without_debug.status.success(),
+        "sessions show must succeed:\n{}",
+        LaunchFixture::both_streams(&without_debug)
+    );
+    let baseline = LaunchFixture::stdout(&without_debug);
+    assert!(
+        !baseline.contains("prompt-cache estimate (1760)"),
+        "without --debug the cache-estimate block must not print at all:\n{baseline}"
+    );
+
+    let with_debug = fixture.glasshouse(&["sessions", "show", &id, "--debug"]);
+    assert!(
+        with_debug.status.success(),
+        "sessions show --debug must succeed:\n{}",
+        LaunchFixture::both_streams(&with_debug)
+    );
+    let debugged = LaunchFixture::stdout(&with_debug);
+    assert!(
+        debugged.starts_with(&baseline),
+        "the --debug block must be appended after the existing report, never change it:\n\
+         baseline:\n{baseline}\ndebugged:\n{debugged}"
+    );
+    assert!(
+        debugged.contains("prompt-cache estimate (1760):"),
+        "got:\n{debugged}"
+    );
+    assert!(
+        debugged.contains("the router's estimate at launch:"),
+        "the router's own contribution must be labelled as the estimate it is:\n{debugged}"
+    );
+    assert!(
+        debugged.contains(
+            "cached-input share 40% over 2 translated exchange(s) (4 cached of 6 input tokens)"
+        ),
+        "the evidence line must show the share, the count and both raw token totals:\n{debugged}"
+    );
+}
+
+/// **Acceptance (a).** A session with no `SessionRouteDecided` row and no
+/// translated exchange prints both absence sentences, never a crash and
+/// never a fabricated number.
+#[test]
+fn sessions_show_debug_on_an_unrouted_session_says_nothing_was_recorded() {
+    let tmp = tempdir();
+    let fixture = LaunchFixture::new(tmp.path());
+
+    let sessions = ProjectSessions::open(&fixture.runtime).unwrap();
+    let record = sessions
+        .store()
+        .create(NewSession::embedded("claude-code"))
+        .unwrap();
+    drop(sessions);
+
+    let shown = fixture.glasshouse(&["sessions", "show", record.id.as_str(), "--debug"]);
+    assert!(
+        shown.status.success(),
+        "sessions show --debug must succeed:\n{}",
+        LaunchFixture::both_streams(&shown)
+    );
+    let text = LaunchFixture::stdout(&shown);
+    assert!(
+        text.contains("no routing rationale recorded for this session"),
+        "got:\n{text}"
+    );
+    assert!(
+        text.contains("no translated exchange has reported cached-input tokens for this session"),
+        "got:\n{text}"
+    );
 }

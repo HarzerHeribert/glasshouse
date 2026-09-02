@@ -238,11 +238,11 @@ disk**, and seven of Phase 47's eight open lines name data nothing persists.
 |---|---|
 | 1757 | `RoutingExplanation` (`routing/mod.rs:475`) has no durable sink — every production sink is a `tracing` line or an in-memory `Vec`. The propagation slot is dead too: `ShellState::record_disposable_choice` (`shell/state.rs:1216`) has zero production callers while `shell/view.rs:1793` already renders it |
 | 1759 | the retrieved set is never recorded; `Extractor::run` (`memory/extract/mod.rs:413`) drops `existing` after `Prompt::build` |
-| 1760 | no cache-temperature signal exists at all; `with_context_state` (`routing/evidence.rs:328`) has zero non-test callers and `cached_input_tokens` has no setter |
+| 1760 | **CLOSED 2026-09-03** (`GH-PHASE47-DEBUG-VIEWS`; `phase-47.md`: the router's own `prompt-cache state` estimate read back from the rationale row beside the session's real cached-input share — `sessions show --debug`). Was: no cache-temperature signal exists at all; `with_context_state` (`routing/evidence.rs:328`) has zero non-test callers and `cached_input_tokens` has no setter |
 | 1763 | **needs a product ruling before code.** Production emits exactly one `GatewayFailure` class: `session::gateway_failure` maps only `Outcome::Unreachable`. Counts-by-class of one class is not the capability. The question is whether a non-2xx `Forwarded` should count as a gateway failure — the gateway currently says no on purpose |
 | 1766 | two links: 1757's absent rationale, and nothing durably records that a decision happened |
-| 1767 | nothing computes a correlation; `routing/domain.rs:31` says so in the source |
-| 1769 | extraction never runs in the shell process; needs a durable extraction record plus a caller change where it does run |
+| 1767 | **CLOSED 2026-09-03** (a prove-it: `route_correlations_section` has printed sample size before confidence since Phase 33C's correlation package; `sample-dropped` KILLED). Was, and stale since then: nothing computes a correlation; `routing/domain.rs:31` says so in the source |
+| 1769 | **CLOSED 2026-09-03** (`[memory] extraction_diagnostics`, an opt-in `memory-extraction.jsonl` written at `run_extraction`, ids and counts only). Was: extraction never runs in the shell process; needs a durable extraction record plus a caller change where it does run |
 | 1247 | **CLOSED 2026-09-02 on the quota-behaviour disjunct** (`GH-ESTIMATOR-RESET`; `phase-32c.md`): the gateway persists `regime_changed_at_unix` when a *stated ceiling* differs between two captured readings, the estimator's one caller floors its rows there, and `entitlements` says *limits changed <age>*. The plan half below still has no producer and the line is an *or*. **Added 2026-09-01** at `estimator-signals`' Phase −1, and it is Cluster H's shape in a phase Cluster H was not written for. *"Reset or re-calibrate an estimator when Glasshouse detects a plan change or materially different quota behavior."* The **present-tense** signal exists and is live in production: `KnownPlan` (`provider/quota.rs:1307`) is constructed at `provider/telemetry.rs:926` and `:1018`, and `RateCeilings` (`quota.rs:1134`) carries observed rate behavior. **Detecting a *change* needs two readings, and nothing keeps the earlier one.** The plan is not a column on `RoutingObservation`, so the ledger rows the estimator reads cannot witness it either, and 32C's estimator is deliberately stateless — *"no table, no migration, no persisted estimator state"* (`phase-32c.md`). This is therefore **not a wiring gap**: it needs a producer that durably records a prior plan reading, which is a schema decision (compare Cluster G) and a Red-tier ruling, not an implementation packet. |
 
 **Do not read 1763 as unlocked by 1735.** The orchestrator recorded that during
@@ -1045,6 +1045,8 @@ skipped.
 
 
 ## Phase 51's thirty-four lines reduce to FOUR root causes, not thirty-four
+
+> **2026-09-03:** RC-C's producers landed during 2026-09-02 (first byte/token/tool-call, tool rounds, repairs, cost, migration 25's ms offsets), and `GH-PHASE51-JOINS` closed **1836, 1855 (token half) and 1854 (sparse + stale)** — `phase-51.md`'s last entry has the three rulings. `GH-RESPONSIVENESS-TERMS` (live) takes 1845 and 1850. RC-B's *routing* half (1834, 1835, 1837, 1846, 1852) still waits on the product question below. **A refusal that outlived its blocker is now a package shape — re-read this file's *reasons* after every wave that adds a column or a row kind.**
 
 `GH-PHASE51-RECON`, 2026-08-30. **1829 and 1830 were the one packageable pair
 and they closed the same evening.** This is what is left, grouped by first

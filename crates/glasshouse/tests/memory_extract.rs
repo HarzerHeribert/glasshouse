@@ -1330,3 +1330,357 @@ fn two_replies_with_the_same_body_and_different_rationales_are_duplicates_of_eac
         "a skipped duplicate must not overwrite the rationale the first row recorded"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Map line 1769 — extraction diagnostics, opt-in.
+//
+// Every test above drives `Extractor::run` directly: correct for the
+// contract, but the diagnostics writer lives behind
+// `main.rs::run_extraction`, the function `glasshouse memory commit` and the
+// `TurnEnded`/`PreCompact` hook arms all share (its own doc comment says
+// so). Proving it therefore means the shipped binary, a real HTTP model —
+// copied from `tests/memory_extract_triggers.rs`'s own `FakeModel`, which
+// states why: *"a unit test with a fake `ExtractionModel` proves the wrong
+// thing here"* — and real `LifecycleEvent`s through this file's own
+// `log_events`, since `main.rs::run_extraction` reads a session's chunk from
+// the real event log via `lifecycle::chunk_for_session`, never from a
+// hand-built `SessionChunk` the way `chunk()` above does.
+//
+// One consequence worth recording rather than working around:
+// `LifecycleEvent` (see `crate::events::LifecycleEvent`) carries no free
+// text in any variant — `chunk_for_session`'s entries are
+// `lifecycle::describe`'s own fixed sentences — so there is no channel on
+// this real path to plant "session activity text" the way a hand-built
+// chunk can. The scrub tests above plant activity text only because they
+// bypass `run_extraction` and hand `SessionChunk::build` a line directly.
+// This section therefore plants the other two the packet named — a memory
+// subject/body and a credential — through what a stored memory and a
+// model's own reply actually carry on this path.
+mod extraction_diagnostics_via_binary {
+    use std::io::{BufRead, BufReader, Read as _, Write as _};
+    use std::net::{SocketAddr, TcpListener, TcpStream};
+    use std::path::PathBuf;
+    use std::process::Command;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    use clap::Parser as _;
+
+    use glasshouse::config::{ExtractionModelRef, ProviderConfig, UserConfig};
+    use glasshouse::events::{EventBus, EventLog, LifecycleEvent, TurnOutcome};
+    use glasshouse::memory::ProjectMemory;
+    use glasshouse::session::{NewSession, ProjectSessions, SessionId};
+    use glasshouse::{Cli, Runtime};
+
+    const MODEL: &str = "a-cheap-local-model";
+    const PROVIDER: &str = "diagnostics-test-runner";
+
+    /// Distinctive enough to never collide with anything else this file's
+    /// tests store, and never repeated in the same string twice — so a
+    /// substring match against the diagnostics line is unambiguous.
+    const PLANTED_SUBJECT: &str = "DIAGNOSTICS-TEST-SUBJECT-c8b3f0";
+    const PLANTED_BODY: &str = "DIAGNOSTICS-TEST-BODY-e5a71d was learned by this run";
+    const PLANTED_CREDENTIAL: &str = "sk-diagnostics9f2c7b1a4d6e8f0";
+
+    /// A model that answers `content` to every request, wrapped in an
+    /// OpenAI-chat-completions envelope — the minimum
+    /// `memory::extract::model::ConfiguredModel` needs.
+    struct FakeModel {
+        address: SocketAddr,
+        stop: Arc<AtomicBool>,
+    }
+
+    impl FakeModel {
+        fn answering(content: &str) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("loopback must bind");
+            listener
+                .set_nonblocking(true)
+                .expect("the accept loop polls its stop flag");
+            let address = listener.local_addr().unwrap();
+            let stop = Arc::new(AtomicBool::new(false));
+            let content = content.to_owned();
+            let thread_stop = Arc::clone(&stop);
+            std::thread::spawn(move || {
+                while !thread_stop.load(Ordering::SeqCst) {
+                    match listener.accept() {
+                        Ok((stream, _)) => {
+                            let _ = stream.set_nonblocking(false);
+                            serve(stream, &content);
+                        }
+                        Err(ref err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(std::time::Duration::from_millis(5));
+                        }
+                        Err(_) => break,
+                    }
+                }
+            });
+            Self { address, stop }
+        }
+
+        fn base_url(&self) -> String {
+            format!("http://{}/v1", self.address)
+        }
+    }
+
+    impl Drop for FakeModel {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::SeqCst);
+        }
+    }
+
+    fn serve(mut stream: TcpStream, content: &str) {
+        let mut reader = BufReader::new(stream.try_clone().expect("the stream clones"));
+        let mut request_line = String::new();
+        if reader.read_line(&mut request_line).is_err() || request_line.is_empty() {
+            return;
+        }
+        let mut length = 0usize;
+        loop {
+            let mut line = String::new();
+            if reader.read_line(&mut line).is_err() {
+                return;
+            }
+            let line = line.trim_end_matches(['\r', '\n']);
+            if line.is_empty() {
+                break;
+            }
+            if let Some((name, value)) = line.split_once(':')
+                && name.trim().eq_ignore_ascii_case("content-length")
+            {
+                length = value.trim().parse().unwrap_or(0);
+            }
+        }
+        let mut body = vec![0u8; length];
+        if reader.read_exact(&mut body).is_err() {
+            return;
+        }
+
+        let document = serde_json::json!({
+            "choices": [{ "message": { "role": "assistant", "content": content } }]
+        })
+        .to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\
+             connection: close\r\n\r\n{document}",
+            document.len()
+        );
+        let _ = stream.write_all(response.as_bytes());
+        let _ = stream.flush();
+    }
+
+    struct Fixture {
+        _tmp: tempfile::TempDir,
+        base: PathBuf,
+        root: PathBuf,
+        runtime: Runtime,
+    }
+
+    impl Fixture {
+        fn new() -> Self {
+            let tmp = tempfile::tempdir().unwrap();
+            let base = tmp.path().to_path_buf();
+            let root = base.join("workspace");
+            std::fs::create_dir_all(root.join(".git")).unwrap();
+            let root = std::fs::canonicalize(&root).unwrap();
+            let cli = Cli::try_parse_from([
+                "glasshouse",
+                "--data-dir",
+                base.join("data").to_str().unwrap(),
+                "--config-dir",
+                base.join("config").to_str().unwrap(),
+            ])
+            .unwrap();
+            let runtime = glasshouse::bootstrap(&cli, &root).unwrap();
+            Self {
+                _tmp: tmp,
+                base,
+                root,
+                runtime,
+            }
+        }
+
+        fn choose_model(&self, base_url: &str) {
+            let mut user = UserConfig::load(self.runtime.paths()).unwrap();
+            let mut provider = ProviderConfig::new("openai-compatible");
+            provider.set_base_url(Some(base_url.to_owned()));
+            user.providers_mut().set(PROVIDER, provider);
+            user.set_memory_extraction_model(Some(ExtractionModelRef::new(PROVIDER, MODEL)));
+            user.save(self.runtime.paths()).unwrap();
+        }
+
+        fn set_extraction_diagnostics(&self, enabled: bool) {
+            let mut user = UserConfig::load(self.runtime.paths()).unwrap();
+            user.memory_mut().set_extraction_diagnostics(Some(enabled));
+            user.save(self.runtime.paths()).unwrap();
+        }
+
+        /// A session with real recorded activity, so the chunk `memory
+        /// commit` reads is not empty — an empty chunk short-circuits
+        /// before the model is ever asked (`ExtractionFailure::NothingToExtract`).
+        fn session_with_activity(&self) -> SessionId {
+            let sessions = ProjectSessions::open(&self.runtime).unwrap();
+            let id = sessions
+                .store()
+                .create(NewSession::embedded("claude-code"))
+                .unwrap()
+                .id;
+            drop(sessions);
+
+            let log = EventLog::open(&self.runtime).unwrap();
+            let bus = EventBus::with_history_and_clock(1, Arc::new(|| 1_700_000_000));
+            let recorded = bus.publish(
+                &id,
+                LifecycleEvent::TurnEnded {
+                    outcome: TurnOutcome::Completed,
+                },
+            );
+            log.append(&recorded, None).unwrap();
+            id
+        }
+
+        fn glasshouse(&self, args: &[&str]) -> std::process::Output {
+            Command::new(env!("CARGO_BIN_EXE_glasshouse"))
+                .current_dir(&self.root)
+                .arg("--scope")
+                .arg(&self.root)
+                .arg("--data-dir")
+                .arg(self.base.join("data"))
+                .arg("--config-dir")
+                .arg(self.base.join("config"))
+                .args(args)
+                .output()
+                .expect("the glasshouse binary must be runnable")
+        }
+
+        fn diagnostics_path(&self) -> PathBuf {
+            self.runtime.state_dir().join("memory-extraction.jsonl")
+        }
+    }
+
+    fn stdout(output: &std::process::Output) -> String {
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    }
+
+    fn both_streams(output: &std::process::Output) -> String {
+        format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        )
+    }
+
+    /// **Acceptance (c), off.** With the knob off (the default), a real
+    /// extraction through `glasshouse memory commit` writes no diagnostics
+    /// file at all.
+    #[test]
+    fn extraction_diagnostics_off_writes_no_file() {
+        let model = FakeModel::answering(
+            r#"{"memories":[{"kind":"finding","authority":"constraint",
+                 "disposition":"accepted","support":"established","confidence":"certain",
+                 "body":"a plain finding this test does not otherwise inspect"}]}"#,
+        );
+        let fixture = Fixture::new();
+        fixture.choose_model(&model.base_url());
+        let id = fixture.session_with_activity();
+
+        let committed = fixture.glasshouse(&["memory", "commit", "--session", id.as_str()]);
+        assert!(
+            committed.status.success(),
+            "memory commit must succeed:\n{}",
+            both_streams(&committed)
+        );
+
+        assert!(
+            !fixture.diagnostics_path().exists(),
+            "the knob defaults to off, so no diagnostics file may exist"
+        );
+    }
+
+    /// **Acceptance (c), on.** With the knob on, one JSON line is appended
+    /// naming the stored memory's id and kind, and a rejected memory by its
+    /// closed-vocabulary reason — never the memory's own subject or body
+    /// text, and never a credential a proposed memory carried.
+    #[test]
+    fn extraction_diagnostics_on_writes_one_line_naming_ids_and_kinds_never_bodies_or_credentials()
+    {
+        let reply = format!(
+            r#"{{"memories": [
+                {{"kind":"finding","authority":"constraint","disposition":"accepted",
+                  "support":"established","confidence":"certain",
+                  "subject":"{PLANTED_SUBJECT}","body":"{PLANTED_BODY}"}},
+                {{"kind":"finding","authority":"constraint","disposition":"accepted",
+                  "support":"established","confidence":"certain",
+                  "body":"API_KEY={PLANTED_CREDENTIAL}"}}
+            ]}}"#
+        );
+        let model = FakeModel::answering(&reply);
+        let fixture = Fixture::new();
+        fixture.choose_model(&model.base_url());
+        fixture.set_extraction_diagnostics(true);
+        let id = fixture.session_with_activity();
+
+        let committed = fixture.glasshouse(&["memory", "commit", "--session", id.as_str()]);
+        assert!(
+            committed.status.success(),
+            "memory commit must succeed:\n{}",
+            both_streams(&committed)
+        );
+        let report = stdout(&committed);
+        assert!(
+            report.contains("stored 1"),
+            "one memory must store, one must be rejected for its credential:\n{report}"
+        );
+
+        let lines: Vec<String> = std::fs::read_to_string(fixture.diagnostics_path())
+            .expect("the knob is on, so the diagnostics file must exist")
+            .lines()
+            .map(str::to_owned)
+            .collect();
+        assert_eq!(lines.len(), 1, "one run, one line: {lines:?}");
+        let line = &lines[0];
+
+        let parsed: serde_json::Value =
+            serde_json::from_str(line).expect("the line must be one parseable JSON object");
+
+        // The stored memory's own id, cross-checked against the project's
+        // real store — never re-derived, read back.
+        let memory = ProjectMemory::open(&fixture.runtime).unwrap();
+        let stored = memory
+            .store()
+            .with_status(glasshouse::memory::MemoryStatus::Active, 10)
+            .unwrap();
+        assert_eq!(stored.len(), 1, "exactly one memory must have been stored");
+        let stored_id = stored[0].id.as_str().to_owned();
+
+        let recorded = parsed["recorded"]
+            .as_array()
+            .expect("`recorded` must be an array");
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0]["id"], stored_id);
+        assert_eq!(recorded[0]["kind"], "finding");
+
+        let rejected = parsed["rejected"]
+            .as_array()
+            .expect("`rejected` must be an array");
+        assert_eq!(rejected.len(), 1);
+        assert_eq!(rejected[0]["kind"], "contract");
+        assert_eq!(
+            rejected[0]["reason"], "credential_found",
+            "the rejection reason must be the closed vocabulary word, never the model's own text"
+        );
+
+        assert!(
+            !line.contains(PLANTED_SUBJECT),
+            "the diagnostics line must never carry a stored memory's subject: {line}"
+        );
+        assert!(
+            !line.contains(PLANTED_BODY),
+            "the diagnostics line must never carry a stored memory's body: {line}"
+        );
+        assert!(
+            !line.contains(PLANTED_CREDENTIAL),
+            "the diagnostics line must never carry a credential a rejected memory proposed: \
+             {line}"
+        );
+    }
+}

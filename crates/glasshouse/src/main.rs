@@ -342,8 +342,8 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
             // The bare command still lists, which is what every existing
             // caller and every printed identifier assumes.
             None => print!("{}", session_report(&runtime)?),
-            Some(SessionCommand::Show { session }) => {
-                print!("{}", session_detail(&runtime, session)?);
+            Some(SessionCommand::Show { session, debug }) => {
+                print!("{}", session_detail(&runtime, session, *debug)?);
             }
             Some(SessionCommand::Rename {
                 session,
@@ -3537,11 +3537,62 @@ fn route_outcomes_section(runtime: &Runtime) -> String {
          it (map line 1834)\n",
     );
     out.push_str(&render_route_outcome_rows(&by_tier));
+    // Map line 1855's token half: a second ledger opened and dropped here,
+    // beside the evaluation ledger above — practice §65's "one open per
+    // read" is about not holding two handles on the *same* store, not about
+    // reading only one store per function.
+    out.push_str(&expected_vs_actual_output_tokens_block(runtime, from, to));
     out.push_str(&render_failover_preventions(&preventions));
     out.push_str(
         "\nA session whose harness never reported a turn end is counted as neither a success \
          nor a failure; a quiet or exited process is never read as either.\n",
     );
+    out
+}
+
+/// Map line 1855's token half, rendered for [`route_outcomes_section`]: the
+/// median of *actual ÷ estimated* output tokens per task class, over the
+/// same `[from, to]` window that section's other blocks read.
+fn expected_vs_actual_output_tokens_block(runtime: &Runtime, from: i64, to: i64) -> String {
+    use std::fmt::Write as _;
+
+    let header = "\n  expected vs actual output tokens (1855):\n";
+    let ledger = match glasshouse::routing::evidence::EvidenceLedger::open(runtime) {
+        Ok(ledger) => ledger,
+        Err(err) => {
+            tracing::debug!(
+                error = %format!("{err:#}"),
+                "could not open the routing evidence ledger for the output-token estimate block"
+            );
+            return format!("{header}    the routing evidence ledger could not be opened\n");
+        }
+    };
+    let rows = match ledger.output_estimate_accuracy(to, (to - from).max(0)) {
+        Ok(rows) => rows,
+        Err(err) => return format!("{header}    {err}\n"),
+    };
+    if rows.is_empty() {
+        return format!("{header}    no output-token estimates recorded in this window\n");
+    }
+    let mut out = header.to_owned();
+    for row in &rows {
+        match row.median_ratio {
+            Some(ratio) => {
+                let _ = writeln!(
+                    out,
+                    "    {}: median actual/estimated ×{ratio:.2} over {} sessions ({} pending)",
+                    row.task_class, row.sample_count, row.pending
+                );
+            }
+            None => {
+                let _ = writeln!(
+                    out,
+                    "    {}: not enough sessions to score ({} pending)",
+                    row.task_class, row.pending
+                );
+            }
+        }
+    }
     out
 }
 
@@ -4717,6 +4768,42 @@ fn comparable_output_tokens(runtime: &Runtime) -> Vec<glasshouse::routing::burn:
         now_unix,
         glasshouse::routing::evidence::CLASSIFICATION_EVIDENCE_WINDOW_SECONDS,
     )
+}
+
+/// Map line 1855's producer call, shared by both of `launch_session`'s
+/// routed exits: writes the launch's own expected output-token size only
+/// when its task class has a real median in [`comparable_output_tokens`]'s
+/// own window — the same window and the same reader
+/// [`session_router`] already consulted to rank this launch, read again
+/// here rather than threaded through, for the reason [`comparable_output_tokens`]'s
+/// own doc gives: this ledger read is fail-soft and costs this estimate
+/// alone, never the launch.
+///
+/// A launch that stated no task, or whose task class has no comparable rows
+/// in the window, writes nothing at all — never a fabricated zero.
+fn record_consumption_estimate(
+    runtime: &Runtime,
+    session_id: &str,
+    classified: Option<&ClassifiedRouting>,
+    observed_at_unix: i64,
+) {
+    let Some(task_class) = classified.map(|classified| classified.answer.task_class()) else {
+        return;
+    };
+    let Some(median_output_tokens) = comparable_output_tokens(runtime)
+        .into_iter()
+        .find(|class_output| class_output.class == task_class)
+        .and_then(|class_output| class_output.median_output_tokens)
+    else {
+        return;
+    };
+    glasshouse::evaluation::record_routing_consumption_estimate(
+        runtime,
+        session_id,
+        task_class,
+        median_output_tokens,
+        observed_at_unix,
+    );
 }
 
 /// Map line 1952's reader — the same producer and window
@@ -6004,6 +6091,15 @@ fn launch_session(
                 routed.explanation(),
                 observed_at,
             );
+            // Map line 1855's token half, on the same instant: the launch's
+            // own expected output-token size for the class it was classified
+            // as, written only when there is a real median to write.
+            record_consumption_estimate(
+                runtime,
+                routed.chosen().id(),
+                classified.as_ref(),
+                observed_at,
+            );
             // Line 1467: the session this work landed on is the sticky one.
             remember_classification(&sticky_cache, classified.as_ref(), routed.chosen().id());
             // Line 1716, on the path that migrates. Taken before
@@ -6624,6 +6720,15 @@ fn launch_session(
             record.id.as_str(),
             routed.chosen().id(),
             routed.explanation(),
+            observed_at,
+        );
+        // Map line 1855's token half, on the same instant: the launch's own
+        // expected output-token size for the class it was classified as,
+        // written only when there is a real median to write.
+        record_consumption_estimate(
+            runtime,
+            record.id.as_str(),
+            classified.as_ref(),
             observed_at,
         );
     }
@@ -8777,6 +8882,22 @@ fn memory_retrieval_diagnostics_enabled(runtime: &Runtime) -> bool {
         .value
 }
 
+/// `[memory] extraction_diagnostics`, resolved — map line 1769's gate on
+/// whether an extraction run writes `memory-extraction.jsonl`, mirroring
+/// [`memory_retrieval_diagnostics_enabled`]'s own fail-safe direction: a
+/// configuration that cannot be read is `false`.
+fn memory_extraction_diagnostics_enabled(runtime: &Runtime) -> bool {
+    let Ok(user) = UserConfig::load(runtime.paths()) else {
+        return false;
+    };
+    let Ok(project) = config::load_project_config(runtime.project()) else {
+        return false;
+    };
+    EffectiveConfig::new(&user, project.as_ref())
+        .memory_extraction_diagnostics()
+        .value
+}
+
 /// Take the requests other dispatches have already claimed out of what each
 /// candidate's pool is known to have left, so the policy ranks what is
 /// actually spendable — capability map line 1367's read side.
@@ -10773,6 +10894,12 @@ fn run_extraction(
             // knowing about.
             record_extraction_observation(runtime, &outcome);
             record_observed_files(runtime, &outcome.recorded, &observed_files);
+            // Map line 1769, opt-in: never fails and never changes `outcome`
+            // — the extraction it describes has already run and already
+            // been reported.
+            if memory_extraction_diagnostics_enabled(runtime) {
+                glasshouse::memory::extract::diagnostics::append_diagnostics(runtime, &outcome);
+            }
             Some(outcome)
         }
         Err(_) => {
@@ -14187,12 +14314,18 @@ fn status_report(runtime: &Runtime) -> anyhow::Result<String> {
                 names.join(", ")
             );
             let thresholds = effective.capacity_band_thresholds().value;
+            // Map line 1836, the same replay `entitlements_report` renders —
+            // see that function's own note on why this ledger is opened once
+            // per pool rather than once per entry.
+            let now_unix = glasshouse::provider::cache::now_unix_seconds();
+            let evidence_ledger = glasshouse::routing::evidence::EvidenceLedger::open(runtime).ok();
             for entry in &entitlements {
+                let replay = headroom_replay_for(evidence_ledger.as_ref(), now_unix, entry);
                 let _ = writeln!(
                     out,
                     "  `{}`  {}",
                     entry.name(),
-                    entitlement_facets(entry, &thresholds)
+                    entitlement_facets(entry, &thresholds, replay)
                 );
             }
         }
@@ -14538,12 +14671,19 @@ fn entitlements_report(runtime: &Runtime) -> anyhow::Result<String> {
         );
     } else {
         let thresholds = effective.capacity_band_thresholds().value;
+        // Map line 1836: opened once for the whole pool, fail-soft — a
+        // ledger this build cannot open leaves every entry's replay at its
+        // honest `not enough throttles to score` default rather than
+        // failing the report.
+        let now_unix = glasshouse::provider::cache::now_unix_seconds();
+        let evidence_ledger = glasshouse::routing::evidence::EvidenceLedger::open(runtime).ok();
         for entry in &entitlements {
             let _ = writeln!(out, "`{}`  ({})", entry.name(), entry.describe());
+            let replay = headroom_replay_for(evidence_ledger.as_ref(), now_unix, entry);
             // The same renderer `glasshouse status` uses, deliberately: the
             // two commands describing one account differently would be a
             // defect nobody could act on.
-            let _ = writeln!(out, "  {}", entitlement_facets(entry, &thresholds));
+            let _ = writeln!(out, "  {}", entitlement_facets(entry, &thresholds, replay));
             let _ = writeln!(out, "  served: {}", served_phrase(served.get(entry.name())));
             let _ = writeln!(out);
         }
@@ -14591,13 +14731,39 @@ fn served_phrase(entry: Option<&(usize, &glasshouse::session::SessionRecord)>) -
     }
 }
 
+/// Map line 1836's replay counts for one entitlement — shared by
+/// `glasshouse entitlements` and `glasshouse status`'s own pool listing, so
+/// the two commands cannot describe one account's throttle history
+/// differently. `None` ledger, or a backing that names no provider (a
+/// native-harness or unstated entry, which no routing row is ever recorded
+/// under), both fall back to the honest zero-throttle default —
+/// [`entitlement_facets`] renders that as *not enough throttles to score*,
+/// the same wording an opened ledger with too few rows gets.
+fn headroom_replay_for(
+    ledger: Option<&glasshouse::routing::evidence::EvidenceLedger>,
+    now_unix: i64,
+    entry: &glasshouse::config::ResolvedEntitlement,
+) -> glasshouse::routing::evidence::HeadroomReplayCounts {
+    match (ledger, entry.backing()) {
+        (Some(ledger), glasshouse::config::EntitlementBacking::Provider(provider)) => ledger
+            .headroom_replay(
+                provider,
+                now_unix,
+                glasshouse::routing::evidence::CLASSIFICATION_EVIDENCE_WINDOW_SECONDS,
+            )
+            .unwrap_or_default(),
+        _ => glasshouse::routing::evidence::HeadroomReplayCounts::default(),
+    }
+}
+
 fn entitlement_facets(
     entry: &glasshouse::config::ResolvedEntitlement,
     thresholds: &glasshouse::provider::quota::CapacityBandThresholds,
+    replay: glasshouse::routing::evidence::HeadroomReplayCounts,
 ) -> String {
     use glasshouse::config::{EntitlementModels, TelemetryScope};
     use glasshouse::routing::evidence::{
-        HeadroomBand, HeadroomBasis, LongWindowPressure, ResetBasis,
+        HeadroomBand, HeadroomBasis, LongWindowPressure, MIN_SAMPLE_FOR_SUMMARY, ResetBasis,
     };
 
     fn band_str(band: HeadroomBand) -> &'static str {
@@ -14723,7 +14889,34 @@ fn entitlement_facets(
         (None, None) => "headroom estimate: unknown".to_owned(),
     };
 
-    format!("{capacity} · {reset} · {throttling} · {models} · {headroom_estimate}")
+    // Map line 1836, on its own physical line — never folded into the
+    // ` · `-joined facets above, so an existing reader that pulls exactly
+    // the next line after an entitlement's header (this function's own
+    // regression fixture, `facets_line`) keeps seeing byte-identical text.
+    let headroom_replay = if replay.throttles() < MIN_SAMPLE_FOR_SUMMARY {
+        "headroom estimate vs throttles (1836): not enough throttles to score".to_owned()
+    } else {
+        let reset_clause = match replay.observed_reset_lag_median_seconds {
+            Some(seconds) => format!(
+                "observed reset lag median {seconds}s over {}",
+                replay.observed_reset_lag_sample_count
+            ),
+            None => "no observed resets".to_owned(),
+        };
+        format!(
+            "headroom estimate vs throttles (1836): warned {} / missed {} / unestimable {} of \
+             {} throttles; {reset_clause}",
+            replay.warned,
+            replay.missed,
+            replay.unestimable,
+            replay.throttles()
+        )
+    };
+
+    format!(
+        "{capacity} · {reset} · {throttling} · {models} · {headroom_estimate}\n  \
+         {headroom_replay}"
+    )
 }
 
 /// One line of the session listing, header included.
@@ -14786,7 +14979,7 @@ fn short_id(id: &glasshouse::session::SessionId) -> String {
 /// started before these columns existed leaves behind. It is deliberately
 /// different from `unknown` and from `the harness's own default`, both of
 /// which are answers Glasshouse recorded on purpose.
-fn session_detail(runtime: &Runtime, session: &str) -> anyhow::Result<String> {
+fn session_detail(runtime: &Runtime, session: &str, debug: bool) -> anyhow::Result<String> {
     use std::fmt::Write as _;
 
     let sessions = ProjectSessions::open(runtime)?;
@@ -14894,6 +15087,9 @@ fn session_detail(runtime: &Runtime, session: &str) -> anyhow::Result<String> {
     drop(sessions);
     out.push_str(&assumption_section(runtime, &id));
     out.push_str(&routing_rationale_section(runtime, &id));
+    if debug {
+        out.push_str(&prompt_cache_debug_section(runtime, &id));
+    }
     Ok(out)
 }
 
@@ -14944,6 +15140,83 @@ fn routing_rationale_section(runtime: &Runtime, id: &glasshouse::session::Sessio
             ),
         );
     }
+    out
+}
+
+/// `sessions show <id> --debug`'s cache-temperature view, map line 1760.
+///
+/// Two readings, kept apart rather than blended into one number: (a) the
+/// router's own `prompt-cache state` contribution
+/// ([`glasshouse::routing::session::prompt_cache_state`]) from this
+/// session's newest recorded rationale — the estimate the router made
+/// *before* any of this session's exchanges happened — and (b) the
+/// cached-input share this project's ledger actually holds over this
+/// session's own translated exchanges, from
+/// [`glasshouse::routing::evidence::EvidenceLedger::cached_share_for_session`].
+///
+/// The trailing sentence is fixed and always printed: this build observes
+/// neither a provider cache's presence nor its lifetime (see
+/// `prompt_cache_state`'s own doc comment), so (a) is an estimate and (b) is
+/// what providers reported on exchanges that came after it, never a
+/// measurement of the same cache the estimate describes.
+fn prompt_cache_debug_section(runtime: &Runtime, id: &glasshouse::session::SessionId) -> String {
+    use std::fmt::Write as _;
+
+    let mut out = String::new();
+    out.push_str("\nprompt-cache estimate (1760):\n");
+
+    let estimate = glasshouse::evaluation::EvaluationObservations::open(runtime)
+        .ok()
+        .and_then(|ledger| ledger.session_route_for(id.as_str()).ok())
+        .flatten()
+        .and_then(|row| {
+            row.detail
+                .as_deref()
+                .map(glasshouse::evaluation::route_contributions)
+        })
+        .and_then(|contributions| {
+            contributions
+                .into_iter()
+                .find(|contribution| contribution.name == "prompt-cache state")
+        });
+    match estimate {
+        Some(contribution) => {
+            let _ = writeln!(
+                out,
+                "  the router's estimate at launch: {:+.3}  {}",
+                contribution.magnitude, contribution.evidence
+            );
+        }
+        None => out.push_str("  no routing rationale recorded for this session\n"),
+    }
+
+    let share = glasshouse::routing::evidence::EvidenceLedger::open(runtime)
+        .ok()
+        .and_then(|ledger| ledger.cached_share_for_session(id.as_str()).ok())
+        .flatten();
+    match share {
+        Some(share) => {
+            let percent = share
+                .cache_read_ratio()
+                .map(|ratio| ratio * 100.0)
+                .unwrap_or(0.0);
+            let _ = writeln!(
+                out,
+                "  cached-input share {percent:.0}% over {} translated exchange(s) ({} cached \
+                 of {} input tokens)",
+                share.sample_count, share.cached_input_tokens, share.input_tokens
+            );
+        }
+        None => out.push_str(
+            "  no translated exchange has reported cached-input tokens for this session\n",
+        ),
+    }
+
+    out.push_str(
+        "  the share above is what providers reported on this session's own exchanges; the \
+         estimate above was made before any of them — an estimate and its evidence, never a \
+         measurement of the provider's cache\n",
+    );
     out
 }
 

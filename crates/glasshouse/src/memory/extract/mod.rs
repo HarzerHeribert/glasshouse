@@ -66,6 +66,7 @@
 pub mod authority;
 pub mod chunk;
 pub mod credentials;
+pub mod diagnostics;
 pub mod disposable;
 pub mod lifecycle;
 pub mod model;

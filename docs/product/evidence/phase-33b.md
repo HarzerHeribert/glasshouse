@@ -467,3 +467,5 @@ prints the seconds counts and never the `*_ms_sample_count`s — and a mixed
 group (some rows with offsets, some without) is untested. **Successor:**
 `GH-RESPONSIVENESS-TERMS` prints `<ms> of <n> measured` beside each mean and
 tests the mixed group (its objective 4). Ticked on the verdict.
+
+**Windows VM run 7 on `8a863c5` (the commit carrying migration 25): build PASS, test PASS, msrv PASS** — `--lib` green including `migration_25_adds_the_millisecond_offsets_and_undoes_cleanly`; the Red package's platform leg is settled on the shipped Windows binary (2026-09-03).

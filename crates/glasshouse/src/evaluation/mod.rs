@@ -318,6 +318,21 @@ pub enum EvaluationKind {
     /// with no contributions still writes a row, `detail` `"[]"`: the
     /// decision happened even when nothing weighed in.
     SessionRouteDecided,
+    /// The launch-path routing decision's own expected output-token size for
+    /// this session's task class — map line 1855's token half, and
+    /// [`crate::routing::evidence::EvidenceLedger::output_estimate_accuracy`]'s
+    /// own row. `subject` is the task class word
+    /// ([`crate::routing::request::TaskClass::as_str`]); `detail` is the
+    /// median output-token count [`crate::routing::burn::output_tokens_by_class`]
+    /// held for that class at the moment of launch, as decimal text;
+    /// `session_id` is the session the decision produced.
+    ///
+    /// **Written only when there is a real median to write.** A launch whose
+    /// task class has no comparable rows in the window — the common case for
+    /// a class this project has not routed before — records nothing at all
+    /// rather than a fabricated zero; see
+    /// [`record_routing_consumption_estimate`]'s own doc comment.
+    RoutingConsumptionEstimated,
 }
 
 /// The `subject` this ledger writes for a destination whose cost class no
@@ -536,6 +551,7 @@ impl EvaluationKind {
             Self::MemoryRevalidated => "memory_revalidated",
             Self::TurnOutcomeObserved => "turn_outcome_observed",
             Self::SessionRouteDecided => "session_route_decided",
+            Self::RoutingConsumptionEstimated => "routing_consumption_estimated",
         }
     }
 
@@ -561,6 +577,7 @@ impl EvaluationKind {
             "memory_revalidated" => Some(Self::MemoryRevalidated),
             "turn_outcome_observed" => Some(Self::TurnOutcomeObserved),
             "session_route_decided" => Some(Self::SessionRouteDecided),
+            "routing_consumption_estimated" => Some(Self::RoutingConsumptionEstimated),
             _ => None,
         }
     }
@@ -2718,6 +2735,68 @@ pub fn record_session_route(
     }
 }
 
+/// Record a launch's own expected output-token size for the session it
+/// produced — the producer for
+/// [`EvaluationKind::RoutingConsumptionEstimated`], map line 1855's token
+/// half.
+///
+/// Its callers are `main.rs::launch_session`'s same two routed exits
+/// [`record_session_route`] has — called right beside it, with the same
+/// `session_id` and the same `observed_at_unix`.
+///
+/// **Written only when there is a real median to write.** `median_output_tokens`
+/// is the caller's own
+/// [`crate::routing::burn::ClassOutput::median_output_tokens`] for this
+/// launch's task class, already `None` below
+/// [`crate::routing::evidence::MIN_SAMPLE_FOR_SUMMARY`] comparable rows — a
+/// launch with no comparable rows for its class calls this with nothing to
+/// write, and this records nothing rather than a fabricated zero. This
+/// function does not re-derive the median itself: the caller already read
+/// it from the same evidence ledger this row is about, and re-reading it
+/// here would be a second, possibly different, read of the same window.
+///
+/// **This never fails a launch**, exactly as [`record_session_route`] does
+/// not: it is on a person's own command path and an estimate row is not
+/// worth a session.
+///
+/// # What is stored
+///
+/// `subject` is `task_class.as_str()`. `detail` is `median_output_tokens`,
+/// rounded to the nearest whole token, as decimal text — never a raw float
+/// string, so [`crate::routing::evidence::EvidenceLedger::output_estimate_accuracy`]
+/// can parse it back without a locale-dependent format. `session_id` is the
+/// session the decision produced.
+pub fn record_routing_consumption_estimate(
+    runtime: &Runtime,
+    session_id: &str,
+    task_class: crate::routing::request::TaskClass,
+    median_output_tokens: f64,
+    observed_at_unix: i64,
+) {
+    let observation = NewObservation::new(EvaluationKind::RoutingConsumptionEstimated)
+        .with_subject(task_class.as_str())
+        .with_session_id(session_id)
+        .with_detail(format!("{}", median_output_tokens.round() as i64));
+
+    let ledger = match EvaluationObservations::open(runtime) {
+        Ok(ledger) => ledger,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "could not open the evaluation ledger; the session is routed, but its expected \
+                 output-token size was not recorded"
+            );
+            return;
+        }
+    };
+    if let Err(err) = ledger.record(observation, observed_at_unix) {
+        tracing::warn!(
+            error = %err,
+            "could not record a session's expected output-token size"
+        );
+    }
+}
+
 /// Record one launch's session-boundary routing decision — the producer for
 /// [`EvaluationKind::RoutingOverrideDecided`] and
 /// [`EvaluationKind::RoutingContinuationDecided`], map lines 1829 and 1830.
@@ -3512,6 +3591,7 @@ mod tests {
             EvaluationKind::MemoryRevalidated,
             EvaluationKind::TurnOutcomeObserved,
             EvaluationKind::SessionRouteDecided,
+            EvaluationKind::RoutingConsumptionEstimated,
         ];
         let names: Vec<&str> = declared.iter().map(|kind| kind.as_str()).collect();
         assert_eq!(
