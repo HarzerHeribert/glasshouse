@@ -932,31 +932,6 @@ fn pool_entitlements_for<'p>(
         .collect()
 }
 
-/// Map line 1519: whether `provider`'s own `[providers.<name>.quota] budget`
-/// has been counted as exhausted, given what
-/// `provider::resources::GatheredTelemetry::gather_budget_spend` counted
-/// against it. `None` whenever either half is unestablished — no budget
-/// configured, or nothing could be priced against it (an empty ledger, no
-/// `pricing.toml` entry, every row relayed or unread) — never `Some` for a
-/// budget nobody could count against, the same "nobody has said is not
-/// cannot" rule every other entitlement gate in `routing::session` follows.
-fn budget_exhausted_for(
-    provider: &str,
-    effective: &EffectiveConfig<'_>,
-    telemetry: &glasshouse::provider::resources::GatheredTelemetry,
-) -> Option<glasshouse::routing::BudgetExhaustion> {
-    let budget = effective.quota_override(provider).value.budget()?;
-    let spent_micro_usd = telemetry.provider_budget_spend(provider)?.micro_usd?;
-    if spent_micro_usd < budget.amount_micro_usd() {
-        return None;
-    }
-    Some(glasshouse::routing::BudgetExhaustion {
-        budget_micro_usd: budget.amount_micro_usd(),
-        spent_micro_usd,
-        period: budget.period().as_str(),
-    })
-}
-
 /// A resolved entitlement as the router carries it, 56A-2's facets included
 /// — the bridge `ResolvedEntitlement::to_routing` deliberately leaves to
 /// this caller, because the capacity band is derived against the user's own
@@ -973,7 +948,7 @@ fn routing_entitlement(
 
     let budget_exhausted = match resolved.backing() {
         EntitlementBacking::Provider(provider) => {
-            budget_exhausted_for(provider, effective, telemetry)
+            glasshouse::provider::resources::budget_exhausted_for(provider, effective, telemetry)
         }
         EntitlementBacking::NativeHarness(_) | EntitlementBacking::Unstated => None,
     };
@@ -8866,7 +8841,8 @@ fn disposable_candidates(
         // exists cannot be named in one — so this is a recorded limit: an
         // excluded model does not appear in a disposable choice's rejection
         // list the way an entitlement job-kind or spend-ceiling refusal does.
-        let budget_exhausted = budget_exhausted_for(&name, effective, telemetry);
+        let budget_exhausted =
+            glasshouse::provider::resources::budget_exhausted_for(&name, effective, telemetry);
         // A free candidate must not inherit the metered ones' capacity
         // reading when it was the money budget that zeroed it: `capacity` is
         // one `CapacityState` per provider, shared by every model of it, and
@@ -8998,6 +8974,25 @@ fn disposable_reducer(
     let telemetry = glasshouse::provider::resources::GatheredTelemetry::new().gather_gateway_quota(
         &glasshouse::provider::telemetry::GatewayQuotaCache::new(runtime.paths()),
     );
+    // Map line 1519: priced spend against every provider's own configured
+    // money budget, for `disposable_candidates`' own exclusion — the same
+    // fail-soft gather `disposable_extraction_model` makes (8320).
+    let telemetry = match glasshouse::routing::evidence::EvidenceLedger::open(runtime) {
+        Ok(ledger) => {
+            let prices = glasshouse::provider::pricing::PriceTable::load_from_dir(
+                runtime.paths().config_dir(),
+            );
+            telemetry.gather_budget_spend(&ledger, &prices, &effective, now_unix)
+        }
+        Err(err) => {
+            tracing::debug!(
+                error = %err,
+                "could not read the routing evidence ledger to count budget spend for the \
+                 context-firewall reducer"
+            );
+            telemetry
+        }
+    };
     let candidates =
         disposable_candidates(user, project, &effective, &secrets, &telemetry, now_unix);
 
@@ -9244,12 +9239,18 @@ fn routing_model_failure(err: &glasshouse::memory::ModelError) -> String {
 
     tracing::warn!(error = %err, "the routing model could not classify this request");
     match err {
-        ModelError::Unavailable => "the routing model could not be reached",
-        ModelError::Refused => "the routing model declined the request",
-        ModelError::TimedOut => "the routing model did not answer within its bound",
-        ModelError::Failed { .. } => "the routing model's call produced no usable answer",
+        ModelError::Unavailable => "the routing model could not be reached".to_owned(),
+        ModelError::Refused => "the routing model declined the request".to_owned(),
+        ModelError::TimedOut => "the routing model did not answer within its bound".to_owned(),
+        ModelError::Failed { .. } => {
+            "the routing model's call produced no usable answer".to_owned()
+        }
+        // Not produced on this path today — `ModelError::Declined` is the
+        // rerank seat's own bypass reason — but the reason is already a
+        // full sentence Glasshouse composed, so it needs no subject-renaming
+        // the way the fixed phrases above do.
+        ModelError::Declined { reason } => reason.clone(),
     }
-    .to_owned()
 }
 
 /// Build the model `provider`/`model` names, or say in one sentence why it
@@ -14589,6 +14590,16 @@ fn entitlement_facets(
             // `4f0c1cf`'s output.
             if estimate.long_window_pressure == LongWindowPressure::Present {
                 rendered.push_str(", persistent pressure beyond the short window");
+            }
+            // Map line 1247's reachable half: once a regime change has been
+            // detected, the estimate above is already derived only from
+            // rows at or after it (`config::populate_provider_facets`'s
+            // floor) — this says so, through the same age formatter every
+            // other facet on this line uses. `format_age` already renders
+            // "ago" (or "just now"), so this appends its output as-is rather
+            // than doubling the word.
+            if let Some(since_unix) = estimate.since_unix {
+                rendered.push_str(&format!("; limits changed {}", format_age(since_unix)));
             }
             rendered
         }

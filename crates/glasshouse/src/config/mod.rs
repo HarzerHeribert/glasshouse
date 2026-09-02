@@ -2657,14 +2657,43 @@ impl ResolvedEntitlement {
                 .session_counts
                 .and_then(|counts| counts.get(self.name.as_str()))
                 .copied();
+            // Map line 1247's reachable half: re-calibrating the estimator
+            // when the quota regime changes is one floor at this, its only
+            // caller. `regime_changed_at` reads the same on-disk reading
+            // `capacity_scope` above already loaded through `cache.load`;
+            // `None` means no change has ever been recorded, in which case
+            // every row in the window is still evidence and the filter
+            // below is a no-op — `filter`, not `filter_map`, so a `None`
+            // floor keeps every row rather than dropping them all.
+            let regime_changed_at = telemetry
+                .gateway_quota
+                .and_then(|cache| cache.regime_changed_at(provider));
+            let floored: Vec<crate::routing::evidence::RoutingObservation>;
+            let scoped_observations: &[crate::routing::evidence::RoutingObservation] =
+                match (telemetry.observations, regime_changed_at) {
+                    (Some(observations), Some(floor)) => {
+                        floored = observations
+                            .iter()
+                            .filter(|row| row.observed_at_unix >= floor)
+                            .cloned()
+                            .collect();
+                        &floored
+                    }
+                    (Some(observations), None) => observations,
+                    (None, _) => &[],
+                };
             self.headroom_estimate = crate::routing::evidence::estimate_subscription_headroom(
-                telemetry.observations.unwrap_or(&[]),
+                scoped_observations,
                 provider,
                 label.as_deref(),
                 telemetry.now_unix,
                 self.seconds_until_reset,
                 session_count,
-            );
+            )
+            .map(|mut estimate| {
+                estimate.since_unix = regime_changed_at;
+                estimate
+            });
         }
 
         if let Some(catalogues) = telemetry.model_catalogues {

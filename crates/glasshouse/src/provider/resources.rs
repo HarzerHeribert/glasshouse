@@ -510,6 +510,37 @@ impl GatheredTelemetry {
     }
 }
 
+/// Map line 1519: whether `provider`'s own `[providers.<name>.quota] budget`
+/// has been counted as exhausted, given what
+/// [`GatheredTelemetry::gather_budget_spend`] counted against it. `None`
+/// whenever either half is unestablished — no budget configured, or nothing
+/// could be priced against it (an empty ledger, no `pricing.toml` entry,
+/// every row relayed or unread) — never `Some` for a budget nobody could
+/// count against, the same "nobody has said is not cannot" rule every other
+/// entitlement gate in `routing::session` follows.
+///
+/// Lives here rather than in `main.rs`, where it was originally written, so
+/// every caller that can reach this module can reach it too — `main.rs`'s
+/// own `routing_entitlement` and `disposable_candidates`, and
+/// `memory::rerank::resolve_rerank_model`, which is library code and cannot
+/// call a binary-crate function.
+pub fn budget_exhausted_for(
+    provider: &str,
+    effective: &EffectiveConfig<'_>,
+    telemetry: &GatheredTelemetry,
+) -> Option<crate::routing::BudgetExhaustion> {
+    let budget = effective.quota_override(provider).value.budget()?;
+    let spent_micro_usd = telemetry.provider_budget_spend(provider)?.micro_usd?;
+    if spent_micro_usd < budget.amount_micro_usd() {
+        return None;
+    }
+    Some(crate::routing::BudgetExhaustion {
+        budget_micro_usd: budget.amount_micro_usd(),
+        spent_micro_usd,
+        period: budget.period().as_str(),
+    })
+}
+
 /// The capacity Glasshouse believes `kind` has, after every reading that
 /// applies to it has been folded in — the function every box in this phase
 /// ultimately closes through.

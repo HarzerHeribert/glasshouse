@@ -13,8 +13,12 @@
 //! Each test is its own `Binary`: sharing one across tests would let a
 //! ledger row planted for one budget's period leak into another's window.
 
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::{Command, Output, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 
 use clap::Parser;
 
@@ -62,6 +66,55 @@ impl Binary {
         std::fs::write(self.base.join("config").join("pricing.toml"), toml)
             .expect("write pricing.toml");
         self
+    }
+
+    /// Overwrite `config.toml` with a new `extra` body — for a test that
+    /// changes a budget between two hook runs of the same fixture, the same
+    /// project the first write already bootstrapped.
+    fn rewrite_config(&self, extra: &str) {
+        std::fs::write(
+            self.base.join("config").join("config.toml"),
+            format!("version = 1\n\n{extra}"),
+        )
+        .expect("rewrite user config");
+    }
+
+    /// Drive `context-firewall hook` with `event` on stdin, and parse the
+    /// hook response — `tests/firewall_reducer.rs`'s own `Fixture::hook`.
+    /// Always exits 0 — fail-open is part of what every reducer test here
+    /// proves too.
+    fn hook(&self, event: &serde_json::Value, extra_args: &[&str]) -> serde_json::Value {
+        let mut args = vec!["context-firewall", "hook", "--emit-updated-output"];
+        args.extend_from_slice(extra_args);
+        let mut child = Command::new(env!("CARGO_BIN_EXE_glasshouse"))
+            .env(VAR, "sk-planted-budget-spend-test")
+            .env(FREE_VAR, "sk-planted-budget-spend-test-free")
+            .arg("--scope")
+            .arg(&self.root)
+            .arg("--data-dir")
+            .arg(self.base.join("data"))
+            .arg("--config-dir")
+            .arg(self.base.join("config"))
+            .args(&args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn glasshouse");
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(&serde_json::to_vec(event).unwrap())
+            .expect("write stdin");
+        let output = child.wait_with_output().expect("wait for glasshouse");
+        assert!(
+            output.status.success(),
+            "the hook must always exit 0 (fail open): stdout={} stderr={}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        serde_json::from_slice(&output.stdout).expect("hook response must be valid JSON")
     }
 
     /// A bootstrapped runtime over this fixture's own directories, for
@@ -394,5 +447,271 @@ fn a_free_model_on_an_exhausted_provider_is_never_excluded() {
     assert!(
         said.contains("would select    free-m on alpha"),
         "a free candidate on the same exhausted provider must still be selectable:\n{said}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// (f) The context-firewall reducer's own chooser — GH-BUDGET-SPEND-REMAINING
+// -CALLERS's residue on `main.rs::disposable_reducer`: an exhausted
+// provider's reducer candidate is excluded before it is ever dialled, the
+// same way `disposable_candidates` already excludes it for extraction and
+// classification, and raising the budget lets the same reducer run.
+//
+// A canned OpenAI chat-completions endpoint on loopback —
+// `tests/firewall_reducer.rs`'s own shape, copied rather than shared: every
+// integration test file in this crate is its own compilation unit.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+struct Seen {
+    body: String,
+}
+
+enum Answer {
+    Content(String),
+}
+
+struct FakeModel {
+    address: SocketAddr,
+    seen: Arc<Mutex<Vec<Seen>>>,
+    stop: Arc<AtomicBool>,
+}
+
+impl FakeModel {
+    fn answering(content: &str) -> Self {
+        let content = content.to_owned();
+        Self::start(move |_| Answer::Content(content.clone()))
+    }
+
+    fn start(responder: impl Fn(&str) -> Answer + Send + Sync + 'static) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("loopback must bind");
+        listener
+            .set_nonblocking(true)
+            .expect("the accept loop polls its stop flag");
+        let address = listener.local_addr().unwrap();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let stop = Arc::new(AtomicBool::new(false));
+
+        let thread_seen = Arc::clone(&seen);
+        let thread_stop = Arc::clone(&stop);
+        std::thread::spawn(move || {
+            while !thread_stop.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((stream, _)) => {
+                        let _ = stream.set_nonblocking(false);
+                        serve(stream, &thread_seen, &responder);
+                    }
+                    Err(ref err) if err.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        Self {
+            address,
+            seen,
+            stop,
+        }
+    }
+
+    fn base_url(&self) -> String {
+        format!("http://{}/v1", self.address)
+    }
+
+    fn requests(&self) -> Vec<Seen> {
+        self.seen.lock().unwrap().clone()
+    }
+}
+
+impl Drop for FakeModel {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+    }
+}
+
+fn serve(
+    mut stream: TcpStream,
+    seen: &Arc<Mutex<Vec<Seen>>>,
+    responder: &(impl Fn(&str) -> Answer + ?Sized),
+) {
+    let mut reader = BufReader::new(stream.try_clone().expect("the stream clones"));
+    let mut request_line = String::new();
+    if reader.read_line(&mut request_line).is_err() || request_line.is_empty() {
+        return;
+    }
+
+    let mut length = 0usize;
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).is_err() {
+            return;
+        }
+        let line = line.trim_end_matches(['\r', '\n']);
+        if line.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':')
+            && name.trim().eq_ignore_ascii_case("content-length")
+        {
+            length = value.trim().parse().unwrap_or(0);
+        }
+    }
+
+    let mut body = vec![0u8; length];
+    if reader.read_exact(&mut body).is_err() {
+        return;
+    }
+    let body = String::from_utf8_lossy(&body).into_owned();
+    seen.lock().unwrap().push(Seen { body: body.clone() });
+
+    let response = match responder(&body) {
+        Answer::Content(content) => {
+            let document = serde_json::json!({
+                "choices": [{ "message": { "role": "assistant", "content": content } }],
+                "usage": { "prompt_tokens": 314, "completion_tokens": 15 }
+            })
+            .to_string();
+            format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\
+                 connection: close\r\n\r\n{document}",
+                document.len()
+            )
+        }
+    };
+    let _ = stream.write_all(response.as_bytes());
+    let _ = stream.flush();
+}
+
+fn reducer_provider_with_budget(
+    name: &str,
+    var: &str,
+    base_url: &str,
+    amount_micro_usd: u64,
+) -> String {
+    format!(
+        "[providers.{name}]\ntemplate = \"openai-compatible\"\nbase_url = \"{base_url}\"\n\
+         credential_env = [\"{var}\"]\nmetered_models = [\"m\"]\n\n\
+         [providers.{name}.quota]\nbudget = {{ amount_micro_usd = {amount_micro_usd}, \
+         period = \"calendar-month\" }}\n"
+    )
+}
+
+fn context_firewall_config(reducer: &str, model: &str) -> String {
+    format!(
+        "[context_firewall]\nmode = \"safe\"\nreducer = \"{reducer}\"\n\
+         reducer_model = \"{model}\"\nmin_semantic_tokens = 1\n"
+    )
+}
+
+fn post_tool_use(
+    tool_name: &str,
+    tool_response: serde_json::Value,
+    tool_input: serde_json::Value,
+    session_id: &str,
+    tool_use_id: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "tool_name": tool_name,
+        "tool_input": tool_input,
+        "tool_response": tool_response,
+        "tool_use_id": tool_use_id,
+        "session_id": session_id,
+        "cwd": "/tmp",
+    })
+}
+
+fn text_response(text: &str) -> serde_json::Value {
+    serde_json::json!({"type": "text", "text": text})
+}
+
+fn updated_output(response: &serde_json::Value) -> Option<&str> {
+    response
+        .get("hookSpecificOutput")
+        .and_then(|v| v.get("updatedToolOutput"))
+        .and_then(|v| v.as_str())
+}
+
+/// A needle among thousands of duplicate hits — oversized enough to cross
+/// `--min-semantic-tokens` after the deterministic ladder, `firewall_reducer.rs`'s
+/// own fixture.
+fn needle_text() -> (String, &'static str) {
+    let mut text = String::new();
+    for _ in 0..2000 {
+        text.push_str("distinct unique noise line long enough to add up quickly\n");
+    }
+    text.push_str("THE-ONE-RELEVANT-NEEDLE-LINE\n");
+    (text, "THE-ONE-RELEVANT-NEEDLE-LINE")
+}
+
+#[test]
+fn a_context_firewall_reducer_on_an_exhausted_provider_falls_open_and_runs_once_the_budget_is_raised()
+ {
+    let model =
+        FakeModel::answering(r#"{"selections":[{"id":0,"relevance":"relevant","reason":"x"}]}"#);
+    let base_url = model.base_url();
+
+    let binary = Binary::with_config(&format!(
+        "{}\n{}",
+        reducer_provider_with_budget("alpha", VAR, &base_url, 10_000_000),
+        context_firewall_config("alpha", "m"),
+    ))
+    .with_pricing(&pricing_toml("alpha", "m", 6.0, 6.0));
+    // 1,000,000 input + 1,000,000 output @ $6/M each = $12 >= the $10 budget.
+    binary.plant_exchange("alpha", "m", 1_000_000, 1_000_000, 60);
+
+    let (text, needle) = needle_text();
+    let event = post_tool_use(
+        "Grep",
+        text_response(&text),
+        serde_json::json!({}),
+        "s-budget-exhausted",
+        "tu-1",
+    );
+    let response = binary.hook(
+        &event,
+        &["--passthrough-tokens", "10", "--min-semantic-tokens", "10"],
+    );
+    let forwarded = updated_output(&response).expect("must still reduce and emit");
+    assert!(
+        forwarded.contains(needle),
+        "with no reducer candidate left once its provider's budget is exhausted, the \
+         deterministic result stands: {forwarded}"
+    );
+    assert_eq!(
+        model.requests().len(),
+        0,
+        "an exhausted provider's reducer must never be dialled: {:?}",
+        model.requests()
+    );
+
+    // Raise the budget well past the counted spend; the same reducer runs.
+    binary.rewrite_config(&format!(
+        "{}\n{}",
+        reducer_provider_with_budget("alpha", VAR, &base_url, 100_000_000),
+        context_firewall_config("alpha", "m"),
+    ));
+    let event = post_tool_use(
+        "Grep",
+        text_response(&text),
+        serde_json::json!({}),
+        "s-budget-raised",
+        "tu-2",
+    );
+    binary.hook(
+        &event,
+        &["--passthrough-tokens", "10", "--min-semantic-tokens", "10"],
+    );
+    let requests = model.requests();
+    assert_eq!(
+        requests.len(),
+        1,
+        "raising the budget must let the same reducer be dialled: {requests:?}"
+    );
+    assert!(
+        requests[0].body.contains("\"model\":\"m\""),
+        "the dialled request must ask the configured reducer model: {}",
+        requests[0].body
     );
 }

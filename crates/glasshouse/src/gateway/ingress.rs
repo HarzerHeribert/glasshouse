@@ -832,7 +832,15 @@ fn forward(
     } else {
         let _ = out.flush();
     }
-    let _ = out.shutdown(Shutdown::Both);
+    // The write half only. Shutting down the read half as well is harmless on
+    // Unix and an abortive close on Windows: `shutdown(SD_RECEIVE)` there
+    // resets the connection the moment any byte is still queued or arrives
+    // afterwards, and the harness then reads a connection reset in place of
+    // the response it was just sent (the Windows VM leg, 2026-09-02,
+    // `conformance::no_rendering_the_gateway_can_produce_carries_either_planted_secret`).
+    // The socket is dropped right after this, which closes the read half on
+    // every platform without that hazard.
+    let _ = out.shutdown(Shutdown::Write);
 
     (
         Exchange {
@@ -1090,7 +1098,11 @@ pub(super) fn settle(
     let _ = reader.get_ref().set_read_timeout(Some(SETTLE_TIMEOUT));
     let cap = content_length.unwrap_or(DRAIN_CAP).min(DRAIN_CAP);
     let _ = std::io::copy(&mut reader.take(cap), &mut std::io::sink());
-    let _ = out.shutdown(Shutdown::Both);
+    // The write half only, for the reason given at `serve`'s own close: on
+    // Windows `shutdown(SD_RECEIVE)` resets the connection while bytes are
+    // still queued — and a refused request capped by `DRAIN_CAP` or
+    // `SETTLE_TIMEOUT` is exactly the case where some may be.
+    let _ = out.shutdown(Shutdown::Write);
 }
 
 /// Whether a response with this status is allowed to carry a body at all.

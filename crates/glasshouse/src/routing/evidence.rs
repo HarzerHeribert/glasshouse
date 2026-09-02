@@ -2451,6 +2451,19 @@ pub struct SubscriptionHeadroomEstimate {
     /// Map line 1249 — whether evidence separates short-window pressure
     /// from pressure that persists into the longer horizon.
     pub long_window_pressure: LongWindowPressure,
+    /// Map line 1247's reachable half — the instant Glasshouse last detected
+    /// a regime change for this provider (a stated ceiling that moved
+    /// between two persisted gateway readings), if one has ever been
+    /// recorded. `None` means the whole evidence window is still in play:
+    /// no change was ever detected, or nothing here has looked for one.
+    ///
+    /// Always `None` out of [`estimate_subscription_headroom`] itself, which
+    /// knows nothing about regime changes — its only production caller,
+    /// [`crate::config::ResolvedEntitlement::with_telemetry`], is the one
+    /// that floors the rows it passes in by this same instant and then
+    /// stamps it here, so a rendered estimate can say which regime it
+    /// describes.
+    pub since_unix: Option<i64>,
 }
 
 /// Map line 1245's estimator, and lines 1244/1246/1250/1251/1254 with it —
@@ -2598,6 +2611,7 @@ pub fn estimate_subscription_headroom(
         account_narrowed,
         reset_basis,
         long_window_pressure,
+        since_unix: None,
     })
 }
 

@@ -356,6 +356,56 @@ fn describe_error(err: &ModelError) -> String {
     err.to_string()
 }
 
+/// Map line 1519's own words for a rerank seat bypass: the figures and the
+/// period a person configured, never a credential — the same fact
+/// `routing::EntitlementRefusal::BudgetExhausted`'s `Display` renders for
+/// `glasshouse route`, in the reranking seat's own phrasing.
+fn budget_exhausted_reason(exhaustion: &crate::routing::BudgetExhaustion) -> String {
+    format!(
+        "budget exhausted: ${}.{:06} per {}, ${}.{:06} counted spent",
+        exhaustion.budget_micro_usd / 1_000_000,
+        exhaustion.budget_micro_usd % 1_000_000,
+        exhaustion.period,
+        exhaustion.spent_micro_usd / 1_000_000,
+        exhaustion.spent_micro_usd % 1_000_000,
+    )
+}
+
+/// An [`ExtractionModel`] that names why it was never going to be called —
+/// [`resolve_rerank_model`]'s answer when the configured rerank provider's
+/// own money budget is counted exhausted (map line 1519). [`Self::complete`]
+/// makes no request of any kind; the reason is fixed at construction and the
+/// call always refuses with it, so [`rerank`] records
+/// [`RerankOutcome::Bypassed`] with this seat's own words instead of the
+/// generic phrases [`ModelError`]'s other variants carry — the same shape
+/// every other rerank bypass already takes, never a stub that reaches the
+/// network.
+struct BudgetExhaustedModel {
+    resource: String,
+    reason: String,
+}
+
+impl BudgetExhaustedModel {
+    fn new(resource: String, exhaustion: &crate::routing::BudgetExhaustion) -> Self {
+        Self {
+            resource,
+            reason: budget_exhausted_reason(exhaustion),
+        }
+    }
+}
+
+impl ExtractionModel for BudgetExhaustedModel {
+    fn describe(&self) -> String {
+        self.resource.clone()
+    }
+
+    fn complete(&self, _prompt: &Prompt) -> Result<String, ModelError> {
+        Err(ModelError::Declined {
+            reason: self.reason.clone(),
+        })
+    }
+}
+
 // ---------------------------------------------------------------------------
 // The reranking seat — the extraction seat's four steps, for `[memory]
 // rerank_model`.
@@ -428,6 +478,42 @@ pub fn resolve_rerank_model(runtime: &crate::Runtime) -> Option<Box<dyn Extracti
         return None;
     }
     let provider = provider_config.to_provider(chosen.provider()).ok()?;
+
+    // Map line 1519: the provider's own money budget, before the local
+    // bypass below and before any candidate is built — the same fail-soft
+    // `gather_budget_spend` `main.rs::disposable_extraction_model` makes
+    // (8320), so `budget_exhausted_for` can answer here exactly as it does
+    // for `main.rs::disposable_candidates`' own exclusion (8809). A free
+    // model is never excluded: the guard below reads
+    // `provider_config.cost_of` for the one configured model, the same call
+    // `disposable_candidates` makes per candidate.
+    let now_unix = crate::provider::cache::now_unix_seconds();
+    let telemetry = crate::provider::resources::GatheredTelemetry::new();
+    let telemetry = match crate::routing::evidence::EvidenceLedger::open(runtime) {
+        Ok(ledger) => {
+            let prices =
+                crate::provider::pricing::PriceTable::load_from_dir(runtime.paths().config_dir());
+            telemetry.gather_budget_spend(&ledger, &prices, &effective, now_unix)
+        }
+        Err(err) => {
+            tracing::debug!(
+                error = %err,
+                "could not read the routing evidence ledger to count budget spend for the \
+                 rerank seat"
+            );
+            telemetry
+        }
+    };
+    if let Some(exhaustion) =
+        crate::provider::resources::budget_exhausted_for(chosen.provider(), &effective, &telemetry)
+        && !provider_config.cost_of(chosen.model()).is_free()
+    {
+        return Some(Box::new(BudgetExhaustedModel::new(
+            format!("{}/{}", chosen.provider(), chosen.model()),
+            &exhaustion,
+        )));
+    }
+
     let secrets = PreferNativeSecretStore::detect();
 
     // Step 2: the local bypass. A provider naming no credential variable is

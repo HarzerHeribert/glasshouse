@@ -4,7 +4,7 @@
 //!
 //! Every test here drives `Command::Resources`'s real `--probe` arm
 //! (`main.rs::resources_report`) against a real loopback fixture, the same
-//! shape `tests/v1_criteria_setup.rs`'s and `tests/provider_discovery.rs`'s
+//! shape `tests/v1_criteria_first_run.rs`'s and `tests/provider_discovery.rs`'s
 //! binary-level tests already use: the assertion that carries each line is
 //! the fixture's own request counter, not just the printed report, because a
 //! refusal that still opened a socket would pass a text-only assertion.
@@ -23,7 +23,7 @@ const TELEMETRY_OBSERVED: i64 = 1_787_800_000;
 // ---------------------------------------------------------------------------
 // A canned upstream on loopback, answering every request `200` with a fixed
 // body and recording what it actually received — trimmed from
-// `tests/v1_criteria_setup.rs::FixtureUpstream`, whose helpers are private
+// `tests/v1_criteria_first_run.rs::FixtureUpstream`, whose helpers are private
 // to that file.
 // ---------------------------------------------------------------------------
 

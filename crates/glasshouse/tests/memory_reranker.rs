@@ -29,9 +29,12 @@ use std::time::{Duration, Instant};
 
 use clap::Parser;
 
-use glasshouse::config::{ExtractionModelRef, ProviderConfig, UserConfig};
+use glasshouse::config::{
+    BudgetPeriod, ExtractionModelRef, MonetaryBudget, ProviderConfig, QuotaOverride, UserConfig,
+};
 use glasshouse::memory::inject::MEMORY_MARKER;
 use glasshouse::memory::{MemoryAuthority, MemoryKind, NewMemory, ProjectMemory};
+use glasshouse::routing::evidence::{EvidenceLedger, NewObservation, Outcome};
 use glasshouse::{Cli, Runtime};
 
 const TIMEOUT: Duration = Duration::from_secs(30);
@@ -115,6 +118,73 @@ impl Fixture {
         self.save(root, user);
     }
 
+    /// A provider speaking OpenAI chat completions at `base_url`, `MODEL`
+    /// metered (never free), with a `[providers.PROVIDER.quota] budget`
+    /// over one calendar month — GH-BUDGET-SPEND-REMAINING-CALLERS' own
+    /// rerank-seat fixture.
+    fn add_metered_provider_with_budget(&self, root: &Path, base_url: &str, amount_micro_usd: u64) {
+        let mut user = self.config(root);
+        let mut provider = ProviderConfig::new("openai-compatible");
+        provider.set_base_url(Some(base_url.to_owned()));
+        provider.set_credential_env(vec![CREDENTIAL_VAR.to_owned()]);
+        provider.set_metered_models(vec![MODEL.to_owned()]);
+        let mut quota = QuotaOverride::default();
+        quota.set_budget(Some(
+            MonetaryBudget::new(amount_micro_usd, BudgetPeriod::CalendarMonth).unwrap(),
+        ));
+        provider.set_quota(Some(quota));
+        user.providers_mut().set(PROVIDER, provider);
+        self.save(root, user);
+    }
+
+    /// [`Self::add_provider`]'s free provider, with the same exhausted-budget
+    /// quota folded in — a free model must never be excluded by it.
+    fn add_free_provider_with_budget(&self, root: &Path, base_url: &str, amount_micro_usd: u64) {
+        let mut user = self.config(root);
+        let mut provider = ProviderConfig::new("openai-compatible");
+        provider.set_base_url(Some(base_url.to_owned()));
+        provider.set_credential_env(vec![CREDENTIAL_VAR.to_owned()]);
+        provider.set_free_models(vec![MODEL.to_owned()]);
+        let mut quota = QuotaOverride::default();
+        quota.set_budget(Some(
+            MonetaryBudget::new(amount_micro_usd, BudgetPeriod::CalendarMonth).unwrap(),
+        ));
+        provider.set_quota(Some(quota));
+        user.providers_mut().set(PROVIDER, provider);
+        self.save(root, user);
+    }
+
+    /// `pricing.toml`, priced so [`Self::plant_exchange`]'s planted tokens
+    /// can be counted against a budget.
+    fn write_pricing(&self, input_per_million: f64, output_per_million: f64) {
+        std::fs::write(
+            self.base.join("config").join("pricing.toml"),
+            format!(
+                "[[prices]]\nprovider = \"{PROVIDER}\"\nmodel = \"{MODEL}\"\n\
+                 input_per_million_usd = {input_per_million}\n\
+                 output_per_million_usd = {output_per_million}\n"
+            ),
+        )
+        .expect("write pricing.toml");
+    }
+
+    /// One served exchange against `PROVIDER`/`MODEL`, `age_seconds` in the
+    /// past — `tests/budget_spend.rs`'s own shape, for priced spend
+    /// `budget_exhausted_for` can count.
+    fn plant_exchange(&self, root: &Path, input: i64, output: i64, age_seconds: i64) {
+        let runtime = self.runtime(root);
+        let ledger = EvidenceLedger::open(&runtime).expect("open the ledger");
+        let now = now_unix();
+        let at = now - age_seconds;
+        let row = NewObservation::new(PROVIDER, MODEL)
+            .with_route(Some("anthropic-messages"))
+            .with_harness(Some("claude-code"))
+            .with_timing(Some(at), Some(at + 1))
+            .with_tokens(Some(input), Some(output), None)
+            .with_outcome(Outcome::Succeeded);
+        ledger.record(row, at + 1).expect("record the exchange");
+    }
+
     /// `[memory] rerank_model` — the seat's consent.
     fn choose_rerank_model(&self, root: &Path) {
         let mut user = self.config(root);
@@ -182,6 +252,13 @@ fn install_session_tagging_harness(bin_dir: &Path) -> PathBuf {
     perms.set_mode(0o755);
     std::fs::set_permissions(&path, perms).unwrap();
     path
+}
+
+fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
 }
 
 fn seed_memory(runtime: &Runtime, kind: MemoryKind, subject: &str, body: &str) -> String {
@@ -729,6 +806,120 @@ fn a_fixture_that_never_answers_bypasses_within_the_seats_timeout() {
         "the reason must say the call did not answer within its bound: {}",
         diag[0]
     );
+}
+
+// ---------------------------------------------------------------------------
+// GH-BUDGET-SPEND-REMAINING-CALLERS: the rerank seat's own budget-exhausted
+// bypass — map line 1519's residue at this seat's chooser. A metered
+// candidate on a provider whose own money budget is counted exhausted is
+// never dialled, and the diagnostics record the reason with the figures; a
+// free candidate on the same exhausted provider is never excluded.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_metered_rerank_model_on_an_exhausted_provider_bypasses_and_diagnostics_record_the_budget() {
+    let fixture = Fixture::new();
+    let root = fixture.project_root("alpha");
+    let runtime = fixture.runtime(&root);
+    seed_memory(
+        &runtime,
+        MemoryKind::Finding,
+        "marmot epsilon",
+        "marmot burrow epsilon finding for this project.",
+    );
+    seed_memory(
+        &runtime,
+        MemoryKind::Finding,
+        "marmot epsilon second",
+        "marmot burrow epsilon second finding for this project.",
+    );
+
+    // The fixture would answer correctly if ever dialled — proving the
+    // bypass is the budget, not unreachability.
+    let fake = FakeModel::answering(r#"["irrelevant"]"#);
+    // $1 budget, $12 counted spent: comfortably exhausted.
+    fixture.add_metered_provider_with_budget(&root, &fake.base_url(), 1_000_000);
+    fixture.write_pricing(6.0, 6.0);
+    // 1,000,000 input + 1,000,000 output @ $6/M each = $12.
+    fixture.plant_exchange(&root, 1_000_000, 1_000_000, 60);
+    fixture.choose_rerank_model(&root);
+    fixture.enable_diagnostics(&root);
+
+    let server = Server::start(&fixture, &root);
+    let session = server.spawn_with_task("marmot burrow");
+    wait_for("the worker's harness to start", || {
+        fixture.argv(&root, &session).is_some()
+    });
+    let lines = deliveries(&fixture, &root, &session, 2);
+    let block = the_injected_block(&lines);
+
+    assert!(
+        block.contains("burrow epsilon finding"),
+        "an exhausted provider's rerank candidate must still leave the lexical match \
+         injected: {block}"
+    );
+    assert!(
+        fake.requests().is_empty(),
+        "an exhausted provider's rerank candidate must never be dialled"
+    );
+
+    let diag = fixture.diagnostics_lines(&root);
+    assert_eq!(
+        diag.len(),
+        1,
+        "one briefing, one diagnostics line: {diag:?}"
+    );
+    assert_eq!(diag[0]["rerank"]["outcome"], "bypassed");
+    let reason = diag[0]["rerank"]["reason"]
+        .as_str()
+        .expect("a bypass must carry a reason");
+    assert!(
+        reason.contains("budget exhausted") && reason.contains('$'),
+        "the reason must name the budget exhaustion with its figures: {reason}"
+    );
+}
+
+#[test]
+fn a_free_rerank_model_on_an_exhausted_provider_still_runs() {
+    let fixture = Fixture::new();
+    let root = fixture.project_root("alpha");
+    let runtime = fixture.runtime(&root);
+    let first_id = seed_memory(
+        &runtime,
+        MemoryKind::Finding,
+        "marmot zeta",
+        "marmot burrow zeta finding for this project.",
+    );
+    let second_id = seed_memory(
+        &runtime,
+        MemoryKind::Finding,
+        "marmot zeta second",
+        "marmot burrow zeta second finding for this project.",
+    );
+
+    let fake = FakeModel::answering(&format!(r#"["{second_id}", "{first_id}"]"#));
+    fixture.add_free_provider_with_budget(&root, &fake.base_url(), 1_000_000);
+    fixture.write_pricing(6.0, 6.0);
+    fixture.plant_exchange(&root, 1_000_000, 1_000_000, 60);
+    fixture.choose_rerank_model(&root);
+    fixture.enable_diagnostics(&root);
+
+    let server = Server::start(&fixture, &root);
+    let session = server.spawn_with_task("marmot burrow");
+    wait_for("the worker's harness to start", || {
+        fixture.argv(&root, &session).is_some()
+    });
+    deliveries(&fixture, &root, &session, 2);
+
+    assert_eq!(
+        fake.requests().len(),
+        1,
+        "a free rerank model must never be excluded by its provider's exhausted money budget"
+    );
+
+    let diag = fixture.diagnostics_lines(&root);
+    assert_eq!(diag.len(), 1, "{diag:?}");
+    assert_eq!(diag[0]["rerank"]["outcome"], "reordered");
 }
 
 // ---------------------------------------------------------------------------

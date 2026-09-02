@@ -202,6 +202,14 @@ pub enum ModelError {
     /// fixed phrase chosen by the implementation, never a provider body.
     #[error("the extraction model failed: {phrase}")]
     Failed { phrase: &'static str },
+    /// The call was never going to be made, for a reason Glasshouse itself
+    /// composed from figures it already had — never a provider body, and
+    /// never the fixed-phrase-only shape [`Self::Failed`] needs for a
+    /// caller with no dynamic text to report. `main.rs::routing_model_failure`
+    /// still speaks for the *routing* model separately, exactly as it does
+    /// for every other variant here.
+    #[error("{reason}")]
+    Declined { reason: String },
 }
 
 /// The prompt an extraction model is given.

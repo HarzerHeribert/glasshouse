@@ -365,9 +365,12 @@ fn workload_outcome(result: &Result<ModelReply, ModelError>) -> WorkloadOutcome 
         Err(ModelError::Failed { phrase }) if *phrase == super::model::RATE_LIMITED => {
             WorkloadOutcome::RateLimited { retry_after: None }
         }
-        Err(ModelError::Unavailable | ModelError::TimedOut | ModelError::Failed { .. }) => {
-            WorkloadOutcome::CapacityFailure
-        }
+        Err(
+            ModelError::Unavailable
+            | ModelError::TimedOut
+            | ModelError::Failed { .. }
+            | ModelError::Declined { .. },
+        ) => WorkloadOutcome::CapacityFailure,
     }
 }
 

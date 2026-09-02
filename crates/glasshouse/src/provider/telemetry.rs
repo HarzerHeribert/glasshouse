@@ -597,6 +597,11 @@ impl RateLimitHeaders {
     ///
     /// `read_from` is names only, exactly as [`RateLimitHeaders::read_from`]
     /// already guarantees — nothing new crosses the boundary here.
+    ///
+    /// `regime_changed_at_unix` is left `None` here: this method only knows
+    /// the headers it was called on, never the reading they are replacing,
+    /// so [`GatewayQuotaCache::try_store`] is the one place that fills it in
+    /// after comparing against what was on disk.
     fn to_persisted(&self) -> PersistedGatewayReadingFields {
         PersistedGatewayReadingFields {
             limit: self.limit,
@@ -612,6 +617,7 @@ impl RateLimitHeaders {
                 .iter()
                 .map(|name| (*name).to_owned())
                 .collect(),
+            regime_changed_at_unix: None,
         }
     }
 
@@ -1245,6 +1251,19 @@ struct PersistedGatewayReadingFields {
     token_remaining: Option<i64>,
     token_reset: Option<i64>,
     read_from: Vec<String>,
+    /// Capability map line 1247's reachable half: the instant
+    /// [`GatewayQuotaCache::try_store`] last detected a **regime change** —
+    /// a difference in a *stated ceiling* (`limit`, `window_seconds` or
+    /// `token_limit`) between this reading and the one it replaced. `None`
+    /// on a first reading, carried forward unchanged on a reading whose
+    /// ceiling did not move, and never cleared once set.
+    ///
+    /// `#[serde(default)]` rather than a new format version: a file written
+    /// before this field existed has no evidence a change was ever detected,
+    /// and reading it as `None` — "no change recorded" — is the accurate
+    /// answer, not a cache miss.
+    #[serde(default)]
+    regime_changed_at_unix: Option<i64>,
 }
 
 /// One provider's file: the fields above, plus what the file itself needs to
@@ -1319,6 +1338,21 @@ impl GatewayQuotaCache {
         crate::provider::cache::provider_json_path(&self.root, provider)
     }
 
+    /// The provider's persisted reading, whole — absent, unreadable,
+    /// truncated, another format version, or a provider name the file
+    /// disagrees with are all `None`, [`Self::load`]'s own contract, one
+    /// level down. The one place both [`Self::load`] and
+    /// [`Self::try_store`]'s regime-change comparison read a file from.
+    fn load_raw(&self, provider: &str) -> Option<PersistedGatewayReading> {
+        let path = self.path_for(provider);
+        let bytes = std::fs::read(&path).ok()?;
+        let stored: PersistedGatewayReading = serde_json::from_slice(&bytes).ok()?;
+        if stored.version != GATEWAY_QUOTA_FORMAT_VERSION || stored.provider != provider {
+            return None;
+        }
+        Some(stored)
+    }
+
     /// The most recent gateway-captured reading for `provider`, if the
     /// gateway has ever forwarded a response for it that carried one.
     ///
@@ -1329,16 +1363,30 @@ impl GatewayQuotaCache {
     /// disagrees with — means the same thing to a caller, which is "no
     /// reading here", never a reason to fail `glasshouse resources`.
     pub fn load(&self, provider: &str) -> Option<(RateLimitHeaders, i64)> {
-        let path = self.path_for(provider);
-        let bytes = std::fs::read(&path).ok()?;
-        let stored: PersistedGatewayReading = serde_json::from_slice(&bytes).ok()?;
-        if stored.version != GATEWAY_QUOTA_FORMAT_VERSION || stored.provider != provider {
-            return None;
-        }
+        let stored = self.load_raw(provider)?;
         Some((
             RateLimitHeaders::from_persisted(&stored.fields),
             stored.observed_at_unix,
         ))
+    }
+
+    /// The instant `try_store` last detected a **regime change** for
+    /// `provider` — capability map line 1247's reachable half. `None` when
+    /// no change has ever been recorded: no reading at all, a first reading,
+    /// a reading whose stated ceiling has never moved, or a file written
+    /// before this field existed (`#[serde(default)]` reads that as "no
+    /// change recorded", never a cache miss).
+    ///
+    /// A sibling accessor beside [`Self::load`] and [`Self::load_all`]
+    /// rather than a widening of either's return shape: both already have
+    /// production callers this package does not own
+    /// (`provider::resources::GatheredTelemetry::gather_gateway_quota`,
+    /// `shell::mod`'s route-health table), and the one caller this instant
+    /// is for (`config::ResolvedEntitlement::populate_provider_facets`)
+    /// already has `provider` in hand from the same [`Self::load`] call it
+    /// makes today.
+    pub fn regime_changed_at(&self, provider: &str) -> Option<i64> {
+        self.load_raw(provider)?.fields.regime_changed_at_unix
     }
 
     /// Every provider this cache currently holds a reading for.
@@ -1412,16 +1460,53 @@ impl GatewayQuotaCache {
         observed_at_unix: i64,
     ) -> std::io::Result<()> {
         std::fs::create_dir_all(&self.root)?;
+        // Capability map line 1247's reachable half: the store is the one
+        // place the earlier and the later reading meet, so it is where the
+        // comparison happens. `load_raw` tolerates absence and a malformed
+        // file the same way — both read as "no previous reading", never an
+        // error this write must propagate.
+        let previous = self.load_raw(provider);
+        let regime_changed_at_unix = match &previous {
+            Some(previous) if stated_ceiling_changed(&previous.fields, headers) => {
+                Some(observed_at_unix)
+            }
+            Some(previous) => previous.fields.regime_changed_at_unix,
+            None => None,
+        };
         let stored = PersistedGatewayReading {
             version: GATEWAY_QUOTA_FORMAT_VERSION,
             provider: provider.to_owned(),
             observed_at_unix,
-            fields: headers.to_persisted(),
+            fields: PersistedGatewayReadingFields {
+                regime_changed_at_unix,
+                ..headers.to_persisted()
+            },
         };
         let encoded = serde_json::to_vec_pretty(&stored)
             .map_err(|err| std::io::Error::other(err.to_string()))?;
         crate::provider::cache::write_json_atomically(&self.path_for(provider), &encoded)
     }
+}
+
+/// Whether `headers` states a different ceiling than `previous` did —
+/// capability map line 1247's own definition of a **regime change**: a
+/// difference in `limit`, `window_seconds` or `token_limit`, each counted
+/// only when **both** readings state a value for it. `remaining`, `reset`
+/// and `retry_after` never enter this comparison at all — they are the pool
+/// being spent, not the ceiling changing — and a field either reading left
+/// unstated is not evidence of anything, so it is skipped rather than
+/// treated as a mismatch.
+fn stated_ceiling_changed(
+    previous: &PersistedGatewayReadingFields,
+    headers: &RateLimitHeaders,
+) -> bool {
+    fn differs(previous: Option<i64>, current: Option<i64>) -> bool {
+        matches!((previous, current), (Some(previous), Some(current)) if previous != current)
+    }
+
+    differs(previous.limit, headers.limit())
+        || differs(previous.window_seconds, headers.window_seconds())
+        || differs(previous.token_limit, headers.token_limit())
 }
 
 // --- automatic classification's retained pick, surviving its own process --
