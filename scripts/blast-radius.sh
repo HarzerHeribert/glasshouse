@@ -285,8 +285,15 @@ printf '  %d symbol(s) kept, %d dropped as too generic (fan-out > %d)\n' \
 LIB=0; declare -a TESTS=() BINS=() FILTERS=()
 while read -r hit; do
   [ -n "$hit" ] || continue
+  # An integration crate is crates/<pkg>/tests/<name>.rs and nothing deeper: a
+  # `case` glob's `*` matches slashes, so the old `crates/*/tests/*.rs` arm
+  # took src/config/tests/part_a.rs for a `--test part_a` crate that does not
+  # exist (found by GH-DECOMP-CONFIG). Those files are lib test modules and
+  # fall through to the src arm below.
+  if [[ "$hit" =~ ^crates/[^/]+/tests/[^/]+\.rs$ ]]; then
+    TESTS+=("$(basename "$hit" .rs)"); continue
+  fi
   case "$hit" in
-    crates/*/tests/*.rs) TESTS+=("$(basename "$hit" .rs)") ;;
     crates/*/src/main.rs) BINS+=("$(echo "$hit" | cut -d/ -f2)") ;;
     crates/*/src/*.rs|crates/*/src/**/*.rs)
       LIB=1
@@ -328,9 +335,10 @@ most_specific_integration_target() {  # <src-file> on stdout if one exists
 
 declare -a TARGETED_TESTS=() TARGETED_FILTERS=()
 for f in "${FILES[@]}"; do
-  case "$f" in
-    crates/*/tests/*.rs) TARGETED_TESTS+=("$(basename "$f" .rs)") ;;
-  esac
+  # Same rule as above: only crates/<pkg>/tests/<name>.rs is an integration crate.
+  if [[ "$f" =~ ^crates/[^/]+/tests/[^/]+\.rs$ ]]; then
+    TARGETED_TESTS+=("$(basename "$f" .rs)")
+  fi
 done
 for f in "${FILES[@]}"; do
   case "$f" in

@@ -24,6 +24,28 @@ validated and waiting on the commit. Next action: `.agent-runtime/CONTINUATION.m
 
 Last updated: 2026-09-02, late night (Europe/Berlin)
 
+## Checkpoint — 2026-09-03, batch 95: 1267 / 1355 (93.5%) — Phase 28 complete, the bootstrap creation atomic, and Phase 59's first splits landing
+
+Session `1ee4f96b` (Fable 5.1), continued. Wave 110 (`b065034`) lands Phase
+28's last three lines: the context firewall's `PostToolUse` hook now records
+every edited path as a `file_touched` lifecycle event (migration 26, in
+migration 7's rebuild shape), the extraction model may name paths that are
+kept only when byte-equal to the session's own touched set, `referenced`
+associations sit beside `observed`, an edit-intent preference orders
+constraints, decisions and failed attempts inside the ladder rung, and every
+file-aware result is advisory with a commit-order freshness. `26fb65b` makes
+the project database's creation atomic — a private file published with one
+hard link — retiring wave 108's lock wait; its independent verifier's first
+finding corrected the design note's cost claim. The user's ruling of
+2026-09-03 opened **Phase 59 — Decompression** (`1322fea`; map 2043–2054;
+denominator 1355), which outranks feature work: a size ratchet runs in every
+gate, pure moves are Green, records are bounded, a flake costs one rerun,
+dogfooding is a lane, and seven refusals the user named are re-opened for
+design. The routing-evidence split is staged under its gate; the config and
+database splits are live. The batch's gates found a fourth migration-pin
+shape and the first flaky-pass under the new rule. Exact next actions:
+`.agent-runtime/CONTINUATION.md`.
+
 ## Checkpoint — 2026-09-02, batch 94: 1264 / 1347 (93.9%) — the bootstrap race closed under independent verification, ten accepted lines land, Phases 33C and 34B complete, and Phase 28's producer found in Phase 57's hook
 
 Session `1ee4f96b` (Fable 5.1), inherited hot from `221d1dd9`. Wave 108

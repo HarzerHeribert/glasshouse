@@ -4,7 +4,6 @@
  16564 crates/glasshouse/src/main.rs
   7213 crates/glasshouse/src/routing/session.rs
   7048 crates/glasshouse/src/config/mod.rs
-  5728 crates/glasshouse/src/routing/evidence.rs
   4973 crates/glasshouse/src/shell/state.rs
   4135 crates/glasshouse/src/api/unix.rs
   3795 crates/glasshouse/src/evaluation/mod.rs
