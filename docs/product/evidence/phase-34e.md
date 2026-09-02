@@ -187,3 +187,49 @@ The routing-model selector package closed this phase's lines 1463, 1465, 1466; t
 ## From `GH-LAUNCH-CLASSIFIER` (2026-08-31)
 
 The launch-path classifier package (router request schema, classification on the acting path) touched this phase's lines 1467, 1468, 1470, 1471 (closed). The full entry — production sites, regression names, the 23 killed mutations, the one honestly-survived one, and the missing producer for 1516/1517/1531 — is in `phase-34d.md`, *Phase 34D — router request schema* and *lines outside Phase 34D*, because the mechanism lives there.
+
+---
+
+## 1469 — censused 2026-09-02 (`GH-RECON-1469`, Sonnet high, read-only): open, and its package is named
+
+*"Cache recent classification results for semantically identical task
+starts when safe."* No producer exists for this line, and the mechanism that
+looks like one is not: `ClassificationStickyCache` /
+`StickyClassification::reuse_for` (`request.rs:1009-1038`, closing
+1467/1468) reuses a classification across turns of the **same warm session**
+and never compares task text. The repeat 1469 names is real on the shipped
+path: `route --task X` then `launch --task X` asks the model twice (`route`
+passes `sticky: None` by design, and a fresh `launch` fails `reuse_for`'s
+session check), and `glasshouse classify` bypasses the sticky cache entirely
+(`classify_with_routing_model`, `main.rs:7746`, from `:158`).
+
+**Semantically identical, honestly:** no embeddings exist (Phase 52 is
+Cluster Q for that reason), so identity is a normalised literal text match,
+keyed by a **hash** — never the text, keeping Phase 51's *no query text
+persisted* rule without extending it. **When safe:** never below
+`Confidence::Low` (reuse `is_low_risk`'s own rule, `classify.rs:480`); same
+`RoutingModelResolution` identity, with an `Automatic` answer tagged by the
+model label that actually answered; same project (inherited from
+`project_state_dir(project_id)`, as both existing sticky caches do); a TTL
+read from `recorded_at_unix`, which `reuse_for` records and never reads; and
+the existing `RoutingFingerprint` as one field of the record. **Where:**
+neither observation ledger is honest — both are append-only logs with no
+lookup key, and `evaluation_observations` forbids query text — so the home is
+a third file-based cache in the two existing caches' exact shape
+(`routing-classification-cache.json` under the project state dir). No
+migration.
+
+**Two rulings the recon left open, made here.** (1) The cache serves the
+acting path (`launch`, `classify_for_routing`'s fall-through before the model
+ask) and `glasshouse classify`; `route`'s report path keeps asking fresh, by
+its own comment's design — a diagnostic that explains *what would happen
+now* must not answer from yesterday. (2) *Recent* is a named constant beside
+`STICKY_TURN_WINDOW_SECONDS` with its reasoning, not a config key; nothing
+here earns a surface.
+
+**Successor: `GH-CLASSIFICATION-CACHE`** (Amber, Sonnet high;
+`routing/request.rs`, `main.rs`) — validated packet in `.agent-runtime`,
+dispatched once the three-leg gate has the machine to itself. Every line
+number the packet inherited was stale and the worker corrected all of them
+(`classify_with_routing_model` `:7746`, `classify_for_routing` `:4464`,
+callers `:158`, `:4528`, `:4272`, `:5061`).
