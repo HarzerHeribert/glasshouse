@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1194 / 1332 mandatory capabilities (90%)** — 138 open across 37 phases.
+**1196 / 1332 mandatory capabilities (90%)** — 136 open across 37 phases.
 
 ## Where the work is
 
@@ -22,6 +22,7 @@ closures are usually at the top. Open the map at the line number given.
 
 | phase | title | open | closed | map line |
 |---|---|---|---|---|
+| Phase 9E | Secret storage | **1** | 12 | `432` |
 | Phase 9H | Sticky gateway routing for harness-backed interactive sessions | **1** | 13 | `501` |
 | Phase 15 | Orchestrator wake-up flow | **1** | 7 | `731` |
 | Phase 21K | Assumption-aware implementation guardrails | **1** | 42 | `992` |
@@ -34,7 +35,6 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 37 | Basic session-aware router | **1** | 10 | `1590` |
 | Phase 39 | Gateway-backed disposable jobs | **1** | 8 | `1614` |
 | Phase 9 | Antigravity adapter | **2** | 5 | `330` |
-| Phase 9E | Secret storage | **2** | 11 | `432` |
 | Phase 20 | Minimal durable project memory | **2** | 16 | `805` |
 | Phase 21F | Memory retrieval quality | **2** | 9 | `927` |
 | Phase 32C | Subscription capacity estimation | **2** | 10 | `1242` |
@@ -47,8 +47,8 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 33A | Routing evidence ledger | **3** | 12 | `1327` |
 | Phase 33C | Failure, quota, and route correlation | **3** | 12 | `1362` |
 | Phase 34C | Automatic routing-model selection | **3** | 10 | `1429` |
+| Phase 56 | Harness–subscription decoupling: choose the harness, route the subscription and model | **3** | 9 | `1941` |
 | Phase 21E | Decision ladder and conflict handling | **4** | 8 | `907` |
-| Phase 56 | Harness–subscription decoupling: choose the harness, route the subscription and model | **4** | 8 | `1941` |
 | Phase 24 | Memory reranking | **5** | 1 | `1082` |
 | Phase 31 | Compaction-aware behavior | **5** | 2 | `1167` |
 | Phase 52 | Criteria before adding semantic/vector retrieval | **5** | 1 | `1858` |
@@ -66,7 +66,7 @@ closures are usually at the top. Open the map at the line number given.
 
 Every phase with **three or fewer** open lines, quoted verbatim. These are
 where a single package finishes a phase, so they are listed here and the
-other ~94 open lines are not.
+other ~90 open lines are not.
 
 For any other phase: `scripts/discover.py --phase <id>` prints its open
 lines and evidence together. **Do not open the 178 KB map to read them.**
@@ -74,6 +74,10 @@ lines and evidence together. **Do not open the 178 KB map to read them.**
 The number is the map line number, which is also the capability's id.
 `validate_round.py` checks a packet's quotes against the map, so paste
 these unwrapped.
+
+### Phase 9E — Secret storage  (1 open, 12 closed)
+
+- **442** ☐ Prefer a Secret Service-compatible keyring on Linux when available.
 
 ### Phase 9H — Sticky gateway routing for harness-backed interactive sessions  (1 open, 13 closed)
 
@@ -123,11 +127,6 @@ these unwrapped.
 
 - **340** ☐ Integrate structured Antigravity lifecycle events where the CLI exposes them.
 - **341** ☐ Translate supported Antigravity lifecycle state into Glasshouse lifecycle events.
-
-### Phase 9E — Secret storage  (2 open, 11 closed)
-
-- **441** ☐ Prefer Windows Credential Manager for user-entered provider secrets on Windows when available.
-- **442** ☐ Prefer a Secret Service-compatible keyring on Linux when available.
 
 ### Phase 20 — Minimal durable project memory  (2 open, 16 closed)
 
@@ -193,6 +192,12 @@ these unwrapped.
 - **1436** ☐ Filter automatic candidates by maximum marginal routing cost.
 - **1439** ☐ Prefer a cheap metered model over an unreliable free model when failed routing attempts would cost more time than the price difference.
 - **1440** ☐ Avoid using a scarce premium subscription session as the classifier when a cheaper adequate routing resource exists.
+
+### Phase 56 — Harness–subscription decoupling: choose the harness, route the subscription and model  (3 open, 9 closed)
+
+- **1948** ☐ Serve any supported harness through Glasshouse's bundled API gateway from any subscription or model whose wire protocol the gateway can translate to the harness's native protocol.
+- **1950** ☐ Keep a harness's native tooling — editing, shell, repository, and tool-call behaviour — intact when it is served by a non-native provider, and refuse the pairing by name when it cannot be kept.
+- **1956** ☐ Cover each supported harness/provider/protocol pairing with an end-to-end test through the shipped binary against a fixture upstream before offering it.
 
 ## Practice sections, by number
 

@@ -1031,3 +1031,104 @@ Recorded scope limits — stated by the worker, not discovered later:
 ---
 
 ---
+
+---
+
+### The launch link for lines 1948, 1950 and 1956 — 2026-09-02 (`GH-GATEWAY-TRANSLATE-LAUNCH`, Amber, Sonnet high); the lines stay open on T3
+
+Package `GH-GATEWAY-TRANSLATE-LAUNCH`, 2026-09-02, Sonnet at high (Amber — one
+decision at one seam). `profile::apply_gateway` now consults
+`gateway::translate::lookup` before refusing a harness whose own wire protocol
+the running gateway does not serve natively: a native match takes exactly the
+path it took (same variable, same call shape); otherwise the first `Supported`
+row over the harness's protocols × the served slugs launches the harness
+speaking its own protocol at the ingress and binds the session to the *served*
+protocol's backend (`gateway.routing().bind(..., &served_protocol, ...)`, so
+`Upstream::serving().as_routing_backend` finds the route and the assignment
+names the serving provider); a `Refused` row is refused by name with the new
+`Refusal::GatewayTranslationRefused { pair, reason }` and nothing started; a
+harness declaring no protocol still gets `GatewayProtocolUnserved`. The
+standing tripwire in `tests/gateway_translate.rs` is deleted as its own doc
+prescribed and replaced by two launch-driven tests through the shipped binary:
+Claude Code on a chat-only entitlement translated end to end (the fixture
+records the chat request, the harness gets its Anthropic answer, one routing
+observation names the chat provider under the translated pair), and an
+OpenCode-shaped `openai-chat` client on an Anthropic-only entitlement refused
+by name with no child and no upstream connection.
+
+Three mutations, three KILLED, killing test and output quoted in the report:
+`never-consult-the-table` (`.or(translated)` → `.or(None)`; the translated
+launch exits 1 before the harness runs), `refused-row-launches`
+(`pair.is_supported()` → `true`; the refused launch is accepted),
+`bind-the-harness-protocol` (bind with the harness slug; the observation no
+longer names the chat provider). Gates: `gateway_translate` 9/9,
+`gateway_degrade` 3 + `launch_preflight` 12, `profile::` lib 83/83,
+`gateway::` lib 142/142, `blast-radius.sh --targeted` green on rerun — its
+first run's one red (`observe_exchange_scores_a_real_failover_against_the_configured_preference`)
+attributed to machine load (ten concurrent rustc from three workers), passed
+alone, three times in-module, and on the full rerun at load 1.
+
+**Packet error, the worker's, accepted.** Two `profile` lib tests used Codex on
+an Anthropic-Messages-only gateway as their "refused" fixture — exactly T2's
+own `openai-responses -> anthropic-messages` Supported row — so lifting the
+launch-link refusal necessarily turned that fixture into a success. Both moved
+to a harness that is genuinely still refused (OpenCode, Cursor) and a positive
+test for the Codex case was added
+(`a_gateway_serving_only_anthropic_messages_accepts_a_codex_launch_through_translation`).
+No property was weakened; the packet's claim that only the tripwire would move
+was wrong.
+
+**Ruling: 1948, 1950 and 1956 stay OPEN**, one of their two named successors
+now landed. The launch link the T1 entry recorded as *"not yet under a real
+launched harness"* is closed for the T1 pair through `glasshouse launch`; the
+other four supported pairs keep their wire-level e2e and no launch-driven test
+of their own (the worker's recorded limit), and the pair-count half waits on
+`GH-GATEWAY-TRANSLATE-T3` (the Gemini codec, live at the time of writing) and
+T3b (the Gemini CLI adapter). The 2026-08-31 reading — *every supported pair* —
+is kept rather than re-read to fit what exists.
+
+---
+
+---
+
+## Line 1954 — CLOSED 2026-09-02 (`GH-GATEWAY-ENTITLEMENT-1954`, Amber, Sonnet high): the gateway-backed launch consults the entitlement behind the serving provider
+
+Recon-56's cause 3 named the gap and the successor as a bounded package on `gateway/session.rs`; it turned out to need no gateway-session change at all — the serving provider is known at the launch site once the gateway has started, and that is where the rule is asked. `Gateway::serving_provider` is the one accessor added.
+
+### Never charge a task to a subscription the user's rules did not allow for that harness or tier, and announce which subscription served each session. (line 1954)
+
+Contract: Given a launch profile backed by the Glasshouse gateway whose serving provider is named by an [entitlements.<name>] entry, when the user launches or resumes under it, Glasshouse asks that entitlement's rules about this harness (and the tier when one is known) exactly as the direct-provider path does -- refusing by the entitlement's name and starting nothing when the rule does not admit it, and otherwise announcing which entitlement will serve the session and recording its name on the session record -- while preserving that a gateway whose serving provider no entitlement describes is announced as such and never refused, and that native and direct-provider launches are byte-identical to today.
+
+State: **COMPLETE** — ruled 2026-09-02. The 08-31 entry above held this line on one clause: a gateway-backed profile had no entitlement at launch because the *router* cannot see the gateway's upstream. The launch can: `launch_session` starts the gateway before it resolves the profile, and the started gateway's serving provider is known, so the consult now happens there — `entitlement_for_provider(gateway.serving_provider())`, the same `rules().refusal(harness, tier)` and the same refusal text as the direct path through one extracted spelling, the announcement naming the entitlement or, when none describes the provider, saying so by the provider's name, and the name written to `sessions.entitlement`. The resume path reads the same gateway. Three shipped-binary tests, three KILLED mutations with the failure text quoted, every entitlement, preflight and degrade suite unchanged and green. `pool_entitlements_for` still returns nothing for a gateway destination on purpose: the router stays blind to the upstream, and *never charge* is enforced where the charge happens. Limits are the worker's: the tier half fires only on a pass that knows the tier, as on the direct path; the resume path has no dedicated binary test; macOS only.
+
+Production evidence:
+- `src/gateway/mod.rs` — `Gateway::serving_provider`
+- `src/main.rs` — `launch_session (gateway consult after start_if_required_with_degrade_sink, before EntitlementScopedSecrets/resolve_with_gateway)`
+- `src/main.rs` — `announce_entitlement (gateway_provider parameter, new GlasshouseGateway/Some(provider) text)`
+- `src/main.rs` — `entitlement_refusal_message (extracted, shared by both call sites)`
+- `src/main.rs` — `resume_session's resume_entitlement block (reads overlay_resolution's gateway)`
+
+Regression evidence:
+- `entitlement_pool::a_gateway_backed_launch_whose_entitlement_denies_the_harness_is_refused_and_starts_nothing`
+- `entitlement_pool::a_gateway_backed_launch_whose_entitlement_admits_the_harness_proceeds_and_is_recorded`
+- `entitlement_pool::a_gateway_whose_provider_no_entitlement_names_is_announced_and_never_refused`
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| if is_gateway_backend { -> if false && is_gateway_backend { | `skip-the-gateway-consult` | **killed** | `entitlement_pool::a_gateway_backed_launch_whose_entitlement_denies_the_harness_is_refused_and_starts_nothing` |
+| .with_entitlement(entitlement.as_ref().map(|entry| entry.name().to_owned())), -> .with_entitlement(None), | `announce-but-do-not-record` | **killed** | `entitlement_pool::a_gateway_backed_launch_whose_entitlement_admits_the_harness_proceeds_and_is_recorded` |
+| entitlement_refusal_message's `entitlement?` early return replaced with an unconditional refusal when entitlement is None | `refuse-the-undescribed-gateway` | **killed** | `entitlement_pool::a_gateway_whose_provider_no_entitlement_names_is_announced_and_never_refused` |
+
+> skip-the-gateway-consult observed: panicked at crates/glasshouse/tests/entitlement_pool.rs:1251:5 -- assert!(!refused.status.success(), ...) -- the denied launch was accepted
+
+> announce-but-do-not-record observed: panicked at crates/glasshouse/tests/entitlement_pool.rs:1299:5 -- assertion `left == right` failed: the record carries the entitlement that actually served (left: None, right: Some("ok"))
+
+> refuse-the-undescribed-gateway observed: panicked at crates/glasshouse/tests/entitlement_pool.rs:1325:5 -- assert!(out.status.success(), ...) -- the undescribed-provider launch was refused instead of proceeding
+
+Recorded scope limits — stated by the worker, not discovered later:
+- macOS only; no Linux/Windows leg run
+- the three new binary tests never forward a real request through the gateway (fake harness exits before dialling)
+- no --task is stated at this point in launch_session, so only the harness half of EntitlementRules::refusal is exercised here, mirroring the pre-existing direct-provider limit
+- the resume-path fix (item 4) has no dedicated binary test; none of the required regression suites covers a gateway-backed resume
+
+---

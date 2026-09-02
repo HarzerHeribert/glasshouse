@@ -50,6 +50,7 @@ pub use generated::EphemeralConfigs;
 use std::ffi::OsString;
 use std::fmt;
 
+use crate::gateway::translate;
 use crate::gateway::upstream::UpstreamBackend;
 use crate::gateway::{Gateway, Route, Upstream};
 use crate::harness::pairing::PairingOverrides;
@@ -525,6 +526,20 @@ pub enum Refusal {
         /// its one configured provider declared a base URL for, not the
         /// whole of [`GATEWAY_INGRESS_PROTOCOLS`].
         protocols: Vec<String>,
+    },
+
+    #[error(
+        "launch profile `{profile}` is backed by the local Glasshouse gateway, but {} cannot be \
+         served through a translated pairing: `{pair}` — {reason}",
+        .harness.display_name(),
+    )]
+    GatewayTranslationRefused {
+        profile: String,
+        harness: IntegrationId,
+        /// The pair table's own spelling, `from->to` — [`translate::Pair::slug`].
+        pair: String,
+        /// The table's own recorded reason the pair is refused.
+        reason: &'static str,
     },
 
     #[error(
@@ -1159,21 +1174,76 @@ fn apply_gateway(
 
     // An explicit ask is a constraint, never a hint — the same rule
     // `choose_protocol` applies to a direct provider. A profile expecting a
-    // protocol the ingress does not serve is refused rather than quietly
-    // given one that exists.
-    let protocol = match profile.expected_protocol {
+    // protocol the ingress does not serve natively is not refused on the
+    // spot any more — the translated search below still has to be asked —
+    // but it narrows that search to `expected` alone, exactly as it narrows
+    // the native one here.
+    let native = match profile.expected_protocol {
         Some(expected) => ingress_serves(&expected).then_some(expected),
         None => harness_protocols.iter().copied().find(ingress_serves),
     };
-    let Some(protocol) = protocol.filter(|protocol| harness_protocols.contains(protocol)) else {
-        return Err(Refusal::GatewayProtocolUnserved {
-            profile: profile.name.clone(),
-            harness: profile.harness,
-            // What the ingress serves, for a message that names the mismatch
-            // from the side the user cannot change. Slugs, because that is
-            // what the gateway could tell us.
-            protocols: served.iter().map(|slug| (*slug).to_owned()).collect(),
-        });
+    let native = native.filter(|protocol| harness_protocols.contains(protocol));
+
+    // No native route: ask the pair table for a harness protocol `P` (one of
+    // `candidates`) with a `Supported` row to a served protocol `Q`. The
+    // harness still speaks `P` at the ingress — `protocol` below feeds the
+    // same `DirectProviderRequest` a native launch would build — and the
+    // session binds to `Q`, the backend that actually answers.
+    //
+    // `translate::lookup` rather than `provider::translation_available`:
+    // both sides here are already slugs (`WireProtocol::slug` and
+    // `Gateway::served_protocols`'s own `&str`s, per the doc above), and
+    // `translation_available` would only add a slug->`WireProtocol` round
+    // trip this module has no other reason to grow.
+    let candidates: Vec<WireProtocol> = match profile.expected_protocol {
+        Some(expected) => vec![expected],
+        None => harness_protocols.to_vec(),
+    };
+    let mut first_pair: Option<&'static translate::Pair> = None;
+    let translated = 'search: {
+        for candidate in candidates.iter().copied() {
+            for &slug in &served {
+                let Some(pair) = translate::lookup(candidate.slug(), slug) else {
+                    continue;
+                };
+                if first_pair.is_none() {
+                    first_pair = Some(pair);
+                }
+                if pair.is_supported() {
+                    break 'search Some((candidate, slug.to_owned()));
+                }
+            }
+        }
+        None
+    };
+
+    let resolved = native
+        .map(|protocol| (protocol, protocol.slug().to_owned()))
+        .or(translated);
+    let (protocol, served_protocol) = match resolved {
+        Some(resolved) => resolved,
+        None => {
+            return Err(match first_pair {
+                // The table was consulted and named a real, if refused, row
+                // — refuse by that row's own name and reason rather than as
+                // a bare "unserved".
+                Some(pair) => Refusal::GatewayTranslationRefused {
+                    profile: profile.name.clone(),
+                    harness: profile.harness,
+                    pair: pair.slug(),
+                    reason: pair.refusal().unwrap_or("no reason recorded"),
+                },
+                // No row at all — the ingress serves nothing the table even
+                // has an opinion on, so the message stays what it always
+                // named: what the ingress serves, for a message that names
+                // the mismatch from the side the user cannot change.
+                None => Refusal::GatewayProtocolUnserved {
+                    profile: profile.name.clone(),
+                    harness: profile.harness,
+                    protocols: served.iter().map(|slug| (*slug).to_owned()).collect(),
+                },
+            });
+        }
     };
 
     // Phase 9H lines 505, 506 and 507. This is the moment a session gets a
@@ -1188,7 +1258,7 @@ fn apply_gateway(
     };
     gateway.routing().bind(
         profile.harness.slug(),
-        protocol.slug(),
+        &served_protocol,
         model,
         gateway.upstream(),
     );
@@ -3118,26 +3188,28 @@ mod tests {
         );
     }
 
-    /// A harness the *running* gateway cannot carry is refused rather than
-    /// pointed at it anyway.
+    /// A harness the *running* gateway cannot carry, even through the pair
+    /// table, is refused rather than pointed at it anyway.
     ///
-    /// This test used to hold because there was no OpenAI Responses ingress
-    /// at all. There is one now, and it still holds — for the reason that
-    /// actually matters. The ingress can serve Responses; **this** gateway
-    /// does not, because the one provider behind it declares no Responses
-    /// base URL. Codex declares `openai-responses` and nothing else, so the
-    /// refusal comes before a child process exists, rather than as a `404`
-    /// on the harness's first request.
+    /// This test used to fixture Codex against an Anthropic-only gateway —
+    /// that combination is `GH-GATEWAY-TRANSLATE-T2`'s own supported row
+    /// (`openai-responses -> anthropic-messages`) now, so it moved to
+    /// [`a_gateway_serving_only_anthropic_messages_accepts_a_codex_launch_through_translation`]
+    /// below and this test switched to OpenCode, whose one protocol
+    /// (`openai-chat`) has no *reverse* pair to Anthropic Messages yet
+    /// (`openai-chat -> anthropic-messages` stays `PairStatus::Refused`) —
+    /// genuinely nothing this gateway can carry, table included.
     ///
-    /// Lose this and `apply_gateway` starts refusing against
-    /// [`GATEWAY_INGRESS_PROTOCOLS`] — what the ingress *could* serve — and
-    /// a Codex session comes up pointed at a gateway with no route for it.
+    /// Lose this and `apply_gateway` starts accepting a `Refused` row as if
+    /// it were `Supported`, and an OpenCode session comes up pointed at a
+    /// gateway with no route for it.
     #[test]
     fn a_harness_that_cannot_speak_the_ingress_protocol_is_refused() {
-        let adapter = adapter_for(IntegrationId::Codex).expect("a harness");
+        let adapter = adapter_for(IntegrationId::OpenCode).expect("a harness");
         let gateway = running_gateway();
-        let mut profile = profile_for(IntegrationId::Codex);
+        let mut profile = profile_for(IntegrationId::OpenCode);
         profile.backend = BackendResource::GlasshouseGateway;
+        profile.model = Some("oc-model".to_owned());
 
         let err = resolve_with_gateway(
             &profile,
@@ -3145,11 +3217,57 @@ mod tests {
             Some(&gateway),
             &GatewayPairing::default(),
         )
-        .expect_err("there is no OpenAI Responses ingress in this phase");
+        .expect_err("openai-chat -> anthropic-messages is a Refused row, not Supported");
+        match err {
+            Refusal::GatewayTranslationRefused { pair, reason, .. } => {
+                assert_eq!(pair, "openai-chat->anthropic-messages");
+                assert!(!reason.is_empty());
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// The other side of the same seam: a harness whose own protocol the
+    /// pair table translates to a protocol this gateway serves is accepted,
+    /// speaks its own protocol at the ingress exactly as a native launch
+    /// would, and binds the session to the *served* backend — Phase 56 lines
+    /// 1948/1950/1956's launch link, GH-GATEWAY-TRANSLATE-LAUNCH.
+    ///
+    /// Codex declares only `openai-responses`; this gateway serves only
+    /// `anthropic-messages`; the table's `openai-responses -> anthropic-messages`
+    /// row is `Supported` (`GH-GATEWAY-TRANSLATE-T2`'s own end-to-end test).
+    #[test]
+    fn a_gateway_serving_only_anthropic_messages_accepts_a_codex_launch_through_translation() {
+        let adapter = adapter_for(IntegrationId::Codex).expect("a harness");
+        let gateway = running_gateway();
+        let mut profile = profile_for(IntegrationId::Codex);
+        profile.backend = BackendResource::GlasshouseGateway;
+
+        let overlay = resolve_with_gateway(
+            &profile,
+            &native_cx(adapter, false, &FakeSecrets::empty()),
+            Some(&gateway),
+            &GatewayPairing::default(),
+        )
+        .expect("a translated pair must be accepted, not refused as unserved");
+
+        // The child still speaks its own protocol at the ingress — same
+        // wire API a native Responses launch would configure.
+        let rendered = format!("{:?}", overlay.args());
         assert!(
-            matches!(err, Refusal::GatewayProtocolUnserved { .. }),
-            "{err:?}"
+            rendered.contains("responses"),
+            "the child was not configured for its own Responses wire API: {rendered}"
         );
+
+        // The session is bound to the *served* backend, not to the protocol
+        // the child speaks: `as_routing_backend("anthropic-messages", ..)`
+        // is what had to succeed for this assignment to exist at all.
+        let assignment = gateway
+            .routing()
+            .assignment()
+            .expect("apply_gateway must bind a translated session, not skip it");
+        assert_eq!(assignment.provider(), "fixture");
+        assert_eq!(assignment.backend().protocol(), "anthropic-messages");
     }
 
     /// A profile that explicitly expects a protocol the ingress does not
@@ -4366,6 +4484,11 @@ mod tests {
     fn a_resolved_credential_never_reaches_a_rendering() {
         let claude = adapter_for(IntegrationId::ClaudeCode).expect("a harness");
         let codex = adapter_for(IntegrationId::Codex).expect("a harness");
+        // Declares no protocols at all (`Declared::Unverified`) — the one
+        // harness left that can still produce `GatewayProtocolUnserved`
+        // now that the pair table covers every ordered pair of the three
+        // known protocols; used only in that scenario below.
+        let cursor = adapter_for(IntegrationId::Cursor).expect("a harness");
         let secrets = FakeSecrets::holding(CREDENTIAL_VAR, PLANTED_CREDENTIAL);
 
         // 1. A successful resolution, rendered every way this type allows.
@@ -4458,12 +4581,31 @@ mod tests {
                 resolve(&p, &native_cx(claude, false, &secrets)).unwrap_err()
             }),
             ("gateway protocol unserved", {
+                // Codex moved out of this scenario: `openai-responses ->
+                // anthropic-messages` is a `Supported` row now, so that
+                // combination resolves instead of refusing. `cursor`
+                // declares no protocols at all, so no row in the table is
+                // ever even consulted for it.
                 let gateway = running_gateway();
-                let mut p = profile_for(IntegrationId::Codex);
+                let mut p = profile_for(IntegrationId::Cursor);
                 p.backend = BackendResource::GlasshouseGateway;
                 resolve_with_gateway(
                     &p,
-                    &native_cx(codex, false, &secrets),
+                    &native_cx(cursor, false, &secrets),
+                    Some(&gateway),
+                    &GatewayPairing::default(),
+                )
+                .unwrap_err()
+            }),
+            ("gateway translation refused", {
+                let opencode = adapter_for(IntegrationId::OpenCode).expect("a harness");
+                let gateway = running_gateway();
+                let mut p = profile_for(IntegrationId::OpenCode);
+                p.backend = BackendResource::GlasshouseGateway;
+                p.model = Some("oc-model".to_owned());
+                resolve_with_gateway(
+                    &p,
+                    &native_cx(opencode, false, &secrets),
                     Some(&gateway),
                     &GatewayPairing::default(),
                 )
@@ -4590,6 +4732,7 @@ mod tests {
             seen.insert(match refusal {
                 Refusal::GatewayNotRunning { .. } => "GatewayNotRunning",
                 Refusal::GatewayProtocolUnserved { .. } => "GatewayProtocolUnserved",
+                Refusal::GatewayTranslationRefused { .. } => "GatewayTranslationRefused",
                 Refusal::GatewayTokenUnplaceable { .. } => "GatewayTokenUnplaceable",
                 Refusal::ProviderNotConfigured { .. } => "ProviderNotConfigured",
                 Refusal::ProviderProtocolUnsupported { .. } => "ProviderProtocolUnsupported",
@@ -4614,7 +4757,7 @@ mod tests {
         }
         assert_eq!(
             seen.len(),
-            20,
+            21,
             "every Refusal variant must be exercised here: {seen:?}"
         );
     }

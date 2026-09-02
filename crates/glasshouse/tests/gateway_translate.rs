@@ -1230,23 +1230,268 @@ fn a_target_the_provider_serves_natively_is_relayed_byte_for_byte_even_though_a_
     );
 }
 
-// --- the witness for the blocked link ---------------------------------------------
+// --- launch-driven: the translated pair and the refused pair, through `glasshouse launch` -----
+//
+// The link the tripwire above used to guard is filled now:
+// `profile::apply_gateway` consults the pair table before refusing, so a
+// Claude Code launch on a chat-only entitlement is translated instead of
+// refused, and an OpenCode launch on an Anthropic-only entitlement is still
+// refused — by the table's own row, named, rather than as a bare "unserved".
+// Both tests below enter at `glasshouse launch`, the way
+// `tests/gateway_degrade.rs` drives its own launch-driven half, and were the
+// tripwire's own prescribed replacement.
 
-/// **Not** a test of this package's behaviour: a witness for the one link
-/// between it and `glasshouse launch` that stays refused. A real
-/// `glasshouse launch claude-code` against a profile whose only provider is
-/// an OpenAI-compatible one is refused at `profile::apply_gateway` — before
-/// the harness starts, before a request could reach the gateway — with
-/// `Refusal::GatewayProtocolUnserved` naming `openai-chat` as the one
-/// protocol the ingress serves.
-///
-/// When the profile package lifts that refusal (accept a harness protocol the
-/// pair table translates to a served one; bind the session to the served
-/// protocol), this test fails on its status assertion. That failure is the
-/// signal to delete it and drive the three pair tests above through
-/// `glasshouse launch` the way `tests/gateway_degrade.rs` does.
+/// The variable the fake harness dumps its environment into, and the one it
+/// watches for permission to exit — the same idiom `gateway_degrade.rs` uses,
+/// named per file so nothing here can collide with that binary's own.
+const LAUNCH_ENV_DUMP_VAR: &str = "GLASSHOUSE_GATEWAY_TRANSLATE_LAUNCH_ENV_DUMP";
+const LAUNCH_STOP_VAR: &str = "GLASSHOUSE_GATEWAY_TRANSLATE_LAUNCH_STOP";
+const LAUNCH_HARNESS_TICKS: u32 = 900;
+
+/// A spawned `glasshouse launch`, killed when the test ends however it ends
+/// — see `gateway_degrade.rs`'s own `Launch` for why a bare `Child` is not
+/// enough.
+struct Launch {
+    child: std::process::Child,
+}
+
+impl std::ops::Deref for Launch {
+    type Target = std::process::Child;
+
+    fn deref(&self) -> &std::process::Child {
+        &self.child
+    }
+}
+
+impl std::ops::DerefMut for Launch {
+    fn deref_mut(&mut self) -> &mut std::process::Child {
+        &mut self.child
+    }
+}
+
+impl Drop for Launch {
+    fn drop(&mut self) {
+        if matches!(self.child.try_wait(), Ok(Some(_))) {
+            return;
+        }
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+/// A harness that records the environment it was launched with — the gateway
+/// base URL and token Claude Code would use — and then waits to be told to
+/// exit. It has to outlive the request the test sends: the gateway's
+/// listener is a guard held by `launch_session`, so a harness that exits
+/// immediately takes the gateway with it.
+#[cfg(unix)]
+fn install_waiting_harness(bin_dir: &std::path::Path) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+
+    let path = bin_dir.join("fake-claude-waiting");
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\n\
+             env > \"${LAUNCH_ENV_DUMP_VAR}.partial\"\n\
+             mv \"${LAUNCH_ENV_DUMP_VAR}.partial\" \"${LAUNCH_ENV_DUMP_VAR}\"\n\
+             ticks=0\n\
+             while [ ! -f \"${LAUNCH_STOP_VAR}\" ] && [ \"$ticks\" -lt {LAUNCH_HARNESS_TICKS} ]; do\n\
+             ticks=$((ticks + 1)); sleep 0.1\n\
+             done\n\
+             exit 0\n"
+        ),
+    )
+    .expect("write fake harness");
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).unwrap();
+    path
+}
+
+#[cfg(windows)]
+fn install_waiting_harness(bin_dir: &std::path::Path) -> PathBuf {
+    let path = bin_dir.join("fake-claude-waiting.cmd");
+    std::fs::write(
+        &path,
+        format!(
+            "@echo off\r\n\
+             set > \"%{LAUNCH_ENV_DUMP_VAR}%.partial\"\r\n\
+             move /y \"%{LAUNCH_ENV_DUMP_VAR}%.partial\" \"%{LAUNCH_ENV_DUMP_VAR}%\" >nul\r\n\
+             set /a ticks=0\r\n\
+             :wait\r\n\
+             if exist \"%{LAUNCH_STOP_VAR}%\" exit /b 0\r\n\
+             if %ticks% GEQ {LAUNCH_HARNESS_TICKS} exit /b 0\r\n\
+             set /a ticks+=1\r\n\
+             ping -n 2 127.0.0.1 >nul\r\n\
+             goto wait\r\n"
+        ),
+    )
+    .expect("write fake harness");
+    path
+}
+
+/// Wait for `path` to exist, or fail saying what the binary printed.
+fn wait_for_launch_file(path: &std::path::Path, child: &mut Launch, what: &str) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !path.exists() {
+        if let Some(status) = child.try_wait().expect("poll the launch") {
+            panic!("the binary exited ({status}) before {what}");
+        }
+        assert!(Instant::now() < deadline, "timed out waiting for {what}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// One `NAME=value` line's value from a dumped environment.
+fn dumped(dump: &str, name: &str) -> String {
+    dump.lines()
+        .find_map(|line| line.strip_prefix(&format!("{name}=")))
+        .unwrap_or_else(|| panic!("the harness's environment had no {name}:\n{dump}"))
+        .trim()
+        .to_owned()
+}
+
+/// Line 1948's launch link, for the translated pair: `glasshouse launch
+/// claude-code` on a profile whose only provider is a chat-only entitlement
+/// no longer refuses. The harness speaks Anthropic Messages at the ingress,
+/// exactly as a native launch would; the fixture — which speaks only OpenAI
+/// Chat — receives the translated request with ids preserved; the client
+/// gets an Anthropic-shaped answer; and the session's assignment, read back
+/// from the project's own evidence ledger the way the binary itself would,
+/// names the chat provider under the pair's own route.
 #[test]
-fn the_shipped_binary_still_refuses_claude_code_on_a_chat_only_entitlement_at_profile_resolution() {
+fn a_claude_code_launch_on_a_chat_only_entitlement_is_translated_end_to_end() {
+    let fixture = ChatOnlyUpstream::start(Answer::Completion);
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let base = std::fs::canonicalize(tmp.path()).expect("canonicalize");
+    let root = base.join("workspace");
+    std::fs::create_dir_all(root.join(".git")).expect("project root");
+    std::fs::create_dir_all(base.join("config")).expect("config dir");
+    let bin_dir = base.join("bin");
+    std::fs::create_dir_all(&bin_dir).expect("bin dir");
+    let harness = install_waiting_harness(&bin_dir);
+    let escaped = harness.display().to_string().replace('\\', "\\\\");
+    std::fs::write(
+        base.join("config").join("config.toml"),
+        format!(
+            "version = 1\n\n\
+             [integrations.claude-code]\nenabled = true\nexecutable = \"{escaped}\"\n\n\
+             [providers.chat]\ntemplate = \"openai-compatible\"\n\
+             base_url = \"{}\"\n\
+             credential_env = [\"{CREDENTIAL_VAR}\"]\n\n\
+             [profiles.gateway-chat]\nharness = \"claude-code\"\n\n\
+             [profiles.gateway-chat.backend]\nkind = \"glasshouse-gateway\"\n",
+            fixture.base_url()
+        ),
+    )
+    .expect("write user config");
+
+    let env_dump = base.join("harness-env.txt");
+    let stop_file = base.join("stop");
+    let mut launch = Launch {
+        child: std::process::Command::new(env!("CARGO_BIN_EXE_glasshouse"))
+            .arg("--scope")
+            .arg(&root)
+            .arg("--data-dir")
+            .arg(base.join("data"))
+            .arg("--config-dir")
+            .arg(base.join("config"))
+            .args([
+                "launch",
+                "claude-code",
+                "--profile",
+                "gateway-chat",
+                "--headless",
+            ])
+            .env(LAUNCH_ENV_DUMP_VAR, &env_dump)
+            .env(LAUNCH_STOP_VAR, &stop_file)
+            .env(CREDENTIAL_VAR, PLANTED_KEY)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("the glasshouse binary must be runnable"),
+    };
+
+    wait_for_launch_file(
+        &env_dump,
+        &mut launch,
+        "the harness to record its environment",
+    );
+    let dump = std::fs::read_to_string(&env_dump).expect("read the harness environment");
+    // The harness still speaks Anthropic Messages at the ingress — the same
+    // variables a native launch would set, pointed at this gateway.
+    let base_url = dumped(&dump, "ANTHROPIC_BASE_URL");
+    let token = dumped(&dump, "ANTHROPIC_AUTH_TOKEN");
+    let address: SocketAddr = base_url
+        .strip_prefix("http://")
+        .expect("the gateway is plain loopback HTTP")
+        .parse()
+        .expect("the gateway's base URL is host:port");
+
+    let response = send_and_read(address, &messages_request(&token, &claude_code_body(false)));
+    let (head, body) = head_and_body(&response);
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+
+    // (a) the fixture, which speaks only OpenAI Chat, received a translated
+    // request with the prior tool call's id preserved.
+    let received = fixture.only_request();
+    assert_eq!(received.target, "/v1/chat/completions");
+    let sent = received.json();
+    assert_eq!(sent["model"], "claude-x");
+    let messages = sent["messages"].as_array().expect("messages");
+    assert_eq!(messages[2]["tool_calls"][0]["id"], "call_prior_1");
+
+    // (b) the harness got an Anthropic-shaped answer, the fixture's own
+    // tool_call id carried back verbatim.
+    let answer: Value = serde_json::from_slice(body).expect("an Anthropic JSON document");
+    assert_eq!(answer["type"], "message");
+    let content = answer["content"].as_array().expect("content blocks");
+    assert_eq!(content[1]["id"], "call_fix_A");
+
+    // (c) the session's assignment names the chat provider, read from the
+    // project's own evidence ledger the way `glasshouse` itself would.
+    let cli = glasshouse::Cli {
+        scope: Some(root.clone()),
+        allow_unsafe_scope: false,
+        data_dir: Some(base.join("data")),
+        config_dir: Some(base.join("config")),
+        log_level: None,
+        log_file: None,
+        log_stderr: false,
+        command: None,
+    };
+    let runtime = glasshouse::bootstrap(&cli, &root).expect("bootstrap the fixture runtime");
+    let ledger = EvidenceLedger::open(&runtime).expect("open the project evidence ledger");
+    let rows = wait_for_row(
+        &ledger,
+        ObservationQuery {
+            provider: "chat",
+            model: AssignedModel::HarnessDefault.label(),
+            route: Some("anthropic-messages->openai-chat"),
+            harness: Some("claude-code"),
+        },
+    );
+    assert_eq!(
+        rows.len(),
+        1,
+        "one routing observation, naming the chat provider under the translated pair"
+    );
+    assert_eq!(rows[0].outcome, Some(Outcome::Succeeded));
+
+    std::fs::write(&stop_file, "go").expect("write the stop file");
+    let status = launch.wait().expect("wait for the launch");
+    assert!(status.success(), "the launch exited {status}");
+}
+
+/// The other side of the same link: `openai-chat -> anthropic-messages` is
+/// the one row the pair table still refuses (1956), so an OpenCode-shaped
+/// launch against an Anthropic-only entitlement is refused by the table's
+/// own name and reason — not as a bare "unserved" — before the harness
+/// starts and before any request could reach the gateway.
+#[test]
+fn an_opencode_launch_on_an_anthropic_only_entitlement_is_refused_by_name_and_nothing_starts() {
+    let fixture = ChatOnlyUpstream::start(Answer::Completion);
     let tmp = tempfile::tempdir().expect("tempdir");
     let base = std::fs::canonicalize(tmp.path()).expect("canonicalize");
     let root = base.join("workspace");
@@ -1260,12 +1505,13 @@ fn the_shipped_binary_still_refuses_claude_code_on_a_chat_only_entitlement_at_pr
         base.join("config").join("config.toml"),
         format!(
             "version = 1\n\n\
-             [integrations.claude-code]\nenabled = true\nexecutable = \"{escaped}\"\n\n\
-             [providers.chat]\ntemplate = \"openai-compatible\"\n\
-             base_url = \"http://127.0.0.1:1/v1\"\n\
+             [integrations.opencode]\nenabled = true\nexecutable = \"{escaped}\"\n\n\
+             [providers.anthropic-only]\ntemplate = \"anthropic-compatible\"\n\
+             base_url = \"{}\"\n\
              credential_env = [\"{CREDENTIAL_VAR}\"]\n\n\
-             [profiles.gateway-chat]\nharness = \"claude-code\"\n\n\
-             [profiles.gateway-chat.backend]\nkind = \"glasshouse-gateway\"\n"
+             [profiles.gateway-opencode]\nharness = \"opencode\"\nmodel = \"oc-model\"\n\n\
+             [profiles.gateway-opencode.backend]\nkind = \"glasshouse-gateway\"\n",
+            fixture.root_url()
         ),
     )
     .expect("write user config");
@@ -1279,9 +1525,9 @@ fn the_shipped_binary_still_refuses_claude_code_on_a_chat_only_entitlement_at_pr
         .arg(base.join("config"))
         .args([
             "launch",
-            "claude-code",
+            "opencode",
             "--profile",
-            "gateway-chat",
+            "gateway-opencode",
             "--headless",
         ])
         .env(CREDENTIAL_VAR, PLANTED_KEY)
@@ -1290,19 +1536,24 @@ fn the_shipped_binary_still_refuses_claude_code_on_a_chat_only_entitlement_at_pr
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         !output.status.success(),
-        "the binary accepted a Claude Code launch on a chat-only entitlement: the profile link \
-         has been lifted, so delete this witness and drive the pair tests through `glasshouse \
-         launch`. stderr: {stderr}"
+        "the binary accepted a launch the pair table refuses: stderr: {stderr}"
     );
     assert!(
-        stderr.contains("cannot be pointed at any protocol that gateway's ingress serves")
-            && stderr.contains("openai-chat"),
-        "the refusal must be `GatewayProtocolUnserved` naming the one served protocol, not some \
-         other failure: {stderr}"
+        stderr.contains("openai-chat->anthropic-messages"),
+        "the refusal must name the table's own row: {stderr}"
+    );
+    assert!(
+        stderr.contains("no end-to-end test") || stderr.contains("1956"),
+        "the refusal must carry the table's own recorded reason: {stderr}"
     );
     assert!(
         !stderr.contains(PLANTED_KEY),
         "the credential never reaches a refusal: {stderr}"
+    );
+    assert_eq!(
+        fixture.connections(),
+        0,
+        "a refused pairing opens nothing upstream"
     );
 }
 

@@ -89,8 +89,17 @@
 //! handles. Neither is ever wrapped, formatted or re-raised:
 //! `classify` reduces every `keyring::Error` to a fixed `&'static str`
 //! chosen by variant alone, so no byte that came out of the store can reach
-//! a message, a log or a `Debug`. See
-//! `tests::a_store_error_never_carries_anything_the_store_returned`.
+//! a message, a log or a `Debug`.
+//!
+//! One thing *is* carried besides that fixed text, and it is carried on
+//! purpose: [`StoreRefusal`] keeps the platform's own **status** — `Windows
+//! ERROR_NO_SUCH_LOGON_SESSION`, an `OSStatus` message — from the only two
+//! `keyring::Error` variants whose payload is a status code rather than
+//! store data. That type documents the reasoning; `backend::platform_status`
+//! is the match that enforces it, and
+//! `tests::a_store_error_never_carries_anything_the_store_returned` and
+//! `tests::a_store_refusals_status_comes_from_no_variant_that_carries_store_data`
+//! are what fail if either drifts.
 
 use super::{EnvironmentSecretStore, Secret, SecretRef, SecretStore};
 
@@ -139,23 +148,89 @@ pub fn os_credential_for_variable(var: &str) -> SecretRef {
 /// Two reasons, deliberately distinguished, because they call for different
 /// things from the user: one is "this platform has no store Glasshouse can
 /// use", which nothing the user does will change, and the other is "there is
-/// one and it would not open", which unlocking a keychain might.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// one and it would not open", which logging in differently might.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Unavailable {
     /// No backend is compiled for this target — see "Which platforms, and
     /// why not the third".
     UnsupportedPlatform,
     /// A backend exists and refused a probe: a locked or missing keychain,
-    /// or a session with no access to one.
-    StoreUnreachable,
+    /// or a session with no access to one — with the store's own account of
+    /// which, in [`StoreRefusal`].
+    StoreUnreachable(StoreRefusal),
+}
+
+/// What the platform's store said when it refused to open.
+///
+/// # Why this carries more than one fixed sentence
+///
+/// It used to be a bare variant, and "the native secure store could not be
+/// opened" was the whole of what a user — or a test — could learn. On
+/// 2026-09-02 the Windows ARM64 gate ran the round trips for the first time
+/// and all five of them skipped with exactly that sentence, which cannot
+/// tell *this session has no credential set* from *the backend is broken*.
+/// Those two call for opposite responses, and the store had already said
+/// which it was: `CredReadW` answered `ERROR_NO_SUCH_LOGON_SESSION` and
+/// Glasshouse discarded it at the one line that turns a `keyring::Error`
+/// into an [`Unavailable`].
+///
+/// # What may be carried, and why it is not a leak
+///
+/// `classification` is `classify`'s fixed text, chosen by the error's
+/// *variant alone*. `status` is the platform's own status, taken from the
+/// only two `keyring::Error` variants whose payload is a status code rather
+/// than something the store returned:
+///
+/// - `PlatformFailure` and `NoStorageAccess` wrap, on Windows,
+///   `keyring::windows::Error(u32)` — built from `GetLastError()` and
+///   rendered as `Windows ERROR_NO_SUCH_LOGON_SESSION` or `Windows error
+///   code <n>`; on macOS, a `security_framework` error built from an
+///   `OSStatus`. Neither is constructed from a byte the store returned.
+/// - `BadEncoding` (the raw stored bytes) and `Ambiguous` (credential
+///   handles, which `keyring`'s own `Display` prints with `{:?}`) are
+///   **excluded by the match**, not by inspecting what they happen to hold,
+///   and so are `TooLong` and `Invalid`, whose payloads are names.
+///
+/// `tests::a_store_error_never_carries_anything_the_store_returned` asserts
+/// that the match names none of the data-carrying variants, and
+/// `tests::a_store_refusals_status_comes_from_no_variant_that_carries_store_data`
+/// plants a value in each of their payloads and fails if one reaches a
+/// message. The first is what still holds when a variant is added.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoreRefusal {
+    /// Fixed text chosen by the store error's variant alone.
+    classification: &'static str,
+    /// The platform's own status, for the two variants that carry one.
+    /// `None` otherwise — never a placeholder, because "no status" and "a
+    /// status that says nothing" are different facts.
+    status: Option<String>,
+}
+
+impl std::fmt::Display for StoreRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.status {
+            Some(status) => write!(f, "{} ({status})", self.classification),
+            None => f.write_str(self.classification),
+        }
+    }
 }
 
 impl Unavailable {
     /// A short reason, for a diagnostic line.
-    pub fn reason(self) -> &'static str {
+    ///
+    /// `glasshouse doctor` prints this after *"native secure store:
+    /// unavailable"*, and the Settings overlay prints it when a credential
+    /// cannot be stored or deleted, so widening it is what puts the
+    /// platform's own answer in front of a **user** rather than only in
+    /// front of a test.
+    pub fn reason(&self) -> String {
         match self {
-            Self::UnsupportedPlatform => "this platform has no secure store Glasshouse can use yet",
-            Self::StoreUnreachable => "the native secure store could not be opened",
+            Self::UnsupportedPlatform => {
+                "this platform has no secure store Glasshouse can use yet".to_owned()
+            }
+            Self::StoreUnreachable(refusal) => {
+                format!("the native secure store could not be opened: {refusal}")
+            }
         }
     }
 }
@@ -319,6 +394,12 @@ pub const UNSUPPORTED_PLATFORM_LABEL: &str =
     "the process environment (this platform has no secure store Glasshouse can use yet)";
 
 /// [`SecretStore::describe`] when a store exists but would not open.
+///
+/// Deliberately still **one fixed string**, and not the widened
+/// [`StoreRefusal`]. `describe` answers *which arrangement is in force* —
+/// one of exactly three, which `integrations::doctor`'s own test asserts by
+/// listing them — and that is a different question from *why*. The why is
+/// [`Unavailable::reason`], which `doctor` prints on the very next line.
 pub const STORE_UNREACHABLE_LABEL: &str =
     "the process environment (the native secure store could not be opened)";
 
@@ -343,7 +424,7 @@ impl PreferNativeSecretStore {
     /// The native store, when one answered — the handle
     /// [`NativeSecretStore::store`] and [`NativeSecretStore::delete`] need.
     pub fn native(&self) -> Result<&NativeSecretStore, Unavailable> {
-        self.native.as_ref().map_err(|err| *err)
+        self.native.as_ref().map_err(Clone::clone)
     }
 
     /// Which of this store's two sources answers `reference` right now, as
@@ -394,7 +475,7 @@ impl SecretStore for PreferNativeSecretStore {
         match self.native {
             Ok(_) => NATIVE_FIRST_LABEL,
             Err(Unavailable::UnsupportedPlatform) => UNSUPPORTED_PLATFORM_LABEL,
-            Err(Unavailable::StoreUnreachable) => STORE_UNREACHABLE_LABEL,
+            Err(Unavailable::StoreUnreachable(_)) => STORE_UNREACHABLE_LABEL,
         }
     }
 }
@@ -524,6 +605,18 @@ mod backend {
     /// [`super::Unavailable::StoreUnreachable`]. There is therefore no
     /// Windows analogue of the macOS hang, and no call to make here.
     ///
+    /// **That branch is not hypothetical.** Measured on the Windows ARM64
+    /// CI VM on 2026-09-02: every `CredReadW`, `CredWriteW` and
+    /// `CredDeleteW` issued from the runner's ssh session — a public-key
+    /// logon, process session 0 — returned `1312`,
+    /// `ERROR_NO_SUCH_LOGON_SESSION`, with no Rust and no `keyring` in the
+    /// call. The same calls in a scheduled task under the same user's
+    /// **interactive** logon (process session 1) succeeded, and the probe
+    /// read returned `1168`, `ERROR_NOT_FOUND`, which is `NoEntry` and
+    /// therefore the store answering. Credential Manager is per logon
+    /// session, not per user, and the product's job on the refusing path is
+    /// exactly what it does: fall back and say so.
+    ///
     /// Kept as a same-named no-op rather than dropped, so `probe` has one
     /// shape on every platform and a future backend that *can* prompt —
     /// the Secret Service is exactly that, which is why it is not here —
@@ -569,11 +662,42 @@ mod backend {
     /// `production_code`, which splits this file on the first occurrence of
     /// that attribute, and would quietly shrink what the source scans below
     /// cover — including this whole backend.
-    pub(super) fn entry(service: &str, account: &str) -> Result<keyring::Entry, &'static str> {
-        let credential = platform_credential_builder()
-            .build(None, service, account)
-            .map_err(|err| classify(&err))?;
+    ///
+    /// Hands back the store's own error rather than a classification of it,
+    /// because `probe` needs the platform status inside it and every other
+    /// caller here reduces it with `classify` on the next line. The
+    /// reduction still happens at exactly one place per path; what changed
+    /// is that it no longer happens *before* the one caller that has a use
+    /// for what is being thrown away.
+    pub(super) fn entry(service: &str, account: &str) -> Result<keyring::Entry, keyring::Error> {
+        let credential = platform_credential_builder().build(None, service, account)?;
         Ok(keyring::Entry::new_with_credential(credential))
+    }
+
+    /// The platform's own status, and **only** from the two variants whose
+    /// payload is a status code rather than something the store returned.
+    ///
+    /// The exclusion is the match arm, not a judgement about what a payload
+    /// happens to contain: `BadEncoding` carries the stored bytes,
+    /// `Ambiguous` carries credential handles, and `TooLong`/`Invalid` carry
+    /// names, so none of them reaches a `to_string()` here. See
+    /// [`super::StoreRefusal`] for what the two remaining payloads are on
+    /// each platform and why they cannot carry stored data.
+    pub(super) fn platform_status(err: &keyring::Error) -> Option<String> {
+        match err {
+            keyring::Error::PlatformFailure(status) | keyring::Error::NoStorageAccess(status) => {
+                Some(status.to_string())
+            }
+            _ => None,
+        }
+    }
+
+    /// The one place a `keyring::Error` becomes an [`Unavailable`].
+    pub(super) fn refusal(err: &keyring::Error) -> Unavailable {
+        Unavailable::StoreUnreachable(super::StoreRefusal {
+            classification: classify(err),
+            status: platform_status(err),
+        })
     }
 
     pub fn probe() -> Result<(), Unavailable> {
@@ -581,13 +705,14 @@ mod backend {
         // which runs through here, so this is the one place that has to
         // remember.
         silence_authorization_dialogs();
-        let entry = entry(SERVICE, PROBE_ACCOUNT).map_err(|_| Unavailable::StoreUnreachable)?;
+        let entry = entry(SERVICE, PROBE_ACCOUNT).map_err(|err| refusal(&err))?;
         match entry.get_attributes() {
             // `NoEntry` is the expected answer and the successful one: the
             // store was reached and had nothing filed under a name nothing
-            // ever writes. Anything else means it did not answer.
+            // ever writes. Anything else means it did not answer, and now
+            // says so in the store's own words.
             Ok(_) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(_) => Err(Unavailable::StoreUnreachable),
+            Err(err) => Err(refusal(&err)),
         }
     }
 
@@ -605,13 +730,15 @@ mod backend {
     }
 
     pub fn set(service: &str, account: &str, value: &str) -> Result<(), &'static str> {
-        entry(service, account)?
+        entry(service, account)
+            .map_err(|err| classify(&err))?
             .set_password(value)
             .map_err(|err| classify(&err))
     }
 
     pub fn delete(service: &str, account: &str) -> Result<Deletion, &'static str> {
-        match entry(service, account)?.delete_credential() {
+        let entry = entry(service, account).map_err(|err| classify(&err))?;
+        match entry.delete_credential() {
             Ok(()) => Ok(Deletion::Removed),
             Err(keyring::Error::NoEntry) => Ok(Deletion::AlreadyAbsent),
             Err(err) => Err(classify(&err)),
@@ -695,6 +822,19 @@ mod tests {
             .filter(|line| !line.trim_start().starts_with("//"))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// A `StoreUnreachable` with the shape the platforms actually produce,
+    /// for the tests that need one without a store to refuse them.
+    ///
+    /// Written here rather than as a `Default`: a refusal always comes from
+    /// a real `keyring::Error` in production, and a constructor on the type
+    /// would be a way to manufacture one that never happened.
+    fn refused(status: Option<&str>) -> Unavailable {
+        Unavailable::StoreUnreachable(StoreRefusal {
+            classification: "the secure store would not grant access; it may be locked",
+            status: status.map(str::to_owned),
+        })
     }
 
     // --- what this module must never do ----------------------------------
@@ -805,8 +945,10 @@ mod tests {
         let present = store.is_present(&reference);
         let describe = store.describe();
         let source = store.source_of(&reference);
-        let unreachable_label =
-            PreferNativeSecretStore::without_native(Unavailable::StoreUnreachable).describe();
+        let unreachable_label = PreferNativeSecretStore::without_native(refused(Some(
+            "Windows ERROR_NO_SUCH_LOGON_SESSION",
+        )))
+        .describe();
 
         unsafe {
             std::env::remove_var(VAR);
@@ -857,14 +999,37 @@ mod tests {
     fn every_unavailable_reason_has_text_and_they_differ() {
         assert_ne!(
             Unavailable::UnsupportedPlatform.reason(),
-            Unavailable::StoreUnreachable.reason()
+            refused(None).reason()
         );
-        for reason in [
-            Unavailable::UnsupportedPlatform,
-            Unavailable::StoreUnreachable,
-        ] {
+        for reason in [Unavailable::UnsupportedPlatform, refused(None)] {
             assert!(!reason.reason().is_empty());
         }
+    }
+
+    /// The widened reason must actually *say* the platform's status, or the
+    /// widening bought nothing: this is the assertion that would have failed
+    /// on the Windows VM before this package, where five tests skipped with
+    /// a sentence that could not tell a session problem from a broken
+    /// backend.
+    #[test]
+    fn an_unreachable_stores_reason_carries_the_platforms_own_status() {
+        const STATUS: &str = "Windows ERROR_NO_SUCH_LOGON_SESSION";
+
+        let with_status = refused(Some(STATUS)).reason();
+        assert!(
+            with_status.contains("could not be opened"),
+            "the reason must still say what happened: {with_status}"
+        );
+        assert!(
+            with_status.contains(STATUS),
+            "the reason must carry the platform's own status: {with_status}"
+        );
+
+        // ... and a refusal with no status says only what it knows, rather
+        // than padding the sentence with an empty pair of brackets.
+        let without = refused(None).reason();
+        assert!(!without.contains('('), "got {without}");
+        assert_ne!(with_status, without);
     }
 
     // --- nothing the store returns is ever carried out --------------------
@@ -886,7 +1051,7 @@ mod tests {
         assert!(!rendered.contains(PLANTED), "got {rendered}");
         assert!(rendered.contains("OPENROUTER_API_KEY"), "got {rendered}");
 
-        let unavailable = NativeStoreError::Unavailable(Unavailable::StoreUnreachable);
+        let unavailable = NativeStoreError::Unavailable(refused(None));
         let rendered = format!("{unavailable} / {unavailable:?}");
         assert!(!rendered.contains(PLANTED), "got {rendered}");
         assert!(rendered.contains("could not be opened"), "got {rendered}");
@@ -900,6 +1065,63 @@ mod tests {
             "`NativeStoreError::Refused::reason` must stay `&'static str`: that type is what \
              makes it impossible to carry a value the store returned"
         );
+
+        // `StoreRefusal` is the one thing here that carries a runtime
+        // `String`, so its source is what has to be constrained rather than
+        // its type. `platform_status` is the only producer of that field,
+        // and it may name no variant whose payload is store data — planting
+        // a value into one and asserting on the render would only prove
+        // today's variants, so this is asserted on the match itself.
+        let status_arm = code
+            .split("fn platform_status")
+            .nth(1)
+            .expect("`platform_status` is what builds the only non-static reason here")
+            .split("\n    }")
+            .next()
+            .expect("its body ends at this module's first dedented brace");
+        for carries_store_data in ["BadEncoding", "Ambiguous", "TooLong", "Invalid"] {
+            assert!(
+                !status_arm.contains(carries_store_data),
+                "`platform_status` names `keyring::Error::{carries_store_data}`, whose payload \
+                 is data the store returned rather than a platform status: it may take a \
+                 status only from `PlatformFailure` and `NoStorageAccess`"
+            );
+        }
+        assert!(
+            status_arm.contains("PlatformFailure") && status_arm.contains("NoStorageAccess"),
+            "`platform_status` must still take the two status-carrying variants, or the \
+             widened reason is empty on every platform: {status_arm}"
+        );
+    }
+
+    /// The same guarantee against real `keyring::Error` values, on the
+    /// platforms where the crate is linked at all.
+    ///
+    /// Not redundant with the source scan above: that one proves the match
+    /// *names* no data-carrying variant, and this one proves the value that
+    /// comes out of a data-carrying error renders nothing of its payload —
+    /// including through `Unavailable::reason`, which is the string
+    /// `doctor` prints.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn a_store_refusals_status_comes_from_no_variant_that_carries_store_data() {
+        const PLANTED: &str = "sk-planted-into-a-keyring-error-01234567";
+
+        for err in [
+            keyring::Error::BadEncoding(PLANTED.as_bytes().to_vec()),
+            keyring::Error::TooLong(PLANTED.to_owned(), 32),
+            keyring::Error::Invalid(PLANTED.to_owned(), PLANTED.to_owned()),
+            keyring::Error::NoEntry,
+        ] {
+            assert_eq!(
+                backend::platform_status(&err),
+                None,
+                "`{err:?}` carries data the store returned or a name, not a platform status"
+            );
+            let refusal = backend::refusal(&err);
+            let rendered = format!("{} / {refusal:?}", refusal.reason());
+            assert!(!rendered.contains(PLANTED), "got {rendered}");
+        }
     }
 
     /// Every store type's `Debug` is names only, with a credential planted
@@ -1134,12 +1356,16 @@ mod tests {
     fn a_credential_stored_in_the_native_store_resolves_and_deletes() {
         const VALUE: &str = "sk-keychain-round-trip-test-0123456789abcdef";
 
-        let Ok(store) = NativeSecretStore::detect() else {
-            eprintln!(
-                "SKIPPED: the native secure store would not open in this session, so this \
-                 test proved nothing"
-            );
-            return;
+        let store = match NativeSecretStore::detect() {
+            Ok(store) => store,
+            Err(refusal) => {
+                eprintln!(
+                    "SKIPPED: the native secure store would not open in this session, so this \
+                     test proved nothing: {}",
+                    refusal.reason()
+                );
+                return;
+            }
         };
 
         let account = test_account("ROUNDTRIP");
@@ -1204,9 +1430,15 @@ mod tests {
         const STORED: &str = "sk-from-the-keychain-0123456789abcdefghij";
         const EXPORTED: &str = "sk-from-the-environment-abcdefghij0123456";
 
-        let Ok(native) = NativeSecretStore::detect() else {
-            eprintln!("SKIPPED: the native secure store would not open in this session");
-            return;
+        let native = match NativeSecretStore::detect() {
+            Ok(native) => native,
+            Err(refusal) => {
+                eprintln!(
+                    "SKIPPED: the native secure store would not open in this session: {}",
+                    refusal.reason()
+                );
+                return;
+            }
         };
 
         let account = test_account("PREFERENCE");
@@ -1285,9 +1517,15 @@ mod tests {
 
         const STORED: &str = "sk-into-a-launch-overlay-0123456789abcdef";
 
-        let Ok(native) = NativeSecretStore::detect() else {
-            eprintln!("SKIPPED: the native secure store would not open in this session");
-            return;
+        let native = match NativeSecretStore::detect() {
+            Ok(native) => native,
+            Err(refusal) => {
+                eprintln!(
+                    "SKIPPED: the native secure store would not open in this session: {}",
+                    refusal.reason()
+                );
+                return;
+            }
         };
 
         let account = test_account("OVERLAY");

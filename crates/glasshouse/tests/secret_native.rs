@@ -190,7 +190,7 @@ fn the_store_says_which_of_its_sources_is_in_force() {
         Err(Unavailable::UnsupportedPlatform) => {
             assert_eq!(description, UNSUPPORTED_PLATFORM_LABEL);
         }
-        Err(Unavailable::StoreUnreachable) => {
+        Err(Unavailable::StoreUnreachable(_)) => {
             assert_eq!(description, STORE_UNREACHABLE_LABEL);
         }
     }
@@ -284,9 +284,15 @@ fn test_account(suffix: &str) -> String {
 fn a_credential_in_the_native_store_is_readable_there_and_invisible_to_the_environment() {
     const VALUE: &str = "sk-native-only-0123456789abcdefghijklmn";
 
-    let Ok(native) = NativeSecretStore::detect() else {
-        eprintln!("SKIPPED: the native secure store would not open in this session");
-        return;
+    let native = match NativeSecretStore::detect() {
+        Ok(native) => native,
+        Err(refusal) => {
+            eprintln!(
+                "SKIPPED: the native secure store would not open in this session: {}",
+                refusal.reason()
+            );
+            return;
+        }
     };
 
     let account = test_account("INVISIBLE");
@@ -337,9 +343,15 @@ fn a_credential_in_the_native_store_is_readable_there_and_invisible_to_the_envir
 fn deleting_a_credential_that_is_not_there_is_success() {
     const VALUE: &str = "sk-delete-twice-abcdefghijklmnop01234567";
 
-    let Ok(native) = NativeSecretStore::detect() else {
-        eprintln!("SKIPPED: the native secure store would not open in this session");
-        return;
+    let native = match NativeSecretStore::detect() {
+        Ok(native) => native,
+        Err(refusal) => {
+            eprintln!(
+                "SKIPPED: the native secure store would not open in this session: {}",
+                refusal.reason()
+            );
+            return;
+        }
     };
 
     let account = test_account("DELETE");

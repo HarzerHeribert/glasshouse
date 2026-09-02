@@ -185,20 +185,27 @@ impl SessionRouting {
     /// credential are serving this harness's session, now that it is starting.
     ///
     /// Called by `crate::profile`'s gateway path, which is the only place
-    /// that knows all three of the harness, the protocol chosen for it, and
-    /// the model the launch profile named. The gateway itself knows none of
-    /// them — it knows where to forward bytes.
+    /// that knows all three of the harness, the protocol resolved for it,
+    /// and the model the launch profile named. The gateway itself knows
+    /// none of them — it knows where to forward bytes.
+    ///
+    /// `protocol` is the **served** protocol, not necessarily the one the
+    /// harness itself speaks: `crate::profile::apply_gateway` (Phase 56,
+    /// GH-GATEWAY-TRANSLATE-LAUNCH) hands this the pair table's `to` slug
+    /// for a translated launch, so a served-but-not-native pairing binds a
+    /// real route the same way a native one always has.
     ///
     /// The assignment names the **serving** backend, which is the first
     /// configured one. Nothing here chooses; the choice was made when the
     /// upstream was built, and this records it.
     pub fn bind(&self, harness: &str, protocol: &str, model: AssignedModel, upstream: &Upstream) {
         let Some(backend) = upstream.serving().as_routing_backend(protocol, &model) else {
-            // The serving backend has no route for the protocol the profile
-            // resolved to. `apply_gateway` refuses that case before a child
-            // exists, so reaching here means the two disagreed; recording an
-            // assignment that names a route which does not exist would be
-            // worse than recording none.
+            // The serving backend has no route for `protocol`. `apply_gateway`
+            // refuses both the unserved and the table-refused case before a
+            // child exists, so reaching here means the caller and this
+            // backend disagreed about what the serving backend carries;
+            // recording an assignment that names a route which does not
+            // exist would be worse than recording none.
             return;
         };
         let mut state = self.lock();

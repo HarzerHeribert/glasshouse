@@ -438,7 +438,7 @@ Fixed architectural requirements
 
 ☑ Define a SecretStore abstraction independent from project memory and provider configuration.
 ☑ Prefer the macOS Keychain for user-entered provider secrets on macOS when available.
-☐ Prefer Windows Credential Manager for user-entered provider secrets on Windows when available.
+☑ Prefer Windows Credential Manager for user-entered provider secrets on Windows when available.
 ☐ Prefer a Secret Service-compatible keyring on Linux when available.
 ☑ Allow environment-variable references as a cross-platform secret source.
 ☑ Provide a clearly labeled fallback when a native secure secret store is unavailable.
@@ -1951,7 +1951,7 @@ Recorded 2026-08-31 from the user's instruction of record: *"I want to be able t
 ☑ Record per-harness task efficiency — tokens, wall-clock, request count, and outcome by task class — so that harness choice can rest on evidence rather than on which vendor bills for it.
 ☑ Prefer, for a stated task the user has not assigned a harness to, the harness with the better observed efficiency for that task class, and say why.
 ☑ Give the routing candidate set a subscription and model axis, so the same harness is ranked across every subscription allowed to serve it.
-☐ Never charge a task to a subscription the user's rules did not allow for that harness or tier, and announce which subscription served each session.
+☑ Never charge a task to a subscription the user's rules did not allow for that harness or tier, and announce which subscription served each session.
 ☑ Keep the decoupling opt-in per launch profile, so an existing profile keeps its native pairing until the user changes it.
 ☐ Cover each supported harness/provider/protocol pairing with an end-to-end test through the shipped binary against a fixture upstream before offering it.
 

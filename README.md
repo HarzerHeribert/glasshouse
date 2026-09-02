@@ -19,7 +19,7 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`███████████████████████████████████░░░░░` 1194 / 1332 mandatory capabilities (89%)
+`███████████████████████████████████░░░░░` 1196 / 1332 mandatory capabilities (89%)
 
 <details>
 <summary>Per-phase breakdown (70 of 107 phases complete)</summary>
@@ -44,7 +44,7 @@ the authoritative specification and tracks what is done.
 | Phase 9B — Scoped harness wrappers and shims | 9/9 ✅ |
 | Phase 9C — Provider protocol model | 12/12 ✅ |
 | Phase 9D — Built-in provider templates | 14/14 ✅ |
-| Phase 9E — Secret storage | 11/13 |
+| Phase 9E — Secret storage | 12/13 |
 | Phase 9F — Direct provider launch profiles | 13/13 ✅ |
 | Phase 9G — Glasshouse local gateway process | 19/19 ✅ |
 | Phase 9H — Sticky gateway routing for harness-backed interactive sessions | 13/14 |
@@ -130,7 +130,7 @@ the authoritative specification and tracks what is done.
 | Phase 54 — Criteria before deeper cmux coupling | 4/4 ✅ |
 | Phase 54A — Setup and portability completion criteria | 10/10 ✅ |
 | Phase 55 — V1 completion definition | 23/23 ✅ |
-| Phase 56 — Harness–subscription decoupling: choose the harness, route the subscription and model | 8/12 |
+| Phase 56 — Harness–subscription decoupling: choose the harness, route the subscription and model | 9/12 |
 | Phase 56A — Entitlement pool and subscription broker: several accounts, one scheduler | 13/13 ✅ |
 | Phase 57 — Context firewall: tool-output compaction between harness and model | 27/27 ✅ |
 

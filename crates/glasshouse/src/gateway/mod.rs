@@ -524,6 +524,21 @@ impl Gateway {
     pub fn upstream(&self) -> &Upstream {
         &self.upstream
     }
+
+    /// The name of the provider this gateway is currently forwarding to —
+    /// map line 1954's gateway shape: a launch backed by
+    /// [`crate::profile::BackendResource::GlasshouseGateway`] does not know
+    /// which entitlement it will charge until this gateway has resolved and
+    /// started its upstream, and this is the one fact the launch path needs
+    /// to ask `EffectiveConfig::entitlement_for_provider` the same question
+    /// the direct-provider path asks before it ever exists.
+    ///
+    /// Delegates to `Upstream::serving`, which stays `pub(super)`: nothing
+    /// else about the upstream — its routes, its credential — is exposed
+    /// here or anywhere outside this module.
+    pub fn serving_provider(&self) -> &str {
+        self.upstream.serving().provider()
+    }
 }
 
 /// Stop accepting, join, and release the port.

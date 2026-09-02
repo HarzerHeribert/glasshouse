@@ -349,3 +349,40 @@ COMPLETE — the production code, the mutations and the manifest guard are all i
 place and green.
 
 State remains **LOCALLY VERIFIED**.
+
+---
+
+## 441 — CLOSED 2026-09-02 (`GH-WINDOWS-SECRET-STORE`, Opus 5 high, Red): the store opens under a logon that has one, and the round-trips ran on Windows
+
+### Phase 9E — Prefer Windows Credential Manager for user-entered provider secrets on Windows when available (line 441)
+
+Contract: Given a user-entered provider secret on Windows, when Glasshouse stores or reads it, it prefers Windows Credential Manager over the process environment and says which store it used — while never linking a store that only pretends to secure anything, and falling back observably, with the platform's own reason, when the native store is unavailable.
+
+State: **COMPLETE** — ruled 2026-09-02. The two entries above asked for one thing: the round-trips executing on Windows, and mutation `m1` re-run there. Both happened on the ARM64 VM. The refusal the first green Windows leg surfaced was the **session's**: Windows OpenSSH builds a public-key session's token with an S4U logon that carries no primary credentials, and Credential Manager is scoped to a logon session, so every `CredReadW`/`CredWriteW`/`CredDeleteW` from the runner's ssh session answered `1312 ERROR_NO_SUCH_LOGON_SESSION` — measured directly against `advapi32` with no Rust in the call. The product was reaching a real Credential Manager and being refused exactly as its fallback is designed to be; the runner was proving nothing. The runner now runs the unchanged `run-glasshouse-ci.cmd` through a scheduled task registered `-LogonType Interactive` under the same CI user (`scripts/dev/windows/run-in-session.ps1`, invoked by `scripts/dev/glasshouse-windows-ci`; no password, no new credential anywhere; it fails loudly with no interactive session rather than running in session 0 and skipping quietly; it never kills a run). Under that logon the two targets ran **ten times each with zero `SKIPPED`** (lib `secret::native` 19/19 ×10, `tests/secret_native.rs` 7/7 ×10; the five tests that skipped on `ff57ddb` each ran 10 of 10), and `a_credential_stored_in_the_native_store_resolves_and_deletes` has `cmdkey /list` as an outside witness — Credential Manager's own CLI saw the item appear and disappear.
+
+Production evidence:
+- `crates/glasshouse/src/secret/native.rs` — `Unavailable::StoreUnreachable(StoreRefusal)`: the refusal now carries `classify`'s fixed text plus the platform's own status, taken from the only two `keyring::Error` variants whose payload is a status code (`PlatformFailure`, `NoStorageAccess`) and never from store data; `Unavailable::reason()` renders it, and `integrations::doctor` and the Settings overlay already print `reason()` after *"native secure store: unavailable"* — so a user on a session without a credential store now reads `Windows ERROR_NO_SUCH_LOGON_SESSION` beside the fallback
+- `crates/glasshouse/src/secret/native.rs` — `backend::probe`, `backend::platform_status`; `PreferNativeSecretStore::detect` unchanged in shape
+- `scripts/dev/glasshouse-windows-ci`, `scripts/dev/windows/run-in-session.ps1` — the runner's interactive-logon path (process, not product; recorded because the platform claim rests on it)
+
+Regression evidence:
+- `secret_native::a_credential_in_the_native_store_is_readable_there_and_invisible_to_the_environment`, `secret_native::deleting_a_credential_that_is_not_there_is_success` — ran on the VM, 10/10, not skipped
+- `secret::native::tests::a_credential_stored_in_the_native_store_resolves_and_deletes`, `the_native_store_is_preferred_over_the_environment`, `a_native_store_credential_reaches_a_launch_overlays_environment` — ran on the VM, 10/10, not skipped
+- `secret::native::tests::an_unreachable_stores_reason_carries_the_platforms_own_status` (new), `a_store_error_never_carries_anything_the_store_returned` (extended to the carried status)
+
+| mutation | vocabulary | result | killed by |
+|---|---|---|---|
+| `PreferNativeSecretStore::detect`: `native: NativeSecretStore::detect(),` → `native: Err(Unavailable::UnsupportedPlatform),` — compiled and run **on the Windows ARM64 VM** under the interactive logon | `m1` (drop-the-native-store) | **killed** | `secret_native::a_credential_in_the_native_store_is_readable_there_and_invisible_to_the_environment`; also `secret::native::tests::the_native_store_is_preferred_over_the_environment`, `a_native_store_credential_reaches_a_launch_overlays_environment` |
+
+> m1 observed (VM): `assertion left == right failed — left: None, right: Some("Windows Credential Manager")` (`tests/secret_native.rs:335`); `the native store must win` (`native.rs:1465`); `a direct-provider profile with a resolvable credential: CredentialUnavailable { … }` (`native.rs:1575`). `test result: FAILED. 17 passed; 2 failed` and `FAILED. 6 passed; 1 failed`. Restore verified by sha256, both sides `15dd73b0…6d81`; the VM re-synced to the restored tree. On the old session-0 runner all three of these tests SKIPPED, so `m1` would have SURVIVED — the finding the batch-51 entry said to expect.
+
+Gates: macOS `secret::native` 19/19 and `secret_native` 7/7 with `--nocapture` and no `SKIPPED`; fmt, clippy clean; `blast-radius.sh --targeted` exit 0. The worker's full blast radius went red on the lib target's PTY-fixture family (*the fake harness never exited*, six tests) and was attributed to HEAD under a loaded machine with two runs (§34) — the gatekeeper-scan family this project has recorded before, not this package's.
+
+Recorded scope limits — stated by the worker, not discovered later:
+- proves Credential Manager for a logged-on user; a Windows service, a Remote Desktop session and a roaming profile are untested, and `1312` is exactly what the first of those would produce — the refusing path is now legible, and it is still the refusing path
+- one VM, one Windows build (ARM64), one user profile, an empty credential store
+- `describe()`'s three fixed labels did not widen (an `integrations` test pins them); the reason is on the next line, in `reason()`
+- `run-in-session.ps1` has no test of its own; its evidence is that it ran the real `build` and `test` batches end to end and took the five skips to zero
+- the report carried no ```glasshouse-facts block; every artifact above is quoted from its body
+
+---

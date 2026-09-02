@@ -995,9 +995,18 @@ impl glasshouse::secret::SecretStore for EntitlementScopedSecrets<'_> {
 /// exists. `None` is announced as what it is — no entry names this resource,
 /// or the gateway has not assigned an upstream yet — rather than as a
 /// entitlement nobody configured.
+///
+/// `gateway_provider` is read only for the `GlasshouseGateway` / `None` case:
+/// the gateway's serving provider once it is known, so that case can say
+/// *which* provider no entry names instead of the pre-Phase-56/1954-gateway
+/// text that was true only because nothing asked yet. `None` there means
+/// exactly what it always meant — the gateway has not resolved an upstream
+/// for this call, which is still true of every caller other than
+/// `launch_session`'s gateway branch and `resume_session`'s announcement.
 fn announce_entitlement(
     entitlement: Option<&glasshouse::config::ResolvedEntitlement>,
     profile: &glasshouse::profile::LaunchProfile,
+    gateway_provider: Option<&str>,
 ) {
     use glasshouse::profile::BackendResource;
 
@@ -1014,16 +1023,44 @@ fn announce_entitlement(
                 "glasshouse: no `[entitlements]` entry names provider `{provider}`, so no \
                  entitlement rule applies to this session."
             ),
-            BackendResource::GlasshouseGateway => eprintln!(
-                "glasshouse: the Glasshouse gateway assigns this session's upstream when it \
-                 starts, so no entitlement is named at launch."
-            ),
+            BackendResource::GlasshouseGateway => match gateway_provider {
+                Some(provider) => eprintln!(
+                    "glasshouse: no `[entitlements]` entry names the gateway's provider \
+                     `{provider}`, so no entitlement rule applies to this session."
+                ),
+                None => eprintln!(
+                    "glasshouse: the Glasshouse gateway assigns this session's upstream when it \
+                     starts, so no entitlement is named at launch."
+                ),
+            },
             BackendResource::Native => eprintln!(
                 "glasshouse: no entitlement describes {}'s own sign-in.",
                 profile.harness.display_name()
             ),
         },
     }
+}
+
+/// Line 1954's refusal check, extracted once so the direct/native path
+/// (asked before the gateway exists) and the gateway path (asked after it
+/// starts, once its serving provider is known) apply exactly one spelling of
+/// the refusal text — see practice §35 on what happens when a check like
+/// this gets copied instead.
+fn entitlement_refusal_message(
+    entitlement: Option<&glasshouse::config::ResolvedEntitlement>,
+    harness: glasshouse::integrations::IntegrationId,
+    launch_profile_name: &str,
+) -> Option<String> {
+    let entitlement = entitlement?;
+    let refused = entitlement.rules().refusal(harness, None)?;
+    Some(format!(
+        "glasshouse: not starting this session — entitlement `{}` does not serve {refused}, \
+         and launch profile `{}` would charge it. Change the rule under `[entitlements.{}]`, \
+         or launch under a profile whose entitlement serves this work.",
+        entitlement.name(),
+        launch_profile_name,
+        entitlement.name()
+    ))
 }
 
 /// Which destinations a caller can actually *use*, which is not the same
@@ -5612,7 +5649,11 @@ fn launch_session(
         .as_ref()
         .and_then(|routed| routed.chosen().entitlement())
         .map(|entitlement| entitlement.name().to_owned());
-    let entitlement = match &chosen_entitlement_name {
+    // `mut`: the `GlasshouseGateway` arm below overwrites this once the
+    // gateway has started and its serving provider is known — see the
+    // consult after `start_if_required_with_degrade_sink`. For every other
+    // backend this is the final value.
+    let mut entitlement = match &chosen_entitlement_name {
         Some(name) => match effective.entitlements() {
             Ok(pool) => pool.into_iter().find(|entry| entry.name() == name),
             Err(err) => {
@@ -5628,20 +5669,27 @@ fn launch_session(
             }
         },
     };
-    if let Some(entitlement) = &entitlement
-        && let Some(refused) = entitlement.rules().refusal(launch_profile.harness, None)
-    {
-        eprintln!(
-            "glasshouse: not starting this session — entitlement `{}` does not serve {refused}, \
-             and launch profile `{}` would charge it. Change the rule under `[entitlements.{}]`, \
-             or launch under a profile whose entitlement serves this work.",
-            entitlement.name(),
-            launch_profile.name,
-            entitlement.name()
-        );
-        return Ok(ExitCode::FAILURE);
+    // Every backend but the gateway asks and announces right here, before
+    // anything else is resolved. A `GlasshouseGateway` profile cannot be
+    // asked yet — `entitlement_for` returns `None` for it by construction,
+    // because no provider is assigned until the gateway starts below — so
+    // its consult, refusal and announcement happen once that provider is
+    // known (see `start_if_required_with_degrade_sink`, further down).
+    let is_gateway_backend = matches!(
+        launch_profile.backend,
+        glasshouse::profile::BackendResource::GlasshouseGateway
+    );
+    if !is_gateway_backend {
+        if let Some(message) = entitlement_refusal_message(
+            entitlement.as_ref(),
+            launch_profile.harness,
+            &launch_profile.name,
+        ) {
+            eprintln!("{message}");
+            return Ok(ExitCode::FAILURE);
+        }
+        announce_entitlement(entitlement.as_ref(), &launch_profile, None);
     }
-    announce_entitlement(entitlement.as_ref(), &launch_profile);
 
     // Phase 9K: the response profile is resolved *here*, on the production
     // launch path, through the same `EffectiveConfig::response_profile`
@@ -5780,6 +5828,39 @@ fn launch_session(
             return Ok(ExitCode::FAILURE);
         }
     };
+
+    // Phase 56/1954, the gateway shape: now that the gateway has started,
+    // its serving provider is known (`Gateway::serving_provider`), and this
+    // asks the same question the direct/native path already asked above —
+    // the same `EntitlementRules::refusal` check, the same refusal text
+    // (`entitlement_refusal_message`), the same announcement — for the one
+    // launch that could not be asked before the gateway existed.
+    // `pool_entitlements_for` still returns nothing for `GlasshouseGateway`
+    // (map line 1954's cause 3 stays true of the *router*), so
+    // `chosen_entitlement_name` above is never `Some` for this backend; this
+    // is the whole of the gateway's consult.
+    if is_gateway_backend {
+        let gateway_provider = gateway.as_ref().map(|gateway| gateway.serving_provider());
+        entitlement = match gateway_provider {
+            Some(provider) => match effective.entitlement_for_provider(provider) {
+                Ok(entitlement) => entitlement,
+                Err(err) => {
+                    eprintln!("glasshouse: {err}");
+                    return Ok(ExitCode::FAILURE);
+                }
+            },
+            None => None,
+        };
+        if let Some(message) = entitlement_refusal_message(
+            entitlement.as_ref(),
+            launch_profile.harness,
+            &launch_profile.name,
+        ) {
+            eprintln!("{message}");
+            return Ok(ExitCode::FAILURE);
+        }
+        announce_entitlement(entitlement.as_ref(), &launch_profile, gateway_provider);
+    }
 
     // 56A line 1969: the overlay may only resolve the serving account's own
     // credential — see `EntitlementScopedSecrets`. With zero or one
@@ -10194,6 +10275,15 @@ fn resume_session(
     // is one the person asked to continue, and a resume is not the moment to
     // refuse — the comment above `overlay_resolution` says the same of an
     // overlay that no longer resolves.
+    //
+    // The gateway shape: `entitlement_for` still answers `None` for
+    // `GlasshouseGateway` by construction, so a resumed gateway-backed
+    // session reads the provider off the gateway `overlay_resolution` above
+    // already started for this resume — no second gateway is started here —
+    // and asks `entitlement_for_provider` instead, exactly as
+    // `launch_session`'s gateway branch does. `None` when that overlay
+    // itself did not resolve (reported above already): the fallback text is
+    // still true then, because nothing here knows the provider either.
     let resume_entitlement = {
         let profile = record
             .launch_profile
@@ -10201,9 +10291,24 @@ fn resume_session(
             .and_then(|name| effective.launch_profile(name, selection.id()).ok())
             .map(|layered| layered.value)
             .unwrap_or_else(|| glasshouse::profile::LaunchProfile::native(selection.id()));
-        match effective.entitlement_for(profile.harness, &profile.backend) {
+        let gateway_provider = matches!(
+            profile.backend,
+            glasshouse::profile::BackendResource::GlasshouseGateway
+        )
+        .then(|| {
+            overlay_resolution
+                .as_ref()
+                .and_then(|(_, _, gateway)| gateway.as_ref())
+        })
+        .flatten()
+        .map(|gateway| gateway.serving_provider());
+        let lookup = match gateway_provider {
+            Some(provider) => effective.entitlement_for_provider(provider),
+            None => effective.entitlement_for(profile.harness, &profile.backend),
+        };
+        match lookup {
             Ok(entitlement) => {
-                announce_entitlement(entitlement.as_ref(), &profile);
+                announce_entitlement(entitlement.as_ref(), &profile, gateway_provider);
                 entitlement
             }
             Err(err) => {

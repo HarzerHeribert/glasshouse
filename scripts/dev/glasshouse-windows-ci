@@ -277,13 +277,16 @@ else
   # why. Ship the copy this checkout has on every run, so the VM never drifts
   # from a file nobody reviewed.
   ci_runner_dir="$ci_repo/scripts/dev/windows"
-  if [[ ! -f "$ci_runner_dir/run-glasshouse-ci.cmd" || ! -f "$ci_runner_dir/install-source.ps1" ]]; then
-    print -u2 "Missing $ci_runner_dir/{run-glasshouse-ci.cmd,install-source.ps1}"
-    exit 2
-  fi
+  for ci_runner_file in run-glasshouse-ci.cmd install-source.ps1 run-in-session.ps1; do
+    if [[ ! -f "$ci_runner_dir/$ci_runner_file" ]]; then
+      print -u2 "Missing $ci_runner_dir/$ci_runner_file"
+      exit 2
+    fi
+  done
   scp "${ci_ssh_options[@]}" \
     "$ci_runner_dir/run-glasshouse-ci.cmd" \
     "$ci_runner_dir/install-source.ps1" \
+    "$ci_runner_dir/run-in-session.ps1" \
     "${ci_endpoint}:C:/ci/"
 
   ssh "${ci_ssh_options[@]}" "$ci_endpoint" \
@@ -292,13 +295,30 @@ fi
 
 print "Running Windows ARM64 CI mode: $ci_mode"
 if (( ci_dry_run )); then
-  print -r -- "dry-run: would run C:\\ci\\run-glasshouse-ci.cmd $ci_mode over ssh."
+  print -r -- "dry-run: would run C:\\ci\\run-in-session.ps1 -Mode $ci_mode over ssh."
 else
+  # WHY THIS GOES THROUGH `run-in-session.ps1` RATHER THAN THE .cmd DIRECTLY
+  # ----------------------------------------------------------------------
+  # Windows OpenSSH builds a public-key session's token with an S4U logon,
+  # which carries no primary credentials, and Windows Credential Manager is
+  # scoped to a logon session. Every `CredReadW`/`CredWriteW` issued from
+  # this ssh session answers 1312, ERROR_NO_SUCH_LOGON_SESSION -- measured
+  # on the VM on 2026-09-02, with no Rust in the call -- so `secret_native`'s
+  # round trips SKIPPED on a gate that otherwise reported PASS. That is the
+  # product behaving correctly and the RUNNER proving nothing.
+  #
+  # `run-in-session.ps1` runs the same `run-glasshouse-ci.cmd` through a
+  # scheduled task registered with `-LogonType Interactive`, which borrows
+  # the console session's own logon: no password, no credential in this
+  # repository, and Credential Manager answers. It streams the batch's log
+  # back over this channel and exits with the batch's own status.
+  #
   # `-n` redirects the remote command's standard input from /dev/null. Without
   # it the far side inherits THIS driver's stdin over the ssh channel, so a
   # test that drains stdin waits for an end of file that never comes when the
   # gate is run from a terminal. macOS already passes `< /dev/null` and the
   # Linux leg runs `docker run` without `-i`; this is the third leg finally
   # saying the same thing.
-  ssh -n "${ci_ssh_options[@]}" "$ci_endpoint" "C:\\ci\\run-glasshouse-ci.cmd $ci_mode"
+  ssh -n "${ci_ssh_options[@]}" "$ci_endpoint" \
+    "powershell.exe -NoLogo -NoProfile -NonInteractive -ExecutionPolicy Bypass -File C:\\ci\\run-in-session.ps1 -Mode $ci_mode"
 fi

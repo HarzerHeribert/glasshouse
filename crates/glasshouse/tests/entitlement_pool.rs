@@ -23,6 +23,8 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::Instant;
 
+use clap::Parser as _;
+
 use glasshouse::RuntimePaths;
 use glasshouse::config::{
     ConfigError, EffectiveConfig, EntitlementBacking, EntitlementCredential, EntitlementKind,
@@ -825,6 +827,21 @@ impl Binary {
         }
     }
 
+    /// A bootstrapped runtime over this fixture's own directories, for
+    /// reading the session store back after the binary runs — the same
+    /// pattern `tests/entitlement_broker.rs`'s own `Binary::runtime` uses.
+    fn runtime(&self) -> glasshouse::Runtime {
+        let cli = glasshouse::Cli::try_parse_from([
+            "glasshouse",
+            "--data-dir",
+            self.base.join("data").to_str().unwrap(),
+            "--config-dir",
+            self.base.join("config").to_str().unwrap(),
+        ])
+        .unwrap();
+        glasshouse::bootstrap(&cli, &self.root).unwrap()
+    }
+
     fn glasshouse(&self, args: &[&str]) -> Output {
         Command::new(env!("CARGO_BIN_EXE_glasshouse"))
             .arg("--scope")
@@ -1167,4 +1184,154 @@ fn the_shipped_binary_attaches_entitlements_to_support_work_candidates() {
          candidate list:\n{said}"
     );
     assert!(!said.contains(VALUE_A), "{said}");
+}
+
+// ===========================================================================
+// Half three — Phase 56/1954, the gateway shape: `pool_entitlements_for`
+// still returns nothing for `GlasshouseGateway` (so the router never
+// attaches an entitlement to a gateway-backed candidate — that stays), but
+// the launch itself now asks `entitlement_for_provider` once the gateway has
+// started and its serving provider is known, through
+// `main.rs::launch_session`'s gateway branch. Through the shipped binary,
+// practice §35's reason: nothing in half one enters below `launch_session`,
+// so nothing there would notice that branch reverting to the pre-1954-gateway
+// behaviour (always `None`, never refused, never recorded).
+//
+// The provider's `base_url` is `tests/gateway_degrade.rs`'s own idiom for
+// "unreachable" — the fake harness below never sends the gateway a request,
+// so the address is never dialled and costs nothing.
+// ===========================================================================
+
+/// One provider behind the Glasshouse gateway, and one profile backed by it.
+/// Reuses `VAR_A`/`VALUE_A`, which [`Binary::glasshouse`] already sets on
+/// every spawn, rather than adding a third credential variable.
+fn gateway_profile_config() -> String {
+    format!(
+        "\n\
+         [providers.gw-probe]\ntemplate = \"anthropic-compatible\"\n\
+         base_url = \"http://127.0.0.1:1\"\ncredential_env = [\"{VAR_A}\"]\n\n\
+         [profiles.gateway-probe]\nharness = \"claude-code\"\n\n\
+         [profiles.gateway-probe.backend]\nkind = \"glasshouse-gateway\"\n"
+    )
+}
+
+/// The `entitlement` column of the one session record a single launch
+/// through `binary` created.
+fn recorded_entitlement(binary: &Binary) -> Option<String> {
+    let runtime = binary.runtime();
+    let sessions = glasshouse::session::ProjectSessions::open(&runtime).unwrap();
+    let records = sessions.store().list().unwrap();
+    assert_eq!(records.len(), 1, "one launch, one record: {records:#?}");
+    records[0].entitlement.clone()
+}
+
+/// **Test (a).** A gateway-backed launch whose serving provider is described
+/// by an `[entitlements.deny]` entry that denies this harness is refused by
+/// that entitlement's name — exactly as a direct-provider launch is refused
+/// (`tests/entitlements.rs::a_launch_whose_entitlement_denies_the_harness_is_refused_by_name_and_starts_nothing`)
+/// — and nothing starts: the fake harness never runs, so nothing ever
+/// reaches the gateway's upstream either.
+#[test]
+fn a_gateway_backed_launch_whose_entitlement_denies_the_harness_is_refused_and_starts_nothing() {
+    let config = format!(
+        "{}\n[entitlements.deny]\nkind = \"api-key\"\nprovider = \"gw-probe\"\n\
+         credential = {{ env = \"{VAR_A}\" }}\ndeny_harnesses = [\"claude-code\"]\n",
+        gateway_profile_config()
+    );
+    let binary = Binary::with_config(&config);
+
+    let refused = binary.glasshouse(&[
+        "launch",
+        "claude-code",
+        "--headless",
+        "--profile",
+        "gateway-probe",
+    ]);
+    let said = Binary::both_streams(&refused);
+    assert!(
+        !refused.status.success(),
+        "a gateway-backed launch charged to an entitlement whose rule denies the harness must \
+         be refused:\n{said}"
+    );
+    assert!(
+        said.contains("entitlement `deny` does not serve harness `claude-code`"),
+        "the refusal names the entitlement and the harness:\n{said}"
+    );
+    assert!(
+        binary.harness_invocations().is_empty(),
+        "nothing may have been started: {:?}",
+        binary.harness_invocations()
+    );
+    assert!(!said.contains(VALUE_A), "{said}");
+}
+
+/// **Test (b).** A gateway-backed launch whose serving provider is described
+/// by an entry with no denial proceeds: the announcement names it before the
+/// harness runs, and the session record it wrote carries that name — the
+/// same `entitlement` column `tests/entitlement_broker.rs`'s
+/// `the_session_record_names_the_entitlement_that_served_it` proves for the
+/// direct-provider path, now proved for the gateway one.
+#[test]
+fn a_gateway_backed_launch_whose_entitlement_admits_the_harness_proceeds_and_is_recorded() {
+    let config = format!(
+        "{}\n[entitlements.ok]\nkind = \"api-key\"\nprovider = \"gw-probe\"\n\
+         credential = {{ env = \"{VAR_A}\" }}\n",
+        gateway_profile_config()
+    );
+    let binary = Binary::with_config(&config);
+
+    let out = binary.glasshouse(&[
+        "launch",
+        "claude-code",
+        "--headless",
+        "--profile",
+        "gateway-probe",
+    ]);
+    let said = Binary::both_streams(&out);
+    assert!(out.status.success(), "the launch must succeed:\n{said}");
+    assert!(
+        said.contains("entitlement `ok`") && said.contains("will serve this session"),
+        "the launch says which entitlement serves it before the harness runs:\n{said}"
+    );
+    assert_eq!(binary.harness_invocations().len(), 1);
+    assert!(!said.contains(VALUE_A), "{said}");
+
+    assert_eq!(
+        recorded_entitlement(&binary).as_deref(),
+        Some("ok"),
+        "the record carries the entitlement that actually served"
+    );
+}
+
+/// **Test (c).** A gateway whose serving provider no `[entitlements]` entry
+/// names is never refused — announced as such, the launch proceeds, and the
+/// session record's `entitlement` column is `NULL`, the same "a resource no
+/// rule describes is never refused" preservation clause the direct-provider
+/// path already proves
+/// (`tests/entitlement_pool.rs::a_launch_no_entitlement_serves_carries_no_accounts_variable`),
+/// now proved for a provider reached only through the gateway.
+#[test]
+fn a_gateway_whose_provider_no_entitlement_names_is_announced_and_never_refused() {
+    let binary = Binary::with_config(&gateway_profile_config());
+
+    let out = binary.glasshouse(&[
+        "launch",
+        "claude-code",
+        "--headless",
+        "--profile",
+        "gateway-probe",
+    ]);
+    let said = Binary::both_streams(&out);
+    assert!(out.status.success(), "the launch must succeed:\n{said}");
+    assert!(
+        said.contains("no `[entitlements]` entry names the gateway's provider `gw-probe`"),
+        "the announcement names the provider no entry describes:\n{said}"
+    );
+    assert_eq!(binary.harness_invocations().len(), 1);
+
+    assert_eq!(
+        recorded_entitlement(&binary),
+        None,
+        "a gateway-backed session no entitlement describes must record none"
+    );
 }
