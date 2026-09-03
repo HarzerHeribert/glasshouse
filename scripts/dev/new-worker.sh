@@ -101,7 +101,7 @@ esac
 # the path inside the prompt that was unusable. Resolve it here, once.
 PACKET="$(cd "$(dirname "$PACKET")" && pwd)/$(basename "$PACKET")"
 
-ARM="FIRST, before reading anything: arm your continuity watch, or you will run out of context mid-package with nothing to show for it. Run Monitor(command: \"${REPO}/scripts/continuity-watch.sh --role worker\", persistent: true). It finds your session itself; if it prints CONTINUITY NOT ARMED, pass --session with the last path component of your scratchpad directory and run it again. THEN:"
+ARM="FIRST, before reading anything: arm your continuity watch, or you will run out of context mid-package with nothing to show for it. Run Monitor(command: \"${REPO}/scripts/continuity-watch.sh --role worker\", persistent: true). It finds your session itself; if it prints CONTINUITY NOT ARMED, pass --session with the last path component of your scratchpad directory and run it again. Never \`cd\` inside a shell command: use absolute paths and \`git -C\`. A \`cd\` followed by a read makes the permission classifier stop and ask, and nobody is watching your pane to answer (2026-09-03: three workers sat on that prompt for half an hour). THEN:"
 PROMPT="${ARM} Read ${PACKET} now and follow it exactly. Read ONLY the files its 'READ ONLY THIS' section names - reading more is the documented way workers waste context. Do not commit. Write your report to the path the packet's REPORT TO section gives."
 
 # Built here, before the --print-prompt short-circuit, so that path can also

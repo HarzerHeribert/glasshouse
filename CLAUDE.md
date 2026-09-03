@@ -164,6 +164,15 @@ task's actual substance.
 It reminds until you run `scripts/worker-ack.sh <name>`. Before starting new
 work, run `scripts/worker-ack.sh --list` and clear anything waiting.
 
+**And one watch none of the others replace — the permission prompt.** A worker
+that runs `cd <worktree> && grep …` trips auto mode's classifier and its pane
+sits on *Do you want to proceed?* with no token moving, which every other watch
+reads as thinking; on 2026-09-03 three workers sat that way for half an hour.
+Arm `Monitor(command: "PROMPT_WATCH_SELF=workspace:<yours> scripts/prompt-watch.sh",
+persistent: true)` in your first turn; it names the pane and the command, and
+`cmux send-key --workspace <ws> Enter` approves it. The launch prompt now tells
+workers never to `cd`.
+
 **That watch is yours, not the worker's, and it is not a continuity watch.** It
 reads the worker's *pane* from your session and tells *you* the pane went
 quiet — which is exactly what a worker that died of context looks like, and it
