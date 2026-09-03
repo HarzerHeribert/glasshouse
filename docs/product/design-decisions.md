@@ -4100,13 +4100,37 @@ declaration is a second reason, contributed by the only party that knows.
 
 **Successor package** (named here so this note is not another investigation
 that ends in a document — practice §83): *a scoped task-progress declaration*,
-carrying a CLI verb and a session-scoped store read in the shape
-`ReserveOverride` already has, wired into both construction sites, closing
-**1294 and 1610 together**. Its Phase −1 is the paragraph above: the field,
-both callers, the propagation path and both consumers all exist in production
-today, and the declaration is the one missing link. It is Amber, not Red — it
-adds a decision and a persisted scope, but touches no lifecycle, migration or
-platform code.
+carrying a CLI verb and a session-scoped, expiring store row, wired into both
+construction sites, closing **1294 and 1610 together**. Its Phase −1 is the
+paragraph above: the field, both callers, the propagation path and both
+consumers all exist in production today, and the declaration is the one
+missing link. `GH-TASK-PROGRESS` is the packet.
+
+Two corrections to this note, from probing the source one step further after
+first writing it:
+
+1. **It is Red, not Amber.** A session-scoped expiring row needs migration 28,
+   and a migration is Red in the tier table regardless of how small the
+   decision is.
+2. **`ReserveOverride`'s channel is configuration, not a CLI verb** —
+   `EffectiveConfig::reserve_override_sessions` → `config/routing_policy.rs`.
+   Its *shape* is still the thing to copy (session-scoped, and a no-match by
+   default so its arrival is a no-op for every existing caller), but its
+   *source* is deliberately not: a settings value is sticky, and a sticky
+   task-progress declaration re-creates the inversion by the slower route this
+   note's last paragraph warns about. The right precedent for the source is the
+   claims machinery that landed the same day — a CLI verb writing an expiring,
+   session-scoped row (`session/store/claims.rs`).
+
+**And the pin that guards this is narrower than the refusal it protects.**
+`tests/subscription_pressure.rs::the_policy_does_not_invent_task_completion`
+asserts `task_nearly_complete: false` appears **exactly once** and `true`
+nowhere — but its `production_source()` is `routing/pressure.rs` alone, up to
+that file's first `#[cfg(test)]`. The second construction site,
+`routing/disposable/mod.rs`'s per-candidate loop, is **not scanned**, so it
+could gain a `true` without the pin noticing — and it is the site that decides
+per candidate. Whoever wires the producer extends the scan to both files in the
+same change; that is not optional cleanup, it is the reason the pin exists.
 
 **What this deliberately does not do.** It does not infer progress from any
 signal Glasshouse already receives; `LifecycleEvent` stays binary and
