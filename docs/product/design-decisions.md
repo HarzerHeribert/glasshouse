@@ -3860,3 +3860,64 @@ When a free candidate that would otherwise be chosen is unreliable enough and an
 **By risk, not by count.** The register's refusals of 1534, 1535, 1545, 1129, 1044, 1294 and 1610 are superseded by the user's ruling that they matter: each gets a design note and a package sized by its mechanism, or a design note that says honestly why it cannot be built yet — but not a refusal by checkbox economics. Everything else open stays refused unless a producer lands.
 
 **Successors, named:** `GH-DECOMP-CONFIG` (Green, Sonnet high: `config/mod.rs` by concern, tests out), `GH-DECOMP-ROUTING-EVIDENCE` (Green, Sonnet high: ledger / readers / joins, tests out), `GH-DECOMP-SHELL` (Green: state / view / screens, tests out), `GH-DECOMP-ROUTING-SESSION`, `GH-DECOMP-MAIN` (after the memory package integrates: `commands/<name>.rs` per subcommand), `GH-TRIM-<module>` per split module, `GH-GATE-RERUN-ALONE` (Green, scripts), and the first dogfooding session.
+
+## Trims: `shell/mod.rs` — history moved out of comments by `GH-TRIM-SHELL`, 2026-09-03
+
+Rule 3's "move history out, behind a one-line pointer" landed here for the handful of blocks whose reasoning was worth keeping but not worth the lines in production code. Each subsection is what the in-code comment now points to.
+
+**The headless-viewport filter, in the `Event::Tick` arm.** `view::render_viewport` already refuses to draw a headless session's screen, so the filter on `state.viewport_grid()`'s producer looks redundant — a mutation deleting it was run rather than assumed, and it survived on the visible-drawing property but was caught by two others: `state.viewport_grid()` stops being an honest description of what is actually on screen the moment the filter is gone (a headless session's grid sits there stale-but-wrong instead of empty), and a headless session's own output would then make the grid differ every tick, repainting continuously for a session nobody is looking at. Both are real behaviour a screenshot cannot see.
+
+**`resource_capacity_line`, line 1659 and line 1663, precisely.** Line 1659 collapses `TelemetryClass::Authoritative` and `Observed` to `"measured"` — the map line names four words, not the five `crate::provider::quota` itself tracks, and both source classes are real readings nobody inferred. `Estimated` and `Manual` keep their own words, and no reading at all is `"unknown"`, never a number. Separately, `RemainingCapacityScore::percent`'s `Exact`/`Estimated` split (used once a score exists) is deliberately not the same test as `state.telemetry_class()`, which answers the whole resource's *best* source across every pool and would print "measured" even when the one number actually shown here is an estimate — two different questions that happen to share vocabulary. Line 1663's reserve note is gated at `band <= CapacityBand::Reserve`, the exact boundary `evaluate_reserve_spend` itself gates real spend on; above it the reserve has influenced nothing this round, so nothing about it is shown.
+
+**`forecast_note`'s wording, in full.** Map line 1283 is *"surface exhaustion forecasts as estimates rather than promises"*, and the function computes one division of a measured remaining count by a median of bucket counts — a figure with real error bars a reader will act on — so every sentence it can produce is hedged in the text itself rather than by a disclaimer somewhere else. "estimated to last about …", never "will last": `about` because the rate is a median over five-minute buckets, `estimated` because the inputs are the ledger's own history, not anything a provider promised. "may not reach its reset at the current rate", never "will run out" and never "guaranteed": `may` because the forecast holds only while the rate does, and `at the current rate` says exactly which assumption it rests on. Hours render to one decimal rather than a timestamp because a clock time reads as a commitment about a moment, and this is not one.
+
+**`spawn_event_tail`, why the interface cannot simply subscribe to its own bus.** A lifecycle hook runs as its own short-lived process — the reason `glasshouse hook` exists at all — and its events are minted on *that* process's bus, then it exits; nothing on the shell's own bus ever sees them, so an interface that only subscribed to itself would show a session's own keystrokes and never once show it finishing a turn. The project's event log is the seam both processes write into, which is why this reads the log on its own thread instead.
+
+## Coupling: the physical split is done, the interfaces are deliberately not — user ruling, 2026-09-03
+
+*Recorded from the user's ruling at the close of Phase 59's decomposition
+waves, in the user's own terms.*
+
+**The state after the splits is good enough.** The acute damage is gone: no
+10,000–16,000-line production modules, responsibilities are findable, a change
+has a smaller review and test surface, and the size ratchet prevents relapse.
+
+**What is left is not a defect.** Several of the new files are physically
+separated but still talk to each other through many re-exports and
+`pub(super)` accesses. The physical separation exists; the domain interfaces
+are in places still broad. **This is an improvement, not a repair**, and it
+does not get a second refactoring wave.
+
+**How the decoupling happens instead — organically, from evidence:**
+
+1. When two modules repeatedly have to be changed together, re-cut the shared
+   responsibility.
+2. When one module needs many internal details of another, introduce a small
+   domain API — small, and for that need.
+3. Remove a re-export only once real new code paths have shown which interface
+   is durably needed.
+4. **No abstract traits and no extra crates invented for the sake of "clean
+   architecture."**
+5. Every new function stays in the module that owns it. `main.rs` and each
+   `mod.rs` are a dispatch and composition layer, nothing else.
+
+**The distinction that matters:** not *decouple everything preventively now*,
+but *accrue no new coupling debt from here on*. Rule 5 is the enforcing half
+and applies to every package from today.
+
+**Order of work, per the same ruling:** close Phase 59 cleanly — its remaining
+open lines, `shell/mod.rs` included — then return to product work and
+dogfooding. After a run of real changes, the shared diffs show which module
+boundaries are actually wrong, and that is a far better basis for further
+decoupling than a theoretical architecture exercise.
+
+**How this gets revisited, and why not yet.** The signal the ruling names is
+**co-change**: which files keep appearing in the same commit. It is
+computable from `git log` in about forty lines (`scripts/co-change.py`, named
+here as the successor, together with a `pub(super)`/re-export census per
+module). It is deliberately **not written yet**: the last three sessions'
+history is dominated by the decomposition itself, so a co-change measure taken
+now would mostly report which files a *split* touched together — the exact
+artefact the ruling says not to reason from. It becomes worth writing after a
+stretch of ordinary product changes, and the trigger to write it is that
+stretch existing, not a date.

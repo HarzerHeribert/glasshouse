@@ -63,6 +63,26 @@ for Red. What changes:
    *design it* (map line 2054). Everything else open stays refused unless a producer
    lands.
 
+8. **No new coupling debt — user ruling 2026-09-03, and it outlives Phase 59.**
+   The splits fixed the physical shape. Several successors still talk through
+   broad `pub(super)` surfaces and re-exports, and **that is accepted, not a
+   defect**: it is an improvement, not a repair, and it gets **no second
+   refactoring wave**. Decoupling happens organically, from evidence — re-cut
+   a shared responsibility only when two modules keep having to change
+   together; introduce a small domain API only when one module needs many
+   internals of another; remove a re-export only when real new code paths show
+   which interface is durably needed. **Never invent an abstract trait or a new
+   crate for the sake of clean architecture.** The enforcing half binds every
+   package from today, Phase 59 or not: **a new function stays in the module
+   that owns it, and `main.rs` and every `mod.rs` are a dispatch and
+   composition layer only.** `design-decisions.md` (*Coupling: the physical
+   split is done*) carries the ruling and names `scripts/co-change.py` as the
+   successor that measures which boundaries are actually wrong — written after
+   a stretch of real product changes, not before, because today's history is
+   dominated by the decomposition itself and would mostly report what a split
+   touched. Order of work: close Phase 59's remaining lines, then product work
+   and dogfooding.
+
 Order of the splits: `config`, `routing/evidence`, `shell` first (no live worker
 touches them), then `routing/session`, then `main.rs → commands/` once the package
 holding `main.rs` integrates; a trim package follows each split; dogfooding runs
