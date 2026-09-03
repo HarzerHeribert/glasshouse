@@ -65,11 +65,38 @@ ever has to be diagnosed after the fact, give `SessionLifecycle::Failed` a
 reason and surface it in `sessions show`. One occurrence, and the live path
 already reports correctly.
 
-**What this session did not cover, and why.** The interactive half — a real
-harness doing real work, with memory extraction, the firewall hook and the
-shell watched — did not run. Both recorded sessions are this orchestrator's
-own non-TTY invocations, correctly refused. `glasshouse launch` needs a
-terminal on both ends, and this context cannot drive an interactive TUI or
-read a pane back. **The lane needs a human-attended run**, or a harness
-started in a pane by hand and left to work; that is where the defects this
-lane exists for actually live, and none of them can be reached from here.
+**The interactive half, run properly.** A real `claude-code` session was
+launched by the shipped binary into a cmux pane, given a real task (read
+`events/mod.rs`, describe `LifecycleEvent`), and exited. It answered
+correctly; 69k tokens, ~$0.91. Glasshouse tracked it end to end: `active` /
+`idle` while waiting, `task continuity 1 task completed`, the native session
+id captured, `resumable` after exit, and the resume line printed. That part of
+the product works.
+
+**The finding, and it is ours not Glasshouse's.** On exit, Claude Code warned:
+*"Permission allow rule (.claude/settings.json): `Write(.../report-*.md)` is
+not matched by file permission checks — only `Edit(path)` rules are."* Both
+worker-report allow-rules in this repo are written as `Write(...)` and have
+therefore never applied. **That is why workers stall on a permission prompt
+when they write their report** — a stall this orchestrator hand-approved
+several times on 2026-09-03 while believing it was a `cd` classifier issue.
+One demonstrated cause, repeated effect: **defect**, fix is `Write(` →
+`Edit(` in `.claude/settings.json`, and it is the user's call because it
+widens what an agent may do unattended.
+
+**Recorded uncertainties, not defects.** `model` stays *"the harness's own
+default"* and pairing class `unknown` although the harness's own status line
+names the model — honest by design (Glasshouse never invents a reading), but a
+visible gap. `memory extract` is a command rather than something this bare
+launch ran, so a one-turn session left no memories; whether that is expected
+without the firewall hook installed was not established and did not block
+anything.
+
+**Method note.** An earlier attempt at this session was abandoned on a false
+conclusion — that this context could not drive an interactive TUI or read a
+pane back. Both are wrong. `cmux read-screen --surface <s>` reads the pane,
+and `cmux send` takes its text **positionally**; the `--text` flag does not
+exist, so cmux typed the literal string `--text …` into the shell. The
+recovery is the one `scripts/dev/new-worker.sh` already implements: wait for a
+prompt, send, read the line back and confirm it is intact, `C-u` and retry if
+not, and only then press Enter.
