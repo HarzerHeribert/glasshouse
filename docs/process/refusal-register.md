@@ -66,7 +66,7 @@ Do not let a `no` become a `yes` because the line looks close.
 | ~~1291~~ | **CLOSED.** Unblocked by 1288; map line is ☑ |
 | ~~1319~~ | **CLOSED.** `gateway/mod.rs:614` now passes the quota through |
 | ~~1290~~ | **CLOSED 2026-08-30** by `GH-RESERVE-INPUTS`. `user_override` is now set by `ReserveOverride`, a *scope* rather than a switch — there is no spelling of it that means every session |
-| ~~1294~~ | **NOT A CLUSTER A ROW — MOVED to Standing refusals, 2026-08-30.** The constant is still there (`routing/disposable.rs:730`), but it is a **refusal written into the source**, not a gap awaiting wiring. `provider/quota.rs:2265-2285`: *"no path reports task progress … the only completion fact available there is that the turn is already over … A fabricated value here does not degrade the policy, it inverts it."* Two independent readers reached this on 2026-08-30 — the orchestrator, and `GH-REGISTER-AUDIT`. **Do not package.** |
+| ~~1294~~ | **NOT A CLUSTER A ROW — MOVED to Standing refusals, 2026-08-30.** The constant is still there (`routing/disposable.rs:730`), but it is a **refusal written into the source**, not a gap awaiting wiring. `provider/quota.rs:2265-2285`: *"no path reports task progress … the only completion fact available there is that the turn is already over … A fabricated value here does not degrade the policy, it inverts it."* Two independent readers reached this on 2026-08-30 — the orchestrator, and `GH-REGISTER-AUDIT`. **~~Do not package.~~ SUPERSEDED by the user's ruling of 2026-09-03** (top of this file; map line 2054): 1294 is one of the seven named product-relevant lines and its refusal no longer says *do not package*. What survives the ruling is the *diagnosis*, and it is the whole design problem: **there is no producer for task progress**, so a packet that claims to close 1294 by wiring the existing constant still fails Phase −1 — inventing the value is the error this row was written about. The permitted work is the missing producer (`CLAUDE.md`: *missing producers required by already committed behaviour are permitted*), and until one exists what 1294 owes is a **design note** saying so, not an implementation packet. Same for **1610**, which needs the same signal. |
 
 ### Cluster B — a mechanism built, tested, and never installed in production *(in-repo: YES)*
 
@@ -672,7 +672,9 @@ deferred experiment gate (Phases 52 and 53) is not a blocker and not in the acti
 execution queue; a refusal is not a deferral; and neither is an open line.
 
 **Not work, so nobody re-derives them:** Cluster E, Cluster F, and the standing
-refusals 1294, 828, 829, 1323. (442 left this list on 2026-09-03 — approved, above.)
+refusals 828, 829, 1323. (**442 and 1294 both left this list on 2026-09-03** — 442
+approved, 1294 named product-relevant; see the ruling at the top. 1294 is not
+"work" as wiring, but its missing producer is.)
 
 
 ## A THIRD VERIFICATION TOOL WAS ANSWERING ABOUT THE WRONG TREE
@@ -1248,7 +1250,7 @@ not.** Six were checked against current source and the register:
 | line | phase | why it is one line from done |
 |---|---|---|
 | 1263, 1267 | 32D | Cluster M — no spend counter, no latency reader |
-| 1294 | 32F | standing refusal; the source itself refuses it |
+| 1294 | 32F | ~~standing refusal~~ — superseded 2026-09-03; needs a task-progress producer, not wiring |
 | 1158 | 30 | refused in `phase-30.md` |
 | **514** | 9H | **REFUSED — missing caller** |
 | **531** | 9I | **REFUSED — missing caller *and* consumer** (Cluster D holds; one supporting fact corrected) |
