@@ -79,6 +79,7 @@ mod ingress;
 pub mod session;
 pub mod translate;
 pub mod upstream;
+mod usage;
 
 use std::fmt;
 use std::io::{ErrorKind, Read};

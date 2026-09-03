@@ -558,8 +558,10 @@ impl SessionRouting {
         )
         .with_first_byte_at(exchange.first_byte_at)
         // Line 1331/1332's pair: `translate::serve` derives both from the
-        // canonical events it already had to decode, and `None` on a
-        // relayed exchange (this method's own caller never gives it one),
+        // canonical events it already had to decode, and since the
+        // 2026-09-03 ruling `ingress::forward` latches both as the markers
+        // pass the relay seam — `ingress`'s own "a seventh thing may now be
+        // recorded". `None` on either path where no marker was recognised,
         // exactly like `first_byte_at` above.
         .with_first_token_at(exchange.first_token_at)
         .with_first_tool_call_at(exchange.first_tool_call_at)
@@ -568,9 +570,9 @@ impl SessionRouting {
         // instant each path sent its upstream request — `ingress::forward`
         // and `translate::serve` each hold their own `Instant` and neither
         // hands one back through `ExchangeReading`, because the accept
-        // loop's `dispatched_at` is the hand-off and not the send. A relayed
-        // exchange carries the first-byte and completion offsets and `None`
-        // for the two token offsets, exactly as it does one line up.
+        // loop's `dispatched_at` is the hand-off and not the send. Each
+        // offset is stamped from the same clock reading as the `*_at` one
+        // line up, on whichever path stamped it.
         .with_first_byte_ms(exchange.first_byte_ms)
         .with_first_token_ms(exchange.first_token_ms)
         .with_first_tool_call_ms(exchange.first_tool_call_ms)
@@ -590,8 +592,10 @@ impl SessionRouting {
         .with_effort_level(exchange.effort)
         .with_turn_shape(exchange.turn_shape)
         // Phase 56: a translated exchange has a parsed response, so its
-        // usage is exact where the provider stated it. A relayed exchange
-        // carries `None` here and writes the same NULLs it always did.
+        // usage is exact where the provider stated it. Since the 2026-09-03
+        // ruling a relayed exchange is exact too, where its protocol has a
+        // usage spelling and its stream ended cleanly — and `None`, meaning
+        // unknown rather than zero, everywhere else.
         .with_tokens(
             exchange
                 .tokens

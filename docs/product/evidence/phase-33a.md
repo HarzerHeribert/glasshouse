@@ -19,7 +19,10 @@ fifteen lines by itself:
   never supplied.** Not merely outside this round's partition — `ingress.rs`
   is forbidden to this package, but even inside it, finding "the first real
   token" needs body parsing the module's own design forbids. **These stay
-  open.**
+  open.** *(**Superseded for the relay path on 2026-09-03** by a user approval
+  and package `GH-RELAY-USAGE` — see* The relay's "never supplied" is lifted
+  *at the end of this file. The three bullets here stay as the record of why
+  the limitation stood; do not read them as current.)*
 - **Line 1332 (do not mistake a keepalive for the first token) is therefore
   moot for this producer**: it never attempts to find a first token, so it
   cannot get the distinction wrong. Recorded as open rather than vacuously
@@ -872,3 +875,80 @@ construction (the sums are per column), not driven through a socket; one
 protocol pair drives the tests, as for the first-events package.
 
 State: **COMPLETE**. **Phase 33A stands at 15 of 15.**
+
+---
+
+## The relay's "never supplied" is lifted — user approval 2026-09-03, package `GH-RELAY-USAGE`
+
+**Three of the five lines this file answered with *"the module's own design
+forbids it"* are now supplied on the relay path.** The bullets near the top of
+this file — 1331 *"never supplied"*, 1332 *"moot for this producer"*, 1333
+*"never supplied, same reason"* — were correct when written and are **no longer
+true of the relay**. They stay above as the record of why the limitation stood;
+this section is what overturned it. A reader who stops at those bullets will
+believe the relay still cannot do this.
+
+**What changed is a user decision, not a clever workaround.** The reasoning in
+those bullets was that finding "the first real token" needs parsing the payload
+`ingress.rs` exists to be unable to read. On 2026-09-03 the user approved the
+gateway parsing *supported* relayed bodies for usage and timing, under six
+constraints that are part of the approval (`design-decisions.md`, *Steering
+decisions of record*). The design fact did not dissolve — it was **scoped**:
+the relay still does not deserialize, and still cannot reconstruct a body.
+
+**How each constraint holds**, each with the test that proves it:
+
+| the approval says | how it holds | proven by |
+|---|---|---|
+| forwarded bytes and protocol semantics preserved | `Counted::read` returns `inner`'s own `read`; the extractor takes `&[u8]` and returns no bytes | `the_bytes_the_client_receives_are_exactly_what_the_provider_sent`; mutation `swallow-a-relayed-byte` |
+| bounded streaming, incremental parsing | a 512-byte sliding window, never a document | `the_window_never_grows_with_the_length_of_the_response` (512 bytes retained, ≤8,704 window) |
+| protocol metadata and usage fields only | a table of literal key spellings; one boolean read of a text value | `no_part_of_the_relay_deserializes_anything`, extended to cover `usage.rs` |
+| **no relayed response content persisted** | nothing leaves the module but three integers and two booleans | `no_relayed_response_content_reaches_the_project_or_a_log` — plants text, then checks every project file **including the database and its journal** |
+| CPU/memory/latency/throughput benchmarked | p50 −0.8%, p95 +0.8%, throughput +0.4%, all within run-to-run spread; CPU +0.086 s per 58.8 MB (~1.5 ns/byte); peak RSS indistinguishable | `proxy_only_overhead`, both arms, three runs, release |
+| unsupported records **unknown**, never estimated | no table entry → no extractor; both counts or neither; a non-`Complete` stream → none | `a_protocol_whose_usage_spelling_is_unknown_records_no_usage`, `a_supported_protocol_that_states_no_usage_records_none`, `a_truncated_stream_records_no_usage_however_much_of_it_arrived`, `a_non_numeric_or_oversized_count_is_refused_rather_than_approximated`; mutation `estimate-instead-of-unknown` |
+
+The 2% figure in the approval is a **provisional engineering trigger** measured
+proxy-only on a local fixture; benchmark noise is not an escalation, and the
+numbers above are noise.
+
+**The lines are not re-ticked and the counts do not move.** 1331, 1332 and 1333
+were already ☑ for the *translated* exchange, closed elsewhere in this file. This
+package makes the same three true of the *relayed* exchange, which is a second
+producer for a closed line, not a new closure. Recorded here so the ledger says
+which paths each line actually holds on.
+
+**One judgement the worker made and stated, and it is the right one.** Timing
+markers are recorded on a **streamed** (`text/event-stream`) delivery only. A
+document arrives as one body: every marker is in it, but the moment each passes
+the seam measures how fast the socket drained, not when the provider produced
+it. `translate::FirstEvents::of_document` answers differently on its own path —
+it sets both instants to `first_byte_at` — because a *decoded* document proves a
+qualifying event exists. The relay does not copy that: **deriving a timestamp
+from another timestamp is the estimate the approval withholds.**
+
+**Limits, carried forward rather than buried:**
+
+- **A gzipped response records `unknown`, and this is the limitation with real
+  product weight.** `accept-encoding` is not hop-by-hop, so a harness's own
+  `accept-encoding: gzip` is forwarded and the provider may answer compressed;
+  the relayed bytes are then not JSON and nothing matches. That is *correct*
+  under the approval, but it could make the feature quiet in practice. It is not
+  fixable at this layer — stripping the header changes the protocol semantics
+  the approval protects, and decompressing to read would buffer. **Nobody has
+  measured what Claude Code and Codex actually send.** That is a ten-minute
+  observation against a recording listener and it belongs *before* any consumer
+  is built on an assumption about how often these columns are populated.
+- **Field-order dependence**: the delta's `type` is assumed to precede its text
+  within one JSON object — true of every observed wire format, not guaranteed by
+  JSON. A reordering provider loses `first_token_at`; it never gets a wrong
+  value. Usage counts do not depend on order.
+- **Three protocol slugs only.** Gemini is unknown by design, and a supported
+  slug with a non-standard usage shape reads as unknown — the intended failure
+  direction.
+- **`cached` is the cache-*read* figure only**; Anthropic's
+  `cache_creation_input_tokens` is a different quantity and is deliberately not
+  conflated with it.
+- **The relay compares an encoded byte, `translate` a decoded character**, when
+  deciding "non-whitespace". On any real delta these agree.
+- **macOS only here.** No `#[cfg]` and nothing platform-specific; the trailing
+  sweep owns the other two.

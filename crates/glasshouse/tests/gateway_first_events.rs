@@ -606,13 +606,27 @@ fn a_translated_stream_with_text_and_no_tool_use_records_no_first_tool_call() {
 }
 
 // ---------------------------------------------------------------------------
-// (c) A relayed exchange: both NULL even though the body has real content.
+// (c) A relayed document: both NULL, and the usage is still exact.
 // ---------------------------------------------------------------------------
 
+/// Both instants stay NULL, and since the 2026-09-03 ruling the *reason* has
+/// changed: the relay does read a supported body's usage figures now
+/// (`GH-RELAY-USAGE`, `gateway/usage.rs`), and it still records no instant
+/// here because this response is a **document**. Every marker is in that one
+/// body, so the moment each passes the seam is a reading of how fast the
+/// socket drained rather than of when the provider produced it —
+/// `usage::Delivery`'s rule, and the reason the relay does not copy
+/// `translate`'s `FirstEvents::of_document` trick of setting both to
+/// `first_byte_at`.
+///
+/// The usage columns below are the other half of the same row and the reason
+/// this is not merely an unchanged test: they are exact, from the document's
+/// own digits.
+///
 /// Mutation target `relay-stamps`: giving the relayed path's `Exchange`
 /// `first_token_at: first_byte_at` must turn this test's `None` into `Some`.
 #[test]
-fn a_relayed_exchange_records_no_first_token_or_first_tool_call() {
+fn a_relayed_document_records_its_usage_and_no_first_token_or_first_tool_call() {
     let fixture = DocumentUpstream::answering(
         json!({
             "type": "message",
@@ -661,9 +675,20 @@ fn a_relayed_exchange_records_no_first_token_or_first_tool_call() {
     assert_eq!(rows.len(), 1);
     assert_eq!(
         rows[0].first_token_at_unix, None,
-        "a relayed exchange's body is never read; nothing may be invented for it"
+        "a document exposes no boundary an instant could describe; nothing may be derived \
+         for it"
     );
     assert_eq!(rows[0].first_tool_call_at_unix, None);
+    assert_eq!(
+        (
+            rows[0].input_tokens,
+            rows[0].output_tokens,
+            rows[0].cached_input_tokens
+        ),
+        (Some(999), Some(888), None),
+        "the usage the document stated is exact — read, not derived — and the cache figure \
+         it never stated stays unknown"
+    );
 }
 
 // ---------------------------------------------------------------------------

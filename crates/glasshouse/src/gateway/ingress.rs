@@ -122,6 +122,44 @@
 //! of "looked and found none," a different fact from not looking, which is
 //! why it is never conflated with `None` here.
 //!
+//! # A seventh thing may now be recorded: what the provider said it billed
+//!
+//! **The relay rule was narrowed again on 2026-09-03, by the user**
+//! (`docs/product/design-decisions.md`, *Steering decisions of record* §1):
+//! accurate usage and evaluation data is worth more than byte-for-byte
+//! opacity, so the gateway may inspect a **supported** relayed body far
+//! enough to extract structured usage and timing. A relayed exchange now
+//! carries [`Tokens`], `first_token_at` and `first_tool_call_at` — the same
+//! three things a translated one has carried since Phase 56, and no more.
+//!
+//! **This file still decodes nothing.** The reading is [`super::usage`]'s:
+//! a table of JSON key spellings scanned over a sliding window of at most
+//! 512 retained bytes, which is why `gateway/tests.rs`'s
+//! `no_part_of_the_relay_deserializes_anything` covers that file too and
+//! still passes. [`Counted`] hands it a shared borrow of the buffer
+//! [`super::http::pump`] is about to write and returns exactly the `read` it
+//! was given — there is no path here that can forward less, later or
+//! differently because a figure was read out of the bytes on their way past.
+//!
+//! Four rules from the ruling decide what a row says, and each is visible in
+//! [`forward`] rather than promised here:
+//!
+//! - **The format comes from the route's protocol slug**, which
+//!   `route_for` chose from the request target alone. A slug with no entry
+//!   in [`super::usage`]'s table — `gemini-generate-content` today — means
+//!   nothing is looked at at all and the row says unknown.
+//! - **Both counts or neither.** A provider that stated an input figure and
+//!   not an output one leaves both columns `NULL`; there is nothing to put in
+//!   the second that would not be invented.
+//! - **Only a stream that ended where its framing said.** A `Truncated`,
+//!   `Aborted` or `ClientClosed` stream records no usage, however much of it
+//!   arrived first.
+//! - **The two instants are observations, not estimates**, so they survive a
+//!   stream that ended badly: a token that passed the seam passed it — and
+//!   they are recorded only on a `text/event-stream` delivery, because an
+//!   instant inside a document is a reading of the socket rather than of the
+//!   provider. See [`usage::Delivery`].
+//!
 //! # The relay rule, narrowed and not repealed (Phase 56)
 //!
 //! Capability map lines 1948–1950, under the ruling recorded in
@@ -159,6 +197,7 @@ use super::GatewayToken;
 use super::http::{self, HeadError};
 use super::translate;
 use super::upstream::{Route, Upstream, UpstreamBackend};
+use super::usage;
 
 /// The `authorization` scheme the gateway accepts from a child harness.
 ///
@@ -225,15 +264,14 @@ pub(super) struct Exchange {
     /// provider could not be reached at all. See this module's own "a third
     /// thing may now be recorded" for what this may and may not become.
     pub(super) first_byte_at: Option<i64>,
-    /// The instant the first real generated token passed the seam, on a
-    /// **translated** exchange only — see this module's own "a fifth thing
-    /// may now be recorded". `None` on every relayed exchange (this module
-    /// never decodes one), on every refused exchange, and on a translated
-    /// exchange whose answer never carried one.
+    /// The instant the first real generated token passed the seam — see this
+    /// module's own "a fifth thing may now be recorded" for the translated
+    /// path and "a seventh" for the relayed one. `None` on every refused
+    /// exchange, on a response whose protocol has no entry in
+    /// [`super::usage`]'s table, and on an answer that never carried one.
     pub(super) first_token_at: Option<i64>,
-    /// The instant the first tool-use block started, on a **translated**
-    /// exchange only — the same rule and the same `None` cases as
-    /// [`Self::first_token_at`].
+    /// The instant the first tool-use block started — the same rule and the
+    /// same `None` cases as [`Self::first_token_at`].
     pub(super) first_tool_call_at: Option<i64>,
     /// Milliseconds from the instant this exchange's upstream request was
     /// **sent** to the instant the provider's status and headers were in
@@ -244,12 +282,12 @@ pub(super) struct Exchange {
     /// that never sent a request, and on every path that never got an
     /// answer.
     pub(super) first_byte_ms: Option<i64>,
-    /// [`Self::first_byte_ms`]'s sibling for the first real generated token,
-    /// on a **translated** exchange only — the same rule and the same `None`
-    /// cases as [`Self::first_token_at`].
+    /// [`Self::first_byte_ms`]'s sibling for the first real generated token —
+    /// the same rule and the same `None` cases as [`Self::first_token_at`],
+    /// and stamped from the same clock reading, so the two can never
+    /// describe different moments.
     pub(super) first_token_ms: Option<i64>,
-    /// [`Self::first_byte_ms`]'s sibling for the first tool-use block start,
-    /// on a **translated** exchange only.
+    /// [`Self::first_byte_ms`]'s sibling for the first tool-use block start.
     pub(super) first_tool_call_ms: Option<i64>,
     /// [`Self::first_byte_ms`]'s sibling for the instant this exchange
     /// stopped moving bytes, on both paths. `None` whenever the request
@@ -260,9 +298,12 @@ pub(super) struct Exchange {
     /// `first_byte_at`. See this module's own "a fourth thing may now be
     /// recorded".
     pub(super) framing: Option<Framing>,
-    /// Token counts the provider stated, on a **translated** exchange only —
-    /// see the module's "narrowed and not repealed". `None` on every relayed
-    /// exchange, whose body this gateway never reads.
+    /// Token counts the provider stated — exact on a **translated** exchange
+    /// because that response was parsed (the module's "narrowed and not
+    /// repealed"), and exact on a **relayed** one whose protocol
+    /// [`super::usage`] has a spelling for and whose stream ended cleanly
+    /// (the module's "a seventh thing"). `None` — unknown, never an estimate
+    /// — everywhere else.
     pub(super) tokens: Option<Tokens>,
     /// The four-word effort the request carried, on a **translated**
     /// exchange whose harness asked for thinking — `crate::database`
@@ -290,10 +331,10 @@ pub(super) struct Exchange {
     pub(super) repairs: Option<u32>,
 }
 
-/// Token counts the provider stated for a translated exchange — Phase 56's
-/// consequence for the refusal register's P1b: *"a translated exchange has a
-/// parsed response, so its usage is recorded as exact where the provider
-/// states it; relayed exchanges are unchanged."*
+/// Token counts the provider stated — Phase 56's consequence for the refusal
+/// register's P1b, and since the 2026-09-03 ruling the relayed path's too.
+/// Never derived: every value here was written as digits by the provider, on
+/// whichever path read them.
 ///
 /// Three counts and nothing else. `an_exchange_has_nowhere_to_put_a_body`
 /// scans this declaration under [`Outcome`]'s stricter list.
@@ -364,18 +405,36 @@ impl StreamEnd {
     }
 }
 
-/// A reader that counts what passes through it and remembers whether the
-/// provider's side failed — the bounded, streaming, non-buffering observer
-/// the design ruling permits, and the whole of it.
+/// A reader that counts what passes through it, remembers whether the
+/// provider's side failed, and — since the 2026-09-03 ruling — offers each
+/// chunk to a bounded usage observer on its way past.
 ///
-/// It sees `n`, the number of bytes each `read` returned, and never `buf`:
-/// nothing here can tell one byte from another, and it holds no buffer of
-/// its own. An `Interrupted` read is passed through untouched, exactly as
-/// [`super::http::pump`] retries it, and is not a failure.
+/// **It still returns exactly what `inner` returned.** Every observation
+/// below is made from a shared borrow of the buffer the caller is about to
+/// write; there is no path here that shortens, reorders or rewrites a read,
+/// which is what "the forwarded bytes are preserved" means at the only place
+/// it could stop being true. An `Interrupted` read is passed through
+/// untouched, exactly as [`super::http::pump`] retries it, and is not a
+/// failure.
+///
+/// [`Self::usage`] is `None` — nothing is looked at at all — whenever the
+/// route's protocol has no established usage spelling; see
+/// [`usage::format_for`].
 struct Counted<R> {
     inner: R,
     relayed: u64,
     upstream_failed: bool,
+    /// The bounded observer, or `None` for a protocol whose usage this relay
+    /// has no spelling for. See [`super::usage`] for what it may read.
+    usage: Option<usage::Extractor>,
+    /// Migration 25's zero, so a marker's two readings — the unix second and
+    /// the offset from the send — describe the same instant.
+    dispatch: Instant,
+    /// The instant the first generated token passed, as the pair
+    /// `(first_token_at, first_token_ms)`. Latched on the first sighting.
+    first_token: Option<(i64, i64)>,
+    /// [`Self::first_token`]'s sibling for the first tool call.
+    first_tool_call: Option<(i64, i64)>,
 }
 
 impl<R: Read> Read for Counted<R> {
@@ -383,6 +442,15 @@ impl<R: Read> Read for Counted<R> {
         match self.inner.read(buf) {
             Ok(read) => {
                 self.relayed += read as u64;
+                if let Some(extractor) = self.usage.as_mut() {
+                    let seen = extractor.feed(&buf[..read]);
+                    if seen.first_text && self.first_token.is_none() {
+                        self.first_token = Some(self.now());
+                    }
+                    if seen.first_tool_call && self.first_tool_call.is_none() {
+                        self.first_tool_call = Some(self.now());
+                    }
+                }
                 Ok(read)
             }
             Err(err) if err.kind() == std::io::ErrorKind::Interrupted => Err(err),
@@ -391,6 +459,20 @@ impl<R: Read> Read for Counted<R> {
                 Err(err)
             }
         }
+    }
+}
+
+impl<R> Counted<R> {
+    /// Both readings of the instant a marker passed the seam: the unix
+    /// second the row's `*_at` column holds, and migration 25's milliseconds
+    /// since the upstream request was sent. Read together for
+    /// `translate::FirstEvents::note`'s reason — asking twice would let the
+    /// pair drift by whatever ran in between.
+    fn now(&self) -> (i64, i64) {
+        (
+            crate::provider::cache::now_unix_seconds(),
+            millis_since(self.dispatch),
+        )
     }
 }
 
@@ -766,6 +848,16 @@ fn forward(
             .iter()
             .filter_map(|(name, value)| Some((name.as_str(), value.to_str().ok()?))),
     );
+    // How the provider delivered it, from the one header that says so —
+    // read here beside the quota headers, before anything below touches the
+    // body. See [`usage::Delivery`] for why an instant inside a document
+    // would be a reading of the socket rather than of the provider.
+    let delivery = match parts.headers.get(header::CONTENT_TYPE) {
+        Some(value) if value.as_bytes().starts_with(b"text/event-stream") => {
+            usage::Delivery::Streamed
+        }
+        _ => usage::Delivery::Document,
+    };
     // A `HEAD` response carries no body however ordinary its status is, and
     // writing one would be read by the client as the start of the *next*
     // response. No harness in scope sends `HEAD`; the method is forwarded
@@ -829,6 +921,13 @@ fn forward(
     }
 
     let mut moved = 0;
+    // What the provider stated about its own usage, and when the first
+    // generated token and tool call passed — `None` until the stream both
+    // ends cleanly and turns out to have stated them. See the module's own
+    // "a seventh thing may now be recorded".
+    let mut tokens = None;
+    let mut first_token = None;
+    let mut first_tool_call = None;
     if carries_body {
         // `Counted` is the observer: it sees how many bytes each read
         // returned and whether the provider's side failed, and `pump` still
@@ -839,10 +938,22 @@ fn forward(
             inner: body.as_reader(),
             relayed: 0,
             upstream_failed: false,
+            // The format is chosen from the route's protocol slug — the
+            // decision `route_for` already made from the target alone — and
+            // never from the body, for the reason this function's own doc
+            // gives about placing a request. A slug with no entry is read as
+            // nothing at all.
+            usage: usage::format_for(route.protocol())
+                .map(|format| usage::Extractor::new(format, delivery)),
+            dispatch,
+            first_token: None,
+            first_tool_call: None,
         };
         let pumped = http::pump(&mut counted, out, chunked);
         moved = counted.relayed;
         framing.relayed = Some(moved);
+        first_token = counted.first_token;
+        first_tool_call = counted.first_tool_call;
         match pumped {
             Ok(_) => {
                 // A clean end from `ureq` that nonetheless fell short of the
@@ -879,6 +990,23 @@ fn forward(
                 );
             }
         }
+        // Only a stream that ended where its own framing said it would has a
+        // usage figure worth writing down. A truncated, aborted or
+        // client-closed stream may well have stated an input count before it
+        // stopped, and pairing that with an output count the provider never
+        // finished stating is the estimate the ruling forbids — so the row
+        // says unknown, which is a different fact from zero.
+        if framing.ended == StreamEnd::Complete {
+            tokens = counted
+                .usage
+                .as_ref()
+                .and_then(usage::Extractor::usage)
+                .map(|stated| Tokens {
+                    input: stated.input,
+                    output: stated.output,
+                    cached: stated.cached,
+                });
+        }
     } else {
         let _ = out.flush();
     }
@@ -902,6 +1030,14 @@ fn forward(
             // push it later.
             completed_ms: Some(millis_since(dispatch)),
             framing: Some(framing),
+            // The seventh thing. Both readings of each instant come from the
+            // one `Counted::now` call that stamped it, so a `*_at` and its
+            // `*_ms` sibling can never describe different moments.
+            first_token_at: first_token.map(|(at, _)| at),
+            first_token_ms: first_token.map(|(_, ms)| ms),
+            first_tool_call_at: first_tool_call.map(|(at, _)| at),
+            first_tool_call_ms: first_tool_call.map(|(_, ms)| ms),
+            tokens,
             ..exchange(
                 Outcome::Forwarded {
                     upstream_status: status.as_u16(),
@@ -1237,11 +1373,11 @@ fn exchange(outcome: Outcome, status: u16, upstream: &Upstream, route: Option<&R
         // arrived; [`forward`]'s own three post-response returns override
         // both of these with the real readings via struct-update syntax.
         first_byte_at: None,
-        // Line 1331/1332's pair: the relay never decodes a request, so it
-        // has nothing to derive either of these from and writes `NULL` for
-        // both, exactly like the token counts below — unread, not absent.
-        // `translate::serve` fills them; nothing on this path does, on any
-        // of its returns.
+        // Line 1331/1332's pair: no response arrived on any path through
+        // this helper, so no marker can have passed the seam and both are
+        // `NULL`. [`forward`]'s own completed return overrides them from
+        // `Counted`'s latched readings via struct-update syntax, and
+        // `translate::serve` fills them on its path.
         first_token_at: None,
         first_tool_call_at: None,
         // Migration 25's four offsets, and the same rule one line up: every
@@ -1256,6 +1392,9 @@ fn exchange(outcome: Outcome, status: u16, upstream: &Upstream, route: Option<&R
         first_tool_call_ms: None,
         completed_ms: None,
         framing: None,
+        // Unknown, and never an estimate: no response arrived on any path
+        // through this helper, so there is nothing a provider stated for
+        // this exchange at all.
         tokens: None,
         // The relay never decodes a request, so it has nothing to derive
         // either of these from and writes `NULL` for both — unread, not
@@ -1597,6 +1736,10 @@ mod tests {
             inner: ShortReader { served: false },
             relayed: 0,
             upstream_failed: false,
+            usage: None,
+            dispatch: Instant::now(),
+            first_token: None,
+            first_tool_call: None,
         };
         let mut out = Vec::new();
         let pumped = http::pump(&mut counted, &mut out, false);
@@ -1617,6 +1760,10 @@ mod tests {
             inner: &b"twelve bytes"[..],
             relayed: 0,
             upstream_failed: false,
+            usage: None,
+            dispatch: Instant::now(),
+            first_token: None,
+            first_tool_call: None,
         };
         let mut out = Vec::new();
         let moved = http::pump(&mut counted, &mut out, true).expect("a clean stream pumps");

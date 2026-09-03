@@ -197,9 +197,18 @@ pub struct PurposeConsumption {
     /// the group, never a fabricated duration for a group nothing timed.
     pub mean_time_to_first_byte_ms: Option<f64>,
     /// [`Self::first_byte_sample_count`]'s sibling for `first_token_at` — a
-    /// real `COUNT(first_token_at)`. Only a **translated** exchange can ever
-    /// supply it (`GH-STREAM-FIRST-EVENTS`, lines 1331/1332), so it is
-    /// honestly `0` for every group whose rows are all relayed.
+    /// real `COUNT(first_token_at)`.
+    ///
+    /// **A relayed exchange can supply it too, since 2026-09-03.** This said
+    /// *only a translated exchange can ever* supply it, which was true until
+    /// the user approved the gateway reading usage and timing out of
+    /// supported relayed bodies (lines 1331/1332; `GH-STREAM-FIRST-EVENTS`
+    /// then `GH-RELAY-USAGE`). Two conditions still leave it `0`: a protocol
+    /// slug whose usage spelling is unknown, and a **non-streamed** delivery
+    /// — a document arrives as one body, so the moment a marker crosses the
+    /// seam measures how fast the socket drained rather than when the
+    /// provider produced it, and deriving one timestamp from another is the
+    /// estimate that approval withholds.
     pub first_token_sample_count: usize,
     /// [`Self::first_byte_ms_sample_count`]'s sibling for `first_token_ms`.
     pub first_token_ms_sample_count: usize,

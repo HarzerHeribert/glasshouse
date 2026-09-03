@@ -867,36 +867,66 @@ fn a_relayed_body_is_never_read_and_never_leaks_into_the_ledger_or_logs() {
     // And the source: the production half of the relay has no call that
     // could turn body bytes into anything else. Comment lines are dropped,
     // because the module's prose names the very calls it forbids.
-    let source = include_str!("../src/gateway/ingress.rs");
-    let production = source
-        .split("#[cfg(test)]")
-        .next()
-        .expect("split always yields at least one part");
-    let code: String = production
-        .lines()
-        .filter(|line| !line.trim_start().starts_with("//"))
-        .collect::<Vec<_>>()
-        .join("\n");
+    //
+    // Both files, since the user's ruling of 2026-09-03: `usage.rs` is where
+    // a relayed body is now read at all, so leaving it out would let the
+    // rule be evaded by moving one line across a module boundary rather than
+    // by arguing for it. What it may do — scan a sliding window for literal
+    // key spellings — needs none of these calls, and what it may not do
+    // needs all of them.
+    let production_code = |source: &str| -> String {
+        source
+            .split("#[cfg(test)]")
+            .next()
+            .expect("split always yields at least one part")
+            .lines()
+            .filter(|line| !line.trim_start().starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let relay = [
+        (
+            "gateway/ingress.rs",
+            production_code(include_str!("../src/gateway/ingress.rs")),
+        ),
+        (
+            "gateway/usage.rs",
+            production_code(include_str!("../src/gateway/usage.rs")),
+        ),
+    ];
     assert!(
-        code.contains("struct Counted") && code.contains("struct Framing"),
+        relay[0].1.contains("struct Counted") && relay[0].1.contains("struct Framing"),
         "the framing observer must be in the production half, or this scan is vacuous"
     );
-    for needle in [
-        "from_utf8",
-        "serde_json",
-        "from_slice",
-        "from_str(",
-        "read_to_string",
-        "read_to_end",
-        "from_reader",
-        "json!",
-    ] {
-        assert!(
-            !code.contains(needle),
-            "`{needle}` appeared in the production half of gateway/ingress.rs: the relay may \
-             count and time what it forwards, never decode it"
-        );
+    assert!(
+        relay[1].1.contains("struct Extractor"),
+        "the usage observer must be in the production half, or this scan is vacuous"
+    );
+    for (name, code) in &relay {
+        for needle in [
+            "from_utf8",
+            "serde_json",
+            "::from_slice",
+            "from_str(",
+            "read_to_string",
+            "read_to_end",
+            "from_reader",
+            "json!",
+        ] {
+            assert!(
+                !code.contains(needle),
+                "`{needle}` appeared in the production half of {name}: the relay may count, \
+                 time, and read the usage figures a supported provider states, never decode \
+                 the response they arrived in"
+            );
+        }
     }
+    // `::from_slice` rather than `from_slice`, and the difference is checked
+    // rather than trusted: the needle has to fire on the realistic violation
+    // and not on `Vec::extend_from_slice`, which is how a bounded observer
+    // takes a copy of the chunk it was handed.
+    assert!("let v: Value = serde_json::from_slice(bytes)?;".contains("::from_slice"));
+    assert!(!"self.window.extend_from_slice(chunk);".contains("::from_slice"));
 }
 
 // --- lines 1316 and 1365: the rendering --------------------------------------

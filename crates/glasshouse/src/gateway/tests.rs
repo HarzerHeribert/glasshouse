@@ -46,7 +46,13 @@ fn gateway_sources() -> Vec<(&'static str, &'static str)> {
     sources
 }
 
-/// The relay: the files that move bytes and may never read them.
+/// The relay: the files that move bytes and may not parse them.
+///
+/// "May never read them" is what this said until the user's ruling of
+/// 2026-09-03 let `usage.rs` read a provider's own usage figures out of a
+/// supported body on the way past. The rule the scans below hold is the one
+/// that did not change: nothing in this list turns a response into a
+/// document, and `usage.rs` is in the list rather than exempted from it.
 fn relay_sources() -> Vec<(&'static str, &'static str)> {
     vec![
         ("gateway/mod.rs", include_str!("mod.rs")),
@@ -54,6 +60,10 @@ fn relay_sources() -> Vec<(&'static str, &'static str)> {
         ("gateway/ingress.rs", include_str!("ingress.rs")),
         ("gateway/session.rs", include_str!("session/mod.rs")),
         ("gateway/upstream.rs", include_str!("upstream.rs")),
+        // The 2026-09-03 ruling's reader. It is here rather than beside the
+        // codecs on purpose: it holds no parser, so the scan below is a real
+        // constraint on it and not an exception carved out for it.
+        ("gateway/usage.rs", include_str!("usage.rs")),
     ]
 }
 
@@ -818,7 +828,7 @@ fn the_gateway_dependency_scan_would_catch_a_violation() {
     assert!(!production_code(tested).contains("crate::session"));
     // ... and the file list it runs over is not empty, which would make
     // every assertion in it vacuous.
-    assert_eq!(gateway_sources().len(), 10);
+    assert_eq!(gateway_sources().len(), 11);
 }
 
 /// No file of the **relay** may deserialize anything. The whole of
@@ -839,6 +849,13 @@ fn the_gateway_dependency_scan_would_catch_a_violation() {
 /// A scan cannot prove the absence of a hand-rolled parser, and this one
 /// does not claim to. What it does catch is the realistic version: the
 /// `use serde_json` that a body inspection would be written on top of.
+///
+/// `usage.rs`, added by the 2026-09-03 ruling, is held to this list like
+/// every other relay file and passes it: it scans a sliding window for a
+/// table of literal key spellings, which is the shape "bounded streaming or
+/// incremental parsing" permits and the shape a deserializer is not. The
+/// day someone reaches for `serde_json` to make that reading easier is the
+/// day the window becomes a whole response, and this is what fires then.
 #[test]
 fn no_part_of_the_relay_deserializes_anything() {
     const FORBIDDEN: [&str; 5] = [
@@ -868,7 +885,7 @@ fn no_part_of_the_relay_deserializes_anything() {
         codecs_parse,
         "translate/ no longer deserializes anything, so the split above proves nothing"
     );
-    assert_eq!(relay_sources().len(), 5);
+    assert_eq!(relay_sources().len(), 6);
 
     // ... and the scan fires on the change it exists to catch, rather
     // than passing because the needle was misspelled.
