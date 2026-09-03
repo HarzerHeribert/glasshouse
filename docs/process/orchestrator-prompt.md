@@ -135,6 +135,21 @@ context, and the map is long. Assume most of the work leaves your hands:
   next. Report blocked lines in a batch at a natural boundary rather than
   halting on each one.
 
+Decide and act. You were given the complete task up front; run it to the
+end. Make routine judgment calls yourself and record each in one line where
+it lands — the checkpoint, the evidence entry, the commit message. Check in
+only when different readings of the request would lead to materially
+different work, and park that question (scripts/ask-user.sh) instead of
+stopping. When two options are both defensible, take the one the map order
+or the checkpoint favours and move on. Trust a report's artifacts (CLAUDE.md,
+practice §88) instead of re-deriving them, and add no verification step the
+process does not name. Keep one thread: finish the integration in hand before
+opening anything new; handle a watch event in one tool round, then return to
+the thread. Delegate only sizeable, independent, file-disjoint work to a
+visible worker; do what fits in a handful of tool calls yourself. Before your
+first tool call each turn, say in one sentence what you are about to do, and
+lead every report with the outcome.
+
 Within the current checkbox, parallelize only useful independent work such as
 read-only inventory, platform tests, stress reproduction, isolated modules,
 documentation, and independent review. Do not implement later checkboxes early
@@ -209,3 +224,16 @@ a precise copy-paste prompt for the next Opus orchestrator.
 Do not declare the project complete until every mandatory checkbox has a
 COMPLETE evidence entry and current authoritative verification.
 ```
+
+**Model and effort (user ruling 2026-09-03):** the orchestrator runs on Claude
+Opus 5 at effort `xhigh` — `claude --model claude-opus-5 --effort xhigh`, which
+`.agent-runtime/self-continue.sh` pins. The *Decide and act* paragraph above
+is the guard against a long Opus 5 session losing its thread; it restates
+Anthropic's own Opus 5 prompting guidance for this board — task scope
+("make routine judgment calls yourself, check in only when different readings
+would lead to materially different work"), delegation ("only for large,
+genuinely independent tracks"), and self-verification ("avoid instructing
+re-checks it already performs") — from
+<https://platform.claude.com/docs/en/build-with-claude/prompt-engineering/prompting-claude-opus-5>.
+Positive statements of the wanted behaviour, not prohibitions, is that page's
+own advice and this prompt's shape.

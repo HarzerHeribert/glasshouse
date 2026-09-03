@@ -24,6 +24,30 @@ validated and waiting on the commit. Next action: `.agent-runtime/CONTINUATION.m
 
 Last updated: 2026-09-02, late night (Europe/Berlin)
 
+## Checkpoint — 2026-09-03, batch 96: 1270 / 1355 (93.7%) — four more Phase 59 splits land, the shell line closes, and the orchestrator moves to Opus 5
+
+Session `b783bdfc` (Fable 5.1), inherited hot from `1ee4f96b`. The
+routing/session split lands (`d4a8d5e`) with the rule its worker found: a
+boundary scan reads source by literal `include_str!` path and must be joined
+across a split's successors — now CLAUDE.md's Decompression rule 2 and
+objective 2b of every packet skeleton. The shell split lands (`892305b`, line
+2052 ticked: each screen's state and key handling in its own file, the inline
+tests of three files moved beside them), then api/unix by verb family
+(`5e4ebf5`); the ratchet is down from twelve files over 2,500 to five, three
+of them with workers live (main.rs, evaluation, session/store) and one queued
+(routing/disposable). The evaluation split is reported and accepted, its
+patch waiting on the wave's trailing legs. The routing-rating question came
+back *yes, both* — 1837 and 1846 route to `GH-ROUTING-RATING` behind Phase
+59 (`62080a6`). Process: the user ruled the board runs unattended, so
+`prompt-watch.sh` can press Enter for a stalled pane (`a82d019`) — and the
+orchestrator's own classifier refuses to arm that mode, so prompts are
+answered by hand and the user answers the orchestrator's remotely. Windows
+run 13 green; run 14 red on one conformance test in the known Windows
+socket-reset shape, its rerun-alone queued. The user's later ruling moves the
+orchestrator to Claude Opus 5 at xhigh with a decide-and-act block in the
+launch prompt (`docs/process/orchestrator-prompt.md`). Exact next actions:
+`.agent-runtime/CONTINUATION.md`.
+
 ## Checkpoint — 2026-09-03, batch 95: 1267 / 1355 (93.5%) — Phase 28 complete, the bootstrap creation atomic, and Phase 59's first splits landing
 
 Session `1ee4f96b` (Fable 5.1), continued. Wave 110 (`b065034`) lands Phase
