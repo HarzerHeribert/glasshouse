@@ -340,13 +340,15 @@ reasoning and the one trap. Start Ox with the normal `ox` TUI—never
 `ox run` or a headless loop. Follow the worker do/don't rules and the safe hook
 protocol rather than personal global routing configuration.
 
-## Proportional assurance — steering guidance 2026-09-03 (monitoring agent, not the user)
+## Proportional assurance — ADVISORY, from the monitoring agent (not a user ruling)
 
-**Source, corrected:** this arrived from a monitoring/steering agent the user has
-running, not from the user directly, and was first recorded here as a *user
-ruling*. It is kept because it is sound, but it does not carry a user ruling's
-authority and the user has not been asked to confirm it. The *Decompression*
-ruling above and *No new coupling debt* (rule 8) are the user's own.
+**Status: advisory recommendation, not a product requirement** — the user's ruling
+of 2026-09-03. It came from a monitoring agent the user runs, was first recorded
+here as a *user ruling*, and that attribution was wrong. Keep it: the advice is
+sound and worth following by default. But it is **not immutable**, it does not
+outrank a user decision, and where it conflicts with one the user's decision
+wins. The *Decompression* ruling above and rule 8 (*no new coupling debt*) are
+the user's own and do carry that authority.
 
 The quality standard stands: project isolation, fail-closed behaviour, real
 regression tests, a mutation where one is owed, the local gate, evidence
@@ -394,6 +396,19 @@ behavioural-contract sentence, split it or stop.**
 
 **After every integration, four short lines**: Outcome, Evidence, Residual
 risk, Next highest-value action.
+
+**The feature-freeze reading is superseded — user decision 2026-09-03.** The rule is
+now: *do not add further large **speculative** capabilities before a broader
+release.* **Missing producers required by already committed behaviour are
+permitted**, and so is the approved A/B/C/F/H coordination slice (Phase 60).
+*"Do not add capability-map lines"* applies to **process machinery** — validators,
+ledger fields, checklist expansion — and does **not** prohibit recording product
+capabilities the user has explicitly approved. Risk-based ordering still applies to
+executable work. Deliberately deferred experiment gates (Phases 52, 53) are not in
+the active execution queue and must not be presented as blockers. **Open, deferred,
+experimental, refused and awaiting-user-decision are five distinct statuses; keep
+them distinct.** The decisions themselves live in `design-decisions.md`,
+*Steering decisions of record*.
 
 ## Scale the ceremony to the task, and prove the board is closing boxes
 

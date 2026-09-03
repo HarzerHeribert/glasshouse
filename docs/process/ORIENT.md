@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1273 / 1355 mandatory capabilities (94%)** — 82 open across 28 phases.
+**1273 / 1371 mandatory capabilities (93%)** — 98 open across 29 phases.
 
 ## Where the work is
 
@@ -39,8 +39,8 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 32G | Provider-aware request-cost estimation | **2** | 8 | `1296` |
 | Phase 33 | Resource health | **2** | 13 | `1309` |
 | Phase 38 | Quota-preserving routing | **2** | 5 | `1604` |
-| Phase 53 | Criteria before adding graph storage | **2** | 3 | `1872` |
-| Phase 59 | Decompression: the code's physical shape catches up with its architecture | **2** | 6 | `2043` |
+| Phase 53 | Criteria before adding graph storage | **2** | 3 | `1875` |
+| Phase 59 | Decompression: the code's physical shape catches up with its architecture | **2** | 6 | `2049` |
 | Phase 33B | Reliability-adjusted agent performance | **3** | 11 | `1345` |
 | Phase 35B | Candidate scoring | **3** | 22 | `1523` |
 | Phase 21E | Decision ladder and conflict handling | **4** | 8 | `907` |
@@ -50,6 +50,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 32A | Unified quota and capacity model | **7** | 14 | `1196` |
 | Phase 9K | Harness-aware response profiles | **8** | 29 | `578` |
 | Phase 51 | Evaluation hooks | **15** | 22 | `1818` |
+| Phase 60 | Parallel-session file coordination | **16** | 0 | `2065` |
 
 **Fully closed (81):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 7, Phase 8, Phase 9A, Phase 9B, Phase 9C, Phase 9D, Phase 9F, Phase 9G, Phase 9I, Phase 9J, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 16, Phase 17, Phase 18, Phase 19, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 21H, Phase 21I, Phase 21J, Phase 22, Phase 23, Phase 24, Phase 25, Phase 26, Phase 28, Phase 29, Phase 32, Phase 32B, Phase 32E, Phase 33A, Phase 33C, Phase 34, Phase 34A, Phase 34B, Phase 34D, Phase 34E, Phase 34F, Phase 35, Phase 35A, Phase 35C, Phase 35D, Phase 36, Phase 39, Phase 40, Phase 41, Phase 42, Phase 43, Phase 44, Phase 45, Phase 46, Phase 47, Phase 48, Phase 49, Phase 50, Phase 54, Phase 54A, Phase 55, Phase 56, Phase 56A, Phase 57, Phase 58.
 
@@ -57,7 +58,7 @@ closures are usually at the top. Open the map at the line number given.
 
 Every phase with **three or fewer** open lines, quoted verbatim. These are
 where a single package finishes a phase, so they are listed here and the
-other ~50 open lines are not.
+other ~66 open lines are not.
 
 For any other phase: `scripts/discover.py --phase <id>` prints its open
 lines and evidence together. **Do not open the 178 KB map to read them.**
@@ -141,13 +142,13 @@ these unwrapped.
 
 ### Phase 53 — Criteria before adding graph storage  (2 open, 3 closed)
 
-- **1879** ☐ Do not add a graph database solely to visualize project memory.
-- **1882** ☐ Evaluate whether SQLite relations are insufficient before adopting a dedicated graph database.
+- **1885** ☐ Do not add a graph database solely to visualize project memory.
+- **1888** ☐ Evaluate whether SQLite relations are insufficient before adopting a dedicated graph database.
 
 ### Phase 59 — Decompression: the code's physical shape catches up with its architecture  (2 open, 6 closed)
 
-- **2053** ☐ Keep doc comments to the invariant and the reason it holds now, moving the history of how a decision was reached to the design or measurements record behind a one-line pointer.
-- **2054** ☐ Re-open the refused lines the user named as product-relevant — context quality (1534), cache temperature and affinity (1535, 1545), low-confidence memory (1129), preserving user changes on rollback (1044), and nearly-complete tasks under a reserve or quota threshold (1294, 1610) — and settle each by design and risk rather than by the count of open boxes.
+- **2059** ☐ Keep doc comments to the invariant and the reason it holds now, moving the history of how a decision was reached to the design or measurements record behind a one-line pointer.
+- **2060** ☐ Re-open the refused lines the user named as product-relevant — context quality (1534), cache temperature and affinity (1535, 1545), low-confidence memory (1129), preserving user changes on rollback (1044), and nearly-complete tasks under a reserve or quota threshold (1294, 1610) — and settle each by design and risk rather than by the count of open boxes.
 
 ### Phase 33B — Reliability-adjusted agent performance  (3 open, 11 closed)
 

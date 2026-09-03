@@ -3921,3 +3921,112 @@ now would mostly report which files a *split* touched together — the exact
 artefact the ruling says not to reason from. It becomes worth writing after a
 stretch of ordinary product changes, and the trigger to write it is that
 stretch existing, not a date.
+
+## Steering decisions of record — the user, 2026-09-03, at `2d1dc4d`
+
+Four decisions, given directly by the user and superseding any interpretation that
+conflicts with them. They are decisions, not proposals: do not reopen them because
+implementation has tradeoffs. Bring back only evidence of a material technical,
+security or performance problem.
+
+**Attribution first.** The *proportional assurance* guidance recorded earlier that day
+came from a monitoring agent the user runs, not from the user. It is retained as an
+**advisory recommendation**, not as an immutable product requirement, and it does not
+outrank this ruling.
+
+### 1. P1b — relay-path usage reading: **approved**
+
+The gateway may inspect supported relayed response bodies far enough to extract
+structured usage and timing. Accurate usage and evaluation data is preferred over the
+previous byte-for-byte opacity. The constraints are part of the decision:
+
+- Forwarded response bytes and protocol semantics are preserved.
+- Bounded streaming or incremental parsing; never buffer a whole response merely for
+  telemetry.
+- Extract protocol metadata and usage fields only — not general response content for
+  storage or analysis, and **no relayed response content is persisted** by this producer.
+- CPU, memory, latency and throughput overhead on the hot path are benchmarked.
+- An unsupported provider or response format records usage as **unknown**, never
+  estimated.
+- A material performance regression is reported with its evidence and proposed
+  alternatives, never silently accepted.
+
+Built as **one producer package followed by its consumers** — not as twenty
+independent projects for the ~20 lines it releases (1333, 1263, 1158, Phase 32G, much
+of Phase 51).
+
+### 2. Linux keyring dependency: **approved**
+
+Use a maintained Secret Service-compatible Linux keyring integration, preferably behind
+a platform-neutral secret-store boundary. Do not implement several desktop keyring
+protocols independently unless the ecosystem actually requires it. Where no supported
+keyring service is available: give actionable installation or configuration
+instructions; permit an unencrypted local fallback **only by explicit opt-in**, after
+clearly explaining the security risk; restrict file permissions as far as the OS
+permits; never make plaintext storage the automatic default; and never write secrets to
+logs, tracked project files or diagnostic exports. Releases the remaining Phase 9E line.
+
+### 3. Phases 52 and 53 — vector and graph retrieval: **deferred gates, not blockers**
+
+Neither becomes a core or MVP dependency. FTS5 and SQLite remain the production
+baseline.
+
+*Semantic/vector retrieval* — a **bounded optional experiment is allowed**, because
+usefulness cannot be established without an implementation to compare against. Define
+the concrete lexical-retrieval failures and the evaluation metrics first; implement
+behind an optional feature or addon boundary; A/B against the existing
+lexical-plus-reranking path on real Glasshouse queries; do not make it the default path
+or introduce a core schema dependency before results justify promotion; if retained it
+augments lexical retrieval rather than replacing it.
+
+*Graph storage* — no dedicated graph database yet. Use explicit typed SQLite
+relationships first, and require concrete multi-hop queries SQLite cannot serve
+adequately before authorising an experiment, isolated the same way.
+
+Both phases' open lines are **deliberate experiment gates**: deferred, not release
+blockers, and not part of the active execution queue. They are not to be ticked as
+completed work.
+
+### 4. A bounded file-coordination capability is promoted to MVP scope
+
+Maybe A, B, C, F and H are promoted from *Maybe* into committed product scope as **one
+vertical capability**, not five platforms — recorded as **Phase 60**. A and F give
+soft, project-scoped, file-granular, turn-scoped claims with automatic release; B gives
+the structured edit-intent observation the coordination layer needs; C consumes claims
+and intents to identify likely conflicts; H reports them so the orchestrator can re-plan
+only the conflicting part of otherwise parallel work.
+
+The MVP proves **one end-to-end behaviour**: two active sessions express edit intent for
+the same file; Glasshouse detects the direct overlap, explains it, notifies the
+orchestrator, and lets the orchestrator re-plan or serialise only that conflicting work;
+the claim is released when the relevant turn finishes.
+
+Scoping rules, which are the decision as much as the capability is: soft coordination
+first — no OS locks and no permission changes; file-level and turn-level granularity by
+default; no repository-wide semantic analysis on every operation; direct same-file
+overlap is the first high-confidence case and inferred adjacent-interface predictions
+stay advisory; use structured hooks where available and be honest when a harness cannot
+provide them, never treating terminal-output inference as equivalent to a structured
+pre-edit hook; preserve an explicit user bypass; keep warnings and re-planning
+inspectable. **F is the scoping rule that keeps A surgical, not a separate locking
+subsystem. H is a bounded consumer of the conflict signal, not a general autonomous
+planning platform.**
+
+Implementation order: **A+F → B → C → H.** Maybe D, E, G, I, J, K and L stay parked and
+are **not** rejected; they are not promoted merely because these five were. Promotion
+does not make every speculative sub-checkbox an MVP release blocker — Phase 60 carries
+the smallest coherent slice and the remaining lines in those groups stay experimental
+refinements.
+
+### 5. The policy contradictions, resolved
+
+The broad feature-freeze reading is replaced by: **do not add further large speculative
+capabilities before a broader release; missing producers required by already committed
+behaviour, and the approved A/B/C/F/H coordination slice, are permitted.** *"Do not add
+capability-map lines"* applies to process machinery — validators, ledger fields,
+checklist expansion — and does **not** prohibit recording product capabilities the user
+has explicitly approved. Risk-based ordering still applies to executable work.
+Deliberately deferred experiment gates are not in the active execution queue and are not
+to be presented as blockers. **Open, deferred, experimental, refused and
+awaiting-user-decision are distinct statuses and must stay distinct.**
+

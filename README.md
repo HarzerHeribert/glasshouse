@@ -19,10 +19,10 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`█████████████████████████████████████░░░` 1273 / 1355 mandatory capabilities (93%)
+`█████████████████████████████████████░░░` 1273 / 1371 mandatory capabilities (92%)
 
 <details>
-<summary>Per-phase breakdown (81 of 109 phases complete)</summary>
+<summary>Per-phase breakdown (81 of 110 phases complete)</summary>
 
 | Phase | Done |
 |---|---|
@@ -135,6 +135,7 @@ the authoritative specification and tracks what is done.
 | Phase 57 — Context firewall: tool-output compaction between harness and model | 27/27 ✅ |
 | Phase 58 — Context economy: cache-stable translation, entitlement-aware reduction, and a measured token budget | 15/15 ✅ |
 | Phase 59 — Decompression: the code's physical shape catches up with its architecture | 6/8 |
+| Phase 60 — Parallel-session file coordination | 0/16 |
 
 </details>
 <!-- progress:end -->

@@ -631,7 +631,7 @@ path. **Do not conflate them again.**
 | # | missing producer | open lines | migration? |
 |---|---|---|---|
 | **P1a** | usage reader on Glasshouse's own model calls | ~12 | **no** — in flight |
-| **P1b** | usage reader on the relay path | 1333, 1263, 1158, ~~most of 32E~~ **32E line 1275 ONLY (censused 2026-09-02, see `phase-32e.md`: eight of the ten are packageable or need a ruling — *"most of 32E"* was wrong in the direction that keeps a phase shut)** + 32G, much of 51 | no — **needs the `ingress` ruling** |
+| **P1b** | usage reader on the relay path | 1333, 1263, 1158, ~~most of 32E~~ **32E line 1275 ONLY (censused 2026-09-02, see `phase-32e.md`: eight of the ten are packageable or need a ruling — *"most of 32E"* was wrong in the direction that keeps a phase shut)** + 32G, much of 51 | no — **RULING GIVEN 2026-09-03: APPROVED**, see below |
 | ↳ P1b, ruled in part 2026-08-31 | design-decisions §Phase 56 *"the user's answer on pairs"*: `ingress` keeps relaying served protocols byte for byte and never parses them — but a **translated** exchange (a target the provider does not serve, entering a codec) is parsed by construction, so its usage is recorded as *exact* where the provider states it. P1b therefore opens for translated pairs as `gateway-translate` (T1) lands, and stays refused for relayed ones. Readers must carry tokens where a row has them and say *not exposed* where it does not (`harness-efficiency`). | partly — translated pairs only |
 | **P2** | a caller that dispatches a Classification/Reranking disposable job | ~38 (34C, 34D, 34E, 1089–1092, 1455/1456) | no |
 | **P3** | measured quantities for the evaluation channel | Phase 51 (34), 627–630 | no — **mostly P1+P2 renamed** |
@@ -644,8 +644,35 @@ path. **Do not conflate them again.**
 | **P10** | a model axis on the candidate set | 566, 569, 35A/35B unchecked | no — **now REQUIRED by Phase 56 line 1953 (2026-08-31)** |
 | **P11** | per-model capability ratings | 1475–1485 | likely |
 
-**Not work, so nobody re-derives them:** Cluster E, Cluster F, 442 (a `keyring`
-dependency decision), and the standing refusals 1294, 828, 829, 1323.
+**The `ingress` ruling — settled 2026-09-03 by the user, P1b is APPROVED.** The
+gateway may inspect supported relayed response bodies far enough to extract structured
+usage and timing: accurate usage and evaluation data is preferred over byte-for-byte
+opacity. Constraints are part of the approval — forwarded bytes and protocol semantics
+preserved; bounded streaming or incremental parsing, never buffering a whole response
+for telemetry; protocol metadata and usage fields only, and **no relayed response
+content persisted**; hot-path CPU, memory, latency and throughput benchmarked; an
+unsupported provider or format records usage **unknown**, never estimated; a material
+regression comes back with evidence and alternatives rather than being absorbed. Build
+it as **one producer package, then its consumers** — not twenty projects for the ~20
+lines (1333, 1263, 1158, Phase 32G, much of Phase 51). Full terms in
+`design-decisions.md`, *Steering decisions of record*.
+
+**442 (the `keyring` dependency) — settled the same day: APPROVED.** A maintained
+Secret Service-compatible Linux integration behind a platform-neutral secret-store
+boundary; no independently implemented desktop keyring protocols unless the ecosystem
+requires it. No supported service available → actionable setup instructions, an
+unencrypted local fallback **only by explicit opt-in** after the risk is explained,
+permissions restricted as far as the OS allows, plaintext never the automatic default,
+and secrets never written to logs, tracked files or diagnostic exports. Releases the
+last Phase 9E line. It is therefore no longer in the "not work" list below.
+
+**Statuses are distinct and stay distinct** (same ruling): *open*, *deferred*,
+*experimental*, *refused*, and *awaiting user decision* are five different things. A
+deferred experiment gate (Phases 52 and 53) is not a blocker and not in the active
+execution queue; a refusal is not a deferral; and neither is an open line.
+
+**Not work, so nobody re-derives them:** Cluster E, Cluster F, and the standing
+refusals 1294, 828, 829, 1323. (442 left this list on 2026-09-03 — approved, above.)
 
 
 ## A THIRD VERIFICATION TOOL WAS ANSWERING ABOUT THE WRONG TREE

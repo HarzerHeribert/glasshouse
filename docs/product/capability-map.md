@@ -1857,6 +1857,9 @@ Phase 51 — Evaluation hooks
 
 Phase 52 — Criteria before adding semantic/vector retrieval
 
+**Status: deferred experiment gate** (user steering decision, 2026-09-03). Not a release blocker and not part of the active execution queue. The open lines below are the criteria to settle *if and when* the experiment is authorised — they are not unperformed work in the release path and are not to be ticked as completed. A bounded optional experiment is permitted under the terms in `design-decisions.md`.
+
+
 Fixed architectural requirements
 
 - Semantic or vector infrastructure is deferred until measured retrieval failures demonstrate that SQLite full-text search and reranking are insufficient.
@@ -1870,6 +1873,9 @@ Fixed architectural requirements
 ☐ Evaluate semantic retrieval on real Glasshouse queries before making it part of the default path.
 
 Phase 53 — Criteria before adding graph storage
+
+**Status: deferred experiment gate** (user steering decision, 2026-09-03). Not a release blocker and not part of the active execution queue. The open lines below are the criteria to settle *if and when* the experiment is authorised — they are not unperformed work in the release path and are not to be ticked as completed. A bounded optional experiment is permitted under the terms in `design-decisions.md`.
+
 
 Fixed architectural requirements
 
@@ -2056,19 +2062,69 @@ Recorded from the user's ruling of 2026-09-03: *Glasshouse is not sloppy; it is 
 
 ────────
 
+Phase 60 — Parallel-session file coordination
+
+Promoted from Maybe A, B, C, F and H by the user's steering decision of 2026-09-03
+(`design-decisions.md`, *Steering decisions of record*). One vertical capability, not
+five platforms. The lines below are the smallest coherent slice that proves the MVP
+behaviour; the remaining lines in those Maybe groups stay experimental refinements and
+are not release blockers.
+
+Fixed architectural requirements
+
+- Soft coordination only: no operating-system locks, no repository permission changes.
+- File-level and turn-level granularity by default; no repository-wide semantic
+  analysis on every operation.
+- Claims are coordination metadata, never source-control ownership.
+- Turn-scoped claims (Maybe F) are the scoping rule that keeps claims surgical, not a
+  separate locking subsystem. Orchestrator handling (Maybe H) is a bounded consumer of
+  the conflict signal, not a general autonomous planning platform.
+- The MVP behaviour this phase exists to prove: two active sessions express edit intent
+  for the same file; Glasshouse detects the direct overlap, explains it, notifies the
+  orchestrator, and lets the orchestrator re-plan or serialise only that conflicting
+  work; the claim is released when the relevant turn finishes.
+- Implementation order: A+F, then B, then C, then H.
+
+Claims, turn-scoped (Maybe A + F)
+
+☐ Claim a file when a session begins an edit-oriented operation on that file.
+☐ Release a session's file claim automatically when the relevant turn completes.
+☐ Release abandoned file claims when the owning session exits, fails, or exceeds a safe stale-claim timeout.
+☐ Allow a session to renew a claim when its next turn continues work on the same file.
+☐ Associate every file claim with the owning Glasshouse session ID rather than only a process ID.
+☐ Keep file claims project-scoped so a claim can never affect another project.
+☐ Surface active file claims in the session overview when they are relevant to parallel work.
+
+Edit intent (Maybe B)
+
+☐ Record an edit_intent event before a session performs a file-modifying operation when the harness exposes enough information.
+☐ Compare new edit intent with active file claims from other sessions.
+☐ Keep intent detection best-effort when a harness does not expose structured pre-tool hooks, and say so rather than inferring intent from terminal output.
+☐ Preserve the user's ability to bypass coordination when Glasshouse cannot determine intent confidently.
+
+Conflict prediction (Maybe C)
+
+☐ Treat two simultaneous edit intents for the same file as a high-confidence conflict risk.
+☐ Show the user which files caused a conflict warning, and distinguish direct file overlap from broader semantic overlap.
+
+Orchestrator handling (Maybe H)
+
+☐ Notify the orchestrator when two workers are likely to touch the same files.
+☐ Allow the orchestrator to serialize only the conflicting portion of otherwise parallel tasks.
+☐ Keep conflict handling transparent so the user can inspect why the orchestrator changed a worker's plan.
+
+────────
+
 Maybe / Experimental Capabilities
 
 These capabilities are intentionally outside the required V1 implementation path. Each should be implemented only after its prerequisite core behavior is stable and real usage provides a measurable problem, baseline, and evaluation method.
 
+
+**Promoted in part.** The committed MVP slice of Maybe A, B, C, F and H is **Phase 60 — Parallel-session file coordination** (user steering decision, 2026-09-03). The lines that remain in these five groups are later refinements and stay experimental; they are not release blockers. Maybe D, E, G, I, J, K and L are unchanged and are **not** rejected.
+
 Maybe A — Cross-session file claims
 
 ☐ Consider adding a project-scoped file-claim registry shared by all active Glasshouse sessions.
-☐ Allow a session to claim a file when it begins an edit-oriented operation on that file.
-☐ Release a session’s file claim automatically when the relevant turn completes.
-☐ Release abandoned file claims when the owning session exits, fails, or exceeds a safe stale-claim timeout.
-☐ Associate every file claim with the owning Glasshouse session ID rather than only a process ID.
-☐ Keep file claims project-scoped so a claim can never affect another project.
-☐ Surface active file claims in the session overview when they are relevant to parallel work.
 ☐ Treat file claims as coordination metadata rather than as source-control ownership.
 ☐ Prefer soft claims and warnings before implementing hard filesystem locks.
 ☐ Do not modify repository file permissions merely to represent an agent claim.
@@ -2077,24 +2133,16 @@ Maybe A — Cross-session file claims
 Maybe B — Cross-session edit-intent hooks
 
 ☐ Consider using harness hooks or tool-call events to detect when a session is about to read or edit a file.
-☐ Record an edit_intent event before a session performs a file-modifying operation when the harness exposes enough information.
 ☐ Record a read_intent event when useful for detecting high-risk concurrent work.
-☐ Allow the coordination layer to compare new edit intent with active file claims from other sessions.
 ☐ Allow the coordination layer to compare new edit intent with recently modified but not yet reconciled files from other sessions.
-☐ Keep intent detection best-effort when a harness does not expose structured pre-tool hooks.
-☐ Avoid pretending terminal-output inference is equivalent to a structured pre-edit hook.
-☐ Preserve the user’s ability to bypass coordination when Glasshouse cannot determine intent confidently.
 
 Maybe C — Parallel conflict prediction
 
 ☐ Consider predicting likely conflicts before two sessions modify overlapping files.
-☐ Treat two simultaneous edit intents for the same file as a high-confidence conflict risk.
 ☐ Treat edits to adjacent files with shared interfaces as a lower-confidence conflict risk.
 ☐ Allow the router to use task plans, touched-file history, Git diffs, and current claims as conflict-prediction inputs.
 ☐ Keep conflict prediction advisory when the expected touched files are inferred rather than observed.
 ☐ Avoid expensive whole-repository analysis merely to predict every possible overlap.
-☐ Show the user which files or interfaces caused a conflict warning.
-☐ Distinguish direct file overlap from broader semantic overlap in warnings.
 
 Maybe D — Queue conflicting work
 
@@ -2120,8 +2168,6 @@ Maybe E — User override and reconcile-later mode
 Maybe F — Turn-scoped coordination
 
 ☐ Prefer turn-scoped claims over long-lived session ownership so agents can work side by side without unnecessarily serializing the project.
-☐ Consider releasing edit claims at successful turn completion even when the native session remains open.
-☐ Allow a session to renew a claim when its next turn continues work on the same file.
 ☐ Avoid treating an entire feature branch or directory as locked when only one file is actively being modified.
 ☐ Consider directory- or interface-level claims only after real usage demonstrates repeated cross-file conflicts.
 ☐ Keep coordination granular enough that unrelated workers can continue in parallel.
@@ -2137,12 +2183,9 @@ Maybe G — Read visibility during active edits
 
 Maybe H — Orchestrator-aware conflict handling
 
-☐ Consider notifying the orchestrator when two workers are likely to touch the same files.
 ☐ Allow the orchestrator to re-plan work before a predicted direct conflict occurs.
-☐ Allow the orchestrator to serialize only the conflicting portion of otherwise parallel tasks.
 ☐ Allow the orchestrator to instruct one worker to work on tests, documentation, or analysis while another owns the conflicting implementation file.
 ☐ Deliver file-claim release events to a waiting orchestrator when relevant.
-☐ Keep conflict handling transparent so the user can inspect why the orchestrator changed a worker’s plan.
 
 Maybe I — Evaluation criteria for file coordination
 
