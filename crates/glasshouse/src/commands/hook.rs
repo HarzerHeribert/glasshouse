@@ -4,9 +4,10 @@ use glasshouse::Runtime;
 use glasshouse::checkpoint::git::GitPosition;
 use glasshouse::checkpoint::{Checkpoint, CheckpointReason, ProjectCheckpoints};
 use glasshouse::config::{self, EffectiveConfig, UserConfig};
-use glasshouse::events::{LifecycleEvent, Observation, TurnOutcome};
+use glasshouse::events::{LifecycleEvent, MessageOrigin, Observation, TurnOutcome};
 use glasshouse::session;
-use glasshouse::session::{ProjectSessions, SessionId};
+use glasshouse::session::api::SessionApi;
+use glasshouse::session::{ProjectSessions, SessionId, SessionRuntime};
 
 /// Record a lifecycle event a harness reported about one of its sessions.
 ///
@@ -826,6 +827,11 @@ fn edit_intent_conflict(
                 crate::commands::shared::short_id(&claim.session_id),
                 crate::commands::shared::format_age(claim.claimed_at),
             ));
+            // Map line 2414: the same collision this loop just told the
+            // editing session about, told to the orchestrator too — one
+            // delivery attempt per path, never a batch, so a conflict on
+            // this path cannot be conflated with one on another (line 2415).
+            notify_orchestrator_of_conflict(&store, path, &id, &claim.session_id);
         }
         // Map line 2402: the intent itself, recorded before the operation
         // runs. Per path rather than per batch, and best effort per path —
@@ -858,6 +864,123 @@ fn edit_intent_conflict(
         notices.join("; "),
         glasshouse::firewall::adapter::OverlapKind::DirectFile.describe(),
     ))
+}
+
+/// Map line 2414: tell this project's one unambiguous live orchestrator
+/// about a direct file overlap [`edit_intent_conflict`] just detected on
+/// `path`, between `editor` (this call's session) and `holder` (the session
+/// whose existing claim it collided with).
+///
+/// Called once per colliding path, never once per hook call: line 2415's
+/// granularity requirement is that a conflict on one path names only that
+/// path, and a single call bundling every notice into one message would
+/// have made a conflict on `src/a.rs` indistinguishable from one on
+/// `src/b.rs` at the one reader — the orchestrator — that is supposed to
+/// act on the difference.
+///
+/// # Ambiguity is reported, not guessed — the map's own architectural note
+///
+/// design-decisions.md's *A bounded file-coordination capability*: *"where
+/// there is no unambiguous active orchestrator, surface that the conflict
+/// could not be delivered rather than inventing a worker-ownership or push
+/// subsystem."* Zero or more than one live orchestrator session is that
+/// case, and this says so at `warn` — visible with `--log-level`/
+/// `--log-file` the way every other diagnostic on this path is — rather
+/// than picking a guess, broadcasting to every one, or the first row.
+///
+/// # No self-notification
+///
+/// The one live orchestrator being either `editor` or `holder` is not
+/// "ambiguous" and is not logged as undeliverable: it is already a party to
+/// this exact conflict and was told through the hook response itself (the
+/// three channels [`glasshouse::firewall::adapter::pre_tool_use_response`]
+/// writes), for the same reason
+/// `edit_intent::a_session_does_not_conflict_with_its_own_claim` exists —
+/// telling it again through a second channel would not be new information.
+///
+/// # Delivery reuses the Phase 15 wake-up seam, and why it is `debug`-only
+/// here today
+///
+/// [`glasshouse::session::api::SessionApi::send_text`] is the delivery path
+/// design-decisions.md names — *"Glasshouse already has an orchestrator
+/// delivery path: the Phase 15 wake-up flow, `SessionApi::send_text`, and
+/// `api/unix/events.rs`. Reuse it… do not design another transport."* This
+/// function is that seam's caller from a new site: a `PreToolUse` hook
+/// subprocess, which owns no pseudo-terminal of its own, so the
+/// [`SessionRuntime`] it constructs starts empty and
+/// [`SessionApi::send_text`] answers `NotLive` unless something else in
+/// *this* process already holds the target session — nothing here does.
+/// That is requirement 5's **best-effort** outcome, logged at `debug` and
+/// never surfaced as the `warn` ambiguity gets: the recipient was resolved
+/// correctly and the seam is wired for the moment a process that does hold
+/// a live handle reaches it, or reads this claim itself. See this packet's
+/// `packet_errors` for why that gap is recorded rather than closed with a
+/// second transport.
+fn notify_orchestrator_of_conflict(
+    store: &glasshouse::session::SessionStore<'_>,
+    path: &str,
+    editor: &SessionId,
+    holder: &SessionId,
+) {
+    let orchestrators = match store.live_orchestrators() {
+        Ok(orchestrators) => orchestrators,
+        Err(err) => {
+            tracing::debug!(
+                error = %format!("{err:#}"),
+                "edit intent: could not read this project's orchestrator sessions"
+            );
+            return;
+        }
+    };
+
+    let orchestrator = match orchestrators.as_slice() {
+        [] => {
+            tracing::warn!(
+                path,
+                "edit intent: a conflict on this path could not be delivered to an \
+                 orchestrator — no live orchestrator session is running in this project"
+            );
+            return;
+        }
+        [only] => only,
+        many => {
+            tracing::warn!(
+                path,
+                candidates = many.len(),
+                "edit intent: a conflict on this path could not be delivered to an \
+                 orchestrator — more than one live orchestrator session is running in \
+                 this project, and Glasshouse does not guess which one"
+            );
+            return;
+        }
+    };
+
+    if &orchestrator.id == editor || &orchestrator.id == holder {
+        return;
+    }
+
+    let text = format!(
+        "Glasshouse file coordination: {path} has {} between session {} and session {}.",
+        glasshouse::firewall::adapter::OverlapKind::DirectFile.describe(),
+        crate::commands::shared::short_id(editor),
+        crate::commands::shared::short_id(holder),
+    );
+
+    let mut live = SessionRuntime::new();
+    let mut api = SessionApi::new(store, &mut live);
+    match api.send_text(&orchestrator.id, &text, MessageOrigin::Machine) {
+        Ok(()) => tracing::info!(
+            orchestrator = %orchestrator.id,
+            path,
+            "edit intent: delivered a conflict notice to the orchestrator"
+        ),
+        Err(err) => tracing::debug!(
+            error = %format!("{err:#}"),
+            orchestrator = %orchestrator.id,
+            path,
+            "edit intent: could not deliver a conflict notice to the orchestrator"
+        ),
+    }
 }
 
 /// Write the `PreToolUse` hook response JSON to stdout — the protocol

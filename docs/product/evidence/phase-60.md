@@ -187,3 +187,49 @@ Two things the worker did that are worth recording:
 
 1. **It confirmed the precedent empirically rather than assuming it transfers.** An unconstructed `pub` variant in a `pub mod` of the library crate does not trip `dead_code` — checked with `cargo clippy -p glasshouse --lib -- -D warnings` rather than inferred from `Referenced` sitting unconstructed elsewhere.
 2. **It found a silent-breakage interaction and designed around it.** The pre-existing `the_session_overview_shows_active_claims` counts every line after the `CLAIMED BY` header and asserts `== 2`; appending the classification as a trailing line would have broken it quietly. The classification is appended **in-row**, so the row count is unchanged and both the new test and the old one hold.
+
+---
+
+## Orchestrator handling (Maybe H) — lines 2414–2416 stay OPEN, and the code lands anyway
+
+Package `GH-ORCHESTRATOR-HANDLING` (Sonnet high, Amber), worktree `.worktrees/orchestrator-handling`, packet `.agent-runtime/packet-orchestrator-handling.md`, report **`.agent-runtime/report-orchestrator-handling.md`**.
+
+**The worker reported all three lines `closed`. The orchestrator ruled all three OPEN.** That is the only disagreement, the tick is the orchestrator's to make, and the worker is the reason it could be made — it disclosed the deciding fact in its own report rather than letting an audit find it later.
+
+### The deciding fact, verified in production source
+
+`commands/hook.rs :: notify_orchestrator_of_conflict` ends with:
+
+    let mut live = SessionRuntime::new();
+    let mut api = SessionApi::new(store, &mut live);
+    match api.send_text(&orchestrator.id, &text, MessageOrigin::Machine) { … }
+
+`SessionRuntime::new()` is a **fresh, empty** runtime, because `glasshouse commands hook edit-intent` is a `PreToolUse` **subprocess** — the orchestrator's live PTY handle lives in a different process. And `session/api/mod.rs :: SessionApi::send_text` is:
+
+    self.resolve(id)?;
+    if self.live.get(id).is_none() {
+        return Err(ApiError::NotLive { id: id.clone() });
+    }
+
+So the resolve succeeds, the liveness check fails, and delivery returns `NotLive` **every time, in production, by construction**. The worker's own words: *"this build never demonstrates a byte actually reaching a live orchestrator's terminal"*, and *"Delivery's real-world success rate in this build is the honest limit stated above: zero."* The `Ok(())` arm is unreachable in production — `cluster-b.py`'s shape, caught before the tick rather than after.
+
+**Line 2414 says *notify*.** A notice that is composed correctly, addressed correctly, and never arrives is not a notification. **2415** is about the granularity of a signal the orchestrator receives, and **2416** about inspecting why the orchestrator *changed a plan* — neither can stand on a delivery that cannot occur. All three stay ☐.
+
+### What the package did prove, and why the code is kept
+
+The decision half is real, tested, and is exactly what a working delivery will need:
+
+- **Exactly one live orchestrator, or nothing.** `SessionStore::live_orchestrators` plus a three-arm match. Zero and many both report undeliverable and name why; neither guesses. `orchestrator_conflict::zero_live_orchestrators_reports_undeliverable`, `::two_live_orchestrators_reports_undeliverable_rather_than_guessing`, `::one_unambiguous_orchestrator_is_attempted_not_reported_ambiguous`.
+- **No self-notification** — an orchestrator that is itself a conflict party is not told about its own claim: `::the_only_orchestrator_being_a_conflict_party_is_not_notified_again`.
+- **The notice is path-scoped**, which is line 2415's whole observable: `::a_conflict_on_one_path_names_only_that_path`, and it reuses `OverlapKind::describe()` rather than spelling the classification a third time.
+- **Mutation `ambiguity-delivers-to-guess`** — the `many` arm made to deliver to `&many[0]` — **KILLED** by `::two_live_orchestrators_reports_undeliverable_rather_than_guessing`. Run twice, restored byte-identical.
+
+Gates: fmt, clippy `-D warnings`, rustdoc `-D warnings` clean; `--test orchestrator_conflict` 5/5, `--test edit_intent` 14/14, `--test file_claims` 21/21, `--lib session` 311, `--lib firewall` 108, `--bin glasshouse` 85/85; `blast-radius.sh --targeted` every traced target passed; ratchet ok. No packet errors, no scope overflow.
+
+### The `SessionRole` allowance, widened deliberately and narrowly
+
+The packet required this be confronted rather than slipped past, and it was. `role_is_inert_tests::a_sessions_role_never_reaches_its_lifecycle` scans five lifecycle files; `commands/hook.rs` is not one of them, so reading the role there does not fail it — which is precisely why the argument had to be made explicitly. Nothing about a session's launch, attach, resume, selection or identification changes; only *who a coordination notice names as its recipient* now reads the role. `session/mod.rs`'s doc comment and its assertion message now state that as a **third narrow allowance** beside "reads" and "displayed", and **the scan itself is untouched and stays exactly as strict**. Phase 14's absence claim still means what it says.
+
+### Named successor — what would actually close these three
+
+Run the conflict check inside a process that already holds the orchestrator's live `SessionRuntime`, or give the hook a cross-process attach to it. The report is explicit that this is *unproven, not disproven* — nothing here concludes the seam cannot carry the event, and nothing was built to route around it, which is the bar `design-decisions.md` sets before a second transport may be designed. Until then these three lines are open with their decision half already built and tested.

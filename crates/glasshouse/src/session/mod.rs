@@ -221,10 +221,15 @@ mod role_is_inert_tests {
     /// is that pattern applied to the file the map's line is about.
     ///
     /// The list below is the map's own allowance read narrowly: a role may
-    /// change how an answer *reads* (`config::response`) and how a session is
-    /// *displayed* (`shell/**`), and nothing else. If a future edit makes the
-    /// launch path branch on a role, this fails and the box reopens — which is
-    /// the whole point of writing it down as a test rather than a paragraph.
+    /// change how an answer *reads* (`config::response`), how a session is
+    /// *displayed* (`shell/**`), and — since map line 2414 — *who a
+    /// coordination notice names as its recipient*
+    /// (`commands::hook::notify_orchestrator_of_conflict`, which reads
+    /// `SessionRole` to find the one live orchestrator to tell about a file
+    /// conflict; nothing about the session's own lifecycle changes). Nothing
+    /// else. If a future edit makes the launch path branch on a role, this
+    /// fails and the box reopens — which is the whole point of writing it
+    /// down as a test rather than a paragraph.
     const LIFECYCLE_FILES: [(&str, &str); 5] = [
         ("session/runtime.rs", include_str!("runtime.rs")),
         ("session/lifecycle.rs", include_str!("lifecycle.rs")),
@@ -261,8 +266,9 @@ mod role_is_inert_tests {
                 !code.contains("SessionRole"),
                 "{name} names `SessionRole`: an orchestrator session has stopped being \
                  identical to a normal one, which is Phase 14's second box. A role may \
-                 change how an answer reads (`config::response`) and how a session is \
-                 displayed (`shell/**`) — nothing else."
+                 change how an answer reads (`config::response`), how a session is \
+                 displayed (`shell/**`), and who a coordination notice names as its \
+                 recipient (`commands::hook`) — nothing else."
             );
         }
     }

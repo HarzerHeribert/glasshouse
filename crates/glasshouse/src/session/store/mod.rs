@@ -741,6 +741,23 @@ impl<'a> SessionStore<'a> {
         Ok(records)
     }
 
+    /// This project's live sessions carrying the orchestrator role — map line
+    /// 2414's "which session is the orchestrator" query.
+    ///
+    /// Every candidate, not the first one found: whether the answer is
+    /// exactly one, none, or several is the caller's decision — map line
+    /// 2414's own architectural note is *"where there is no unambiguous
+    /// active orchestrator, say the conflict could not be delivered rather
+    /// than guessing a recipient"*, and a method that took the first row
+    /// would have made that guess here instead, silently.
+    pub fn live_orchestrators(&self) -> Result<Vec<SessionRecord>, SessionStoreError> {
+        Ok(self
+            .list()?
+            .into_iter()
+            .filter(|record| record.role == SessionRole::Orchestrator && record.lifecycle.is_live())
+            .collect())
+    }
+
     /// Move a session to a new lifecycle state, which also counts as activity.
     ///
     /// # This is the single ordered path — Phase 10A's twelfth line
