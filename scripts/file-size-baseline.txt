@@ -1,8 +1,4 @@
 # Phase 59 size ratchet — production lines of every file over the ceiling.
 # Regenerate with scripts/check-file-sizes.py --update after a decomposition.
 # ceiling 2500
- 16564 crates/glasshouse/src/main.rs
-  3795 crates/glasshouse/src/evaluation/mod.rs
   2942 crates/glasshouse/src/shell/mod.rs
-  2898 crates/glasshouse/src/session/store.rs
-  2532 crates/glasshouse/src/routing/disposable.rs

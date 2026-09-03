@@ -810,7 +810,17 @@ mod doc_comment_claims {
     fn cache_locality_between_is_the_only_place_that_constructs_a_cache_loss_reason() {
         let interactive = production_code(include_str!("../src/routing/interactive.rs"));
         let free = production_code(include_str!("../src/routing/free.rs"));
-        let disposable = production_code(include_str!("../src/routing/disposable.rs"));
+        // `disposable.rs` became a directory in Phase 59; the scan must read
+        // every production file of it, or it silently checks a third of what
+        // it used to.
+        let disposable = production_code(
+            &[
+                include_str!("../src/routing/disposable/mod.rs"),
+                include_str!("../src/routing/disposable/candidates.rs"),
+                include_str!("../src/routing/disposable/classification.rs"),
+            ]
+            .join("\n"),
+        );
 
         for (name, source) in [
             ("interactive.rs", &interactive),
@@ -895,6 +905,13 @@ mod doc_comment_claims {
     /// names.
     #[test]
     fn no_routing_source_file_names_anything_that_could_open_a_connection_or_read_the_clock() {
+        // See the note above: the split made this one file three.
+        let disposable_source = [
+            include_str!("../src/routing/disposable/mod.rs"),
+            include_str!("../src/routing/disposable/candidates.rs"),
+            include_str!("../src/routing/disposable/classification.rs"),
+        ]
+        .join("\n");
         let sources = [
             ("mod.rs", include_str!("../src/routing/mod.rs")),
             (
@@ -902,10 +919,7 @@ mod doc_comment_claims {
                 include_str!("../src/routing/interactive.rs"),
             ),
             ("free.rs", include_str!("../src/routing/free.rs")),
-            (
-                "disposable.rs",
-                include_str!("../src/routing/disposable.rs"),
-            ),
+            ("disposable.rs", disposable_source.as_str()),
         ];
         let forbidden = [
             "ureq",

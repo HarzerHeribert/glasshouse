@@ -155,7 +155,7 @@ fn routing_fallback_json(reason: &config::RoutingFallback) -> serde_json::Value 
 ///
 /// # One ranking, not two
 ///
-/// The decision is `crate::route_recommendation`, which is the whole of
+/// The decision is `crate::commands::route::route_recommendation`, which is the whole of
 /// `glasshouse route` as well (see its own doc comment). This handler
 /// classifies nothing, scores nothing and orders nothing; it turns the
 /// answer into JSON. Ruling 2 of this verb's packet: if the command and the
@@ -196,7 +196,7 @@ pub(super) fn recommend_route(
     moment: &str,
     alternatives: usize,
 ) -> Response {
-    let Some(moment) = crate::routing_moment_from_str(moment) else {
+    let Some(moment) = crate::commands::route::routing_moment_from_str(moment) else {
         // The caller's own spelling is deliberately not quoted back: this
         // string arrived over a socket, and naming the three that exist is
         // the whole of what a client can act on.
@@ -221,21 +221,24 @@ pub(super) fn recommend_route(
     // requests. Structurally, that also makes `Routed::overrode` and
     // `Routed::override_refused` always `None` here, which is why neither
     // appears in the response.
-    let recommendation =
-        match crate::route_recommendation(runtime, &effective, moment, None, false, false, task) {
-            Ok(recommendation) => recommendation,
-            Err(_) => return Response::err("this project's routing inputs could not be read"),
-        };
+    let recommendation = match crate::commands::route::route_recommendation(
+        runtime, &effective, moment, None, false, false, task,
+    ) {
+        Ok(recommendation) => recommendation,
+        Err(_) => return Response::err("this project's routing inputs could not be read"),
+    };
 
     let bound = alternatives.min(MAX_ROUTE_ALTERNATIVES);
     match &recommendation {
-        crate::RouteRecommendation::Nowhere(reason) => Response::ok(serde_json::json!({
-            "routed": false,
-            "moment": crate::routing_moment_slug(moment),
-            "reason": no_route_reason(reason),
-            "report": crate::render_route_recommendation(&recommendation),
-        })),
-        crate::RouteRecommendation::Ranked(ranked) => {
+        crate::commands::route::RouteRecommendation::Nowhere(reason) => {
+            Response::ok(serde_json::json!({
+                "routed": false,
+                "moment": crate::commands::route::routing_moment_slug(moment),
+                "reason": no_route_reason(reason),
+                "report": crate::commands::route::render_route_recommendation(&recommendation),
+            }))
+        }
+        crate::commands::route::RouteRecommendation::Ranked(ranked) => {
             let routed = &ranked.routed;
             // `considered` is best-first and its head is what the *ranking*
             // chose, which is `destination` itself — this verb takes no
@@ -247,8 +250,8 @@ pub(super) fn recommend_route(
             Response::ok(serde_json::json!({
                 "routed": true,
                 // The wire spelling a caller sent, not `RoutingMoment`'s
-                // own prose — see `crate::routing_moment_slug`.
-                "moment": crate::routing_moment_slug(routed.moment()),
+                // own prose — see `crate::commands::route::routing_moment_slug`.
+                "moment": crate::commands::route::routing_moment_slug(routed.moment()),
                 // `false` is line 1592's boundary gate holding the work where
                 // it is rather than a ranking having been taken — the same
                 // distinction `Routed::render` prints in words.
@@ -293,7 +296,7 @@ pub(super) fn recommend_route(
                 // a number it will misread. Bounded by construction — at most
                 // five lines, whatever the candidate set holds — which is why
                 // it can travel beside a capped listing.
-                "caveats": crate::routing_caveats(
+                "caveats": crate::commands::route::routing_caveats(
                     routed,
                     &ranked.destinations,
                     &ranked.refused_by_launch,
@@ -304,14 +307,14 @@ pub(super) fn recommend_route(
     }
 }
 
-/// Which of [`crate::NoRoute`]'s two situations applies, keyed mechanically
+/// Which of [`crate::commands::route::NoRoute`]'s two situations applies, keyed mechanically
 /// rather than by its rendered sentence — the same reason
 /// [`routing_fallback_json`] keys on variant names: a client telling the
 /// cases apart must not have to parse prose written for a person.
-fn no_route_reason(reason: &crate::NoRoute) -> &'static str {
+fn no_route_reason(reason: &crate::commands::route::NoRoute) -> &'static str {
     match reason {
-        crate::NoRoute::NoDestination => "no_destination",
-        crate::NoRoute::MomentDoesNotRoute(_) => "moment_does_not_route",
+        crate::commands::route::NoRoute::NoDestination => "no_destination",
+        crate::commands::route::NoRoute::MomentDoesNotRoute(_) => "moment_does_not_route",
     }
 }
 

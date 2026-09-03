@@ -1500,6 +1500,27 @@ mod tests {
             .join("\n")
     }
 
+    /// `session/store`'s production code, joined -- Phase 59
+    /// (`GH-DECOMP-SESSION-STORE`) split `session/store.rs` into
+    /// `mod.rs`, `record.rs` and `context.rs`, as `routing/mod.rs::session_source`
+    /// joins `routing/session`'s files.
+    ///
+    /// `production_code` is applied to each file **before** the join, not
+    /// after: `mod.rs`'s own `#[cfg(test)] mod tests;` declaration sits after
+    /// every other item in that file (deliberately, for exactly this scan),
+    /// so truncating each file on its own first-and-only `#[cfg(test)]`
+    /// keeps every production line of all three files; truncating the joined
+    /// string once would stop at `mod.rs`'s marker and silently drop
+    /// `record.rs` and `context.rs` from the scan.
+    fn session_store_source() -> String {
+        [
+            production_code(include_str!("../session/store/record.rs")),
+            production_code(include_str!("../session/store/context.rs")),
+            production_code(include_str!("../session/store/mod.rs")),
+        ]
+        .join("\n")
+    }
+
     // --- the catalogue and its adapters ---------------------------------
 
     #[test]
@@ -2528,11 +2549,11 @@ mod tests {
     /// session model."
     #[test]
     fn the_session_model_depends_on_no_adapter() {
-        let code = production_code(include_str!("../session/store.rs"));
+        let code = session_store_source();
         for forbidden in ["HarnessAdapter", "crate::harness", "IntegrationId"] {
             assert!(
                 !code.contains(forbidden),
-                "session/store.rs names `{forbidden}` in production code: the session model \
+                "session/store names `{forbidden}` in production code: the session model \
                  has become dependent on a harness adapter"
             );
         }

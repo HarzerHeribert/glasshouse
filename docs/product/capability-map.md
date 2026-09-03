@@ -2045,7 +2045,7 @@ Phase 59 — Decompression: the code's physical shape catches up with its archit
 Recorded from the user's ruling of 2026-09-03: *Glasshouse is not sloppy; it is extraordinarily conscientious, in places too conscientious. The biggest risk is now complexity through over-assurance — files too large, too much historical documentation, a process whose evidence system itself needs maintaining. Before a broader release: no further large features; a hardening and simplification phase that splits modules, cuts redundant explanation, runs real long sessions, and closes the open items by risk rather than by checkbox count.* Measured at the ruling: 348,661 Rust lines (218k under `src`, 130k under `tests`); `main.rs` 16,247 production lines, twelve files over 2,500, and 31–38 % comment lines in the largest. `design-decisions.md` (*Decompression*) has the reasoning; `scripts/check-file-sizes.py` is the ratchet.
 
 ☐ Keep every production source file under 2,500 production lines, enforced by a size ratchet in every gate that no package may raise.
-☐ Keep `main.rs` to argument parsing and dispatch, with every subcommand's implementation in its own module under `commands/`.
+☑ Keep `main.rs` to argument parsing and dispatch, with every subcommand's implementation in its own module under `commands/`.
 ☐ Keep inline test modules under 500 lines; a larger one lives in its own file beside the module it tests.
 ☑ Split the configuration module by concern — loading and layering, entitlements and plans, routing policy, firewall, response profiles — so that a change to one concern touches one file.
 ☑ Split the routing evidence module into the ledger that writes rows, the readers that summarise them, and the joins across tables.

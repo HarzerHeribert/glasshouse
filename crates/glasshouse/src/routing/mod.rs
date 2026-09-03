@@ -1678,6 +1678,18 @@ mod tests {
         .join("\n")
     }
 
+    /// `routing/disposable` is a directory since Phase 59 (`GH-DECOMP-DISPOSABLE`);
+    /// the boundary scans below read every production file of it, joined, the
+    /// same way [`session_source`] does for `session/` above.
+    fn disposable_source() -> String {
+        [
+            include_str!("disposable/mod.rs"),
+            include_str!("disposable/candidates.rs"),
+            include_str!("disposable/classification.rs"),
+        ]
+        .join("\n")
+    }
+
     fn production_code(source: &str) -> String {
         source
             .split("#[cfg(test)]")
@@ -1715,7 +1727,7 @@ mod tests {
             "routing/interactive.rs names the disposable policy class: the two policy classes \
              Phase 9I line 533 requires to stay separate have started to share code"
         );
-        let disposable = production_code(include_str!("disposable.rs"));
+        let disposable = production_code(&disposable_source());
         assert!(
             !disposable.contains("interactive"),
             "routing/disposable.rs names the interactive policy class: the two policy classes \
@@ -1776,7 +1788,7 @@ mod tests {
             ("routing/mod.rs", include_str!("mod.rs")),
             ("routing/interactive.rs", include_str!("interactive.rs")),
             ("routing/free.rs", include_str!("free.rs")),
-            ("routing/disposable.rs", include_str!("disposable.rs")),
+            ("routing/disposable.rs", disposable_source().as_str()),
             ("routing/session.rs", session_source().as_str()),
         ] {
             let code = production_code(source);

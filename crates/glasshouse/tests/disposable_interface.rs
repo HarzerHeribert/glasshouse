@@ -315,7 +315,37 @@ fn a_non_openai_chat_protocol_is_refused_even_on_a_loopback_host() {
 /// `memory_reranker.rs`, `firewall_reducer.rs`), not by this scan.
 #[test]
 fn disposable_jobs_serve_classification_extraction_reranking_and_reduction_in_production() {
-    let main_source = include_str!("../src/main.rs");
+    // Phase 59 moved every subcommand's implementation out of `main.rs` into
+    // `commands/*.rs`. The three names below are what this census is: reading
+    // `main.rs` alone now finds none of them, so the scan reads the binary
+    // crate's whole production source, as `main.rs`'s own scans do. Add a new
+    // file here whenever one is added under `commands/`.
+    let main_source = [
+        include_str!("../src/main.rs"),
+        include_str!("../src/commands/status.rs"),
+        include_str!("../src/commands/entitlements.rs"),
+        include_str!("../src/commands/gateway.rs"),
+        include_str!("../src/commands/setup.rs"),
+        include_str!("../src/commands/response.rs"),
+        include_str!("../src/commands/resources.rs"),
+        include_str!("../src/commands/route.rs"),
+        include_str!("../src/commands/routing_cost.rs"),
+        include_str!("../src/commands/context_firewall.rs"),
+        include_str!("../src/commands/sessions.rs"),
+        include_str!("../src/commands/memory.rs"),
+        include_str!("../src/commands/memory_extraction.rs"),
+        include_str!("../src/commands/checkpoint.rs"),
+        include_str!("../src/commands/hook.rs"),
+        include_str!("../src/commands/shim.rs"),
+        include_str!("../src/commands/assumptions.rs"),
+        include_str!("../src/commands/launch.rs"),
+        include_str!("../src/commands/resume.rs"),
+        include_str!("../src/commands/routing_destinations.rs"),
+        include_str!("../src/commands/routing_classification.rs"),
+        include_str!("../src/commands/shared.rs"),
+    ]
+    .join("\n");
+    let main_source = main_source.as_str();
     let rerank_source = include_str!("../src/memory/rerank.rs");
 
     assert!(

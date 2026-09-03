@@ -464,7 +464,9 @@ pub(super) fn query_memory(
 
     // `None`: `Request::QueryMemory` carries no session field to attribute
     // this search to — see `memory_search_grouped`'s own doc comment.
-    let grouped = match crate::memory_search_grouped(runtime, query, history, limit, None) {
+    let grouped = match crate::commands::memory::memory_search_grouped(
+        runtime, query, history, limit, None,
+    ) {
         Ok(grouped) => grouped,
         // Through [`memory_error_message`], not `Response::err(err)` directly:
         // this anyhow chain carries a `database::DatabaseError` when the
@@ -472,7 +474,7 @@ pub(super) fn query_memory(
         // names the file's absolute path. See that function.
         Err(err) => return Response::err(memory_error_message(&err)),
     };
-    let report = match crate::render_memory_report(&grouped, query, history) {
+    let report = match crate::commands::memory::render_memory_report(&grouped, query, history) {
         Ok(report) => report,
         Err(err) => return Response::err(err),
     };
@@ -515,7 +517,7 @@ pub(super) fn query_memory(
 /// [`query_memory`].
 ///
 /// Opens the project's memory directly, the same shape [`get_memory`] and
-/// [`current_memory`] use, rather than through `crate::memory_search_grouped`:
+/// [`current_memory`] use, rather than through `crate::commands::memory::memory_search_grouped`:
 /// that helper is `main.rs`'s text-search core and records every retrieval
 /// through it as a *search* (`evaluation::record_memory_retrieval`); a path
 /// lookup runs no query and recording it as one would misreport what was

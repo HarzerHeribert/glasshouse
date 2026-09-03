@@ -463,16 +463,49 @@ fn the_hard_capability_set_is_not_a_reserve_input() {
 /// would fail there for a reason that has nothing to do with the claim.
 #[test]
 fn nothing_in_this_build_produces_task_nearly_complete() {
+    // `disposable.rs` became a directory in Phase 59; the scan reads every
+    // production file of it, or it silently checks a third of what it used to.
+    let disposable_source = [
+        include_str!("../src/routing/disposable/mod.rs"),
+        include_str!("../src/routing/disposable/candidates.rs"),
+        include_str!("../src/routing/disposable/classification.rs"),
+    ]
+    .join("\n");
+    // Phase 59 moved every subcommand out of `main.rs` into `commands/*.rs`;
+    // reading `main.rs` alone would leave this scan green over a twentieth of
+    // the code it was written to cover.
+    let main_source = [
+        include_str!("../src/main.rs"),
+        include_str!("../src/commands/status.rs"),
+        include_str!("../src/commands/entitlements.rs"),
+        include_str!("../src/commands/gateway.rs"),
+        include_str!("../src/commands/setup.rs"),
+        include_str!("../src/commands/response.rs"),
+        include_str!("../src/commands/resources.rs"),
+        include_str!("../src/commands/route.rs"),
+        include_str!("../src/commands/routing_cost.rs"),
+        include_str!("../src/commands/context_firewall.rs"),
+        include_str!("../src/commands/sessions.rs"),
+        include_str!("../src/commands/memory.rs"),
+        include_str!("../src/commands/memory_extraction.rs"),
+        include_str!("../src/commands/checkpoint.rs"),
+        include_str!("../src/commands/hook.rs"),
+        include_str!("../src/commands/shim.rs"),
+        include_str!("../src/commands/assumptions.rs"),
+        include_str!("../src/commands/launch.rs"),
+        include_str!("../src/commands/resume.rs"),
+        include_str!("../src/commands/routing_destinations.rs"),
+        include_str!("../src/commands/routing_classification.rs"),
+        include_str!("../src/commands/shared.rs"),
+    ]
+    .join("\n");
     let sources = [
-        (
-            "routing/disposable.rs",
-            include_str!("../src/routing/disposable.rs"),
-        ),
+        ("routing/disposable.rs", disposable_source.as_str()),
         (
             "provider/quota.rs",
             include_str!("../src/provider/quota.rs"),
         ),
-        ("main.rs", include_str!("../src/main.rs")),
+        ("main.rs + commands/*", main_source.as_str()),
     ];
 
     let mut assignments = Vec::new();

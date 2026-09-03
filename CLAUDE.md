@@ -24,12 +24,18 @@ for Red. What changes:
 2. **A pure move is Green and owes no mutation.** *(Boundary scans follow the
    move: several `#[cfg(test)]` tests read source files by literal
    `include_str!("<file>.rs")` — `routing/mod.rs`, `harness/mod.rs`,
-   `shell/mod.rs`, `shell/view.rs`, `guardrails/store.rs`, `shim.rs`. A split
-   packet greps `include_str!("<the file>")` across `src/` first and lists every
-   scanning test; the scan's include list must cover every successor file, and
-   that edit is part of the move even when the scanning test lives outside the
-   module. `GH-DECOMP-ROUTING-SESSION` reported itself partial for lack of this
-   line.)* It is verified by the full targeted
+   `shell/mod.rs`, `shell/view.rs`, `guardrails/store.rs`, `shim.rs` — **and
+   `crates/glasshouse/tests/`, where three more live**. A split packet greps
+   `include_str!` for the file across **both `src/` and `tests/`** first and
+   lists every scanning test; the scan's include list must cover every
+   successor file, and that edit is part of the move even when the scanning
+   test lives outside the module — put those files in the packet's YOURS, not
+   its FORBIDDEN. `GH-DECOMP-ROUTING-SESSION` reported itself partial for lack
+   of this line; `GH-DECOMP-DISPOSABLE` reported itself partial again for the
+   `tests/` half of it, and a `src/`-only grep is why. **A crate-root
+   decomposition greps one thing more**: bare `crate::<name>` paths from the
+   crate's own sibling modules — `GH-DECOMP-MAIN`'s packet claimed a binary
+   crate root has no outside callers, and `api/unix.rs` had ten.)* It is verified by the full targeted
    gate (for `config` or `main.rs` that is most of the crate), a moved-lines
    accounting (`git diff --color-moved=zebra --stat`; the worker reports how many
    lines are not moves and what they are), every existing import path kept valid by

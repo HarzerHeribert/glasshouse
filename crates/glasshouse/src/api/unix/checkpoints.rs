@@ -59,7 +59,7 @@ fn checkpoint_store_err(err: CheckpointStoreError) -> String {
 /// Take a checkpoint — box 11.
 ///
 /// Mirrors `main.rs`'s `CheckpointCommand::Save` arm: the same session
-/// resolution (`crate::active_session`, named or the project's most recently
+/// resolution (`crate::commands::resume::active_session`, named or the project's most recently
 /// active), the same `Checkpoint::capture`, the same store. Duplicated
 /// rather than called through because that arm prints to standard output as
 /// part of returning an `ExitCode`, which has nothing to do with what this
@@ -77,7 +77,7 @@ pub(super) fn request_checkpoint(
     test_state: Option<String>,
     next_actions: Vec<String>,
 ) -> Response {
-    let record = match crate::active_session(sessions, session) {
+    let record = match crate::commands::resume::active_session(sessions, session) {
         Ok(Some(record)) => record,
         Ok(None) => {
             return Response::err(

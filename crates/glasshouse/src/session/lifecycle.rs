@@ -333,6 +333,49 @@ mod tests {
             .join("\n")
     }
 
+    /// `main.rs`'s production code joined with every file Phase 59 moved out
+    /// of it under `commands/`. Before that decomposition every subcommand's
+    /// implementation lived in `main.rs` itself, so the two scans below read
+    /// it alone; the move relocated the code they look for without changing
+    /// it, so reading `main.rs` alone would now silently find nothing. Add a
+    /// new file here whenever one is added under `commands/`.
+    ///
+    /// Each file's own `production_code` is taken **before** joining, not
+    /// after: `main.rs` is first in the list and carries the
+    /// `#[cfg(test)] mod tests` marker `production_code` cuts at, so joining
+    /// the raw files first and stripping once would discard every
+    /// `commands/*.rs` file after it — the same file, none of the code.
+    fn main_rs_and_commands_source() -> String {
+        [
+            include_str!("../main.rs"),
+            include_str!("../commands/status.rs"),
+            include_str!("../commands/entitlements.rs"),
+            include_str!("../commands/gateway.rs"),
+            include_str!("../commands/setup.rs"),
+            include_str!("../commands/response.rs"),
+            include_str!("../commands/resources.rs"),
+            include_str!("../commands/route.rs"),
+            include_str!("../commands/routing_cost.rs"),
+            include_str!("../commands/context_firewall.rs"),
+            include_str!("../commands/sessions.rs"),
+            include_str!("../commands/memory.rs"),
+            include_str!("../commands/memory_extraction.rs"),
+            include_str!("../commands/checkpoint.rs"),
+            include_str!("../commands/hook.rs"),
+            include_str!("../commands/shim.rs"),
+            include_str!("../commands/assumptions.rs"),
+            include_str!("../commands/launch.rs"),
+            include_str!("../commands/resume.rs"),
+            include_str!("../commands/routing_destinations.rs"),
+            include_str!("../commands/routing_classification.rs"),
+            include_str!("../commands/shared.rs"),
+        ]
+        .iter()
+        .map(|source| production_code(source))
+        .collect::<Vec<_>>()
+        .join("\n")
+    }
+
     /// "Keep terminal-text parsing only as a fallback for state that cannot be
     /// obtained structurally."
     ///
@@ -357,8 +400,9 @@ mod tests {
         }
 
         // And the only writers are the structural ones.
+        let main_and_commands = main_rs_and_commands_source();
         let writers = [
-            ("main.rs", include_str!("../main.rs")),
+            ("main.rs", main_and_commands.as_str()),
             ("shell/mod.rs", include_str!("../shell/mod.rs")),
             ("session/runtime.rs", include_str!("runtime.rs")),
             ("session/attach.rs", include_str!("attach.rs")),
@@ -403,7 +447,7 @@ mod tests {
     /// wrong reason, which this module has been caught by before.
     #[test]
     fn the_resume_path_reopens_its_session_through_the_stores_resume_boundary() {
-        let main = production_code(include_str!("../main.rs"));
+        let main = main_rs_and_commands_source();
 
         let start = main
             .find("fn resume_session(")
