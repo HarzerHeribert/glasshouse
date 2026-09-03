@@ -340,6 +340,55 @@ reasoning and the one trap. Start Ox with the normal `ox` TUI—never
 `ox run` or a headless loop. Follow the worker do/don't rules and the safe hook
 protocol rather than personal global routing configuration.
 
+## Proportional assurance — user ruling 2026-09-03; it outranks everything below it
+
+The quality standard stands: project isolation, fail-closed behaviour, real
+regression tests, a mutation where one is owed, the local gate, evidence
+consistency, honest residual risk. What changes is the **amount**. The goal is
+correct product behaviour delivered per unit of review, not a complete proof
+machine. Priority order: user-visible correctness and safety > finishing the
+capability in hand > maintainability > sufficient evidence > process.
+
+**Classify before acting.** Every finding is exactly one of: **Blocker**
+(the capability cannot work or be verified), **Defect** (behaviour is
+observably wrong, unsafe or misleading), **Debt** (it works; structure could
+improve), **Curiosity** (interesting, no demonstrated effect). Only a blocker
+or material defect may interrupt the task in hand. Debt becomes one successor
+line and is left alone. **A curiosity never becomes a package.** Being
+investigable, testable or documentable is not a reason to promote something.
+
+**State the contract before implementing**, in one sentence each: the
+observable behaviour changing, the invariant or failure mode that matters, the
+narrowest production path, and the smallest test that fails when the behaviour
+is removed. Prove that and the existing gates, then **stop** — no extra
+assertions, no adjacent polish, no second hypothesis, unless a concrete
+failure is still open. **One decisive mutation beats six variations**; the
+count is not a metric.
+
+**New machinery** — a map line, practice section, validator rule, script,
+evidence state, ledger field, mandatory packet section, or standing worker
+duty — requires **all five**: the failure is material; it has happened twice
+or once irreversibly; no existing invariant or gate covers it; automation
+beats a one-line clarification to a rule that already exists; the effort saved
+exceeds the upkeep. Otherwise record it **once**, in one place, and continue.
+A lesson becomes a principle, not a preserved incident. Do not retell the same
+finding in the handoff, the ledger, the measurements, the design record and
+the commit message — pick one home and link.
+
+**An investigation opens with a falsifiable question and gets two probes.**
+Then: supported → act; disproved → drop; uncertain but not blocking → record
+the uncertainty and move on; blocking → escalate the exact decision. Never
+explore to context exhaustion because an answer might exist.
+
+**Before every dispatch, four questions.** Does this change product behaviour
+or remove demonstrated risk? Is the scope smaller than the value? What exact
+condition ends it? What will we deliberately not do? A packet that cannot
+answer them is narrowed or refused. **If the task no longer fits one
+behavioural-contract sentence, split it or stop.**
+
+**After every integration, four short lines**: Outcome, Evidence, Residual
+risk, Next highest-value action.
+
 ## Scale the ceremony to the task, and prove the board is closing boxes
 
 Output tokens per net closed box, by day: **57k → 109k → 126k → 811k**
