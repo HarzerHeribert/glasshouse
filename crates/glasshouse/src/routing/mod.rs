@@ -1666,6 +1666,18 @@ mod tests {
     /// Comment lines go because this module's own documentation names both
     /// policy classes in one breath while explaining why they do not name
     /// each other.
+    /// `routing/session` is a directory since Phase 59 (`GH-DECOMP-ROUTING-SESSION`);
+    /// the boundary scans below read every production file of it, joined.
+    fn session_source() -> String {
+        [
+            include_str!("session/mod.rs"),
+            include_str!("session/discovery.rs"),
+            include_str!("session/scoring.rs"),
+            include_str!("session/reserve.rs"),
+        ]
+        .join("\n")
+    }
+
     fn production_code(source: &str) -> String {
         source
             .split("#[cfg(test)]")
@@ -1723,7 +1735,7 @@ mod tests {
     /// the exact failure line 533 exists to prevent.
     #[test]
     fn the_session_router_cannot_reach_the_disposable_policy_class() {
-        let session = production_code(include_str!("session.rs"));
+        let session = production_code(&session_source());
         assert!(
             !session.contains("disposable"),
             "routing/session.rs names the disposable policy class: a router that chooses where a \
@@ -1744,7 +1756,7 @@ mod tests {
     /// rather than by a convention.
     #[test]
     fn the_session_router_cannot_look_a_session_or_a_checkpoint_up() {
-        let session = production_code(include_str!("session.rs"));
+        let session = production_code(&session_source());
         for forbidden in ["crate::session", "crate::checkpoint", "SessionStore"] {
             assert!(
                 !session.contains(forbidden),
@@ -1765,7 +1777,7 @@ mod tests {
             ("routing/interactive.rs", include_str!("interactive.rs")),
             ("routing/free.rs", include_str!("free.rs")),
             ("routing/disposable.rs", include_str!("disposable.rs")),
-            ("routing/session.rs", include_str!("session.rs")),
+            ("routing/session.rs", session_source().as_str()),
         ] {
             let code = production_code(source);
             for forbidden in ["ureq", "TcpStream", "reqwest", "std::net"] {

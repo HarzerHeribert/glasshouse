@@ -21,7 +21,15 @@ for Red. What changes:
    `blast-radius.sh` and sits in `ci-local.sh`'s lint lane: a file over 2,500
    production lines may only shrink, per `scripts/file-size-baseline.txt`. A
    decomposition package ends with `--update`; the reviewer diffs the baseline.
-2. **A pure move is Green and owes no mutation.** It is verified by the full targeted
+2. **A pure move is Green and owes no mutation.** *(Boundary scans follow the
+   move: several `#[cfg(test)]` tests read source files by literal
+   `include_str!("<file>.rs")` — `routing/mod.rs`, `harness/mod.rs`,
+   `shell/mod.rs`, `shell/view.rs`, `guardrails/store.rs`, `shim.rs`. A split
+   packet greps `include_str!("<the file>")` across `src/` first and lists every
+   scanning test; the scan's include list must cover every successor file, and
+   that edit is part of the move even when the scanning test lives outside the
+   module. `GH-DECOMP-ROUTING-SESSION` reported itself partial for lack of this
+   line.)* It is verified by the full targeted
    gate (for `config` or `main.rs` that is most of the crate), a moved-lines
    accounting (`git diff --color-moved=zebra --stat`; the worker reports how many
    lines are not moves and what they are), every existing import path kept valid by

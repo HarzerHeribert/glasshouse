@@ -238,6 +238,8 @@ EOF
     printf '## VERIFICATION COMMANDS\n\n'
     printf '    cargo test -p glasshouse --test TODO      # the box'"'"'s own test; quote its `test result:` line (§68)\n'
     printf '    scripts/blast-radius.sh --targeted <every .rs file you changed>\n\n'
+    printf 'Run every command from your worktree root WITHOUT `cd` -- a `cd` before a read makes auto mode stop\n'
+    printf 'on a permission prompt nobody sees; use absolute paths and `git -C`.\n'
     printf 'Never the bare `scripts/blast-radius.sh` here -- that is the full sweep, which is the\n'
     printf 'orchestrator'"'"'s and trails per wave (CLAUDE.md). Your gate is the targeted one.\n\n'
   fi

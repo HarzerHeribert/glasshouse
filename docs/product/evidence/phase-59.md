@@ -27,3 +27,4 @@ Limits: a move proves nothing beyond "unchanged"; the comment share is untouched
 | package | file | before → after | report |
 |---|---|---|---|
 | `GH-DECOMP-DATABASE` (2026-09-03) | `database.rs` (3,563 production + 3,374 test) | `database/{mod 266, schema 291, bootstrap 499, migrations/{mod 169, v1_to_v13 1160, v14_on 1227}, tests 3379}` | `.agent-runtime/report-decomp-database.md` — 55/55; discharges the grandfathering recorded in `26fb65b` and `b065034` |
+| `GH-DECOMP-ROUTING-SESSION` (2026-09-03) | `routing/session.rs` (7,213: 5,891 production + 1,322 test) | `session/{mod 2152, discovery 926, scoring 1228, reserve 1626, tests 1328}` | `.agent-runtime/report-decomp-routing-session.md` — 286/286 on `--lib routing`, ten routing targets green on the merged tree; the report's *partial* was the three `include_str!("session.rs")` boundary scans in `routing/mod.rs`, joined at integration as `session_source()` — now rule 2's boundary-scan clause |
