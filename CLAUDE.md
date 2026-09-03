@@ -340,7 +340,13 @@ reasoning and the one trap. Start Ox with the normal `ox` TUI—never
 `ox run` or a headless loop. Follow the worker do/don't rules and the safe hook
 protocol rather than personal global routing configuration.
 
-## Proportional assurance — user ruling 2026-09-03; it outranks everything below it
+## Proportional assurance — steering guidance 2026-09-03 (monitoring agent, not the user)
+
+**Source, corrected:** this arrived from a monitoring/steering agent the user has
+running, not from the user directly, and was first recorded here as a *user
+ruling*. It is kept because it is sound, but it does not carry a user ruling's
+authority and the user has not been asked to confirm it. The *Decompression*
+ruling above and *No new coupling debt* (rule 8) are the user's own.
 
 The quality standard stands: project isolation, fail-closed behaviour, real
 regression tests, a mutation where one is owed, the local gate, evidence
