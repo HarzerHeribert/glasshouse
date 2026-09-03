@@ -2,7 +2,6 @@
 # Regenerate with scripts/check-file-sizes.py --update after a decomposition.
 # ceiling 2500
  16564 crates/glasshouse/src/main.rs
-  4135 crates/glasshouse/src/api/unix.rs
   3795 crates/glasshouse/src/evaluation/mod.rs
   2942 crates/glasshouse/src/shell/mod.rs
   2898 crates/glasshouse/src/session/store.rs
