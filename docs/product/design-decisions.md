@@ -3358,9 +3358,11 @@ two decisions live here.
 
 ### A task is never "nearly complete" — Glasshouse does not guess at progress
 
-`ReserveDecisionInputs::task_nearly_complete` is `false` at its one
-production construction site (`routing/pressure.rs::reserve_verdict`) and
-that is a decision, not an omission.
+`ReserveDecisionInputs::task_nearly_complete` is `false` at both of its
+production construction sites (`routing/pressure.rs::reserve_verdict` and
+`routing/disposable/mod.rs`'s per-candidate loop — this section said "its one
+site" until 2026-09-03, when re-deriving it for the design note below found
+the second) and that is a decision, not an omission.
 
 **Nothing in this build observes task progress.** The only completion fact
 available where the reserve verdict is computed is that a turn is already
@@ -4045,3 +4047,73 @@ Deliberately deferred experiment gates are not in the active execution queue and
 to be presented as blockers. **Open, deferred, experimental, refused and
 awaiting-user-decision are distinct statuses and must stay distinct.**
 
+
+## A task's progress is declared, never guessed — designing lines 1294 and 1610, 2026-09-03
+
+The user named **1294** (*"avoid moving an almost-complete high-value task to
+another session solely because a reserve threshold was crossed"*) and **1610**
+(*"avoid migrating a nearly completed task solely to preserve a small amount of
+quota"*) among the seven lines whose refusal by checkbox economics does not
+hold, and said *design it*. This is that design note. It supersedes nothing in
+*A task is never "nearly complete"* above — it **answers that section's own
+closing sentence**, which says both lines re-open together the moment a real
+producer of task progress lands.
+
+**What the ruling did not lift.** The inference ban stands, and it is the
+strongest argument in either section: turn counts and elapsed time report
+"almost complete" for work that has merely been running a while, which is
+precisely the long-running work a protected reserve exists to keep serving.
+`task_nearly_complete` is the **first branch** `evaluate_reserve_spend` takes,
+outranking every other signal including the user override, so a fabricated
+value does not degrade the policy — it inverts it, at the one moment the
+protection matters. Nothing about a user ruling makes a proxy honest.
+
+**The state in current source** (re-derived 2026-09-03; the refusal register's
+citations had gone stale on Phase 59's splits, which is what that file's own
+"this file drifts" section warns about):
+
+- the field is `ReserveDecisionInputs::task_nearly_complete`, in
+  `provider/quota/mod.rs`, with the refusal at its own doc comment;
+- there are **two** production construction sites, not one:
+  `routing/pressure.rs::reserve_verdict` and
+  `routing/disposable/mod.rs`'s per-candidate loop. Both pass `false`, each
+  with a comment naming the line;
+- the two consumers are `provider/quota/mod.rs::evaluate_reserve_spend` (1294)
+  and `routing/pressure.rs::reserve_verdict` (1610) — **one mechanism seen from
+  two phases**, which is why the two lines are one package and not two.
+
+**The producer that is honest: a declaration.** The pattern is already at the
+richer of the two construction sites, one field away.
+`routing/disposable/mod.rs` passes `user_override: self.reserve_override.applies()`
+— a real user declaration, scoped so it is true only for a session the user
+actually named. That is not an inference about the work; it is a statement
+somebody made on purpose. Task progress can arrive the same way, and only that
+way: **the person or orchestrator doing the work says the task is nearly
+complete**, exactly as Phase 60's file claims are declared by a CLI verb rather
+than guessed from terminal output (see *Claims, turn-scoped* in
+`evidence/phase-60.md`, and line 2404's insistence that intent detection stay
+best-effort and say so rather than infer).
+
+This satisfies both lines as written. Their operative word is **solely**: the
+guard exists to stop a *threshold* from being the whole reason a task moves. A
+declaration is a second reason, contributed by the only party that knows.
+
+**Successor package** (named here so this note is not another investigation
+that ends in a document — practice §83): *a scoped task-progress declaration*,
+carrying a CLI verb and a session-scoped store read in the shape
+`ReserveOverride` already has, wired into both construction sites, closing
+**1294 and 1610 together**. Its Phase −1 is the paragraph above: the field,
+both callers, the propagation path and both consumers all exist in production
+today, and the declaration is the one missing link. It is Amber, not Red — it
+adds a decision and a persisted scope, but touches no lifecycle, migration or
+platform code.
+
+**What this deliberately does not do.** It does not infer progress from any
+signal Glasshouse already receives; `LifecycleEvent` stays binary and
+retrospective, and two of its variants keep the doc comments saying they are
+not statements about the session's work. It does not relax the test that pins
+the literal — that test is what stops the field drifting open before a producer
+exists, and relaxing it was never a way to close either line. And it does not
+make the declaration sticky: a declaration that outlives the task it described
+would re-create the inversion by a slower route, so it is scoped and expiring,
+like a claim.
