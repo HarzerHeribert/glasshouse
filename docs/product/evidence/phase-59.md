@@ -22,6 +22,16 @@ Limits: a move proves nothing beyond "unchanged"; the comment share is untouched
 
 ---
 
+### Split the shell into state, view and per-screen modules so that a screen's behaviour lives in one file. (line 2052)
+
+Contract: Given `shell/` as three files — `state.rs` (4,973 production + 3,084 inline-test lines), `mod.rs` (2,941 + 3,685), `view.rs` (2,483 + 3,633) — when the package lands, Glasshouse behaves byte-for-byte as before — every `crate::shell::state::…` path still resolves and `--lib shell` passes with the same count — while each screen's state and key handling lives in its own file under `state/`, no new file exceeds 2,500 production lines, and every inline test module lives under `shell/tests/`.
+
+State: **COMPLETE** — ruled 2026-09-03 by the orchestrator. Package `GH-DECOMP-SHELL` (Sonnet high, Green pure move); report `.agent-runtime/report-decomp-shell.md`. `state/mod.rs` (857: `Overlay`, `Mode`, `Action`, `ViewportGrid`, the `ShellState` struct, construction, navigation and the top key dispatcher), `state/overview.rs` (659: session list, the overview screens and the launch flow), `state/knowledge.rs` (437), `state/route.rs` (326), `state/settings/{mod 1299, keys 1468}` (the types and forwarding, then `impl SettingsState` as a child module so its private fields need no bump); `mod.rs` (2,943) and `view.rs` (2,485) keep their production bodies and lose their inline tests to `tests/{mod_tests 3683, view_tests 3630, state_tests 3082}`. Non-move hunks enumerated in the report: module wiring and re-exports, 14 `impl ShellState` wrapper pairs, 28 `pub(super)` widenings each named with its caller, one field bump, four `include_str!` path corrections (`../mod.rs`, `../view.rs` — the scanned files are still single files, so no join), one `super::` depth fix. `--lib shell` 314/314 before and after (312 `#[test]` items on both sides); clippy, rustdoc, the ratchet clean; `blast-radius.sh --targeted` exit 0. Re-run on the merged tree by the orchestrator: `cargo check --all-targets`, clippy, rustdoc, `--lib shell`, the targeted blast radius, the ratchet.
+
+Limits: a move proves nothing beyond "unchanged". `shell/mod.rs` stays at 2,943 production lines, over the ceiling by 443 — that is line 2047's debt, held by the ratchet, and `GH-TRIM-SHELL` is the package for it; `view.rs` renders every screen from one file (2,485, under the ceiling), which this line's *per-screen* clause covers for behaviour, not rendering. Packet error recorded: the packet called `mod.rs` under the ceiling; it was 2,941 and already in the baseline.
+
+---
+
 ### Contributions to line 2047 (the ceiling) — files brought under 2,500 without a line of their own
 
 | package | file | before → after | report |
