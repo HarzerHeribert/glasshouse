@@ -291,7 +291,23 @@ if [ "$delivered" -eq 1 ]; then
   exit 0
 fi
 
-printf '\033[31mnew-worker: %s DID NOT ACCEPT the prompt\033[0m — still at 0 tokens.\n' "$NAME"
+# Zero tokens has TWO causes and they need opposite responses. Re-sending into
+# the second one queues a duplicate prompt behind a turn that is about to
+# succeed, and the worker then runs its packet twice. 2026-09-03's provider 529
+# outage produced the false negative three times in one session, and the
+# documented "just send Enter" remedy made it worse each time.
+screen="$(cmux read-screen --surface "$surface" 2>/dev/null)"
+if grep -qE 'API Error: 5[0-9][0-9]|Retrying in [0-9]+s · attempt|attempt [0-9]+/[0-9]+' <<<"$screen"; then
+  printf '\033[33mnew-worker: %s LANDED the prompt but the provider is refusing it\033[0m — 0 tokens, and the pane shows an API error or a retry ladder.\n' "$NAME"
+  printf '  DO NOT re-send: the prompt is the active turn, and a second copy queues behind it.\n'
+  printf '  Wait for the ladder to finish. Re-submit only once the pane is idle with an EMPTY input box,\n'
+  printf '  and press Escape first to drop anything already queued.\n'
+  printf '  Recover the exact text with:  PRINT_PROMPT=1 %s <same args>\n' "$0"
+  exit 2
+fi
+
+printf '\033[31mnew-worker: %s DID NOT ACCEPT the prompt\033[0m — still at 0 tokens, and the pane shows no API error.\n' "$NAME"
 printf '  This is the documented failure: the harness started but the prompt did not land.\n'
 printf '  Re-send it by hand:  cmux send --surface %s "<prompt>" && cmux send-key --surface %s Enter\n' "$surface" "$surface"
+printf '  (cmux send takes its text POSITIONALLY; there is no --text flag.)\n'
 exit 1
