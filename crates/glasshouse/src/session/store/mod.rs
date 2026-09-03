@@ -46,6 +46,7 @@ use record::{
 };
 // Named only by `tests.rs`, through this module's own `use super::*;` --
 // unused outside `#[cfg(test)]`.
+pub use claims::{FileClaim, STALE_CLAIM_AFTER};
 pub use context::{
     AdvisoryCacheState, CacheState, CheckpointRecency, SessionContext, TaskContinuity,
 };
@@ -194,6 +195,19 @@ pub enum SessionStoreError {
         id: SessionId,
         lifecycle: SessionLifecycle,
     },
+    #[error(
+        "session `{id}` is {lifecycle}, and a session that has finished cannot claim a \
+         file; a claim it took would be released again the moment anything read it"
+    )]
+    NotClaimable {
+        id: SessionId,
+        lifecycle: SessionLifecycle,
+    },
+    #[error(
+        "`{path}` is not a path this project can claim; a claimed path is \
+         repo-relative and inside the project, with no `..` component"
+    )]
+    ClaimPath { path: String },
     #[error(transparent)]
     Label(#[from] LabelError),
     #[error("the project database has no project identifier bound")]
@@ -1861,6 +1875,7 @@ fn require_owning_harness(harness: &str) -> Result<(), SessionStoreError> {
     super::owning_harness(harness)
 }
 
+mod claims;
 mod context;
 mod record;
 #[cfg(test)]

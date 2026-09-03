@@ -2389,13 +2389,13 @@ Fixed architectural requirements
 
 Claims, turn-scoped (Maybe A + F)
 
-☐ Claim a file when a session begins an edit-oriented operation on that file.
-☐ Release a session's file claim automatically when the relevant turn completes.
-☐ Release abandoned file claims when the owning session exits, fails, or exceeds a safe stale-claim timeout.
-☐ Allow a session to renew a claim when its next turn continues work on the same file.
-☐ Associate every file claim with the owning Glasshouse session ID rather than only a process ID.
-☐ Keep file claims project-scoped so a claim can never affect another project.
-☐ Surface active file claims in the session overview when they are relevant to parallel work.
+☑ Claim a file when a session begins an edit-oriented operation on that file.
+☑ Release a session's file claim automatically when the relevant turn completes.
+☑ Release abandoned file claims when the owning session exits, fails, or exceeds a safe stale-claim timeout.
+☑ Allow a session to renew a claim when its next turn continues work on the same file.
+☑ Associate every file claim with the owning Glasshouse session ID rather than only a process ID.
+☑ Keep file claims project-scoped so a claim can never affect another project.
+☑ Surface active file claims in the session overview when they are relevant to parallel work.
 
 Edit intent (Maybe B)
 

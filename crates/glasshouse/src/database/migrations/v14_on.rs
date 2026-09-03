@@ -1,7 +1,7 @@
-//! Migrations 14 through 26, split out of `database.rs`'s `MIGRATIONS`
-//! array by Phase 59's decomposition. Bodies are verbatim.
+//! Migrations 14 onwards, split out of `database.rs`'s `MIGRATIONS`
+//! array by Phase 59's decomposition. Bodies through 26 are verbatim.
 
-pub(super) const MIGRATIONS_V14_ON: [&str; 13] = [
+pub(super) const MIGRATIONS_V14_ON: [&str; 14] = [
     // 14: the order checkpoints were actually written in, because
     // `created_at` cannot carry it.
     //
@@ -1222,6 +1222,84 @@ pub(super) const MIGRATIONS_V14_ON: [&str; 13] = [
     FOR EACH ROW
     BEGIN
         SELECT RAISE(ABORT, 'the project event log is append-only');
+    END;
+    ",
+    // 27: `file_claims` — Phase 60's soft, project-scoped, turn-scoped file
+    // claims (map lines 2392-2398).
+    //
+    // # One row per (session, path), which is what makes a renew a renew
+    //
+    // The primary key is `(session_id, path)`, so a session claiming a file
+    // it already holds can only ever move `renewed_at` and `expires_at` on
+    // the row it already has — line 2395's *"renew rather than create a
+    // second one"* is the table's shape and not a rule the writer has to
+    // remember. `claimed_at` is left alone by a renew, so *"since when"* and
+    // *"still wanted as of"* stay two separate facts.
+    //
+    // # Two sessions may claim one path, and that is not an error
+    //
+    // Nothing here is unique on `path`. A claim is coordination metadata: it
+    // never locks, never blocks and never fails another session's write, so a
+    // second claimant is the overlap a later package reports, not a
+    // constraint violation this one raises.
+    //
+    // # `session_id` and not a process id — line 2396
+    //
+    // `NOT NULL`, and migration 12's rule on the reference itself: a bare id
+    // with no `REFERENCES`, because the sessions row may be trimmed and a
+    // read that cannot resolve one drops the claim rather than failing. A pid
+    // is deliberately absent: pids are recycled, and a recycled pid resolving
+    // to a live claim is exactly what the line forbids.
+    //
+    // # Project scope — line 2397
+    //
+    // Migration 15's two triggers, copied exactly. The database file is the
+    // project, so a claim written in one project is not merely filtered out
+    // of another project's reads — there is no query in another project's
+    // database that could name it — and a row carrying a foreign
+    // `project_id` is refused before it is written.
+    "
+    CREATE TABLE file_claims (
+        project_id  TEXT    NOT NULL,
+        -- The owning Glasshouse session, never a process id.
+        session_id  TEXT    NOT NULL,
+        -- Repo-relative, `/`-separated, UTF-8, never absolute:
+        -- `memory_files.path`'s spelling, enforced by the same function
+        -- (`crate::memory::normalize_observed_path`) at the same kind of
+        -- door. The schema can only refuse the empty string, for migration
+        -- 17's reason.
+        path        TEXT    NOT NULL CHECK (path <> ''),
+        -- Seconds since the Unix epoch. `claimed_at` survives a renew;
+        -- `renewed_at` and `expires_at` are what a renew moves.
+        claimed_at  INTEGER NOT NULL,
+        renewed_at  INTEGER NOT NULL,
+        expires_at  INTEGER NOT NULL,
+
+        PRIMARY KEY (session_id, path)
+    );
+
+    -- The other direction: who else holds this path. Deliberately not
+    -- UNIQUE -- see the comment above.
+    CREATE INDEX file_claims_by_path ON file_claims (path, session_id);
+
+    CREATE TRIGGER file_claims_reject_foreign_project_insert
+    BEFORE INSERT ON file_claims
+    FOR EACH ROW
+    WHEN NEW.project_id IS NOT (
+        SELECT value FROM project_metadata WHERE key = 'project_id'
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'file claim belongs to a different project');
+    END;
+
+    CREATE TRIGGER file_claims_reject_foreign_project_update
+    BEFORE UPDATE OF project_id ON file_claims
+    FOR EACH ROW
+    WHEN NEW.project_id IS NOT (
+        SELECT value FROM project_metadata WHERE key = 'project_id'
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'file claim belongs to a different project');
     END;
     ",
 ];

@@ -452,6 +452,39 @@ pub(crate) fn report_hook_with(
         // call below returns early for it. Refusal register, *"Phase 51's
         // memory proxy — 1821 and 1831"*, ruling (b).
         if let LifecycleEvent::TurnEnded { outcome } = translated {
+            // Map line 2393 — *"release a session's file claim automatically
+            // when the relevant turn completes."* This is the only place in
+            // the shipped binary that learns a turn ended, and a claim is
+            // scoped to a turn, so this is where the release belongs.
+            //
+            // **Both outcomes release.** `TurnOutcome` is the harness's
+            // verdict on its own turn; a turn that ended badly is a turn that
+            // finished, and a claim outliving it would describe work nobody
+            // is doing.
+            //
+            // Ordered first in this arm, ahead of the evaluation writes and
+            // well ahead of extraction: it is one `DELETE`, and it is the one
+            // write here that another *session* can observe. Extraction runs
+            // on its own thread up to `EXTRACTION_BOUND` and this process can
+            // be torn down by the harness while it does, which must not cost
+            // a claim its release.
+            //
+            // Best-effort, like every other write on this path: a hook that
+            // failed to release a claim must not fail the user's turn over
+            // it, and `STALE_CLAIM_AFTER` is what bounds a claim this line
+            // missed.
+            match store.release_claims_of(&id) {
+                Ok(0) => {}
+                Ok(released) => {
+                    tracing::debug!(session = %id, released, "released this turn's file claims");
+                }
+                Err(err) => tracing::debug!(
+                    error = %err,
+                    session = %id,
+                    "could not release this session's file claims"
+                ),
+            }
+
             glasshouse::evaluation::record_turn_outcome(
                 runtime,
                 id.as_str(),

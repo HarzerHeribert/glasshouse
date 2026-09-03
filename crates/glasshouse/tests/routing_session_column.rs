@@ -1029,6 +1029,9 @@ fn a_version_23_database_migrates_and_reads_back_three_nulls() {
              ALTER TABLE routing_observations DROP COLUMN turn_shape;
              ALTER TABLE routing_observations DROP COLUMN effort_level;
              ALTER TABLE routing_observations DROP COLUMN session_id;
+             -- Migration 27's table: a rollback that leaves it in place
+             -- meets `table file_claims already exists` on the re-run.
+             DROP TABLE IF EXISTS file_claims;
              DELETE FROM schema_migrations WHERE version >= 24;",
         )
         .expect("roll back to 23");

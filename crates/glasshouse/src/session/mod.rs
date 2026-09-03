@@ -57,11 +57,11 @@ pub use runtime::{
 };
 pub use select::{ExecutableSource, HarnessSelection, SelectionError, select};
 pub use store::{
-    AdvisoryCacheState, CacheState, CheckpointRecency, LabelError, NewSession, ProjectSessions,
-    ResponseMechanism, ResumableSession, SessionContext, SessionDisposition, SessionId,
-    SessionLifecycle, SessionName, SessionPairingClass, SessionPresentation, SessionProtocol,
-    SessionPurpose, SessionRecord, SessionRole, SessionStore, SessionStoreError, SupervisionRecord,
-    TaskContinuity,
+    AdvisoryCacheState, CacheState, CheckpointRecency, FileClaim, LabelError, NewSession,
+    ProjectSessions, ResponseMechanism, ResumableSession, STALE_CLAIM_AFTER, SessionContext,
+    SessionDisposition, SessionId, SessionLifecycle, SessionName, SessionPairingClass,
+    SessionPresentation, SessionProtocol, SessionPurpose, SessionRecord, SessionRole, SessionStore,
+    SessionStoreError, SupervisionRecord, TaskContinuity,
 };
 pub use supervision::{
     ProcessIdentity, ProcessState, SupervisedSession, Supervision, SupervisionRefusal,

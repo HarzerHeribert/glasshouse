@@ -322,6 +322,41 @@ pub enum Command {
         #[command(subcommand)]
         command: Option<SessionCommand>,
     },
+    /// Claim a file for a session, so parallel work can see who is on what.
+    ///
+    /// A claim is soft coordination metadata and nothing else. It takes no
+    /// operating-system lock, changes no permission, blocks nothing, and can
+    /// never fail another session's write. Two sessions may hold a claim on
+    /// the same file — Glasshouse records that rather than refusing it.
+    ///
+    /// Claims are project-scoped and turn-scoped: one is released when the
+    /// session's turn ends, when the session exits or fails, and when it goes
+    /// stale unrenewed. Claiming a file the same session already holds
+    /// renews that claim rather than adding a second.
+    ///
+    /// This is the deliberate entry point while Glasshouse cannot observe
+    /// edit intent for itself. When it can, the same claims appear without
+    /// anyone typing this.
+    Claim {
+        /// The file to claim, inside this project. Absolute, or relative to
+        /// where you are standing; it is recorded repo-relative either way.
+        #[arg(required_unless_present_any = ["list", "release"])]
+        path: Option<String>,
+
+        /// Which session the claim belongs to, by the identifier
+        /// `glasshouse sessions` prints, or any leading part of it.
+        #[arg(long, required_unless_present = "list")]
+        session: Option<String>,
+
+        /// Release a claim instead of taking one. With no path, release every
+        /// claim that session holds.
+        #[arg(long)]
+        release: bool,
+
+        /// Print this project's active claims and change nothing.
+        #[arg(long, conflicts_with_all = ["path", "session", "release"])]
+        list: bool,
+    },
     /// Search this project's durable memory.
     ///
     /// Memory is project-scoped: this reads the database belonging to the

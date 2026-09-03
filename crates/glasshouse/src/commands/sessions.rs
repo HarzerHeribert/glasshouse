@@ -6,7 +6,7 @@ use glasshouse::guardrails::AssumptionStore;
 use glasshouse::integrations::cmux;
 use glasshouse::session::{
     ProjectSessions, SessionDisposition, SessionName, SessionProtocol, SessionPurpose,
-    SessionRecord,
+    SessionRecord, SessionStore,
 };
 
 /// `glasshouse sessions focus` — Phase 17 line 759. One `workspace select`
@@ -120,7 +120,145 @@ pub(crate) fn session_report(runtime: &Runtime) -> anyhow::Result<String> {
             )
         );
     }
+    if let Some(claims) = claims_block(&sessions.store())? {
+        // Line 2398, and its *"when they are relevant to parallel work"*
+        // half: nothing is printed when nothing is claimed, so a project that
+        // does not use claims sees the listing it always saw.
+        let _ = write!(out, "\n{claims}");
+    }
     Ok(out)
+}
+
+/// The `CLAIMED BY` block for the session overview — map line 2398 — or
+/// `None` when this project has no active claim.
+///
+/// Ordered by path, so the sessions claiming one file stand next to each
+/// other. That adjacency is the whole of what is surfaced: it is not a
+/// conflict verdict, not a warning, and not a recommendation, all of which
+/// belong to a later package.
+fn claims_block(store: &SessionStore<'_>) -> anyhow::Result<Option<String>> {
+    use std::fmt::Write as _;
+
+    let claims = store.active_claims()?;
+    if claims.is_empty() {
+        return Ok(None);
+    }
+
+    let path_width = claims
+        .iter()
+        .map(|claim| claim.path.len())
+        .chain(std::iter::once("PATH".len()))
+        .max()
+        .unwrap_or("PATH".len());
+
+    let mut out = String::new();
+    let _ = writeln!(out, "{:<12}  {:<path_width$}  SINCE", "CLAIMED BY", "PATH");
+    for claim in &claims {
+        let _ = writeln!(
+            out,
+            "{:<12}  {:<path_width$}  {}",
+            crate::commands::shared::short_id(&claim.session_id),
+            claim.path,
+            crate::commands::shared::format_age(claim.claimed_at),
+        );
+    }
+    Ok(Some(out))
+}
+
+/// `glasshouse claim` — the deliberate entry point for map line 2392 while
+/// Glasshouse cannot yet observe edit intent for itself.
+///
+/// A seam, not a feature: everything it decides is decided in
+/// `session::store::claims`, and the next package calls that store directly
+/// rather than this verb.
+pub(crate) fn claim_command(
+    runtime: &Runtime,
+    path: Option<&str>,
+    session: Option<&str>,
+    release: bool,
+    list: bool,
+) -> anyhow::Result<String> {
+    let sessions = ProjectSessions::open(runtime)?;
+    let store = sessions.store();
+
+    if list {
+        return Ok(match claims_block(&store)? {
+            Some(block) => block,
+            None => format!("No file claims in {}.\n", runtime.project().name()),
+        });
+    }
+
+    // `clap` requires `--session` unless `--list`, and requires a path unless
+    // `--list` or `--release`; both are stated here rather than assumed,
+    // because an argument definition is not a proof.
+    let Some(session) = session else {
+        anyhow::bail!("`glasshouse claim` needs `--session <id>`; `--list` needs no session");
+    };
+    let id = store.resolve_id(session)?;
+    let short = crate::commands::shared::short_id(&id);
+
+    match (release, path) {
+        (true, None) => {
+            let released = store.release_claims_of(&id)?;
+            Ok(format!(
+                "glasshouse: released {released} file {} held by session {short}\n",
+                if released == 1 { "claim" } else { "claims" }
+            ))
+        }
+        (true, Some(raw)) => {
+            let path = claimed_path(runtime, raw)?;
+            if store.release_claim(&id, &path)? {
+                Ok(format!(
+                    "glasshouse: session {short} released its claim on {path}\n"
+                ))
+            } else {
+                Ok(format!(
+                    "glasshouse: session {short} held no claim on {path}\n"
+                ))
+            }
+        }
+        (false, Some(raw)) => {
+            let path = claimed_path(runtime, raw)?;
+            let claim = store.claim_file(&id, &path)?;
+            Ok(format!(
+                "glasshouse: session {short} claims {} (held since {})\n",
+                claim.path,
+                crate::commands::shared::format_age(claim.claimed_at),
+            ))
+        }
+        (false, None) => {
+            anyhow::bail!("`glasshouse claim` needs a path, `--release`, or `--list`")
+        }
+    }
+}
+
+/// The repo-relative spelling of a path a person typed, or a refusal naming
+/// the project it is not inside.
+///
+/// A relative path is resolved against the working directory, which is what
+/// a path typed at a shell means — unlike a tool input, which
+/// [`crate::commands::context_firewall::project_relative_path`] treats as
+/// already root-relative. Everything after that is that function's, so a
+/// claimed path and a remembered path are the same string for the same file.
+fn claimed_path(runtime: &Runtime, raw: &str) -> anyhow::Result<String> {
+    let root = runtime.project().root();
+    let given = std::path::Path::new(raw);
+    let absolute = if given.is_absolute() {
+        given.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(given))
+            .unwrap_or_else(|_| root.join(given))
+    };
+
+    crate::commands::context_firewall::project_relative_path(root, &absolute.display().to_string())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "`{raw}` is not a file inside {}; a file claim is project-scoped \
+                 and names a path in this project",
+                root.display()
+            )
+        })
 }
 
 /// One line of the session listing, header included.

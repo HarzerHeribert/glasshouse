@@ -242,7 +242,12 @@ pub(crate) fn record_file_touches(
 /// nothing outside the project is stored, not even to be filtered out later.
 /// A relative path is accepted as already being relative to the root, which
 /// is what a relative path in a tool input means.
-fn project_relative_path(root: &std::path::Path, raw: &str) -> Option<String> {
+///
+/// `pub(crate)` for `commands::sessions::claimed_path`, which needs the same
+/// answer for the same reason: `file_claims.path` and `memory_files.path`
+/// hold the same spelling, and a second implementation of "inside this
+/// project, spelled this way" is how the two would come to disagree.
+pub(crate) fn project_relative_path(root: &std::path::Path, raw: &str) -> Option<String> {
     let folded = raw.replace('\\', "/");
     let root_folded = root.display().to_string().replace('\\', "/");
     let root_folded = root_folded.trim_end_matches('/');

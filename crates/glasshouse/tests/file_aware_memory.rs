@@ -1089,8 +1089,14 @@ fn a_schema_25_database_migrates_in_place_with_every_seq_preserved() {
     {
         let conn = rusqlite::Connection::open(fixture.runtime.database_path()).unwrap();
         conn.execute_batch(SCHEMA_25_LIFECYCLE_EVENTS).unwrap();
-        conn.execute("DELETE FROM schema_migrations WHERE version = 26", [])
-            .unwrap();
+        // `>= 26`, and migration 27's table with it: this fixture claims to
+        // be a 25, and a later migration's row left behind would make the
+        // claim false while the re-run met a table that already exists.
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS file_claims;
+             DELETE FROM schema_migrations WHERE version >= 26;",
+        )
+        .unwrap();
         let claimed: i64 = conn
             .query_row(
                 "SELECT COALESCE(MAX(version), 0) FROM schema_migrations",

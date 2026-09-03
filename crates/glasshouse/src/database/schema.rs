@@ -115,9 +115,18 @@
 /// same events. See the migration's own doc comment, and
 /// `docs/product/design-decisions.md`'s *File paths a memory explicitly
 /// references* for why the record is an event rather than a table.
+/// Version 27 adds `file_claims`, Phase 60's soft file-coordination
+/// claims — capability map lines 2392 to 2398. One row per (session, path),
+/// which is what makes a renew a renew rather than a second claim; migration
+/// 15's two project triggers; no `UNIQUE` on `path`, because two sessions
+/// claiming one file is the overlap a later package reports and not an error
+/// this schema refuses. See the migration's own doc comment for why the
+/// owner is a session identifier and never a process id, and
+/// [`crate::session::store::STALE_CLAIM_AFTER`] for the timeout that bounds
+/// a claim nothing ever released.
 /// Later migrations are appended to [`MIGRATIONS`], and this constant moves
 /// with them.
-pub(super) const SUPPORTED_SCHEMA_VERSION: i64 = 26;
+pub(super) const SUPPORTED_SCHEMA_VERSION: i64 = 27;
 
 /// The `lifecycle_events.kind` values migration 5's `CHECK` constraint allows.
 ///
