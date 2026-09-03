@@ -34,6 +34,42 @@ and the shell — and findings filed here, then packaged **by risk**.
 
 ## Sessions
 
-_None yet. The first is due the first working day after 2026-09-03; the
-orchestrator runs it when the decomposition workers are not saturating the
-machine, because a loaded host hides the latencies this lane exists to see._
+### 2026-09-03 — `2d1dc4d`, claude-code, read-only surfaces only
+
+Scratch project: a worktree of this repository. Covered: `sessions`, `route`,
+`route --help`, `resources`, `entitlements`, `doctor`, `sessions show`, and
+`launch` up to the point it refuses.
+
+**No defect found.** Three things were checked against a suspicion and the
+suspicion lost each time — recorded because "I looked and it was fine" is the
+result, not an absence of one:
+
+- `route` and every `launch` print a 21-line *why* of which 19 are `+0.000`.
+  It reads as noise on a first run. It is **deliberate**: `commands/route.rs`
+  states that a reader must be able to tell "provider health was equal" from
+  "provider health was never read", so an inert term is named rather than
+  dropped. Settled decision, no contradictory evidence — **curiosity, not a
+  package.**
+- A launch that fails records `state failed` and `sessions show` gives no
+  reason; `SessionLifecycle::Failed` carries no payload. But the CLI **does**
+  say why at the time, and says it well: *"a harness session needs a terminal
+  on both standard input and standard output; run this from an interactive
+  terminal rather than through a pipe or a redirect."* The user is told. Later
+  diagnosis from the record alone is weaker — **debt**, successor below.
+- `resources` prints a raw epoch beside the useful relative age
+  (`last observed unix 1788430539 (0s old; provider limit 900s)`) —
+  **curiosity.**
+
+**Successor (debt, do not schedule on its own):** if a second session's record
+ever has to be diagnosed after the fact, give `SessionLifecycle::Failed` a
+reason and surface it in `sessions show`. One occurrence, and the live path
+already reports correctly.
+
+**What this session did not cover, and why.** The interactive half — a real
+harness doing real work, with memory extraction, the firewall hook and the
+shell watched — did not run. Both recorded sessions are this orchestrator's
+own non-TTY invocations, correctly refused. `glasshouse launch` needs a
+terminal on both ends, and this context cannot drive an interactive TUI or
+read a pane back. **The lane needs a human-attended run**, or a harness
+started in a pane by hand and left to work; that is where the defects this
+lane exists for actually live, and none of them can be reached from here.
