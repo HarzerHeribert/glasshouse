@@ -640,7 +640,7 @@ pub(super) fn serve(
 /// `crate::profile::ingress_targets`' OpenAI Responses entry.
 fn forward(
     head: http::RequestHead,
-    reader: BufReader<TcpStream>,
+    mut reader: BufReader<TcpStream>,
     out: &mut TcpStream,
     upstream: &Upstream,
     agent: &Agent,
@@ -664,6 +664,10 @@ fn forward(
             "the request target could not be appended to the configured provider's base URL",
             Some(&head.method),
         );
+        // The refusal is only useful if the client can read it, which is
+        // `settle`'s whole subject: the body this request declared is still
+        // arriving, and closing under it resets the connection.
+        settle(&mut reader, out, head.content_length);
         return (
             exchange(Outcome::Declined, 400, upstream, Some(route)),
             no_quota(),
@@ -699,6 +703,9 @@ fn forward(
             "the request could not be rebuilt for the configured provider",
             Some(&head.method),
         );
+        // Past the point where the body was handed to the outbound hop, so
+        // the drain goes through `out` — see `settle_queued`.
+        settle_queued(out);
         return (
             exchange(Outcome::Declined, 400, upstream, Some(route)),
             no_quota(),
@@ -726,6 +733,12 @@ fn forward(
                 "the Glasshouse gateway could not reach the configured provider",
                 Some(&head.method),
             );
+            // The body was handed to `agent.run` and dropped there unread
+            // when the connection failed, so every byte of it the reader had
+            // not already buffered is still queued on this socket. Closing
+            // over it is the reset the Windows leg reported — see
+            // `settle_queued`.
+            settle_queued(out);
             return (
                 exchange(Outcome::Unreachable { detail }, 502, upstream, Some(route)),
                 no_quota(),
@@ -1146,6 +1159,42 @@ pub(super) fn settle(
     // still queued — and a refused request capped by `DRAIN_CAP` or
     // `SETTLE_TIMEOUT` is exactly the case where some may be.
     let _ = out.shutdown(Shutdown::Write);
+}
+
+/// Discard whatever the client has already queued, then half-close.
+///
+/// The invariant is [`settle`]'s: a client that has been answered observes
+/// an end of stream, and it holds because nothing of the client's is left
+/// unread when the socket closes. Closing one whose receive queue still
+/// holds the client's own bytes sends a reset in place of the `FIN`, and the
+/// harness then reads a connection reset instead of the response it was just
+/// sent — the Windows VM leg, run 5 and run 14,
+/// `conformance::no_rendering_the_gateway_can_produce_carries_either_planted_secret`.
+///
+/// Why this is not [`settle`]: on the two refusals below the request body
+/// was already handed to the outbound hop, so the reader that would have
+/// drained it went with the request, and `socket` — a `try_clone` of the
+/// same connection — is the only thing left that can empty the queue. It
+/// reads non-blocking and stops the moment the socket says there is nothing
+/// queued, so no wait stands in for the drain; [`DRAIN_CAP`] bounds a client
+/// that is still writing, exactly as it bounds [`settle`]'s.
+fn settle_queued(socket: &mut TcpStream) {
+    if socket.set_nonblocking(true).is_ok() {
+        let mut discard = [0u8; 8192];
+        let mut drained: u64 = 0;
+        while drained < DRAIN_CAP {
+            match socket.read(&mut discard) {
+                Ok(0) => break,
+                Ok(read) => drained += read as u64,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => break,
+            }
+        }
+        // Back to blocking before the close: `try_clone` duplicates the
+        // descriptor and the flag is the socket's, not the descriptor's.
+        let _ = socket.set_nonblocking(false);
+    }
+    let _ = socket.shutdown(Shutdown::Write);
 }
 
 /// Whether a response with this status is allowed to carry a body at all.

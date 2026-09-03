@@ -406,7 +406,7 @@ mod tests {
             ("shell/mod.rs", include_str!("../shell/mod.rs")),
             ("session/runtime.rs", include_str!("runtime.rs")),
             ("session/attach.rs", include_str!("attach.rs")),
-            ("session/select.rs", include_str!("select.rs")),
+            ("session/select/mod.rs", include_str!("select/mod.rs")),
         ];
         let allowed = ["main.rs", "shell/mod.rs"];
         for (name, source) in writers {

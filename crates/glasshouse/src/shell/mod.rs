@@ -1,31 +1,18 @@
-//! The main interactive interface.
-//!
-//! The shell is what `glasshouse` opens with no arguments: a persistent top bar
-//! naming the project and its canonical root, a session bar listing the
-//! project's sessions, a viewport reserved for the active session's terminal,
-//! and a session overview a keystroke away.
-//!
-//! Split the same way the first-run wizard is — [`state`] answers keys without
-//! drawing, [`view`] draws without deciding anything — so the interesting
-//! behaviour is testable without a terminal, and the run loop below stays small
-//! enough to read in one sitting.
-//!
+//! The main interactive interface: what `glasshouse` opens with no
+//! arguments — a persistent top bar naming the project and its canonical
+//! root, a session bar listing the project's sessions, a viewport reserved
+//! for the active session's terminal, and a session overview a keystroke
+//! away. Split the same way the first-run wizard is — [`state`] answers keys
+//! without drawing, [`view`] draws without deciding anything.
 //! This is where a [`crate::session::SessionRuntime`] is actually owned: the
-//! shell is the one place that holds several live harnesses at once and gives
-//! one of them the keyboard. See
-//! `.agent-runtime/design-shell-session-modes.md` for how the keyboard is
-//! divided between Glasshouse and the focused session's PTY — [`state::Mode`]
-//! is the switch it hangs on.
-//!
-//! The viewport shows the focused session's own screen, converted each tick
-//! from its `vt100::Parser` into a [`state::ViewportGrid`] — see
-//! `build_viewport_grid` — and drawn cell by cell by
-//! `view::render_viewport`. The run loop is also the one place that
-//! answers a session's cursor-position queries (see
-//! [`crate::session::runtime::SessionRuntime::answer_terminal_queries`]'s doc
-//! comment on why an embedded session must, unlike `session::attach`) and
-//! that tells a session's pseudo-terminal and emulator the viewport's own
-//! size rather than the terminal's outer one — see [`view::viewport_slot`].
+//! shell holds several live harnesses at once and gives one of them the
+//! keyboard — see `.agent-runtime/design-shell-session-modes.md` and
+//! [`state::Mode`]. The viewport is the focused session's own screen,
+//! converted each tick by `build_viewport_grid` into a
+//! [`state::ViewportGrid`] and drawn by `view::render_viewport`; the run
+//! loop also answers a session's cursor-position queries and tells its PTY
+//! and emulator the viewport's own size, not the terminal's outer one — see
+//! [`view::viewport_slot`].
 
 pub mod state;
 pub mod view;
@@ -61,14 +48,12 @@ pub use state::{
     RoutingRow, RoutingSettingsEdit, SettingsEdit, ShellState, ViewportGrid,
 };
 
-/// Open the shell and run it until the user leaves.
-///
-/// Session *records* are read once at startup and re-read whenever the event
-/// loop is nudged. The [`SessionRuntime`] built here starts out empty:
-/// leaving the shell leaves every session it started exactly as it was — none
-/// are stopped on the way out — and a session recorded on a previous run is
-/// not automatically live again just because its row is in the bar; only `n`
-/// or a resume starts a process.
+/// Open the shell and run it until the user leaves. Session *records* are
+/// read once at startup and re-read whenever the event loop is nudged. The
+/// [`SessionRuntime`] built here starts out empty: leaving the shell leaves
+/// every session it started exactly as it was, and a recorded session is
+/// not automatically live again just because its row is in the bar; only
+/// `n` or a resume starts a process.
 pub fn run(runtime: &Runtime) -> Result<()> {
     let sessions = ProjectSessions::open(runtime)?;
     let records = sessions.store().list()?;
@@ -80,15 +65,12 @@ pub fn run(runtime: &Runtime) -> Result<()> {
         crate::VERSION,
         records,
     );
-    // The one normalized lifecycle stream, owned here and shared with the
-    // session runtime, so that everything the runtime publishes reaches this
-    // shell's consumers — and, through the sink below, the project's durable
-    // log.
+    // The one normalized lifecycle stream, shared with the session runtime
+    // and, through the sink below, the project's durable log.
     let events = EventBus::new();
     let event_log = attach_event_log(runtime, &events);
-    // Drained every tick. Publishing never waits on this, by construction:
-    // the queue is bounded and the oldest events are dropped if a viewport
-    // stops draining — see `crate::events::bus`.
+    // Drained every tick; publishing never waits on it — the queue is bounded
+    // and oldest events drop if a viewport stops draining. See `crate::events::bus`.
     let event_stream = events.subscribe();
 
     let checkpoints = ProjectCheckpoints::open(runtime)?;
@@ -97,27 +79,23 @@ pub fn run(runtime: &Runtime) -> Result<()> {
         crate::session::runtime::DEFAULT_SCROLLBACK_BYTES,
         events.clone(),
     );
-    // What each started session's harness index held for this project before
-    // it ran — half the identity guard for a harness whose identifiers live
-    // in one shared index, and the reason that read has to happen at start
-    // rather than at exit. See `session::native_id::snapshot`. Kept in memory
-    // rather than in the session record: it is scaffolding for one discovery,
-    // meaningless once the session has ended, and a shell that dies mid-session
-    // has nothing to capture anyway.
+    // What each session's harness index held before it ran — half the
+    // identity guard for a shared-index harness; must be read at start, not
+    // exit. See `session::native_id::snapshot`. Kept in memory only: it is
+    // meaningless once the session ends, and a shell that dies mid-session has
+    // nothing to capture anyway.
     let mut index_snapshots: HashMap<SessionId, session::native_id::IndexSnapshot> = HashMap::new();
 
     // Acquired after the database work above, so a failure there leaves the
     // user's terminal untouched rather than flashing an alternate screen.
     let mut screen = Screen::acquire()?;
     let events = EventSource::new(DEFAULT_TICK);
-    // Where a provider probe's answer comes back. The request itself is made
-    // on a thread of its own — see `spawn_provider_probe` — and this is the
-    // seam that keeps it off the thread drawing the terminal.
+    // Where a provider probe's answer comes back — the request runs on its
+    // own thread (`spawn_provider_probe`), off the thread drawing the terminal.
     let (probe_results, probe_inbox) = std::sync::mpsc::channel::<ProviderProbeResult>();
-    // And where a harness's own reports come back. Same shape, same reason:
-    // reading them means reading SQLite, and a reader can be made to wait on
-    // whoever holds the write lock. On the drawing thread that is a frozen
-    // interface, which is a defect this project has already shipped once.
+    // Where a harness's own reports come back — reading them means reading
+    // SQLite, and a reader can wait on the writer; on the drawing thread that
+    // is a frozen interface, a defect this project has already shipped once.
     let (reported, reported_inbox) = std::sync::mpsc::channel::<Vec<RecordedEvent>>();
     spawn_event_tail(runtime, &reported, &events.sender());
 
@@ -161,14 +139,9 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                                     state.refresh(records);
                                 }
                                 if presentation == SessionPresentation::Headless {
-                                    // A headless session draws no viewport by
-                                    // design, so `N` would otherwise be a key
-                                    // that appeared to do nothing. The
-                                    // viewport placeholder says so on every
-                                    // frame — see `view::render_viewport` —
-                                    // which is what carries the message on a
-                                    // terminal too narrow to leave room for
-                                    // this note beside the key bindings.
+                                    // No viewport, so `N` would look like a
+                                    // no-op — `render_viewport`'s placeholder
+                                    // says so on every frame.
                                     state.set_status("started a headless session — `o` lists it");
                                 }
                             }
@@ -393,13 +366,7 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                         store_provider_credential(&mut state);
                     }
                     Action::RunProviderProbe => {
-                        // `ProbeTimeouts::default()` and nothing else. The
-                        // parameter exists so a test can bound a hanging
-                        // endpoint in under a second instead of waiting out
-                        // `RESPONSE_TIMEOUT`; the values production uses are
-                        // asserted by `provider::discovery`'s own
-                        // `the_default_timeouts_are_the_named_constants_and_none_is_unset`,
-                        // and that this call site passes the default is
+                        // `ProbeTimeouts::default()` and nothing else;
                         // asserted by `the_run_loop_probes_with_the_default_timeouts`.
                         spawn_provider_probe(
                             runtime,
@@ -413,12 +380,8 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                         delete_provider_credential(&mut state);
                     }
                     Action::ReopenOnboarding => {
-                        // The wizard drives its own `Screen`, so this
-                        // shell's must be released first and reacquired once
-                        // it returns — the two never hold the terminal at
-                        // once. Sessions already running keep running; only
-                        // which screen is drawn changes for the moment the
-                        // wizard has it.
+                        // The wizard drives its own `Screen`; released here,
+                        // reacquired below — the two never hold it at once.
                         drop(screen);
                         let outcome = reopen_onboarding(runtime);
                         screen = Screen::acquire()?;
@@ -445,10 +408,8 @@ pub fn run(runtime: &Runtime) -> Result<()> {
             Event::Resize(cols, rows) => {
                 screen.on_resize(cols, rows)?;
                 if let Some(id) = live.focused().cloned() {
-                    // The viewport's own inner size, not the terminal's outer
-                    // one — see `view::viewport_slot`'s doc comment. A
-                    // harness resized to the terminal's full size would draw
-                    // for space Glasshouse's chrome has already claimed.
+                    // Inner size, not the terminal's outer one — see
+                    // `view::viewport_slot` — or a harness draws over chrome.
                     let slot = view::viewport_slot(Rect::new(0, 0, cols, rows));
                     if let Err(err) = live.resize(&id, TerminalSize::new(slot.height, slot.width)) {
                         tracing::warn!(session = %id, %err, "could not resize the focused session");
@@ -457,34 +418,26 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                 screen.draw(|frame| view::render(&state, frame))?;
             }
             Event::Tick => {
-                // A signal is the only thing that ends the shell other than a
-                // key, and it has to be noticed between keystrokes rather than
-                // only when one arrives.
+                // A signal is the only thing besides a key that ends the
+                // shell, and must be noticed between keystrokes.
                 if crate::shutdown::shutdown_requested() {
                     return Ok(());
                 }
 
-                // An embedded session has no real terminal behind it to
-                // answer its own `ESC[6n` — Glasshouse is the terminal, so
-                // Glasshouse must answer, every tick, or a harness waiting
-                // on the reply hangs looking exactly like one that started
-                // and did nothing. See `SessionRuntime::answer_terminal_queries`.
+                // An embedded session has no real terminal to answer its own
+                // `ESC[6n` — Glasshouse must, every tick, or a harness
+                // waiting on the reply hangs looking like it did nothing.
                 live.answer_terminal_queries();
 
                 let mut redraw = false;
                 let exits = live.poll_exits();
                 let any_exited = !exits.is_empty();
                 for (id, status) in exits {
-                    // `ProcessExit` owns this classification and is the only
-                    // place it lives. It used to be computed inline here as
-                    // well, which is two definitions of "did it crash" — and
-                    // two definitions of that eventually disagree about a
-                    // signal, which is the case that comes up least often and
-                    // costs the most when it is wrong.
+                    // `ProcessExit` owns this classification, the only place
+                    // it lives — two copies of "did it crash" can disagree.
                     let lifecycle = ProcessExit::from_status(&status).session_state();
                     // The session is over, so this is the tightest the
-                    // discovery window will ever be — see
-                    // `session::native_id::capture`'s doc comment.
+                    // discovery window will ever be — see `native_id::capture`.
                     let index_before = index_snapshots.remove(&id).unwrap_or_default();
                     if let Ok(Some(record)) = sessions.store().get(&id) {
                         session::native_id::capture(
@@ -505,33 +458,18 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                         redraw = true;
                     }
                 }
-                // Phase 11 line 688: a session's disposition can only turn
-                // `Resumable` here, on exit, and nothing else ever refreshes
-                // `state.sessions()` on its own — the session bar and
-                // overview otherwise only re-read the store on specific
-                // triggers (starting a session, `AppEvent::Redraw`), and an
-                // exit noticed on this tick is neither. Without this, `r`
-                // pressed against a session that exited moments ago would
-                // refuse it as "still running" against a record this loop
-                // had already, correctly, marked `Stopped` underneath it.
+                // Phase 11 line 688: disposition only turns `Resumable` here,
+                // on exit — without this, `r` on a session that just exited
+                // would still read "still running".
                 if any_exited && state.refresh(sessions.store().list()?) == Action::Redraw {
                     redraw = true;
                 }
 
-                // Everything that happened since the last tick, from both
-                // sides of the one stream: what this process published, and
-                // what a harness reported to a hook process the interface
-                // never sees. Drained on the interface's own thread — never
-                // on the one reading a pseudo-terminal, which is the whole
-                // point of the bus being a queue rather than a callback.
+                // Both sides of the one stream, drained here, never on the
+                // thread reading a pseudo-terminal.
                 let mut recorded = event_stream.drain();
                 recorded.extend(reported_inbox.try_iter().flatten());
-                // The consumer that makes this a delivery rather than a
-                // path: the overview's activity view shows these, and a user
-                // pressing `o` sees what their sessions have been doing. A
-                // drain whose result went nowhere would be a delivery path
-                // with nothing at the end of it, which is the state this
-                // capability sat in until now.
+                // The overview's activity view is the consumer.
                 if state.note_events(&recorded) == Action::Redraw {
                     redraw = true;
                 }
@@ -547,38 +485,21 @@ pub fn run(runtime: &Runtime) -> Result<()> {
                     redraw = true;
                 }
 
-                // A probe's answer normally arrives with its own wake-up —
-                // the worker sends `AppEvent::Redraw` — but it is drained
-                // here too, so a result can never be stranded by a wake-up
-                // that raced a tick.
+                // Drained here too, so a probe result can never be stranded
+                // by a wake-up that raced a tick.
                 if drain_provider_probes(&probe_inbox, &mut state) {
                     redraw = true;
                 }
-                // A request is outstanding, so keep repainting. Without this
-                // the in-flight line would be drawn once and then sit there
-                // looking exactly like the hang it exists to rule out.
+                // Otherwise the in-flight line draws once and looks hung.
                 if state.provider_probe_in_flight() {
                     redraw = true;
                 }
 
-                // A headless session is skipped, and this is deliberately
-                // **not** where the guarantee lives: `view::render_viewport`
-                // refuses to draw one, which is what holds even for a grid
-                // that is merely stale. Removing the filter below therefore
-                // changes nothing anyone can see, and a mutation proving that
-                // was run rather than assumed.
-                //
-                // It stays for two things a test cannot observe. It keeps
-                // `state.viewport_grid()` an honest description of what is on
-                // screen rather than a screen that is deliberately not shown;
-                // and without it a headless session producing output would
-                // make the grid differ every tick, so the shell would repaint
-                // continuously for a session nobody is looking at.
-                //
-                // The runtime's own presentation is the authority — it is
-                // what `focus` refuses on — rather than the stored record,
-                // which can be about a session no longer running in this
-                // Glasshouse at all.
+                // Headless is skipped here too, though `render_viewport`
+                // already refuses to draw one — see design-decisions.md,
+                // "Trims: `shell/mod.rs`" for the mutation that proved this
+                // load-bearing anyway. The runtime's presentation is the
+                // authority, not the stored record.
                 let grid = state
                     .active_session()
                     .and_then(|record| live.get(&record.id))
@@ -596,9 +517,8 @@ pub fn run(runtime: &Runtime) -> Result<()> {
             }
             Event::Shutdown => return Ok(()),
             Event::App(AppEvent::Redraw) => {
-                // Something outside the terminal changed. Re-read the records
-                // rather than trusting the sender to describe what moved; the
-                // list is small and the alternative is a second source of truth.
+                // Re-read the records rather than trusting the sender to
+                // describe what moved — the list is small.
                 let probed = drain_provider_probes(&probe_inbox, &mut state);
                 if state.refresh(sessions.store().list()?) == Action::Redraw || probed {
                     screen.draw(|frame| view::render(&state, frame))?;
@@ -610,16 +530,11 @@ pub fn run(runtime: &Runtime) -> Result<()> {
 }
 
 /// Send this shell's lifecycle events to the project's durable log as well.
-///
-/// Best effort by construction, and the direction of the trade is the point:
-/// a project whose database cannot be opened loses event history and keeps
-/// its sessions. Refusing to open the interface because a diagnostic log
-/// could not be attached would be Glasshouse's bookkeeping mattering more
-/// than the sessions it keeps books about, which it never does.
-///
-/// The sink queues behind a writer thread rather than writing inline — see
-/// [`crate::events::log`]. Publishing happens on whichever thread produced
-/// the event, and one of those is the thread draining a pseudo-terminal.
+/// Best effort: a project whose database cannot be opened loses event
+/// history and keeps its sessions. The sink queues behind a writer thread
+/// rather than writing inline — see [`crate::events::log`] — because
+/// publishing happens on whichever thread produced the event, and one of
+/// those is the thread draining a pseudo-terminal.
 fn attach_event_log(runtime: &Runtime, events: &EventBus) -> Option<std::sync::Arc<EventLogSink>> {
     match EventLog::open(runtime) {
         Ok(log) => {
@@ -640,39 +555,25 @@ fn attach_event_log(runtime: &Runtime, events: &EventBus) -> Option<std::sync::A
 }
 
 /// Watch the project's event log for what a harness reported to a hook.
-///
-/// # Why the interface cannot simply subscribe to the bus for these
-///
-/// A lifecycle hook runs as its **own short-lived process** — that is how
-/// every supported harness reports, and it is why `glasshouse hook` exists at
-/// all. Its events are minted on that process's bus and it exits. Nothing on
-/// this process's bus ever sees them, so an interface that only subscribed
-/// would show a session's own keystrokes and never once show it finishing a
-/// turn.
-///
-/// The project's event log is the seam between the two, because it is the one
-/// ordering both processes write into. This reads it and delivers what it
-/// finds through the same channel `spawn_provider_probe` uses, for the same
-/// reason: **reading it means reading SQLite, and a reader waits on whoever
-/// holds the write lock.** On the drawing thread that is a frozen interface —
-/// the exact defect class this project shipped once already, in a settings
-/// screen that made a blocking call where the terminal was being painted.
-///
-/// It starts from the log's current head rather than its beginning: opening
-/// the interface should show what happens next, not replay a week.
+/// A lifecycle hook runs as its own short-lived process and cannot be seen
+/// by simply subscribing to this process's bus — why, in design-decisions.md,
+/// "Trims: `shell/mod.rs`". Reads on its own thread rather than inline, on
+/// the same [`spawn_provider_probe`] reasoning: reading it means reading
+/// SQLite, and a reader can wait on the writer, which on the drawing thread
+/// is a frozen interface — a defect class this project has shipped once.
+/// Starts from the log's current head, not its beginning: opening the
+/// interface should show what happens next, not replay a week.
 fn spawn_event_tail(
     runtime: &Runtime,
     reported: &std::sync::mpsc::Sender<Vec<RecordedEvent>>,
     wake: &std::sync::mpsc::Sender<AppEvent>,
 ) {
-    /// How often the log is asked what is new.
-    ///
-    /// Far slower than the interface's own tick: this is a database query,
-    /// and a harness event arriving a quarter of a second later than it
-    /// happened is imperceptible next to the turn it belongs to.
+    /// How often the log is asked what is new — far slower than the
+    /// interface's own tick, since a quarter-second-late harness event is
+    /// imperceptible next to the turn it belongs to.
     const POLL: std::time::Duration = std::time::Duration::from_millis(250);
-    /// Most rows to take in one pass, so a log that grew while Glasshouse was
-    /// closed cannot arrive as one enormous message.
+    /// Most rows to take in one pass, so a log that grew while closed cannot
+    /// arrive as one enormous message.
     const BATCH: usize = 256;
 
     let log = match EventLog::open(runtime) {
@@ -688,10 +589,9 @@ fn spawn_event_tail(
     let reported = reported.clone();
     let wake = wake.clone();
 
-    // Not joined and not stopped explicitly. It ends by itself when the
-    // channel's receiver goes, which happens when `run` returns — the same
-    // lifetime `spawn_provider_probe`'s thread has, and for the same reason:
-    // there is nothing to clean up but a `Sender`.
+    // Not joined and not stopped explicitly: it ends when the channel's
+    // receiver goes, which is when `run` returns — the same lifetime
+    // `spawn_provider_probe`'s thread has, for the same reason.
     let started = std::thread::Builder::new()
         .name("glasshouse-event-tail".to_owned())
         .spawn(move || {
@@ -727,13 +627,10 @@ fn spawn_event_tail(
 }
 
 /// Waits briefly for the event log's writer to catch up on the way out.
-///
 /// A guard rather than a call, because `shell::run` returns from several
 /// places and the one that would get forgotten is whichever is added next.
-///
-/// Bounded, for the reason [`crate::shutdown`] gives about its own cleanup:
-/// failing to record the last few events is survivable, and failing to give
-/// the user their terminal back is not.
+/// Bounded, on [`crate::shutdown`]'s own reasoning: losing the last few
+/// events is survivable, and not returning the user's terminal is not.
 struct FlushOnLeaving(Option<std::sync::Arc<EventLogSink>>);
 
 impl Drop for FlushOnLeaving {
@@ -751,23 +648,11 @@ impl Drop for FlushOnLeaving {
 }
 
 /// Take an automatic checkpoint for every session whose turn just ended.
-///
-/// # What "automatically" can and cannot mean here
-///
 /// A checkpoint's objective, state and next actions are authored — Glasshouse
-/// does not know them and will not guess them from a session's terminal
-/// output, for the same reason nothing else in this codebase reads state out
-/// of scrollback. So an automatic checkpoint **carries forward the handoff the
-/// user last wrote for that session**, restamped with the current time and the
-/// repository's current position.
-///
-/// That is worth doing and is not a substitute for writing one: it keeps the
-/// most recent checkpoint fresh as of the last task boundary, so a session
-/// that dies leaves a handoff describing where the repository actually was
-/// rather than where it was an hour ago. A session whose user has never taken
-/// a checkpoint gets nothing, silently, because the alternative is inventing
-/// one.
-///
+/// will not guess them from terminal output. So an automatic checkpoint
+/// **carries forward the handoff the user last wrote**, restamped with the
+/// current time and repository position, rather than leaving it stale. A
+/// session whose user never took a checkpoint gets nothing, silently.
 /// Returns whether anything worth repainting happened.
 fn checkpoint_task_boundaries(
     checkpoints: &CheckpointStore<'_>,
@@ -778,10 +663,8 @@ fn checkpoint_task_boundaries(
 ) -> bool {
     let mut noted = false;
     for event in recorded {
-        // A turn ending is the task boundary Glasshouse actually detects.
-        // Nothing else in the stream is one: a process exiting says the
-        // harness is gone, not that the work finished, and that distinction
-        // is the whole of `crate::events`'s doc comment.
+        // A turn ending is the task boundary Glasshouse detects — a process
+        // exiting says the harness is gone, not that the work finished.
         if !matches!(event.event(), LifecycleEvent::TurnEnded { .. }) {
             continue;
         }
@@ -830,28 +713,19 @@ fn checkpoint_task_boundaries(
     noted
 }
 
-/// Interrupt one session, whether or not it is the one on screen.
-///
-/// The whole point of the capability, so it is worth being explicit about
-/// what this does **not** do: it does not focus the session, does not change
-/// which session the bar presents, and does not move the session's recorded
-/// lifecycle. A harness that handles the interrupt keeps running; one that
-/// exits because of it is noticed by `poll_exits` on the next tick, from the
-/// operating system rather than inferred here — the same rule that keeps
-/// session state out of terminal output everywhere else.
-///
-/// Whether the byte becomes a signal is the platform's business:
-/// `PtyProcess::interrupt` writes `ETX` into the session's terminal, and it
-/// is the Unix line discipline — or ConPTY's Win32 input mode — that turns
-/// that into an interrupt for the process group. Nothing here is
-/// platform-specific.
+/// Interrupt one session, whether or not it is the one on screen. Does
+/// **not** focus it, change which session the bar presents, or move its
+/// recorded lifecycle — an exit from the interrupt is noticed by
+/// `poll_exits` on the next tick, from the operating system. Whether the
+/// byte becomes a signal is the platform's business: `PtyProcess::interrupt`
+/// writes `ETX`, and it is the Unix line discipline — or ConPTY's Win32
+/// input mode — that turns it into a process-group interrupt.
 fn interrupt_session(live: &mut SessionRuntime, state: &mut ShellState, id: &SessionId) {
     let name = state::short_session_id(id);
     match live.interrupt(id) {
         Ok(()) => state.set_status(format!("interrupted session `{name}`")),
-        // Refused out loud, never silently: the runtime knows things the
-        // records do not — a session that exited since the last poll still
-        // reads as live in the store, and `ShellState` can only see the store.
+        // Refused out loud: the runtime knows things the records do not — a
+        // session that exited since the last poll still reads as live here.
         Err(err) => {
             tracing::warn!(session = %id, %err, "could not interrupt a session");
             state.set_status(format!(
@@ -863,20 +737,15 @@ fn interrupt_session(live: &mut SessionRuntime, state: &mut ShellState, id: &Ses
 }
 
 /// Why the runtime refused, *without* the session it refused about.
-///
-/// [`RuntimeError`]'s own `Display` names the session in full, which is right
-/// for a log line and wrong for a status note: the note has already named it,
-/// in the short form the overview's rows use, and a sentence carrying a
-/// twelve-character identifier and a thirty-two-character one is long enough
-/// to be clipped by the popup it is drawn in. Found by running the shipped
-/// binary — the refusal was correct and unreadable.
+/// [`RuntimeError`]'s own `Display` names the session in full — right for a
+/// log line, wrong for a status note that already named it, long enough to
+/// clip in the popup. Found by running the shipped binary.
 fn refusal_reason(err: &RuntimeError) -> String {
     match err {
         RuntimeError::NotLive { .. } => "it is not running in this Glasshouse".to_owned(),
         RuntimeError::Exited { .. } => "it has already exited".to_owned(),
         RuntimeError::Headless { .. } => "it is headless and has no viewport".to_owned(),
-        // Names neither the session nor the line: the note has already named
-        // the session, and the line may be anything the user pasted.
+        // Names neither the session (already named) nor the pasted line.
         RuntimeError::LineTooLong { bytes, limit, .. } => {
             format!("that line is {bytes} bytes and its terminal takes at most {limit} in one line")
         }
@@ -885,15 +754,10 @@ fn refusal_reason(err: &RuntimeError) -> String {
 }
 
 /// Send one line to a session, whether or not it is the one on screen.
-///
 /// A carriage return is appended because this is a *line*: a bare `\r` is
-/// exactly what a real Enter key delivers to a terminal, which is what
-/// `state::encode` sends in session mode, so text arriving this way is
-/// indistinguishable to the harness from text somebody typed.
-///
-/// `SessionRuntime::send_text` does not touch focus, and neither does this —
-/// a line arriving in a background session must never pull the user out of
-/// the one they are working in.
+/// what a real Enter key delivers, so this arrives indistinguishable from
+/// something typed. Does not touch focus — a line arriving in a background
+/// session must never pull the user out of the one they are working in.
 fn send_session_text(
     live: &mut SessionRuntime,
     state: &mut ShellState,
@@ -910,14 +774,11 @@ fn send_session_text(
     }
 }
 
-/// Bring the runtime's focus in line with whichever session the bar is
-/// presenting.
-///
-/// `RuntimeError::NotLive` is ignored on purpose: a session the bar lists but
-/// that is not running in this `Glasshouse` invocation (recorded on a past
-/// run, say) is normal, not a bookkeeping failure. This never touches a
-/// process — see [`SessionRuntime::focus`]'s doc comment — it only ever
-/// changes which live session the keyboard reaches.
+/// Bring the runtime's focus in line with whichever session the bar shows.
+/// `RuntimeError::NotLive` is ignored on purpose: a session the bar lists
+/// but that is not running in this invocation is normal. Never touches a
+/// process — see [`SessionRuntime::focus`] — only changes which live
+/// session the keyboard reaches.
 fn sync_focus(live: &mut SessionRuntime, state: &ShellState) {
     let Some(active) = state.active_session() else {
         return;
@@ -927,11 +788,9 @@ fn sync_focus(live: &mut SessionRuntime, state: &ShellState) {
     }
     match live.focus(&active.id) {
         Ok(()) | Err(RuntimeError::NotLive { .. }) => {}
-        // A headless session has no viewport to bring forward — that is what
-        // makes it headless. The bar moving onto one leaves the keyboard
-        // exactly where it was rather than logging a failure on every key,
-        // and the user is told the moment they try to enter it; see
-        // `ShellState::enter_session_mode`.
+        // A headless session has no viewport to bring forward — the bar
+        // moving onto one leaves the keyboard where it was rather than
+        // logging a failure on every key; see `ShellState::enter_session_mode`.
         Err(RuntimeError::Headless { .. }) => {}
         Err(err) => tracing::warn!(session = %active.id, %err, "could not focus a session"),
     }
@@ -947,12 +806,10 @@ fn viewport_terminal_size(screen: &Screen) -> TerminalSize {
 }
 
 /// Convert `vt100`'s colour model to Ratatui's — the one place either module
-/// needs to know about the other's colour type.
-///
-/// `Default` becomes `None`, meaning "inherit whatever is already there"
-/// rather than any specific colour, so a cell whose fore/background was
-/// never set keeps the terminal's own default instead of being forced to a
-/// literal black or white.
+/// needs to know about the other's colour type. `Default` becomes `None`,
+/// meaning "inherit whatever is already there", so a cell whose
+/// fore/background was never set keeps the terminal's own default instead
+/// of being forced to literal black or white.
 fn convert_color(color: vt100::Color) -> Option<ratatui::style::Color> {
     match color {
         vt100::Color::Default => None,
@@ -1009,24 +866,14 @@ fn build_viewport_grid(screen: &vt100::Screen) -> ViewportGrid {
 }
 
 /// Resolve a harness, record a new session, and start it — the same
-/// selection seam `main.rs: launch_session` uses for `glasshouse launch`,
-/// minus attaching to this process's own terminal: the shell attaches by
-/// giving the session the viewport once its output starts arriving, instead.
-///
-/// `presentation` is the only difference between `n` and `N`. Everything
-/// else — harness selection, the recorded session, hooks, the launch — is
-/// deliberately shared, so a headless session is an ordinary session that is
-/// not shown rather than a second kind of thing.
-///
-/// `size` is the viewport's own inner size at the moment `n` was pressed —
-/// see `view::viewport_slot`'s doc comment for why that, and not the
-/// terminal's outer size, is what a harness must be told it has — rather
-/// than the default `HarnessLaunch` would otherwise use: a harness TUI lays
-/// itself out from the size it sees at startup, so starting it at the wrong
-/// geometry and resizing afterwards would draw its first frame for space it
-/// does not have — see `HarnessLaunch::size`'s doc comment, which names this
-/// exact failure mode for the single-session `attach` path that this
-/// mirrors.
+/// selection seam `main.rs: launch_session` uses, minus attaching to this
+/// process's own terminal: the shell gives the session the viewport once its
+/// output arrives instead. `presentation` is the only difference between `n`
+/// and `N` — everything else is shared, so a headless session is an ordinary
+/// one not shown. `size` is the viewport's own inner size at the moment `n`
+/// was pressed, not the terminal's outer size — see `view::viewport_slot`
+/// and `HarnessLaunch::size`: a harness TUI lays itself out from the size it
+/// sees at startup, so the wrong geometry draws its first frame short.
 fn start_session(
     app_runtime: &Runtime,
     live: &mut SessionRuntime,
@@ -1046,14 +893,10 @@ fn start_session(
         .then(|| store.new_native_session_id())
         .transpose()?;
 
-    // Phase 9A line 368. The shell's quick-open resolves no launch profile
-    // and no response request of its own — there is no surface here to ask
-    // for either, see `HarnessSelection::install_hooks`'s own doc comment —
-    // so both are the implied defaults a session gets when nobody asked for
-    // anything else: the `Native` profile, and the `Interactive` role. That
-    // is still six real facts, not four blanks: a session opened with `n`
-    // now records the same kind of answer `glasshouse launch` does for an
-    // unadorned `glasshouse launch <harness>`, rather than `-` for every
+    // Phase 9A line 368. The shell's quick-open resolves no launch profile or
+    // response request of its own, so both take the implied defaults: the
+    // `Native` profile and the `Interactive` role — the same kind of answer
+    // `glasshouse launch <harness>` records unadorned, not `-` for every
     // column `main.rs::launch_session` fills in.
     let launch_profile = crate::profile::LaunchProfile::native(selection.id());
     let pairing = {
@@ -1061,10 +904,9 @@ fn start_session(
         use crate::harness::pairing::{PairingQuery, ServingRoute, classify};
         use crate::routing::AssignedModel;
 
-        // The same fallback `main.rs::session_pairing` builds for a `Native`
-        // profile: `pairing_queries` never lists it, so a configured-pairing
-        // lookup here would always miss anyway — see that function's own doc
-        // comment for why the implied profile needs no lookup at all.
+        // The same fallback `main.rs::session_pairing` builds for `Native`:
+        // `pairing_queries` never lists it, so a lookup here would always
+        // miss anyway.
         let query = PairingQuery {
             harness: launch_profile.harness,
             model: AssignedModel::HarnessDefault,
@@ -1082,17 +924,14 @@ fn start_session(
         effective.response_profile(&config::response::ResponseRequest::default());
     for problem in response_profile.problems() {
         // `eprintln!` would corrupt the alternate-screen viewport this
-        // process owns while the shell is running — this is the diagnostic
-        // channel every other shell warning already uses.
+        // process owns — the diagnostic channel every shell warning uses.
         tracing::warn!(problem, "could not read part of the response profile");
     }
     let response_application =
         crate::harness::response::apply(selection.adapter(), response_profile.resolved());
 
-    // The presentation is recorded before the process exists and is then the
-    // single source of truth for it: `live.start` below is handed
-    // `record.presentation`, so a session's stored presentation and its
-    // running one cannot disagree.
+    // Recorded before the process exists and is the single source of truth:
+    // `live.start` below gets `record.presentation`, so it cannot disagree.
     let record = store.create(
         NewSession::embedded(selection.id().slug())
             .with_presentation(presentation)
@@ -1108,8 +947,7 @@ fn start_session(
             ))),
     )?;
 
-    // Before the harness runs — see the declaration of `index_snapshots` in
-    // `run`, and `session::native_id::snapshot`.
+    // Before the harness runs — see `index_snapshots` in `run`.
     index_snapshots.insert(
         record.id.clone(),
         session::native_id::snapshot(&record.harness, app_runtime.project().root()),
@@ -1129,11 +967,9 @@ fn start_session(
     // Best effort: a session that reports nothing is still a session, and is
     // a far smaller loss than refusing to start one the user asked for.
     let project_hooks_consent = effective.project_hooks(selection.id()).value;
-    // `install_session_document` rather than `install_hooks`: the latter is
-    // the narrower mechanism that exists precisely because this call site
-    // used to resolve no response profile — see its own doc comment, which
-    // this is the fix for. Hooks and the response profile now share one
-    // document exactly as `main.rs::launch_session`'s already does.
+    // `install_session_document` rather than `install_hooks`: hooks and the
+    // response profile now share one document, exactly as
+    // `main.rs::launch_session`'s already does.
     let document_args = std::env::current_exe()
         .map_err(anyhow::Error::from)
         .and_then(|program| {
@@ -1162,10 +998,9 @@ fn start_session(
     let mut launch = HarnessLaunch::new(selection.into_executable(), app_runtime.project())
         .args(args)
         .size(size);
-    // Map line 1973: the same scrub `main.rs::launch_session` applies before
-    // its overlay — this path builds its own `HarnessLaunch`, and the child
-    // would otherwise inherit every configured entitlement's credential
-    // variable from this process's own environment, not only the one
+    // Map line 1973: the same scrub `main.rs::launch_session` applies —
+    // without it the child inherits every configured entitlement's
+    // credential variable from this process's environment, not only the one
     // serving this session.
     let entitlement =
         match effective.entitlement_for(launch_profile.harness, &launch_profile.backend) {
@@ -1185,8 +1020,7 @@ fn start_session(
     }
     let launch = launch;
     if let Err(err) = live.start(record.id.clone(), record.presentation, &launch) {
-        // A session that never started will never be polled for its exit, so
-        // its snapshot has nothing left to pair with.
+        // Never polled for its exit, so its snapshot has nothing to pair with.
         index_snapshots.remove(&record.id);
         if let Err(store_err) = store.set_lifecycle(&record.id, SessionLifecycle::Failed) {
             tracing::warn!(
@@ -1202,35 +1036,15 @@ fn start_session(
 }
 
 /// Reopen a recorded session, embedded in this shell — Phase 11 line 688,
-/// "allow the user to resume any compatible stopped session from the
-/// overview".
-///
-/// This is `main.rs::resume_session`'s embedded counterpart, cut down to
-/// what the overview's key needs and mirroring `start_session` above rather
-/// than that CLI path: the shell keeps every live harness inside its own
-/// [`SessionRuntime`] rather than handing the terminal away with
-/// `session::attach`, so this calls `live.start` exactly as a fresh session
-/// does, with the resumed session's own recorded id.
-///
-/// # What this does not do
-///
-/// It does not re-resolve the session's launch profile overlay the way
-/// `main.rs::resume_session` does — that machinery
-/// (`resolve_resume_overlay`) is private to `main.rs`, which this package may
-/// not edit (see the packet's `FORBIDDEN FILES`), so a resumed session here
-/// runs on a plain resume invocation with no regenerated provider
-/// configuration. A session resumed from the overview that needs its
-/// original overlay reapplied is a gap for the next package, not a silent
-/// approximation — recorded in this phase's evidence rather than hidden.
-///
-/// It also cannot record [`LifecycleEvent::SessionResumed`]:
-/// [`SessionRuntime::start`] always publishes `SessionStarted`, and that is
-/// `session/runtime.rs`, also outside this package's `FORBIDDEN FILES`. The
-/// activity feed will therefore say "session started" for a resume, which is
-/// the same finding one layer down — the event model already draws this
-/// exact distinction (see `describe_event`'s doc comment), and the seam that
-/// would let `SessionRuntime::start` publish the right one is not this
-/// package's to open.
+/// "allow the user to resume any compatible stopped session from the overview".
+/// `main.rs::resume_session`'s embedded counterpart, mirroring
+/// `start_session` above: the shell keeps every live harness in its own
+/// [`SessionRuntime`] rather than handing the terminal away, so this calls
+/// `live.start` with the resumed id. **Gaps, recorded in this phase's
+/// evidence, not silent approximations** (both outside `FORBIDDEN FILES`):
+/// no re-resolved launch profile overlay, so no regenerated provider
+/// configuration; and no [`LifecycleEvent::SessionResumed`] since
+/// `SessionRuntime::start` always publishes `SessionStarted`.
 fn resume_session(
     app_runtime: &Runtime,
     live: &mut SessionRuntime,
@@ -1239,11 +1053,9 @@ fn resume_session(
     size: TerminalSize,
 ) -> anyhow::Result<()> {
     let store = sessions.store();
-    // The store's own gate, not a second copy of it: `open_for_resume`
-    // refuses a session that belongs to another project, is still running,
-    // or was never given a native identifier to resume to — the same check
-    // `main.rs::resume_session` relies on, so an overview resume and a CLI
-    // one refuse exactly the same sessions for exactly the same reasons.
+    // The store's own gate, not a second copy of it — the same check
+    // `main.rs::resume_session` relies on, so an overview and a CLI resume
+    // refuse exactly the same sessions for exactly the same reasons.
     let resumable = store.open_for_resume(id)?;
     let record = store
         .get(&resumable.id)?
@@ -1253,9 +1065,8 @@ fn resume_session(
     let project_config = config::load_project_config(app_runtime.project())?;
     let effective = EffectiveConfig::new(&user, project_config.as_ref());
     // The record's own harness, not whatever is configured now — resuming a
-    // Codex conversation in Claude Code would be nonsense, and this is the
-    // same rule `main.rs::resume_session`'s doc comment states for the CLI
-    // path.
+    // Codex conversation in Claude Code would be nonsense; same rule
+    // `main.rs::resume_session` states for the CLI path.
     let selection = session::select::select(Some(resumable.harness.as_str()), effective)?;
 
     let Some(mut args) = selection.resume_args(&resumable.native_session_id, Vec::<String>::new())
@@ -1305,24 +1116,19 @@ fn resume_session(
         }
     }
 
-    // `open_for_resume` already proved this session's process exited, but its
-    // `LiveSession` is still sitting in `live` — `SessionRuntime` never drops
-    // one on its own, and `get`/`focus`/`interrupt`/`send_text` all resolve
-    // the *first* entry with a given id. Starting a fresh process under this
-    // same id without forgetting the dead one first would leave every one of
-    // those calls silently talking to the exited process's frozen screen
-    // instead of the one just started. `close` is best-effort: `NotLive`
-    // here would only mean the entry was already gone, which is fine.
+    // `open_for_resume` proved the process exited, but its `LiveSession` is
+    // still in `live` — `SessionRuntime` never drops one on its own, and
+    // `get`/`focus`/`interrupt`/`send_text` resolve the *first* entry with a
+    // given id. Without this, a fresh process under the same id would leave
+    // those calls talking to the exited process's frozen screen. Best-effort:
+    // `NotLive` here only means the entry was already gone.
     let _ = live.close(&resumable.id);
 
-    // Map line 1973, on the path that continues a session — the same scrub
-    // `start_session` applies above, and `main.rs::resume_session` applies on
-    // the CLI path, for the same reason: this process's environment would
-    // otherwise leak every configured entitlement's credential variable into
-    // the resumed child, not only the one serving this session. The record's
-    // own launch profile, the way `main.rs::resume_session` reads it, with
-    // the same fallback to the implied Native profile for a session that
-    // recorded none. Resolved before `selection` is consumed below.
+    // Map line 1973, on the resume path — the same scrub `start_session`
+    // applies above, for the same reason: the resumed child must not inherit
+    // every configured entitlement's credential variable. The record's own
+    // launch profile, with the same Native fallback, resolved before
+    // `selection` is consumed below.
     let resume_profile = record
         .launch_profile
         .as_deref()
@@ -1370,13 +1176,9 @@ fn resume_session(
 /// Reopen the first-run wizard for a "reconfigure" invocation from the
 /// Settings overlay — Phase 2C: "Allow the onboarding wizard to be reopened
 /// later from settings."
-///
-/// Loads `UserConfig` fresh from disk, not whatever unsaved Settings edits
-/// happen to be staged in `state` — reopening the wizard and saving Settings
-/// are two separate, independent write paths, exactly as they already are
-/// for the user- versus project-level saves. [`onboarding::run`] seeds every
-/// screen from what it is handed, so it shows the user's persisted choices
-/// (including any previously configured provider) instead of a blank wizard.
+/// Loads `UserConfig` fresh from disk, not whatever unsaved edits are staged
+/// in `state` — reopening the wizard and saving Settings are separate write
+/// paths, so it shows the user's persisted choices, not a blank wizard.
 fn reopen_onboarding(runtime: &Runtime) -> anyhow::Result<onboarding::Outcome> {
     let config = UserConfig::load(runtime.paths())?;
     let discovery = Discovery::run(runtime.project());
@@ -1396,12 +1198,8 @@ type SettingsRows = (
 
 /// Current binding memory (decisions and constraints) and unresolved todos,
 /// summarized into display lines for [`state::ShellState::open_project_overview`].
-///
-/// Reading `crate::memory` is file I/O this module deliberately does not
-/// hold in `shell/state.rs`, exactly like [`build_settings`] and
-/// `EffectiveConfig`. `binding` and `snapshot` are otherwise only exercised
-/// by `tests/memory_authority.rs` and `tests/memory_snapshot.rs` — this is
-/// their first production caller.
+/// Reading `crate::memory` is file I/O this module deliberately keeps out of
+/// `shell/state.rs`, like [`build_settings`] and `EffectiveConfig`.
 struct ProjectOverviewMemory {
     decisions: Vec<String>,
     todos: Vec<String>,
@@ -1454,33 +1252,14 @@ fn build_project_overview_memory(runtime: &Runtime) -> anyhow::Result<ProjectOve
 
 /// Map lines 1657, 1658, 1659, 1660 and 1663: what Glasshouse has observed
 /// about this project's own configured resources, one line per resource —
-/// the project overview's condensed sibling of `glasshouse resources`'s full
-/// report, read the same way `main.rs::resources_report` reads it: the same
-/// [`crate::provider::resources::observed_capacity`] over the same on-disk
-/// [`crate::provider::telemetry::GatewayQuotaCache`], no network call.
-///
-/// Scoped to [`EffectiveConfig::provider_names`] rather than the full
-/// [`crate::provider::registry::registry`] catalog: that accessor's own doc
-/// comment says "a provider only exists here because a user or project
-/// explicitly configured one" — exactly the behavioral contract's "configured
-/// resources", and the same set `main.rs::disposable_candidates` already
-/// scores a real routing decision over, which is what makes
-/// [`resource_capacity_line`]'s reserve note more than a hypothetical: it
-/// mirrors the identical `with_resource_reserve` fold
-/// `main.rs::disposable_candidate_capacity` builds for that decision.
-///
-/// Line 1661 is [`build_project_overview_routing`], deliberately a separate
-/// function: that line reads the routing evidence ledger, a project database
-/// this function never opens, and keeping the two split matches every other
-/// section here staying one concern per builder.
-///
-/// # Cannot fail visibly
-///
-/// A configuration Glasshouse cannot read becomes one honest line rather
-/// than an empty section blocking the rest of the overlay. Reading
-/// `crate::config` and the gateway-quota cache is file I/O this module
-/// deliberately does not hold in `shell/state.rs` — the same split
-/// [`build_project_overview_memory`] keeps.
+/// the condensed sibling of `glasshouse resources`'s full report, read the
+/// same way: [`crate::provider::resources::observed_capacity`], no network
+/// call. Scoped to [`EffectiveConfig::provider_names`], not the full
+/// registry — the same set `main.rs::disposable_candidates` scores a
+/// routing decision over. Line 1661 is [`build_project_overview_routing`],
+/// split out because it reads a database this function never opens.
+/// Cannot fail visibly: an unreadable configuration becomes one honest line,
+/// the same file-I/O split [`build_project_overview_memory`] keeps.
 fn build_project_overview_capacity(runtime: &Runtime) -> Vec<String> {
     use crate::provider::registry::ResourceKind;
     use crate::provider::resources::{GatheredTelemetry, observed_capacity};
@@ -1507,11 +1286,8 @@ fn build_project_overview_capacity(runtime: &Runtime) -> Vec<String> {
     let base_thresholds = effective.capacity_band_thresholds().value;
 
     // **Line 1283's producer.** The rows a burn rate counts, read once for
-    // every provider below and dropped before anything else opens the
-    // database (practice §65). Fail-soft in this function's own established
-    // way: a ledger that cannot be opened or read leaves the forecast
-    // honestly absent, and every line below then prints exactly what it
-    // printed before Phase 32E — never an error, never a guess.
+    // every provider below. Fail-soft: a ledger that cannot be opened leaves
+    // the forecast honestly absent — never an error, never a guess.
     let consumption = crate::routing::evidence::EvidenceLedger::open(runtime)
         .and_then(|ledger| {
             Ok(ledger.consumption_in_window(
@@ -1535,10 +1311,8 @@ fn build_project_overview_capacity(runtime: &Runtime) -> Vec<String> {
             let reserve_percent = effective.reserve_percent(&provider).value.get();
             let thresholds = base_thresholds.with_resource_reserve(reserve_percent);
             let seconds_until_reset = state.seconds_until_reset(now_unix);
-            // Keyed provider-wide (`quota_context: None`) for
-            // `destination_capacity`'s reason: this overview is per
-            // configured provider, and no line of it names one of that
-            // provider's credentials.
+            // Keyed provider-wide (`quota_context: None`): this overview is
+            // per configured provider, and names no credential of it.
             let forecast = consumption.as_ref().and_then(|rows| {
                 crate::routing::burn::forecast(
                     rows,
@@ -1562,16 +1336,10 @@ fn build_project_overview_capacity(runtime: &Runtime) -> Vec<String> {
         })
         .collect();
 
-    // Line 1276: the same rows the forecasts above already opened, read
-    // once more for the moving average per task class. Absent entirely,
-    // never a zero, when no class has enough live rows — the same
-    // fail-soft shape the per-resource lines above already use.
-    //
-    // `task_class_request_rates` itself has no row-count floor (it names a
-    // class the moment it has one live row) — gated here at
-    // `MIN_ROWS_FOR_BURN_RATE`, the same minimum `burn_rate` already
-    // enforces for the per-resource line above, using the `rows` count each
-    // `ClassRate` already carries rather than widening the reader.
+    // Line 1276: the same rows, read once more for the moving average per
+    // task class. Absent entirely, never a zero, when no class has enough
+    // live rows — gated at `MIN_ROWS_FOR_BURN_RATE`, the same minimum
+    // `burn_rate` enforces for the per-resource line above.
     if let Some(rows) = consumption.as_ref() {
         let rates = crate::routing::burn::task_class_request_rates(rows, now_unix, None);
         let printable: Vec<_> = rates
@@ -1579,12 +1347,9 @@ fn build_project_overview_capacity(runtime: &Runtime) -> Vec<String> {
             .filter(|rate| rate.rows >= crate::routing::burn::MIN_ROWS_FOR_BURN_RATE)
             .collect();
         if !printable.is_empty() {
-            // Line 1275: the same rows, and the same floor — a class's
-            // token figure is gated at `MIN_ROWS_FOR_BURN_RATE` on
-            // `token_rows`, independently of whether the request figure
-            // above cleared it, and prints `tokens not counted` rather than
-            // a fabricated `0 tok/h` below that floor or with no
-            // token-carrying row at all.
+            // Line 1275: the same floor, on `token_rows` independently of
+            // the request figure — `tokens not counted` rather than a
+            // fabricated `0 tok/h`.
             let by_class = printable
                 .iter()
                 .map(|rate| {
@@ -1618,36 +1383,15 @@ fn build_project_overview_capacity(runtime: &Runtime) -> Vec<String> {
 
 /// Map line 1661: the routing model currently selected to classify work, and
 /// its most recent observed latency — the first production reader
-/// `crate::routing::evidence::EvidenceLedger::summarize`'s
-/// `median_duration_ms`, `tail_duration_ms` and `ewma_duration_ms` fields
-/// have ever had outside a test (this phase's own evidence entry names the
-/// gap).
-///
-/// # Which model
-///
-/// [`EffectiveConfig::routing_model_resolution`] — the same live,
-/// present-tense answer `api::unix::routing_model_status` already reports for
-/// capability map line 1680 — not the raw stored `RoutingModelChoice` the
-/// Settings overlay's routing row shows. A `Pinned` choice naming a provider
-/// that has since been removed from configuration must not read as
-/// "selected" here, because nothing will actually route through it; the
-/// resolution already carries that degrade.
-///
-/// # Whose latency
-///
-/// Only [`crate::config::RoutingModelResolution::Pinned`] names an exact
-/// `(provider, model)` identity the evidence ledger can be asked about.
-/// `Automatic` and `Heuristics` do not name a single model — Phase 34C's
-/// dynamic choice and the deterministic fallback both classify without one —
-/// so there is no identity to query, and the line says so rather than
-/// showing a project-wide average attributed to a name that did not earn it
-/// (ruling 3: a wrong number wearing a right label).
-///
-/// # Cannot fail visibly
-///
-/// An unopenable ledger or a failed query degrades to one honest line, the
-/// same shape [`build_project_overview_capacity`] already uses — never
-/// panics, never blocks, never empties the rest of the overview.
+/// `EvidenceLedger::summarize`'s duration fields have had outside a test.
+/// Model: [`EffectiveConfig::routing_model_resolution`], the same live
+/// answer map line 1680 reports — a `Pinned` choice naming a since-removed
+/// provider does not read as "selected" when nothing routes through it.
+/// Latency: only [`crate::config::RoutingModelResolution::Pinned`] names an
+/// identity the ledger can query; `Automatic`/`Heuristics` classify without
+/// one, so the line says so rather than showing an average attributed to a
+/// name that did not earn it (ruling 3). Cannot fail visibly: degrades to
+/// one honest line, the same shape [`build_project_overview_capacity`] uses.
 fn build_project_overview_routing(runtime: &Runtime) -> String {
     use crate::config::RoutingModelResolution;
     use crate::routing::evidence::EvidenceLedger;
@@ -1690,11 +1434,10 @@ fn build_project_overview_routing(runtime: &Runtime) -> String {
 
 /// The short label for what will actually classify a request right now — the
 /// first pure half of [`build_project_overview_routing`], testable without a
-/// config file. Matches `shell::view::render_routing`'s own word choice for
+/// config file. Matches `shell::view::render_routing`'s word choice for
 /// [`crate::config::RoutingModelChoice::Automatic`]/`Deterministic`/`Pinned`
-/// exactly, so the same state reads the same way in both places, with the
-/// one addition a *resolution* can say that a raw choice cannot: which
-/// fallback, if any, is actually in effect right now.
+/// exactly, plus the one thing a *resolution* can say that a raw choice
+/// cannot: which fallback, if any, is actually in effect right now.
 fn routing_resolution_label(resolution: &crate::config::RoutingModelResolution) -> String {
     use crate::config::{RoutingFallback, RoutingModelResolution};
 
@@ -1717,16 +1460,12 @@ fn routing_resolution_label(resolution: &crate::config::RoutingModelResolution) 
 /// One phrase naming a queried model's most recent latency, or exactly why
 /// there is none — the second pure half of [`build_project_overview_routing`],
 /// testable directly against a hand-built
-/// [`crate::routing::evidence::RoutingSummary`] rather than only through a
-/// real evidence ledger.
-///
-/// Ruling 1: `None` is never `0`. `summary` being absent (`None` argument, no
-/// observation at all) and `summary.median_duration_ms` being absent (an
-/// observation exists but is below the minimum sample) both read the same
-/// honest "unknown" here — a caller downstream of this line does not need to
-/// tell the two apart, and
-/// [`crate::routing::evidence::EvidenceLedger::summarize_latest_for_model`]'s
-/// own doc comment is where that distinction is kept for one that does.
+/// [`crate::routing::evidence::RoutingSummary`].
+/// Ruling 1: `None` is never `0`. `summary` being absent and
+/// `summary.median_duration_ms` being absent (below the minimum sample) both
+/// read the same honest "unknown" here — a caller downstream does not need
+/// to tell the two apart; `summarize_latest_for_model` keeps that
+/// distinction for one that does.
 fn routing_latency_phrase(summary: Option<&crate::routing::evidence::RoutingSummary>) -> String {
     let Some(median) = summary.and_then(|s| s.median_duration_ms.as_ref()) else {
         return "unknown — not enough observations yet".to_owned();
@@ -1744,36 +1483,13 @@ fn routing_latency_phrase(summary: Option<&crate::routing::evidence::RoutingSumm
 
 /// One line describing what Glasshouse currently believes about `label`'s
 /// capacity — the pure formatting half of
-/// [`build_project_overview_capacity`], split out so every case (measured,
-/// estimated, manual, unknown, reset present or absent, reserve engaged or
-/// not) is testable directly against a hand-built
-/// [`crate::provider::quota::CapacityState`] rather than only through real
-/// configuration files and an on-disk cache.
-///
+/// [`build_project_overview_capacity`], testable directly against a
+/// hand-built [`crate::provider::quota::CapacityState`].
 /// `thresholds` must already carry this resource's own protected reserve —
-/// see `crate::provider::resources`'s private `capacity_band_thresholds_for`,
-/// which this mirrors rather than calls: that function lives in
-/// `provider/resources.rs`, outside this package's partition this round.
-///
-/// # Line 1659, precisely
-///
-/// [`crate::provider::quota::TelemetryClass::Authoritative`] and
-/// [`crate::provider::quota::TelemetryClass::Observed`] both collapse to
-/// `"measured"` here — line 1659 names four words, not the five
-/// [`crate::provider::quota`] itself tracks, and both are real readings
-/// nobody inferred. [`crate::provider::quota::TelemetryClass::Estimated`]
-/// and [`crate::provider::quota::TelemetryClass::Manual`] keep their own
-/// words, and no reading at all is `"unknown"` — never a number.
-///
-/// # Line 1663, precisely
-///
-/// A reserve note is shown only at or below
-/// [`crate::provider::quota::CapacityBand::Reserve`] — the exact boundary
-/// `crate::provider::quota::evaluate_reserve_spend` itself
-/// gates on (`inputs.band > CapacityBand::Reserve` trivially allows every
-/// request; at or below it, the reserve policy actually runs and can deny
-/// one). Above that boundary the reserve has influenced nothing this round,
-/// so nothing about it is shown.
+/// mirrors `crate::provider::resources`'s private
+/// `capacity_band_thresholds_for` rather than calling it (outside this
+/// package's partition this round). Lines 1659 and 1663's exact wording and
+/// gating are in design-decisions.md, "Trims: `shell/mod.rs`".
 fn resource_capacity_line(
     label: &str,
     state: &crate::provider::quota::CapacityState,
@@ -1791,10 +1507,9 @@ fn resource_capacity_line(
     let forecast_note = forecast_note(forecast);
 
     let Some(score) = state.remaining_capacity_score() else {
-        // No pool normalized to a percentage, but the resource's own plan or
-        // rate ceilings may still carry a class worth naming — a manually
-        // configured plan, say. `state.telemetry_class()` answers that;
-        // `None` here is the genuine "unknown" case line 1657/1658 name.
+        // No pool normalized to a percentage, but a manually configured plan
+        // may still carry a class worth naming. `None` here is the genuine
+        // "unknown" case line 1657/1658 name.
         let class_word = match state.telemetry_class() {
             None => "unknown",
             Some(TelemetryClass::Authoritative | TelemetryClass::Observed) => "measured",
@@ -1805,13 +1520,11 @@ fn resource_capacity_line(
     };
 
     let band = score.band(thresholds);
-    // `RemainingCapacityScore::percent` is only ever `Exact` (this displayed
-    // value came from the provider itself) or `Estimated` (anything weaker
-    // fed into it) — never `Manual` or absent, since a score exists here.
-    // That is line 1659's "measured" vs "estimated" distinction exactly, and
+    // `RemainingCapacityScore::percent` is only ever `Exact` or `Estimated`
+    // here, never `Manual` or absent — line 1659's distinction exactly, and
     // deliberately not `state.telemetry_class()`, which answers the whole
-    // resource's *best* source across every pool and would report
-    // "measured" even when the one number actually shown is an estimate.
+    // resource's *best* source and would say "measured" even when the one
+    // number shown is an estimate.
     let (class_word, digits) = match score.percent().exact() {
         Some(percent) => ("measured", percent),
         None => (
@@ -1834,34 +1547,11 @@ fn resource_capacity_line(
 }
 
 /// **Line 1283**: an exhaustion forecast rendered as an *estimate*, never as
-/// a promise.
-///
-/// # The wording is the capability, and it is load-bearing
-///
-/// The line's own words are *"surface exhaustion forecasts as estimates
-/// rather than promises"*. What this function computes is one division of a
-/// measured remaining count by a median of bucket counts — a figure with
-/// real error bars that a reader will act on. So every sentence it can
-/// produce is hedged in the text itself rather than by a disclaimer
-/// somewhere else:
-///
-/// - **"estimated to last about …"**, never *"will last"*. `about` because
-///   the rate is a median over five-minute buckets, and `estimated` because
-///   `crate::routing::burn::forecast`'s inputs are the ledger's own history
-///   rather than anything a provider promised.
-/// - **"may not reach its reset at the current rate"**, never *"will run
-///   out"* and never *"guaranteed"*. `may` because the forecast holds only
-///   while the rate does, and `at the current rate` says exactly which
-///   assumption it rests on.
-///
-/// `""` when there is no forecast, which makes every line this build printed
-/// before Phase 32E byte-identical — the property
-/// `a_resource_with_no_forecast_prints_exactly_what_it_printed_before`
+/// a promise — real error bars a reader will act on, so every sentence is
+/// hedged in the text itself. Full wording rationale in design-decisions.md,
+/// "Trims: `shell/mod.rs`". `""` when there is no forecast, which the
+/// property `a_resource_with_no_forecast_prints_exactly_what_it_printed_before`
 /// pins.
-///
-/// The hours are rendered to one decimal rather than as a timestamp on
-/// purpose: a clock time reads as a commitment about a moment, and this is
-/// not one.
 fn forecast_note(forecast: Option<crate::routing::burn::ExhaustionForecast>) -> String {
     let Some(forecast) = forecast else {
         return String::new();
@@ -1881,11 +1571,10 @@ fn forecast_note(forecast: Option<crate::routing::burn::ExhaustionForecast>) -> 
 
 /// One display line: the memory's kind, and its subject if it has one or its
 /// body cut to [`PROJECT_OVERVIEW_BODY_CHARS`] otherwise.
-///
-/// Prefers the subject over the body when both exist because the subject is
-/// already the producer's own summary (`MemoryRecord::subject`'s doc
-/// comment) — cutting the body instead would show less of a memory that
-/// already told us how to describe it concisely.
+/// Prefers the subject over the body when both exist: the subject is already
+/// the producer's own summary (`MemoryRecord::subject`), so cutting the body
+/// instead would show less of a memory that already told us how to describe
+/// it concisely.
 fn summarize_memory_line(
     kind: crate::memory::MemoryKind,
     subject: Option<&str>,
@@ -1902,13 +1591,11 @@ fn summarize_memory_line(
 }
 
 /// How many entries [`build_project_knowledge_memory`] shows per section —
-/// the same generous default [`PROJECT_OVERVIEW_DECISION_LIMIT`] uses, for
-/// the same reason: a summary read occasionally, not a paginated list.
+/// the same generous default [`PROJECT_OVERVIEW_DECISION_LIMIT`] uses.
 const PROJECT_KNOWLEDGE_SECTION_LIMIT: usize = 20;
 /// Ceiling for one [`crate::memory::MemoryStore::with_status`] fetch before
-/// [`knowledge_section`] applies its own per-kind display limit. Generous
-/// enough that no real project's per-status memory count approaches it —
-/// this bounds one query, not the section shown on screen.
+/// [`knowledge_section`] applies its own per-kind display limit — bounds one
+/// query, not the section shown on screen.
 const PROJECT_KNOWLEDGE_FETCH_LIMIT: usize = 10_000;
 
 /// Every kind of durable project knowledge, grouped and formatted for
@@ -1923,40 +1610,29 @@ struct ProjectKnowledgeMemory {
 }
 
 /// Read every section the project-knowledge view shows, from the current
-/// project's memory database.
-///
-/// Reading `crate::memory` is file I/O this module deliberately does not
-/// hold in `shell/state.rs` — the same split [`build_project_overview_memory`]
-/// keeps. `MemoryStore` has no single "everything, by kind" query, so each
-/// section is built by [`knowledge_section`] against the public
-/// `with_status`/kind filter, exactly the surface
-/// [`build_project_overview_memory`] already uses.
+/// project's memory database. `MemoryStore` has no single "everything, by
+/// kind" query, so each section is built by [`knowledge_section`] against
+/// the public `with_status`/kind filter.
 fn build_project_knowledge_memory(runtime: &Runtime) -> anyhow::Result<ProjectKnowledgeMemory> {
     use crate::memory::{MemoryKind, ProjectMemory};
 
     let memory = ProjectMemory::open(runtime)?;
     let store = memory.store();
 
-    // Map lines 1100-1102: active decisions, known constraints, and
-    // implemented-or-planned features are all *current* project knowledge —
-    // `MemoryStatus::is_current` is the one test for that, so a superseded,
-    // rejected or invalidated record of any of these three kinds never
-    // reaches its section (acceptance test 3).
+    // Map lines 1100-1102: current project knowledge — `is_current` excludes
+    // a superseded, rejected or invalidated record (acceptance test 3).
     let decisions = knowledge_section(&store, MemoryKind::Decision, |status| status.is_current())?;
     let constraints =
         knowledge_section(&store, MemoryKind::Constraint, |status| status.is_current())?;
     let features = knowledge_section(&store, MemoryKind::Feature, |status| status.is_current())?;
 
-    // Map line 1104: *unresolved*, not merely *current* —
-    // `MemoryStatus::is_open_work` also keeps a todo under review or in
-    // conflict, which `is_current` alone would drop, and excludes a resolved
-    // one exactly like `is_current` does.
+    // Map line 1104: *unresolved*, not merely *current* — `is_open_work`
+    // also keeps a todo under review or in conflict.
     let todos = knowledge_section(&store, MemoryKind::Todo, |status| status.is_open_work())?;
 
     // Map line 1103: failed approaches get a dedicated *historical* section,
-    // deliberately unfiltered by status — the record of what was tried and
-    // did not work is the point, including one a newer memory has since
-    // superseded (map line 1106 is how that supersession is named).
+    // unfiltered by status, including one a newer memory has since
+    // superseded (map line 1106 names that supersession).
     let failed_attempts = knowledge_section(&store, MemoryKind::FailedAttempt, |_| true)?;
 
     Ok(ProjectKnowledgeMemory {
@@ -1971,15 +1647,12 @@ fn build_project_knowledge_memory(runtime: &Runtime) -> anyhow::Result<ProjectKn
 /// Every memory of `kind` whose status satisfies `include`, most recently
 /// updated first, formatted and capped at
 /// [`PROJECT_KNOWLEDGE_SECTION_LIMIT`].
-///
 /// `MemoryStore::binding` filters by authority, not kind, and
 /// `memory::snapshot::snapshot` only ever returns
 /// [`crate::memory::MemoryStatus::Active`] records — neither fits a section
-/// that needs one specific kind across a caller-chosen set of statuses. So
-/// this walks [`crate::memory::MemoryStatus::ALL`] through the public
-/// [`crate::memory::MemoryStore::with_status`] and keeps what matches both
-/// `kind` and `include`: the same public surface, used the way a caller
-/// outside `memory/**` is meant to combine it.
+/// needing one specific kind across a caller-chosen set of statuses. So this
+/// walks [`crate::memory::MemoryStatus::ALL`] through the public
+/// [`crate::memory::MemoryStore::with_status`] and keeps what matches both.
 fn knowledge_section(
     store: &crate::memory::MemoryStore<'_>,
     kind: crate::memory::MemoryKind,
@@ -2021,11 +1694,8 @@ fn knowledge_section(
 /// One display line: [`summarize_memory_line`]'s kind-and-text line, with a
 /// trailing supersession note when [`crate::memory::MemoryRecord::superseded_by`]
 /// names a successor.
-///
-/// Map line 1106: said in words *when a supersession relationship exists*,
-/// and silent otherwise — never a placeholder like "none" or an empty
-/// column, which is why this is one conditional push rather than always
-/// appending a (possibly empty) field.
+/// Map line 1106: said in words when a supersession exists, silent
+/// otherwise — never a placeholder like "none".
 fn knowledge_line(record: &crate::memory::MemoryRecord) -> String {
     let mut line = summarize_memory_line(record.kind, record.subject.as_deref(), &record.body);
     if let Some(successor) = &record.superseded_by {
@@ -2037,14 +1707,11 @@ fn knowledge_line(record: &crate::memory::MemoryRecord) -> String {
 /// Map line 1105's drill-down data for one memory: its rationale, source
 /// session, source commit and lifecycle state, straight off
 /// [`crate::memory::MemoryRecord`]'s own fields.
-///
-/// `rationale` comes from `record.provenance.rationale` rather than the
-/// whole [`crate::memory::DecisionProvenance`] — the line names only the
-/// rationale, not the five kinds of recorded assumption sitting beside it,
-/// and showing those here would be answering a question the box does not
-/// ask. `lifecycle` uses [`crate::memory::MemoryStatus`]'s own `Display`
-/// (`"active"`, `"superseded"`, and so on) rather than inventing a second
-/// vocabulary for the same fact.
+/// `rationale` comes from `record.provenance.rationale`, not the whole
+/// [`crate::memory::DecisionProvenance`] — the line names only the
+/// rationale, not the recorded assumptions beside it. `lifecycle` uses
+/// [`crate::memory::MemoryStatus`]'s own `Display` rather than inventing a
+/// second vocabulary for the same fact.
 fn knowledge_detail(record: &crate::memory::MemoryRecord) -> MemoryDetail {
     MemoryDetail {
         rationale: record.provenance.rationale.clone(),
@@ -2056,15 +1723,11 @@ fn knowledge_detail(record: &crate::memory::MemoryRecord) -> MemoryDetail {
 
 /// One display line for the project-memory view: [`knowledge_line`]'s
 /// kind-and-text line, prefixed with the memory's lifecycle status.
-///
 /// [`build_project_knowledge_memory`]'s five sections each already imply a
-/// single status by construction — the active-decisions section is
-/// `is_current`, the todos section is `is_open_work`, and so on — so
-/// `knowledge_line` alone is enough there: which section an entry is in
-/// already says its status. This view has exactly one list spanning every
-/// [`crate::memory::MemoryStatus`] at once, so the status has to be said on
-/// the line rather than implied by where the entry sits — map line 234's
-/// "at least its kind and its status".
+/// single status by construction, so `knowledge_line` alone is enough there.
+/// This view spans every [`crate::memory::MemoryStatus`] at once, so the
+/// status has to be said on the line — map line 234's "at least its kind and
+/// its status".
 fn memory_view_line(record: &crate::memory::MemoryRecord) -> String {
     format!("[{}] {}", record.status, knowledge_line(record))
 }
@@ -2073,16 +1736,10 @@ fn memory_view_line(record: &crate::memory::MemoryRecord) -> String {
 /// [`crate::memory::MemoryKind`], at every [`crate::memory::MemoryStatus`],
 /// most recently updated first — for [`state::Action::OpenProjectMemory`].
 /// Map line 234.
-///
-/// [`build_project_knowledge_memory`]'s unfiltered sibling: that function
-/// calls [`knowledge_section`] once per curated kind, each restricted to a
-/// status predicate that makes it "current knowledge". This view has no
-/// predicate and no per-kind split — every kind, including
-/// [`crate::memory::MemoryKind::Finding`], which `build_project_knowledge_memory`
-/// never queries for at all, and every status, including one
-/// `is_current`/`is_open_work` would drop. Reading `crate::memory` is file
-/// I/O this module deliberately does not hold in `shell/state.rs` — the same
-/// split [`build_project_knowledge_memory`] keeps.
+/// [`build_project_knowledge_memory`]'s unfiltered sibling: no predicate and
+/// no per-kind split, so every kind (including
+/// [`crate::memory::MemoryKind::Finding`], never queried there) and every
+/// status (including one `is_current`/`is_open_work` would drop) appears.
 fn build_project_memory_view(runtime: &Runtime) -> anyhow::Result<KnowledgeSection> {
     use crate::memory::{MemoryKind, MemoryStatus, ProjectMemory};
 
@@ -2095,10 +1752,7 @@ fn build_project_memory_view(runtime: &Runtime) -> anyhow::Result<KnowledgeSecti
         .map(|status| store.with_status(status, PROJECT_KNOWLEDGE_FETCH_LIMIT))
         .collect::<Result<Vec<_>, _>>()?;
 
-    // Every kind this project's memory has — the whole point of this view
-    // next to `ProjectKnowledge`'s curated sections. `MemoryStatus::ALL`
-    // above already returns every kind at each status; this keeps the
-    // inclusion explicit rather than resting on the absence of a filter.
+    // Every kind, explicit rather than resting on the absence of a filter.
     let kinds: &[MemoryKind] = MemoryKind::ALL;
     let mut matched: Vec<crate::memory::MemoryRecord> = by_status
         .into_iter()
@@ -2129,27 +1783,20 @@ fn build_project_memory_view(runtime: &Runtime) -> anyhow::Result<KnowledgeSecti
 }
 
 /// How many identities [`build_route_evidence_table`] shows — the same
-/// generous, read-occasionally default [`PROJECT_KNOWLEDGE_SECTION_LIMIT`]
-/// uses.
+/// generous default [`PROJECT_KNOWLEDGE_SECTION_LIMIT`] uses.
 const ROUTE_EVIDENCE_ROW_LIMIT: usize = 20;
 
 /// How far back [`build_route_evidence_table`] looks for observed
-/// identities. A week — long enough that a project worked on across a normal
-/// week still sees its own routing activity, short enough that an identity
-/// nobody has exercised in a month quietly ages out of the table rather than
-/// accumulating in it forever. Provisional, like the constants
-/// `crate::routing::evidence`'s own module names for the same reason.
+/// identities. A week: long enough a project still sees its own routing
+/// activity, short enough an identity nobody has exercised in a month ages
+/// out. Provisional, like `crate::routing::evidence`'s own constants.
 const ROUTE_EVIDENCE_WINDOW_SECONDS: i64 = 7 * 24 * 60 * 60;
 
 /// Read the routing evidence ledger's own distinct identities — Phase 47
 /// lines 1762 and 1764, closed after batch 42 found the ledger could not
 /// enumerate identities at all (practice §71).
 /// [`crate::routing::evidence::EvidenceLedger::observed_identities`] is this
-/// package's one additive method and the whole of what makes this function
-/// possible; see its own doc comment for why `recent`/`summarize` alone
-/// could not answer this. Reading the ledger is file I/O this module
-/// deliberately does not hold in `shell/state.rs` — the same split
-/// [`build_project_overview_memory`] keeps.
+/// package's one additive method and the whole of what makes this possible.
 fn build_route_evidence_table(runtime: &Runtime) -> anyhow::Result<Vec<RouteEvidenceRow>> {
     use crate::routing::evidence::EvidenceLedger;
 
@@ -2176,41 +1823,21 @@ fn build_route_evidence_table(runtime: &Runtime) -> anyhow::Result<Vec<RouteEvid
 }
 
 /// How many decisions the routing-decisions view shows.
-///
 /// Smaller than [`ROUTE_EVIDENCE_ROW_LIMIT`] on purpose: a row here is a
-/// whole rationale — a heading plus one line per named contribution — where a
-/// row there is one line, so twenty of these would be several screens of text
-/// nobody scrolls. Ten is a few days of ordinary use for a project whose
-/// turns end under Glasshouse.
+/// whole rationale, not one line, so twenty would be several screens nobody
+/// scrolls. Ten is a few days of ordinary use.
 const ROUTE_DECISION_ROW_LIMIT: usize = 10;
 
-/// Read the disposable-routing rationales `glasshouse hook` recorded — the
-/// consumer half of this package, and the reason its producer is not
-/// Cluster B.
-///
+/// Read the disposable-routing rationales `glasshouse hook` recorded.
 /// [`crate::evaluation::EvaluationObservations::recent_of_kind`] is this
-/// package's one additive read, and the whole of what makes this function
-/// possible: [`crate::evaluation::EvaluationObservations::recent`] is an
-/// unkeyed listing over every kind, so on a project that has searched its
-/// memory recently the newest ten rows are ten retrievals and this view would
-/// be empty while the ledger held decisions.
-///
-/// # Project scope is the store's, not this function's
-///
-/// The ledger is opened from [`Runtime`] and nowhere else, which is the same
-/// single door [`build_route_evidence_table`] uses: the database file is this
-/// project's, and migration 15's two triggers refuse a row naming any other
-/// `project_id` besides. There is no argument here that could reach another
-/// project's decisions, and nothing below filters for project scope because
-/// nothing below could observe a row that lacked it.
-///
-/// # Nothing is derived
-///
-/// Every field is the stored column. The rationale is the sentence the
-/// producer rendered at the moment it decided — see
-/// [`crate::shell::state::RouteDecisionRow`] for why it is text and must
-/// stay text — and a row that recorded no session or no rationale arrives
-/// here as `None` rather than as an empty string that would read as a value.
+/// package's one additive read: `recent` alone is an unkeyed listing over
+/// every kind, so a project that has searched its memory recently would
+/// otherwise show retrievals here instead of routing decisions.
+/// **Project scope is the store's, not this function's**: the ledger opens
+/// from [`Runtime`] alone, and migration 15's triggers refuse a row naming
+/// any other `project_id`. **Nothing is derived** — every field is the
+/// stored column, and a row recording no session or rationale arrives as
+/// `None`, never an empty string.
 fn build_route_decision_table(runtime: &Runtime) -> anyhow::Result<Vec<RouteDecisionRow>> {
     use crate::evaluation::{EvaluationKind, EvaluationObservations};
 
@@ -2238,35 +1865,14 @@ fn build_route_decision_table(runtime: &Runtime) -> anyhow::Result<Vec<RouteDeci
 /// Read what a local gateway has observed about each free resource — Phase 47
 /// map line 1765, *"show route health, immediate availability, cadence, quota
 /// reset, and failure-domain evidence as separate concepts"*.
-///
-/// # Why this can be read from the interactive shell at all
-///
-/// The shell process has no gateway and no router in it: [`run`] takes only a
-/// [`Runtime`], and the gateway is started in `main.rs`'s `launch_session`,
-/// which is a different invocation. So none of this can come from live router
-/// state. It does not have to: `crate::gateway::mod`'s accept loop already
-/// writes both of these caches to disk on every forwarded exchange
-/// (`GatewayQuotaCache::store` and `GatewayHealthCache::store`), for exactly
-/// this reason — `glasshouse resources` is a separate process too, and reads
-/// them back the same way. This is that same seam, used by a second reader.
-///
-/// # Never fails, and that is the caches' own contract
-///
-/// Both loads are documented as returning no error ever: absent, unreadable,
-/// truncated, or written by another format version all mean *nothing was
-/// observed*, which is a complete and honest answer. There is consequently no
-/// note for [`ShellState::open_route_health`] to carry, unlike
-/// [`build_route_evidence_table`], whose ledger really can fail to open.
-///
-/// # Scope: this is installation-wide, and the view says so
-///
-/// Both caches live under [`crate::paths::RuntimePaths::data_dir`], keyed by
-/// provider — **not** under `project_state_dir`. They describe providers, and
-/// providers are configured at the user level, so a reading written while a
-/// gateway served one project is visible to every project's shell. That is
-/// the same scope `glasshouse resources` already prints, and it is labelled
-/// in the view rather than left for a reader to assume. Nothing project-scoped
-/// is read here at all: no project database is opened by this function.
+/// The shell has no gateway or router of its own — [`run`] takes only a
+/// [`Runtime`] — but `crate::gateway::mod`'s accept loop, in a different
+/// invocation, already writes both caches to disk on every forwarded
+/// exchange; `glasshouse resources` reads them back the same way. Never
+/// fails: absent, unreadable or old-format all mean *nothing was observed*.
+/// **Scope is installation-wide, and the view says so**: both caches live
+/// under [`crate::paths::RuntimePaths::data_dir`], keyed by provider, **not**
+/// `project_state_dir` — visible to every project's shell.
 fn build_route_health_table(runtime: &Runtime) -> Vec<RouteHealthRow> {
     use crate::provider::telemetry::{GatewayHealthCache, GatewayQuotaCache};
     use crate::routing::domain::FailureDomain;
@@ -2284,12 +1890,10 @@ fn build_route_health_table(runtime: &Runtime) -> Vec<RouteHealthRow> {
     let mut rows = Vec::new();
     for (provider, readings) in GatewayHealthCache::new(runtime.paths()).load_all() {
         // Concept 5's only honest signal. `FailureDomain::between` compares
-        // two `Backend`s and neither cache stores one, so what is available
-        // here is the identity that comparison would use — the provider name
-        // — applied to the resources actually observed under it. The
-        // vocabulary comes from the enum itself so this can never drift into
-        // a second spelling, and `Independent` is unreachable by
-        // construction: there is no branch below that produces it.
+        // two `Backend`s and neither cache stores one, so this uses the
+        // identity that comparison would use — the provider name. The
+        // vocabulary comes from the enum itself, and `Independent` is
+        // unreachable by construction.
         let peers = readings.len().saturating_sub(1);
         let domain = if peers > 0 {
             FailureDomain::Shared
@@ -2322,19 +1926,14 @@ fn build_route_health_table(runtime: &Runtime) -> Vec<RouteHealthRow> {
 
 /// Build the rows the Settings overlay shows, from a fresh [`Discovery`]
 /// pass and the configuration currently on disk.
-///
 /// This is the only place that combines them: [`state::ShellState`] and its
-/// `SettingsState` never run discovery or read a configuration file
-/// themselves — that would put file I/O in `shell/state.rs`, which the
-/// module keeps free of it by design.
+/// `SettingsState` never run discovery or read a configuration file — that
+/// would put file I/O in `shell/state.rs`, which the module keeps free of.
 fn build_settings(runtime: &Runtime) -> anyhow::Result<SettingsRows> {
     let discovery = Discovery::run(runtime.project());
-    // **Phase 9D line 3, and the whole of it.** Opening Settings reads the
-    // model catalogue off disk. It does not fetch, it does not check an
-    // expiry, and it does not fall back to the network on a miss — a provider
-    // with no cache simply shows none until someone presses `m`. The type
-    // that does this cannot make a request at all, which is a stronger
-    // guarantee than remembering not to.
+    // **Phase 9D line 3, and the whole of it.** Reads the model catalogue off
+    // disk — no fetch, no expiry check, no network fallback on a miss. The
+    // type that does this cannot make a request at all.
     let model_cache = ModelCache::new(runtime.paths());
     let user = UserConfig::load(runtime.paths())?;
     let project = config::load_project_config(runtime.project())?;
@@ -2368,9 +1967,9 @@ fn build_settings(runtime: &Runtime) -> anyhow::Result<SettingsRows> {
         }
     }
 
-    // Providers are atomic per name — see `ProviderRow::layer`'s own doc —
-    // so each row's whole configuration and layer come from whichever table
-    // actually holds that name, project winning over user, matching
+    // Providers are atomic per name — see `ProviderRow::layer` — so each
+    // row's configuration and layer come from whichever table holds that
+    // name, project winning over user, matching
     // `EffectiveConfig::configured_provider`.
     let mut providers = Vec::new();
     for name in effective.provider_names() {
@@ -2392,8 +1991,8 @@ fn build_settings(runtime: &Runtime) -> anyhow::Result<SettingsRows> {
 
     // `EffectiveConfig::profile_names` also lists the implied Native
     // profile, which has no `ProfileConfig` behind it — see
-    // `crate::profile::NATIVE_PROFILE_NAME`'s own doc — so the merge is
-    // built directly from the two tables instead of reusing that method.
+    // `crate::profile::NATIVE_PROFILE_NAME` — so this merges the two tables
+    // directly instead of reusing that method.
     let mut profile_names: std::collections::BTreeSet<String> =
         user.profiles().names().map(str::to_owned).collect();
     if let Some(project) = project.as_ref() {
@@ -2424,8 +2023,8 @@ fn build_settings(runtime: &Runtime) -> anyhow::Result<SettingsRows> {
     let max_cost = effective.max_router_cost();
     let prefer_free = effective.prefer_free_routing();
     let premium_reserve = effective.premium_reserve();
-    // Phase 9I line 536: the user's own order, disabled list and pin over the
-    // free pool, layered exactly like every routing preference beside them.
+    // Phase 9I line 536: the user's order, disabled list and pin over the
+    // free pool, layered like every routing preference beside them.
     let free_order = effective.free_resource_order();
     let free_disabled = effective.free_resource_disabled();
     let free_pin = effective.free_resource_pin();
@@ -2452,10 +2051,9 @@ fn build_settings(runtime: &Runtime) -> anyhow::Result<SettingsRows> {
 }
 
 /// Re-read Settings' rows after a successful save and hand them to
-/// [`state::ShellState::refresh_settings`], which is also what clears the
-/// edits that just landed on disk. A failure here is not the save failing —
-/// the write already succeeded — so it only costs a stale display, reported
-/// the same non-fatal way as everything else in this module.
+/// [`state::ShellState::refresh_settings`], which also clears the landed
+/// edits. A failure here is not the save failing, so it only costs a stale
+/// display.
 fn refresh_settings_after_save(runtime: &Runtime, state: &mut ShellState) {
     match build_settings(runtime) {
         Ok((harnesses, integrations, providers, profiles, routing, memory)) => state
@@ -2474,15 +2072,12 @@ fn refresh_settings_after_save(runtime: &Runtime, state: &mut ShellState) {
 }
 
 /// Write the credential the user just typed into the OS's own secure store.
-///
-/// # The whole lifetime of the value is this function
-///
-/// It is taken out of the Settings overlay (which no longer holds it), moved
-/// into [`crate::secret::native::NativeSecretStore::store`], and dropped at
-/// the closing brace. It is never logged, never put in a status line, and
-/// never returned: every `set_status` below names the provider and the store,
-/// and nothing else. That is the same rule
-/// [`crate::profile::resolve`] follows for the one credential a launch mints.
+/// **The whole lifetime of the value is this function**: taken out of the
+/// Settings overlay (which no longer holds it), moved into
+/// [`crate::secret::native::NativeSecretStore::store`], and dropped at the
+/// closing brace. Never logged, never put in a status line, never returned —
+/// every `set_status` below names the provider and the store, nothing else.
+/// The same rule [`crate::profile::resolve`] follows for a launch's credential.
 fn store_provider_credential(state: &mut ShellState) {
     let Some((provider, value)) = state.take_provider_credential_entry() else {
         return;
@@ -2493,8 +2088,7 @@ fn store_provider_credential(state: &mut ShellState) {
         Ok(native) => native,
         Err(reason) => {
             // Line 2: an unavailable native store is reported plainly, and
-            // the user is told what Glasshouse will read instead rather than
-            // being left to guess.
+            // the user is told what Glasshouse will read instead.
             state.set_status(format!(
                 "cannot store a credential: {} — Glasshouse will read {} instead",
                 reason.reason(),
@@ -2506,8 +2100,7 @@ fn store_provider_credential(state: &mut ShellState) {
 
     // Filed under the variable name the provider already declares, so the
     // stored credential is found by exactly the reference
-    // `crate::profile::resolve` asks with — see
-    // `secret::native`'s "a reference names a credential".
+    // `crate::profile::resolve` asks with.
     let Some(var) = state.provider_credential_variable(&provider) else {
         state.set_status(format!(
             "`{provider}` names no credential variable to store a credential under"
@@ -2533,33 +2126,15 @@ fn store_provider_credential(state: &mut ShellState) {
 }
 
 /// Make the provider request the Settings overlay just planned, **on a
-/// thread of its own**.
-///
-/// # This is the whole point of the batch
-///
-/// `ureq` is a blocking client. Calling it from here — the thread that reads
-/// keys and draws frames — would stop both for as long as the provider took
-/// to answer, which for a wedged endpoint is until
-/// [`discovery::TOTAL_TIMEOUT`]. A terminal that has stopped repainting and
-/// stopped accepting keys is a hung terminal from the user's side, and the
-/// fact that it would have come back in twenty seconds is invisible while it
-/// is happening. Phase 9E shipped exactly this class of bug once already, and
-/// it was found by running the binary rather than by any test.
-///
-/// So the request goes to a worker thread, which:
-///
-/// 1. resolves the credential — the first reference in the intent that
-///    answers — immediately before the request and nowhere else;
-/// 2. makes exactly one request, bounded by
-///    [`discovery::ProbeTimeouts::default`];
-/// 3. sends the outcome back down `results`;
-/// 4. and nudges the event loop, so the answer is drawn the moment it lands
-///    rather than at the next tick.
-///
-/// The thread is deliberately not joined and not tracked. It is bounded by
-/// its own timeouts, it holds nothing the shell needs back, and a user who
-/// quits while a probe is outstanding should not wait for a provider to
-/// answer before their terminal is returned to them.
+/// thread of its own** — `ureq` is blocking, and calling it from the thread
+/// that reads keys and draws frames would hang the terminal until
+/// [`discovery::TOTAL_TIMEOUT`] for a wedged endpoint (Phase 9E shipped
+/// exactly this bug once, found by running the binary, not a test). The
+/// worker resolves the credential immediately before the request and
+/// nowhere else, makes one request bounded by
+/// [`discovery::ProbeTimeouts::default`], sends the outcome down `results`,
+/// and nudges the event loop. Not joined or tracked: bounded by its own
+/// timeouts, holding nothing the shell needs back.
 fn spawn_provider_probe(
     runtime: &Runtime,
     state: &mut ShellState,
@@ -2578,11 +2153,9 @@ fn spawn_provider_probe(
     std::thread::Builder::new()
         .name(format!("glasshouse-probe-{}", intent.provider))
         .spawn(move || {
-            // Resolved here and not in `state`: this is the last possible
-            // moment before the value is needed, it happens off the drawing
-            // thread, and the `Secret` it produces lives only as long as this
-            // closure. The store a launch would use, so a key in the Keychain
-            // is a key this probe can send.
+            // Resolved here, not in `state`: the last possible moment before
+            // it is needed, off the drawing thread, and the `Secret` lives
+            // only as long as this closure. The same store a launch would use.
             let store = secret::native::PreferNativeSecretStore::detect();
             let credential = intent
                 .secret_refs
@@ -2599,19 +2172,15 @@ fn spawn_provider_probe(
             );
             let result = run_provider_probe(&intent, &request, &cache, timeouts);
 
-            // A send failure means the shell has already gone. Nothing to
-            // report to and nothing to clean up — the answer is simply
-            // dropped, which is the correct outcome for a question nobody is
-            // waiting on any more.
+            // A send failure means the shell has already gone — the answer
+            // is simply dropped, correct for a question nobody awaits.
             if results.send(result).is_ok() {
                 let _ = wake.send(AppEvent::Redraw);
             }
         })
         .map_or_else(
             |err| {
-                // A thread that will not start is reported rather than
-                // silently retried on this one, which is the failure mode
-                // this function exists to prevent.
+                // Reported rather than silently retried on this thread.
                 tracing::warn!(error = %err, "could not start a provider probe");
                 state.set_status(format!("could not start the provider request: {err}"));
             },
@@ -2620,7 +2189,6 @@ fn spawn_provider_probe(
 }
 
 /// One probe, start to finish, with nothing that touches the terminal.
-///
 /// Split out from the thread body so it can be called directly by a test,
 /// which is what makes the timeout and the cache-write assertions possible
 /// without a `Screen`.
@@ -2652,10 +2220,8 @@ fn run_provider_probe(
                     models,
                 );
                 // Written before it is reported, so a catalogue the user is
-                // told about is one that survives a restart. A write failure
-                // is reported as a failed refresh rather than swallowed: a
-                // list that vanishes on the next start would be worse than
-                // one that never appeared.
+                // told about survives a restart. A write failure is reported
+                // as a failed refresh rather than swallowed.
                 match cache.store(&catalogue) {
                     Ok(_) => ProviderProbeResult {
                         provider: intent.provider.clone(),
@@ -2702,9 +2268,8 @@ fn drain_provider_probes(
     state: &mut ShellState,
 ) -> bool {
     let mut redraw = false;
-    // Every result waiting, not just the first: two providers can have
-    // requests outstanding at once, and a loop that took one per tick would
-    // make the second look slower than it was.
+    // Every result waiting, not just the first — two providers can have
+    // requests outstanding at once.
     while let Ok(result) = inbox.try_recv() {
         if state.apply_provider_probe_result(result) == Action::Redraw {
             redraw = true;
@@ -2714,11 +2279,9 @@ fn drain_provider_probes(
 }
 
 /// Delete the selected provider's stored credential — line 3.
-///
 /// Both halves, and both reported: the item leaves the OS store, and the
 /// reference leaves the provider's configuration. Deleting one that is not
-/// there is **not** an error; it is already the desired state, and saying so
-/// is better than raising — see
+/// there is **not** an error — see
 /// [`crate::secret::native::Deletion::AlreadyAbsent`].
 fn delete_provider_credential(state: &mut ShellState) {
     let Some((provider, references)) = state.selected_provider_stored_credentials() else {
@@ -2754,9 +2317,7 @@ fn delete_provider_credential(state: &mut ShellState) {
         }
     }
 
-    // The configuration half runs whether or not the store held anything:
-    // a reference to a credential that is not there is exactly the record
-    // that should go.
+    // Runs regardless: a reference to a missing credential should still go.
     state.record_provider_credential_cleared(&provider);
     state.set_status(if removed > 0 {
         format!(
@@ -2770,9 +2331,8 @@ fn delete_provider_credential(state: &mut ShellState) {
 }
 
 /// Apply every pending Settings edit onto `table`, leaving any field an edit
-/// never touched exactly as it was. This is what keeps a save from silently
-/// promoting a value that was only ever a project or default layer into the
-/// layer being written, when the user never actually changed it.
+/// never touched exactly as it was — this is what keeps a save from silently
+/// promoting a value the user never actually changed.
 fn apply_settings_edits(table: &mut config::IntegrationTable, edits: &[SettingsEdit]) {
     for edit in edits {
         let entry = table.entry(edit.id);
@@ -2787,9 +2347,8 @@ fn apply_settings_edits(table: &mut config::IntegrationTable, edits: &[SettingsE
 
 /// Apply every pending provider edit onto `table` — an add/replace for
 /// `Some`, a removal for `None`. Unlike [`apply_settings_edits`], each edit
-/// already carries a complete [`config::ProviderConfig`], since every
-/// provider edit in the Settings overlay produces (or removes) the whole
-/// value rather than one field of it.
+/// already carries a complete [`config::ProviderConfig`]: a provider edit
+/// produces or removes the whole value, never one field of it.
 fn apply_provider_edits(table: &mut config::ProviderTable, edits: &[ProviderSettingsEdit]) {
     for edit in edits {
         match &edit.upsert {
@@ -2829,9 +2388,8 @@ fn apply_routing_edit(table: &mut config::RoutingConfig, edit: &RoutingSettingsE
     if let Some(value) = edit.premium_reserve {
         table.set_premium_reserve(Some(value));
     }
-    // Phase 9I line 536. The pin is a double `Option` because, unlike every
-    // preference above it, "no pin" is a state a user can choose explicitly
-    // rather than merely not having touched.
+    // Phase 9I line 536: the pin is a double `Option` because "no pin" is a
+    // state a user can choose explicitly, unlike every preference above it.
     if let Some(value) = &edit.free_order {
         table.set_free_resource_order(Some(value.clone()));
     }
@@ -2889,10 +2447,9 @@ pub fn save_user_settings_with_routing(
 /// Write every pending Settings edit to
 /// `<project root>/.glasshouse/config.toml` via
 /// [`config::write_project_config_with_consent`] — the only writer. The
-/// consent it requires is obtained by the Settings overlay's own `W`
-/// confirmation, before [`Action::SaveProjectSettings`] is ever produced —
-/// see `state::SettingsState`. Returns the path written, for the status
-/// line.
+/// consent it requires comes from the Settings overlay's own `W`
+/// confirmation, before [`Action::SaveProjectSettings`] is produced. Returns
+/// the path written, for the status line.
 pub fn save_project_settings(
     runtime: &Runtime,
     harness_edits: &[SettingsEdit],

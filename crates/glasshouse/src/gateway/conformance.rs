@@ -2772,3 +2772,110 @@ fn every_turn_goes_to_the_assigned_backend_and_a_free_alternative_is_never_conne
     );
     assert!(gateway.routing().changes().is_empty());
 }
+
+// --- 8. the close, and what it must not be ----------------------------------
+
+/// A client that has been answered sees an end of stream, and nothing of its
+/// own is left unread when the ingress closes.
+///
+/// One invariant with two halves, and both are asserted because the platform
+/// that punishes losing either is not the one this runs on: on Windows a
+/// `closesocket` over a non-empty receive queue sends `RST` rather than
+/// `FIN`, and the harness then reads a connection reset in place of the
+/// response it was just sent. That is the Windows VM's runs 5 and 14 of
+/// [`no_rendering_the_gateway_can_produce_carries_either_planted_secret`],
+/// whose third exchange is exactly the one below.
+///
+/// **What makes both halves observable here is that this test keeps a
+/// `try_clone` of the accepted socket.** The connection therefore does not
+/// close merely because [`serve`] returned: the client reaches an end of
+/// stream only if the ingress genuinely half-closed, and whatever the
+/// ingress left unread is still queued to be counted afterwards. Read
+/// through a socket the test does not hold, neither half is visible on a
+/// platform that closes gracefully.
+///
+/// The exchange is the unreachable-provider refusal, because that is the
+/// path that hands the request body to the outbound hop — where it is
+/// dropped unread when the connection fails — and then answers `502` with
+/// the body still on the wire. The body is 32 KiB deliberately: larger than
+/// the ingress's `BufReader`, so some of it is provably still in the
+/// kernel's receive queue rather than buffered in userspace, and far smaller
+/// than a loopback receive buffer, so the client's own `write_all` completes
+/// without the ingress reading anything for it to. Nothing is timed: the
+/// channel below carries the client's "the request is written" and the join
+/// carries "the response is complete", so there is no sleep standing in for
+/// either wait.
+#[test]
+fn an_answered_client_sees_an_end_of_stream_with_nothing_of_its_own_left_unread() {
+    let token = GatewayToken(PLANTED_TOKEN.to_owned());
+    let upstream = upstream_at(&format!("http://{}", closed_loopback_address()));
+    let agent = agent();
+
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).expect("loopback is bindable");
+    let address = listener
+        .local_addr()
+        .expect("a bound listener has an address");
+
+    let raw = messages_request(PLANTED_TOKEN, &"x".repeat(32 * 1024));
+    let (written, request_written) = mpsc::channel();
+    let client = std::thread::spawn(move || {
+        let mut socket = TcpStream::connect(address).expect("the accept below is already waiting");
+        socket
+            .set_read_timeout(Some(CLIENT_TIMEOUT))
+            .expect("a non-zero read timeout is valid");
+        socket
+            .write_all(&raw)
+            .expect("a request this size fits a loopback socket's buffers");
+        socket.flush().expect("the ingress reads the request");
+        let _ = written.send(());
+        let mut received = Vec::new();
+        socket
+            .read_to_end(&mut received)
+            .expect("the ingress answers and then half-closes");
+        received
+    });
+
+    let (accepted, _peer) = listener.accept().expect("the client above connects");
+    // Before the ingress runs, so that "what is still queued" below is a fact
+    // about the close rather than about how far the client had got.
+    request_written
+        .recv()
+        .expect("the client thread writes its request");
+    let probe = accepted
+        .try_clone()
+        .expect("a loopback socket can be duplicated");
+    let (exchange, _quota) = serve(accepted, &token, &upstream, &agent);
+
+    assert!(
+        matches!(exchange.outcome, Outcome::Unreachable { .. }),
+        "the exchange took another path, so the close this test means to watch is not the one it \
+         watched: {exchange:?}"
+    );
+
+    // The first half. `serve` has returned and dropped both of its handles;
+    // this join completes only because the ingress half-closed, since `probe`
+    // is holding the connection open.
+    let received = client.join().expect("the client thread does not panic");
+    assert!(
+        as_text(&received).starts_with("HTTP/1.1 502"),
+        "the client did not read the refusal it was sent: {}",
+        as_text(&received)
+    );
+
+    // The second half, read off the socket the ingress just finished with.
+    probe
+        .set_nonblocking(true)
+        .expect("a loopback socket accepts the flag");
+    let mut left_unread = [0u8; 8192];
+    match (&probe).read(&mut left_unread) {
+        // The client's own close, with nothing ahead of it.
+        Ok(0) => {}
+        // Nothing queued, and the client has not closed yet.
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+        Ok(unread) => panic!(
+            "the ingress closed with at least {unread} bytes of the request still unread, which \
+             is the reset the Windows leg reported"
+        ),
+        Err(error) => panic!("the queue could not be read back: {error}"),
+    }
+}

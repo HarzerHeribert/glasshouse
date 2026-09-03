@@ -945,7 +945,7 @@ mod tests {
             include_str!("../session/lifecycle.rs"),
         ),
         ("session/runtime.rs", include_str!("../session/runtime.rs")),
-        ("session/api.rs", include_str!("../session/api.rs")),
+        ("session/api/mod.rs", include_str!("../session/api/mod.rs")),
         (
             "session/recovery.rs",
             include_str!("../session/recovery.rs"),

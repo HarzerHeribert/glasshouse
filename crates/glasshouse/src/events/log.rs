@@ -1137,8 +1137,8 @@ mod tests {
                 "bootstrap_prompt",
             ),
             (
-                "session/api.rs",
-                include_str!("../session/api.rs"),
+                "session/api/mod.rs",
+                include_str!("../session/api/mod.rs"),
                 "send_text",
             ),
         ];

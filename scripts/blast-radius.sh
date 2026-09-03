@@ -412,6 +412,28 @@ LIB_SERIAL_FAMILIES=(
   integrations::version
   session::api
 )
+
+# Decompression rule 4 (CLAUDE.md): a red target in a KNOWN load-sensitive
+# family gets exactly one rerun, alone, before it counts as red. This is that
+# rule's own list, not a new one -- KNOWN_SERIAL_TESTS above plus the three
+# named LIB_SERIAL_FAMILIES seeds (captured here, before the grep loop below
+# extends LIB_SERIAL_FAMILIES with families that are merely process-bound, not
+# named by rule 4), plus terminal_loss, which rule 4 names by name and neither
+# list held. Nothing outside this union is ever rerun automatically.
+RERUN_ELIGIBLE_FAMILIES=(
+  "${KNOWN_SERIAL_TESTS[@]}"
+  shell::settings_persistence_tests
+  integrations::version
+  session::api
+  terminal_loss
+)
+is_rerun_eligible() {   # is_rerun_eligible <family-or-target-name>
+  local f="$1" k
+  [ -n "$f" ] || return 1
+  for k in "${RERUN_ELIGIBLE_FAMILIES[@]}"; do [ "$f" = "$k" ] && return 0; done
+  return 1
+}
+
 while read -r libsrc; do
   [ -n "$libsrc" ] || continue
   m="$(echo "$libsrc" | sed -E 's#^crates/[^/]+/src/##; s#\.rs$##; s#/mod$##; s#/#::#g')"
@@ -555,6 +577,8 @@ trap 'rm -f "$SYMS_FILE" "${HITS_FILE:-}"; release_lock' EXIT
 # so a huge --lib run does not swamp the signal (§68: a filter matching nothing
 # looks exactly like a pass, so the count is printed either way).
 rc=0
+FLAKY_PASS_COUNT=0
+FLAKY_FAIL_COUNT=0
 run_target() {                     # run_target <label> <cargo args...>
   local label="$1"; shift
   echo; printf '\033[1m=== %s ===\033[0m\n' "$label"
@@ -563,6 +587,7 @@ run_target() {                     # run_target <label> <cargo args...>
   local status=$?
   # §68: a filter that matches nothing looks exactly like a pass, so always show
   # the result line, including the count.
+  local result_line; result_line="$(grep -E 'test result:' "$out" | tail -1)"
   grep -E 'test result:|^error' "$out" | tail -6
   grep -q 'test result: FAILED' "$out" && status=1
   # Show the panic MESSAGE, not only the failing test's name. cargo prints the
@@ -574,6 +599,41 @@ run_target() {                     # run_target <label> <cargo args...>
   [ "$status" -ne 0 ] && { echo "  --- why ---"; grep -A6 'panicked at' "$out" | head -24; }
   [ "$status" -ne 0 ] && { echo "  --- failures ---"; grep -A4 '^failures:' "$out" | head -12; }
   rm -f "$out"
+
+  # Decompression rule 4: a red in a load-sensitive family gets exactly one
+  # rerun, alone -- no loop, no timeout, no sleep. Every RERUN_ELIGIBLE_FAMILIES
+  # member is classified into the serial lane by construction (KNOWN_SERIAL_TESTS
+  # and LIB_SERIAL_FAMILIES both feed it), so by the time this runs, nothing
+  # else from this script is running concurrently in this tree.
+  if [ "$status" -ne 0 ]; then
+    local family=""
+    case "${1:-}" in
+      --lib)  [ "${2:-}" != "--" ] && family="${2:-}" ;;
+      --test) family="${2:-}" ;;
+    esac
+    if is_rerun_eligible "$family"; then
+      echo "  blast-radius: '$family' is a rule-4 load-sensitive family -- rerunning alone, once"
+      local out2; out2="$(mktemp)"
+      cargo test -p glasshouse --all-features "$@" >"$out2" 2>&1
+      local status2=$?
+      local result_line2; result_line2="$(grep -E 'test result:' "$out2" | tail -1)"
+      grep -E 'test result:|^error' "$out2" | tail -6
+      grep -q 'test result: FAILED' "$out2" && status2=1
+      if [ "$status2" -eq 0 ]; then
+        printf '\033[33mflaky-pass: %s (family: %s) -- first: %s | rerun: %s\033[0m\n' \
+          "$label" "$family" "$result_line" "$result_line2"
+        FLAKY_PASS_COUNT=$((FLAKY_PASS_COUNT + 1))
+        status=0
+      else
+        echo "  --- rerun why ---"; grep -A6 'panicked at' "$out2" | head -24
+        echo "  --- rerun failures ---"; grep -A4 '^failures:' "$out2" | head -12
+        printf 'blast-radius: %s failed on the rerun too (family: %s) -- a real red, not flaky. Do not rerun it a third time.\n' \
+          "$label" "$family"
+        FLAKY_FAIL_COUNT=$((FLAKY_FAIL_COUNT + 1))
+      fi
+      rm -f "$out2"
+    fi
+  fi
   return "$status"
 }
 
@@ -749,7 +809,12 @@ fi
 
 echo
 if [ "$rc" -eq 0 ]; then
-  printf '\033[32mblast-radius: every traced target passed\033[0m\n'
+  if [ "$FLAKY_PASS_COUNT" -gt 0 ]; then
+    printf '\033[33mblast-radius: every traced target passed (%d flaky-pass%s -- see above; not red, no attribution write-up)\033[0m\n' \
+      "$FLAKY_PASS_COUNT" "$([ "$FLAKY_PASS_COUNT" -eq 1 ] && echo '' || echo 'es')"
+  else
+    printf '\033[32mblast-radius: every traced target passed\033[0m\n'
+  fi
 else
   printf '\033[31mblast-radius: FAILURES above — fix before the gate\033[0m\n'
 fi

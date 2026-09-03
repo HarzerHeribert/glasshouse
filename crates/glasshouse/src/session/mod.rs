@@ -228,8 +228,8 @@ mod role_is_inert_tests {
         ("session/runtime.rs", include_str!("runtime.rs")),
         ("session/lifecycle.rs", include_str!("lifecycle.rs")),
         ("session/attach.rs", include_str!("attach.rs")),
-        ("session/select.rs", include_str!("select.rs")),
-        ("session/native_id.rs", include_str!("native_id.rs")),
+        ("session/select/mod.rs", include_str!("select/mod.rs")),
+        ("session/native_id/mod.rs", include_str!("native_id/mod.rs")),
     ];
 
     /// Production half only, comments stripped — `routing::interactive`'s own

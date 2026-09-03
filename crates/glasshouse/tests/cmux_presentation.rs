@@ -997,7 +997,19 @@ fn production_code_naming_cmux(dir: &Path) -> Vec<PathBuf> {
                 pending.push(path);
                 continue;
             }
-            if path.extension().is_some_and(|ext| ext == "rs") {
+            // A test module that Phase 59 moved into its own file has no
+            // `#[cfg(test)]` marker of its own -- the declaration stays in the
+            // parent `mod.rs` -- so `production_without_comments` below would
+            // read the whole file as production and report a test's own
+            // `cmux` as a layering violation. Windows VM run 15 reported
+            // exactly that for `session/store/tests.rs`. A file named
+            // `tests.rs`, or any file under a `tests/` directory, is test
+            // code wherever it sits.
+            let is_test_file = path.file_name().is_some_and(|name| name == "tests.rs")
+                || path
+                    .components()
+                    .any(|component| component.as_os_str() == "tests");
+            if !is_test_file && path.extension().is_some_and(|ext| ext == "rs") {
                 let source = std::fs::read_to_string(&path).expect("read source");
                 if production_without_comments(&source)
                     .to_lowercase()

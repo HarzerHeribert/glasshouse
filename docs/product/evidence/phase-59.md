@@ -47,6 +47,23 @@ Limits: a move proves nothing beyond "unchanged" — no mutation is owed and non
 
 ---
 
+### Keep every production source file under 2,500 production lines, enforced by a size ratchet in every gate that no package may raise. (line 2047)
+
+Contract: Given twelve production files over 2,500 lines at the ruling (`main.rs` 16,247; `config/mod.rs` 10,564; `routing/evidence.rs` 8,160; `shell/state.rs` 8,057; `routing/session.rs` 5,891; `api/unix.rs` 4,135; `evaluation/mod.rs` 3,795; `routing/disposable.rs` 3,542; `database.rs` 3,563; `session/store.rs` 2,898; `shell/mod.rs` 2,942; `shell/view.rs` 2,483), when the phase's decompositions land, no production source file exceeds 2,500 production lines and `scripts/check-file-sizes.py` runs in every gate refusing any package that raises an entry.
+
+State: **COMPLETE** — ruled 2026-09-03 by the orchestrator. `scripts/file-size-baseline.txt` is **empty of entries**: `check-file-sizes: baseline rewritten, 0 file(s) over 2500`. The ratchet ran at the end of `scripts/blast-radius.sh` and in `ci-local.sh`'s lint lane throughout, and refused nothing at integration because every package that grew a file shrank another first. Twelve files were brought under by ten packages across three sessions — the contributions table below names each with its report — and the last of them, `shell/mod.rs` at 2,942, came under by **trimming rather than splitting**: `GH-TRIM-SHELL` (Sonnet high, Green, comment-only) took it to **2,499**, 443 comment lines, of which roughly 350 were shortened in place to the invariant plus why it holds now, 49 were blank `///` paragraph separators, and four blocks moved verbatim to `design-decisions.md` under one new section with a one-line pointer at each call site.
+
+The proof that made a comment-only package reviewable: the packet required
+
+    git diff -U0 -- <file> | grep -E '^[-+]' | grep -vE '^(\+\+\+|---)' \
+      | grep -vE '^[-+][[:space:]]*(//|/\*|\*)' | grep -vE '^[-+][[:space:]]*$'
+
+to print nothing, which mechanically excludes code motion and leaves the review to be only about whether an invariant survived. Both map-line-1973 credential-scrub comments (`start_session` and `resume_session`) survive, shortened, with the invariant and its reason intact; the orchestrator read them. `--lib shell` 314/314 before and after — provable from the same diff proof, since no code line moved.
+
+Limits: the ceiling is a **line count, not a complexity measure**. `commands/routing_classification.rs` (2,312) and `commands/launch.rs` (2,201) sit just under it and are the two files most likely to breach it next. The ratchet holds the line but nothing yet stops a file from approaching it; a package that adds 200 lines to a 2,400-line file passes. Line 2053 (doc comments to the invariant) is **still open** — `GH-TRIM-SHELL` is one file of many, and the rest of the crate has not been trimmed. `shell/mod.rs` clears the ceiling by **one line**, which is the ratchet working rather than a margin to defend: the next comment added there without a cut trips the gate, which is exactly what it is for.
+
+---
+
 ### Contributions to line 2047 (the ceiling) — files brought under 2,500 without a line of their own
 
 | package | file | before → after | report |
@@ -56,3 +73,18 @@ Limits: a move proves nothing beyond "unchanged" — no mutation is owed and non
 | `GH-DECOMP-API-UNIX` (2026-09-03) | `api/unix.rs` (4,135 production, no inline tests) | `unix/{mod 879, sessions 699, memory 794, routing 379, checkpoints 122, events 782, assumptions 563}` — one file per verb family of the dispatch `match`, which stays in `mod.rs` unedited | `.agent-runtime/report-decomp-api-unix.md` — 83 non-move lines (six `mod` lines, the `use` blocks redistributed, 41 `pub(super)` each named with its caller); `--lib api` 17/17, `memory_query_api` 9, `mcp_project_scope` 4, `worker_access` 19, `file_aware_memory` 17; nothing scans `api/unix.rs`; `api/mod.rs` byte-identical |
 | `GH-DECOMP-EVALUATION` (2026-09-03) | `evaluation/mod.rs` (3,795 production) | `evaluation/{mod 542, kinds 642, writer 794, readers 1616, joins 233, tests 104}` — the row-writing ledger, the readers that summarise it and the cross-table joins, split by what each does to the database | `.agent-runtime/report-decomp-evaluation.md` — 36 non-move lines; `--lib evaluation` 6/6, `evaluation_observations` 30, `routing_outcome` 4, `memory_rating` 15, `phase51_joins` 9, `route_correlation` 2, `evaluation_producers` 6; nothing scans it |
 | `GH-DECOMP-MAIN` (2026-09-03) | `main.rs` (16,243 production + 4,706 test) | `main.rs` 883 + `commands/` × 21 (largest 2,312) — see line 2048's own entry above | `.agent-runtime/report-decomp-main.md` — the ratchet's largest entry by far, removed |
+| `GH-DECOMP-DISPOSABLE` (2026-09-03) | `routing/disposable.rs` (2,532 production + 1,010 test) | `disposable/{mod 1528, candidates 368, classification 661, tests 1014}` | `.agent-runtime/report-decomp-disposable.md` — `--lib routing` 286/286; reported itself partial and handed over the fix rather than editing a forbidden file: three `include_str!("../src/routing/disposable.rs")` scans live in `crates/glasshouse/tests/`, outside its packet's `src/`-only grep |
+| `GH-TRIM-SHELL` (2026-09-03) | `shell/mod.rs` (2,942 production) | `shell/mod.rs` **2,499** — comments only, zero code lines changed | `.agent-runtime/report-trim-shell.md` — the last file under the ceiling; see line 2047's entry above |
+
+### Contributions to line 2049 (inline test modules under 500 lines)
+
+Measured at the ruling and again after each wave. **25 production files carried an inline `#[cfg(test)] mod tests` over 500 lines** when the count was first taken (2026-09-03, by matching brace, excluding files already extracted). Each package below moves the module to its own file beside the module it tests — a child module, so no visibility widening is needed and none was made.
+
+| package | files | result | report |
+|---|---|---|---|
+| `GH-TESTS-OUT-PROFILE-ONBOARDING` | `profile/mod.rs` (3,106), `onboarding/state.rs` (1,458), `onboarding/view.rs` (844) | `profile/tests.rs`, `onboarding/{state,view}/{mod,tests}.rs`; `--lib profile` 118/118, `--lib onboarding` 53/53 | `.agent-runtime/report-tests-out-profile-onboarding.md` — its two-tree grep found a self-scan (`onboarding/state.rs:2334`) that was in **nobody's** known list, the first dividend of the widened rule 2 |
+| `GH-TESTS-OUT-SESSION` | `session/{api,native_id,select}.rs` (940, 718, 562) | three `{mod,tests}.rs` pairs; `--lib session` 308/308 | `.agent-runtime/report-tests-out-session.md` — six scan sites, four of them in files the packet had marked FORBIDDEN; the packet's "nothing scans these" claim was the orchestrator's truncated grep and is recorded as a packet error |
+| `GH-TESTS-OUT-PLATFORM-EDGES` | `integrations/mod.rs` (936), `firewall/mod.rs` (644), `platform/exec.rs` (502) | `integrations/tests.rs`, `firewall/tests.rs`, `platform/exec/{mod,tests}.rs`; counts unchanged on all three | `.agent-runtime/report-tests-out-platform-edges.md` — no scan names any of the three, verified by a counted grep rather than a headed one |
+| `GH-TESTS-OUT-GATEWAY` | `gateway/{session.rs, mod.rs}`, `translate/{mod.rs, gemini.rs, openai_responses.rs}` (1,094 / 883 / 720 / 719 / 553) | `gateway/tests.rs`, `gateway/session/{mod,tests}.rs`, `translate/tests.rs`, two more `{mod,tests}.rs` pairs; `--lib gateway` 210/210 run **whole**, so `gateway/mod.rs`'s `crate::session` scan ran | `.agent-runtime/report-tests-out-gateway.md` — eleven of `gateway/mod.rs`'s twelve `include_str!` paths stay valid because the module moved to a sibling in the same directory; only `session.rs` → `session/mod.rs` changed |
+
+After these four: **11 files remain**, and packages for ten of them are in flight (`provider` ×5, `routing/{interactive,burn}`, `main.rs` + `harness/{mod,pairing}`). `events/mod.rs` (527) is the last one and is the most heavily self-scanned file in the crate — seven `include_str!` sites of its own plus `tests/reserve_inputs.rs:521`.
