@@ -1,6 +1,6 @@
 //! GH-TRANSLATED-USAGE-PROOF (map line 1333): proof, not production change,
 //! that a translated exchange's *stated* usage reaches
-//! `routing_observations`, and that a relayed exchange's does not — through a
+//! `routing_observations` — through a
 //! real socket and a real [`Gateway`], the same door
 //! `tests/gateway_translate.rs` and `gateway::conformance` already enter.
 //!
@@ -13,10 +13,17 @@
 //! translated exchange (lines 802-821 there) — the recon this packet was
 //! dispatched from (`report-recon-33a-32g.md`, 1333) said no such test
 //! existed; it does, and it is the mutation-1 witness (below) already. So the
-//! genuinely missing half — the one this file adds — is the restraint side:
-//! a **relayed** exchange, whose body the gateway never reads, must write
-//! `NULL` to all three columns even when that body happens to carry a real
-//! `usage` object. Nothing in `gateway/conformance.rs` or
+//! genuinely missing half — the one this file adds — is the **relay** side.
+//!
+//! **It was added as the *restraint* half and inverted on 2026-09-03.** As
+//! written, a relayed exchange whose body carried a real `usage` object had
+//! to write `NULL` to all three columns, because the gateway never read that
+//! body. The user then approved reading usage and timing out of *supported*
+//! relayed bodies, `GH-RELAY-USAGE` built it, and the assertion became a pin
+//! on replaced behaviour. It now asserts the provider's own digits; what
+//! survives unchanged is that the relay **invents** nothing, and the cases
+//! where a column is legitimately empty moved to `tests/relay_usage.rs`,
+//! which can still say *why* it is empty. Nothing in `gateway/conformance.rs` or
 //! `gateway_translate.rs` asserts that; grepped for
 //! `input_tokens|output_tokens|cached_input_tokens` in the former, and there
 //! is a relay-through-a-translate-capable-provider test in the latter
@@ -405,15 +412,31 @@ fn a_translated_exchanges_stated_usage_reaches_the_routing_row() {
     assert_eq!(rows[0].cached_input_tokens, Some(8));
 }
 
-/// Line 1333, restraint half — the genuinely missing test this packet was
-/// dispatched to write. A harness-protocol request against an upstream
-/// serving the harness's *own* protocol natively is relayed byte for byte;
-/// the gateway never decodes the body, so even though this fixture's
-/// response carries a real, non-trivial `usage` object, none of it may reach
-/// the row. Mutation 2 — fabricating `Some(Tokens{..})` on the relay path —
-/// must turn this test red.
+/// Line 1333, relay half. A harness-protocol request against an upstream
+/// serving the harness's *own* protocol natively is relayed byte for byte,
+/// and the row records the usage that body **states**.
+///
+/// # This test was inverted on 2026-09-03, deliberately
+///
+/// It was written as the *restraint* half — the gateway never decodes a
+/// relayed body, so a real `usage` object in the response had to reach
+/// `NULL` columns, and fabricating `Some(Tokens{..})` on the relay path had
+/// to turn it red. The user then approved the gateway reading usage and
+/// timing out of **supported** relayed bodies under six constraints
+/// (`design-decisions.md`, *Steering decisions of record*), and
+/// `GH-RELAY-USAGE` built it. Asserting `NULL` here would now pin the
+/// behaviour that approval replaced.
+///
+/// **What survives, and is what this test proves:** the relay copies the
+/// provider's own digits and invents nothing. The restraint half it used to
+/// carry moved to the tests that can still express it —
+/// `relay_usage::a_protocol_whose_usage_spelling_is_unknown_records_no_usage`,
+/// `::a_supported_protocol_that_states_no_usage_records_none`, and
+/// `::a_truncated_stream_records_no_usage_however_much_of_it_arrived` —
+/// where "no known spelling" and "stated nothing" are the reasons a column
+/// is empty, rather than "could not look".
 #[test]
-fn a_relayed_exchange_invents_no_usage_even_though_its_body_has_some() {
+fn a_relayed_exchange_records_the_usage_its_body_states_and_invents_none() {
     let fixture = FixtureUpstream::answering(
         "200 OK",
         r#"{"type":"message","id":"msg_relayed","role":"assistant","model":"fixture-model","content":[{"type":"text","text":"hi there"}],"stop_reason":"end_turn","stop_sequence":null,"usage":{"input_tokens":999,"output_tokens":888}}"#,
@@ -462,10 +485,28 @@ fn a_relayed_exchange_invents_no_usage_even_though_its_body_has_some() {
         "one routing observation for the relayed exchange"
     );
     assert_eq!(rows[0].outcome, Some(Outcome::Succeeded));
+    // **This assertion was inverted on 2026-09-03, and the inversion is the
+    // point of the rename above.** It used to read `None`, with the reason
+    // "a relayed exchange's body is never read; nothing may be invented for
+    // it". The first clause stopped being true when the user approved the
+    // gateway reading usage and timing out of *supported* relayed bodies
+    // (`design-decisions.md`, *Steering decisions of record*;
+    // `evidence/phase-33a.md`, *The relay's "never supplied" is lifted*).
+    // The second clause never stopped being true and is what this test still
+    // proves: these are the provider's own digits, copied, not derived.
+    //
+    // The route is `anthropic-messages`, whose usage spelling is known, and
+    // the body above states 999/888 — so exact digits are the correct
+    // outcome. `cached_input_tokens` stays `None` because this body states
+    // no cache-read figure, and a figure nobody stated is never filled in.
     assert_eq!(
-        rows[0].input_tokens, None,
-        "a relayed exchange's body is never read; nothing may be invented for it"
+        rows[0].input_tokens,
+        Some(999),
+        "a supported relayed route records the digits the provider stated"
     );
-    assert_eq!(rows[0].output_tokens, None);
-    assert_eq!(rows[0].cached_input_tokens, None);
+    assert_eq!(rows[0].output_tokens, Some(888));
+    assert_eq!(
+        rows[0].cached_input_tokens, None,
+        "this body states no cache-read figure, and an unstated count is never invented"
+    );
 }
