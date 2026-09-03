@@ -8,6 +8,9 @@ use super::*;
 use crate::{Cli, Runtime};
 use clap::Parser;
 use rusqlite::OptionalExtension;
+// Only the unix permission tests below name `fs` unqualified; on Windows the
+// import would be unused and `-D warnings` refuses it (Windows VM run 12).
+#[cfg(unix)]
 use std::fs;
 use std::path::PathBuf;
 
