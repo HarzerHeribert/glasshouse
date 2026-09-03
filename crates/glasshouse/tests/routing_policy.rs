@@ -808,7 +808,7 @@ mod doc_comment_claims {
     /// beside `between`, computing the same verdict a different way.
     #[test]
     fn cache_locality_between_is_the_only_place_that_constructs_a_cache_loss_reason() {
-        let interactive = production_code(include_str!("../src/routing/interactive.rs"));
+        let interactive = production_code(include_str!("../src/routing/interactive/mod.rs"));
         let free = production_code(include_str!("../src/routing/free.rs"));
         // `disposable.rs` became a directory in Phase 59; the scan must read
         // every production file of it, or it silently checks a third of what
@@ -916,7 +916,7 @@ mod doc_comment_claims {
             ("mod.rs", include_str!("../src/routing/mod.rs")),
             (
                 "interactive.rs",
-                include_str!("../src/routing/interactive.rs"),
+                include_str!("../src/routing/interactive/mod.rs"),
             ),
             ("free.rs", include_str!("../src/routing/free.rs")),
             ("disposable.rs", disposable_source.as_str()),

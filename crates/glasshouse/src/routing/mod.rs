@@ -1721,7 +1721,7 @@ mod tests {
     /// the other, so nothing can quietly become one router with a flag.
     #[test]
     fn the_two_policy_classes_do_not_name_each_other() {
-        let interactive = production_code(include_str!("interactive.rs"));
+        let interactive = production_code(include_str!("interactive/mod.rs"));
         assert!(
             !interactive.contains("disposable"),
             "routing/interactive.rs names the disposable policy class: the two policy classes \
@@ -1786,7 +1786,7 @@ mod tests {
     fn no_routing_policy_can_make_a_request() {
         for (name, source) in [
             ("routing/mod.rs", include_str!("mod.rs")),
-            ("routing/interactive.rs", include_str!("interactive.rs")),
+            ("routing/interactive.rs", include_str!("interactive/mod.rs")),
             ("routing/free.rs", include_str!("free.rs")),
             ("routing/disposable.rs", disposable_source().as_str()),
             ("routing/session.rs", session_source().as_str()),

@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1272 / 1355 mandatory capabilities (94%)** — 83 open across 28 phases.
+**1273 / 1355 mandatory capabilities (94%)** — 82 open across 28 phases.
 
 ## Where the work is
 
@@ -40,9 +40,9 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 33 | Resource health | **2** | 13 | `1309` |
 | Phase 38 | Quota-preserving routing | **2** | 5 | `1604` |
 | Phase 53 | Criteria before adding graph storage | **2** | 3 | `1872` |
+| Phase 59 | Decompression: the code's physical shape catches up with its architecture | **2** | 6 | `2043` |
 | Phase 33B | Reliability-adjusted agent performance | **3** | 11 | `1345` |
 | Phase 35B | Candidate scoring | **3** | 22 | `1523` |
-| Phase 59 | Decompression: the code's physical shape catches up with its architecture | **3** | 5 | `2043` |
 | Phase 21E | Decision ladder and conflict handling | **4** | 8 | `907` |
 | Phase 31 | Compaction-aware behavior | **5** | 2 | `1167` |
 | Phase 52 | Criteria before adding semantic/vector retrieval | **5** | 1 | `1858` |
@@ -144,6 +144,11 @@ these unwrapped.
 - **1879** ☐ Do not add a graph database solely to visualize project memory.
 - **1882** ☐ Evaluate whether SQLite relations are insufficient before adopting a dedicated graph database.
 
+### Phase 59 — Decompression: the code's physical shape catches up with its architecture  (2 open, 6 closed)
+
+- **2053** ☐ Keep doc comments to the invariant and the reason it holds now, moving the history of how a decision was reached to the design or measurements record behind a one-line pointer.
+- **2054** ☐ Re-open the refused lines the user named as product-relevant — context quality (1534), cache temperature and affinity (1535, 1545), low-confidence memory (1129), preserving user changes on rollback (1044), and nearly-complete tasks under a reserve or quota threshold (1294, 1610) — and settle each by design and risk rather than by the count of open boxes.
+
 ### Phase 33B — Reliability-adjusted agent performance  (3 open, 11 closed)
 
 - **1354** ☐ Count empty completions, unusable tool calls, stream aborts, and apparently successful but non-actionable turns as distinct unsuccessful outcomes.
@@ -155,12 +160,6 @@ these unwrapped.
 - **1534** ☐ Include context quality in candidate scoring.
 - **1535** ☐ Include prompt-cache temperature in candidate scoring.
 - **1545** ☐ Include cache affinity and the distinction between warm, cold, and unknown observations.
-
-### Phase 59 — Decompression: the code's physical shape catches up with its architecture  (3 open, 5 closed)
-
-- **2049** ☐ Keep inline test modules under 500 lines; a larger one lives in its own file beside the module it tests.
-- **2053** ☐ Keep doc comments to the invariant and the reason it holds now, moving the history of how a decision was reached to the design or measurements record behind a one-line pointer.
-- **2054** ☐ Re-open the refused lines the user named as product-relevant — context quality (1534), cache temperature and affinity (1535, 1545), low-confidence memory (1129), preserving user changes on rollback (1044), and nearly-complete tasks under a reserve or quota threshold (1294, 1610) — and settle each by design and risk rather than by the count of open boxes.
 
 ## Practice sections, by number
 
