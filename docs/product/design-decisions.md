@@ -3951,6 +3951,13 @@ previous byte-for-byte opacity. The constraints are part of the decision:
 - A material performance regression is reported with its evidence and proposed
   alternatives, never silently accepted.
 
+**Provisional regression trigger (user, 2026-09-03):** 2% is an *engineering trigger*,
+not a universal SLA. Measure **proxy-only overhead with a controlled local fixture**,
+separately from provider and network latency, and report CPU, throughput, p50/p95
+latency and bounded per-stream memory. Escalate only if a **repeatable** regression
+above roughly 2%, or another material resource cost, survives reasonable optimisation.
+Benchmark noise is not a product escalation.
+
 Built as **one producer package followed by its consumers** — not as twenty
 independent projects for the ~20 lines it releases (1333, 1263, 1158, Phase 32G, much
 of Phase 51).
@@ -4011,6 +4018,14 @@ pre-edit hook; preserve an explicit user bypass; keep warnings and re-planning
 inspectable. **F is the scoping rule that keeps A surgical, not a separate locking
 subsystem. H is a bounded consumer of the conflict signal, not a general autonomous
 planning platform.**
+
+**Delivery path for H, settled by the user (2026-09-03) — do not design another
+transport.** Glasshouse already has an orchestrator delivery path: the Phase 15 wake-up
+flow, `SessionApi::send_text`, and `api/unix/events.rs`. Reuse it. The MVP targets the
+active project session designated as orchestrator; where there is no unambiguous active
+orchestrator, **surface that the conflict could not be delivered** rather than inventing
+a worker-ownership or push subsystem. Come back only if repository evidence proves that
+seam cannot carry the event safely.
 
 Implementation order: **A+F → B → C → H.** Maybe D, E, G, I, J, K and L stay parked and
 are **not** rejected; they are not promoted merely because these five were. Promotion

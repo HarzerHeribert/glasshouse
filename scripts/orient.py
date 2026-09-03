@@ -50,6 +50,8 @@ PHASE = re.compile(r"^(Phase [0-9]+[A-Z]?|Maybe [A-Z])\s+[—-]\s+(.+?)\s*$")
 # The "Maybe / Experimental" section is out of scope unless mandatory work
 # depends on it, so its lines are counted separately and never presented as work.
 EXPERIMENTAL_HEADER = re.compile(r"^Maybe / Experimental Capabilities\s*$")
+# The map's own words for a phase the user deferred as an experiment gate.
+GATE = "deferred experiment gate"
 BOX = re.compile(r"^([☐☑])\s+(.*)$")
 SECTION = re.compile(r"^## (§\d+)\s*[—-]\s*(.+?)\s*$")
 CHECKPOINT = re.compile(r"^## (Checkpoint\b.*)$")
@@ -74,10 +76,21 @@ def map_state():
                 "line": idx,
                 "open": [],
                 "closed": 0,
-                "experimental": experimental or m.group(1).startswith("Maybe"),
+                # A capability's ID is its line number, so a new phase is
+                # APPENDED at the end of the map (scripts/map-index.py). Judge a
+                # heading by its kind, not by whether it sits after the
+                # experimental banner: `Phase N` is committed wherever it is.
+                "experimental": m.group(1).startswith("Maybe"),
+                "gate": GATE in line,
             }
             phases.append(current)
             continue
+        # The user deferred these phases as experiment gates (2026-09-03); the
+        # map says so in words. Their unchecked criteria are a decision not yet
+        # taken, so they are shown apart from the work queue instead of sitting
+        # at the top of it as the "cheapest closures".
+        if current is not None and "deferred experiment gate" in line:
+            current["gate"] = True
         b = BOX.match(line)
         if b and current is not None:
             if b.group(1) == "☑":
@@ -115,8 +128,12 @@ def evidence_index():
 def render() -> str:
     phases = map_state()
     mandatory = [p for p in phases if not p["experimental"]]
+    gates = [p for p in mandatory if p.get("gate")]
+    active = [p for p in mandatory if not p.get("gate")]
     closed = sum(p["closed"] for p in mandatory)
-    openn = sum(len(p["open"]) for p in mandatory)
+    openn = sum(len(p["open"]) for p in active)
+    gate_open = sum(len(p["open"]) for p in gates)
+    parked = sum(len(p["open"]) for p in phases if p["experimental"])
     total = closed + openn
     pct = round(100 * closed / total) if total else 0
 
@@ -138,8 +155,14 @@ def render() -> str:
     add("derived from those same documents and points at the file and line to open")
     add("next. **Read this first, then open only what you actually need.**")
     add("")
-    add(f"**{closed} / {total} mandatory capabilities ({pct}%)** — "
-        f"{openn} open across {len([p for p in mandatory if p['open']])} phases.")
+    add(f"**{closed} closed · {openn} active committed open ({pct}%)** — "
+        f"across {len([p for p in active if p['open']])} phases.")
+    if gates or parked:
+        add("")
+        add(f"Not in the work queue: **{gate_open} deferred gate criteria** "
+            f"({', '.join(p['id'] for p in gates) or 'none'}) awaiting a user "
+            f"decision, and **{parked} parked experimental lines**. They are "
+            "visible in the map; they are not release-blocking work.")
     add("")
 
     add("## Where the work is")
@@ -149,7 +172,7 @@ def render() -> str:
     add("")
     add("| phase | title | open | closed | map line |")
     add("|---|---|---|---|---|")
-    for p in sorted((p for p in mandatory if p["open"]),
+    for p in sorted((p for p in active if p["open"]),
                     key=lambda p: (len(p["open"]), p["line"])):
         add(f"| {p['id']} | {p['title']} | **{len(p['open'])}** | "
             f"{p['closed']} | `{p['line']}` |")

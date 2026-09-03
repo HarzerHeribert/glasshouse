@@ -19,10 +19,12 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`█████████████████████████████████████░░░` 1273 / 1371 mandatory capabilities (92%)
+`█████████████████████████████████████░░░` **1273 closed** · **91 active committed open** (93%)
+
+Separately tracked, and not release-blocking: **7 deferred gate criteria** (Phase 52, Phase 53) awaiting a decision, and **229 parked experimental lines** under Maybe / Experimental.
 
 <details>
-<summary>Per-phase breakdown (81 of 110 phases complete)</summary>
+<summary>Per-phase breakdown (81 of 108 active phases complete)</summary>
 
 | Phase | Done |
 |---|---|
@@ -125,8 +127,8 @@ the authoritative specification and tracks what is done.
 | Phase 49 — Configuration | 16/16 ✅ |
 | Phase 50 — Tracked project knowledge as an optional feature | 7/7 ✅ |
 | Phase 51 — Evaluation hooks | 22/37 |
-| Phase 52 — Criteria before adding semantic/vector retrieval | 1/6 |
-| Phase 53 — Criteria before adding graph storage | 3/5 |
+| Phase 52 — Criteria before adding semantic/vector retrieval (deferred experiment gate) | 1/6 |
+| Phase 53 — Criteria before adding graph storage (deferred experiment gate) | 3/5 |
 | Phase 54 — Criteria before deeper cmux coupling | 4/4 ✅ |
 | Phase 54A — Setup and portability completion criteria | 10/10 ✅ |
 | Phase 55 — V1 completion definition | 23/23 ✅ |
@@ -136,6 +138,8 @@ the authoritative specification and tracks what is done.
 | Phase 58 — Context economy: cache-stable translation, entitlement-aware reduction, and a measured token budget | 15/15 ✅ |
 | Phase 59 — Decompression: the code's physical shape catches up with its architecture | 6/8 |
 | Phase 60 — Parallel-session file coordination | 0/16 |
+| Phase 52 — Criteria before adding semantic/vector retrieval (deferred experiment gate) | 1/6 — deferred gate |
+| Phase 53 — Criteria before adding graph storage (deferred experiment gate) | 3/5 — deferred gate |
 
 </details>
 <!-- progress:end -->
