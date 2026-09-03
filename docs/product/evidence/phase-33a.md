@@ -928,8 +928,36 @@ from another timestamp is the estimate the approval withholds.**
 
 **Limits, carried forward rather than buried:**
 
-- **A gzipped response records `unknown`, and this is the limitation with real
-  product weight.** `accept-encoding` is not hop-by-hop, so a harness's own
+- **A gzipped response records `unknown`. MEASURED 2026-09-03, and the answer
+  is per-harness** — `GH-ACCEPT-ENCODING-RECON`,
+  `.agent-runtime/report-accept-encoding-recon.md`, captured from two real
+  standalone harness binaries against a loopback recording listener with fake
+  credentials:
+  - **Codex sends no `accept-encoding` at all**, so nothing enables
+    compression on that path and **the usage columns should be populated
+    always** — a compliant server does not compress what the client never said
+    it could decode. This works today and needs no change; the recon is the
+    first confirmation that it does.
+  - **Claude Code sends `Accept-Encoding: gzip, deflate, br, zstd`** — the
+    Stainless-generated Anthropic SDK's default, not a deliberate opt-in. So
+    the column is **conditionally empty, and the condition is whether the
+    provider's edge chose to compress that particular response** — not
+    something Glasshouse or the harness controls. Glasshouse forwards the
+    header unchanged and adds none of its own, which
+    `gateway/tests.rs :: the_gateway_adds_no_headers_of_its_own_to_a_forwarded_request`
+    already proves and the recon cited rather than re-derived.
+
+  **Still unmeasured, and it is the whole remaining question**: whether
+  Anthropic's edge actually compresses a real `200` streamed body. That needs a
+  real credential and a live relay driven from an interactive terminal, which
+  the recon packet forbade. **The successor is narrower than "fix it"** — it is
+  that single measurement, not a change. Both mitigations remain correctly
+  refused: stripping the header changes the protocol semantics the approval
+  protects, and decompressing to read would buffer, which bounded streaming
+  forbids.
+
+  The original framing of this limit, kept because it is what prompted the
+  measurement: `accept-encoding` is not hop-by-hop, so a harness's own
   `accept-encoding: gzip` is forwarded and the provider may answer compressed;
   the relayed bytes are then not JSON and nothing matches. That is *correct*
   under the approval, but it could make the feature quiet in practice. It is not
