@@ -756,6 +756,7 @@ fn a_version_five_database_migrates_forward_keeping_its_memories() {
              -- Migration 27's table: a rollback that leaves it in place
              -- meets `table file_claims already exists` on the re-run.
 
+             DROP TABLE IF EXISTS task_progress_declarations;
              DROP TABLE IF EXISTS file_claims;
 
              DELETE FROM schema_migrations WHERE version >= 6;",
@@ -789,7 +790,7 @@ fn a_version_five_database_migrates_forward_keeping_its_memories() {
         })
         .unwrap();
     assert_eq!(
-        version, 27,
+        version, 28,
         "the launch must have applied migrations 6 through 22"
     );
     drop(conn);
@@ -1059,6 +1060,7 @@ fn a_memorys_provenance_survives_the_seq_rebuild() {
              -- Migration 27's table: a rollback that leaves it in place
              -- meets `table file_claims already exists` on the re-run.
 
+             DROP TABLE IF EXISTS task_progress_declarations;
              DROP TABLE IF EXISTS file_claims;
 
              DELETE FROM schema_migrations WHERE version >= 7;",
@@ -1091,7 +1093,7 @@ fn a_memorys_provenance_survives_the_seq_rebuild() {
         })
         .unwrap();
     assert_eq!(
-        version, 27,
+        version, 28,
         "the launch must have applied migrations 7 through 22"
     );
     drop(conn);

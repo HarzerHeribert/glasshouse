@@ -455,7 +455,8 @@ fn migration_18_adds_failure_class_and_undoes_cleanly() {
             ALTER TABLE routing_observations DROP COLUMN failure_class;
             -- Migration 27's table: a rollback that leaves it in place
             -- meets `table file_claims already exists` on the re-run.
-            DROP TABLE IF EXISTS file_claims;
+            DROP TABLE IF EXISTS task_progress_declarations;
+             DROP TABLE IF EXISTS file_claims;
             DELETE FROM schema_migrations WHERE version >= 18;
         ";
 
@@ -602,7 +603,8 @@ fn migration_23_adds_task_class_and_undoes_cleanly() {
             ALTER TABLE routing_observations DROP COLUMN task_class;
             -- Migration 27's table: a rollback that leaves it in place
             -- meets `table file_claims already exists` on the re-run.
-            DROP TABLE IF EXISTS file_claims;
+            DROP TABLE IF EXISTS task_progress_declarations;
+             DROP TABLE IF EXISTS file_claims;
             DELETE FROM schema_migrations WHERE version >= 23;
         ";
 
@@ -641,7 +643,7 @@ fn migration_23_adds_task_class_and_undoes_cleanly() {
         "the launch must have applied migration 23"
     );
     assert_eq!(
-        SUPPORTED_SCHEMA_VERSION, 27,
+        SUPPORTED_SCHEMA_VERSION, 28,
         "a fresh database reports the version the newest migration ships"
     );
     {
@@ -795,7 +797,8 @@ fn migration_24_adds_the_session_columns_and_undoes_cleanly() {
             ALTER TABLE routing_observations DROP COLUMN session_id;
             -- Migration 27's table: a rollback that leaves it in place
             -- meets `table file_claims already exists` on the re-run.
-            DROP TABLE IF EXISTS file_claims;
+            DROP TABLE IF EXISTS task_progress_declarations;
+             DROP TABLE IF EXISTS file_claims;
             DELETE FROM schema_migrations WHERE version >= 24;
         ";
 
@@ -836,7 +839,7 @@ fn migration_24_adds_the_session_columns_and_undoes_cleanly() {
         "the launch must have applied migration 24"
     );
     assert_eq!(
-        SUPPORTED_SCHEMA_VERSION, 27,
+        SUPPORTED_SCHEMA_VERSION, 28,
         "a fresh database reports the version the newest migration ships"
     );
     {
@@ -1002,7 +1005,8 @@ fn migration_25_adds_the_millisecond_offsets_and_undoes_cleanly() {
             ALTER TABLE routing_observations DROP COLUMN first_byte_ms;
             -- Migration 27's table: a rollback that leaves it in place
             -- meets `table file_claims already exists` on the re-run.
-            DROP TABLE IF EXISTS file_claims;
+            DROP TABLE IF EXISTS task_progress_declarations;
+             DROP TABLE IF EXISTS file_claims;
             DELETE FROM schema_migrations WHERE version >= 25;
         ";
 
@@ -1053,7 +1057,7 @@ fn migration_25_adds_the_millisecond_offsets_and_undoes_cleanly() {
         "the launch must have applied migration 25"
     );
     assert_eq!(
-        SUPPORTED_SCHEMA_VERSION, 27,
+        SUPPORTED_SCHEMA_VERSION, 28,
         "a fresh database reports the version the newest migration ships"
     );
     {
@@ -1224,7 +1228,8 @@ fn migration_19_adds_the_assumption_tables_and_undoes_cleanly() {
             DROP TABLE task_assumptions;
             -- Migration 27's table: a rollback that leaves it in place
             -- meets `table file_claims already exists` on the re-run.
-            DROP TABLE IF EXISTS file_claims;
+            DROP TABLE IF EXISTS task_progress_declarations;
+             DROP TABLE IF EXISTS file_claims;
             DELETE FROM schema_migrations WHERE version >= 19;
         ";
 
@@ -1412,7 +1417,8 @@ fn migration_20_adds_presentation_ref_and_undoes_cleanly() {
             ALTER TABLE sessions DROP COLUMN presentation_ref;
             -- Migration 27's table: a rollback that leaves it in place
             -- meets `table file_claims already exists` on the re-run.
-            DROP TABLE IF EXISTS file_claims;
+            DROP TABLE IF EXISTS task_progress_declarations;
+             DROP TABLE IF EXISTS file_claims;
             DELETE FROM schema_migrations WHERE version >= 20;
         ";
 
@@ -1541,7 +1547,8 @@ fn the_memory_commit_migration_adds_its_two_columns_and_undoes_cleanly() {
             ALTER TABLE sessions DROP COLUMN last_seen_commit;
             -- Migration 27's table: a rollback that leaves it in place
             -- meets `table file_claims already exists` on the re-run.
-            DROP TABLE IF EXISTS file_claims;
+            DROP TABLE IF EXISTS task_progress_declarations;
+             DROP TABLE IF EXISTS file_claims;
             DELETE FROM schema_migrations WHERE version >= 21;
         ";
 
@@ -1725,7 +1732,8 @@ fn the_entitlement_migration_adds_its_column_and_undoes_cleanly() {
             ALTER TABLE sessions DROP COLUMN entitlement;
             -- Migration 27's table: a rollback that leaves it in place
             -- meets `table file_claims already exists` on the re-run.
-            DROP TABLE IF EXISTS file_claims;
+            DROP TABLE IF EXISTS task_progress_declarations;
+             DROP TABLE IF EXISTS file_claims;
             DELETE FROM schema_migrations WHERE version >= 22;
         ";
 
@@ -1765,7 +1773,7 @@ fn the_entitlement_migration_adds_its_column_and_undoes_cleanly() {
         "the launch must have applied the entitlement migration"
     );
     assert_eq!(
-        SUPPORTED_SCHEMA_VERSION, 27,
+        SUPPORTED_SCHEMA_VERSION, 28,
         "a fresh database reports the version the newest migration ships"
     );
     {
@@ -1888,7 +1896,8 @@ fn a_version_sixteen_database_migrates_forward_keeping_its_memories() {
                  DROP TABLE memory_files;
                  -- Migration 27's table: a rollback that leaves it in place
                  -- meets `table file_claims already exists` on the re-run.
-                 DROP TABLE IF EXISTS file_claims;
+                 DROP TABLE IF EXISTS task_progress_declarations;
+             DROP TABLE IF EXISTS file_claims;
                  DELETE FROM schema_migrations WHERE version >= 17;",
         )
         .unwrap();
@@ -2043,7 +2052,8 @@ fn a_version_nine_database_migrates_forward_keeping_its_memories() {
                  -- Migration 27's table: a rollback that leaves it in place
                  -- meets `table file_claims already exists` on the re-run.
 
-                 DROP TABLE IF EXISTS file_claims;
+                 DROP TABLE IF EXISTS task_progress_declarations;
+             DROP TABLE IF EXISTS file_claims;
 
                  DELETE FROM schema_migrations WHERE version >= 10;"
         ))
@@ -2125,7 +2135,8 @@ fn a_version_twelve_database_migrates_forward_keeping_a_supersession_it_could_no
                  ALTER TABLE memories DROP COLUMN superseded_reason;
                  -- Migration 27's table: a rollback that leaves it in place
                  -- meets `table file_claims already exists` on the re-run.
-                 DROP TABLE IF EXISTS file_claims;
+                 DROP TABLE IF EXISTS task_progress_declarations;
+             DROP TABLE IF EXISTS file_claims;
                  DELETE FROM schema_migrations WHERE version >= 13;"
         ))
         .unwrap();
@@ -2223,7 +2234,8 @@ fn a_version_thirteen_database_migrates_forward_keeping_the_order_it_could_recor
             "{UNDO_MIGRATIONS_ABOVE_THIRTEEN}
                  -- Migration 27's table: a rollback that leaves it in place
                  -- meets `table file_claims already exists` on the re-run.
-                 DROP TABLE IF EXISTS file_claims;
+                 DROP TABLE IF EXISTS task_progress_declarations;
+             DROP TABLE IF EXISTS file_claims;
                  DELETE FROM schema_migrations WHERE version >= 14;"
         ))
         .unwrap();
@@ -2404,7 +2416,8 @@ fn a_version_ten_database_migrates_forward_keeping_its_memories() {
                  DROP TABLE routing_observations;
                  -- Migration 27's table: a rollback that leaves it in place
                  -- meets `table file_claims already exists` on the re-run.
-                 DROP TABLE IF EXISTS file_claims;
+                 DROP TABLE IF EXISTS task_progress_declarations;
+             DROP TABLE IF EXISTS file_claims;
                  DELETE FROM schema_migrations WHERE version >= 11;"
         ))
         .unwrap();

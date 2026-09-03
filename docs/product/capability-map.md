@@ -1291,7 +1291,7 @@ Phase 32F — Protected quota reserve
 ☑ Allow reserve policy to become more permissive shortly before a known quota reset.
 ☑ Allow reserve policy to become more conservative when the next reset is distant.
 ☑ Keep reserve behavior inspectable in routing explanations.
-☐ Avoid moving an almost-complete high-value task to another session solely because a reserve threshold was crossed.
+☑ Avoid moving an almost-complete high-value task to another session solely because a reserve threshold was crossed.
 
 Phase 32G — Provider-aware request-cost estimation
 
@@ -1607,7 +1607,7 @@ Phase 38 — Quota-preserving routing
 ☑ Prefer local or free resources for trivial classification and extraction work when suitable.
 ☐ Prefer cheap resources for simple repository summarization when no valuable warm session already exists.
 ☑ Prefer premium warm sessions for difficult tasks that benefit strongly from existing context.
-☐ Avoid migrating a nearly completed task solely to preserve a small amount of quota.
+☑ Avoid migrating a nearly completed task solely to preserve a small amount of quota.
 ☑ Avoid spending premium model capacity on internal Glasshouse bookkeeping when a cheap resource can perform it reliably.
 ☑ Keep quota preservation as a tunable policy rather than a hard-coded model hierarchy.
 

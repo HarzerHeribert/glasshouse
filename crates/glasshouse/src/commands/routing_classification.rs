@@ -925,11 +925,20 @@ pub(crate) fn disposable_extraction_model(
         effective.reserve_override_sessions().value,
     )
     .deciding_for(session.to_string());
+    // Map lines 1294 and 1610's production wiring, on the same shape and for
+    // the same reason as the override above: what somebody declared, paired
+    // with the session this decision is for, and false for every session
+    // nobody declared.
+    let task_progress = glasshouse::routing::disposable::DeclaredTaskProgress::for_sessions(
+        crate::commands::sessions::declared_task_progress_sessions(runtime),
+    )
+    .deciding_for(session.to_string());
     let routing = glasshouse::routing::disposable::DisposableRouting::for_support_work(
         effective.prefer_free_routing().value,
         free_preferences,
     )
     .with_reserve_override(reserve_override)
+    .with_task_progress(task_progress)
     // Capability map line 1577's background half, on the path that acts.
     // Memory extraction is a support job Glasshouse runs on its own behalf,
     // so the scope is `Background` and the selection is made here — by

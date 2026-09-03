@@ -357,6 +357,42 @@ pub enum Command {
         #[arg(long, conflicts_with_all = ["path", "session", "release"])]
         list: bool,
     },
+    /// Declare that a session's current task is nearly complete, so a quota
+    /// threshold alone will not move the work elsewhere.
+    ///
+    /// Glasshouse protects a slice of each provider's quota, and when that
+    /// reserve is crossed it will normally prefer to move work to a cheaper
+    /// resource. That is the wrong call for a task that is almost done:
+    /// moving it throws away the context it has built up to save a small
+    /// amount of quota. This is how you say so.
+    ///
+    /// **Glasshouse never guesses this.** It cannot see how far through a
+    /// task a session is — it sees turns starting and ending, and a turn
+    /// boundary is not a task boundary. Every available guess (how many
+    /// turns have passed, how long the session has been running) reports
+    /// "almost done" for work that has merely been going on a while, which
+    /// is exactly the long-running work the reserve exists to keep serving.
+    /// So the declaration is yours to make, and it is the only thing that
+    /// sets it.
+    ///
+    /// A declaration is project-scoped and **expires by itself**, because a
+    /// statement that outlived its task would keep protecting work that had
+    /// already finished. Declaring again for the same session renews it;
+    /// `--withdraw` ends it early, and it ends anyway when the session does.
+    TaskProgress {
+        /// Which session's task is nearly complete, by the identifier
+        /// `glasshouse sessions` prints, or any leading part of it.
+        #[arg(long, required_unless_present = "list")]
+        session: Option<String>,
+
+        /// Withdraw the declaration instead of making one.
+        #[arg(long)]
+        withdraw: bool,
+
+        /// Print this project's active declarations and change nothing.
+        #[arg(long, conflicts_with_all = ["session", "withdraw"])]
+        list: bool,
+    },
     /// Search this project's durable memory.
     ///
     /// Memory is project-scoped: this reads the database belonging to the

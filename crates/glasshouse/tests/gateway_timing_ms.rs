@@ -937,6 +937,7 @@ fn a_version_24_database_migrates_and_reads_back_four_nulls() {
              ALTER TABLE routing_observations DROP COLUMN first_byte_ms;
              -- Migration 27's table: a rollback that leaves it in place
              -- meets `table file_claims already exists` on the re-run.
+             DROP TABLE IF EXISTS task_progress_declarations;
              DROP TABLE IF EXISTS file_claims;
              DELETE FROM schema_migrations WHERE version >= 25;",
         )

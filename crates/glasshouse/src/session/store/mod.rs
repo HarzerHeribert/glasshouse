@@ -50,6 +50,7 @@ pub use claims::{FileClaim, STALE_CLAIM_AFTER};
 pub use context::{
     AdvisoryCacheState, CacheState, CheckpointRecency, SessionContext, TaskContinuity,
 };
+pub use progress::{TASK_PROGRESS_EXPIRES_AFTER, TaskProgressDeclaration};
 pub use record::{
     LabelError, NewSession, ResponseMechanism, ResumableSession, SessionDisposition, SessionId,
     SessionLifecycle, SessionName, SessionPairingClass, SessionPresentation, SessionProtocol,
@@ -208,6 +209,15 @@ pub enum SessionStoreError {
          repo-relative and inside the project, with no `..` component"
     )]
     ClaimPath { path: String },
+    #[error(
+        "session `{id}` is {lifecycle}, and a session that has finished has no \
+         current task to be nearly complete; a declaration it made would be \
+         honoured by nothing the moment anything read it"
+    )]
+    NotDeclarable {
+        id: SessionId,
+        lifecycle: SessionLifecycle,
+    },
     #[error(transparent)]
     Label(#[from] LabelError),
     #[error("the project database has no project identifier bound")]
@@ -1877,6 +1887,7 @@ fn require_owning_harness(harness: &str) -> Result<(), SessionStoreError> {
 
 mod claims;
 mod context;
+mod progress;
 mod record;
 #[cfg(test)]
 mod tests;

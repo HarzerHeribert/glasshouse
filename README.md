@@ -19,12 +19,12 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`█████████████████████████████████████░░░` **1286 closed** · **78 active committed open** (94%)
+`█████████████████████████████████████░░░` **1288 closed** · **76 active committed open** (94%)
 
 Separately tracked, and not release-blocking: **7 deferred gate criteria** (Phase 52, Phase 53) awaiting a decision, and **229 parked experimental lines** under Maybe / Experimental.
 
 <details>
-<summary>Per-phase breakdown (81 of 108 active phases complete)</summary>
+<summary>Per-phase breakdown (82 of 108 active phases complete)</summary>
 
 | Phase | Done |
 |---|---|
@@ -93,7 +93,7 @@ Separately tracked, and not release-blocking: **7 deferred gate criteria** (Phas
 | Phase 32C — Subscription capacity estimation | 11/12 |
 | Phase 32D — Normalized remaining-capacity score | 11/12 |
 | Phase 32E — Burn rate and exhaustion forecasting | 10/10 ✅ |
-| Phase 32F — Protected quota reserve | 7/8 |
+| Phase 32F — Protected quota reserve | 8/8 ✅ |
 | Phase 32G — Provider-aware request-cost estimation | 8/10 |
 | Phase 33 — Resource health | 13/15 |
 | Phase 33A — Routing evidence ledger | 15/15 ✅ |
@@ -113,7 +113,7 @@ Separately tracked, and not release-blocking: **7 deferred gate criteria** (Phas
 | Phase 35D — Routing under subscription pressure | 8/8 ✅ |
 | Phase 36 — Session affinity | 8/8 ✅ |
 | Phase 37 — Basic session-aware router | 10/11 |
-| Phase 38 — Quota-preserving routing | 5/7 |
+| Phase 38 — Quota-preserving routing | 6/7 |
 | Phase 39 — Gateway-backed disposable jobs | 9/9 ✅ |
 | Phase 40 — Fresh-session handoff | 9/9 ✅ |
 | Phase 41 — Project overview | 15/15 ✅ |

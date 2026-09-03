@@ -1648,6 +1648,18 @@ pub(crate) fn session_router(
     glasshouse::routing::session::SessionRouter::with_override(user_override)
         .with_reserve_policies(effective.reserve_policies())
         .with_reserve_override_sessions(effective.reserve_override_sessions().value)
+        // Map lines 1294 and 1610, read HERE for the same reason as the
+        // score weights below: this is the one constructor every real
+        // ranking goes through, so the path that acts and the path that
+        // reports cannot disagree about whether a task was declared nearly
+        // complete. The set comes from the project's own store and holds
+        // only declarations that are inside their horizon and whose session
+        // is still live; a project that has declared nothing yields an empty
+        // set, which is what every ranking saw before this line had a
+        // producer.
+        .with_declared_task_progress(crate::commands::sessions::declared_task_progress_sessions(
+            runtime,
+        ))
         // Map lines 1357/1358: the configured score weights are read HERE,
         // in the one constructor every real ranking goes through. Until
         // 2026-09-02 this line did not exist: `[routing.score_weights]`

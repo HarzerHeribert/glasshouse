@@ -3382,6 +3382,14 @@ lines re-open together** — that is why a test pins the constant rather than
 letting it drift, and why relaxing the test is not a way to close either
 line.
 
+> **That happened on 2026-09-03, and this section's prediction is what made it
+> safe.** A producer landed — a *declaration*, not an observation — and 1294
+> and 1610 closed together exactly as written here. Nothing above is retracted:
+> Glasshouse still does not guess at progress, the proxies named here are still
+> refused, and the pins were **re-stated by the same argument** rather than
+> relaxed. See *A task's progress is declared, never guessed* below, and
+> `evidence/phase-32f.md` / `phase-38.md` for the closure.
+
 ### A file association is observed, never inferred
 
 `FileAssociation` distinguishes a file Glasshouse *watched* a session touch

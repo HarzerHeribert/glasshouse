@@ -1,7 +1,7 @@
 //! Migrations 14 onwards, split out of `database.rs`'s `MIGRATIONS`
 //! array by Phase 59's decomposition. Bodies through 26 are verbatim.
 
-pub(super) const MIGRATIONS_V14_ON: [&str; 14] = [
+pub(super) const MIGRATIONS_V14_ON: [&str; 15] = [
     // 14: the order checkpoints were actually written in, because
     // `created_at` cannot carry it.
     //
@@ -1300,6 +1300,86 @@ pub(super) const MIGRATIONS_V14_ON: [&str; 14] = [
     )
     BEGIN
         SELECT RAISE(ABORT, 'file claim belongs to a different project');
+    END;
+    ",
+    // 28: `task_progress_declarations` — the honest producer of
+    // `provider::quota::ReserveDecisionInputs::task_nearly_complete`, map
+    // lines 1294 and 1610.
+    //
+    // # Why a table and not a setting
+    //
+    // The field this feeds is the *first* branch `evaluate_reserve_spend`
+    // takes, outranking every other signal including the user's own
+    // override. A value that is wrong there does not degrade the reserve
+    // policy, it inverts it, at the one moment the protection matters. Two
+    // shapes were therefore refused: a proxy derived from turn counts or
+    // elapsed time (which reports "almost complete" for work that has merely
+    // been running a while — exactly the long-running work a protected
+    // reserve exists to keep serving), and a configuration value (which is
+    // sticky by nature, and a declaration that outlives the task it described
+    // re-creates the same inversion by a slower route).
+    //
+    // What is left is a **declaration**: somebody says the task is nearly
+    // complete, on purpose, about one named session, and the statement
+    // expires. That is migration 27's claim, one column narrower.
+    //
+    // # One row per session
+    //
+    // The primary key is `session_id` alone, not `(session_id, path)`:
+    // progress is a fact about the session's current task, and a session has
+    // one. Re-declaring moves `renewed_at` and `expires_at` on the row that
+    // exists; `declared_at` is left alone, so *"since when"* survives a
+    // renew, exactly as `file_claims.claimed_at` does.
+    //
+    // # Nothing here describes the work
+    //
+    // There is deliberately no note, label or summary column. A declaration
+    // is one bit plus a scope plus a horizon; a free-text column would be a
+    // place for prompt text or session content to reach a table that exists
+    // to answer a boolean, and `session::store::tests`'s schema inventory
+    // holds this build to having nowhere to put one.
+    //
+    // # `session_id` and not a process id, and project scope
+    //
+    // Migration 27's reasoning verbatim: a bare id with no `REFERENCES`
+    // because a trimmed sessions row must drop the declaration rather than
+    // fail a read, no pid because a recycled pid resolving to a live
+    // declaration is precisely the inversion above, and migration 15's two
+    // project triggers because a row carrying a foreign `project_id` is
+    // refused before it is written.
+    "
+    CREATE TABLE task_progress_declarations (
+        project_id   TEXT    NOT NULL,
+        -- The session whose current task was declared nearly complete,
+        -- never a process id.
+        session_id   TEXT    NOT NULL,
+        -- Seconds since the Unix epoch. `declared_at` survives a renew;
+        -- `renewed_at` and `expires_at` are what a renew moves.
+        declared_at  INTEGER NOT NULL,
+        renewed_at   INTEGER NOT NULL,
+        expires_at   INTEGER NOT NULL,
+
+        PRIMARY KEY (session_id)
+    );
+
+    CREATE TRIGGER task_progress_reject_foreign_project_insert
+    BEFORE INSERT ON task_progress_declarations
+    FOR EACH ROW
+    WHEN NEW.project_id IS NOT (
+        SELECT value FROM project_metadata WHERE key = 'project_id'
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'task progress belongs to a different project');
+    END;
+
+    CREATE TRIGGER task_progress_reject_foreign_project_update
+    BEFORE UPDATE OF project_id ON task_progress_declarations
+    FOR EACH ROW
+    WHEN NEW.project_id IS NOT (
+        SELECT value FROM project_metadata WHERE key = 'project_id'
+    )
+    BEGIN
+        SELECT RAISE(ABORT, 'task progress belongs to a different project');
     END;
     ",
 ];

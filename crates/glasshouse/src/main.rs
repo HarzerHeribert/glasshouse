@@ -464,6 +464,22 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
                 return Ok(ExitCode::FAILURE);
             }
         },
+        Some(Command::TaskProgress {
+            session,
+            withdraw,
+            list,
+        }) => match crate::commands::sessions::task_progress_command(
+            &runtime,
+            session.as_deref(),
+            *withdraw,
+            *list,
+        ) {
+            Ok(report) => print!("{report}"),
+            Err(err) => {
+                eprintln!("glasshouse: {err:#}");
+                return Ok(ExitCode::FAILURE);
+            }
+        },
         // `run` and `launch` dispatch through this one arm on purpose — see
         // `Command::Run`'s doc. A change to how a launch is assembled can
         // only ever be made here, once, so the two can never diverge.

@@ -387,6 +387,20 @@ pub struct PressureInputs<'a> {
     /// [`super::disposable::ReserveOverride`]: true only for an existing
     /// session the user named.
     pub user_override: bool,
+    /// Whether this destination's session had its current task **declared**
+    /// nearly complete — lines 1294 and 1610, scoped at the caller exactly
+    /// as `user_override` above is: true only for an existing session
+    /// somebody declared, and only while that declaration is inside its
+    /// horizon.
+    ///
+    /// `false` is *nothing declared*, which is what every caller that
+    /// declares nothing carries and what makes this field's arrival a no-op
+    /// for them. It is never derived from a turn count, an elapsed time or
+    /// any other observable — see
+    /// [`crate::provider::quota::ReserveDecisionInputs::task_nearly_complete`]
+    /// for why a proxy inverts the reserve policy rather than approximating
+    /// it.
+    pub task_nearly_complete: bool,
     /// Phase 32E line 1280: what [`super::burn::forecast`] made of this
     /// destination's resource, when it could make anything of it at all.
     ///
@@ -693,6 +707,7 @@ fn reserve_band(inputs: &PressureInputs<'_>, band: CapacityBand) -> Contribution
                 inputs.alternatives.cheaper_adequate().is_some(),
                 inputs.user_override,
                 inputs.facts.seconds_until_reset(),
+                inputs.task_nearly_complete,
             );
             match verdict {
                 ReserveDecision::Allow { reason } => tight_penalty(inputs, band, Some(&reason)),
@@ -733,24 +748,30 @@ fn reserve_band(inputs: &PressureInputs<'_>, band: CapacityBand) -> Contribution
 /// verdict equal, on `is_allowed`, to the lowest tier's across every input
 /// combination, so the copy cannot drift from the original.
 ///
-/// # Line 1610 is refused here, and `task_nearly_complete` says so
+/// # Line 1610, and the one thing that may make `task_nearly_complete` true
 ///
-/// `ReserveDecisionInputs::task_nearly_complete` is `false` below, and that
-/// is the decision recorded in `docs/product/design-decisions.md` under
-/// *"A task is never 'nearly complete'"*, and at the field's own doc
-/// comment: nothing in this build
-/// can observe that a task is nearly complete, and a proxy from turn counts
-/// or elapsed time would report "almost complete" for work that had merely
-/// been running a while — inverting the protection at exactly the moment it
-/// exists for. Line 1610 (*"avoid migrating a nearly completed task solely to
-/// preserve a small amount of quota"*) is the same guard seen from Phase 38,
-/// and it is refused on the same ground rather than approximated.
+/// Line 1610 (*"avoid migrating a nearly completed task solely to preserve a
+/// small amount of quota"*) is line 1294's guard seen from Phase 38, and
+/// both turn on the word **solely**: the guard stops a threshold being the
+/// whole reason work moves. A second reason may only come from the party
+/// that knows, so `task_nearly_complete` below is a **declaration** —
+/// somebody said so, on purpose, about this session, recently — carried in
+/// by the caller through `PressureInputs::task_nearly_complete` and scoped
+/// there.
+///
+/// This module still infers nothing, and that half of
+/// `docs/product/design-decisions.md`'s *"A task is never 'nearly
+/// complete'"* is untouched: a proxy from turn counts or elapsed time would
+/// report "almost complete" for work that had merely been running a while,
+/// inverting the protection at exactly the moment it exists for. The value
+/// arrives from a caller or it is `false`; nothing here derives it.
 pub fn reserve_verdict(
     band: CapacityBand,
     tier: Option<WorkloadTier>,
     cheaper_adequate_resource_exists: bool,
     user_override: bool,
     seconds_until_reset: Option<i64>,
+    task_nearly_complete: bool,
 ) -> ReserveDecision {
     if let Some(tier) = tier {
         return evaluate_reserve_spend(ReserveDecisionInputs {
@@ -759,9 +780,27 @@ pub fn reserve_verdict(
             cheaper_adequate_resource_exists,
             user_override,
             seconds_until_reset,
-            // Line 1294's standing refusal, and line 1610's — see above.
-            task_nearly_complete: false, // never a proxy
+            // Lines 1294 and 1610, declared by the caller and never derived
+            // here — see above.
+            task_nearly_complete,
         });
+    }
+
+    // The unknown-tier copy below reproduces `evaluate_reserve_spend`'s
+    // precedence, so the declaration leads here too. It has to: this guard
+    // outranks every other signal precisely because it is about work already
+    // in flight, and whether the router managed to establish that work's
+    // tier says nothing about whether somebody declared it nearly done. A
+    // copy that started at the override would quietly withhold the
+    // protection from every task whose tier was not classified — line
+    // 1459's conservatism applied to the one branch it was never about.
+    if task_nearly_complete {
+        return ReserveDecision::Allow {
+            reason: "this session's operator declared its current task nearly complete, so the \
+                     reserve threshold is not the sole reason to move the work (lines 1294, \
+                     1610)"
+                .to_owned(),
+        };
     }
 
     if user_override {
@@ -838,6 +877,7 @@ mod tests {
             policies: ReservePolicies::default(),
             scope: ReserveScope::Interactive,
             user_override: false,
+            task_nearly_complete: false,
             forecast: None,
         }
     }
@@ -861,6 +901,13 @@ mod tests {
     /// `reserve_verdict(.., None, ..)` mirrors `evaluate_reserve_spend` with
     /// the lowest tier on every input this module can hand it. Only the
     /// reasons differ, and they are meant to.
+    ///
+    /// **The declared-task-progress axis is in the sweep for a reason.** The
+    /// unknown-tier arm is a hand-written copy of the precedence, so lines
+    /// 1294 and 1610's guard has to be re-implemented in it; a copy that
+    /// omitted the branch would withhold the protection from exactly the
+    /// tasks whose tier the router could not establish, and nothing else in
+    /// the suite compares the two arms input for input.
     #[test]
     fn an_unknown_tier_decides_exactly_as_the_lowest_tier_would() {
         for band in [
@@ -871,31 +918,60 @@ mod tests {
         ] {
             for cheaper in [false, true] {
                 for user_override in [false, true] {
-                    for reset in [None, Some(0), Some(60), Some(1800), Some(7200)] {
-                        let unknown = reserve_verdict(band, None, cheaper, user_override, reset);
-                        let lowest = evaluate_reserve_spend(ReserveDecisionInputs {
-                            band,
-                            tier: WorkloadTier::Deterministic,
-                            cheaper_adequate_resource_exists: cheaper,
-                            user_override,
-                            seconds_until_reset: reset,
-                            task_nearly_complete: false,
-                        });
-                        assert_eq!(
-                            unknown.is_allowed(),
-                            lowest.is_allowed(),
-                            "band {band}, cheaper {cheaper}, override {user_override}, reset \
-                             {reset:?}: unknown said {unknown:?}, lowest said {lowest:?}"
-                        );
+                    for declared in [false, true] {
+                        for reset in [None, Some(0), Some(60), Some(1800), Some(7200)] {
+                            let unknown = reserve_verdict(
+                                band,
+                                None,
+                                cheaper,
+                                user_override,
+                                reset,
+                                declared,
+                            );
+                            let lowest = evaluate_reserve_spend(ReserveDecisionInputs {
+                                band,
+                                tier: WorkloadTier::Deterministic,
+                                cheaper_adequate_resource_exists: cheaper,
+                                user_override,
+                                seconds_until_reset: reset,
+                                task_nearly_complete: declared,
+                            });
+                            assert_eq!(
+                                unknown.is_allowed(),
+                                lowest.is_allowed(),
+                                "band {band}, cheaper {cheaper}, override {user_override}, \
+                                 declared {declared}, reset {reset:?}: unknown said \
+                                 {unknown:?}, lowest said {lowest:?}"
+                            );
+                        }
                     }
                 }
             }
         }
     }
 
+    /// The unknown-tier arm's own words, so a caller reading the reason sees
+    /// that the second reason was a **declaration** and not something
+    /// Glasshouse worked out — lines 1294 and 1610 both turn on *solely*.
+    #[test]
+    fn a_declared_task_is_kept_at_an_unknown_tier_and_the_reason_says_who_said_so() {
+        let verdict = reserve_verdict(CapacityBand::Reserve, None, true, false, Some(7200), true);
+        assert!(verdict.is_allowed(), "{}", verdict.reason());
+        assert!(
+            verdict.reason().contains("declared"),
+            "the reason must name the declaration: {}",
+            verdict.reason()
+        );
+        // Without the declaration the same inputs are a denial, so the
+        // assertion above is about the declaration and not about the band.
+        let undeclared =
+            reserve_verdict(CapacityBand::Reserve, None, true, false, Some(7200), false);
+        assert!(!undeclared.is_allowed(), "{}", undeclared.reason());
+    }
+
     #[test]
     fn an_unknown_tier_is_named_in_the_denial_rather_than_called_light() {
-        let verdict = reserve_verdict(CapacityBand::Reserve, None, true, false, None);
+        let verdict = reserve_verdict(CapacityBand::Reserve, None, true, false, None, false);
         assert!(!verdict.is_allowed());
         assert!(
             verdict.reason().contains("not established"),

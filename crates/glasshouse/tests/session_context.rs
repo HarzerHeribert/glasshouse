@@ -223,6 +223,7 @@ fn a_schema_fifteen_database_migrates_forward_and_its_sessions_read_as_uncounted
              ALTER TABLE sessions DROP COLUMN observed_compactions;
              -- Migration 27's table: a rollback that leaves it in place
              -- meets `table file_claims already exists` on the re-run.
+             DROP TABLE IF EXISTS task_progress_declarations;
              DROP TABLE IF EXISTS file_claims;
              DELETE FROM schema_migrations WHERE version >= 16;",
         )
@@ -238,8 +239,8 @@ fn a_schema_fifteen_database_migrates_forward_and_its_sessions_read_as_uncounted
     let conn = Connection::open(migrated.database_path()).unwrap();
     assert_eq!(
         schema_version(&conn),
-        27,
-        "the launch must have applied migrations 16 through 27"
+        28,
+        "the launch must have applied migrations 16 through 28"
     );
     drop(conn);
 

@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1286 closed · 78 active committed open (94%)** — across 27 phases.
+**1288 closed · 76 active committed open (94%)** — across 26 phases.
 
 Not in the work queue: **7 deferred gate criteria** (Phase 52, Phase 53) awaiting a user decision, and **229 parked experimental lines**. They are visible in the map; they are not release-blocking work.
 
@@ -33,14 +33,13 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 30 | Session context metadata | **1** | 7 | `1156` |
 | Phase 32C | Subscription capacity estimation | **1** | 11 | `1242` |
 | Phase 32D | Normalized remaining-capacity score | **1** | 11 | `1257` |
-| Phase 32F | Protected quota reserve | **1** | 7 | `1285` |
 | Phase 34C | Automatic routing-model selection | **1** | 12 | `1429` |
 | Phase 37 | Basic session-aware router | **1** | 10 | `1590` |
+| Phase 38 | Quota-preserving routing | **1** | 6 | `1604` |
 | Phase 9 | Antigravity adapter | **2** | 5 | `330` |
 | Phase 20 | Minimal durable project memory | **2** | 16 | `805` |
 | Phase 32G | Provider-aware request-cost estimation | **2** | 8 | `1296` |
 | Phase 33 | Resource health | **2** | 13 | `1309` |
-| Phase 38 | Quota-preserving routing | **2** | 5 | `1604` |
 | Phase 59 | Decompression: the code's physical shape catches up with its architecture | **2** | 6 | `2043` |
 | Phase 33B | Reliability-adjusted agent performance | **3** | 11 | `1345` |
 | Phase 35B | Candidate scoring | **3** | 22 | `1523` |
@@ -52,7 +51,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 9K | Harness-aware response profiles | **8** | 29 | `578` |
 | Phase 51 | Evaluation hooks | **15** | 22 | `1818` |
 
-**Fully closed (81):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 7, Phase 8, Phase 9A, Phase 9B, Phase 9C, Phase 9D, Phase 9F, Phase 9G, Phase 9I, Phase 9J, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 16, Phase 17, Phase 18, Phase 19, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 21H, Phase 21I, Phase 21J, Phase 22, Phase 23, Phase 24, Phase 25, Phase 26, Phase 28, Phase 29, Phase 32, Phase 32B, Phase 32E, Phase 33A, Phase 33C, Phase 34, Phase 34A, Phase 34B, Phase 34D, Phase 34E, Phase 34F, Phase 35, Phase 35A, Phase 35C, Phase 35D, Phase 36, Phase 39, Phase 40, Phase 41, Phase 42, Phase 43, Phase 44, Phase 45, Phase 46, Phase 47, Phase 48, Phase 49, Phase 50, Phase 54, Phase 54A, Phase 55, Phase 56, Phase 56A, Phase 57, Phase 58.
+**Fully closed (82):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 7, Phase 8, Phase 9A, Phase 9B, Phase 9C, Phase 9D, Phase 9F, Phase 9G, Phase 9I, Phase 9J, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 16, Phase 17, Phase 18, Phase 19, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 21H, Phase 21I, Phase 21J, Phase 22, Phase 23, Phase 24, Phase 25, Phase 26, Phase 28, Phase 29, Phase 32, Phase 32B, Phase 32E, Phase 32F, Phase 33A, Phase 33C, Phase 34, Phase 34A, Phase 34B, Phase 34D, Phase 34E, Phase 34F, Phase 35, Phase 35A, Phase 35C, Phase 35D, Phase 36, Phase 39, Phase 40, Phase 41, Phase 42, Phase 43, Phase 44, Phase 45, Phase 46, Phase 47, Phase 48, Phase 49, Phase 50, Phase 54, Phase 54A, Phase 55, Phase 56, Phase 56A, Phase 57, Phase 58.
 
 ## The nearly-finished phases, in full
 
@@ -103,10 +102,6 @@ these unwrapped.
 
 - **1267** ☐ Treat unlimited local inference as high-capacity but still account for measured latency and concurrency.
 
-### Phase 32F — Protected quota reserve  (1 open, 7 closed)
-
-- **1294** ☐ Avoid moving an almost-complete high-value task to another session solely because a reserve threshold was crossed.
-
 ### Phase 34C — Automatic routing-model selection  (1 open, 12 closed)
 
 - **1440** ☐ Avoid using a scarce premium subscription session as the classifier when a cheaper adequate routing resource exists.
@@ -114,6 +109,10 @@ these unwrapped.
 ### Phase 37 — Basic session-aware router  (1 open, 10 closed)
 
 - **1594** ☐ Prefer a fresh session when existing relevant sessions are cold, bloated, or semantically poor and a good checkpoint exists.
+
+### Phase 38 — Quota-preserving routing  (1 open, 6 closed)
+
+- **1608** ☐ Prefer cheap resources for simple repository summarization when no valuable warm session already exists.
 
 ### Phase 9 — Antigravity adapter  (2 open, 5 closed)
 
@@ -134,11 +133,6 @@ these unwrapped.
 
 - **1323** ☐ Avoid background probing at an aggressive rate that wastes free-request pools.
 - **1325** ☐ Record whether a health observation came from a real task, a retry, a repair attempt, or an explicit probe.
-
-### Phase 38 — Quota-preserving routing  (2 open, 5 closed)
-
-- **1608** ☐ Prefer cheap resources for simple repository summarization when no valuable warm session already exists.
-- **1610** ☐ Avoid migrating a nearly completed task solely to preserve a small amount of quota.
 
 ### Phase 53 — Criteria before adding graph storage (deferred experiment gate)  (2 open, 3 closed)
 

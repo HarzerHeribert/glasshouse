@@ -2270,17 +2270,28 @@ pub struct ReserveDecisionInputs {
     /// [`CapacityState::seconds_until_reset`]. Capability map lines 1291 and
     /// its distant-reset complement, 1292.
     pub seconds_until_reset: Option<i64>,
-    /// Whether the task this decision is for is almost complete — capability
-    /// map line 1294's guard on migration.
+    /// Whether the task this decision is for has been **declared** almost
+    /// complete — capability map line 1294's guard on migration, and line
+    /// 1610's on quota-driven migration.
     ///
-    /// # Nothing in this build can produce this, and a proxy must not be
+    /// # It is declared, never guessed, and a proxy must still not be
     /// invented for it
     ///
-    /// Every caller passes `false`, and that is a refusal rather than a gap
-    /// waiting to be filled. Glasshouse's own event vocabulary
-    /// ([`crate::events::LifecycleEvent`]) is deliberately binary and
-    /// retrospective — a turn started, a turn ended and how, the harness is
-    /// waiting for the user, the process exited — and two of its variants
+    /// The only thing that may set this true is somebody saying so on
+    /// purpose about one named session:
+    /// `crate::session::SessionStore::declare_task_nearly_complete`, written
+    /// by the `glasshouse task-progress` verb and read back through the
+    /// scoped types the two routers carry
+    /// ([`crate::routing::disposable::DeclaredTaskProgress`] and
+    /// `crate::routing::session::SessionRouter`'s own declared set). It is a
+    /// `bool` here and a *scope* at the producer, exactly as
+    /// [`Self::user_override`] is, and it expires — see
+    /// [`crate::session::TASK_PROGRESS_EXPIRES_AFTER`].
+    ///
+    /// **Nothing in this build may infer it.** Glasshouse's own event
+    /// vocabulary ([`crate::events::LifecycleEvent`]) is deliberately binary
+    /// and retrospective — a turn started, a turn ended and how, the harness
+    /// is waiting for the user, the process exited — and two of its variants
     /// carry doc comments saying in as many words that they are *not*
     /// statements about the session's work. No harness this build integrates
     /// reports task progress, and the one path that reaches
@@ -2292,8 +2303,14 @@ pub struct ReserveDecisionInputs {
     /// like a producer. It would also be wrong in the one situation this line
     /// exists to protect: it would report "almost complete" for a task that
     /// had merely been running a while, and this field is the *first* branch
-    /// [`evaluate_reserve_spend`] takes, outranking every other signal. A
-    /// fabricated value here does not degrade the policy, it inverts it.
+    /// [`evaluate_reserve_spend`] takes, outranking every other signal
+    /// including the user override. A fabricated value here does not degrade
+    /// the policy, it inverts it. That is why a declaration is the producer
+    /// and a proxy is not, and why the declaration expires: a statement that
+    /// outlived the task it described would invert the policy by the slower
+    /// route. `tests/subscription_pressure.rs`'s source scan holds both
+    /// construction sites to reading the declaration rather than writing a
+    /// literal.
     pub task_nearly_complete: bool,
 }
 
@@ -2305,9 +2322,14 @@ pub struct ReserveDecisionInputs {
 ///
 /// # Precedence, and why this order
 ///
-/// 1. **Line 1294 first, unconditionally.** An almost-complete high-value
-///    task is never moved "solely because a reserve threshold was crossed" —
-///    the line's own words — so nothing below this can override it.
+/// 1. **Line 1294 first, unconditionally.** A task somebody declared almost
+///    complete is never moved "solely because a reserve threshold was
+///    crossed" — the line's own words — so nothing below this can override
+///    it. Both lines' operative word is *solely*: the guard stops a
+///    threshold being the whole reason work moves, and a declaration is a
+///    second reason, contributed by the only party that knows. It is scoped
+///    and expiring at its producer, so "this task is nearly complete" can
+///    only ever be true of a session somebody named, recently.
 /// 2. **Line 1290 next.** An explicit user override is a statement about
 ///    *this* task or session that the user made on purpose; it outranks
 ///    every automatic signal below it, but not line 1294's guard, which
@@ -2336,9 +2358,11 @@ pub fn evaluate_reserve_spend(inputs: ReserveDecisionInputs) -> ReserveDecision 
 
     if inputs.task_nearly_complete {
         return ReserveDecision::Allow {
-            reason: "the task is almost complete; capability map line 1294 forbids moving an \
-                     almost-complete high-value task to another session solely because a \
-                     reserve threshold was crossed"
+            reason: "this session's operator declared its current task nearly complete, so the \
+                     reserve threshold is not the sole reason to move the work; capability map \
+                     line 1294 forbids moving an almost-complete high-value task to another \
+                     session solely because a reserve threshold was crossed, and line 1610 \
+                     forbids migrating one solely to preserve a small amount of quota"
                 .to_owned(),
         };
     }

@@ -309,6 +309,103 @@ impl ReserveOverride {
     }
 }
 
+/// A declaration that a session's current task is nearly complete —
+/// capability map lines 1294 and 1610.
+///
+/// # Why this is a pair, and why it is not [`ReserveOverride`]
+///
+/// [`crate::provider::quota::ReserveDecisionInputs::task_nearly_complete`]
+/// is a `bool`, and a `bool` is all a policy function should need. The scope
+/// belongs one level up, here, for [`ReserveOverride`]'s reason: a boolean
+/// *setting* would spend protected reserve for every job in every session
+/// for ever, and no reason string could say on whose behalf.
+///
+/// It is a second type rather than a second use of `ReserveOverride`
+/// because the two carry different statements from different places. An
+/// override says *spend the reserve on this session anyway*, and it comes
+/// from configuration, where being sticky is correct. A declaration says
+/// *this session's current task is nearly done*, it comes from a store row
+/// written by `glasshouse task-progress`, and being sticky would be the
+/// defect: the field it feeds is the first branch the reserve policy takes,
+/// so a statement outliving the task it described would keep the reserve
+/// open on behalf of work that finished. Merging them would put one word on
+/// two facts with opposite storage requirements.
+///
+/// # Nothing here infers anything
+///
+/// The set is what somebody declared, read back from
+/// `crate::session::SessionStore::active_task_progress`, which reports no
+/// declaration that has expired or whose session is no longer live. There is
+/// deliberately no constructor meaning "everywhere" and no derivation from a
+/// turn count, an elapsed time or any other observable — see the field's own
+/// doc comment for why a proxy inverts the policy rather than approximating
+/// it. [`DeclaredTaskProgress::default`] is the empty declaration that every
+/// caller predating these lines already gets, and it can never match.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DeclaredTaskProgress {
+    /// The sessions whose operators declared their current task nearly
+    /// complete, as `crate::session::SessionStore::active_task_progress`
+    /// resolved them. A [`BTreeSet`] so the membership test does not depend
+    /// on the order the store happened to return them in.
+    sessions: BTreeSet<String>,
+    /// The session whose work this routing instance is deciding for, when
+    /// the caller knows one.
+    ///
+    /// `None` is every caller that predates these lines, and it can never
+    /// match — which is what keeps this type's arrival a no-op for them.
+    deciding_for: Option<String>,
+}
+
+impl DeclaredTaskProgress {
+    /// Nothing declared: the reserve policy decides on its own signals,
+    /// which is exactly what it did before these lines had a producer.
+    pub fn none() -> Self {
+        Self::default()
+    }
+
+    /// The sessions that declared. Declaring none is the same as
+    /// [`Self::none`].
+    pub fn for_sessions<S: Into<String>>(sessions: impl IntoIterator<Item = S>) -> Self {
+        Self {
+            sessions: sessions.into_iter().map(Into::into).collect(),
+            deciding_for: None,
+        }
+    }
+
+    /// Point this declaration at the session actually being decided for.
+    ///
+    /// Separate from [`Self::for_sessions`] for [`ReserveOverride`]'s
+    /// reason: the two facts come from different places — the set from the
+    /// store, the subject from whichever caller is routing — and a single
+    /// constructor taking both would invite a caller to pass the same value
+    /// twice and prove nothing.
+    #[must_use]
+    pub fn deciding_for(mut self, session: impl Into<String>) -> Self {
+        self.deciding_for = Some(session.into());
+        self
+    }
+
+    /// Whether the task *this decision is for* was declared nearly complete.
+    ///
+    /// False whenever nobody declared, whenever the caller named no session,
+    /// and — the case that matters — whenever the session being decided for
+    /// is not one that declared.
+    pub fn applies(&self) -> bool {
+        self.deciding_for
+            .as_deref()
+            .is_some_and(|session| self.sessions.contains(session))
+    }
+
+    /// The session this declaration was made for, when it applies — for the
+    /// routing explanation, so a spend of protected reserve names whose task
+    /// was declared rather than only the fact of a declaration.
+    pub fn declared_session(&self) -> Option<&str> {
+        self.applies()
+            .then_some(self.deciding_for.as_deref())
+            .flatten()
+    }
+}
+
 /// How long automatic classification's retained pick may be reused before a
 /// fresh decision is required — map line 1442's "a short period", which
 /// names no figure.
@@ -356,6 +453,12 @@ pub struct DisposableRouting {
     /// said otherwise, so every construction that predates the line keeps
     /// exactly the behaviour it had.
     reserve_override: ReserveOverride,
+    /// Whether this job's session declared its current task nearly complete
+    /// — capability map lines 1294 and 1610.
+    /// [`DeclaredTaskProgress::none`] unless a caller said otherwise, so
+    /// every construction that predates those lines keeps exactly the
+    /// behaviour it had.
+    task_progress: DeclaredTaskProgress,
     /// What the user's `[routing.reserve]` policy for **background** work
     /// makes of a reserve-band candidate — capability map line 1577's
     /// second half.
@@ -392,6 +495,7 @@ impl DisposableRouting {
             prefer_free_setting,
             preferences,
             reserve_override: ReserveOverride::none(),
+            task_progress: DeclaredTaskProgress::none(),
             reserve_policy: ReservePolicy::default(),
             classification_policy: ClassificationPolicy::default(),
         }
@@ -416,6 +520,7 @@ impl DisposableRouting {
             prefer_free_setting: true,
             preferences,
             reserve_override: ReserveOverride::none(),
+            task_progress: DeclaredTaskProgress::none(),
             reserve_policy: ReservePolicy::default(),
             classification_policy: ClassificationPolicy::default(),
         }
@@ -446,6 +551,24 @@ impl DisposableRouting {
     /// report it.
     pub fn reserve_override(&self) -> &ReserveOverride {
         &self.reserve_override
+    }
+
+    /// Carry the scoped task-progress declaration — capability map lines
+    /// 1294 and 1610.
+    ///
+    /// A builder for [`Self::with_reserve_override`]'s reason, and omitting
+    /// it is [`DeclaredTaskProgress::none`], which is what every existing
+    /// caller does and what keeps their behaviour byte-identical.
+    #[must_use]
+    pub fn with_task_progress(mut self, task_progress: DeclaredTaskProgress) -> Self {
+        self.task_progress = task_progress;
+        self
+    }
+
+    /// The declaration this policy is carrying, for a caller that wants to
+    /// report it.
+    pub fn task_progress(&self) -> &DeclaredTaskProgress {
+        &self.task_progress
     }
 
     /// Carry the user's reserve policy for background work — capability map
@@ -731,11 +854,14 @@ impl DisposableRouting {
                 // in the policy function.
                 user_override: self.reserve_override.applies(),
                 seconds_until_reset: candidate.value().capacity.seconds_until_reset,
-                // Line 1294, and it stays a literal on purpose — nothing in
-                // this build can observe that a task is nearly complete, and
-                // [`ReserveDecisionInputs::task_nearly_complete`] records why
-                // a proxy must not be invented for it.
-                task_nearly_complete: false,
+                // Lines 1294 and 1610, scoped exactly as the override above
+                // is: true only when the session this policy was built for
+                // is one whose operator declared its current task nearly
+                // complete. Never inferred — see [`DeclaredTaskProgress`]
+                // and the field's own doc comment for why a proxy from turn
+                // counts or elapsed time inverts this policy rather than
+                // approximating it.
+                task_nearly_complete: self.task_progress.applies(),
             });
             // Capability map line 1577, second half. The reserve policy the
             // user set for *background* work decides what happens to a
@@ -1228,6 +1354,23 @@ impl DisposableRouting {
                 format!(
                     "the user overrode reserve protection for session {session}; protected \
                      reserve may be spent for this session's work and no other (map line 1290)"
+                ),
+            ));
+        }
+
+        // Map lines 1294 and 1610, and the reason names the *declaration*
+        // rather than only the outcome: the lines' operative word is
+        // "solely", so a reader has to be able to see that the second reason
+        // was a statement somebody made about this session and not something
+        // Glasshouse worked out for itself.
+        if let (Some(session), true) = (self.task_progress.declared_session(), reserve.is_some()) {
+            explanation.push(Contribution::new(
+                "declared task progress",
+                0.0,
+                format!(
+                    "session {session} declared its current task nearly complete, so a crossed \
+                     reserve threshold is not the sole reason to move this work; the \
+                     declaration was made, never inferred, and expires (map lines 1294, 1610)"
                 ),
             ));
         }

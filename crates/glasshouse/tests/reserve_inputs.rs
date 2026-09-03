@@ -15,9 +15,15 @@
 //! - **1290** — *"allow the user to override reserve protection for a
 //!   specific task or session"*. `user_override` now has a producer:
 //!   `ReserveOverride`, which is a *scope* and not a switch.
-//! - **1294** — refused. Nothing in this build can observe that a task is
-//!   almost complete, and `nothing_in_this_build_produces_task_nearly_complete`
-//!   is the evidence rather than an assertion that it is hard.
+//! - **1294** — closed on 2026-09-03, with 1610, by a **declaration**.
+//!   Nothing in this build can *observe* that a task is almost complete and
+//!   nothing tries to: the producer is somebody saying so on purpose about
+//!   one named session (`glasshouse task-progress`), through a store row
+//!   that expires. `nothing_in_this_build_infers_task_nearly_complete` is
+//!   this file's half of the evidence, re-stated rather than relaxed when
+//!   the producer landed; `the_event_vocabulary_cannot_express_almost_complete`
+//!   below is untouched and is now the reason a declaration was the only
+//!   honest source rather than a proxy.
 //!
 //! Every test that exercises the override goes through
 //! `DisposableRouting::choose`, which is the function the shipped binary
@@ -33,7 +39,8 @@ use glasshouse::provider::quota::{
 };
 use glasshouse::routing::classify::{HardCapability, WorkloadTier, classify_heuristically};
 use glasshouse::routing::disposable::{
-    CandidateCapacity, DisposableCandidate, DisposableRouting, JobKind, NoResource, ReserveOverride,
+    CandidateCapacity, DeclaredTaskProgress, DisposableCandidate, DisposableRouting, JobKind,
+    NoResource, ReserveOverride,
 };
 use glasshouse::routing::free::{FreePool, FreePreferences};
 use glasshouse::routing::{Cost, CredentialId};
@@ -448,21 +455,86 @@ fn the_hard_capability_set_is_not_a_reserve_input() {
     );
 }
 
+// --- 4b. Lines 1294 and 1610: the declaration, scoped the same way --------
+
+/// The declared session's work keeps the reserve that would otherwise be
+/// denied — through `DisposableRouting::choose`, the function the shipped
+/// binary calls. Practice §35: the source scan below proves no site
+/// fabricates the value; this proves the site that reads it changes the
+/// outcome.
+#[test]
+fn a_declared_task_keeps_the_reserve_for_the_session_that_declared() {
+    let routing = DisposableRouting::for_support_work(true, FreePreferences::new())
+        .with_task_progress(
+            DeclaredTaskProgress::for_sessions([OVERRIDDEN]).deciding_for(OVERRIDDEN),
+        );
+
+    assert!(
+        reserve_allows(&routing),
+        "this session's operator declared its current task nearly complete, so a crossed \
+         reserve threshold is not the sole reason to move the work (map lines 1294, 1610)"
+    );
+}
+
+/// **The half that matters, and the one a `bool` producer would fail.** The
+/// same declaration, deciding for a session nobody declared, must change
+/// nothing — which is what distinguishes these lines from "the reserve is
+/// off for everybody".
+#[test]
+fn a_declaration_does_not_reach_a_session_nobody_declared() {
+    let routing = DisposableRouting::for_support_work(true, FreePreferences::new())
+        .with_task_progress(
+            DeclaredTaskProgress::for_sessions([OVERRIDDEN]).deciding_for(NOT_OVERRIDDEN),
+        );
+
+    assert!(
+        !reserve_allows(&routing),
+        "a declaration made about `{OVERRIDDEN}` must not spend protected reserve on \
+         `{NOT_OVERRIDDEN}`'s behalf"
+    );
+}
+
+/// Nothing declared decides exactly as this build did before the producer
+/// existed — the default is a no-op, on the production entry point rather
+/// than only on the policy function.
+#[test]
+fn declaring_nothing_leaves_the_disposable_verdict_where_it_was() {
+    let untouched = DisposableRouting::for_support_work(true, FreePreferences::new());
+    let declared_none = DisposableRouting::for_support_work(true, FreePreferences::new())
+        .with_task_progress(DeclaredTaskProgress::none().deciding_for(OVERRIDDEN));
+
+    assert!(!reserve_allows(&untouched));
+    assert_eq!(
+        reserve_allows(&untouched),
+        reserve_allows(&declared_none),
+        "an empty declaration must decide exactly as no declaration at all"
+    );
+}
+
 // --- 5. Line 1294, refused, with the evidence ------------------------------
 
-/// Acceptance test 4, for the line this package refuses.
+/// Acceptance test 4, **re-stated on 2026-09-03 when the producer landed**.
 ///
-/// `task_nearly_complete` is honoured by the consumer — the test above proves
-/// that branch works — and is set by nothing. This scans the shipped crate's
-/// own source for a producer and finds only the literal `false`, which is the
-/// refusal stated where a reader can check it rather than in a report they
-/// cannot.
+/// Its predecessor asserted that every construction site read the literal
+/// `false`, which was the refusal stated where a reader could check it. That
+/// refusal was always conditional — it said, in the design record and in this
+/// file, that both lines re-open the moment a real producer of task progress
+/// exists. One does now, and it is a **declaration**: somebody says the task
+/// is nearly complete, on purpose, about one named session, through a row
+/// that expires. So the assertion moves to what was always the load-bearing
+/// half — **no site fabricates the value** — rather than being deleted or
+/// weakened to an inequality.
+///
+/// A literal of *either* polarity now fails. A hard `true` fabricates the
+/// protection, which is the inversion the design refuses; a hard `false`
+/// silently withdraws it from a site that still compiles perfectly, which is
+/// how a wired producer quietly stops being read.
 ///
 /// Practice §14: the sources are normalised for line endings first, because a
 /// Windows checkout reads this file with CRLF and a scan that assumed `\n`
 /// would fail there for a reason that has nothing to do with the claim.
 #[test]
-fn nothing_in_this_build_produces_task_nearly_complete() {
+fn nothing_in_this_build_infers_task_nearly_complete() {
     // `disposable.rs` became a directory in Phase 59; the scan reads every
     // production file of it, or it silently checks a third of what it used to.
     let disposable_source = [
@@ -526,14 +598,30 @@ fn nothing_in_this_build_produces_task_nearly_complete() {
         "the scan found no construction site at all, so it is checking nothing"
     );
     for (name, number, line) in &assignments {
-        assert_eq!(
+        assert_ne!(
+            line, "task_nearly_complete: true,",
+            "{name}:{number} fabricates line 1294's input. The field is the first branch the \
+             policy takes, outranking every other signal including the user override, so a \
+             hard `true` does not degrade the reserve protection — it inverts it, for every \
+             task, at the one moment the protection matters."
+        );
+        assert_ne!(
             line, "task_nearly_complete: false,",
-            "{name}:{number} produces a value for line 1294's input. That is only correct if \
-             something in this build can genuinely observe that a task is almost complete; a \
-             turn count or an elapsed-time threshold cannot, and this field is the first branch \
-             the policy takes."
+            "{name}:{number} pins line 1294's input to a literal. The input has a producer \
+             now — a scoped, expiring declaration — and a site pinned to `false` is one that \
+             silently stopped reading it while still compiling."
         );
     }
+
+    // And the one construction site among these sources reads the scoped
+    // declaration, which is the shape that keeps "for which session" out of
+    // the policy function — `user_override`'s own arrangement.
+    assert!(
+        assignments
+            .iter()
+            .any(|(_, _, line)| line.contains("self.task_progress.applies()")),
+        "no site reads the scoped declaration; the producer is wired to nothing: {assignments:?}"
+    );
 }
 
 /// The other half of the refusal: the signal does not arrive because

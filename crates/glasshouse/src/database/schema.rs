@@ -124,9 +124,19 @@
 /// owner is a session identifier and never a process id, and
 /// [`crate::session::store::STALE_CLAIM_AFTER`] for the timeout that bounds
 /// a claim nothing ever released.
+/// Version 28 adds `task_progress_declarations`, the honest producer of
+/// `provider::quota::ReserveDecisionInputs::task_nearly_complete` —
+/// capability map lines 1294 and 1610. One row per session, because progress
+/// is a fact about the session's current task and a session has one; two
+/// project triggers as always; and deliberately no column that could hold
+/// text describing the work, because a declaration is one bit, a scope and a
+/// horizon. See the migration's own doc comment for why a proxy and a
+/// configuration value were both refused, and
+/// [`crate::session::store::TASK_PROGRESS_EXPIRES_AFTER`] for the horizon
+/// that stops a declaration outliving the task it described.
 /// Later migrations are appended to [`MIGRATIONS`], and this constant moves
 /// with them.
-pub(super) const SUPPORTED_SCHEMA_VERSION: i64 = 27;
+pub(super) const SUPPORTED_SCHEMA_VERSION: i64 = 28;
 
 /// The `lifecycle_events.kind` values migration 5's `CHECK` constraint allows.
 ///

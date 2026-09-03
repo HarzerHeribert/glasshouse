@@ -709,11 +709,22 @@ fn disposable_reducer(
         effective.reserve_override_sessions().value,
     )
     .deciding_for(session_id.to_string());
+    // Map lines 1294 and 1610's production wiring, scoped exactly as the
+    // override above: the sessions that declared, paired with the session
+    // this decision is actually for. `DeclaredTaskProgress::applies` is what
+    // makes those two facts one input, and it is false for every session
+    // nobody declared — including when the set is empty, which is every user
+    // who has never run `glasshouse task-progress`.
+    let task_progress = glasshouse::routing::disposable::DeclaredTaskProgress::for_sessions(
+        crate::commands::sessions::declared_task_progress_sessions(runtime),
+    )
+    .deciding_for(session_id.to_string());
     let routing = DisposableRouting::for_support_work(
         effective.prefer_free_routing().value,
         free_preferences,
     )
     .with_reserve_override(reserve_override)
+    .with_task_progress(task_progress)
     .with_reserve_policy(
         effective
             .reserve_policies()

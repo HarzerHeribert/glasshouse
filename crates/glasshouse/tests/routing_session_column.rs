@@ -872,9 +872,24 @@ fn a_relayed_exchange_records_the_session_and_neither_request_fact() {
         "the relay never decoded this request, and its thinking budget must not appear"
     );
     assert_eq!(rows[0].turn_shape, None);
+    // The restraint this test is named for — *neither request fact* — is
+    // unchanged and is the two assertions above: the relay never decodes the
+    // REQUEST, so a thinking budget and a turn shape can never appear.
+    //
+    // The token columns are a different thing, and they moved on 2026-09-03.
+    // They are a *response* fact the provider states in its own body, and the
+    // user approved the gateway reading supported relayed bodies for usage
+    // and timing (`design-decisions.md`, *Steering decisions of record*;
+    // `evidence/phase-33a.md`, *The relay's "never supplied" is lifted*).
+    // This line used to read `None` with the comment "the pre-existing
+    // restraint on the token columns is unchanged"; that restraint is the one
+    // the approval lifted, so asserting it would now pin the old behaviour
+    // rather than protect anything.
     assert_eq!(
-        rows[0].input_tokens, None,
-        "the pre-existing restraint on the token columns is unchanged"
+        rows[0].input_tokens,
+        Some(999),
+        "a relayed exchange records the exact digits the provider stated — never an \
+         estimate, and never anything read from the request"
     );
 }
 
@@ -1031,6 +1046,7 @@ fn a_version_23_database_migrates_and_reads_back_three_nulls() {
              ALTER TABLE routing_observations DROP COLUMN session_id;
              -- Migration 27's table: a rollback that leaves it in place
              -- meets `table file_claims already exists` on the re-run.
+             DROP TABLE IF EXISTS task_progress_declarations;
              DROP TABLE IF EXISTS file_claims;
              DELETE FROM schema_migrations WHERE version >= 24;",
         )

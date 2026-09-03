@@ -1378,6 +1378,19 @@ fn the_project_database_schema_has_nowhere_to_put_a_credential() {
             "task_assumptions.uncertainty",
             "task_assumptions.affected",
             "task_assumptions.verification",
+            // Migration 28. A project identifier, a Glasshouse session
+            // identifier, and three timestamps — five columns, and
+            // deliberately nothing else. A declaration is one bit
+            // (*nearly complete*) plus a scope plus a horizon, so there
+            // is no note, label or summary column: a free-text column
+            // here would be a place for prompt text or session content
+            // to reach a table that exists to answer a boolean, and
+            // nothing about the work would be readable back anyway.
+            "task_progress_declarations.project_id",
+            "task_progress_declarations.session_id",
+            "task_progress_declarations.declared_at",
+            "task_progress_declarations.renewed_at",
+            "task_progress_declarations.expires_at",
         ],
         "the project database schema changed; confirm the new column cannot \
          hold a provider credential before updating this list"
@@ -1433,6 +1446,9 @@ fn no_launch_profile_definition_is_stored_in_the_project_database() {
             "schema_migrations",
             "sessions",
             "task_assumptions",
+            // Migration 28: whose current task somebody declared nearly
+            // complete, not a profile definition.
+            "task_progress_declarations",
         ],
         "no table defining launch profiles may exist in the project database"
     );
@@ -1542,6 +1558,7 @@ fn upgrading_a_version_2_database_preserves_every_existing_session() {
              DROP TABLE IF EXISTS task_assumptions;
              -- Migration 27's table: a rollback that leaves it in place
              -- meets `table file_claims already exists` on the re-run.
+             DROP TABLE IF EXISTS task_progress_declarations;
              DROP TABLE IF EXISTS file_claims;
              DELETE FROM schema_migrations WHERE version >= 3;",
         )
@@ -1554,7 +1571,7 @@ fn upgrading_a_version_2_database_preserves_every_existing_session() {
         })
         .unwrap();
     assert_eq!(
-        version, 27,
+        version, 28,
         "the launch must have applied migrations 3 through 22"
     );
 
@@ -1736,6 +1753,7 @@ fn a_version_one_database_migrates_forward_keeping_its_binding() {
              DROP TABLE IF EXISTS task_assumptions;
              -- Migration 27's table: a rollback that leaves it in place
              -- meets `table file_claims already exists` on the re-run.
+             DROP TABLE IF EXISTS task_progress_declarations;
              DROP TABLE IF EXISTS file_claims;
              DELETE FROM schema_migrations WHERE version >= 2;",
         )
@@ -1749,7 +1767,7 @@ fn a_version_one_database_migrates_forward_keeping_its_binding() {
         })
         .unwrap();
     assert_eq!(
-        version, 27,
+        version, 28,
         "the launch must have applied migrations 2 through 22"
     );
 
@@ -2760,6 +2778,7 @@ mod phase_10 {
              DROP TABLE IF EXISTS memory_files;
              -- Migration 27's table: a rollback that leaves it in place
              -- meets `table file_claims already exists` on the re-run.
+             DROP TABLE IF EXISTS task_progress_declarations;
              DROP TABLE IF EXISTS file_claims;
              DELETE FROM schema_migrations WHERE version >= 8;"
             ))
@@ -2772,7 +2791,7 @@ mod phase_10 {
             })
             .unwrap();
         assert_eq!(
-            version, 27,
+            version, 28,
             "the launch must have applied migrations 8 through 22"
         );
 
@@ -2892,7 +2911,8 @@ mod phase_40 {
                  ALTER TABLE memories DROP COLUMN superseded_reason;
                  -- Migration 27's table: a rollback that leaves it in place
                  -- meets `table file_claims already exists` on the re-run.
-                 DROP TABLE IF EXISTS file_claims;
+                 DROP TABLE IF EXISTS task_progress_declarations;
+             DROP TABLE IF EXISTS file_claims;
                  DELETE FROM schema_migrations WHERE version >= 12;"
             ))
             .unwrap();
@@ -2904,7 +2924,7 @@ mod phase_40 {
             })
             .unwrap();
         assert_eq!(
-            version, 27,
+            version, 28,
             "the reopen must have applied migrations 12 through 22"
         );
 

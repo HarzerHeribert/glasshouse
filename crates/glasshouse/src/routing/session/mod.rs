@@ -1571,6 +1571,27 @@ pub struct SessionRouter {
     /// than imported, because this module may not reach that module
     /// (`super::tests::the_session_router_cannot_reach_the_disposable_policy_class`).
     reserve_override_sessions: BTreeSet<String>,
+    /// Lines 1294 and 1610: the sessions whose operators declared their
+    /// current task nearly complete, as
+    /// `crate::session::SessionStore::active_task_progress` resolved them —
+    /// which reports no declaration that has expired or whose session is no
+    /// longer live, so a stale statement never reaches this set. Read at
+    /// exactly one place, [`SessionRouter::task_nearly_complete`], which is
+    /// true only of an existing session somebody declared.
+    ///
+    /// **Declared, never inferred.** Nothing here derives this from a turn
+    /// count, an elapsed time or any other observable; the set is what
+    /// somebody said on purpose. The reserve policy takes this as its first
+    /// branch, outranking every other signal including the override above,
+    /// so a value Glasshouse had worked out for itself would invert the
+    /// protection rather than approximate it — see
+    /// [`crate::provider::quota::ReserveDecisionInputs::task_nearly_complete`].
+    ///
+    /// Restated here as a set rather than imported, for
+    /// `reserve_override_sessions`' reason: this module may not reach the
+    /// throwaway-job policy class
+    /// (`super::tests::the_session_router_cannot_reach_the_disposable_policy_class`).
+    declared_task_progress_sessions: BTreeSet<String>,
     /// Line 1564: the failure class the most recent exchange on the
     /// *current* destination's backend recorded, when the caller looked one
     /// up — see [`Self::with_retry_after`].
@@ -1628,6 +1649,19 @@ impl SessionRouter {
         sessions: impl IntoIterator<Item = S>,
     ) -> Self {
         self.reserve_override_sessions = sessions.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Lines 1294 and 1610: the sessions whose operators declared their
+    /// current task nearly complete. Declaring none is the same as not
+    /// calling this, which is what every caller predating those lines does
+    /// and what keeps their rankings byte-identical.
+    #[must_use]
+    pub fn with_declared_task_progress<S: Into<String>>(
+        mut self,
+        sessions: impl IntoIterator<Item = S>,
+    ) -> Self {
+        self.declared_task_progress_sessions = sessions.into_iter().map(Into::into).collect();
         self
     }
 
@@ -1728,6 +1762,21 @@ impl SessionRouter {
     /// a specific task or session*).
     fn reserve_overridden(&self, destination: &Destination) -> bool {
         !destination.is_fresh() && self.reserve_override_sessions.contains(destination.id())
+    }
+
+    /// Whether `destination`'s session had its current task declared nearly
+    /// complete — lines 1294 and 1610, true only for an existing session
+    /// somebody declared.
+    ///
+    /// A fresh destination has no session anyone could have declared, which
+    /// is also why the guard cannot make the router keep work it has not
+    /// started: the branch it feeds protects work already in flight, and a
+    /// fresh candidate has none.
+    fn task_nearly_complete(&self, destination: &Destination) -> bool {
+        !destination.is_fresh()
+            && self
+                .declared_task_progress_sessions
+                .contains(destination.id())
     }
 
     /// Step 2 of [`Self::choose`], in two halves — the one place the hard
@@ -1967,6 +2016,7 @@ impl SessionRouter {
                     policies: self.reserve_policies,
                     scope: ReserveScope::Interactive,
                     user_override: self.reserve_overridden(destination),
+                    task_nearly_complete: self.task_nearly_complete(destination),
                     forecast: destination.burn_forecast(),
                 };
                 let explanation = score(

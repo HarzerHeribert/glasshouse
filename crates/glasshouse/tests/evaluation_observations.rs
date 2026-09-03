@@ -375,7 +375,7 @@ fn a_ledger_that_cannot_be_written_does_not_fail_the_retrieval() {
             })
             .unwrap();
         assert_eq!(
-            version, 27,
+            version, 28,
             "the database must still claim the current schema version, so nothing \
              rebuilds the table"
         );
@@ -1194,6 +1194,7 @@ fn a_version_fourteen_database_migrates_forward_keeping_every_row() {
              DROP TABLE evaluation_observations;
              -- Migration 27's table: a rollback that leaves it in place
              -- meets `table file_claims already exists` on the re-run.
+             DROP TABLE IF EXISTS task_progress_declarations;
              DROP TABLE IF EXISTS file_claims;
              DELETE FROM schema_migrations WHERE version >= 15;",
         )
@@ -1215,7 +1216,7 @@ fn a_version_fourteen_database_migrates_forward_keeping_every_row() {
         })
         .unwrap();
     assert_eq!(
-        version, 27,
+        version, 28,
         "the launch must have applied migrations 15 through 22"
     );
 

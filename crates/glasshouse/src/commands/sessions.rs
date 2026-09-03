@@ -183,6 +183,140 @@ fn claims_block(store: &SessionStore<'_>) -> anyhow::Result<Option<String>> {
     Ok(Some(out))
 }
 
+/// The declarations block for the session overview and `glasshouse
+/// task-progress --list`, or `None` when nothing is declared.
+fn task_progress_block(store: &SessionStore<'_>) -> anyhow::Result<Option<String>> {
+    use std::fmt::Write as _;
+
+    let declared = store.active_task_progress()?;
+    if declared.is_empty() {
+        return Ok(None);
+    }
+
+    // Display only, and the same wall-clock seconds `format_age` reads a
+    // line below — the row's own clock is the store's, and this introduces
+    // no second one for it.
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|elapsed| i64::try_from(elapsed.as_secs()).unwrap_or(i64::MAX))
+        .unwrap_or(0);
+
+    let mut out = String::new();
+    let _ = writeln!(out, "{:<12}  {:<12}  EXPIRES IN", "TASK NEARLY", "DECLARED");
+    for declaration in &declared {
+        let remaining = declaration.expires_at - now;
+        let _ = writeln!(
+            out,
+            "{:<12}  {:<12}  {}",
+            crate::commands::shared::short_id(&declaration.session_id),
+            crate::commands::shared::format_age(declaration.declared_at),
+            format_remaining(remaining),
+        );
+    }
+    Ok(Some(out))
+}
+
+/// `EXPIRES IN`, in the coarsest unit that still says something useful.
+///
+/// A declaration people can see expiring is the point: the horizon is what
+/// stops a statement outliving the task it described, so an overview that
+/// showed only *"declared"* would hide the half of the design that keeps it
+/// honest.
+fn format_remaining(seconds: i64) -> String {
+    match seconds {
+        s if s <= 0 => "expired".to_owned(),
+        s if s < 60 => format!("{s}s"),
+        s => format!("{}m", s / 60),
+    }
+}
+
+/// `glasshouse task-progress` — the producer of
+/// `provider::quota::ReserveDecisionInputs::task_nearly_complete`, capability
+/// map lines 1294 and 1610.
+///
+/// # Why a person types this
+///
+/// The field this writes is the **first** branch the reserve policy takes,
+/// outranking every other signal including the user's own override. Nothing
+/// in this build can observe task progress — a turn boundary is not a task
+/// boundary — and every available proxy reports "almost complete" for work
+/// that has merely been running a while, which is precisely the long-running
+/// work a protected reserve exists to keep serving. So a value Glasshouse
+/// invented would invert the policy rather than approximate it, and the only
+/// honest source is somebody saying so on purpose about one named session.
+///
+/// A seam, not a feature: everything it decides is decided in
+/// `session::store::progress`, and a caller that wants the declaration reads
+/// that store directly rather than this verb.
+pub(crate) fn task_progress_command(
+    runtime: &Runtime,
+    session: Option<&str>,
+    withdraw: bool,
+    list: bool,
+) -> anyhow::Result<String> {
+    let sessions = ProjectSessions::open(runtime)?;
+    let store = sessions.store();
+
+    if list {
+        return Ok(match task_progress_block(&store)? {
+            Some(block) => block,
+            None => format!(
+                "No task declared nearly complete in {}.\n",
+                runtime.project().name()
+            ),
+        });
+    }
+
+    // `clap` requires `--session` unless `--list`; stated here rather than
+    // assumed, because an argument definition is not a proof.
+    let Some(session) = session else {
+        anyhow::bail!(
+            "`glasshouse task-progress` needs `--session <id>`; `--list` needs no session"
+        );
+    };
+    let id = store.resolve_id(session)?;
+    let short = crate::commands::shared::short_id(&id);
+
+    if withdraw {
+        return Ok(if store.withdraw_task_progress(&id)? {
+            format!("glasshouse: session {short} withdrew its task-progress declaration\n")
+        } else {
+            format!("glasshouse: session {short} had declared no task progress\n")
+        });
+    }
+
+    let declared = store.declare_task_nearly_complete(&id)?;
+    let minutes = (declared.expires_at - declared.renewed_at) / 60;
+    Ok(format!(
+        "glasshouse: session {short}'s current task is declared nearly complete; a crossed \
+         quota reserve alone will not move this work for the next {minutes}m\n"
+    ))
+}
+
+/// The sessions that currently declare their task nearly complete, for the
+/// routers — capability map lines 1294 and 1610.
+///
+/// **Best-effort on purpose.** A project database that cannot be opened
+/// yields an empty set, which is *nothing declared*, which is byte-identical
+/// to the behaviour every routing path had before this line had a producer.
+/// The alternative — failing a routing decision because a declaration could
+/// not be read — would let an unreadable database deny work that has nothing
+/// to do with task progress.
+pub(crate) fn declared_task_progress_sessions(
+    runtime: &Runtime,
+) -> std::collections::BTreeSet<String> {
+    let Ok(sessions) = ProjectSessions::open(runtime) else {
+        return std::collections::BTreeSet::new();
+    };
+    match sessions.store().sessions_declaring_task_nearly_complete() {
+        Ok(declared) => declared,
+        Err(err) => {
+            tracing::debug!(error = %err, "could not read declared task progress");
+            std::collections::BTreeSet::new()
+        }
+    }
+}
+
 /// `glasshouse claim` — the deliberate entry point for map line 2392 while
 /// Glasshouse cannot yet observe edit intent for itself.
 ///

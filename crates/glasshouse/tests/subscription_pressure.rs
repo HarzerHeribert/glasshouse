@@ -645,6 +645,7 @@ fn interactive_and_background_reserve_policies_are_independent() {
         },
         scope: ReserveScope::Background,
         user_override: false,
+        task_nearly_complete: false,
         forecast: None,
     };
     let background = pressure::capacity_band_pressure(&inputs);
@@ -809,6 +810,15 @@ fn pressure_terms_with_no_reading_are_inert_and_named_as_such() {
 
 const PRESSURE_SOURCE: &str = include_str!("../src/routing/pressure.rs");
 
+/// The **other** production construction site of `ReserveDecisionInputs`.
+///
+/// `routing/disposable/mod.rs`'s per-candidate loop builds the same struct
+/// and decides per candidate, and until 2026-09-03 nothing scanned it — so
+/// it could have gained a `task_nearly_complete: true` literal without this
+/// file noticing. Both sites are scanned now; that is the reason the pin
+/// exists rather than optional tidying.
+const DISPOSABLE_SOURCE: &str = include_str!("../src/routing/disposable/mod.rs");
+
 /// The production half of `routing/pressure.rs` — everything above its
 /// first `#[cfg(test)]`, which is practice §81's own boundary. The module's
 /// unit tests legitimately name inputs the production code must not, and
@@ -818,6 +828,32 @@ fn production_source() -> &'static str {
         .find("#[cfg(test)]")
         .expect("routing/pressure.rs carries its own unit tests");
     &PRESSURE_SOURCE[..boundary]
+}
+
+/// The production half of `routing/disposable/mod.rs`, which is **all of
+/// it** — and the slice practice §81 describes would be wrong here.
+///
+/// That file's only `#[cfg(test)]` is the `mod tests;` declaration near the
+/// top, because its unit tests live in a sibling file rather than inline.
+/// Slicing at the first occurrence, as `production_source` correctly does
+/// for a file with inline tests, would discard roughly 1,470 lines of
+/// production code including the construction site this scan exists to
+/// watch — a scan that reads as passing while covering almost nothing, which
+/// is §68's shape. The boundary rule is *"a call site is production if it is
+/// below the file's first `#[cfg(test)]`"*; where the marker is a module
+/// declaration rather than a module body, there is no test code in the file
+/// to exclude.
+fn disposable_production_source() -> &'static str {
+    let boundary = DISPOSABLE_SOURCE
+        .find("#[cfg(test)]")
+        .expect("routing/disposable/mod.rs declares its test module");
+    assert!(
+        DISPOSABLE_SOURCE[boundary..].starts_with("#[cfg(test)]\nmod tests;"),
+        "routing/disposable/mod.rs has grown an inline `#[cfg(test)]` block; this scan assumes \
+         the whole file is production because its tests live in a sibling file, and that \
+         assumption has to be re-decided rather than silently kept"
+    );
+    DISPOSABLE_SOURCE
 }
 
 /// Whether `name` occurs in `source` as a whole word — bounded on both sides
@@ -892,12 +928,33 @@ fn the_policy_names_no_provider_or_model() {
     }
 }
 
-/// **Line 1610 is refused, and the refusal is in the source.** The reserve
-/// verdict passes `task_nearly_complete: false` — the decision recorded in
-/// `docs/product/design-decisions.md`, *"A task is never 'nearly complete'"*
-/// — exactly once, with its reasoning beside it. If this ever fails because
-/// a producer of task progress was found, that decision and line 1610
-/// re-open together; do not relax it.
+/// **Lines 1294 and 1610: the policy still does not invent task completion,
+/// and now it does not have to.** This test's predecessor asserted that
+/// `task_nearly_complete: false` appeared exactly once and `true` nowhere,
+/// and said in its own words: *"If this ever fails because a producer of
+/// task progress was found, that decision and line 1610 re-open together; do
+/// not relax it."* On 2026-09-03 that is what happened. The producer is a
+/// **declaration** — `glasshouse task-progress` writing an expiring,
+/// session-scoped row that
+/// `crate::session::SessionStore::active_task_progress` reads back — so the
+/// two lines closed together and this pin is **re-stated, not relaxed**.
+///
+/// What it asserts now is the part that was always load-bearing: **no
+/// production construction site writes a literal `true`, and neither writes
+/// a literal `false` any more either** — each reads the declaration. The old
+/// count-of-`false` was a proxy for "the field is not being fabricated"; a
+/// literal of either polarity is now the thing to catch, because a hard
+/// `true` fabricates the protection and a hard `false` silently withdraws it
+/// from the site that still compiles perfectly without it. `at least`
+/// appears nowhere below on purpose: an inequality is what relaxing this
+/// would look like.
+///
+/// **And it scans both sites.** `routing/pressure.rs::reserve_verdict` and
+/// `routing/disposable/mod.rs`'s per-candidate loop both build
+/// `ReserveDecisionInputs`. Only the first was ever scanned, so the second —
+/// the one that decides per candidate — could have gained a `true` without
+/// this test noticing. See `disposable_production_source` for why that
+/// file's whole body is the production half.
 ///
 /// **The citation this pins MOVED on 2026-09-01, and the substance did not.**
 /// This test used to require the production source to name the process
@@ -907,28 +964,63 @@ fn the_policy_names_no_provider_or_model() {
 /// in direct contradiction, and this file was one of three that had been
 /// shipping past the boundary gate. (This comment names no such path for the
 /// same reason: the gate matches the path literal, wherever it appears.)
-/// The refusal was promoted into `design-decisions.md` as
-/// a decision about behavior, which is what it always was, and the strings
-/// below follow it there. **Every substantive assertion is unchanged**: the
-/// input is still passed `false` exactly once and `true` nowhere. Only where
-/// the reasoning is recorded moved.
 #[test]
 fn the_policy_does_not_invent_task_completion() {
-    assert_eq!(
-        production_source()
-            .matches("task_nearly_complete: false")
-            .count(),
-        1,
-        "the reserve verdict must pass the refused input as `false` exactly once"
+    for (file, source) in [
+        ("routing/pressure.rs", production_source()),
+        ("routing/disposable/mod.rs", disposable_production_source()),
+    ] {
+        assert!(
+            !source.contains("task_nearly_complete: true"),
+            "`{file}` sets task progress from a literal `true`: the reserve policy's first \
+             branch would fire for work nobody declared, which inverts the protection instead \
+             of applying it (lines 1294, 1610)"
+        );
+        assert!(
+            !source.contains("task_nearly_complete: false"),
+            "`{file}` sets task progress from a literal `false`: the declaration has a \
+             producer now, and a site pinned to a literal is one that silently stopped \
+             reading it (lines 1294, 1610)"
+        );
+        assert!(
+            source.contains("task_nearly_complete"),
+            "`{file}` no longer names the input at all"
+        );
+    }
+
+    // Each site reads the value somebody declared, through the scoped type
+    // that owns "for which session" — the `bool`-here/scope-at-the-producer
+    // arrangement `user_override` already uses.
+    assert!(
+        production_source().contains("task_nearly_complete,"),
+        "`routing/pressure.rs` must forward the declaration its caller passed in"
     );
-    assert!(!production_source().contains("task_nearly_complete: true"));
-    for cited in ["Line 1610", "design-decisions", "A task is never"] {
+    assert!(
+        disposable_production_source()
+            .contains("task_nearly_complete: self.task_progress.applies()"),
+        "`routing/disposable/mod.rs` must read the scoped declaration rather than a literal"
+    );
+
+    // The ban on inferring it is what did not change, and it is recorded
+    // where behaviour decisions are recorded.
+    for cited in ["1610", "design-decisions", "declaration"] {
         assert!(
             production_source().contains(cited),
-            "the refusal must cite `{cited}`"
+            "the decision must still cite `{cited}`"
         );
     }
 }
+
+// A scan for forbidden *words* — `turn_count`, `elapsed` — was written here
+// and removed: it fails on the module's own doc comments, which say in as
+// many words that a proxy from turn counts or elapsed time would invert the
+// policy. A pin that punishes stating the invariant is worse than no pin,
+// and this module's habit is that every branch explains itself. What
+// actually holds the line is above and is structural rather than lexical:
+// neither site writes a literal of either polarity, `routing/pressure.rs`
+// forwards the value its caller passed in, and
+// `routing/disposable/mod.rs` reads the scoped declaration. A derivation
+// would have to replace one of those three, and each is asserted by name.
 
 // ===========================================================================
 // Half two — the shipped binary.
