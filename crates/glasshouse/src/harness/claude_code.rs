@@ -743,6 +743,25 @@ pub fn merge_context_firewall_hook(
     document: &str,
     hook_entry_json: &str,
 ) -> anyhow::Result<String> {
+    merge_hook_entry(document, "PostToolUse", hook_entry_json)
+}
+
+/// Merge one event's hooks-array entry into an already-written Claude Code
+/// settings document.
+///
+/// One function for both of Glasshouse's tool hooks, because they merge into
+/// the **same** document and a second implementation is how one would come
+/// to clobber the other. It touches exactly the `event` key it was given:
+/// merging `PreToolUse` cannot disturb a `PostToolUse` the context firewall
+/// already registered, in either order, which
+/// `both_tool_hooks_coexist_in_one_document` pins.
+///
+/// Refuses rather than overwrites when `document` is not the JSON object
+/// this adapter itself always writes, or already carries `event` — the
+/// second case means something else registered one first, and silently
+/// replacing it is exactly what "never touch other hooks" (map line 1993)
+/// refuses to do.
+fn merge_hook_entry(document: &str, event: &str, hook_entry_json: &str) -> anyhow::Result<String> {
     let mut root: serde_json::Value = serde_json::from_str(document)
         .context("the settings document this adapter wrote is not valid JSON")?;
     let object = root
@@ -754,15 +773,94 @@ pub fn merge_context_firewall_hook(
     let hooks_object = hooks
         .as_object_mut()
         .context("the document's `hooks` key is not a JSON object")?;
-    if hooks_object.contains_key("PostToolUse") {
-        anyhow::bail!("a `PostToolUse` hook is already registered in this settings document");
+    if hooks_object.contains_key(event) {
+        anyhow::bail!("a `{event}` hook is already registered in this settings document");
     }
     let entry: serde_json::Value = serde_json::from_str(hook_entry_json)
-        .context("the context-firewall hook entry is not valid JSON")?;
-    hooks_object.insert("PostToolUse".to_string(), entry);
+        .with_context(|| format!("the `{event}` hook entry Glasshouse built is not valid JSON"))?;
+    hooks_object.insert(event.to_string(), entry);
     let mut rendered = serde_json::to_string_pretty(&root)?;
     rendered.push('\n');
     Ok(rendered)
+}
+
+/// Seconds the edit-intent hook may take before Claude Code abandons it.
+///
+/// [`HOOK_TIMEOUT_SECONDS`]'s value and its reasoning, not
+/// [`CONTEXT_FIREWALL_HOOK_TIMEOUT_SECONDS`]'s: this hook reads one small
+/// JSON document, runs two statements against a local database and exits.
+/// There is no ladder, no raw store and no model call. And unlike a
+/// lifecycle hook, an abandoned one here costs the user *nothing* — Claude
+/// Code proceeds with the tool call, which is the same thing this hook would
+/// have told it to do.
+const EDIT_INTENT_HOOK_TIMEOUT_SECONDS: u32 = HOOK_TIMEOUT_SECONDS;
+
+/// The Claude Code hook matcher that selects the tools which can change a
+/// file — `Edit|Write|MultiEdit|NotebookEdit`, built from
+/// [`crate::firewall::eligibility::WRITING_TOOLS`] so there is no second
+/// list to keep in step.
+///
+/// **A narrow matcher rather than the firewall's `"*"`, and it was verified
+/// rather than assumed.** Captured against Claude Code 2.1.259 on
+/// 2026-09-03: a settings document declaring `"matcher": "Edit|Write"` was
+/// installed for a `claude -p` session told to `Read` one file and `Write`
+/// another; the hook received the two `Write` events and **no** `Read`
+/// event. So the alternation is honoured, and this build does not spawn a
+/// process for a `Read`, a `Grep` or a `Bash` — which is the difference
+/// between a per-tool-call cost and a per-*edit* cost.
+///
+/// `edit_intent_paths` still asks
+/// [`crate::firewall::eligibility::is_writing_tool`] about every event that
+/// does arrive. The matcher is an optimization; the predicate is the rule.
+pub fn edit_intent_tool_matcher() -> String {
+    crate::firewall::eligibility::WRITING_TOOLS.join("|")
+}
+
+/// The shell command line `edit-intent hook` runs as this session's
+/// `PreToolUse` hook.
+///
+/// `session` is the **Glasshouse** session identifier, baked in for exactly
+/// the reason [`context_firewall_command_line`] states for its own: a
+/// `PreToolUse` payload carries *Claude Code's* `session_id`, which no table
+/// here has ever seen, and a hook runs as a fresh process that must not
+/// discover anything from its surroundings. It is hexadecimal and cannot
+/// carry a space, so it is not quoted; the program path is, because a
+/// Windows path is full of backslashes.
+///
+/// No mode flag, unlike the firewall's. There are two modes and one of them
+/// registers no hook at all, so a registered command line is always the
+/// `on` one — a `--mode` here could only ever say `on`.
+pub fn edit_intent_command_line(program: &std::path::Path, session: &str) -> String {
+    format!(
+        "{program} edit-intent hook --session {session}",
+        program = super::quote(&program.display().to_string()),
+    )
+}
+
+/// The `PreToolUse` hooks-array entry that registers `command_line`, matched
+/// by [`edit_intent_tool_matcher`].
+pub fn edit_intent_hook_entry(command_line: &str) -> String {
+    serde_json::json!([
+        {
+            "matcher": edit_intent_tool_matcher(),
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": command_line,
+                    "timeout": EDIT_INTENT_HOOK_TIMEOUT_SECONDS,
+                }
+            ]
+        }
+    ])
+    .to_string()
+}
+
+/// Merge a `PreToolUse` hook entry into an already-written Claude Code
+/// settings document — the sibling of [`merge_context_firewall_hook`], and
+/// the same private merge underneath, so neither can disturb the other's
+/// event key.
+pub fn merge_edit_intent_hook(document: &str, hook_entry_json: &str) -> anyhow::Result<String> {
+    merge_hook_entry(document, "PreToolUse", hook_entry_json)
 }
 
 #[cfg(test)]
@@ -1075,6 +1173,135 @@ mod tests {
         let parsed: serde_json::Value = serde_json::from_str(&merged).unwrap();
         assert_eq!(parsed["outputStyle"], "Concise");
         assert_eq!(parsed["hooks"]["PostToolUse"][0]["matcher"], "*");
+    }
+
+    // =======================================================================
+    // GH-EDIT-INTENT
+    // =======================================================================
+
+    /// The trap `harness/claude_code.rs:56` names: `PreToolUse` fires many
+    /// times per turn and would be noise for a lifecycle that only
+    /// distinguishes running from waiting. The coordination hook is
+    /// installed as its own settings entry and must never reach the state
+    /// machine.
+    #[test]
+    fn pre_tool_use_is_never_a_reported_lifecycle_event() {
+        assert!(
+            !REPORTED_EVENTS.contains(&"PreToolUse"),
+            "PreToolUse must stay out of the lifecycle subset"
+        );
+        assert!(
+            !REPORTED_EVENTS.contains(&"PostToolUse"),
+            "and so must PostToolUse, for the same reason"
+        );
+        // Still a real Claude Code event, and still declared as one.
+        assert!(HOOK_EVENTS.contains(&"PreToolUse"));
+    }
+
+    #[test]
+    fn the_matcher_names_every_writing_tool_and_nothing_else() {
+        let matcher = edit_intent_tool_matcher();
+        assert_eq!(matcher, "Edit|Write|MultiEdit|NotebookEdit");
+        for tool in matcher.split('|') {
+            assert!(
+                crate::firewall::eligibility::is_writing_tool(tool),
+                "`{tool}` is in the matcher but is not a writing tool"
+            );
+        }
+        for tool in crate::firewall::eligibility::WRITING_TOOLS {
+            assert!(
+                matcher.split('|').any(|named| named == *tool),
+                "`{tool}` writes files and the matcher does not select it"
+            );
+        }
+        for tool in ["Read", "Grep", "Glob", "Bash"] {
+            assert!(
+                !matcher.split('|').any(|named| named == tool),
+                "`{tool}` reads and must not spawn the coordination hook"
+            );
+        }
+    }
+
+    #[test]
+    fn the_edit_intent_command_line_carries_the_glasshouse_session() {
+        let program = std::path::Path::new("/usr/local/bin/glasshouse");
+        let line = edit_intent_command_line(program, "abc123");
+        assert!(line.contains("edit-intent hook"), "{line}");
+        assert!(line.contains("--session abc123"), "{line}");
+        assert!(line.starts_with("'/usr/local/bin/glasshouse'"), "{line}");
+    }
+
+    #[test]
+    fn the_edit_intent_entry_matches_the_writing_tools_and_invokes_the_command_line() {
+        let entry = edit_intent_hook_entry("glasshouse edit-intent hook --session s");
+        let parsed: serde_json::Value = serde_json::from_str(&entry).unwrap();
+        assert_eq!(parsed[0]["matcher"], edit_intent_tool_matcher());
+        assert_eq!(
+            parsed[0]["hooks"][0]["command"],
+            "glasshouse edit-intent hook --session s"
+        );
+        assert_eq!(parsed[0]["hooks"][0]["type"], "command");
+    }
+
+    /// The regression the packet asks for by name: a merge that clobbered
+    /// the firewall's own entry would be a silent security regression, so
+    /// both orders are pinned.
+    #[test]
+    fn both_tool_hooks_coexist_in_one_document() {
+        let base = serde_json::json!({
+            "hooks": {
+                "Stop": [{"hooks": [{"type": "command", "command": "lifecycle", "timeout": 5}]}]
+            }
+        })
+        .to_string();
+        let firewall = context_firewall_hook_entry("glasshouse context-firewall hook");
+        let intent = edit_intent_hook_entry("glasshouse edit-intent hook");
+
+        for (first_name, first, second_name, second) in [
+            ("firewall", &firewall, "intent", &intent),
+            ("intent", &intent, "firewall", &firewall),
+        ] {
+            let merged = if first_name == "firewall" {
+                let once = merge_context_firewall_hook(&base, first).unwrap();
+                merge_edit_intent_hook(&once, second).unwrap()
+            } else {
+                let once = merge_edit_intent_hook(&base, first).unwrap();
+                merge_context_firewall_hook(&once, second).unwrap()
+            };
+            let parsed: serde_json::Value = serde_json::from_str(&merged).unwrap();
+            assert_eq!(
+                parsed["hooks"]["Stop"][0]["hooks"][0]["command"], "lifecycle",
+                "{first_name} then {second_name} lost the lifecycle hook"
+            );
+            assert_eq!(
+                parsed["hooks"]["PostToolUse"][0]["hooks"][0]["command"],
+                "glasshouse context-firewall hook",
+                "{first_name} then {second_name} lost the firewall hook"
+            );
+            assert_eq!(
+                parsed["hooks"]["PreToolUse"][0]["hooks"][0]["command"],
+                "glasshouse edit-intent hook",
+                "{first_name} then {second_name} lost the coordination hook"
+            );
+            assert_eq!(parsed["hooks"]["PostToolUse"][0]["matcher"], "*");
+            assert_eq!(
+                parsed["hooks"]["PreToolUse"][0]["matcher"],
+                edit_intent_tool_matcher()
+            );
+        }
+    }
+
+    #[test]
+    fn merging_refuses_to_overwrite_an_existing_pre_tool_use_hook() {
+        let document = serde_json::json!({
+            "hooks": {
+                "PreToolUse": [{"hooks": [{"type": "command", "command": "someone-else"}]}]
+            }
+        })
+        .to_string();
+        let entry = edit_intent_hook_entry("glasshouse edit-intent hook");
+        let err = merge_edit_intent_hook(&document, &entry).unwrap_err();
+        assert!(format!("{err}").contains("PreToolUse"), "{err}");
     }
 
     #[test]

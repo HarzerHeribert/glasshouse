@@ -1740,6 +1740,14 @@ pub(crate) fn launch_session(
         &launch_profile.name,
         &record.id,
     );
+    // Map lines 2402-2405: Phase 60's edit-intent coordination hook, merged
+    // into the same settings document and after the firewall's own entry —
+    // the two touch different event keys, so neither can disturb the other
+    // (`claude_code::merge_hook_entry`, pinned by
+    // `both_tool_hooks_coexist_in_one_document`). Ordered second so that a
+    // failure here is one a session with a working firewall survives; both
+    // are best effort and neither touches `args`.
+    install_edit_intent_hook(&selection, effective, &session_dir, &record.id);
     let mut launch = HarnessLaunch::new(selection.into_executable(), runtime.project()).args(args);
     // Map line 1973: the child inherits this process's environment, so
     // another entitlement's credential variable would reach a session that
@@ -1854,6 +1862,99 @@ impl DeferredBriefing {
 /// The `briefed with ...` line both delivery rungs print, once, on a
 /// successful delivery — never composed twice so the wording cannot drift
 /// between rungs.
+/// Map lines 2402-2405: register Phase 60's edit-intent `PreToolUse` hook
+/// for a Claude Code session, unless a configuration layer turned
+/// coordination off.
+///
+/// **Never a second `--settings` flag**, for the reason
+/// [`crate::commands::resume::install_context_firewall_hook`] states at
+/// length: Claude Code keeps only the last one, so the only safe way to add
+/// a hook is to merge it into the document `install_session_document`
+/// already wrote. This reads that file back, adds one `PreToolUse` key, and
+/// writes it in place; `args` is never touched.
+///
+/// **`mode = "off"` installs nothing at all** — line 2405's own words, and
+/// the reason this returns before reading the executable path or the session
+/// directory. Not installed-and-inert: an inert hook would still spawn a
+/// process for every `Edit` the session makes.
+///
+/// Best effort, matching every other registration on this path: a failure
+/// here is a session that starts without coordination rather than one that
+/// fails to start, and it is logged rather than propagated. There is no
+/// version floor and no probe — unlike the firewall's `updatedToolOutput`,
+/// nothing this hook returns needs a Claude Code newer than the one that
+/// first accepted a `PreToolUse` entry, and the worst a build that ignores
+/// the entry can do is not run it.
+fn install_edit_intent_hook(
+    selection: &session::HarnessSelection,
+    effective: EffectiveConfig<'_>,
+    session_dir: &std::path::Path,
+    session: &SessionId,
+) {
+    use glasshouse::config::firewall::EditIntentMode;
+    use glasshouse::harness::claude_code;
+
+    if selection.id() != glasshouse::integrations::IntegrationId::ClaudeCode {
+        // Map line 2404: where a harness exposes no structured pre-tool
+        // hook, the feature is simply absent for that harness and nothing is
+        // substituted for it. `glasshouse doctor` says so out loud per
+        // adapter (`integrations::write_adapter_report`); this line is the
+        // per-launch trace, at `debug` so it is not spam.
+        tracing::debug!(
+            harness = selection.id().slug(),
+            "edit intent: no verified PreToolUse hook for this harness; coordination is              absent for this session"
+        );
+        return;
+    }
+
+    if effective.edit_intent_mode().value == EditIntentMode::Off {
+        return;
+    }
+
+    let program = match std::env::current_exe() {
+        Ok(program) => program,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "edit intent: could not find the Glasshouse executable; not registered"
+            );
+            return;
+        }
+    };
+
+    let command_line = claude_code::edit_intent_command_line(&program, session.as_str());
+    let hook_entry = claude_code::edit_intent_hook_entry(&command_line);
+    let path = session_dir.join(claude_code::SETTINGS_FILE_NAME);
+    let existing = match std::fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                path = %path.display(),
+                "edit intent: could not read the settings document to merge its hook into;                  not registered"
+            );
+            return;
+        }
+    };
+    match claude_code::merge_edit_intent_hook(&existing, &hook_entry) {
+        Ok(merged) => {
+            if let Err(err) = std::fs::write(&path, merged) {
+                tracing::warn!(
+                    error = %err,
+                    path = %path.display(),
+                    "edit intent: could not write the merged settings document; not registered"
+                );
+            }
+        }
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "edit intent: could not merge the PreToolUse hook; not registered"
+            );
+        }
+    }
+}
+
 fn briefing_announcement(memories: usize, binding: usize, failed_attempts: usize) -> String {
     format!(
         "briefed with {memories} memories ({binding} binding, {failed_attempts} failed approaches)"

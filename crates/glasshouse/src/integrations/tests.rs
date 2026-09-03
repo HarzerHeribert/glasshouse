@@ -645,7 +645,9 @@ fn the_doctor_report_shows_each_adapters_declarations() {
     let block: Vec<&str> = adapters_section
         .lines()
         .skip_while(|line| !line.trim_start().starts_with("Claude Code"))
-        .take(8)
+        // Nine: the heading plus eight declaration rows. `edit intent:`
+        // (Phase 60 map line 2404) is the ninth line and the newest.
+        .take(9)
         .collect();
     assert!(
         !block.is_empty(),
@@ -684,6 +686,10 @@ fn the_doctor_report_shows_each_adapters_declarations() {
     assert!(row("capabilities:").contains("MCP"));
     assert!(row("protocols:").contains("anthropic-messages"));
     assert!(row("model:").contains("--model"));
+    // Map line 2404: Claude Code is the one harness with a verified
+    // structured pre-tool hook, and the report says which event it is.
+    assert!(row("edit intent:").contains("`PreToolUse`"));
+    assert!(row("edit intent:").contains("available"));
 }
 
 /// Every harness gets a block, not only the ones that happen to be

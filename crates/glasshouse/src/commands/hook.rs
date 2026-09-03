@@ -663,3 +663,214 @@ pub(crate) fn install_quiet_panic_hook() {
         tracing::error!(location, panic = %info, "a glasshouse hook process panicked");
     }));
 }
+
+/// How long the coordination hook waits for Claude Code to finish writing
+/// the `PreToolUse` payload.
+///
+/// [`PAYLOAD_DRAIN_BOUND`]'s value, and a stricter reason: the lifecycle hook
+/// drains its input to be polite to the writer, whereas this one *needs* the
+/// bytes and still may not wait for them. A payload that has not arrived in a
+/// second is a payload this process goes on without — allowing, silently.
+const EDIT_INTENT_READ_BOUND: std::time::Duration = PAYLOAD_DRAIN_BOUND;
+
+/// Handle `edit-intent hook` — capability map lines 2402 to 2405.
+///
+/// Reads one `PreToolUse` event on stdin, records what the session is about
+/// to change, compares it with other live sessions' claims, and writes the
+/// hook response on stdout.
+///
+/// # It always allows, and that is the whole contract
+///
+/// `PreToolUse` is a **gate**: a `deny` here stops a user's `Edit` dead, and
+/// a hook that exited non-zero would veto the tool call outright. Steering
+/// decision 4 (design-decisions.md) rules soft coordination with an explicit
+/// bypass and **no blocking**, so this function returns `()` rather than a
+/// `Result` and every step below fails into the same quiet allowance:
+///
+/// - no `--session`, so nothing can be attributed → allow, silently;
+/// - a payload that does not arrive, or does not parse → allow, silently;
+/// - a read-only tool, or one naming no path inside the project → allow,
+///   silently;
+/// - a project database that cannot be opened, a session not in it, a claim
+///   that cannot be written → allow, and say so only in the debug log.
+///
+/// A coordination layer that broke a user's edit because its own lookup
+/// failed would be worse than no coordination at all.
+///
+/// # Order: read the claims, then take one
+///
+/// [`glasshouse::session::SessionStore::active_claims`] is read **before**
+/// this session claims anything, so the answer cannot include a claim this
+/// very call just wrote. It would be filtered by session identity anyway;
+/// reading first means that invariant does not depend on the filter.
+pub(crate) fn edit_intent_hook(runtime: &Runtime, session: Option<&str>) {
+    let payload = read_pre_tool_use_payload();
+    let conflict = edit_intent_conflict(runtime, session, payload.as_deref());
+    print_edit_intent_response(conflict.as_deref());
+}
+
+/// The `PreToolUse` payload, or `None` if it did not arrive in time.
+///
+/// On its own thread and abandoned at [`EDIT_INTENT_READ_BOUND`], the shape
+/// [`abandon_after`] exists for — with the bytes handed back through a
+/// channel, because unlike the lifecycle hook's drain this one has a result
+/// worth keeping.
+fn read_pre_tool_use_payload() -> Option<Vec<u8>> {
+    use std::io::Read as _;
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut input = Vec::new();
+        let read = std::io::stdin().read_to_end(&mut input);
+        // A closed receiver means the bound expired and nobody is listening,
+        // which is a normal outcome here.
+        let _ = sender.send(read.ok().map(|_| input));
+    });
+    match receiver.recv_timeout(EDIT_INTENT_READ_BOUND) {
+        Ok(payload) => payload,
+        Err(_) => {
+            tracing::debug!(
+                bound_ms = EDIT_INTENT_READ_BOUND.as_millis(),
+                "edit intent: the harness had not finished writing this hook's input; \
+                 allowing without recording"
+            );
+            None
+        }
+    }
+}
+
+/// One sentence naming the other sessions that already claimed a path this
+/// call is about to change, or `None`.
+///
+/// Every failure answers `None`, which the caller renders as a quiet
+/// allowance — see [`edit_intent_hook`]'s own doc for the list.
+fn edit_intent_conflict(
+    runtime: &Runtime,
+    session: Option<&str>,
+    payload: Option<&[u8]>,
+) -> Option<String> {
+    let session = session?;
+    let payload = payload?;
+
+    let event = match glasshouse::firewall::adapter::parse_pre_tool_use_event(payload) {
+        Ok(event) => event,
+        Err(err) => {
+            tracing::debug!(
+                error = %err,
+                "edit intent: could not parse the PreToolUse event; allowing without recording"
+            );
+            return None;
+        }
+    };
+
+    // The tool gate and the project gate, in that order and both from the
+    // shipped functions the `file_touched` producer already uses: a
+    // read-shaped tool records nothing even though its input carries a path,
+    // and a path outside this project is dropped before it can be stored.
+    let root = runtime.project().root();
+    let mut paths: Vec<String> = Vec::new();
+    for raw in glasshouse::firewall::adapter::edit_intent_paths(&event) {
+        let Some(path) = crate::commands::context_firewall::project_relative_path(root, &raw)
+        else {
+            continue;
+        };
+        if !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    if paths.is_empty() {
+        return None;
+    }
+
+    let sessions = match ProjectSessions::open(runtime) {
+        Ok(sessions) => sessions,
+        Err(err) => {
+            tracing::debug!(
+                error = %format!("{err:#}"),
+                "edit intent: the project database is unavailable; allowing without recording"
+            );
+            return None;
+        }
+    };
+    let store = sessions.store();
+    let id = match store.resolve_id(session) {
+        Ok(id) => id,
+        Err(err) => {
+            tracing::debug!(
+                error = %format!("{err:#}"),
+                "edit intent: this hook's session is not in the project; allowing without \
+                 recording"
+            );
+            return None;
+        }
+    };
+
+    // Map line 2403's comparison, read before line 2402's write.
+    let existing = store.active_claims().unwrap_or_else(|err| {
+        tracing::debug!(
+            error = %format!("{err:#}"),
+            "edit intent: could not read this project's file claims; allowing, and \
+             reporting no conflict"
+        );
+        Vec::new()
+    });
+
+    let mut notices: Vec<String> = Vec::new();
+    for path in &paths {
+        for claim in existing
+            .iter()
+            .filter(|claim| &claim.path == path && claim.session_id != id)
+        {
+            notices.push(format!(
+                "{path} is already claimed by session {} (since {})",
+                crate::commands::shared::short_id(&claim.session_id),
+                crate::commands::shared::format_age(claim.claimed_at),
+            ));
+        }
+        // Map line 2402: the intent itself, recorded before the operation
+        // runs. Per path rather than per batch, and best effort per path —
+        // one claim that cannot be written must not take the others, and
+        // none of them may change what this hook answers.
+        if let Err(err) = store.claim_file(&id, path) {
+            tracing::debug!(
+                error = %format!("{err:#}"),
+                path,
+                "edit intent: could not record an edit intent"
+            );
+        }
+    }
+
+    if notices.is_empty() {
+        return None;
+    }
+    tracing::info!(
+        session = %id,
+        conflicts = notices.len(),
+        "edit intent: another session already claims a file this one is about to change"
+    );
+    Some(format!(
+        "Glasshouse file coordination: {}. This is advice, not a lock — the edit is \
+         going ahead. Consider coordinating before overwriting shared work.",
+        notices.join("; ")
+    ))
+}
+
+/// Write the `PreToolUse` hook response JSON to stdout — the protocol
+/// channel here exactly as it is for `context-firewall hook`.
+///
+/// Not a `Result`: a response that could not be serialized would leave the
+/// harness with no answer at all, which Claude Code reads as "no opinion"
+/// and proceeds from. There is nothing here worth failing a tool call over,
+/// so a serialization failure degrades to the bare allow literal.
+fn print_edit_intent_response(conflict: Option<&str>) {
+    let response = glasshouse::firewall::adapter::pre_tool_use_response(conflict);
+    match serde_json::to_string(&response) {
+        Ok(rendered) => println!("{rendered}"),
+        Err(err) => {
+            tracing::debug!(error = %err, "edit intent: could not render the hook response");
+            println!(
+                r#"{{"hookSpecificOutput":{{"hookEventName":"PreToolUse","permissionDecision":"allow"}}}}"#
+            );
+        }
+    }
+}

@@ -305,6 +305,11 @@ pub struct UserConfig {
         skip_serializing_if = "firewall::ContextFirewallConfig::is_unset"
     )]
     context_firewall: firewall::ContextFirewallConfig,
+    /// Phase 60 map line 2405's bypass — see [`firewall::EditIntentConfig`].
+    /// Skipped when empty for the same reason `context_firewall` is; an
+    /// undecided stack resolves to [`firewall::EditIntentMode::DEFAULT`].
+    #[serde(default, skip_serializing_if = "firewall::EditIntentConfig::is_unset")]
+    edit_intent: firewall::EditIntentConfig,
     /// The `[memory]` table — see [`MemoryConfig`] and
     /// [`EffectiveConfig::inject_memory_at_launch`].
     #[serde(default, skip_serializing_if = "MemoryConfig::is_unset")]
@@ -329,6 +334,7 @@ impl Default for UserConfig {
             memory: MemoryConfig::default(),
             guardrails: GuardrailsConfig::default(),
             context_firewall: firewall::ContextFirewallConfig::default(),
+            edit_intent: firewall::EditIntentConfig::default(),
         }
     }
 }
@@ -450,6 +456,16 @@ impl UserConfig {
 
     pub fn context_firewall_mut(&mut self) -> &mut firewall::ContextFirewallConfig {
         &mut self.context_firewall
+    }
+
+    /// This layer's `[edit_intent]` table — see
+    /// [`firewall::EditIntentConfig`].
+    pub fn edit_intent(&self) -> &firewall::EditIntentConfig {
+        &self.edit_intent
+    }
+
+    pub fn edit_intent_mut(&mut self) -> &mut firewall::EditIntentConfig {
+        &mut self.edit_intent
     }
 
     /// This layer's `[memory]` table — see [`MemoryConfig`].
@@ -577,6 +593,11 @@ pub struct ProjectConfig {
         skip_serializing_if = "firewall::ContextFirewallConfig::is_unset"
     )]
     context_firewall: firewall::ContextFirewallConfig,
+    /// A project may turn edit-intent coordination off for everyone working
+    /// in it — see [`UserConfig::edit_intent`] for the table this mirrors
+    /// and [`EffectiveConfig::edit_intent_mode`] for how the two layer.
+    #[serde(default, skip_serializing_if = "firewall::EditIntentConfig::is_unset")]
+    edit_intent: firewall::EditIntentConfig,
     /// A project may override the user's decision on briefing a launch with
     /// this project's memory — see [`UserConfig::memory`] for the table this
     /// mirrors and [`EffectiveConfig::inject_memory_at_launch`] for how the
@@ -601,6 +622,7 @@ impl Default for ProjectConfig {
             memory_extraction_model: None,
             guardrails: GuardrailsConfig::default(),
             context_firewall: firewall::ContextFirewallConfig::default(),
+            edit_intent: firewall::EditIntentConfig::default(),
             memory: MemoryConfig::default(),
         }
     }
@@ -716,6 +738,16 @@ impl ProjectConfig {
 
     pub fn context_firewall_mut(&mut self) -> &mut firewall::ContextFirewallConfig {
         &mut self.context_firewall
+    }
+
+    /// This layer's `[edit_intent]` table — see
+    /// [`UserConfig::edit_intent`] for the table this mirrors.
+    pub fn edit_intent(&self) -> &firewall::EditIntentConfig {
+        &self.edit_intent
+    }
+
+    pub fn edit_intent_mut(&mut self) -> &mut firewall::EditIntentConfig {
+        &mut self.edit_intent
     }
 
     /// This layer's `[memory]` table — see [`UserConfig::memory`] for the

@@ -506,6 +506,23 @@ impl<'a> EffectiveConfig<'a> {
         Layered::new(firewall::FirewallMode::Off, Layer::Default)
     }
 
+    /// Phase 60 map line 2405: whether a launched Claude Code session gets
+    /// the edit-intent coordination hook, and which layer decided.
+    ///
+    /// Project over user over default, exactly like
+    /// [`Self::context_firewall_mode`] — and unlike it, the default is
+    /// [`firewall::EditIntentMode::DEFAULT`] (`on`) rather than `off`. That
+    /// constant's own doc carries the reasoning.
+    pub fn edit_intent_mode(&self) -> Layered<firewall::EditIntentMode> {
+        if let Some(value) = self.project.and_then(|p| p.edit_intent().mode()) {
+            return Layered::new(value, Layer::Project);
+        }
+        if let Some(value) = self.user.edit_intent().mode() {
+            return Layered::new(value, Layer::User);
+        }
+        Layered::new(firewall::EditIntentMode::DEFAULT, Layer::Default)
+    }
+
     /// The passthrough-token threshold for `mode`, and which layer set it.
     ///
     /// Reads a different field per mode — `aggressive_passthrough_tokens`

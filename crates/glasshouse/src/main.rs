@@ -2,7 +2,9 @@ use std::process::ExitCode;
 
 use std::io::IsTerminal;
 
-use glasshouse::cli::{ApiCommand, ContextFirewallCommand, GatewayCommand, McpCommand};
+use glasshouse::cli::{
+    ApiCommand, ContextFirewallCommand, EditIntentCommand, GatewayCommand, McpCommand,
+};
 use glasshouse::config::{self, EffectiveConfig, UserConfig};
 use glasshouse::integrations::cmux;
 use glasshouse::profile::response::Dimension;
@@ -799,6 +801,17 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
             crate::commands::hook::install_quiet_panic_hook();
             crate::commands::hook::report_hook(&runtime, session, event);
         }
+        // Phase 60, map lines 2402-2405. The same quiet panic hook as the
+        // lifecycle arm above and for the same reason: this runs inside the
+        // user's own session, where a panic message on stderr is noise in
+        // their terminal. It never returns a failure — see
+        // `commands::hook::edit_intent_hook`.
+        Some(Command::EditIntent { command }) => match command {
+            EditIntentCommand::Hook { session } => {
+                crate::commands::hook::install_quiet_panic_hook();
+                crate::commands::hook::edit_intent_hook(&runtime, session.as_deref());
+            }
+        },
         Some(Command::Shim {
             harness,
             profile,

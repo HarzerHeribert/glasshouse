@@ -2399,10 +2399,10 @@ Claims, turn-scoped (Maybe A + F)
 
 Edit intent (Maybe B)
 
-☐ Record an edit_intent event before a session performs a file-modifying operation when the harness exposes enough information.
-☐ Compare new edit intent with active file claims from other sessions.
-☐ Keep intent detection best-effort when a harness does not expose structured pre-tool hooks, and say so rather than inferring intent from terminal output.
-☐ Preserve the user's ability to bypass coordination when Glasshouse cannot determine intent confidently.
+☑ Record an edit_intent event before a session performs a file-modifying operation when the harness exposes enough information.
+☑ Compare new edit intent with active file claims from other sessions.
+☑ Keep intent detection best-effort when a harness does not expose structured pre-tool hooks, and say so rather than inferring intent from terminal output.
+☑ Preserve the user's ability to bypass coordination when Glasshouse cannot determine intent confidently.
 
 Conflict prediction (Maybe C)
 

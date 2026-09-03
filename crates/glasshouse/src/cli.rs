@@ -928,6 +928,46 @@ pub enum Command {
         #[command(subcommand)]
         command: ContextFirewallCommand,
     },
+    /// Edit intent — Phase 60's soft file coordination, map lines 2402-2405.
+    ///
+    /// Records what a session is about to change and says when another live
+    /// session already claimed the same file. It never blocks, delays or
+    /// denies an operation; turn it off entirely with `mode = "off"` in the
+    /// `[edit_intent]` table of a user or project configuration.
+    EditIntent {
+        #[command(subcommand)]
+        command: EditIntentCommand,
+    },
+}
+
+/// `glasshouse edit-intent` subcommands.
+#[derive(Debug, Subcommand)]
+pub enum EditIntentCommand {
+    /// Read one `PreToolUse` hook event on stdin, write the hook response on
+    /// stdout. This is the exact command a launched Claude Code session
+    /// registers per session (map line 2402); run by hand or by a test, it
+    /// is the same production caller.
+    ///
+    /// **Always answers `allow`**, on every path including the conflict path
+    /// and every error path — map line 2405's soft coordination. A tool call
+    /// this command cannot understand, a database it cannot reach and a path
+    /// it cannot place inside the project all produce the same silent
+    /// allowance.
+    Hook {
+        /// The Glasshouse session this hook is registered for.
+        ///
+        /// **Optional at the CLI**, exactly as
+        /// `context-firewall hook --session` is and for the same reason: a
+        /// settings document written by an older build must keep running
+        /// rather than exiting on an unknown argument. Absent, the hook
+        /// records no intent, reports no conflict, and still allows.
+        ///
+        /// It cannot be inferred from the payload: a `PreToolUse` event
+        /// carries *Claude Code's* `session_id`, which is not an identifier
+        /// any Glasshouse table knows.
+        #[arg(long, value_name = "ID")]
+        session: Option<String>,
+    },
 }
 
 /// `glasshouse context-firewall` subcommands.

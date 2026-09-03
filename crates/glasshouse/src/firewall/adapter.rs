@@ -150,6 +150,101 @@ pub fn hook_response(updated_output: Option<&str>) -> Value {
     }
 }
 
+/// One `PreToolUse` event, captured from Claude Code 2.1.259 on 2026-09-03
+/// by a throwaway hook teeing stdin to a file (the report for
+/// `GH-EDIT-INTENT` carries the exact command). The real capture carried
+/// `session_id`, `transcript_path`, `cwd`, `prompt_id`, `permission_mode`,
+/// `effort`, `hook_event_name`, `tool_name`, `tool_input` and `tool_use_id`;
+/// only the three this build reads are declared, and the rest are
+/// pass-through unknowns by `serde`'s own default, exactly as
+/// [`PostToolUseEvent`] leaves them.
+///
+/// **`tool_input` is the whole reason this event is worth parsing** — it is
+/// what says which file the tool is about to write, before it writes it. It
+/// arrived populated in every captured event (`{"file_path": "...",
+/// "content": "..."}` for `Write`), and is still `#[serde(default)]` here
+/// for the same reason it is on [`PostToolUseEvent`]: a document that omits
+/// it must parse and record nothing rather than fail.
+#[derive(Debug, Deserialize)]
+pub struct PreToolUseEvent {
+    pub tool_name: String,
+    #[serde(default)]
+    pub tool_input: Value,
+    /// Claude Code's own session identifier, not a Glasshouse one — see
+    /// [`PostToolUseEvent::session_id`]'s neighbours and
+    /// `harness::claude_code::edit_intent_command_line` for why the
+    /// Glasshouse session is baked into the registered command line instead.
+    #[serde(default)]
+    pub session_id: String,
+}
+
+/// Parse one `PreToolUse` JSON document.
+pub fn parse_pre_tool_use_event(bytes: &[u8]) -> Result<PreToolUseEvent, serde_json::Error> {
+    serde_json::from_slice(bytes)
+}
+
+/// The `permissionDecision` every response this module builds carries — map
+/// line 2405's soft-coordination constraint, as one constant so that
+/// "Glasshouse never blocks an edit" is a single token a reader can check
+/// rather than a claim spread over branches.
+///
+/// `PreToolUse` **is** a gate: `deny` here would stop a user's `Edit` dead.
+/// Steering decision 4 (design-decisions.md) says soft coordination with an
+/// explicit bypass and no blocking, so this build has no path that produces
+/// anything else — not on the conflict path, not on an error path, not when
+/// the database is unreachable.
+const PRE_TOOL_USE_DECISION: &str = "allow";
+
+/// The `PreToolUse` hook response Claude Code reads back on stdout.
+///
+/// **Always allows.** `conflict`, when present, is one already-rendered
+/// sentence naming the other session and the path; it changes only what the
+/// user and the model are *told*, never what the harness is permitted to do.
+/// A conflict is reported through three channels because they reach three
+/// readers: `permissionDecisionReason` is the harness's own record of why
+/// the decision was made, `systemMessage` is what the person watching the
+/// terminal sees, and `additionalContext` is what the model itself reads —
+/// which is the one that lets an agent choose to coordinate.
+///
+/// `None` produces the bare allow: no reason, no message, no context. That
+/// is the shape for a read-only tool, an unparseable event, and an
+/// unreachable database alike (see `commands::hook::edit_intent_hook`).
+pub fn pre_tool_use_response(conflict: Option<&str>) -> Value {
+    let mut hook_specific = serde_json::json!({
+        "hookEventName": "PreToolUse",
+        "permissionDecision": PRE_TOOL_USE_DECISION,
+    });
+    let mut response = serde_json::json!({});
+    if let Some(conflict) = conflict {
+        hook_specific["permissionDecisionReason"] = Value::String(conflict.to_owned());
+        hook_specific["additionalContext"] = Value::String(conflict.to_owned());
+        response["systemMessage"] = Value::String(conflict.to_owned());
+    }
+    response["hookSpecificOutput"] = hook_specific;
+    response
+}
+
+/// The paths a `PreToolUse` event says are about to be **changed**, or an
+/// empty vector.
+///
+/// Two shipped functions and no third rule: [`crate::firewall::eligibility`]
+/// decides whether the tool writes, and [`tool_input_paths`] reads the paths
+/// out of its input. A read-shaped tool answers empty here even though its
+/// input carries a `file_path`, which is the same distinction
+/// `LifecycleEvent::FileTouched` already draws — an intent to edit must not
+/// be earned by a glance.
+///
+/// The paths are the harness's own spelling and usually absolute; bringing
+/// them under the project root is the caller's job, through
+/// `commands::context_firewall::project_relative_path`, because that is
+/// where the root is known.
+pub fn edit_intent_paths(event: &PreToolUseEvent) -> Vec<String> {
+    if !crate::firewall::eligibility::is_writing_tool(&event.tool_name) {
+        return Vec::new();
+    }
+    tool_input_paths(&event.tool_input)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,6 +404,154 @@ mod tests {
     #[test]
     fn the_default_hook_response_is_a_no_op() {
         assert_eq!(hook_response(None), serde_json::json!({}));
+    }
+
+    // =======================================================================
+    // GH-EDIT-INTENT — the `PreToolUse` sibling
+    // =======================================================================
+
+    /// The REAL shape, captured against the installed Claude Code 2.1.259 on
+    /// 2026-09-03 with a throwaway `PreToolUse` hook teeing stdin to a file,
+    /// driven by `claude -p "...use the Write tool to create
+    /// probe-out.txt..." --settings <a document declaring that hook>` in a
+    /// scratch directory. Personal paths (`session_id`, `transcript_path`,
+    /// `cwd`, `prompt_id`, `tool_use_id`) are scrubbed; every other key and
+    /// value below is the real capture, `effort` and `permission_mode`
+    /// included — both are unknowns this build never declares, and the point
+    /// of keeping them here is that the parse still succeeds.
+    #[test]
+    fn the_real_captured_pre_tool_use_write_event_parses_with_its_file_path() {
+        let raw = br#"{
+            "session_id": "capture-session",
+            "transcript_path": "/capture/transcript.jsonl",
+            "cwd": "/capture/cwd",
+            "prompt_id": "capture-prompt",
+            "permission_mode": "acceptEdits",
+            "effort": {"level": "xhigh"},
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Write",
+            "tool_input": {"file_path": "/capture/cwd/probe-out.txt", "content": "done"},
+            "tool_use_id": "capture-tool-use-id"
+        }"#;
+        let event = parse_pre_tool_use_event(raw).expect("the real captured shape must parse");
+        assert_eq!(event.tool_name, "Write");
+        assert_eq!(event.session_id, "capture-session");
+        assert_eq!(
+            edit_intent_paths(&event),
+            vec!["/capture/cwd/probe-out.txt".to_string()]
+        );
+    }
+
+    #[test]
+    fn an_event_with_no_tool_input_parses_and_names_no_path() {
+        let event =
+            parse_pre_tool_use_event(br#"{"tool_name": "Write"}"#).expect("must still parse");
+        assert!(edit_intent_paths(&event).is_empty());
+    }
+
+    /// The same distinction `LifecycleEvent::FileTouched` draws: a `Read`
+    /// carries a `file_path` and is not an intent to edit.
+    #[test]
+    fn a_read_shaped_tool_names_no_path_even_though_its_input_carries_one() {
+        for tool in ["Read", "Grep", "Glob", "Bash", "WebFetch"] {
+            let event = PreToolUseEvent {
+                tool_name: tool.to_string(),
+                tool_input: serde_json::json!({"file_path": "src/main.rs"}),
+                session_id: "s".to_string(),
+            };
+            assert!(
+                edit_intent_paths(&event).is_empty(),
+                "`{tool}` is not a writing tool and must record no intent"
+            );
+        }
+    }
+
+    #[test]
+    fn every_writing_tool_names_its_path() {
+        for tool in crate::firewall::eligibility::WRITING_TOOLS {
+            let event = PreToolUseEvent {
+                tool_name: (*tool).to_string(),
+                tool_input: serde_json::json!({"file_path": "src/main.rs"}),
+                session_id: "s".to_string(),
+            };
+            assert_eq!(
+                edit_intent_paths(&event),
+                vec!["src/main.rs".to_string()],
+                "`{tool}` writes and must name its path"
+            );
+        }
+    }
+
+    #[test]
+    fn a_notebook_edit_names_its_notebook_path() {
+        let event = PreToolUseEvent {
+            tool_name: "NotebookEdit".to_string(),
+            tool_input: serde_json::json!({"notebook_path": "analysis.ipynb"}),
+            session_id: "s".to_string(),
+        };
+        assert_eq!(
+            edit_intent_paths(&event),
+            vec!["analysis.ipynb".to_string()]
+        );
+    }
+
+    /// Map line 2405's constraint, on the path that matters: a conflict is
+    /// told, never enforced.
+    #[test]
+    fn a_conflict_is_reported_and_still_allowed() {
+        let response = pre_tool_use_response(Some("session b claims src/main.rs"));
+        assert_eq!(
+            response["hookSpecificOutput"]["permissionDecision"],
+            serde_json::json!("allow"),
+            "a conflict must never deny: {response}"
+        );
+        assert_eq!(
+            response["hookSpecificOutput"]["permissionDecisionReason"],
+            serde_json::json!("session b claims src/main.rs")
+        );
+        assert_eq!(
+            response["hookSpecificOutput"]["additionalContext"],
+            serde_json::json!("session b claims src/main.rs")
+        );
+        assert_eq!(
+            response["systemMessage"],
+            serde_json::json!("session b claims src/main.rs")
+        );
+    }
+
+    #[test]
+    fn a_response_with_no_conflict_allows_and_says_nothing_else() {
+        let response = pre_tool_use_response(None);
+        assert_eq!(
+            response["hookSpecificOutput"]["permissionDecision"],
+            serde_json::json!("allow")
+        );
+        assert_eq!(
+            response,
+            serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "allow",
+                }
+            }),
+            "a quiet allow carries no message, reason or context"
+        );
+    }
+
+    /// A tripwire over the text itself: there is no argument to this builder
+    /// that produces `deny` or `ask`, which is what makes "Glasshouse never
+    /// blocks an edit" checkable rather than asserted.
+    #[test]
+    fn no_input_to_the_builder_ever_produces_deny_or_ask() {
+        for conflict in [None, Some(""), Some("a conflict"), Some("deny")] {
+            let response = pre_tool_use_response(conflict);
+            let decision = &response["hookSpecificOutput"]["permissionDecision"];
+            assert_eq!(
+                decision,
+                &serde_json::json!("allow"),
+                "conflict {conflict:?} produced {decision}"
+            );
+        }
     }
 
     #[test]

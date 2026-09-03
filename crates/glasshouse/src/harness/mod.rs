@@ -1362,6 +1362,36 @@ pub fn adapter_for(id: IntegrationId) -> Option<&'static dyn HarnessAdapter> {
     }
 }
 
+/// The harness's own structured pre-tool hook event, when Glasshouse has a
+/// verified bridge to one — Phase 60 map line 2404.
+///
+/// **A statement about Glasshouse, not only about the harness.** A harness
+/// may well fire something pre-tool that nobody here has read a payload
+/// from; naming it would promise coordination this build cannot deliver. So
+/// this answers `Some` only where the event is in that adapter's own
+/// [`Hooks::verified_events`] *and* a launch actually registers a hook on it
+/// — today, Claude Code's `PreToolUse` and nothing else
+/// (`commands::launch::install_edit_intent_hook`).
+///
+/// `None` is line 2404's honest answer, and the *only* other one: where this
+/// returns `None`, edit-intent coordination is simply absent for that
+/// harness, and nothing — not a terminal scrape, not a prompt guess — is put
+/// in its place.
+pub fn structured_pre_tool_hook(id: IntegrationId) -> Option<&'static str> {
+    match id {
+        IntegrationId::ClaudeCode => Some("PreToolUse"),
+        IntegrationId::Codex
+        | IntegrationId::Antigravity
+        | IntegrationId::OpenCode
+        | IntegrationId::Cursor
+        | IntegrationId::Pi
+        | IntegrationId::Hermes
+        | IntegrationId::Cmux
+        | IntegrationId::Ollama
+        | IntegrationId::LlamaCpp => None,
+    }
+}
+
 /// Every harness adapter, in catalogue order.
 pub fn all() -> impl Iterator<Item = &'static dyn HarnessAdapter> {
     IntegrationId::ALL

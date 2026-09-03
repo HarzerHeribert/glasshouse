@@ -12,6 +12,16 @@ pub const DEFAULT_ELIGIBLE_TOOLS: &[&str] = &["Grep", "Glob", "Read", "Bash"];
 /// map calls permission- or security-shaped.
 const HARD_BLOCKED_TOOLS: &[&str] = &["Edit", "Write", "MultiEdit", "NotebookEdit"];
 
+/// The names [`is_writing_tool`] answers `true` for, for the one caller that
+/// needs the *list* rather than the question:
+/// `harness::claude_code::edit_intent_tool_matcher` builds a Claude Code
+/// hook matcher from it, so the coordination hook is spawned for exactly the
+/// tools that can change a file and for no others.
+///
+/// An alias rather than a second list — a fifth editing tool is still added
+/// in exactly one place, and the matcher cannot drift from the predicate.
+pub const WRITING_TOOLS: &[&str] = HARD_BLOCKED_TOOLS;
+
 /// Whether `tool_name` is eligible for reduction under `configured` (the
 /// resolved `--tools` list; pass [`DEFAULT_ELIGIBLE_TOOLS`] when the flag
 /// named nothing).

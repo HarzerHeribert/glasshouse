@@ -1132,3 +1132,42 @@ fn the_dependency_scan_would_catch_a_violation() {
     let tested = "fn spawn() {}\n#[cfg(test)]\nmod tests { use IntegrationId; }";
     assert!(!production_code(tested).contains("IntegrationId"));
 }
+
+/// Map line 2404: a harness named as having a structured pre-tool hook must
+/// actually declare that event, or `glasshouse doctor` would promise
+/// coordination the harness never offered.
+#[test]
+fn a_named_pre_tool_hook_is_one_the_adapter_itself_declares() {
+    for adapter in super::all() {
+        let Some(event) = super::structured_pre_tool_hook(adapter.id()) else {
+            continue;
+        };
+        let hooks = adapter
+            .describe()
+            .hooks
+            .value()
+            .copied()
+            .unwrap_or_else(|| {
+                panic!(
+                    "{} names {event} but declares no hooks",
+                    adapter.id().slug()
+                )
+            });
+        assert!(
+            hooks.verified_events.contains(&event),
+            "{} names {event} as its pre-tool hook and does not declare it",
+            adapter.id().slug()
+        );
+    }
+}
+
+/// The other direction, and the honest half: today exactly one harness has a
+/// bridge, and every other one answers `None` rather than a guess.
+#[test]
+fn claude_code_is_the_only_harness_with_a_verified_pre_tool_bridge() {
+    let named: Vec<_> = super::all()
+        .filter(|adapter| super::structured_pre_tool_hook(adapter.id()).is_some())
+        .map(|adapter| adapter.id())
+        .collect();
+    assert_eq!(named, vec![crate::integrations::IntegrationId::ClaudeCode]);
+}

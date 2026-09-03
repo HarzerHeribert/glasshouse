@@ -478,6 +478,128 @@ impl ContextFirewallConfig {
     }
 }
 
+/// `[edit_intent]` — Phase 60 map line 2405's user bypass: whether a
+/// launched Claude Code session gets the edit-intent coordination hook.
+///
+/// # Why this lives beside `[context_firewall]` and not in a module of its
+/// own
+///
+/// The two tables answer one question — *which hooks does Glasshouse merge
+/// into a launched session's settings document* — and this one is a single
+/// mode word. A module, a re-export and a fourth config file for one enum
+/// would be new machinery under CLAUDE.md's five-question test, so it is
+/// recorded here once instead. Nothing in this table is read by
+/// [`crate::firewall`]; the coordination hook and the context firewall share
+/// no code path beyond the settings document they both merge into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EditIntentMode {
+    /// No `PreToolUse` hook is registered at all, so a launched session's
+    /// settings document is byte-identical to one built before this phase
+    /// existed. Not *installed and inert* — line 2405 asks for an off
+    /// switch reachable without editing a database, and an inert hook still
+    /// spawns a process per writing tool call.
+    Off,
+    /// The hook is registered. It records what the session is about to edit
+    /// and reports another session's live claim on the same path, and it
+    /// **always** answers `allow` — see
+    /// [`crate::firewall::adapter::pre_tool_use_response`].
+    On,
+}
+
+impl EditIntentMode {
+    /// Every variant, in declaration order.
+    pub const ALL: &'static [Self] = &[Self::Off, Self::On];
+
+    /// The default when no layer decided.
+    ///
+    /// **`On`, unlike [`FirewallMode`]'s `Off`, and the asymmetry is the
+    /// point.** The firewall can change what the model is shown, so it stays
+    /// opt-in. This hook cannot: it never denies a tool call, never delays
+    /// one, and never alters a tool's input or result — the worst it can do
+    /// is add a sentence saying another session claimed the same file. The
+    /// MVP behaviour design-decisions.md's steering decision 4 names ("two
+    /// active sessions express edit intent for the same file") is not
+    /// observable at all if it ships off, and *bypass* in line 2405 is a
+    /// word about something that is otherwise happening.
+    pub const DEFAULT: Self = Self::On;
+
+    /// The one spelling this value has on the wire, in configuration and on
+    /// a terminal.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::On => "on",
+        }
+    }
+
+    /// The inverse of [`Self::as_str`]. `None` is "a spelling this build
+    /// does not know", never a neighbouring variant.
+    pub fn from_stored(value: &str) -> Option<Self> {
+        match value {
+            "off" => Some(Self::Off),
+            "on" => Some(Self::On),
+            _ => None,
+        }
+    }
+
+    /// The vocabulary, for a refusal message.
+    pub fn spellings() -> String {
+        Self::ALL
+            .iter()
+            .map(|value| format!("`{}`", value.as_str()))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+impl fmt::Display for EditIntentMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.pad(self.as_str())
+    }
+}
+
+impl Serialize for EditIntentMode {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for EditIntentMode {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        Self::from_stored(&value).ok_or_else(|| {
+            serde::de::Error::custom(format!("`{value}` is not one of {}", Self::spellings()))
+        })
+    }
+}
+
+/// The `[edit_intent]` table.
+///
+/// One optional field, for the same three-state reason
+/// [`ContextFirewallConfig`] gives: `None` means *this layer never decided*,
+/// not *off*. [`EditIntentMode::DEFAULT`] is what an undecided stack
+/// resolves to.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EditIntentConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    mode: Option<EditIntentMode>,
+}
+
+impl EditIntentConfig {
+    pub fn is_unset(&self) -> bool {
+        self.mode.is_none()
+    }
+
+    pub fn mode(&self) -> Option<EditIntentMode> {
+        self.mode
+    }
+
+    pub fn set_mode(&mut self, mode: Option<EditIntentMode>) -> &mut Self {
+        self.mode = mode;
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -646,6 +768,32 @@ mod tests {
             Some(["headroom-select".to_owned()].as_slice())
         );
         assert!(config.local_reducer("missing").is_none());
+    }
+
+    /// Line 2405's off switch, and the one asymmetry with
+    /// [`FirewallMode`]: an undecided stack coordinates, and turning it off
+    /// is one word in one table.
+    #[test]
+    fn an_undecided_edit_intent_table_is_unset_and_the_default_is_on() {
+        let config = EditIntentConfig::default();
+        assert!(config.is_unset());
+        assert_eq!(config.mode(), None);
+        assert_eq!(EditIntentMode::DEFAULT, EditIntentMode::On);
+    }
+
+    #[test]
+    fn the_edit_intent_table_round_trips_and_refuses_a_spelling_it_does_not_know() {
+        let mut config = EditIntentConfig::default();
+        config.set_mode(Some(EditIntentMode::Off));
+        assert!(!config.is_unset());
+        let json = serde_json::to_string(&config).unwrap();
+        assert_eq!(json, r#"{"mode":"off"}"#);
+        let restored: EditIntentConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(config, restored);
+
+        assert_eq!(EditIntentMode::from_stored("on"), Some(EditIntentMode::On));
+        assert_eq!(EditIntentMode::from_stored("shadow"), None);
+        assert!(serde_json::from_str::<EditIntentConfig>(r#"{"mode":"shadow"}"#).is_err());
     }
 
     #[test]

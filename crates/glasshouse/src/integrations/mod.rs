@@ -1082,6 +1082,20 @@ fn write_adapter_report(out: &mut String, adapter: &'static dyn crate::harness::
     };
     let _ = writeln!(out, "      hooks:        {hooks}");
 
+    // Phase 60 map line 2404: edit-intent coordination is **best effort**,
+    // and a harness that exposes no structured pre-tool hook simply does not
+    // have it. Said out loud here rather than left to be discovered, because
+    // the alternative the line forbids — inferring intent from terminal
+    // output or a PTY scrape — is exactly what a user would assume was
+    // happening if this row were absent. Nothing is substituted.
+    let edit_intent = match crate::harness::structured_pre_tool_hook(adapter.id()) {
+        Some(event) => format!("`{event}`, so file coordination is available"),
+        None => "no verified pre-tool hook; file coordination is unavailable for this \
+                 harness, and nothing is inferred from its terminal output"
+            .to_string(),
+    };
+    let _ = writeln!(out, "      edit intent:  {edit_intent}");
+
     // A blanket bypass is never worded as though it were review — that
     // distinction is the entire point of `ApprovalModes`, so the two are
     // rendered with different vocabulary ("auto review" vs. "no automatic
