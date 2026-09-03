@@ -150,3 +150,40 @@ Limits: `mode = "off"` is proven by unit test over the resolver plus the early r
 2. **No migration, and therefore no `edit_intent` row in `lifecycle_events`.** The packet said the conflict should be surfaced *"in the event log"*; the worker refused, with a better reason than the packet's instruction. `lifecycle_events` carries `CHECK ((kind = 'file_touched') = (path IS NOT NULL))`, so an `edit_intent` kind carrying a path is a table-rebuild migration plus roughly six more files — and the packet's own REQUIRED BEHAVIOR permitted skipping it if the claims table already carries what an intent needs. It does: a `file_claims` row **is** the record "session S is about to change path P at time T". A parallel event row would be a second source of truth for one fact, which CLAUDE.md rule 8 forbids and `LifecycleEvent::SessionStarted`'s own doc refuses. The conflict is not a new fact either — it is a *query* over claims. **Named successor if a durable event kind is ever wanted**: migration 28 plus the `edit_intent` kind, with line 2409 (conflict prediction) as the first consumer that would actually read it.
 
 3. **Line 2392's tick was ahead of its producer, and this package is the producer.** The worker flagged it rather than quietly benefiting from it: when `cfbb432` closed 2392 (*"claim a file when a session begins an edit-oriented operation"*), nothing in the shipped binary called `claim_file` except the `glasshouse claim` verb a person types. The evidence entry above recorded that honestly as a limit — *"the claim is declared by a CLI verb; edit-intent detection is Maybe B"* — but the line's own words describe an automatic trigger, and there was none. **There is now**, in the same phase and within hours, so the tick is left standing rather than reverted and re-applied; this entry is where that is written down. The general lesson is the one `cluster-b.py` exists for: a box whose only caller is a CLI verb a human runs is a box worth re-reading.
+
+---
+
+## Conflict prediction (Maybe C) — lines 2409–2410
+
+Both lines closed by one package: `GH-CONFLICT-PREDICTION` (Sonnet high, **Amber** — it adds one decision: what makes an overlap high-confidence, and how the two kinds are named and told apart), worktree `.worktrees/conflict-prediction`, packet `.agent-runtime/packet-conflict-prediction.md`, report **`.agent-runtime/report-conflict-prediction.md`**.
+
+**Contract as delivered:** *Given two live sessions with edit intent on the same path, when Glasshouse reports the conflict, it names the overlap as a direct file overlap and treats it as the high-confidence case, while stating that semantic overlap is not assessed — and while preserving that the operation is still allowed and nothing is ever inferred from a file's contents, name or imports.*
+
+Gates on the merged tree: fmt, clippy `-D warnings`, rustdoc `-D warnings` clean; `--test edit_intent` **14/14** (13 before), `--test file_claims` **21/21** (20 before), `--lib firewall` 108, `--bin glasshouse` 85/85; `blast-radius.sh --targeted` exit 0; size ratchet ok. No packet errors, no scope overflow.
+
+### Treat two simultaneous edit intents for the same file as a high-confidence conflict risk. (line 2409)
+
+Contract: Given two live sessions with edit intent on the same path, when Glasshouse reports the conflict, it names the overlap as a direct file overlap and treats it as high-confidence risk, while preserving that the operation is still allowed.
+
+State: **COMPLETE** — ruled 2026-09-03 by the orchestrator. Production: `firewall/adapter.rs :: OverlapKind`, `:: OverlapKind::describe`, `commands/hook.rs :: edit_intent_conflict`. Regression: `edit_intent::a_conflict_is_named_a_direct_file_overlap_and_says_semantic_overlap_is_not_assessed`, `::a_second_session_editing_the_same_file_is_told_who_holds_it`, `::a_conflict_never_denies_the_operation`.
+
+Limits: `DirectFile` is the only producible kind, and the confidence is a fixed label rather than a computed score — deliberately. See the ruling below.
+
+### Show the user which files caused a conflict warning, and distinguish direct file overlap from broader semantic overlap. (line 2410)
+
+Contract: Given a reported conflict, when it is shown to the user, the model, or `glasshouse sessions`, Glasshouse names it a direct file overlap and states plainly that broader semantic overlap is not assessed, using the same words in every reader, while inferring nothing from file contents, names, or imports.
+
+State: **COMPLETE** — ruled 2026-09-03 by the orchestrator. Production: `firewall/adapter.rs :: OverlapKind` and its `describe`, `commands/hook.rs :: edit_intent_conflict`, `commands/sessions.rs :: claims_block`.
+
+Mutation `direct-overlap-classification`: `OverlapKind::DirectFile.describe()` → `OverlapKind::Semantic.describe()` — **KILLED** by `a_conflict_is_named_a_direct_file_overlap_and_says_semantic_overlap_is_not_assessed`. The quoted failure is the **user-facing sentence**, not the enum: *"src/main.rs is already claimed by session 8b7194e7fe14 (since just now) (a semantic overlap). This is advice, not a lock — the edit is going ahead."* That was the packet's explicit requirement — kill it at the surface a person reads.
+
+Limits: `OverlapKind::Semantic` is **never constructed in this build**; nothing infers semantic overlap from file names, imports or contents. The variant exists so the distinction is nameable, which is what line 2410 asks for.
+
+## The ruling: the shape was copied, not invented
+
+You need two overlap kinds to *distinguish* them and only one has a producer — and this project had already solved that exact problem. `OverlapKind::{DirectFile, Semantic}` mirrors `memory::FileAssociation::{Observed, Referenced}`, where `Referenced` is deliberately unreachable and `design-decisions.md` says why: inferring it would produce a confident association from a name mentioned in passing, and an advisory signal is worse than none when it is stale. The packet named that precedent and made *"stop if you are about to infer semantic overlap"* a stop condition rather than a preference. **No scoring function, no threshold, no trait** — one `describe()` method is the single place each kind's wording lives, which is also what keeps the two readers from drifting: `hook.rs` and `sessions.rs` both call it rather than each spelling the classification out.
+
+Two things the worker did that are worth recording:
+
+1. **It confirmed the precedent empirically rather than assuming it transfers.** An unconstructed `pub` variant in a `pub mod` of the library crate does not trip `dead_code` — checked with `cargo clippy -p glasshouse --lib -- -D warnings` rather than inferred from `Referenced` sitting unconstructed elsewhere.
+2. **It found a silent-breakage interaction and designed around it.** The pre-existing `the_session_overview_shows_active_claims` counts every line after the `CLAIMED BY` header and asserts `== 2`; appending the classification as a trailing line would have broken it quietly. The classification is appended **in-row**, so the row count is unchanged and both the new test and the old one hold.

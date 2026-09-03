@@ -285,6 +285,36 @@ fn a_second_session_editing_the_same_file_is_told_who_holds_it() {
     assert!(claims.iter().all(|claim| claim.path == "src/main.rs"));
 }
 
+/// Map lines 2409-2410: the same-path collision the hook detects is named as
+/// a direct file overlap and treated as the high-confidence case, and the
+/// message says plainly that broader semantic overlap is not assessed.
+#[test]
+fn a_conflict_is_named_a_direct_file_overlap_and_says_semantic_overlap_is_not_assessed() {
+    let fixture = Fixture::new();
+    let first = running_session(&fixture.runtime);
+    let second = running_session(&fixture.runtime);
+    let event = write_event(&fixture.root, "src/main.rs");
+
+    fixture.hook(Some(&first), &event);
+    let reported = fixture.hook(Some(&second), &event);
+    let message = reported["systemMessage"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the conflict must be surfaced: {reported}"));
+
+    assert!(
+        message.contains("direct file overlap"),
+        "the overlap must be named: {message}"
+    );
+    assert!(
+        message.contains("high-confidence"),
+        "line 2409's own word must appear: {message}"
+    );
+    assert!(
+        message.contains("semantic overlap is not assessed"),
+        "line 2410's distinction must be stated, not merely absent: {message}"
+    );
+}
+
 /// A session's own earlier intent is not a conflict with itself.
 #[test]
 fn a_session_does_not_conflict_with_its_own_claim() {

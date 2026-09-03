@@ -151,16 +151,34 @@ fn claims_block(store: &SessionStore<'_>) -> anyhow::Result<Option<String>> {
         .max()
         .unwrap_or("PATH".len());
 
+    // `active_claims` is `ORDER BY path`, so a path more than one session
+    // holds is already adjacent here — this only counts rows per path, so a
+    // row on such a path can say so. Map line 2410, same words as the hook
+    // (`commands::hook::edit_intent_conflict`): `OverlapKind::describe` is
+    // the one place the vocabulary lives.
+    let mut per_path: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    for claim in &claims {
+        *per_path.entry(claim.path.as_str()).or_insert(0) += 1;
+    }
+
     let mut out = String::new();
     let _ = writeln!(out, "{:<12}  {:<path_width$}  SINCE", "CLAIMED BY", "PATH");
     for claim in &claims {
-        let _ = writeln!(
+        let _ = write!(
             out,
             "{:<12}  {:<path_width$}  {}",
             crate::commands::shared::short_id(&claim.session_id),
             claim.path,
             crate::commands::shared::format_age(claim.claimed_at),
         );
+        if per_path.get(claim.path.as_str()).copied().unwrap_or(0) > 1 {
+            let _ = write!(
+                out,
+                "  ({})",
+                glasshouse::firewall::adapter::OverlapKind::DirectFile.describe(),
+            );
+        }
+        let _ = writeln!(out);
     }
     Ok(Some(out))
 }

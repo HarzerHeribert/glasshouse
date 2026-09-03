@@ -2406,8 +2406,8 @@ Edit intent (Maybe B)
 
 Conflict prediction (Maybe C)
 
-☐ Treat two simultaneous edit intents for the same file as a high-confidence conflict risk.
-☐ Show the user which files caused a conflict warning, and distinguish direct file overlap from broader semantic overlap.
+☑ Treat two simultaneous edit intents for the same file as a high-confidence conflict risk.
+☑ Show the user which files caused a conflict warning, and distinguish direct file overlap from broader semantic overlap.
 
 Orchestrator handling (Maybe H)
 

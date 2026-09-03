@@ -848,10 +848,15 @@ fn edit_intent_conflict(
         conflicts = notices.len(),
         "edit intent: another session already claims a file this one is about to change"
     );
+    // Map lines 2409-2410: every conflict this build can detect is a same-path
+    // collision, so it is named as one — `OverlapKind::describe` is the one
+    // place that wording lives, and `commands::sessions::claims_block` reads
+    // it too rather than spelling it out a second time.
     Some(format!(
-        "Glasshouse file coordination: {}. This is advice, not a lock — the edit is \
+        "Glasshouse file coordination: {} ({}). This is advice, not a lock — the edit is \
          going ahead. Consider coordinating before overwriting shared work.",
-        notices.join("; ")
+        notices.join("; "),
+        glasshouse::firewall::adapter::OverlapKind::DirectFile.describe(),
     ))
 }
 

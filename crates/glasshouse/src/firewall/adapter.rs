@@ -183,6 +183,49 @@ pub fn parse_pre_tool_use_event(bytes: &[u8]) -> Result<PreToolUseEvent, serde_j
     serde_json::from_slice(bytes)
 }
 
+/// The two kinds of overlap Glasshouse's conflict detection can name between
+/// two live sessions' edit intent — map lines 2409–2410.
+///
+/// Mirrors [`crate::memory::FileAssociation`]: one kind has a producer today
+/// and the other does not, and the second is not invented to fill the gap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverlapKind {
+    /// Two live sessions hold intent, or a claim, on the exact same path —
+    /// compared by exact string equality on the canonical spelling, same as
+    /// `memory_files`. The only kind this build detects: a same-path
+    /// collision is not a coincidence, which is what makes it the
+    /// high-confidence case map line 2409 names.
+    DirectFile,
+    /// Two sessions' work is related without touching the same path — a
+    /// shared interface, adjacent modules, a caller and its callee.
+    ///
+    /// **Deliberately unreachable.** Nothing on the conflict path reads a
+    /// file's contents, name, or imports to guess at relatedness — the same
+    /// reasoning `design-decisions.md`'s *"A file association is observed,
+    /// never inferred"* gives for `FileAssociation::Referenced`: a
+    /// confident-looking signal built from an inference is worse than no
+    /// signal when the inference is wrong. The variant stays so line 2410's
+    /// *"distinguish"* has something to distinguish from, and so a future
+    /// producer that can detect this honestly lands beside `DirectFile`
+    /// rather than overloading it.
+    Semantic,
+}
+
+impl OverlapKind {
+    /// The one description both `glasshouse hook` and `glasshouse sessions`
+    /// use for this kind of overlap, so the two readers never disagree about
+    /// the words for the same fact.
+    pub fn describe(self) -> &'static str {
+        match self {
+            OverlapKind::DirectFile => {
+                "a direct file overlap — the high-confidence conflict-risk case; \
+                 broader semantic overlap is not assessed"
+            }
+            OverlapKind::Semantic => "a semantic overlap",
+        }
+    }
+}
+
 /// The `permissionDecision` every response this module builds carries — map
 /// line 2405's soft-coordination constraint, as one constant so that
 /// "Glasshouse never blocks an edit" is a single token a reader can check

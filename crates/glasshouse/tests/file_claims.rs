@@ -677,6 +677,52 @@ fn the_session_overview_shows_active_claims() {
     assert_eq!(claimed.len(), 2, "{overview}");
 }
 
+/// Map lines 2409-2410, read from `glasshouse sessions` rather than the hook:
+/// two claims on one path are named the same way there — one vocabulary, not
+/// two — while a path only one session holds says nothing about overlap at
+/// all.
+#[test]
+fn the_session_overview_names_a_shared_path_a_direct_file_overlap() {
+    let fixture = Fixture::new();
+    let mine = running_session(&fixture.runtime);
+    let theirs = running_session(&fixture.runtime);
+    let alone = running_session(&fixture.runtime);
+
+    fixture.ok(
+        &fixture.root,
+        &["claim", "src/main.rs", "--session", mine.as_str()],
+    );
+    fixture.ok(
+        &fixture.root,
+        &["claim", "src/main.rs", "--session", theirs.as_str()],
+    );
+    fixture.ok(
+        &fixture.root,
+        &["claim", "src/lib.rs", "--session", alone.as_str()],
+    );
+
+    let overview = fixture.ok(&fixture.root, &["sessions"]);
+    let shared: Vec<&str> = overview
+        .lines()
+        .filter(|line| line.contains("src/main.rs"))
+        .collect();
+    assert_eq!(shared.len(), 2, "{overview}");
+    for line in shared {
+        assert!(line.contains("direct file overlap"), "{line}");
+        assert!(line.contains("high-confidence"), "{line}");
+    }
+
+    let solo: Vec<&str> = overview
+        .lines()
+        .filter(|line| line.contains("src/lib.rs"))
+        .collect();
+    assert_eq!(solo.len(), 1, "{overview}");
+    assert!(
+        !solo[0].contains("overlap"),
+        "a path only one session holds is not an overlap: {overview}"
+    );
+}
+
 /// *"When nothing is claimed, print nothing"* — a project that does not use
 /// claims sees the listing it always saw.
 #[test]

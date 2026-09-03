@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1284 closed · 80 active committed open (94%)** — across 27 phases.
+**1286 closed · 78 active committed open (94%)** — across 27 phases.
 
 Not in the work queue: **7 deferred gate criteria** (Phase 52, Phase 53) awaiting a user decision, and **229 parked experimental lines**. They are visible in the map; they are not release-blocking work.
 
@@ -44,9 +44,9 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 59 | Decompression: the code's physical shape catches up with its architecture | **2** | 6 | `2043` |
 | Phase 33B | Reliability-adjusted agent performance | **3** | 11 | `1345` |
 | Phase 35B | Candidate scoring | **3** | 22 | `1523` |
+| Phase 60 | Parallel-session file coordination | **3** | 13 | `2374` |
 | Phase 21E | Decision ladder and conflict handling | **4** | 8 | `907` |
 | Phase 31 | Compaction-aware behavior | **5** | 2 | `1167` |
-| Phase 60 | Parallel-session file coordination | **5** | 11 | `2374` |
 | Phase 21G | Memory revalidation | **6** | 3 | `941` |
 | Phase 32A | Unified quota and capacity model | **7** | 14 | `1196` |
 | Phase 9K | Harness-aware response profiles | **8** | 29 | `578` |
@@ -58,7 +58,7 @@ closures are usually at the top. Open the map at the line number given.
 
 Every phase with **three or fewer** open lines, quoted verbatim. These are
 where a single package finishes a phase, so they are listed here and the
-other ~55 open lines are not.
+other ~50 open lines are not.
 
 For any other phase: `scripts/discover.py --phase <id>` prints its open
 lines and evidence together. **Do not open the 178 KB map to read them.**
@@ -161,6 +161,12 @@ these unwrapped.
 - **1534** ☐ Include context quality in candidate scoring.
 - **1535** ☐ Include prompt-cache temperature in candidate scoring.
 - **1545** ☐ Include cache affinity and the distinction between warm, cold, and unknown observations.
+
+### Phase 60 — Parallel-session file coordination  (3 open, 13 closed)
+
+- **2414** ☐ Notify the orchestrator when two workers are likely to touch the same files.
+- **2415** ☐ Allow the orchestrator to serialize only the conflicting portion of otherwise parallel tasks.
+- **2416** ☐ Keep conflict handling transparent so the user can inspect why the orchestrator changed a worker's plan.
 
 ## Practice sections, by number
 
