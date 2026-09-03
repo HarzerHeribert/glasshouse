@@ -658,14 +658,23 @@ class RealAcceptanceTests(unittest.TestCase):
         packet failing is the rule working, not a regression — but an
         acceptance test asserting "a real packet passes" has to name one that
         is real *today*.
+
+        The pin is expected to move, and moving it is not a regression: a
+        packet names production files by path, so any decomposition that
+        splits one of those files makes every older packet naming it fail
+        `yours-paths-exist` — correctly. `packet-gateway-evidence.md` was the
+        exemplar until Phase 59 split `routing/evidence.rs`,
+        `routing/interactive.rs`, `gateway/session.rs` and `harness/pairing.rs`
+        out from under it. When this test goes red, check that the named
+        packet is stale before suspecting the validator.
         """
-        packet = SIBLING_GLASSHOUSE / ".agent-runtime" / "packet-gateway-evidence.md"
+        packet = SIBLING_GLASSHOUSE / ".agent-runtime" / "packet-edit-intent.md"
         if not packet.exists():
             self.skipTest("the current exemplar packet is not on this machine")
         result = subprocess.run(
             [sys.executable, str(REPO_ROOT / "scripts" / "validate_round.py"),
              "--map", str(SIBLING_GLASSHOUSE / "docs" / "product" / "capability-map.md"),
-             ".agent-runtime/packet-gateway-evidence.md"],
+             ".agent-runtime/packet-edit-intent.md"],
             capture_output=True, text=True, cwd=str(SIBLING_GLASSHOUSE),
         )
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)

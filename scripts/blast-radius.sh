@@ -281,7 +281,33 @@ printf '  %d symbol(s) kept, %d dropped as too generic (fan-out > %d)\n' \
 # ---- 3. map files -> cargo test targets ------------------------------------
 # crates/<pkg>/tests/<name>.rs  -> --test <name>
 # crates/<pkg>/src/main.rs      -> --bin <pkg>
+# binary-crate modules          -> --bin <pkg>   (see binary_crate_pkg below)
 # crates/<pkg>/src/**.rs        -> --lib, filtered by module path
+
+# A src file under a top-level module that main.rs declares and lib.rs does not
+# is BINARY-crate code, and `cargo test --lib <that module>` selects ZERO tests
+# there. A filter matching nothing is indistinguishable from a pass (§68), so
+# before this function every change under such a module got no coverage at all
+# while the gate reported green. GH-DECOMP-MAIN created 21 of those files in
+# `commands/` in one morning, and `api/` had seven already; GH-CLAIMS-AF hit it
+# and ran `--bin glasshouse` by hand. Echoes the package name when the file
+# belongs to the binary crate, so the caller can ask for `--bin` instead.
+binary_crate_pkg() {  # <src-file>; echoes <pkg>, or returns 1
+  local f="$1" pkg top
+  case "$f" in crates/*/src/*/*) : ;; *) return 1 ;; esac
+  pkg="$(echo "$f" | cut -d/ -f2)"
+  top="$(echo "$f" | sed -E 's#^crates/[^/]+/src/##' | cut -d/ -f1)"
+  [ -n "$top" ] && [ -f "crates/$pkg/src/main.rs" ] || return 1
+  grep -qE "^[[:space:]]*(pub )?mod ${top};" "crates/$pkg/src/main.rs" || return 1
+  # Declared in BOTH: the lib copy is the one `--lib` compiles and runs, so the
+  # module is not binary-only and the existing --lib filter is correct.
+  if [ -f "crates/$pkg/src/lib.rs" ] &&
+     grep -qE "^[[:space:]]*(pub )?mod ${top};" "crates/$pkg/src/lib.rs"; then
+    return 1
+  fi
+  printf '%s\n' "$pkg"
+}
+
 LIB=0; declare -a TESTS=() BINS=() FILTERS=()
 while read -r hit; do
   [ -n "$hit" ] || continue
@@ -296,6 +322,9 @@ while read -r hit; do
   case "$hit" in
     crates/*/src/main.rs) BINS+=("$(echo "$hit" | cut -d/ -f2)") ;;
     crates/*/src/*.rs|crates/*/src/**/*.rs)
+      if _binpkg="$(binary_crate_pkg "$hit")"; then
+        BINS+=("$_binpkg"); continue
+      fi
       LIB=1
       # src/gateway/session.rs -> gateway::session ; src/foo.rs -> foo
       m="$(echo "$hit" | sed -E 's#^crates/[^/]+/src/##; s#\.rs$##; s#/mod$##; s#/#::#g')"
@@ -333,7 +362,7 @@ most_specific_integration_target() {  # <src-file> on stdout if one exists
   return 1
 }
 
-declare -a TARGETED_TESTS=() TARGETED_FILTERS=()
+declare -a TARGETED_TESTS=() TARGETED_FILTERS=() TARGETED_BINS=()
 for f in "${FILES[@]}"; do
   # Same rule as above: only crates/<pkg>/tests/<name>.rs is an integration crate.
   if [[ "$f" =~ ^crates/[^/]+/tests/[^/]+\.rs$ ]]; then
@@ -344,6 +373,17 @@ for f in "${FILES[@]}"; do
   case "$f" in
     crates/*/src/main.rs) : ;;  # a bin's own target isn't in --targeted's promise; see the header
     crates/*/src/*.rs)
+      # Binary-crate code: `--lib <module>` selects nothing there, so --targeted
+      # asks for `--bin <pkg>` instead. This DOES widen --targeted's promise
+      # past "no bin targets" -- deliberately, ruled at integration 2026-09-03:
+      # the alternative is a filter that matches zero tests and reads as green,
+      # and `--bin glasshouse` is 85 tests in about 7 seconds. A change to
+      # main.rs itself still adds nothing (arm above): its own dispatch is
+      # covered whenever any commands/ file moves with it, and a main.rs-only
+      # change is argument wiring the full sweep carries.
+      if _tbinpkg="$(binary_crate_pkg "$f")"; then
+        TARGETED_BINS+=("$_tbinpkg"); continue
+      fi
       tgt="$(most_specific_integration_target "$f")" && [ -n "$tgt" ] && TARGETED_TESTS+=("$tgt")
       m="$(echo "$f" | sed -E 's#^crates/[^/]+/src/##; s#\.rs$##; s#/mod$##; s#/#::#g')"
       [ "$m" = "lib" ] || TARGETED_FILTERS+=("$m")
@@ -356,6 +396,7 @@ for f in "${FILES[@]}"; do
 done
 mapfile -t TARGETED_TESTS   < <(printf '%s\n' "${TARGETED_TESTS[@]-}"   | sort -u | sed '/^$/d')
 mapfile -t TARGETED_FILTERS < <(printf '%s\n' "${TARGETED_FILTERS[@]-}" | sort -u | sed '/^$/d')
+mapfile -t TARGETED_BINS    < <(printf '%s\n' "${TARGETED_BINS[@]-}"    | sort -u | sed '/^$/d')
 TARGETED_LIB=0
 [ ${#TARGETED_FILTERS[@]} -gt 0 ] && TARGETED_LIB=1
 
@@ -368,6 +409,13 @@ TARGETED_MATCHED_COUNT=0
 for t in "${TESTS[@]-}"; do
   for tt in "${TARGETED_TESTS[@]-}"; do
     if [ "$t" = "$tt" ]; then TARGETED_MATCHED_COUNT=$((TARGETED_MATCHED_COUNT+1)); break; fi
+  done
+done
+# A bin the targeted trace now DOES run is not skipped. Only a main.rs-only
+# change still counts as skipped, which is what the comment above describes.
+for b in "${BINS[@]-}"; do
+  for tb in "${TARGETED_BINS[@]-}"; do
+    if [ "$b" = "$tb" ]; then TARGETED_MATCHED_COUNT=$((TARGETED_MATCHED_COUNT+1)); break; fi
   done
 done
 SKIPPED_FULL_TARGET_COUNT=$(( FULL_TRACE_TARGET_COUNT - TARGETED_MATCHED_COUNT ))
@@ -523,6 +571,10 @@ if [ "$LIST" -eq 1 ]; then
   echo
   printf '\033[1m=== --targeted preview ===\033[0m\n'
   [ "$TARGETED_LIB" -eq 1 ] && printf '  --lib  filters: %s\n' "${TARGETED_FILTERS[*]}"
+  for b in "${TARGETED_BINS[@]-}"; do
+    [ -n "$b" ] || continue
+    printf '  --bin %s\n' "$b"
+  done
   for t in "${TARGETED_TESTS[@]-}"; do
     [ -n "$t" ] || continue
     printf '  --test %s\n' "$t"
@@ -668,6 +720,10 @@ if [ "$TARGETED" -eq 1 ]; then
       run_target "cargo test --lib $fl" --lib "$fl" || rc=1
     done
   fi
+  for b in "${TARGETED_BINS[@]-}"; do
+    [ -n "$b" ] || continue
+    run_target "cargo test --bin $b" --bin "$b" || rc=1
+  done
   for t in "${TARGETED_TESTS[@]-}"; do
     [ -n "$t" ] || continue
     run_target "cargo test --test $t" --test "$t" || rc=1
