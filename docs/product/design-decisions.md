@@ -8512,3 +8512,3326 @@ with it.
 
     or
     explicitly known and not imminent
+
+## Trims: memory and session module docs — history moved out of comments by `GH-TRIM-MEMORY-SESSION-DOCS`, 2026-09-05
+
+### `memory/policy.rs` — module doc
+
+    //! What the memory table refuses to hold.
+    //!
+    //! Phase 20 states four properties of durable project memory as prohibitions:
+    //! no raw conversation filler, no temporary step-by-step plans unless they
+    //! became an accepted constraint or decision, no obvious source-code facts,
+    //! and a preference for information whose rediscovery would be expensive.
+    //!
+    //! # Only two of the four are enforced here, deliberately
+    //!
+    //! The first two are *mechanically decidable* from the text itself, so they
+    //! are enforced at the one place every memory must pass through:
+    //! [`crate::memory::MemoryStore::record`] refuses them, and the refusal is a
+    //! typed error rather than a silent drop.
+    //!
+    //! The other two are not decidable here and are not faked. Whether a statement
+    //! is an "obvious source-code fact", or whether rediscovering it "would
+    //! require significant exploration", is a judgment about the project that only
+    //! the producer of the memory can make — Phase 21's extractor, or a person. A
+    //! keyword heuristic pretending to make that call would refuse real memories
+    //! and admit fake ones, and would produce a test that passed for the wrong
+    //! reason. This module's job is to be a floor that cannot be argued with, not
+    //! a classifier.
+    //!
+    //! So [`MemoryRefusal`] is a **closed, conservative** guard. It refuses text
+    //! that is *nothing but* an acknowledgement, and text that is *unambiguously*
+    //! an ordered plan. Anything it is unsure about, it admits — the cost of a
+    //! wrongly-admitted memory is one bad search result, and the cost of a wrongly
+    //! refused one is knowledge that is gone.
+
+### `memory/policy.rs` — half_life_days
+
+    /// How many days it takes a memory of this authority to decay halfway from
+    /// full weight to [`RETRIEVAL_WEIGHT_FLOOR`] — Phase 21D line 898's *"age
+    /// never overrides authority"*, made into policy instead of a magic number
+    /// inside the ranker.
+    ///
+    /// A full `match` on every class, never a lookup table with a default: a
+    /// class added to [`MemoryAuthority`] must be given an explicit rate here
+    /// rather than silently inheriting one meant for something else.
+    ///
+    /// - [`MemoryAuthority::Invariant`] has no half-life at all — see
+    ///   [`retrieval_weight`], which returns full weight for it before this is
+    ///   ever consulted. Line 898: *"do not make age alone invalidate a genuine
+    ///   invariant."*
+    /// - [`MemoryAuthority::Constraint`] decays slowly: it is still a currently
+    ///   binding limit, and a limit does not stop applying merely because time
+    ///   passed.
+    /// - [`MemoryAuthority::Decision`] and unclassified memories decay at the
+    ///   map's own "ordinary decision" rate (line 899).
+    /// - [`MemoryAuthority::Preference`], [`MemoryAuthority::Hypothesis`] and
+    ///   [`MemoryAuthority::Idea`] decay fastest (line 900) — they were never
+    ///   binding, so staleness costs nothing to make visible quickly.
+    /// - [`MemoryAuthority::Historical`] decays at the ordinary rate: it already
+    ///   explains rather than directs, so there is no faster-decaying class
+    ///   below it that the map names, and treating it as ordinary is the
+    ///   conservative middle rather than an invented rule.
+
+### `memory/policy.rs` — phase_penalty
+
+    /// Phase 21F lines 931 and 933's project-phase signal, folded into decay as
+    /// an extra multiplier rather than a second independent check.
+    ///
+    /// This module does not read the project's *current* phase or architecture
+    /// — that is line 932, and map lines 828/829/862 already settled that a
+    /// storage-layer heuristic for "does this still match the repository"
+    /// refuses real memories and admits fake ones. What it can honestly do with
+    /// what a memory itself recorded is this: a decision made in an earlier,
+    /// more provisional phase and never rechecked since is preferred less than
+    /// one that has been checked at all, whatever phase that check happened
+    /// in — which is why reaffirming ([`super::store::MemoryStore::reaffirm`])
+    /// clears the penalty entirely rather than scaling it down. [`ProjectPhase`]
+    /// is a fixed, ordered vocabulary (Phase 21B), not a live reading of the
+    /// repository, so ranking by it is ranking by what was stored, not by an
+    /// invented judgement about where the project is now.
+    ///
+    /// [`ProjectPhase::Prototype`] is line 933's "exploratory session," by that
+    /// variant's own doc comment. [`ProjectPhase::Alpha`] gets the milder
+    /// version line 931 also asks for. [`ProjectPhase::Beta`],
+    /// [`ProjectPhase::Production`], [`ProjectPhase::Migration`] and unrecorded
+    /// phase are not judged at all — a decision with no evidence it was made
+    /// early is not assumed to be provisional.
+
+### `memory/policy.rs` — retrieval_weight
+
+    /// The retrieval-weight multiplier a memory of this authority, age,
+    /// validation history and originating project phase should carry — Phase
+    /// 21D and Phase 21F.
+    ///
+    /// `1.0` means no decay at all. Applied by [`super::store::MemoryStore::search`]
+    /// to the raw BM25 score of every current result, so an old, low-authority
+    /// memory that matches the query text well still ranks below a fresh,
+    /// high-authority memory that matches it poorly — see that method's own
+    /// documentation for why the multiplier is applied there and not baked into
+    /// the SQL.
+    ///
+    /// # Why the reference point is `last_validated_at.unwrap_or(created_at)`
+    ///
+    /// Line 901: *"allow recently reaffirmed memories to regain retrieval weight
+    /// without changing their original creation timestamp."* Reaffirming
+    /// ([`super::store::MemoryStore::reaffirm`]) writes only
+    /// [`super::store::MemoryRecord::last_validated_at`], so decay has to measure
+    /// age from whichever of the two is more recent information about when this
+    /// memory was last known to be true — and a memory that has never been
+    /// reaffirmed has no more recent information than its creation. This is also
+    /// line 899's *"when they have not been reaffirmed"*: a memory that has been
+    /// keeps its full weight for a fresh interval measured from the reaffirming,
+    /// not from when it was first written down. Line 931 rides the same
+    /// mechanism: a validated memory always has a reference point at least as
+    /// recent as an otherwise-identical unvalidated one, so it can never rank
+    /// below it at equal relevance and authority.
+    ///
+    /// # Why age never invalidates an invariant
+    ///
+    /// Line 898. Checked before anything else, and unconditionally: no age, no
+    /// validation history, no project phase, and no half-life computation can
+    /// move an invariant's weight away from `1.0`.
+    ///
+    /// # Why the phase penalty multiplies the decay term, not the final weight
+    ///
+    /// [`phase_penalty`] is folded in *before* [`RETRIEVAL_WEIGHT_FLOOR`] is
+    /// applied, so the floor's own guarantee — decay demotes, it never makes a
+    /// memory unfindable — still holds for a memory the phase penalty also
+    /// applies to.
+
+### `memory/store.rs` — module doc
+
+    //! The `memories` table, and the only way to read or write it.
+    //!
+    //! # Project isolation
+    //!
+    //! Enforced in three independent places, for the reason each is different:
+    //!
+    //! - **At the file**, because [`ProjectMemory::open`] goes through
+    //!   `database::open`, which derives the path from the runtime and
+    //!   refuses a database bound to another project outright.
+    //! - **At the row**, by the two SQLite triggers migration 4 creates. A query
+    //!   can forget to filter by `project_id`; a `BEFORE INSERT` / `BEFORE UPDATE`
+    //!   guard cannot be forgotten, and it holds against any writer, including one
+    //!   written later by someone who never read this module.
+    //! - **At the read boundary**, by [`MemoryStore::get`], which compares the
+    //!   stored identifier against the active project before handing a record
+    //!   back.
+    //!
+    //! The third is not redundant with the second, for the reason
+    //! [`crate::session::store`] gives about resume: the trigger governs what this
+    //! database will *accept* from now on, while the boundary check governs what
+    //! Glasshouse will *act on* — including a row that predates a guard, arrived
+    //! through a restored backup, or was written by a build whose triggers
+    //! differed. Retrieval is the operation that turns a stored row into something
+    //! an agent will treat as true, so it verifies rather than assumes.
+    //!
+    //! # No credentials
+    //!
+    //! There is no column here for a token, a key, or a provider secret, and there
+    //! is no field for one either. The project database is checked into nothing
+    //! and backed up casually; the operating system's secret storage
+    //! ([`crate::secret`]) is where a credential lives. `body` is free text an
+    //! extractor produced, which is exactly why nothing may *route* a credential
+    //! into it.
+
+### `memory/store.rs` — normalize_observed_path
+
+    /// The one spelling `memory_files.path` accepts, or `None`.
+    ///
+    /// **Migration 17's column contract, enforced where it can be enforced.** The
+    /// column is repo-relative, `/`-separated, UTF-8 and never absolute; the
+    /// schema can only refuse the empty string, because `CHECK (path NOT LIKE
+    /// '/%')` would miss `C:\...` and a `CHECK` forbidding `\` or `:` would
+    /// reject file names that are legal on Unix. So the contract is a function,
+    /// and every writer goes through it.
+    ///
+    /// # Why refusing beats normalising here
+    ///
+    /// Two spellings of one file become two rows, and the exact-match index then
+    /// silently misses one of them — a missed association is invisible, where a
+    /// wrong one is at least wrong out loud. So anything this cannot bring to the
+    /// canonical spelling with certainty is dropped rather than guessed at:
+    ///
+    /// - `\` becomes `/`, because git's own index never writes `\` and a
+    ///   Windows-shaped path reaching here means some other producer wrote it;
+    /// - a leading `./` is stripped, and repeated or trailing separators are
+    ///   collapsed, because they name the same file;
+    /// - an **absolute** path is refused — it is not repo-relative, and the
+    ///   project root is exactly where the `/var` versus `/private/var` class of
+    ///   ambiguity lives, which is the reason this column stores no root at all;
+    /// - a `..` component is refused, because it can leave the repository and no
+    ///   normalisation here can tell whether it did;
+    /// - an empty result is refused, which is what `.` and `./` collapse to.
+    ///
+    /// The observed producer never exercises any of this: git's index is already
+    /// UTF-8, repo-relative and `/`-separated on every platform, Windows
+    /// included, and `checkpoint::git::parse_index` reads it with no separator
+    /// translation. This exists for the producers that come after it.
+
+### `memory/store.rs` — DecisionProvenance
+
+    /// Why a durable decision was made, and what it assumed — Phase 21B.
+    ///
+    /// # Why these are fields and not one blob of prose
+    ///
+    /// The memory-validity principle is that *"an old decision is not still
+    /// correct merely because it was remembered"*. Deciding whether a decision
+    /// still holds means checking its assumptions against the project as it is
+    /// now, and that is only mechanisable if the assumptions are separable: a
+    /// scale assumption is rechecked against a benchmark, a security assumption
+    /// against a new requirement, a compatibility assumption against a platform
+    /// bump. Phase 21C is the phase that does the rechecking; this is the shape
+    /// it needs to find.
+    ///
+    /// # `None` means "not known", never "none"
+    ///
+    /// Every field is optional and absent is never the same as empty. A decision
+    /// that recorded no security assumption is a decision nobody asked that
+    /// question about; a decision that recorded *"none: this path handles no
+    /// user data"* has answered it. Collapsing the two would make Phase 21B's
+    /// *"when they influenced the decision"* unrepresentable, and would make
+    /// [`DecisionProvenance::is_thin`] — which drives Phase 21B's
+    /// lower-confidence rule — meaningless.
+    ///
+    /// # Every field here is free text, and free text can hold a credential
+    ///
+    /// The same statement `subject` and `body` carry, recorded in migration 6
+    /// rather than left to be inferred. The control is on the producer side:
+    /// `super::extract::schema::judge` screens each emitted element **whole**,
+    /// before reading any field, so a field added to this struct is covered
+    /// automatically. [`DecisionProvenance::source_excerpt`] is the sharpest of
+    /// them because it is verbatim session text.
+
+### `memory/store.rs` — supersede_with_reason
+
+        /// [`MemoryStore::supersede`], recording **why** — map line 925.
+        ///
+        /// # Why the reason is a separate door rather than a changed signature
+        ///
+        /// Superseding without a reason stays legal and stores `NULL`: the map
+        /// asks that the reason be *recordable*, not that every supersession have
+        /// one, and Phase 22's `superseded_by` is already allowed to be absent for
+        /// the same kind of reason. Callers that have nothing to say keep calling
+        /// [`MemoryStore::supersede`] unchanged.
+        ///
+        /// # What happens to blank text, and why here rather than at the caller
+        ///
+        /// `Some("")` and `Some("   ")` are recorded as `None`. A reason that is
+        /// only whitespace is not a reason, and if it were stored the row would
+        /// read back as *"a reason was recorded"* to every consumer. Migration
+        /// 13's `CHECK` refuses `''` outright, so this is the trim that keeps a
+        /// blank `--reason` from being an error the user cannot act on.
+        ///
+        /// # The reason is operator text and never reaches SQL as text
+        ///
+        /// It is bound as parameter `?4` — never formatted into the statement —
+        /// and it is not logged. The `UPDATE` also keeps its `project_id`
+        /// predicate, so this cannot write across the project boundary even if a
+        /// caller somehow held a foreign identifier.
+
+### `memory/store.rs` — record_observed_files
+
+        /// Record which files were being worked on when `memories` were learned —
+        /// migration 17's `memory_files`, and the only writer of it.
+        ///
+        /// `paths` is
+        /// [`crate::checkpoint::WorkingTreeStatus::changed_files`]: what the git
+        /// index said differed from the working tree at the moment extraction
+        /// ran. Every row this writes carries
+        /// [`FileAssociation::Observed`] and **never anything stronger** — see
+        /// that variant, and migration 17's own text, for why *observed-dirty* is
+        /// not *explicitly referenced* and why writing the stronger word here
+        /// would invert map line 1294's rule rather than bend it.
+        ///
+        /// # An empty answer is an absence, never a row
+        ///
+        /// A clean tree writes nothing: no memory, no path, no empty-string path
+        /// standing in for "there were none". Neither does a path this build
+        /// cannot bring to the column's canonical spelling — see
+        /// [`normalize_observed_path`], which drops rather than guesses. The
+        /// count returned is rows written, so a caller that wants to know whether
+        /// anything was recorded can ask without querying the table back.
+        ///
+        /// # It is the cross product, and that is the signal rather than a defect
+        ///
+        /// Every memory here was extracted from one session, and the dirty set is
+        /// a property of that session and not of any one memory. Three memories
+        /// and twenty paths are sixty rows, each of them true: *"this was learned
+        /// while that file was being worked on."* A producer that could say more
+        /// than that does not exist in this build.
+        ///
+        /// # Failure is never the caller's problem
+        ///
+        /// Returns [`MemoryStoreError::Sql`] the way every other writer here
+        /// does, so a caller may log it — but a caller on the extraction path
+        /// should log and continue: the memories are already stored, and losing
+        /// their file association is strictly better than losing the session's
+        /// turn to a bookkeeping error.
+
+### `memory/rerank.rs` — module doc
+
+    //! Reranking the top lexical memory candidates by a cheap language model —
+    //! capability map lines 1089-1092 and 1094.
+    //!
+    //! # What this module refuses to be
+    //!
+    //! [`super::inject`]'s ladder — invariants and constraints first, then
+    //! failed attempts, then everything else — is settled and stays settled.
+    //! [`rerank`] never sees an invariant or a constraint: it is handed only
+    //! [`super::search::RetrievalResult::other`], the bucket [`super::inject`]
+    //! already treats as ordinary matches, and it reorders *within* that bucket
+    //! and nothing above it. Nothing here can promote a candidate past a rung
+    //! its own authority did not earn, for the same reason [`super::inject`]'s
+    //! own module doc gives: the ladder is a stable partition, and this is one
+    //! more pass over one partition of it.
+    //!
+    //! # Every failure is a bypass, never an error the session sees
+    //!
+    //! No `[memory] rerank_model` configured, fewer than two candidates, a model
+    //! that times out, refuses, or answers something this module cannot trust —
+    //! every one of these is [`RerankOutcome`] carrying a reason, and every one
+    //! of them leaves `candidates` in the lexical order they arrived in. A
+    //! reranker that could turn "the model was unreachable" into "no memory is
+    //! injected" would make Glasshouse's own memory less available exactly when
+    //! the network is least available — the shape `GH-LOCAL-REDUCER`'s own
+    //! posture (`docs/product/evidence/phase-58.md`) already refuses.
+    //!
+    //! # The reply is a JSON array of ids, and it is strictly parsed
+    //!
+    //! The model is not asked to write a memory —
+    //! [`super::extract::schema::PROMPT_CONTRACT`] is a different contract for a
+    //! different job — it is asked to return the ids it was given, reordered. So
+    //! the whole reply is one array of strings, and this module's own reply
+    //! parsing is stricter than [`super::extract::schema::parse`] in the one way
+    //! that matters here: an id the reply names that was never sent is not a memory
+    //! this module can classify as low-confidence and keep half of, the way a
+    //! malformed extraction field can — it is evidence the reply is not
+    //! answering about the candidates it was actually given, and the whole
+    //! reply is a bypass.
+
+### `memory/rerank.rs` — resolve_rerank_model
+
+    /// Resolve `[memory] rerank_model` into a callable model, or say `None`.
+    ///
+    /// The extraction seat's four steps (`docs/product/evidence/phase-9i.md`'s
+    /// `GH-ROUTED-EXTRACTION-CLIENT`) — consent, the local bypass, the choice,
+    /// the client — for `JobKind::Reranking`. Lives here, in the library, rather
+    /// than beside `main.rs::disposable_extraction_model`: [`super::inject::briefing`]
+    /// is reached from **two** doors, `main.rs::brief_launch_session` and
+    /// `crate::api::unix::select_memory`, and only the library crate is common
+    /// to both — `main.rs` is a separate binary target that cannot be called
+    /// from `crate::api`. `main.rs::disposable_rerank_model` is this function by
+    /// another name, kept there only as the thin call `brief_launch_session`
+    /// makes.
+    ///
+    /// # `None`, never a model whose calls would all fail
+    ///
+    /// Unlike [`super::extract::disposable::RoutedModel`]'s own "route, explain,
+    /// record, call nothing" posture for memory extraction's unconsented case
+    /// (Phase 9I line 534: durable evidence of what *would* have been chosen),
+    /// reranking has no such evidence requirement for a knob nobody set — see
+    /// map line 1090. So this returns `None` immediately when unconsented,
+    /// before any candidate, health read, or routing decision is built, rather
+    /// than returning a model that would only fail when called. `None` is also
+    /// the answer when a candidate could not be built, the router found none,
+    /// or the resolved client could not be built — every one of these is
+    /// `RerankOutcome::Bypassed` at [`rerank`]'s own call site, with the reason
+    /// [`super::extract::ModelError::Unavailable`] gives.
+    ///
+    /// # What this deliberately does not carry, unlike extraction's own seat
+    ///
+    /// No persisted cross-process health ([`crate::routing::free::FreePool::new`]
+    /// is the honest argument for a caller with no history — that type's own
+    /// doc comment), and no paced-request reservation claim. At most one
+    /// rerank call happens per briefing, so the pacing that protects a shared
+    /// free allowance under memory extraction's own dispatch volume is not
+    /// reused here; a Green follow-up if reranking's own volume ever earns it.
+    ///
+    /// No `session` parameter, unlike `main.rs::disposable_extraction_model`:
+    /// this function records nothing (see above), so it has nothing to key a
+    /// record by. `main.rs::disposable_rerank_model` keeps `session` in its own
+    /// signature, matching its sibling's shape, and does not pass it here.
+
+### `memory/export_local.rs` — module doc
+
+    //! `glasshouse memory export-local` — Phase 58 item 6, map line 2040: *"An
+    //! opt-in export of remembered constraints and failed approaches into a
+    //! marker-delimited block of the harness's native local instruction file,
+    //! gitignored by default, replacing only its own block on re-export."*
+    //!
+    //! # A sibling verb, not `export`
+    //!
+    //! [`super::export::TrackedKnowledge`] (`glasshouse memory export --tracked`)
+    //! is Phase 50's projection of decisions and constraints into
+    //! `.glasshouse/knowledge/`, a **tracked** directory reviewed through an
+    //! ordinary Git workflow. This module writes a different file, for a
+    //! different reader, under a different verb: `CLAUDE.local.md` is the
+    //! harness's own **local**, conventionally untracked instruction file, read
+    //! at launch rather than reviewed in a diff. The two share no flag and no
+    //! destination — the orchestrator's ruling on the worker's blocked report of
+    //! 2026-09-02, after the CLI's `Export` name turned out to already be Phase
+    //! 50's. Never merge them.
+    //!
+    //! # Why this reuses `inject`'s renderer rather than a copy
+    //!
+    //! `super::inject::render_entry` is already the format a session reads at
+    //! launch: the bracketed head (`[position/total standing kind=... authority=...
+    //! id=...]`) plus the quoted subject and body. Calling the same function here
+    //! means an exported entry and an injected one are, byte for byte, the same
+    //! shape — a reader who has seen one recognizes the other. `render_entry`,
+    //! `standing` and `quote` were private to `inject.rs`; this package's only
+    //! change to that file is widening the three to `pub(crate)`, a visibility
+    //! change and nothing else.
+    //!
+    //! # What never happens here
+    //!
+    //! Nothing in this module runs unless `glasshouse memory export-local` is
+    //! typed: no hook, no launch-time call, no timer. It reads
+    //! [`super::MemoryStore::binding`] and [`super::MemoryStore::current_of_kind`],
+    //! both of which already scope to the active project and to
+    //! [`super::MemoryStatus::Active`] — the same read boundary every other
+    //! memory command goes through. Every byte outside the marker block is
+    //! copied forward unchanged, and the user's own `.gitignore` is never opened
+    //! for writing, only read.
+
+### `memory/snapshot.rs` — module doc
+
+    //! The concise current-project snapshot agents ask for (Phase 26).
+    //!
+    //! Declared ahead of its implementation so that the module owning it never has
+    //! to edit `memory/mod.rs`, which another worker holds.
+    //!
+    //! # What "current" means here
+    //!
+    //! Only [`MemoryStatus::Active`] memories are current. A todo whose status is
+    //! [`MemoryStatus::NeedsReview`] or [`MemoryStatus::Conflicted`] is still open
+    //! work by [`MemoryStatus::is_open_work`], but this snapshot is stricter: it
+    //! is what an agent treats as settled project knowledge, and a memory under
+    //! review or in conflict with another is exactly the opposite of settled. So
+    //! every section here holds `Active` memories and nothing else — the resolved,
+    //! superseded, rejected, invalidated, needs-review and conflicted rows stay in
+    //! the database, queryable by id or by [`super::MemoryStore::with_status`],
+    //! and simply do not appear.
+    //!
+    //! # Budget, by construction
+    //!
+    //! [`snapshot`] takes a [`SnapshotBudget`] and honours it on every section
+    //! independently: a per-section entry cap, and a per-entry body length. A
+    //! project with five thousand memories and one with fifty produce
+    //! same-sized output. Nothing is silently dropped — a section that hit its
+    //! cap reports how many entries it left out ([`SnapshotSection::omitted`]),
+    //! and an entry whose body was cut records that it was
+    //! ([`SnapshotEntry::body_truncated`]).
+
+### `memory/extract/diagnostics.rs` — module doc
+
+    //! Extraction diagnostics — capability map line 1769: one JSON line per
+    //! extraction run, appended to `<state_dir>/memory-extraction.jsonl` only
+    //! when `[memory] extraction_diagnostics` is on
+    //! ([`crate::config::EffectiveConfig::memory_extraction_diagnostics`]).
+    //!
+    //! Modeled on [`crate::memory::rerank::append_diagnostics`]'s own shape —
+    //! one `create(true).append(true)` open and one `write_all`, fail-soft, a
+    //! path under `runtime.state_dir()` and therefore project-scoped — and on
+    //! that module's own `serde`-encoded record: this module, unlike
+    //! `crate::evaluation`, carries no pin against a general-purpose
+    //! serializer (verified: `memory::extract::schema` and
+    //! `memory::extract::model` already depend on `serde`/`serde_json` for the
+    //! extraction contract itself), so the line is encoded the same way
+    //! `rerank`'s is rather than hand-assembled.
+    //!
+    //! # What never reaches this file
+    //!
+    //! The prompt, a memory's body or subject, and a rejection's own free text
+    //! (a model's malformed reply, an unknown field value, a store's rendered
+    //! error) never appear here — only ids, the closed vocabulary words this
+    //! module maps each reason to, and counts. [`ExtractionOutcome`] itself
+    //! carries the prompt nowhere ([`super::Prompt`] has no accessor that would
+    //! let it), so the guarantee this module adds is narrower: every *reason*
+    //! recorded here is a fixed word or a schema field name, never a value
+    //! copied from the model's reply.
+
+### `memory/extract/lifecycle.rs` — module doc
+
+    //! Turning a session's recorded lifecycle events into something extraction
+    //! can read (Phase 21).
+    //!
+    //! # Why the event log, and not the terminal
+    //!
+    //! Phase 21 asks the extractor to be fed *"bounded session/event chunks"*.
+    //! The **event** half is what Glasshouse actually has after a turn ends: a
+    //! `glasshouse hook` process is a separate short-lived program with no access
+    //! to the interface's scrollback, and the project database is the only thing
+    //! both it and the interface can see.
+    //!
+    //! It is also the only source that is safe by construction. A hook payload
+    //! carries the user's prompt and the model's last message; Glasshouse's
+    //! handler drains that stream **unread**, and `lifecycle_events` has no
+    //! column a conversation could reach — migration 5 says so and
+    //! `the_hook_command_never_reads_its_payload` enforces it. So a chunk built
+    //! here cannot contain conversation text, because there is none to contain.
+    //!
+    //! **State the cost plainly, because it is the honest limit of this
+    //! path.** What an event chunk carries is the *shape* of a session — turns
+    //! starting and ending, how a turn ended, how much text was delivered and
+    //! from where, a process exiting, a gateway failing. That is enough for a
+    //! model to record a finding about how a session behaved and nowhere near
+    //! enough for it to recover why a decision was made. Until Glasshouse has a
+    //! richer source that does not read a conversation, automatic extraction is
+    //! bounded by this, and `glasshouse memory extract --activity` remains the
+    //! way to feed it something a person chose.
+    //!
+    //! # Why the range is computed from what survived the budget
+    //!
+    //! [`SessionChunk::build`] keeps the newest entries when the budget binds. A
+    //! provenance range naming events whose text never reached the model would be
+    //! a claim this module cannot support, so [`chunk_for_session`] narrows the
+    //! range to the entries that actually got in. See its implementation note.
+
+### `memory/extract/chunk.rs` — module doc
+
+    //! What the extractor is allowed to be shown: a bounded, scrubbed chunk.
+    //!
+    //! # One constructor, two guarantees
+    //!
+    //! [`SessionChunk::build`] is the only way to make one, and it does two
+    //! things no caller can skip:
+    //!
+    //! 1. **It bounds.** Phase 21 requires bounded session/event chunks "rather
+    //!    than entire unbounded session histories". A limit a caller passes is a
+    //!    limit a caller forgets, so the bound is applied here, three ways at
+    //!    once — a cap on entries, a cap on each entry, and a cap on the whole —
+    //!    and the third is the one that matters: without it, a thousand entries
+    //!    just under the per-entry cap is an unbounded chunk assembled out of
+    //!    bounded parts.
+    //!
+    //! 2. **It scrubs.** Every entry goes through
+    //!    [`super::credentials::scrub`] on the way in, so there is no
+    //!    `SessionChunk` anywhere in the program holding un-scrubbed text. That
+    //!    is what makes "the extractor is never fed credential material" a
+    //!    property of the type rather than a rule someone has to remember at
+    //!    every call site — and the prompt can only be built from this type.
+    //!
+    //! # Newest first, and why the tail is what survives
+    //!
+    //! When there is more activity than the budget allows, the **most recent**
+    //! entries are kept. A task's conclusion is at its end: what was decided,
+    //! what failed, what was agreed. The beginning is where the exploring
+    //! happened, and Phase 21A specifically does not want an idea discussed
+    //! early to arrive with the authority of a decision made late.
+    //!
+    //! # Nothing is dropped silently
+    //!
+    //! [`SessionChunk::dropped`], [`SessionChunk::truncated`] and
+    //! [`SessionChunk::redactions`] report exactly what the budget and the
+    //! scrubber removed. A chunk that lost half a session and says so is
+    //! evidence; one that lost half a session quietly is a bug that looks like a
+    //! result.
+
+### `session/recovery.rs` — module doc
+
+    //! What may happen to a task whose session died.
+    //!
+    //! Phase 45's three lines, and nothing else: resume a failed task in the same
+    //! native session when possible, hand it to a fresh session when appropriate,
+    //! and refuse to retry a destructive task on a different harness without
+    //! enough task-state information to know that is safe. [`plan`] is the single
+    //! decision point; it is pure, so a caller supplies everything it needs and
+    //! reads back exactly one of three outcomes.
+    //!
+    //! # What counts as "enough task-state information"
+    //!
+    //! Narrowly: a [`CheckpointRef`] and nothing else. A [`TaskState`] may also
+    //! carry an `event_history` — what the harness reported doing, turn by turn —
+    //! but [`plan`] never reads it when deciding whether a cross-harness retry is
+    //! safe. An event history records what happened to the *session*: turns
+    //! starting and ending, text arriving. It does not record what the *task* had
+    //! already done to the world, which is the only question a destructive retry
+    //! needs answered. Only a portable checkpoint answers it, and Phase 19 — which
+    //! produces checkpoints — is not implemented yet, so in this build the answer
+    //! is effectively always "no" for a destructive or unknown-kind cross-harness
+    //! retry. That is the correct outcome, not a gap: the capability map's line
+    //! asks Glasshouse to *avoid* the retry, and refusing does exactly that.
+
+### `session/runtime.rs` — module doc
+
+    //! Several live harness sessions at once.
+    //!
+    //! [`fn@crate::session::attach`] runs exactly one harness and gives it the user's
+    //! terminal for the whole of its life. That is the right shape for
+    //! `glasshouse launch` and the wrong shape for an interface that shows several
+    //! sessions: its input pump cannot be cancelled, so it relies on the process
+    //! exiting out from under it, and nothing else can have the keyboard meanwhile.
+    //!
+    //! [`SessionRuntime`] is the other shape. It owns any number of live
+    //! [`LiveSession`]s, each with its own reader thread draining the pseudo-
+    //! terminal into its own bounded [`Scrollback`]. Every session keeps running
+    //! whether or not anyone is looking at it, and focus is *only* a statement
+    //! about which one the keyboard reaches — changing it never touches a process.
+    //!
+    //! Two consequences worth being explicit about, because they are the whole
+    //! point:
+    //!
+    //! - **Output is never lost while a session is unfocused.** Each session's
+    //!   reader thread runs continuously and independently; the buffer is what the
+    //!   viewport reads from when the session is brought forward.
+    //! - **A session's exit is detected from the process, not from its output.** A
+    //!   harness that dies silently is noticed exactly as fast as one that prints a
+    //!   farewell, because [`SessionRuntime::poll_exits`] asks the process.
+
+### `session/runtime.rs` — USER_INPUT_PRECEDENCE
+
+    /// How long a person keeps the keyboard after putting something into a
+    /// session — capability map line 1719.
+    ///
+    /// For this long after a person's own input reaches a session, machine text
+    /// aimed at that same session is **refused**, and told why. A person and an
+    /// orchestrator addressing one harness are two hands on one keyboard, and the
+    /// harness cannot tell them apart: it sees one stream of bytes into one line
+    /// editor. This project has already paid for what happens when they collide —
+    /// see `SessionRuntime::deliver`, where *"a second message into a worker
+    /// mid-turn ended that turn and stranded it"* is recorded as the reason a
+    /// concurrent delivery is refused rather than queued.
+    ///
+    /// # Why ten seconds, and why it is a constant
+    ///
+    /// It is long enough to cover the gap between a person's line landing and the
+    /// harness taking the turn it starts — the window in which an orchestrator's
+    /// message would either be swallowed by the line editor or end that turn —
+    /// and short enough that an orchestrator blocked by it is blocked for one
+    /// visible moment rather than for a stretch anyone would have to plan around.
+    ///
+    /// It is deliberately **not** configuration. A setting here would be a knob
+    /// for turning off the rule that a person outranks a machine at their own
+    /// keyboard, and a person who wants an orchestrator's message delivered while
+    /// they type has a way to say so already: wait, or use a different session.
+    /// The one control the map does ask for — a person stopping machine messages
+    /// *entirely*, for a time they name — is line 1717's mute, which is a
+    /// separate verb with an explicit duration.
+
+### `session/runtime.rs` — deliver
+
+        /// The one path an input reaches this session by — Phase 10A's thirteenth
+        /// line.
+        ///
+        /// *"Never deliver two inputs to the same session concurrently."* Two
+        /// things make that true, and neither on its own would:
+        ///
+        /// - **One path.** Keystrokes, a line typed at the shell's prompt, a
+        ///   machine-sent message, an interrupt, and the runtime's own answer to
+        ///   a terminal query all arrive here. A second place that touched
+        ///   `self.process` would be a second order nobody arbitrates, which is
+        ///   why `only_one_path_writes_to_a_session` fails if one appears. The
+        ///   terminal-query reply is in that list deliberately: it is bytes on the
+        ///   same terminal, and a `\x1b[24;80R` landing in the middle of a line
+        ///   somebody typed corrupts both.
+        /// - **A per-session lock, held across the whole delivery.** `try_lock`
+        ///   rather than `lock`: a second concurrent delivery is *refused* and the
+        ///   caller told, never queued behind the first. Queuing would deliver it
+        ///   eventually, out of the order its sender believed, which is the
+        ///   failure this project already paid for once in its own process — a
+        ///   second message into a worker mid-turn ended that turn and stranded
+        ///   it.
+        ///
+        /// In today's build the lock is never contended, because every delivery
+        /// method takes `&mut self` and the shipped binary owns the runtime behind
+        /// a `Mutex`. It is here for the shape of the change that would break it,
+        /// which is a shape that compiles.
+
+### `session/runtime.rs` — start (readiness settle)
+
+            // Phase 10A, ninth line — *"require a started session to become
+            // verifiably ready within a bounded time, and record a start that never
+            // became ready as a failure with a stated reason rather than as a
+            // session"* — is deliberately **not** enforced here, and this comment is
+            // the reason why.
+            //
+            // An earlier version of this phase waited `READINESS_SETTLE` for the
+            // process to prove itself and refused the start when it died inside the
+            // window. It could not be made to mean the same thing on two operating
+            // systems, and it cost a capability that was already closed.
+            //
+            // # What was measured
+            //
+            // The fixture is `echo STARTED; kill -9 $$` — the harness
+            // `tests/events_lifecycle.rs` has used since Phase 45 closed
+            // *"preserve terminal output and event history after a worker
+            // crashes"*. One tree, one gate run: **macOS 5 passed, Linux 3 passed
+            // and 2 failed.** The cause is not the length of the window. It is that
+            // the two kernels disagree about a process that has died and not yet
+            // been reaped: `/proc/<pid>/stat` still describes a zombie, so Linux
+            // keeps looking and the parent handle reports the `SIGKILL` first;
+            // `proc_pidinfo` stops answering for one, so macOS concludes it cannot
+            // identify the process and keeps the session. Same code, opposite
+            // answers, neither of them a coin flip — so no larger settle window
+            // fixes it.
+            //
+            // # And there is no in-start refusal that would have been right
+            // {#no-deterministic-refusal}
+            //
+            // `spawn` returns a live process id before anyone knows whether the
+            // `exec` behind it worked, so at start time *"the process is alive"* is
+            // always true and *"it died"* is always a later observation. That
+            // observation is the same one for a harness whose configuration was
+            // unreadable and for a harness that ran and crashed: on Windows the two
+            // fixtures this repository uses for those cases are the same three
+            // lines. Nothing separates them — not the exit status, and not whether
+            // output arrived, which under Linux container load is the flake §34
+            // already records.
+            //
+            // # So the line is answered where the difference is real
+            //
+            // In the record. A start that never became ready is one whose record
+            // never left `starting` and whose process is gone;
+            // `supervision::reconcile` concludes exactly that, durably,
+            // identically on every platform, and says so in `supervision_reason` —
+            // and a session whose harness died is recorded as `failed` by
+            // [`SessionRuntime::poll_exits`], with the harness's own last words
+            // still in its scrollback. Both are failures with a stated reason, and
+            // neither throws away the output the user needs to see why.
+            //
+            // Refusing the start is what discarded that output, and it is what a
+            // capability that was already closed was closed *against*.
+
+### `session/runtime.rs` — start (dead-entry removal)
+
+            // Structural, not remembered. An *exited* entry under this id is kept
+            // deliberately by `poll_exits`, so that a crashed worker's output and
+            // its crash report survive it; pushing beside that entry is precisely
+            // what the comment on the duplicate guard above describes, because
+            // `get`, `get_mut`, `focus`, `close` and `crash_report` all resolve
+            // the **first** match and the corpse is the one already in the vector.
+            // The live session would then be steerable by nobody, and a send to it
+            // would return `RuntimeError::Exited` for a harness the user can watch
+            // running.
+            //
+            // `shell::resume_session` has been calling `close` by hand to avoid
+            // exactly this, with nine lines of comment explaining why. Doing it
+            // here means the invariant holds for every caller that reuses an id —
+            // `api`, `main`, a future resume path — rather than only for the
+            // callers that happened to know.
+            //
+            // Removing rather than refusing, because refusing would make a
+            // restart-under-the-same-id impossible without the caller first
+            // knowing to close: the same remembered obligation, moved one step.
+            //
+            // **Here, and not beside the guard above**, because everything between
+            // there and this line can fail — `launch.spawn()` and `spawn_reader`
+            // both carry a `?`. Removing earlier would mean a failed restart threw
+            // away the crash report of the run that prompted it, which is the one
+            // thing the caller would then want to read.
+
+### `session/runtime.rs` — deliver (SessionRuntime)
+
+        /// The one path an input reaches a session by — Phase 10A's thirteenth
+        /// line.
+        ///
+        /// *"Never deliver two inputs to the same session concurrently."* Two
+        /// things make that true, and neither on its own would:
+        ///
+        /// - **One path.** Keystrokes, a line typed at the shell's prompt, a
+        ///   machine-sent message and an interrupt all arrive here. A second place
+        ///   that touched `session.process` would be a second order nobody
+        ///   arbitrates, which is why `only_one_path_writes_to_a_session` fails if
+        ///   one appears.
+        /// - **A per-session lock, held across the whole delivery.** `try_lock`
+        ///   rather than `lock`: a second concurrent delivery is *refused* and the
+        ///   caller told, never queued behind the first. Queuing would deliver it
+        ///   eventually, out of the order its sender believed, which is the
+        ///   failure this project already paid for once in its own process — a
+        ///   second message into a worker mid-turn ended that turn and stranded
+        ///   it.
+        ///
+        /// In today's build the lock is never contended, because every delivery
+        /// method takes `&mut self` and the shipped binary owns this runtime
+        /// behind a `Mutex`. It is here for the shape of the change that would
+        /// break it, which is a shape that compiles.
+
+### `session/runtime.rs` — note_user_input
+
+        /// Record that a person put something into this session at `at` —
+        /// capability map line 1719.
+        ///
+        /// Called by every path a person's own input reaches a session by:
+        /// [`SessionRuntime::write_to_focused`] (the keyboard),
+        /// [`SessionRuntime::send_text_from`] (the shell's send-a-line prompt and
+        /// `glasshouse api send`), and [`SessionRuntime::interrupt_from`].
+        ///
+        /// `at` is a parameter rather than read from the clock here so that the
+        /// window's *expiry* is testable without a test sleeping through it. Every
+        /// production caller passes `Instant::now()`; a test that needs to stand
+        /// on the far side of [`USER_INPUT_PRECEDENCE`] passes a moment that far
+        /// in the past, which is the same call the binary makes rather than a
+        /// door beside it.
+        ///
+        /// Never moves the mark backwards: two inputs in the window leave the
+        /// later one standing, so a person typing steadily keeps the keyboard
+        /// rather than losing it to the age of their first line.
+        ///
+        /// A session this runtime does not hold is silently ignored — there is
+        /// nothing to protect and nothing to say, and every caller here has
+        /// already established liveness by writing to it.
+
+### `session/runtime.rs` — poll_exits
+
+        /// Notice any session whose process has ended since the last call.
+        ///
+        /// Asked of the process, never inferred from its output going quiet — a
+        /// harness can be silent for minutes while thinking, and treating that as
+        /// death is the classic way a session manager kills work in progress.
+        /// Each exit is reported exactly once; the session stays in the runtime
+        /// afterwards so its final output remains readable.
+        ///
+        /// **Reported only for a session that stayed exited.** A death that this
+        /// method answers by putting the harness back is published to the history
+        /// as [`LifecycleEvent::ProcessExited`] and then dropped from the returned
+        /// vector, because every caller of it treats an entry as the end of the
+        /// session — see the comment on the `retain` below.
+        ///
+        /// # Windows: this is also where output is declared to have ended
+        ///
+        /// [`crate::pty`] wrote down, before the reader thread existed, that a
+        /// reader "must not treat *no more bytes* as its stop condition, because
+        /// on Windows that may never come while the pty is still held open", and
+        /// prescribed observing the process instead. The prescription is right
+        /// about the diagnosis and **cannot be carried out where it points**: by
+        /// the time there are no more bytes, `pump` is parked inside a blocking
+        /// `read` that will not return, so it can neither call `try_wait` nor
+        /// notice a flag someone set for it. A stop condition is no use to a
+        /// thread that has already stopped.
+        ///
+        /// So the thread that *does* observe the exit says so. When a session's
+        /// process has been seen to end and `OUTPUT_DRAIN_WAIT` has passed
+        /// since, this marks the session's output finished and publishes
+        /// [`LifecycleEvent::OutputEnded`]. `pump` still publishes it on every
+        /// platform that produces an end-of-file, and
+        /// `OutputEnd::finish` decides which of the two got there first, so the
+        /// event fires exactly once either way.
+        ///
+        /// **Nothing is truncated by this.** The reader is not stopped and not
+        /// interrupted; it keeps draining into the scrollback for as long as the
+        /// session is held. The grace is what keeps the *event* honest — a
+        /// child's death outruns its last words by a millisecond or two, measured
+        /// at 1.1–2.2ms on Linux — and a byte that somehow arrives after it is
+        /// still recorded, only after the announcement.
+        ///
+        /// **Windows only, deliberately.** On Unix "the output ended" is a
+        /// statement about a file descriptor and the descriptor can make it, so
+        /// nothing here should redefine it — including the case this would
+        /// otherwise change, a crashed harness whose grandchild still holds the
+        /// pty slave open, where the strict meaning is the true one and *no*
+        /// output-end really has happened. On Windows that descriptor cannot
+        /// speak at all, so the honest meaning there is the weaker one:
+        /// **the process exited and its output stopped arriving.**
+
+### `session/runtime.rs` — poll_exits (retain)
+
+            // A session that was put back is not an ending anyone may act on.
+            //
+            // `ProcessExited` has already been published, so the history still
+            // records the death — what must not travel out of here is the claim
+            // that the session is *over*. Every consumer of this vector treats an
+            // entry as terminal: `shell::run` writes
+            // `ProcessExit::session_state()` into the durable record and runs
+            // `session::native_id::capture`, and `main.rs`'s headless loop returns
+            // that status as the run's own result. A record left reading `Failed`
+            // or `Stopped` for a live harness is not merely wrong on a list:
+            // `supervision::guard_start` returns `Ok(())` for any record whose
+            // lifecycle is not live, so nothing downstream would refuse a start
+            // over the top of the conversation this harness is still holding —
+            // the duplicate `open_for_resume` exists to prevent, reached from the
+            // outside. `native_id::capture` also runs its end-of-session discovery
+            // window against a mid-life session, which is the widest that window
+            // can be rather than the tightest it assumes. And the focus fix-up
+            // below would move the keyboard off a session that is running again.
+            //
+            // The predicate is the session's *observed* state after the restart
+            // attempt, not the fact that one was attempted, so every way
+            // `consider_restart` can decline or fail — a clean exit, a deliberate
+            // one, a harness that was never healthy, the bound reached, a spawn or
+            // reader that failed — leaves `exit` set and the exit reported. A
+            // session no longer in the runtime at all is kept for the same reason:
+            // there is nothing alive to withhold the report for.
+            //
+            // A harness that is put back and dies again immediately is not lost,
+            // only deferred: its new process is `exit: None` here, and the next
+            // poll asks it, publishes a fresh `ProcessExited`, and reports the
+            // exit as soon as one of them is the death it stays dead of.
+
+### `session/runtime.rs` — consider_restart
+
+        /// Answer the terminal questions the sessions have asked.
+        ///
+        /// **An embedded session inverts `session::attach`'s rule.** `attach` is a
+        /// pass-through and must never answer, because the user's real terminal is
+        /// on the other end and will; a second reply would reach the harness as
+        /// input. Here Glasshouse *is* the terminal — the output goes into a buffer
+        /// it owns and is redrawn into a viewport, and no real terminal ever sees
+        /// the question. Nothing else can answer, so a harness that waits for a
+        /// reply waits forever.
+        ///
+        /// **Waiting forever is not the only way this hurts.** A harness that
+        /// gives up on an unanswered question may not merely degrade for that
+        /// session: Claude Code counts the failures and, after two, disables its
+        /// fullscreen renderer *globally*, writing that decision into the user's
+        /// own configuration where it outlives Glasshouse entirely. Answering is
+        /// therefore not a nicety, it is the difference between embedding a
+        /// harness and quietly damaging it.
+        ///
+        /// Called from the interface's tick. Best effort per session: one harness
+        /// that cannot be written to must not stop the others being answered.
+        /// Put a session's harness back, if this exit was one worth restarting
+        /// for and the bound has not been reached — Phase 10A's tenth line.
+        ///
+        /// # What counts as *exiting unexpectedly*
+        ///
+        /// Four things exclude a restart, and each of them is a case where putting
+        /// the harness back would be wrong rather than merely unnecessary:
+        ///
+        /// - **A clean exit.** A harness that did its work and left has not
+        ///   failed; this project already refuses to call that finishing, and it
+        ///   must not call it crashing either.
+        /// - **An ending the user asked for.** `interrupt` marks the session, and
+        ///   the mark survives only until the session is seen alive again, so it
+        ///   excuses the exit it caused and no later one.
+        /// - **A session that was never healthy.** This is the load-bearing one. A
+        ///   harness that has not once come up did not *exit unexpectedly* — it is
+        ///   a start that did not work, and restarting it three more times turns a
+        ///   mistyped executable into four processes. It is also the reason this
+        ///   line does not disturb `tests/events_lifecycle.rs`: a harness that
+        ///   prints one line and dies has crashed, and Glasshouse keeps its output
+        ///   and its history rather than trying again.
+        /// - **A bound already reached, or a restart that itself failed.** Once
+        ///   there is a stated reason, it stands.
+
+### `session/runtime.rs` — crash_report
+
+        /// Everything that survived a crash, or `None` if this session did not
+        /// crash.
+        ///
+        /// A crashed worker's terminal output and event history outlive it,
+        /// because neither belongs to the process: the scrollback is Glasshouse's
+        /// buffer and the history is the project's bus. The session stays in the
+        /// runtime after it exits for exactly this reason — removing it would be
+        /// the only way to lose the output, and `poll_exits` deliberately does
+        /// not.
+        ///
+        /// `None` for a session that is running, that exited on its own terms, or
+        /// that Glasshouse closed itself: [`SessionRuntime::close`] removes the
+        /// session before it signals, so a deliberate kill is never reported as a
+        /// crash.
+        ///
+        /// # Why this waits
+        ///
+        /// **A process's exit becomes observable before its last output does.**
+        /// The exit comes from `waitpid`; the output has to travel through the
+        /// pseudo-terminal and be copied into the scrollback by this session's
+        /// reader thread, which is a *different* thread that may not have run
+        /// yet. Asking `poll_exits` and then reading the scrollback in the same
+        /// breath therefore reports a crashed worker as having said nothing —
+        /// which is what the Linux gate had been failing on at random for weeks,
+        /// and which reproduced at 8 runs in 17 beside the full workspace suite —
+        /// see `docs/product/design-decisions.md`, "A pseudo-terminal child's exit
+        /// is observable before its output is".
+        ///
+        /// `session::attach` — the other shape a harness runs in — has always
+        /// done this, and says so in `OUTPUT_DRAIN_GRACE`. This path is the one
+        /// that had not learned it.
+        ///
+        /// Nothing is ever lost when that happens: the bytes are in the kernel's
+        /// pty buffer and arrive about two milliseconds later. Linux hands a
+        /// reader everything that was written before it reports `EIO`, and a
+        /// probe of 200 trials per timing confirmed it never drops a byte, even
+        /// when the child is reaped before the first read. So this is not data
+        /// loss — it is a post-mortem written before the body stopped talking,
+        /// and the fix is to let it finish.
+        ///
+        /// # Why the wait is bounded
+        ///
+        /// Output is not guaranteed to end at all. A harness that crashed after
+        /// starting something of its own leaves that grandchild holding the pty
+        /// slave open, and the reader will sit there for as long as it lives —
+        /// see [`crate::pty::PtyOutput`], which records the same lifetime rule
+        /// from the other side. An unbounded wait here would hang a caller on
+        /// exactly the crash it most needs reporting, so the report is produced
+        /// either way and the ceiling is 250ms — the same grace `session::attach`
+        /// allows its own pump.
+
+### `session/lifecycle.rs` — module doc
+
+    //! Turning a harness's own lifecycle events into Glasshouse's.
+    //!
+    //! A harness reports what happened in its own vocabulary, and Glasshouse
+    //! records one of a handful of states that mean something to a session
+    //! overview. Claude Code and Codex happen to spell every shared event
+    //! identically — both say `UserPromptSubmit`, not `user_prompt_submit`. An
+    //! earlier revision of this module claimed Codex used snake_case, citing the
+    //! wrong artifact: Codex's `config.toml` records hook *trust* under
+    //! snake_case keys, but the `hooks.json` document it actually reads is
+    //! PascalCase, per its own hook review screen. That agreement is why most of
+    //! this translation works untouched for either harness — but it is a fact
+    //! about the two installed binaries, not a guarantee, so this module is
+    //! deliberately the only place that knows either vocabulary at all.
+    //!
+    //! # Why an unknown event changes nothing
+    //!
+    //! Harnesses gain events between releases. An event this build has never
+    //! heard of must leave the session exactly as it was, because the alternative
+    //! — guessing a state from an unfamiliar name — would show the user a session
+    //! that is idle when it is working, or working when it is waiting for them.
+    //!
+    //! # Why a finished session cannot be revived
+    //!
+    //! Hook processes are separate processes, and a slow one can deliver its event
+    //! after the harness it belongs to has exited. Applying it would resurrect a
+    //! stopped session in the records, which is worse than losing a note about a
+    //! session that has already ended.
+
+### `session/lifecycle.rs` — precedes_native_compaction
+
+    /// Whether `event` is a harness saying it is about to compact its own
+    /// context — Phase 21's *"allow memory extraction to run before or around
+    /// native prompt compaction."*
+    ///
+    /// # Why this is a separate question from [`event_for`]
+    ///
+    /// A compaction is **not a `SessionLifecycle` state**: a session that
+    /// compacts was running before and is running after, and there is no
+    /// `LifecycleEvent` for it. Answering it through [`event_for`] would mean
+    /// inventing one, which would mean a new `database::LIFECYCLE_EVENT_KINDS`
+    /// value and a migration to widen a `CHECK`, which SQLite cannot do in place
+    /// and which `database`'s own house rule refuses. So this is a predicate a
+    /// *trigger* can ask, and the event log stays exactly as narrow as it was.
+    ///
+    /// # What is recorded, since map line 1159
+    ///
+    /// A **count**, on the session row: migration 16's
+    /// `sessions.observed_compactions`, written by
+    /// [`crate::session::SessionStore::record_observed_compaction`] at this
+    /// predicate's one production call site. That is a different claim from an
+    /// event — it says the compaction has now happened *n* times, not that it
+    /// happened at an instant beside everything else that happened — and it is
+    /// the one line 1159 asks for. The raw observation is still preserved by
+    /// [`observe`]'s own [`crate::events::RawObservation`] line, and no
+    /// `lifecycle_events` row is written for it.
+    ///
+    /// # Why `PostCompact` is not here
+    ///
+    /// `PostCompact` is a real Codex event and Glasshouse asks for it (see
+    /// `harness::codex`'s `REPORTED_EVENTS`), but extraction reads **this
+    /// project's event log**, which a harness compacting its own context does not
+    /// change. Running on both would be two extractions over identical material,
+    /// inside the user's session, per compaction. `PreCompact` is the "before"
+    /// the line names and the one that arrives while the harness still has what
+    /// it is about to lose. Named explicitly, rather than left to the wildcard,
+    /// so the omission reads as a decision.
+    ///
+    /// # Claude Code, corrected 2026-09-01
+    ///
+    /// This predicate matches on the event string alone, so it was never the
+    /// reason Claude Code's compactions went uncounted — a stale version of this
+    /// comment used to say otherwise, from a 2.1.245 reading that found no
+    /// compaction hook at all. Claude Code 2.1.257 has one: run and observed
+    /// (`harness::claude_code`'s `REPORTED_EVENTS` doc), a manual `/compact`
+    /// against a real installation fired a `PreCompact` hook whose payload named
+    /// this exact string. The gap was one link earlier — `harness::claude_code`'s
+    /// `REPORTED_EVENTS` never asked Claude Code to report it, so no hook was
+    /// ever installed and this predicate never saw the event. That is now fixed;
+    /// this function itself did not need to change.
+    ///
+    /// Event names are the harness's own, exactly as its adapter declares them.
+
+### `session/lifecycle.rs` — may_apply
+
+    /// Whether `current` may be moved to `next` by a harness event.
+    ///
+    /// Only a live session can change state this way. A session that has stopped,
+    /// failed, or been closed is finished, and a hook arriving afterwards — from a
+    /// process that outlived its harness — must not bring it back.
+    ///
+    /// # Why a genuine resume needs nothing here
+    ///
+    /// A resumed session was, for a while, refused by this rule: its record still
+    /// read `stopped`, so every hook the reopened harness sent was discarded. The
+    /// cause was not this predicate. `main.rs::resume_session` already wrote
+    /// *"running"* the moment it reopened the session, and
+    /// [`crate::session::SessionStore`]'s own copy of this rule — the one inside
+    /// its write transaction, where two processes cannot step over it — declined
+    /// that write for exactly the reason above. The record never left `stopped`,
+    /// and this function was then asked the wrong question about a state that
+    /// should not have been current.
+    ///
+    /// The fix belongs where the acts differ: `SessionStore::begin_resume` is
+    /// something Glasshouse *does*, at a boundary it opened, and a hook is an
+    /// event that merely *arrives*. Widening this predicate instead would have
+    /// meant a hook arguing for its own authority, which is the one thing the
+    /// rule exists to refuse — and it would not have helped, because the record
+    /// would still have been `stopped` when it was asked.
+    ///
+    /// So this stays as it is. Once a resume has been recorded the session is
+    /// live, and a live session follows its harness.
+
+### `session/api/mod.rs` — module doc
+
+    //! The internal API for driving and inspecting a live session.
+    //!
+    //! [`SessionApi`] is the one surface that sends text to, interrupts, or
+    //! inspects a session by identifier — the seam an orchestrator, the MCP
+    //! surface, or anything else internal to Glasshouse goes through instead of
+    //! reaching into [`super::store::SessionStore`] and [`super::runtime::SessionRuntime`]
+    //! directly. Two things make that worth a seam of its own:
+    //!
+    //! - **Project scope is checked once, here, for every entry point.** Every
+    //!   method resolves the identifier through the store first and compares its
+    //!   `project_id` against the active project before doing anything else —
+    //!   including before asking whether the session is even live. A foreign
+    //!   session that also happens to be stopped is still refused as foreign,
+    //!   never as merely not running, because "you asked about someone else's
+    //!   session" is the true answer and the only one worth giving.
+    //! - **Who sent a message is recorded, never inferred.** Every write goes
+    //!   through [`super::runtime::SessionRuntime::send_text_from`] and
+    //!   [`super::runtime::SessionRuntime::interrupt_from`] with an origin its
+    //!   **caller** supplies, not the plain `send_text` / `interrupt` that assume
+    //!   a person's keyboard. The distinction is recorded in Glasshouse's own
+    //!   event log, not inferred later from context that will not exist by then.
+    //!
+    //!   This seam used to hard-wire [`crate::events::MessageOrigin::Machine`],
+    //!   on the reasoning that everything reaching it was Glasshouse or an
+    //!   orchestrator. That stopped being true when `glasshouse api send` and
+    //!   `glasshouse api interrupt` shipped: a person's keystrokes now arrive
+    //!   here, over the control door, and hard-wiring made their intervention
+    //!   equal field for field to an orchestrator's own message. A seam that
+    //!   *decides* the origin can only be right while it has one kind of caller,
+    //!   so this one asks instead. Callers that are Glasshouse still pass
+    //!   `Machine` and are unchanged; the control door passes what its request
+    //!   said, defaulting to `Machine` when it said nothing.
+
+### `session/api/mod.rs` — send_text
+
+        /// Send a line of text to a live session, on behalf of `origin`.
+        ///
+        /// A carriage return is appended, the same way `shell::send_session_text`
+        /// sends a line typed at the shell's own prompt: this call delivers one
+        /// line, not raw bytes, and `\r` is what a session's terminal expects to
+        /// see for the harness's line editor to submit it.
+        ///
+        /// `origin` is the caller's to state and this method's to record — see
+        /// the module doc comment for why it is no longer decided here. Pass
+        /// [`MessageOrigin::Machine`] for anything Glasshouse itself originates,
+        /// which is what every caller inside this process does; only the control
+        /// door has a caller it did not write, and only that door can know
+        /// whether a person is on the other end of it.
+        ///
+        /// # A person at this session's keyboard outranks a machine — line 1719
+        ///
+        /// Machine text is **refused** with
+        /// [`ApiError::UserHasTheKeyboard`] while a person has put something into
+        /// this same session within
+        /// [`crate::session::runtime::USER_INPUT_PRECEDENCE`]. Refused rather than queued,
+        /// which is this seam's existing rule and not a new one:
+        /// `super::runtime::SessionRuntime::deliver` already refuses a
+        /// concurrent delivery instead of queuing it, because *"queuing would
+        /// deliver it eventually, out of the order its sender believed"* — and a
+        /// message held for ten seconds and then typed into whatever the person
+        /// is now doing is that failure with a delay in front of it. A refusal a
+        /// caller can read is the answer it can act on.
+        ///
+        /// The rule is taken **here**, at the one seam every machine sender in
+        /// this process passes through — the control door's `send_message`, the
+        /// task a spawn delivers, an injected memory briefing, and a worker
+        /// completion pumped into an orchestrator — rather than at any one of
+        /// them, so there is no machine write path that quietly is not subject to
+        /// it. It is deliberately **not** applied to
+        /// [`SessionApi::interrupt`]: see that method.
+
+### `session/api/mod.rs` — machine_delivery_refusal
+
+        /// The refusal a machine-originated line to `id` would be given right
+        /// now, or `None` if it would be delivered — capability map line 1719.
+        ///
+        /// [`SessionApi::send_text`] takes this decision itself, so no caller has
+        /// to ask, and it is **private on purpose**.
+        ///
+        /// It was briefly public, so the control door could refuse a machine
+        /// message before opening this project's memory store for a briefing it
+        /// was about to throw away. That saved one SQLite open and cost the whole
+        /// rule: with a copy of the check in front of this seam, mutating the
+        /// check *inside* [`SessionApi::send_text`] away left the entire suite
+        /// green, because nothing ever reached the seam to be refused by it. A
+        /// rule with two enforcement points is a rule with one that nobody
+        /// watches.
+        ///
+        /// So there is one enforcement point, this is its only caller, and a
+        /// caller that wants to know without sending has to ask by sending. The
+        /// wasted memory open on a refused message is the price, and it is paid
+        /// only on the path where a person is already using the session.
+        ///
+        /// It reads state and changes none, and it resolves through the same
+        /// project-scope check every other method starts with, so a foreign
+        /// session is refused as foreign here too rather than answered.
+
+### `session/store/mod.rs` — module doc
+
+    //! Glasshouse's own record of the sessions in one project.
+    //!
+    //! This is deliberately *not* a view over a harness's session files. Claude
+    //! Code, Codex, and the rest each keep their own history in their own format
+    //! in their own directory, and Glasshouse neither parses nor owns those files.
+    //! What it keeps here is the metadata it needs to list, resume, and reason
+    //! about sessions: which harness, when it started, when it was last active,
+    //! what role it plays, where it is presented, and what state it is in. The
+    //! harness's own identifier is recorded when it is known, as a nullable
+    //! reference — so a session survives in this table whether or not the harness
+    //! kept anything, and clearing a harness's history never silently deletes
+    //! Glasshouse's record of what happened.
+    //!
+    //! # Project isolation
+    //!
+    //! Every row carries the project identifier, and it is enforced in two places
+    //! on purpose:
+    //!
+    //! - **Structurally**, by SQLite triggers created in migration 2, which abort
+    //!   any insert or update whose `project_id` is not the identifier bound in
+    //!   `project_metadata`. No query in this module — or any future one — has to
+    //!   remember to filter, because a foreign row cannot be written at all.
+    //! - **At the resume boundary**, by [`SessionStore::open_for_resume`], which
+    //!   compares the stored identifier against the active project before handing
+    //!   back anything a caller could act on.
+    //!
+    //! The second check is not redundant with the first. The trigger governs what
+    //! this database will accept from now on; the resume check governs what
+    //! Glasshouse will *act on*, including rows that predate a guard, arrived
+    //! through a restored backup, or were written by a build whose triggers
+    //! differed. A resume is the one operation that takes a stored identity and
+    //! turns it back into a running process, so it verifies rather than assumes.
+
+### `session/store/mod.rs` — Revival
+
+    /// Whether this write is Glasshouse resuming a session, and may therefore
+    /// move a finished record back to a live state.
+    ///
+    /// # The asymmetry this type exists to express
+    ///
+    /// *"A finished session stays finished"* was written for one hazard, and it is
+    /// a real one: hook processes are separate processes, and a slow one can
+    /// deliver its event after the harness it belongs to has exited. Applying it
+    /// would resurrect a stopped session in the records.
+    ///
+    /// A genuine resume is not that case, and until this marker existed the two
+    /// were indistinguishable — with the consequence that
+    /// `main.rs::resume_session`'s own *"this session is running again"* write was
+    /// silently declined along with the zombies, leaving a demonstrably live
+    /// session reading `stopped` and every hook it went on to send discarded. That
+    /// was observed against a live Codex, with the resume twenty-nine seconds
+    /// after the process exit that preceded it.
+    ///
+    /// **A resume is an act Glasshouse performs; a late hook is an event that
+    /// merely arrives.** So the authority is a value only the resume boundary can
+    /// supply, rather than a property of the event or a loosening of
+    /// [`SessionLifecycle::is_live`] — which is unchanged, and which other callers
+    /// depend on. [`SessionStore::begin_resume`] is the only constructor of
+    /// [`Revival::Authorized`] in the crate, and it is unreachable from the hook
+    /// path: `glasshouse hook` never opens a resume boundary.
+
+### `session/store/mod.rs` — set_lifecycle
+
+        /// Move a session to a new lifecycle state, which also counts as activity.
+        ///
+        /// # This is the single ordered path — Phase 10A's twelfth line
+        ///
+        /// Every lifecycle change in the shipped binary arrives here: the launch
+        /// path's `note_lifecycle`, the shell's exit handling and its failed-start
+        /// handling, and `glasshouse hook` when a harness reports something. They
+        /// are **separate operating-system processes**, so nothing in Rust's type
+        /// system orders them, and until this method took a transaction they raced
+        /// in the classic read-check-write shape:
+        ///
+        /// 1. a hook process reads `running` and decides `idle`;
+        /// 2. the launch process observes the harness exit and writes `stopped`;
+        /// 3. the hook process writes `idle`.
+        ///
+        /// The result is `idle` — a live state for a session whose process is
+        /// gone. Neither writer asked for that, which is exactly the interleaving
+        /// the line forbids.
+        ///
+        /// `BEGIN IMMEDIATE` takes SQLite's write lock **before** the read, so the
+        /// read and the write are one indivisible step and the second writer's
+        /// check runs against what the first writer actually left. The order is
+        /// then decided by the lock rather than by which process happened to read
+        /// first, and the losing writer sees the winner's state and declines.
+        ///
+        /// # What it declines
+        ///
+        /// One rule, and it is [`super::lifecycle::may_apply`]'s: **a session that
+        /// has finished may not be moved back to a live state.** It refuses
+        /// nothing the shipped binary legitimately does — every real transition is
+        /// from a live state — so this is not a new policy, it is the existing
+        /// policy moved to where two processes cannot step over it. A declined
+        /// change returns the record as it stands rather than an error: the caller
+        /// asked for something that is no longer true, which is not its fault and
+        /// not a failure.
+
+### `session/store/mod.rs` — write_lifecycle_locked
+
+        /// **The only statement in this crate that moves a session's lifecycle.**
+        ///
+        /// That is what "a single ordered path" means at the level a reader can
+        /// check: not that one function is polite about it, but that there is one
+        /// `UPDATE` and everything else has to come through it.
+        /// `one_statement_moves_a_sessions_lifecycle` fails if a second appears,
+        /// because a second writer is a second order and two orders are no order.
+        ///
+        /// Callers must already hold a write transaction — see
+        /// [`SessionStore::in_a_write_transaction`], which is what makes the read
+        /// below and the write after it one indivisible step.
+        ///
+        /// # What it declines
+        ///
+        /// One rule, and it is [`super::lifecycle::may_apply`]'s: **a session that
+        /// has finished may not be moved back to a live state.** It refuses
+        /// nothing the shipped binary legitimately does — every real transition is
+        /// from a live state — so this is not a new policy, it is the existing
+        /// policy moved to where two processes cannot step over it. A declined
+        /// change leaves the record as it stands rather than erroring: the caller
+        /// asked for something that is no longer true, which is not its fault.
+
+### `session/store/mod.rs` — record_observed_compaction
+
+        /// Count one compaction a harness said it was about to perform — map
+        /// line 1159.
+        ///
+        /// # Why this is a column and not an event
+        ///
+        /// `super::lifecycle::precedes_native_compaction` is the observation, and
+        /// its own documentation explains why a compaction cannot join
+        /// `LIFECYCLE_EVENT_KINDS`: that vocabulary is a SQL `CHECK`, SQLite
+        /// cannot widen one in place, and the eleventh value already cost a full
+        /// rebuild of the table `memories` references by `seq`. Migration 16 says
+        /// the same thing from the schema's side. So the count lives on the
+        /// session row, and the event log is left exactly as narrow as it was.
+        ///
+        /// # `COALESCE`, and what it costs
+        ///
+        /// A row recorded before migration 16 reads `NULL`, meaning *"nobody was
+        /// counting"*. Its first observed compaction moves it to `1` rather than
+        /// leaving it unknowable for ever, so from then on the number is a
+        /// **lower bound** — compactions before the upgrade were observed by
+        /// nothing and cannot be recovered. For a session this build created the
+        /// count is exact, because `create` starts it at a measured `0`.
+        ///
+        /// # It is not activity
+        ///
+        /// `last_activity_at` is untouched, for `rename`'s reason turned around:
+        /// a compaction is the harness reorganising what it holds, not the
+        /// session doing work, and stamping it would move a session up a list
+        /// ordered by when it last ran on the strength of housekeeping.
+
+### `session/store/mod.rs` — context
+
+        /// Everything Phase 30 can say about one session's context, as of now.
+        ///
+        /// `Ok(None)` for a session this project does not have, exactly as
+        /// [`SessionStore::get`] answers.
+        ///
+        /// # Why one function and not five
+        ///
+        /// Four of Phase 30's lines are answered by facts that already existed —
+        /// the session's own activity stamp, its checkpoints, and its turn
+        /// events — and were unreadable together. A caller assembling them itself
+        /// would have to know that "recent checkpoint" is a comparison against
+        /// `last_activity_at` and that a cache state must never be derived from
+        /// resumability; those are the rulings this phase is made of, and they
+        /// belong in one place rather than in each caller. See
+        /// [`SessionContext`], including its paragraph on the line that is
+        /// **not** here.
+        ///
+        /// # It reads two sibling tables, and never writes them
+        ///
+        /// `checkpoints` and `lifecycle_events` are read by `project_id` and
+        /// `session_id` together, so the project boundary
+        /// [`SessionRecord::project_id`] draws is honoured by the query and not
+        /// merely by the caller. Nothing here inserts, updates or deletes, and in
+        /// `lifecycle_events`' case nothing could: migration 5's triggers
+        /// `RAISE(ABORT)` on every write but an insert.
+        ///
+        /// # Nothing here is stored
+        ///
+        /// The cache estimate and the checkpoint verdict are computed at the
+        /// moment they are asked for, on purpose. A stored `hot` is wrong the
+        /// minute after it is written, and a stored copy of
+        /// `checkpoints.created_at` would be a second source of truth for a
+        /// column one table over — migration 15's objection to copying a token
+        /// count, applied to this phase. Only [`SessionRecord::observed_compactions`]
+        /// is durable, because a compaction leaves no trace anywhere else.
+
+### `session/store/mod.rs` — close
+
+        /// Retire Glasshouse's record of a session — line 654.
+        ///
+        /// # What this deliberately does not do
+        ///
+        /// It writes one column. `native_session_id` is untouched, and so is
+        /// every harness file on disk: this module has never parsed or owned
+        /// those, and closing a Glasshouse record is not an occasion to start.
+        /// Line 654 says the record may be closed *"without deleting the native
+        /// provider history unless explicitly requested"*, and nothing here is a
+        /// request. `closing_a_session_keeps_the_harnesss_own_history` proves the
+        /// history is still there afterwards rather than proving no error came
+        /// back.
+        ///
+        /// # A live session is refused
+        ///
+        /// Closing is filing a record away, and a record whose process is still
+        /// running is not finished being written. Refusing names the state so the
+        /// user knows to stop the session first, rather than leaving a `closed`
+        /// row that a running harness keeps updating.
+        ///
+        /// # `last_activity_at` stays put, for [`SessionStore::rename`]'s reason
+        ///
+        /// When the session last did something is a fact about the session. When
+        /// somebody filed it away is a different fact, and this column is not the
+        /// place for it.
+
+### `session/store/mod.rs` — begin_resume
+
+        /// Record that Glasshouse is resuming this session, moving it back to
+        /// `Running`.
+        ///
+        /// # Why this is not `set_lifecycle`
+        ///
+        /// [`SessionStore::set_lifecycle`] declines to move a finished record back
+        /// to a live state, and must keep declining: a hook process outliving its
+        /// harness is exactly what that rule is for. But the resume path's own
+        /// *"this session is running again"* write went through the same door and
+        /// was refused by the same rule, so a session Glasshouse itself had just
+        /// reopened kept reading `stopped` — and every hook the resumed harness
+        /// then sent was discarded for arriving at a finished session.
+        ///
+        /// Observed against a live Codex over five compaction trials, with the
+        /// resume recorded twenty-nine seconds after the process exit before it,
+        /// so nothing about it was a race.
+        ///
+        /// The two cases are told apart by **who is acting**. A resume is
+        /// something Glasshouse does, at a boundary it opened deliberately; a late
+        /// hook is an event that merely arrives. So this is a separate operation
+        /// carrying `Revival::Authorized`, rather than a widening of
+        /// [`SessionLifecycle::is_live`] or of `lifecycle::may_apply` — and once
+        /// this has run, a resumed session is live, so `may_apply` believes its
+        /// harness again without knowing anything about resumes at all.
+        ///
+        /// # The disposition is checked again, under the write lock
+        ///
+        /// Not defence in depth for its own sake. [`SessionStore::open_for_resume`]
+        /// reads outside a transaction, so between its answer and this write
+        /// another process can close the record, quarantine it, or start it — the
+        /// classic read-check-write window this module's
+        /// `in_a_write_transaction` exists to shut. Re-asking
+        /// [`SessionRecord::disposition`] with the write lock already held makes
+        /// the check and the write one indivisible step, which is Phase 10A's
+        /// requirement for every lifecycle change and is what makes this one safe
+        /// to authorise at all.
+        ///
+        /// # `Stopped`, `Failed` and `Closed` are three different answers
+        ///
+        /// Only a **stopped** record with a native identifier is
+        /// [`SessionDisposition::Resumable`], and only that one is revived here.
+        /// A **failed** session ended badly and reports
+        /// [`SessionDisposition::Failed`]; a **closed** one was retired by the
+        /// user, and a stopped one with nothing to resume *to* is
+        /// [`SessionDisposition::Closed`]. All three are refused, by the same
+        /// classification `open_for_resume` refuses them by — one rule read twice
+        /// rather than a second rule that could drift from the first.
+        ///
+        /// # The process identity is re-recorded here, and that is not a detail
+        ///
+        /// A resume happens in a **new operating-system process**. Making the
+        /// record live again while it still named the `glasshouse` that created
+        /// the session left every later invocation verifying a process id that
+        /// had exited — so `supervision::reconcile` reached [`Verdict::Gone`],
+        /// correctly, and wrote `stopped` back over the resume on the very next
+        /// command. Observed twice out of two trials against a live Codex, where
+        /// the command that undid the resume was the resumed session's own first
+        /// hook.
+        ///
+        /// The two writes are one transaction on purpose. A resumed record is
+        /// discoverable by supervision the instant its lifecycle goes live
+        /// ([`supervision::discover`] filters on exactly that), so a live
+        /// lifecycle and a stale identity must never both be readable, not even
+        /// between two statements. Afterwards a resumed row is the same shape a
+        /// created one is — live, with the identity of the Glasshouse responsible
+        /// for it — and supervision reaches the same conclusions about it for the
+        /// same reasons, which is the whole of the repair.
+        ///
+        /// Nothing about supervision is weakened. A resumed session whose process
+        /// is genuinely gone is still found and still recorded `lost`; that is
+        /// `a_resumed_session_whose_process_is_gone_is_still_lost` in
+        /// `tests/session_supervision.rs`, reached against the identity this
+        /// function wrote.
+        ///
+        /// `None` — a platform that will not name its processes — clears the
+        /// columns rather than leaving the old values behind, for
+        /// [`SessionStore::create`]'s reason: an unverifiable session is a real
+        /// answer that supervision refuses to conclude anything from, and a stale
+        /// identity is a wrong one it concludes a great deal from.
+        ///
+        /// [`Verdict::Gone`]: super::supervision::Verdict::Gone
+
+### `session/store/mod.rs` — write_identity_locked
+
+        /// Record the process a session is running in, replacing whatever was
+        /// recorded before it.
+        ///
+        /// The write [`SessionStore::create`] makes as part of its `INSERT`, as an
+        /// `UPDATE`, so that the other way a session becomes live can make it too.
+        /// Callers must already hold a write transaction — the identity and the
+        /// lifecycle it belongs to are one change, and a reader that could see
+        /// half of it is the defect this exists to close.
+        ///
+        /// `supervision` is set to [`Supervision::Owned`] beside the identity, and
+        /// the reason cleared, for the reason `create` gives: this Glasshouse is
+        /// responsible for this process, and it is the only conclusion a writer
+        /// that is not [`super::supervision::reconcile`] may reach. Leaving the
+        /// previous conclusion would leave a sentence like *"its process (65061)
+        /// is no longer running"* printed beside a session that is running, about
+        /// a process the row no longer names.
+        ///
+        /// A `None` identity clears all four columns rather than half of them —
+        /// [`SessionStore::supervision_of`] reads the three identity columns
+        /// together or not at all, and a partially cleared row would be read as an
+        /// identity built from whichever parts survived.
+
+### `session/store/mod.rs` — require_owning_harness
+
+    /// Refuse a session whose owner is not a real harness — line 646.
+    ///
+    /// # The catalogue is asked, not held
+    ///
+    /// The map's first fixed architectural requirement for this phase is that
+    /// *every interactive Glasshouse session is owned by a real harness*, and
+    /// line 646 names the failure it guards: a direct API provider or a gateway
+    /// appearing in this table as though it were one.
+    ///
+    /// The question is answered by [`super::owning_harness`], one module up,
+    /// because Phase 6 line 294 keeps adapter knowledge out of the session store
+    /// and `harness::tests::the_session_model_depends_on_no_adapter` enforces it
+    /// by scanning this file. That separation is right on its own terms: this
+    /// module owns *what is recorded about a session* and has no business
+    /// holding a list of harnesses, which grows.
+    ///
+    /// It is enforced **here** rather than at the caller because this is the only
+    /// door. A guard in `main.rs` would be a guard `shell::start_session` does
+    /// not have, and one any future caller could forget; a refusal in `create` is
+    /// one no caller can bypass — the §35 shape, applied before the fact instead
+    /// of after it.
+
+### `session/store/claims.rs` — module doc
+
+    //! Soft, project-scoped, turn-scoped file claims — capability map lines 2392
+    //! to 2398, Phase 60's A+F slice.
+    //!
+    //! # What a claim is, and the four things it is not
+    //!
+    //! A claim is one row saying *"this Glasshouse session is working on this
+    //! file, and still wanted it as of this second."* It is **coordination
+    //! metadata**. Taking one never blocks, never locks, never changes a file's
+    //! permissions, and never fails another session's write; two sessions may
+    //! hold a claim on the same path, and that is the overlap a later package
+    //! reports rather than an error raised here. Nothing in this build consults a
+    //! claim before deciding anything.
+    //!
+    //! # It belongs to a session, never to a process
+    //!
+    //! Line 2396. The owner is a [`SessionId`], so a recycled process identifier
+    //! can never resolve to a live claim — there is no process identifier here to
+    //! recycle. A claim for a session this project does not have is refused
+    //! before a row exists.
+    //!
+    //! # Project isolation
+    //!
+    //! Line 2397, and it holds three times over: the database file *is* the
+    //! project, migration 27's two triggers refuse a row whose `project_id` is
+    //! not the bound one, and every statement below also names `project_id`
+    //! explicitly. A claim taken in one project cannot be named by a query in
+    //! another.
+
+### `session/store/claims.rs` — STALE_CLAIM_AFTER
+
+    /// How long a claim nobody renewed stays active — line 2394's *"safe
+    /// stale-claim timeout"*.
+    ///
+    /// # Why two hours
+    ///
+    /// This is a **backstop**, not the ordinary release path. A claim is normally
+    /// released when the turn ends (`commands::hook`'s `TurnEnded` arm), and a
+    /// claim whose owning session has stopped or failed is neither reported by
+    /// [`SessionStore::active_claims`] nor kept, whatever the clock says. What is
+    /// left for a timeout is the case both of those miss: a machine that lost power,
+    /// or a harness killed hard enough that no hook ran and no lifecycle write
+    /// landed.
+    ///
+    /// The two failure directions are not symmetric. Too short expires a claim
+    /// under a session that is still editing, and the claim silently stops
+    /// describing real work. Too long leaves a ghost that outlives the machine it
+    /// was made on. Two hours is longer than any single harness turn — a turn is
+    /// one prompt-to-stop cycle, minutes rather than hours, and a session working
+    /// for longer than that renews as it goes — and short enough that a claim
+    /// orphaned by a crash does not survive the working day. It is a judgement,
+    /// not a measurement, and it is one constant so that changing it is one edit.
+
+### `session/store/progress.rs` — module doc
+
+    //! Declared task progress — capability map lines 1294 and 1610, the honest
+    //! producer of
+    //! [`crate::provider::quota::ReserveDecisionInputs::task_nearly_complete`].
+    //!
+    //! # What a declaration is, and the two things it is not
+    //!
+    //! A declaration is one row saying *"whoever is running this Glasshouse
+    //! session says its current task is nearly complete, and still said so as of
+    //! this second."* It is a **statement somebody made on purpose**, about one
+    //! named session, that stops being true on its own.
+    //!
+    //! It is not an **inference**. Nothing in this build observes task progress:
+    //! [`crate::events::LifecycleEvent`] is binary and retrospective, and the
+    //! only completion fact available where the reserve verdict is computed is
+    //! that a turn is already over. Every available proxy — a turn count, an
+    //! elapsed time — reports "almost complete" for work that has merely been
+    //! running a while, which is precisely the long-running work a protected
+    //! reserve exists to keep serving. The field this feeds is the *first*
+    //! branch [`crate::provider::quota::evaluate_reserve_spend`] takes,
+    //! outranking every other signal including the user's own override, so a
+    //! fabricated value there does not degrade the policy — it inverts it, at
+    //! the one moment the protection matters.
+    //!
+    //! It is not a **setting**. A configuration value is sticky by nature, and a
+    //! declaration that outlives the task it described re-creates that inversion
+    //! by a slower route: the reserve would be permanently open on behalf of a
+    //! task that finished last week. So the source is a row that expires, and
+    //! the shape is [`super::claims`]'s — session-scoped, project-scoped, and a
+    //! no-match by default, which is what makes its arrival a no-op for every
+    //! caller that declares nothing.
+    //!
+    //! # Project isolation
+    //!
+    //! Migration 28's two triggers refuse a row whose `project_id` is not the
+    //! bound one, every statement below also names `project_id` explicitly, and
+    //! the database file *is* the project. A declaration made in one project
+    //! cannot be named by a query in another.
+
+### `session/store/progress.rs` — TASK_PROGRESS_EXPIRES_AFTER
+
+    /// How long a declaration nobody renewed keeps protecting its session's work.
+    ///
+    /// # Why thirty minutes, and why shorter than a claim
+    ///
+    /// The two failure directions are **not symmetric, and they are not
+    /// symmetric the other way round from [`super::STALE_CLAIM_AFTER`]**, which
+    /// is why this is a second constant and not a reuse of that one.
+    ///
+    /// Expiring too early costs the operator the protection they asked for, and
+    /// they get it back by declaring again. The behaviour it falls back to is
+    /// exactly today's — the reserve decides on its own signals — so an early
+    /// expiry is the *safe* direction.
+    ///
+    /// Expiring too late is the failure this whole design exists to prevent. A
+    /// declaration left standing keeps forcing the first branch to `Allow` for
+    /// whatever that session does next, which is a stale statement about a task
+    /// that is gone being applied to a task nobody described. That is the
+    /// inversion the design note refuses, arriving by the slower route.
+    ///
+    /// So the horizon points short. Thirty minutes is longer than a harness turn
+    /// — a turn is one prompt-to-stop cycle, minutes rather than hours, and a
+    /// session genuinely finishing a task renews as it goes — and short enough
+    /// that a declaration somebody forgot cannot protect an unrelated later
+    /// task. A task still not finished half an hour after somebody called it
+    /// nearly complete was not nearly complete. It is a judgement, not a
+    /// measurement, and it is one constant so that changing it is one edit.
+
+## Trims: routing module docs — history moved out of comments by `GH-TRIM-ROUTING-DOCS`, 2026-09-05
+
+### `routing/capability.rs` — module doc
+
+    //! The capability registry — map line 1382: *"describe each harness and
+    //! model resource with a small set of capabilities used for routing."*
+    //!
+    //! # Why this is not a second [`HardCapability`]
+    //!
+    //! [`super::classify::HardCapability`] states what a *task* needs.
+    //! [`ResourceCapabilities`] describes what a *resource* can do. Merging the
+    //! two into one scale would let a router compare a task's tier against its
+    //! own tier and believe that proved something —
+    //! `super::classify`'s own doc comment on line 79 already refuses this for
+    //! the same reason. [`axis_for`] is the one comparison function that joins
+    //! them; nothing else in this module or [`super::session`] collapses the
+    //! two.
+    //!
+    //! # Why this is not a widening of `harness::Capabilities`
+    //!
+    //! Map line 1382 asks for "each harness **and model** resource". A harness
+    //! adapter has no business declaring a model's context window or its
+    //! price/speed class, so [`ResourceCapabilities`] is *built from*
+    //! [`crate::harness::Capabilities`] plus [`ResourceFacts`] — a model/resource
+    //! fact a harness adapter never sees — rather than being a bigger version of
+    //! the adapter-declared type.
+    //!
+    //! # Why every axis is a [`Declared<bool>`]
+    //!
+    //! `Unverified` is not absent. `harness::Capabilities`' own tests pin that an
+    //! unverified axis must never be scored as a `no`
+    //! (`an_unverified_capability_is_not_treated_as_present`), and this registry
+    //! carries the same rule forward: [`ResourceCapabilities::axis`] returns
+    //! *established present*, *established absent*, or *not established* —
+    //! never a bare bool.
+    //!
+    //! # 1390 — updatable without changing the core router
+    //!
+    //! [`super::session::capability_fit`] contains no `match` on a resource's
+    //! identity and no capability values of its own; it only asks
+    //! [`ResourceCapabilities::axis`] a question and applies a fixed scoring
+    //! formula. To add a resource, correct an axis, or add a new model-level
+    //! fact, construct or edit a [`ResourceFacts`] value — nothing in
+    //! `session.rs` changes. `Destination::with_resource_facts` (`super::session`)
+    //! is where a caller attaches one; the harness half comes from the adapter
+    //! [`crate::harness::adapter_for`] already returns.
+
+### `routing/classify.rs` — module doc
+
+    //! Lightweight task classification — Phase 35.
+    //!
+    //! # What "lightweight" rules out
+    //!
+    //! The map's own preamble frames this as the thing Glasshouse asks *before*
+    //! spending premium agent capacity — [`super::disposable::JobKind::Classification`]
+    //! is already the name for that job in the disposable-routing policy class.
+    //! A classifier that had to make a network call for every request would not
+    //! be lightweight and could not "run on a cheap, free, or local model" in any
+    //! meaningful sense, so this module makes none: [`classify_heuristically`] is
+    //! a pure, deterministic function of the request text, and [`classify`]'s
+    //! model path takes an *already-produced* [`TaskClassification`] as an
+    //! argument rather than calling anything itself — the same discipline
+    //! [`mod@super`]'s own doc comment states for the two routing-policy classes,
+    //! extended to this one.
+    //!
+    //! # Nothing here decides which model does the classifying
+    //!
+    //! `crate::config::RoutingModelChoice` and `RoutingModelResolution` (Phase
+    //! 2C) already record *whether* a routing model is configured and resolve it
+    //! against the providers that exist. This module is downstream of that
+    //! decision, not a duplicate of it: whatever calls a routing model is
+    //! expected to turn its reply into a [`TaskClassification`] and hand it to
+    //! [`classify`], and whatever finds no routing model configured falls
+    //! through to [`classify_heuristically`] instead. Neither path is wired to a
+    //! caller yet — see the module-level "no production caller" note in this
+    //! phase's evidence entry.
+    //!
+    //! # Confidence is an escalation lever, not a report card
+    //!
+    //! Phase 35's line about escalating "uncertain tier assignments... conservatively"
+    //! is answered by [`TaskClassification::conservative_workload_tier`] and
+    //! [`TaskClassification::conservative_safe_for_disposable_model`], which never
+    //! read better than the raw fields and only ever move in the direction of
+    //! *more* capability or *less* trust — the same fail-closed shape
+    //! [`super::Cost::Metered`] already uses as its default.
+
+### `routing/classify.rs` — `WorkloadTier` doc
+
+    /// The coarse workload tier a task requires — Phase 35's "assign a required
+    /// workload tier to the task", widened to the map's five-tier system
+    /// (capability map lines 1395-1400 and 1404).
+    ///
+    /// Ordered, so a policy may escalate by moving one step up
+    /// ([`WorkloadTier::escalate`]) without a `match` of its own. This is
+    /// deliberately not the same type as any future Phase 34F model-capability
+    /// ceiling: a task's *requirement* and a model's *ceiling* are compared by a
+    /// router, not merged into one enum, for the reason
+    /// [`super::AssignedModel`]'s doc comment gives for keeping "no model" and "a
+    /// named model" apart — collapsing a requirement and a capability into one
+    /// scale would let a router compare a task's tier against its own tier and
+    /// believe that proved something.
+    ///
+    /// [`Self::Deterministic`] (Tier 0) and [`Self::Frontier`] (Tier 4) have no
+    /// producer yet: nothing in this module or its callers currently classifies
+    /// a task into either. That is deliberate — this project adds a variant when
+    /// its producer lands, never in advance (`src/evaluation/mod.rs:89` states
+    /// the same rule for its own enum) — and every consumer of this type must
+    /// stay exhaustive over all five so that the day a producer does exist, a
+    /// missed call site is a compile error rather than a silent wrong decision.
+
+### `routing/classify.rs` — `fn parse_classification`
+
+    /// Read one model reply as a [`TaskClassification`] attributed to `label`.
+    ///
+    /// # Every classifying field is required, and nothing has a default
+    ///
+    /// A model that omits `workload_tier` has not classified the request, and a
+    /// classification assembled around a default would be a fabrication wearing
+    /// [`ClassificationSource::Model`] — indistinguishable, at every consumer
+    /// downstream, from a tier the model actually chose. So this returns an error
+    /// and the caller falls back to [`classify_heuristically`], which is honest
+    /// about being a heuristic. That is the same direction
+    /// [`crate::memory::extract::TokenUsage`]'s fields take for an unreported count.
+    ///
+    /// # The two recommendation fields are the exception, and why that is not a default
+    ///
+    /// `expected_duration` and `execution_shape` (map lines 1457 and 1458) are
+    /// read when present and **`None` when absent or unrecognised** — never an
+    /// error, and never a value stored as if the model had said it. `None` is
+    /// its own fact ("the producer did not state one"), and every reader goes
+    /// through [`TaskClassification::expected_duration`] and
+    /// [`TaskClassification::expected_execution_shape`], which derive the answer
+    /// from the ten fields the model *did* state. A reply from a model that
+    /// predates the two keys therefore parses exactly as it always did, and a
+    /// model that invents a fourth shape is read as having recommended nothing
+    /// rather than as having failed to classify.
+    ///
+    /// `label` names the resource that answered, for
+    /// [`ClassificationSource::Model`]. It is the caller's own description of a
+    /// model it configured — a provider name, a model name and a route — and
+    /// never anything the reply said.
+
+### `routing/disposable/classification.rs` — `fn classification_verdict`
+
+    /// Decide whether `candidate` may be asked to classify — the four filters
+    /// capability map lines 1427, 1436, 1432 and 1435 name, in that order.
+    ///
+    /// # The honesty rule, and the one place it is deliberately inverted
+    ///
+    /// Reliability and latency are **measurements**, and a measurement that has
+    /// not been taken never excludes: a candidate with no record, or with fewer
+    /// than [`CLASSIFICATION_RELIABILITY_MIN_OBSERVATIONS`] outcomes, or with no
+    /// median yet, is admitted with a note saying the requirement was inert —
+    /// the same rule [`has_no_known_headroom`] applies to capacity, because
+    /// turning "nothing measured" into "fails the bar" is a fabrication. Price
+    /// is the same shape once more: a metered candidate with no entry in
+    /// `pricing.toml` is *unpriced*, never excluded by the ceiling, exactly
+    /// like an unmeasured latency.
+    ///
+    /// Locality is **not a measurement**: it is a fact the provider registry
+    /// states for every provider name, and a caller that attaches none has
+    /// declined to say rather than failed to measure. Under
+    /// [`ClassificationPolicy::local_only`] that fails **closed** — a candidate
+    /// nobody could say is local is not sent anything — because this is a
+    /// privacy constraint, and a privacy constraint that admits on silence
+    /// would send a request off the machine on the strength of nobody having
+    /// said where the model runs.
+
+### `routing/disposable/classification.rs` — `fn time_price_preference`
+
+    /// Map line 1439 — `design-decisions.md`'s *"Preferring a cheap metered
+    /// classifier over an unreliable free one"*, amended 2026-09-02: prefer
+    /// `metered` over `free` when `free`'s expected wasted retry time — `(1 -
+    /// parsed_fraction) * median_ms` over its own classification record, above
+    /// the reliability sample floor — **exceeds `metered`'s own median
+    /// classification latency**, also above the floor and read from `metered`'s
+    /// own [`ClassificationRecord`], and `metered`'s estimated call cost is at
+    /// or below `policy`'s marginal-cost ceiling. `[routing] max_router_latency`
+    /// plays no part here — that knob stays 1435's alone. No exchange rate
+    /// between milliseconds and micro-dollars exists here or anywhere else in
+    /// this build: the comparison this rule actually makes is between two
+    /// *times*, and the cost half is still checked only against a ceiling the
+    /// user stated in their own currency.
+    ///
+    /// # Why the first version of this rule (comparing against `max_router_latency`) was withdrawn
+    ///
+    /// `free`'s expected wasted time is at most `median_ms`, for any parsed
+    /// fraction in `[0, 1]`. Comparing that wasted time against the same
+    /// `max_router_latency` [`classification_verdict`]'s 1435 gate excludes on
+    /// meant this rule could only ever fire on a candidate 1435 (and, below the
+    /// 80% floor, 1432) had already excluded from
+    /// [`DisposableRouting::choose_for_automatic_classification`]'s admitted
+    /// list — an account of an exclusion, never a preference that could change a
+    /// choice. Comparing `free`'s wasted time against `metered`'s **own**
+    /// measured latency has no such relationship to either gate: both times come
+    /// from candidates that pass 1432/1435/1436 on their own terms, so this rule
+    /// can fire on a candidate the router was genuinely about to choose.
+
+### `routing/disposable/mod.rs` — module doc
+
+    //! Routing for bounded internal jobs — the second policy class (Phase 9I).
+    //!
+    //! # What a disposable job is, and why it does not share a router
+    //!
+    //! A disposable job is a bounded, non-conversational request Glasshouse makes
+    //! for its own purposes: classifying a request before spending premium agent
+    //! capacity, extracting memories from a finished session, reranking search
+    //! results. Phase 9I line 530 names those three.
+    //!
+    //! Nothing about them resembles a live coding session. They have no
+    //! conversation prefix worth keeping warm, no tools, no user watching a
+    //! cursor, and no cost to being served by a different model than the last one
+    //! was. Line 533 therefore asks that they be routed by a **separate policy
+    //! class**, and the module header of [`mod@super`] lists the three
+    //! independent ways that separation is made structural here.
+    //!
+    //! The practical content of the separation is one sentence: this policy
+    //! **prefers free capacity and re-decides every time**, and the interactive
+    //! policy **keeps what it has and re-decides only after a real failure**.
+    //!
+    //! # Glasshouse's own test and evaluation runs
+    //!
+    //! Phase 9I line 539 — *"allow Glasshouse's own automated evaluation and test
+    //! runs to use configured zero-cost models, and never a metered resource
+    //! without an explicit opt-in"* — is an acceptance condition, not a
+    //! preference. A test run that silently spends the user's money is the worst
+    //! outcome this module can produce, and it is worse than a failing test.
+    //!
+    //! It is enforced by construction rather than by a check a caller might
+    //! forget: a routing policy is built with a [`MeteredUse`], the value that
+    //! Glasshouse's own runs are built with is [`MeteredUse::Withheld`], and a
+    //! [`DisposableChoice`] on a metered resource cannot be produced from a
+    //! policy holding it. There is no second door — [`DisposableChoice`]'s fields
+    //! are private and nothing else in the crate constructs one.
+
+### `routing/domain.rs` — module doc
+
+    //! Two domains a failover candidate belongs to, and why they are two types —
+    //! Phase 33C line 1371.
+    //!
+    //! # A quota domain needs no new type
+    //!
+    //! "Two keys for one router are two allowances" is [`super::free`]'s own
+    //! module header, and its pool is already keyed by [`super::CredentialId`].
+    //! A quota domain **is** a [`super::CredentialId`]: two different
+    //! credentials are two different quota domains by that type's own
+    //! `PartialEq`, and nothing here wraps it in a second type that would only
+    //! ever compare the same way a `CredentialId` already does.
+    //!
+    //! # A failure domain is a different question, with a different shape
+    //!
+    //! [`super::Backend`] carries no base URL — see that type's own doc comment
+    //! on why it is deliberately narrower than [`crate::provider::Provider`] —
+    //! so the only honest signal available for "does this request land on the
+    //! same infrastructure" is the provider name. That signal answers "yes" with
+    //! certainty and answers "no" with **no certainty at all**: a different
+    //! provider is not evidence of a different failure domain, only the absence
+    //! of evidence that it is the same one. [`FailureDomain`] is three states
+    //! rather than a bool for exactly that reason — line 1371's "represent...
+    //! separately" and line 1378's "prevent absent evidence from being
+    //! interpreted as independence".
+
+### `routing/evidence/joins.rs` — `fn estimate_subscription_headroom`
+
+    /// Map line 1245's estimator, and lines 1244/1246/1250/1251/1254 with it —
+    /// see [`SubscriptionHeadroomEstimate`] and [`HeadroomBand`] for the type's
+    /// own honesty rules. No new table, no migration, no persisted estimator
+    /// state: every call re-derives the estimate from rows the caller already
+    /// holds, the same "today's history IS the ledger's own rows in window"
+    /// premise every other reader in this module keeps.
+    ///
+    /// Reads five things, none of them queried here:
+    ///
+    /// - **accepted-request counts** and **throttle events with their
+    ///   recency**, from `observations` — this provider's own informative rows
+    ///   (`outcome.is_some()`, excluding [`CORRELATION_PURPOSE`] rows, the same
+    ///   filter [`classify_throttle_scope`] applies), narrowed to
+    ///   `credential_label` by the widen-when-unsure rule
+    ///   [`recent_credential_throttles`] and [`recent_credential_spend`] already
+    ///   apply: only when **every** informative row names its account does the
+    ///   count narrow, and one contextless row widens the whole estimate to
+    ///   provider scope rather than silently dropping it (map line 1246);
+    /// - **token usage where rows carry it** — never turned into a figure, only
+    ///   recorded on the returned value's [`HeadroomBasis`] (line 1251);
+    /// - **reset behavior**, as `seconds_until_reset` — the caller's own
+    ///   gateway-quota-cache reading, already computed for the provider-wide
+    ///   capacity facet and handed in rather than re-read. Map line 1248: when
+    ///   this is `None`, a fallback is learned from `scoped`'s own
+    ///   throttle→success recoveries rather than left unused — see
+    ///   [`ResetBasis`]. The learned value never displaces a real reading;
+    ///   [`SubscriptionHeadroomEstimate::reset_basis`] says which one applied;
+    /// - **historical sessions**, as `recent_session_count` — this project's own
+    ///   count of sessions charged to this account (`sessions.entitlement`,
+    ///   migration 22), read by the caller and handed in: this function stays a
+    ///   pure read over values already fetched, the shape every other reader in
+    ///   this module keeps.
+    ///
+    /// `None` — unknown — when nothing at all is available: no informative row,
+    /// no session count, no reset reading. An account this genuinely unmeasured
+    /// is not "exhausted" and not "ample"; it is unmeasured, the 32B line-1239
+    /// discipline every other facet on `ResolvedEntitlement` already keeps.
+
+### `routing/evidence/joins.rs` — `fn estimate_pairs`
+
+    /// **Map line 1855, the token half.** Joins each
+    /// [`crate::evaluation::EvaluationKind::RoutingConsumptionEstimated`]
+    /// row in the window to the sum of `output_tokens` over this project's
+    /// own routing rows carrying the same `session_id`, at or after the
+    /// estimate row's own `observed_at` — the actual consumption the
+    /// launch's estimate was a prediction *of*.
+    ///
+    /// # Why this reads across two tables from one connection
+    ///
+    /// [`crate::evaluation::EvaluationObservations`] and this ledger wrap
+    /// separate [`Connection`]s onto the **same** project database file —
+    /// [`Self::effort_shadow`] already reads `evaluation_observations` this
+    /// way, correlating a routing row to the session's next harness verdict.
+    /// This reader is that precedent's mirror image: here
+    /// `evaluation_observations` (kind
+    /// [`crate::evaluation::EvaluationKind::RoutingConsumptionEstimated`])
+    /// is the driving table and `routing_observations` is summed per match,
+    /// but it is the same one-file, one-query join, scoped by
+    /// [`Self::project_id`] on both sides rather than opening a second
+    /// ledger handle for a read this connection can already serve.
+    ///
+    /// A session with an estimate row and **no** matching routing row (or
+    /// one whose `output_tokens` are all still `NULL`) has an unknown
+    /// actual, never a fabricated zero — [`Self::consumption_by_purpose`]'s
+    /// own rule for an absent sum. [`Self::output_estimate_accuracy`]
+    /// reports it as *pending*.
+
+### `routing/evidence/joins.rs` — `fn responsiveness_separation`
+
+    /// Capability map line 1850: whether effective TTFC separates usable
+    /// agent turns from unusable ones better than raw TTFC, TTFT or decode
+    /// tokens per second — one [`SeparationMeasure`] per figure.
+    ///
+    /// Scoped to [`HARNESS_TURN_PURPOSE`] rows, the same restriction
+    /// [`Self::translation_cache_savings`] applies for the same reason: only
+    /// a translated exchange ever carries `first_tool_call_ms`,
+    /// `first_token_ms` or a tool round to measure at all. The usable-turn
+    /// verdict is [`Self::effort_shadow`]'s own subquery — the session's next
+    /// [`crate::evaluation::EvaluationKind::TurnOutcomeObserved`] row at or
+    /// after the exchange — never [`RoutingObservation::outcome`], which is a
+    /// transport 2xx proxy and not a verdict (see that field's own doc
+    /// comment). An exchange whose session recorded no such row is excluded
+    /// from every measure here, not folded into either side.
+    ///
+    /// **Effective TTFC is attached per row from its own route**, not
+    /// computed per exchange: a single exchange carries no failure rate of
+    /// its own, so each row's contribution to that measure is its
+    /// `(provider, model)`'s [`RouteResponsiveness::effective_ttfc_ms`] over
+    /// this same window, computed once per route and read off for every row
+    /// that route served. Raw TTFC, TTFT and decode tokens/s are each row's
+    /// own figure.
+
+### `routing/evidence/joins.rs` — `fn effort_shadow`
+
+    /// [`EffortShadow`] — capability map line 2039's shadow measurement: per
+    /// translated exchange this build recorded a turn shape and an
+    /// output-token count for, whether the exchange's session's next
+    /// harness-reported verdict was a completion, a failure, or nothing at
+    /// all. Joined by migration 24's `session_id`, **never** by
+    /// [`RoutingObservation::outcome`] — a transport 2xx proxy, not a
+    /// verdict, per that field's own doc comment.
+    ///
+    /// **Two statements, not one.** The verdict is *the session's next
+    /// [`crate::evaluation::EvaluationKind::TurnOutcomeObserved`] row at or
+    /// after the exchange's `observed_at`* — a correlated "first row at or
+    /// after" lookup expressed as a scalar subquery per candidate row — and
+    /// this reader's median is computed in Rust from the raw sample the way
+    /// every other median on this ledger is, so the classified
+    /// rows are fetched flat, with the verdict subquery inline, and folded
+    /// here rather than in a single `GROUP BY`. [`EffortShadow::unread`] is a
+    /// second, simpler statement over the same window and purpose: a row
+    /// whose `turn_shape` this reader could not decode is never folded into
+    /// either turn shape, so its count comes from a query that does not
+    /// filter on `output_tokens` at all — an unread row's tokens are unread
+    /// for the same reason its shape is.
+    ///
+    /// Only [`HARNESS_TURN_PURPOSE`] rows with `output_tokens IS NOT NULL`
+    /// enter a group.
+
+### `routing/evidence/readers.rs` — `struct PurposeConsumption` doc
+
+    /// Request and token consumption for one `(purpose, harness_recorded)`
+    /// group, within a queried window — capability map line 1464's "measure
+    /// routing-model token and request consumption separately from coding-agent
+    /// consumption," and the absent aggregate
+    /// [`EvidenceLedger::consumption_by_purpose`] builds: every other reader on
+    /// this ledger requires the caller to already name an identity, and nothing
+    /// before this grouped by the columns that answer *what a call was for* and
+    /// *whether a harness was relaying it*.
+    ///
+    /// `purpose` alone is not enough to separate coding-agent consumption from
+    /// everything else: `purpose` is `None` for every row no producer has
+    /// stamped, and today that is **both** every gateway relay exchange (line
+    /// 1464's own "coding-agent consumption", `crate::gateway::session`, which
+    /// always calls [`NewObservation::with_harness`]) **and** every
+    /// memory-extraction call (`crate::memory::extract::ModelCall::observation`,
+    /// which never does) — see [`NewObservation::with_purpose`]'s doc comment
+    /// for why extraction's rows are not back-filled with one. `harness_recorded`
+    /// is what tells those two `NULL`-purpose producers apart: `true` only when
+    /// every row in the group named a harness, which today means gateway rows
+    /// and gateway rows alone.
+    ///
+    /// `sample_count` is a real `COUNT(*)`, always defined. The three token
+    /// fields are not: each is `None` when every row in the group left that
+    /// column `NULL`, which is a different fact from `Some(0)` and must stay
+    /// one — the hazard this whole aggregate exists to avoid rendering as a
+    /// number. A group that mixes counted and uncounted rows sums only what was
+    /// counted, exactly as [`NewObservation::with_tokens`] asks every producer to
+    /// leave absent counts absent rather than zeroed.
+
+### `routing/evidence/readers.rs` — `struct ClassificationRecord` doc
+
+    /// What this project's ledger holds about one `(provider, model)` **as a
+    /// routing-model classifier** — capability map lines 1422/1432 (does it
+    /// come back in the schema?) and 1421/1435 (how long does it take?) — read
+    /// from the [`CLASSIFICATION_PURPOSE`] rows alone.
+    ///
+    /// Two counts and one median, each carrying its own denominator:
+    ///
+    /// - `outcomes_recorded` is the number of rows that carry a parse outcome
+    ///   at all — [`Outcome::Succeeded`] or [`Outcome::Failed`] — and `parsed`
+    ///   is how many of those succeeded. A row with no outcome (written by a
+    ///   build before the producer recorded one) counts in neither: it is not
+    ///   evidence of reliability in either direction.
+    /// - `timed` is how many rows carry a duration, and `median_duration_ms`
+    ///   is their median **only** once there are at least
+    ///   [`MIN_SAMPLE_FOR_SUMMARY`] of them — the same floor every other figure
+    ///   on this ledger sits behind. Below it the field is `None`, which a
+    ///   consumer must read as *unmeasured*, never as fast.
+    ///
+    /// **Resolution is one second.** `dispatched_at` and `completed_at` are
+    /// whole Unix seconds (this module's header, on line 1332's gap), so every
+    /// duration here is a multiple of 1000ms, and a ceiling compared against
+    /// this median is honest only to the second.
+    ///
+    /// Not split by [`ContextState`]: a classification call is a fresh prompt
+    /// every time with nothing warm to keep, and its producer records
+    /// [`ContextState::Unknown`] on every row.
+
+### `routing/evidence/readers.rs` — `struct RoutingOverhead` doc
+
+    /// Routing-model spend set against everything else — capability map line
+    /// 1465 — as one pure reading over
+    /// [`EvidenceLedger::consumption_by_purpose`]'s groups, so the arithmetic is
+    /// testable without a database and is rendered with its denominators rather
+    /// than as a bare ratio.
+    ///
+    /// "Spend" is **tokens**, input plus output as the provider reported them,
+    /// because that is still the only currency this reading can rely on:
+    /// `cost_micro_usd` has one producer (map line 1307,
+    /// `main.rs::record_entitlement_fallback`), and it fires only on an
+    /// entitlement-fallback event — coding-agent spend routed through the
+    /// gateway relay, the volume this comparison exists to weigh, leaves the
+    /// column `NULL` exactly as before. Cached input tokens are left out of the
+    /// sum — providers disagree on whether they are already inside
+    /// `input_tokens`, and a sum that might double-count is worse than one that
+    /// names what it omits.
+    ///
+    /// A `None` token figure means *no row in that side carried a count*, the
+    /// same convention [`PurposeConsumption`] keeps; a side that mixes counted
+    /// and uncounted rows sums only what was counted. [`Self::fraction`] is
+    /// `None` whenever either side is uncounted or the task side is zero, and
+    /// [`Self::exceeds`] never fires on an unmeasured comparison.
+
+### `routing/evidence/readers.rs` — `fn consumption_in_window`
+
+    /// Every observation in the window ending at `now_unix`, **whether or
+    /// not it carries an outcome** — the row set a *consumption* reader
+    /// needs, and the one [`Self::observations_in_window`] deliberately
+    /// cannot serve.
+    ///
+    /// # Why this is not `observations_in_window` with a flag
+    ///
+    /// [`Self::observations_in_window`] filters `outcome IS NOT NULL`
+    /// because its callers classify *how exchanges went* — a throttle scope,
+    /// a route correlation, a failure-class census — and a row with no
+    /// recorded outcome is not evidence about that question.
+    ///
+    /// Capability map lines 1274 and 1276 ask a different question: how much
+    /// of a resource was **consumed**. A request whose outcome nobody wrote
+    /// down still consumed the request. And the one producer that carries a
+    /// task class today — `main.rs::record_routing_latency`, which is the
+    /// only caller holding a `crate::routing::request::RouterAnswer` — records no
+    /// outcome at all, so every row line 1276 is about is invisible to the
+    /// other read. Widening that read instead would silently change what
+    /// four existing classifiers count, which is the opposite of what a new
+    /// line is allowed to do.
+    ///
+    /// Ordered by `observed_at` ascending, like its sibling, because
+    /// [`crate::routing::burn`] buckets by time and an idle gap is a property of
+    /// consecutive rows.
+
+### `routing/evidence/readers.rs` — `fn consumption_by_purpose`
+
+    /// [`PurposeConsumption`] for every `(purpose, harness_recorded)` group
+    /// this ledger holds a row for, within one window — capability map line
+    /// 1464, and the aggregate this module's own header says nothing
+    /// computes yet.
+    ///
+    /// Grouped by `purpose` first, so a routing model's own spend (`purpose
+    /// = "classification"` today) never gets folded into anyone else's
+    /// total; and, within the `NULL`-purpose rows every other producer
+    /// leaves, split again by whether a harness was recorded, because that
+    /// is what actually separates coding-agent consumption
+    /// (`crate::gateway::session` always names a harness) from every other
+    /// `NULL`-purpose producer (`crate::memory::extract` never does) — a
+    /// distinction `purpose` alone cannot make. See [`PurposeConsumption`]'s
+    /// own doc comment for why grouping on `purpose` alone would still fold
+    /// two different producers together.
+    ///
+    /// `SUM(input_tokens)`, and its two siblings, are what SQLite's own
+    /// aggregate already does correctly: it skips `NULL` inputs and answers
+    /// `NULL` only when a group carried none at all, never `0` for an absent
+    /// count. The row reader reads that straight into the `Option<i64>`
+    /// [`PurposeConsumption`] declares, with no manual accumulate-and-default
+    /// in between for a mutation to weaken.
+    ///
+    /// `first_byte_sample_count` is a genuine `COUNT(first_byte_at)`, so it
+    /// is honestly `0` — not absent — for a group nothing timed, and
+    /// `first_byte_ms_sample_count` is the same count over migration 25's
+    /// measured offset. `mean_time_to_first_byte_ms` **prefers the offset**:
+    /// each row contributes its own `first_byte_ms` when it has one and its
+    /// `first_byte_at - dispatched_at` difference in milliseconds when it
+    /// does not, so a window spanning the migration produces one mean over
+    /// every timed row rather than two incomparable ones. It is `NULL`
+    /// (`None`) exactly when no row offered either — SQLite's `AVG` over an
+    /// empty set is already `NULL`, so there is no manual zero-guard here.
+    /// `first_token_*`/`first_tool_call_*` are the identical triple.
+    ///
+    /// `decode_output_tokens` and `decode_ms` are line 1349's matched pair,
+    /// summed over exactly the rows carrying `output_tokens`,
+    /// `first_token_ms` and `completed_ms` with a non-negative gap — the one
+    /// figure here with **no** seconds fallback, because at one-second
+    /// resolution its denominator is routinely `0`. See
+    /// [`PurposeConsumption::decode_tokens_per_second`].
+    ///
+    /// Scoped to this ledger's own `project_id`, like [`Self::observed_identities`]
+    /// next door and for the same belt-and-suspenders reason: this reads
+    /// across every row in the table rather than one already-named identity.
+
+### `routing/evidence/signals.rs` — `struct RouteCorrelation` doc
+
+    /// What this project's ledger has observed about whether two routes fail
+    /// together — capability map lines 1370, 1373, 1374 and 1376, as one value.
+    ///
+    /// # What is counted
+    ///
+    /// An **informative failure event** is a correlatable failure
+    /// ([`FailureClass::is_correlatable`]) on one route during which the other
+    /// route was *observed at all* — had an exchange with a recorded outcome
+    /// whose window overlaps the failure's within
+    /// [`CORRELATION_OVERLAP_TOLERANCE_SECONDS`]. A failure while the other
+    /// route was idle says nothing about the pair and is counted nowhere: line
+    /// 1370's "measured, never assumed" cuts both ways, and treating an
+    /// unobserved route as having survived would manufacture independence.
+    ///
+    /// Of the informative events, `overlaps` are those where the other route
+    /// failed with the **same class** inside the tolerance, and `lone` are those
+    /// where it was observed and did not. Each failure event is matched at most
+    /// once, so a burst of five on each side is ten events and not twenty-five
+    /// pairs.
+    ///
+    /// # Why the confidence moves both ways (line 1374)
+    ///
+    /// [`Self::confidence`] is `overlaps / (overlaps + lone)`. A new overlapping
+    /// failure raises it; a new failure the other route sat out lowers it.
+    /// Nothing here is a stored flag: the value is recomputed from the rows on
+    /// every read and never persisted, because the rows are the claim and the
+    /// rows keep arriving.
+
+### `routing/evidence/signals.rs` — `enum ThrottleScope` doc
+
+    /// Capability map line 1317: whether a throttle on one route reads as this
+    /// provider's own cadence limiter firing everywhere, or as one model's own
+    /// limit — computed, never stored, from the same rows and the same overlap
+    /// [`correlate_routes`] measures, restricted to [`FailureClass::Throttle`]
+    /// and to one provider's own models rather than every route in the ledger.
+    ///
+    /// # One of the map line's four scopes is still not here
+    ///
+    /// Line 1317 names four: provider-wide, model-specific, account-specific,
+    /// request-pool-specific. Three now have a producer in this build.
+    /// **Account-specific** gained its key with Phase 56A: every gateway
+    /// exchange row carries the serving credential's label in
+    /// [`RoutingObservation::quota_context`]
+    /// (`crate::gateway::session` stamps `credential().label()` on every
+    /// observation), so a second account of one provider is now something the
+    /// rows can tell apart — the earlier note here that *"no row carries an
+    /// account identity"* described the build before that column had its
+    /// producer. The variant is still emitted only when the evidence permits:
+    /// rows without a `quota_context` contribute nothing to it, and a ledger
+    /// with one account's rows classifies exactly as it always did.
+    /// **Request-pool-specific** still has neither a producer nor a consumer:
+    /// `routing::free::is_request_pool` has no production caller, and the one
+    /// production allowance read asks only `is_exhausted`, which a pooled and a
+    /// token-priced credential both answer the same way (refusal register, row
+    /// 531). Fabricating it would be exactly the invention line 1317's own
+    /// "when evidence permits" refuses.
+
+### `routing/evidence/signals.rs` — `struct CredentialSpend` doc
+
+    /// Token spend recorded against one account inside a queried window — map
+    /// line 1971's *"spend ceilings"* half, read from the rows this ledger
+    /// actually holds.
+    ///
+    /// # Why tokens, and why that is not this reader's own decision
+    ///
+    /// `routing_observations.cost_micro_usd` has one producer now — map line
+    /// 1307, `main.rs::record_entitlement_fallback`, carrying
+    /// [`crate::routing::session::Routed::cost`] — but it writes only on an
+    /// entitlement-fallback event, at [`CostConfidence::Estimated`] built from
+    /// the user's own `pricing.toml` rather than a provider-reported figure. The
+    /// overwhelming majority of rows still leave the column `NULL`, so a reader
+    /// here that answered in money would answer `None` for nearly every window,
+    /// and a ceiling that can almost never be reached is a rule the broker can
+    /// almost never be held to. Map line 1465's reader already settled the same
+    /// question the same way, in production, in [`RoutingOverhead`]'s own
+    /// words: *"'Spend' is tokens, input plus output as the provider reported
+    /// them, because that is the only currency this ledger holds."* This reader
+    /// is that sentence applied per account. Cached input tokens are excluded
+    /// for line 1465's reason too: providers disagree on whether they are
+    /// already inside `input_tokens`, and a sum that might double-count is worse
+    /// than one that names what it omits.
+
+### `routing/free.rs` — module doc
+
+    //! The free pool: which zero-cost resources exist, what is left of each, and
+    //! which of them is currently able to serve.
+    //!
+    //! # Health comes from work, never from a probe
+    //!
+    //! Phase 9I line 534 asks Glasshouse to *"avoid consuming scarce free
+    //! requests on health probes when actual workload can provide health
+    //! signals"*. A health checker that burns the quota it is protecting is a
+    //! defect with a passing test, so this module is built so that one cannot be
+    //! written here: [`FreePool::observe`] is the **only** thing that changes a
+    //! resource's health, it takes a [`WorkloadOutcome`] that a real exchange
+    //! produced, and there is no client, no socket and no timer anywhere in this
+    //! file — `routing::tests::no_routing_policy_can_make_a_request` scans for
+    //! that.
+    //!
+    //! The production feed is the gateway's own request path: every exchange it
+    //! completes already knows the credential it used, the status the provider
+    //! returned and whether it reached the provider at all.
+    //!
+    //! # A request pool is not a token budget
+    //!
+    //! Phase 9I line 528 — *"track request-pool limits separately from
+    //! token-priced limits"*. [`Allowance`] has one variant for each and no
+    //! shared arithmetic, because the failure mode of collapsing them is
+    //! specific and quiet: a token budget decremented by one per request reads as
+    //! healthy for a very long time and then is not.
+    //!
+    //! What a request pool holds is what a **real response said** — a limit, a
+    //! remaining count and a reset instant, each `None` until a provider actually
+    //! stated it. Glasshouse defines no window of its own. A guessed window is
+    //! how a router talks itself into believing a pool has refilled.
+    //!
+    //! # Per credential, because two keys are two allowances
+    //!
+    //! Phase 9I lines 537 and 538. Allowance state is keyed by [`CredentialId`]
+    //! and health by credential **and** model, so exhausting one key says nothing
+    //! about the other key, and exhausting one model says nothing about the
+    //! others behind the same key. Keying either of these by provider is the
+    //! mistake the two lines exist to name; `crates/glasshouse/tests/` carries
+    //! the test that fails when it is made.
+
+### `routing/free.rs` — `fn fail`
+
+    /// One rate-limit or capacity failure — the two outcomes Phase 9I line
+    /// 535 names — and the cooldown that follows.
+    ///
+    /// **A cooldown a provider declared and one Glasshouse invented are not
+    /// the same kind of fact.** Capability map line 1319 makes the provider's
+    /// own answer *authoritative* for a temporary scheduling block, not
+    /// merely preferred, so the two take different paths here:
+    ///
+    /// - **A declared `retry_after` applies as given, and immediately.**
+    ///   [`FAILURES_BEFORE_COOLDOWN`] exists because *inventing* a cooldown
+    ///   out of one ordinary `429` would empty a pool of perfectly good
+    ///   resources; nothing is invented when the provider stated the wait
+    ///   itself, and scheduling work against a resource that just told us to
+    ///   hold is exactly the block line 1319 forbids. [`MAX_COOLDOWN`] does
+    ///   not apply either — it bounds what Glasshouse imposes *by itself*
+    ///   (see its own doc), never what a provider declared. Clamping a stated
+    ///   one-hour wait down to fifteen minutes is overriding the provider,
+    ///   which is the whole of what this line rules out.
+    /// - **Without one, the bounded doubling from [`BASE_COOLDOWN`] applies**,
+    ///   and only once there have been [`FAILURES_BEFORE_COOLDOWN`] of them.
+    ///   [`Self::backoff`] applies [`MAX_COOLDOWN`] itself, so the ceiling on
+    ///   the invented path is unchanged by the split.
+    ///
+    /// A declared wait that is *shorter* than a cooldown already in place
+    /// shortens it, for the same reason: authoritative means authoritative in
+    /// both directions, and it is the same rule that lets
+    /// [`WorkloadOutcome::Served`] clear a cooldown outright.
+
+### `routing/free.rs` — `fn adopt_observed`
+
+    /// Adopt a health state **another process** already observed about
+    /// `resource` — capability map line 1599's bridge, and the only entry
+    /// point that does not learn.
+    ///
+    /// # Why this is not [`FreePool::observe`]
+    ///
+    /// `observe` takes one outcome and derives the rest: it counts the
+    /// failure, and it computes the cooldown itself from `BASE_COOLDOWN` or
+    /// the provider's stated `retry_after`. There is no outcome here to
+    /// derive anything from. A caller holding a persisted reading knows the
+    /// failure count and the deadline as *facts already established*, and
+    /// replaying them through `observe` would manufacture a cooldown length
+    /// this pool invented rather than the one the gateway actually granted.
+
+### `routing/interactive/mod.rs` — module doc
+
+    //! Sticky routing for one live harness-backed gateway session (Phase 9H).
+    //!
+    //! # The session owns the assignment; the assignment is not a session
+    //!
+    //! Phase 9H line 507 asks Glasshouse to *"treat the gateway assignment as
+    //! backend state belonging to the harness-backed session rather than as an
+    //! independent agent session"*. [`Assignment`] is therefore a value with no
+    //! identity of its own: no session id, no lifecycle, no start or end, nothing
+    //! that could be listed beside the user's real sessions. It is held by the
+    //! gateway a session started and dies with it.
+    //!
+    //! That is structural, not promised. Nothing in this file names
+    //! `crate::session`, and `tests::the_assignment_is_not_a_session_of_its_own`
+    //! scans for it — the same move `gateway::mod` already makes for the same
+    //! reason, and for the same product principle: the harness stays the harness.
+    //!
+    //! # Sticky means *nothing on a normal turn asks the question*
+    //!
+    //! Lines 508 and 509 are two halves of one behaviour, and the second is the
+    //! one that is easy to lose. It is not enough that a normal turn happens to
+    //! keep the same backend; a normal turn must keep it **even when a cheaper
+    //! free model is sitting right there**. So [`InteractiveRouting::next_turn`]
+    //! takes the alternatives as an argument. A version of this function that
+    //! could not see them would satisfy the line by accident, and the first
+    //! optimisation someone added would break it silently.
+    //!
+    //! # A failover is not a migration, and the difference is decidable today
+    //!
+    //! Lines 513 and 514 ask for same-family failover to be preferred and a
+    //! *material* model-family change to be treated as a migration decision.
+    //! Rather than invent a taxonomy by pattern-matching model names, this module
+    //! uses the conservative rule the available facts support:
+    //!
+    //! - **the same model identifier served by a different provider** is a
+    //!   same-family move — it is literally the same model, which is the common
+    //!   real case (one model offered by two routers) — so it is a
+    //!   [`FailureResponse::FailOver`];
+    //! - **any different model identifier** is treated as material, so it is
+    //!   offered as a migration and never taken transparently.
+    //!
+    //! Erring this way costs an automatic recovery that a family table would have
+    //! allowed. Erring the other way silently changes the model under a live
+    //! coding session, which is exactly what line 514 forbids.
+    //!
+    //! # Phase 9J and Phase 33A rank the survivors; they do not choose the group
+    //!
+    //! [`InteractiveRouting::on_provider_failure`] used to take the first
+    //! candidate in each group (same-model, then different-model) and return
+    //! immediately — the ordering above is unaffected by anything below this
+    //! paragraph. What changed is *which* candidate wins **within** a group,
+    //! once more than one survives `compatible`: `score_candidate` classifies
+    //! each one against the harness the failing session was serving
+    //! ([`pairing::classify`], Phase 9J) and weighs it against local observed
+    //! evidence for that exact `(provider, model, route, harness)` combination
+    //! (`crate::routing::evidence::ObservedEvidenceSource`, Phase 33A), and
+    //! `best` picks the highest-scoring survivor, the caller's own order
+    //! breaking a tie. A candidate can never be *excluded* this way — only
+    //! `compatible` refuses one — so this is design decision 1's "additive,
+    //! never a filter" made literal for this policy's own decision.
+    //!
+    //! Every candidate also carries a **failure-domain diversity** contribution
+    //! (Phase 33C, `failure_domain_contribution`): a candidate sharing the
+    //! failed backend's provider is penalised, because `Backend` carries no base
+    //! URL and the provider is the only honest proxy this build has for "lands
+    //! on the same infrastructure" (see [`super::domain::FailureDomain`]). A
+    //! different provider scores `0.0` rather than a bonus — line 1378 forbids
+    //! rewarding a candidate for independence nothing has established.
+
+### `routing/interactive/mod.rs` — `fn start`
+
+    /// Map lines 566 and 569: which of several eligible backends a **fresh**
+    /// session starts on, and the full explanation of why.
+    ///
+    /// [`Self::assign`] above is the older, narrower entry point: the caller
+    /// had already chosen, and `assign` recorded the choice. This one is the
+    /// caller *asking*. It exists because line 566 asks for a positive
+    /// **initial** routing prior — "initial" is a moment, and until this
+    /// function there was no moment in Glasshouse where a starting session
+    /// compared two backends. `crate::gateway::session::SessionRouting::bind`
+    /// took `Upstream::serving()`, the first configured backend, and its own
+    /// doc said so: *"Nothing here chooses; the choice was made when the
+    /// upstream was built."*
+    ///
+    /// # What is weighed, and in what order
+    ///
+    /// 1. **Hard constraints first** (line 568), through
+    ///    [`apply_hard_constraints`] and therefore structurally rather than
+    ///    by convention: a session pin is a
+    ///    [`HardConstraint::UserConstraint`] and removes a candidate outright.
+    ///    Unlike `score_candidate`'s own receipt-shaped call, this check can
+    ///    actually reject, so the [`EligibleCandidate`](crate::routing::EligibleCandidate)s
+    ///    below are a filter's output and not a formality.
+    /// 2. **The native-pairing prior** (line 566) and **local observed
+    ///    evidence** (Phase 33A), from `score_candidate` — the same function,
+    ///    unchanged, that [`Self::on_provider_failure`] already scores
+    ///    failover survivors with.
+    /// 3. **Session continuity** (line 569), from
+    ///    [`session_continuity_contribution`] — bounded, never negative, and
+    ///    on the prior's own scale so that `best` can weigh the two against
+    ///    each other by simple sum. That is what "commensurable" has to mean
+    ///    here: not that a warm session is compared to a prior by a special
+    ///    rule, but that neither term knows the other exists and
+    ///    [`RoutingExplanation::total`] adds them up.
+    ///
+    /// A candidate is never *excluded* by any of steps 2 or 3 — only step 1
+    /// can remove one, and only for a constraint the user or the protocol
+    /// imposed. That is design decision 1 ("additive, never a filter") at the
+    /// one caller where a prior could most easily have been written as
+    /// `if native { return it }`.
+    ///
+    /// # What a build with nothing configured does
+    ///
+    /// Exactly what it did before this function existed. With
+    /// [`NoObservations`](crate::config::pairing::NoObservations),
+    /// [`NoWarmSessions`](crate::config::pairing::NoWarmSessions) and no
+    /// vendor-native candidate, every contribution is `0.0`, every candidate
+    /// ties, and `best` keeps the first — which is `Upstream::backends()`'
+    /// own order, which is the user's configuration order.
+    ///
+    /// # What this function cannot decide, and it is not a gap here
+    ///
+    /// **The native-pairing prior is constant across every candidate set the
+    /// shipped binary can build**, so at this caller it contributes a real
+    /// number to every explanation and separates nothing.
+    /// [`pairing::classify`] reads `query.route` exactly once, and only to
+    /// compute `Pairing::protocol_fit` — a field
+    /// `native_pairing_prior_contribution` never looks at — so
+    /// [`pairing::PairingClass`] is a function of the harness, the model and
+    /// the user's corrections alone. A session start's candidates are
+    /// `crate::gateway::upstream::Upstream::backends`, which carry a
+    /// provider, a credential and a cost and **no model**: the one model
+    /// comes from the launch profile and is the same for all of them. Same
+    /// harness plus same model means same class means same prior.
+    ///
+    /// `tests::the_native_pairing_prior_is_constant_across_a_real_session_start_candidate_set`
+    /// holds that as an executable fact rather than a comment. What *does*
+    /// separate candidates here is local evidence and session continuity,
+    /// both of which are keyed by [`pairing::EvidenceKey`] and therefore vary
+    /// with the route.
+    ///
+    /// `None` only when `candidates` is empty: there is nothing to start on,
+    /// and `best` may not be called with nothing.
+
+### `routing/interactive/mod.rs` — `fn on_provider_failure`
+
+    /// Lines 512, 513, 514, 517 and 518: what a real provider failure does.
+    ///
+    /// `candidates` are the other backends configured for this session's
+    /// protocol. The order is the caller's — the user's own ordering is the
+    /// tiebreaker, exactly as it is in the free pool — but every candidate
+    /// that survives `compatible` is now scored by Phase 9J's native-pairing
+    /// prior and Phase 33A's local evidence (`score_candidate`), and the
+    /// best-scoring one wins rather than simply the first one found. With no
+    /// evidence at all (`evidence` answers `None` for everything, as
+    /// [`crate::config::pairing::NoObservations`] always does) every
+    /// candidate scores `0.0` and this reproduces "first compatible
+    /// candidate" exactly, which is what every test in this module that
+    /// passes `NoObservations` is checking.
+    ///
+    /// `evidence` is [`crate::config::pairing::ObservationSource`] rather
+    /// than a concrete store for the same reason
+    /// `native_pairing_prior_contribution` itself takes one: this function
+    /// stays a pure function of its arguments (see this module's own header)
+    /// with no knowledge of `crate::routing::evidence::EvidenceLedger` or how
+    /// its caller reached it.
+    ///
+    /// `preference` and `overrides` are Phase 9J line 576's own patch: the
+    /// user's configured native-pairing preference and corrections, resolved
+    /// once from configuration by `crate::profile`'s gateway path and carried
+    /// here by `crate::gateway::session::SessionRouting`, which is why this
+    /// method takes them as arguments rather than storing them on `self` —
+    /// `self.pin` is session *policy* state that a pin or an unpin replaces
+    /// wholesale, while a resolved preference must survive that replacement
+    /// unchanged.
+    ///
+    /// `correlations` is Phase 33C lines 1370–1376's answer to *do these
+    /// two front doors fail together* — read off the same ledger as
+    /// `evidence`, by the same caller, and passed beside it for the same
+    /// reason: this function stays pure. [`RouteCorrelations::default`]
+    /// (every pair unmeasured) reproduces the ranking exactly as it was
+    /// before that package, which is what every test here that passes it
+    /// checks.
+
+### `routing/interactive/mod.rs` — `fn route_correlation_contribution`
+
+    /// Capability map lines 1370, 1373, 1374 and 1376 at the one place a
+    /// correlation changes a decision: what the ledger has **measured** about
+    /// `candidate` failing at the same moments as the backend that just failed.
+    ///
+    /// # A sibling of `failure_domain_contribution`, not a change to it
+    ///
+    /// [`FailureDomain::between`] is a certainty about provider identity and
+    /// stays exactly what it was; this term is evidence about behaviour, and it
+    /// is only ever consulted for a pair that identity calls
+    /// [`FailureDomain::Unknown`]. A same-provider candidate gets [`None`] here:
+    /// the provider term already carries the whole penalty, and a second term
+    /// for the same fact would count it twice. Keeping the two terms apart is
+    /// also what keeps line 1851's count meaning what `glasshouse route` prints
+    /// beside it — *steered off a candidate sharing the failed backend's
+    /// provider* — while line 1852 is derived from this term alone.
+    ///
+    /// # What the magnitude is
+    ///
+    /// [`RouteCorrelation::confidence`] scaled by [`SHARED_FAILURE_DOMAIN_PENALTY`]:
+    /// a pair observed failing together every time is penalised exactly as a
+    /// shared provider is, a pair that never did is penalised nothing, and a
+    /// pair between moves between — line 1374's "confidence-weighted", with the
+    /// weight recomputed from the rows on every failover rather than stored.
+    ///
+    /// # Line 1376
+    ///
+    /// Below [`super::evidence::MIN_CORRELATION_SAMPLE`] events the term is
+    /// `0.0` — indistinguishable in the ranking from no correlation at all —
+    /// and its detail says how many of how many, so the explanation `glasshouse
+    /// route` prints names the sample size before anything reads as meaningful.
+
+### `routing/interactive/mod.rs` — `struct FailureDomainEffect` doc
+
+    /// What the failure-domain term did to one ranking — **capability map line
+    /// 1851**, derived rather than decided.
+    ///
+    /// # Why this is a derivation and not a rejection
+    ///
+    /// Design decision 1 makes failure-domain diversity *additive, never a
+    /// filter*: `failure_domain_contribution` is a `-1.0` term inside an
+    /// explanation, and nothing anywhere refuses a candidate for sharing the
+    /// failed backend's provider. So no production code path *decides* that a
+    /// failover was prevented, and inventing one would change the policy in
+    /// order to measure it.
+    ///
+    /// What can be established honestly is a comparison: rank the survivors
+    /// once as production does, and once with that one term's magnitude removed.
+    /// If the winners differ, the term is what moved the decision.
+    ///
+    /// # The displaced candidate always shares the failed provider
+    ///
+    /// This is a property of the arithmetic rather than a claim. Every
+    /// candidate's score differs between the two rankings by its own
+    /// failure-domain magnitude, which is `0.0` for every candidate except one
+    /// on the failed backend's own provider, where it is
+    /// `SHARED_FAILURE_DOMAIN_PENALTY`. A candidate scoring `0.0` for that
+    /// term therefore has the same total in both rankings, while every other
+    /// candidate's total can only be lower in the production ranking — so a
+    /// `0.0` winner of the term-free ranking still wins the production one, with
+    /// `best`'s first-seen tie-break unchanged because both rankings walk the
+    /// same order. A winner that *changes* is therefore always a candidate that
+    /// shared the upstream, which is exactly the map line's *"failover onto the
+    /// same unhealthy upstream"*.
+
+### `routing/mod.rs` — module doc
+
+    //! Routing policy: which backend serves which work, and why.
+    //!
+    //! [`classify`] is a third, independent thing: not a policy that picks a
+    //! backend, but the lightweight, model-optional classification of a request
+    //! (Phase 35) that a future policy — Phase 34F/35B, neither built yet — would
+    //! read before picking one. Nothing in this module or its siblings consumes
+    //! a [`classify::TaskClassification`] today; see that module's doc comment.
+    //!
+    //! # Two policy classes, and the reason they are two types
+    //!
+    //! Phase 9I line 533 asks Glasshouse to *"keep interactive harness routing
+    //! and disposable-support-job routing as separate policy classes"*. That
+    //! sentence is easy to satisfy on paper and easy to lose: one router with a
+    //! `disposable: bool` parameter would read as compliance and would be one
+    //! careless call site away from routing a live coding session the way a
+    //! throwaway classification job is routed.
+    //!
+    //! So the separation here is **structural**, in three independent ways:
+    //!
+    //! 1. [`interactive::InteractiveRouting`] and
+    //!    [`disposable::DisposableRouting`] are distinct types with distinct
+    //!    result types — [`interactive::Assignment`] and
+    //!    [`disposable::DisposableChoice`]. Neither result converts into the
+    //!    other: there is no `From`, no `Into`, no shared trait, and no public
+    //!    field on either, so a caller holding one cannot produce the other
+    //!    without going through the policy that mints it.
+    //! 2. Neither module names the other. `interactive.rs` contains no mention
+    //!    of `disposable`, and `disposable.rs` none of `interactive`;
+    //!    `tests::the_two_policy_classes_do_not_name_each_other` scans both
+    //!    sources to keep it that way, the same move
+    //!    `gateway::mod`'s import scan already makes.
+    //! 3. They **decide differently on identical input**, which is the part that
+    //!    matters: given one catalogue in which a free model and a paid model
+    //!    both serve, the disposable class picks the free one and the
+    //!    interactive class keeps the backend the session started on. A test
+    //!    that only checked the type separation would pass for a router that had
+    //!    quietly become one policy.
+    //!
+    //! # What this module refuses to do
+    //!
+    //! Nothing here opens a socket, resolves a credential, or reads the clock.
+    //! Every function is a pure function of values the caller supplies —
+    //! including `now`, which is a parameter and never [`std::time::Instant::now`]
+    //! called inside a policy. That is not tidiness:
+    //!
+    //! - a policy that could probe would eventually probe, and Phase 9I line 534
+    //!   says free requests must not be spent on health probes (see
+    //!   [`free::FreePool`], whose only mutator is fed by real workload);
+    //! - a policy that read its own clock could not be tested for a cooldown
+    //!   boundary without waiting for one.
+    //!
+    //! # Credentials appear here only as names
+    //!
+    //! [`CredentialId`] holds a [`SecretRef`] — an environment variable name, or
+    //! a store service and account. Never a value. Phase 9I lines 537 and 538
+    //! require quota state to be tracked *per credential*, which means a
+    //! credential has to be a map key, and a map key is a thing that gets
+    //! printed. `SecretRef` is already the one shape in Glasshouse that is safe
+    //! to write into a tracked configuration file, so it is the one used here.
+
+### `routing/mod.rs` — `enum CacheLocality` doc
+
+    /// Whether a change of backend leaves provider-side prompt caching usable.
+    ///
+    /// # Pinning down "likely", because Phase 9H line 516 uses that word
+    ///
+    /// The line is *"warn when failover is likely to invalidate provider-side
+    /// prompt caching"*, and a capability whose trigger is a feeling is not a
+    /// capability. So the rule is written down once, here, and every warning in
+    /// Glasshouse comes from it:
+    ///
+    /// - **Different provider.** The cache is held by the provider. A request
+    ///   that goes to a different service reaches a cache that never saw this
+    ///   conversation. Certain, so [`CacheLocality::Lost`].
+    /// - **Different model.** A provider-side cache is keyed by the model as well
+    ///   as the prefix — a cached prefix for one model is not a cached prefix for
+    ///   another. Certain, so [`CacheLocality::Lost`].
+    /// - **Same provider and model, different credential.** Provider-side caches
+    ///   are commonly scoped to the account a key belongs to, and Glasshouse has
+    ///   established that for **no** configured provider — every template in
+    ///   [`crate::provider::templates`] declares its capabilities `Unverified`.
+    ///   So this is the case the map's "likely" is actually about, and it is
+    ///   [`CacheLocality::LikelyLost`]: warned, and said as a likelihood rather
+    ///   than as a fact.
+    /// - **Nothing moved.** [`CacheLocality::Preserved`].
+    ///
+    /// The consequence worth stating: rotating a credential (Phase 9I line 537)
+    /// is a cache event too, which is not obvious and is why the rule is a
+    /// function rather than a comment.
+
+### `routing/mod.rs` — `fn same_capability_tier`
+
+    /// The seam map line 1970's tier-preserving fallback consumes: are these two
+    /// destinations' models of the same user-assigned capability tier?
+    ///
+    /// # The axis, now landed
+    ///
+    /// `classify::WorkloadTier` ranks *how hard the task is*, and
+    /// `capability::CapabilityAxis` answers *can it do this at all* — neither is
+    /// "how capable is this model, relative to others". Phase 34F's answer to
+    /// that question is the resolved ceiling a user assigns a model (an
+    /// override, or a capability record's own `ceiling`): the same `WorkloadTier`
+    /// vocabulary, read as *the tier this model is trusted to serve*. The caller
+    /// resolves that once per destination — `main.rs::destination_tier_ceiling`,
+    /// beside where it attaches [`session::Destination::with_tier_ceiling`] — and
+    /// attaches it via [`session::Destination::with_capability_tier`]; this
+    /// function compares the two attached values and reads no configuration of
+    /// its own, matching every other free function in this module.
+    ///
+    /// [`TierRelation::Unknown`] is not [`TierRelation::Same`]: a destination
+    /// whose model nobody assigned a tier answers unknown, and the fallback's
+    /// tier steps never fire on it — the ruling's own direction, *"You can't put
+    /// a fable 5 task and switch it to a nemotron v3"*, and a fallback that
+    /// silently downgrades the model *"is worse than a refusal, because the work
+    /// continues and looks fine"*.
+
+### `routing/pressure.rs` — module doc
+
+    //! Phase 35D — routing under subscription pressure: what a destination's
+    //! capacity **band** and the nearness of its reset do to the session
+    //! router's ranking, and the reserve policy the scope of work runs under.
+    //!
+    //! # What this module decides, and what it deliberately reuses
+    //!
+    //! Capability map lines 1570–1577, and 1606/1612 as Phase 38 restates them.
+    //! Two contributions, one public function each so a mutation can zero exactly
+    //! one of them (the same shape as `super::session`'s seven):
+    //!
+    //! - [`capacity_band_pressure`] — lines 1570, 1571, 1573, 1574 and 1577. A
+    //!   premium destination in the **tight** band is penalised, and less so the
+    //!   nearer its reset; one in the **reserve** band is put to the
+    //!   protected-reserve policy this build already has,
+    //!   [`crate::provider::quota::evaluate_reserve_spend`], under the policy the
+    //!   caller's scope selects.
+    //! - [`low_tier_spend`] — line 1575. A premium destination already under
+    //!   pressure is not spent on low-tier work while a healthy zero-cost
+    //!   alternative adequate for that work is among the candidates.
+    //!
+    //! Everything else here is *read*, not re-decided: the band comes from
+    //! [`crate::provider::quota::RemainingCapacityScore::band`] against the
+    //! thresholds the user configures (line 1270) and the provider's own protected
+    //! reserve percentage (line 1288); the reset comes from
+    //! [`crate::provider::quota::CapacityState::seconds_until_reset`]; the task's
+    //! tier is Phase 35's [`WorkloadTier`]; and the precedence a reserve-band
+    //! decision follows is Phase 32F's own function. Inventing a second copy of
+    //! any of those would be two scales for one question, which is the mistake
+    //! `ReserveDecisionInputs::tier`'s doc comment already refuses.
+    //!
+    //! # The rule every term obeys — a term must be able to separate a pair
+    //!
+    //! `docs/product/evidence/phase-9j.md`'s last entry: a signal constant across
+    //! the candidate set cannot change a ranking. Every contribution below has a
+    //! test in `tests/subscription_pressure.rs` holding two destinations that
+    //! differ **only** in its axis and resolving differently, and every case in
+    //! which a term cannot separate anything — no reading, unknown tier, a
+    //! zero-cost destination — contributes exactly `0.0` and says in its evidence
+    //! that it is inert and why. That is not "assume healthy" and not "assume
+    //! exhausted": an unread resource is neither preferred nor withheld, the
+    //! stance `super::session::quota_pressure` already takes for the same
+    //! reading.
+    //!
+    //! # "Premium" is one fact, and it is [`super::Cost`]
+    //!
+    //! The lines say *premium subscription*. The fact that decides it here is
+    //! whether the destination costs the user anything at the margin —
+    //! [`super::Backend::cost`], which is [`super::Cost::Metered`] for everything
+    //! nobody has marked free (fail-closed, per that type's own doc) and
+    //! [`super::Cost::Free`] for a model the user named in a provider's
+    //! `free_models`. Nothing about the *shape* of the quota (a rolling window, a
+    //! balance) is consulted: a metered key in its tight band is spent as
+    //! carefully as a subscription in its tight band, and a reset time is what
+    //! separates the two shapes when one exists, not a second flag.
+    //!
+    //! # Purity
+    //!
+    //! No clock, no store, no socket, no name. `seconds_until_reset` is a value
+    //! the caller computed against its own clock, and the set-level facts in
+    //! [`Alternatives`] are computed by the router from the candidate set it
+    //! holds. **No provider, model or harness is named in this file** — the
+    //! policy is tunable through configuration (`routing.reserve.*`,
+    //! `routing.capacity_band_thresholds`, a provider's `reserve_percent`) and
+    //! never through a hierarchy written here; line 1612 is enforced by a test
+    //! that scans this source.
+
+### `routing/pressure.rs` — `fn exhaustion_forecast_pressure`
+
+    /// Line 1280: what a forecast of exhaustion before the next reset
+    /// contributes.
+    ///
+    /// # It is inert unless a forecast exists, and it says so
+    ///
+    /// `super::burn::forecast` answers `None` for a resource with too few rows,
+    /// no measured request-unit remaining amount, no known reset, or a zero burn
+    /// rate — the four ways line 1278's *"sufficiently known"* is not met. Every
+    /// one of them reaches this term as `inputs.forecast == None`, and every one
+    /// of them contributes exactly `0.0`. That is what keeps a ranking on a
+    /// build with no forecast identical to what it was before this module
+    /// existed, which is a property with its own test
+    /// (`a_destination_with_no_forecast_ranks_exactly_as_it_did`).
+    ///
+    /// # "Well before", and why it is not "before"
+    ///
+    /// [`super::burn::WELL_BEFORE_RESET_FRACTION`] carries the reasoning: a
+    /// forecast landing just short of the reset is inside the estimator's own
+    /// tolerance, and reacting to it would be line 1281's overreaction wearing a
+    /// different hat. A resource forecast to exhaust *after* the reset, or in
+    /// the last half of the window before it, contributes `0.0` and names the
+    /// figures it was comparing — an informational line, not a silent one.
+    ///
+    /// # The words are hedged here too
+    ///
+    /// The evidence text says *estimated* and *at the current rate*, never
+    /// *will*. The explanation this contributes to is read by a person through
+    /// `glasshouse route`, so line 1283's restraint applies to it exactly as it
+    /// applies to `crate::shell`'s capacity line.
+
+### `routing/pressure.rs` — `fn reserve_verdict`
+
+    /// Whether a reserve-band spend is justified — Phase 32F's own
+    /// [`evaluate_reserve_spend`] when the task's tier is established, and its
+    /// precedence with every tier-dependent branch taken **conservatively** when
+    /// it is not.
+    ///
+    /// # The unknown tier, decided against line 1459
+    ///
+    /// Line 1459 says a low-confidence classification is a reason for a
+    /// conservative rule. An absent one is the limit of low confidence. The
+    /// reserve exists *for* high-tier work (line 1571), so a task not established
+    /// to be high-tier is not admitted on the tier branch — the same outcome the
+    /// lowest tier would get, with a reason that says the tier was unknown rather
+    /// than one claiming the task "does not require the heavy tier". Every other
+    /// branch — the user's override, an imminent reset, the absence of any
+    /// cheaper adequate resource — is the same as Phase 32F's and admits the
+    /// spend regardless of tier. A test in this module holds the unknown-tier
+    /// verdict equal, on `is_allowed`, to the lowest tier's across every input
+    /// combination, so the copy cannot drift from the original.
+    ///
+    /// # Line 1610, and the one thing that may make `task_nearly_complete` true
+    ///
+    /// Line 1610 (*"avoid migrating a nearly completed task solely to preserve a
+    /// small amount of quota"*) is line 1294's guard seen from Phase 38, and
+    /// both turn on the word **solely**: the guard stops a threshold being the
+    /// whole reason work moves. A second reason may only come from the party
+    /// that knows, so `task_nearly_complete` below is a **declaration** —
+    /// somebody said so, on purpose, about this session, recently — carried in
+    /// by the caller through `PressureInputs::task_nearly_complete` and scoped
+    /// there.
+    ///
+    /// This module still infers nothing, and that half of
+    /// `docs/product/design-decisions.md`'s *"A task is never 'nearly
+    /// complete'"* is untouched: a proxy from turn counts or elapsed time would
+    /// report "almost complete" for work that had merely been running a while,
+    /// inverting the protection at exactly the moment it exists for. The value
+    /// arrives from a caller or it is `false`; nothing here derives it.
+
+### `routing/request.rs` — module doc
+
+    //! Phase 34D — the router request schema, the router answer, and the one
+    //! economy rule (Phase 34E, line 1467) that decides when the answer can be
+    //! reused without asking again.
+    //!
+    //! # What reaches a routing model, and what structurally cannot
+    //!
+    //! [`RouterRequest`] is the whole of what a routing model is shown about a
+    //! decision, and it is built from **values the caller already holds at the
+    //! moment it decides**: the task a person typed, which harness they named,
+    //! whether a warm session exists among the candidates, the capacity *band*
+    //! of each candidate provider, and the constraints they stated. Every field
+    //! is a typed, bounded value. There is no field of type "file", "transcript",
+    //! "environment" or "credential", and no constructor takes one — so map lines
+    //! 1425, 1426, 1455 and 1456 hold by the shape of the type rather than by a
+    //! filter that could be bypassed. The one free-text field, the task, is
+    //! bounded by [`TASK_TEXT_CEILING_BYTES`] and is the half
+    //! [`crate::memory::extract::Prompt::for_request`] scrubs before anything
+    //! leaves the process.
+    //!
+    //! # Bands, never numbers
+    //!
+    //! Line 1449: a provider's remaining quota reaches the model as one of five
+    //! words ([`crate::provider::quota::CapacityBand`]) and never as a remaining
+    //! count, a limit, a reset time or a spend. The router needs to know whether
+    //! a provider is tight; it does not need the billing figure that says so.
+    //!
+    //! # Purity
+    //!
+    //! The same rule as the rest of `routing`: no socket, no file, no clock. The
+    //! sticky record ([`StickyClassification`]) is a value the caller persists and
+    //! reloads; [`StickyClassification::reuse_for`] is a pure function of it and
+    //! of what the caller can see right now.
+
+### `routing/session/discovery.rs` — `fn hard_constraint`
+
+    /// The gate step 2 runs. Five constraints and no others, for the same
+    /// reason [`crate::routing::interactive`]'s `compatible` has two: each is a
+    /// fact about whether the destination *can* serve, not a preference about
+    /// whether it *should*.
+    ///
+    /// Two of the five — map lines 1517 and 1518 — are asked on both passes,
+    /// like tool semantics and protocol: whether a destination lacks a required
+    /// hard capability, or whether its provider has refused the credential or
+    /// declared a still-active cooldown, does not depend on which tier the
+    /// movement settled. Both follow the same "established, not merely unread"
+    /// rule as the others: an unverified capability axis and an *invented*
+    /// cooldown are not "cannot," so neither excludes — see [`is_adequate`] and
+    /// [`provider_unavailable_cause`].
+    ///
+    /// The fifth — map line 1516 — fires only on an **established** ceiling
+    /// strictly below the required tier. A destination with no ceiling stated
+    /// passes, because "nobody has said" is not "cannot"; the same rule the
+    /// other constraints already follow for `Unverified` tool semantics and an
+    /// unknown protocol.
+    ///
+    /// `minimum_tier` is the tier the gate reads — [`TierMovement::gate_tier`]
+    /// once the movement is decided, and `None` for the pass that decides it
+    /// (the two capability constraints only). It is an argument rather than
+    /// `inputs.requirements.minimum_tier` so a downgrade (line 1562) can admit
+    /// a resource the classified tier would have refused, in exactly one place.
+
+### `routing/session/mod.rs` — module doc
+
+    //! Phase 37 — the basic session-aware router: which *destination* a piece of
+    //! work goes to, and why.
+    //!
+    //! # What makes this a different router from the two beside it
+    //!
+    //! [`super::interactive`] answers "which backend serves this session", and
+    //! [`super::disposable`] answers "which resource serves this throwaway job".
+    //! Both rank **backends**. This module ranks **destinations**, and a
+    //! destination is a strictly larger thing: an existing session that could be
+    //! continued, or a fresh session that would have to be started. Map lines
+    //! 1593 and 1594 are that comparison and nothing else — *"prefer an existing
+    //! relevant session"* against *"prefer a fresh session"* — and neither can
+    //! be expressed by a policy whose candidates are all backends.
+    //!
+    //! That difference is also what makes the six `Consider X` lines (1595–1600)
+    //! answerable here when their equivalents were not answerable one layer down.
+    //! `docs/product/evidence/phase-9j.md`'s last entry records why: a signal
+    //! that is **constant across the candidate set** cannot change a ranking, and
+    //! every candidate set `crate::gateway::upstream::Upstream` can build varies
+    //! only by route, because [`Backend`] carries a provider, a credential and a
+    //! cost and no harness and no model of its own. A [`Destination`] carries its
+    //! own [`IntegrationId`] and its own [`Continuation`], so a candidate set here
+    //! genuinely varies along harness, warmth, cache locality, credential and
+    //! bootstrap cost — the six axes the six lines name. Every contribution below
+    //! has a test that holds two destinations differing **only** in that axis and
+    //! asserts they resolve differently; a contribution that could not do that
+    //! would be dead weight, and saying so is the finding rather than the failure.
+    //!
+    //! # The native-pairing prior, and why it belongs here and not one layer down
+    //!
+    //! `docs/product/evidence/phase-9j.md`'s 2026-09-02 entry corrects the
+    //! sentence this paragraph used to carry: the constancy proof it cites is
+    //! scoped to [`super::interactive`]'s `UpstreamBackend`, which has no model
+    //! field of its own and takes one model for the whole candidate set at
+    //! `SessionRouting::bind`. A [`Destination`]'s [`Backend`] carries a model
+    //! resolved **per launch profile** (`main.rs::destination_backend` →
+    //! `session_pairing`), so a candidate set built from two enabled profiles of
+    //! one harness genuinely varies in `PairingClass` — a fact
+    //! `docs/product/evidence/phase-56.md`'s "The question the orchestrator
+    //! added" section establishes from current production code. [`pairing_prior`]
+    //! reads `classify`'s *vendor* axis for exactly that reason, beside
+    //! [`harness_capability_fit`], which reads its *capability* axes (protocol
+    //! fit, model-behaviour fit, tool semantics) and does not.
+    //!
+    //! # Purity
+    //!
+    //! Same rule as the rest of `routing`: no socket, no credential resolution,
+    //! no clock. `now` is an argument. Warmth, capacity and checkpoint quality
+    //! are values the **caller looked up** — this module names neither
+    //! `crate::session` nor `crate::checkpoint`, for the reason
+    //! [`crate::config::pairing::ContinuitySource`] gives.
+
+### `routing/session/reserve.rs` — entitlement-pool terms block
+
+    // ---------------------------------------------------------------------------
+    // Phase 56A step 3, lines 1953 and 1966–1969 — the entitlement pool's own
+    // terms: the pool enters the candidate set (main.rs widens it, one candidate
+    // per entitlement allowed to serve the harness), and the score chooses.
+    //
+    // Five factors, map line 1966's own list: available capacity (band), time
+    // until reset, recent throttling, session affinity, and model availability.
+    // The affinity factor is deliberately NOT a new term — it **is**
+    // [`session_affinity`], because the entitlement holding a warm session's
+    // context scores exactly what that session's warmth already says, and a
+    // second number for the same fact would be the double-count this module
+    // refuses everywhere. Stickiness (line 1968) is therefore the affinity
+    // term's weight, not a second mechanism, and
+    // [`entitlement_stickiness_note`] says so in the explanation.
+    //
+    // Two rules every term below obeys:
+    //
+    // - **an unknown facet contributes NOTHING and says so** — never a guessed
+    //   number, the same stance `quota_pressure` takes for an unread quota;
+    // - **the terms are live only when the candidate set actually offers a
+    //   choice of configured entitlements** ([`EntitlementPoolView`], two or
+    //   more distinct configured names). A user with zero or one configured
+    //   entitlement has no pool for a score to choose across, and their ranking
+    //   must stay byte-for-byte what it was — the packet's own preservation
+    //   clause, enforced structurally rather than hoped for.
+    // ---------------------------------------------------------------------------
+
+### `routing/session/reserve.rs` — `fn entitlement_fallback`
+
+    /// Map line 1970's reselection: given the ranking and the index it settled
+    /// on, the index the work should move to instead and the record of why.
+    ///
+    /// `ranked` is the already-ranked, already-gated list `Routed` keeps as
+    /// [`Routed::considered`], best first — so every candidate this function can
+    /// reach has passed every hard constraint, **map line 1971's rules
+    /// included**. That is the whole of
+    /// how *"an exhausted pool does not license exceeding a rule"* is enforced:
+    /// there is no path from here to a candidate the gate removed, because the
+    /// gate ran first and this function never sees its rejections.
+    ///
+    /// `None` — no fallback — whenever any of these holds, and each is a
+    /// deliberate narrowing rather than an omission:
+    ///
+    /// - the candidate set carries fewer than two configured entitlements, so
+    ///   there is no pool to fall back across (the gate every pool term checks);
+    /// - the chosen candidate carries no entitlement, or its entitlement is
+    ///   neither exhausted nor throttled — the untriggered case, which must stay
+    ///   byte-identical to today's decision;
+    /// - no step of [`FallbackStep::ORDER`] matched a **healthy** candidate on a
+    ///   **different** account. A sibling in the same state is not a refuge, and
+    ///   a second candidate on the *same* account is the same account.
+
+### `routing/session/scoring.rs` — `fn capability_fit`
+
+    /// Map line 1382, joined to a task's hard capability requirements —
+    /// `GH-ROUTING-CAPABILITY`'s package, and `capability::axis_for`'s own
+    /// comparison function is what makes this ruling-1-safe: this function never
+    /// compares a task's tier to a resource's tier, only a resource's registry
+    /// entry to the specific axis a requirement names.
+    ///
+    /// This is one of `TaskClassification::hard_capabilities`' two production
+    /// consumers — the other is `is_adequate`, which `session::hard_constraint`
+    /// asks the same question of to raise `HardConstraint::Capability` (map line
+    /// 1517). `requirements.hard_capabilities` is where a caller of
+    /// [`SessionRouter::choose`] attaches it: `main.rs`'s `launch_session` and
+    /// `route_recommendation` both build it from `classified.answer.requirements()`
+    /// on every classified launch; a caller with no task in hand still passes
+    /// `TaskRequirements::default()`, an empty list that contributes `0.0` here
+    /// and excludes nothing at the gate.
+    ///
+    /// Reads `destination.harness()` the same way [`harness_capability_fit`]
+    /// does — the identity is already in hand at the point this term is
+    /// computed — and combines it with [`Destination::resource_facts`] through
+    /// [`capability::ResourceCapabilities::describe`]. No capability value and no
+    /// resource identity is matched here: this function only asks the registry a
+    /// question and applies the three named constants above, which is 1390's
+    /// answer — a new resource, a new harness, or a corrected axis changes
+    /// nothing in this function's body.
+
+### `routing/session/scoring.rs` — `fn cost_preference`
+
+    /// Map line 1558: *"prefer the cheapest healthy candidate that satisfies the
+    /// required workload tier and hard capabilities."*
+    ///
+    /// # What this term is, and what the three words before it already decide
+    ///
+    /// The line names four properties, and three of them are already decided
+    /// before this function is reached, which is why it prices only the fourth:
+    ///
+    /// - *satisfies the required workload tier* — `hard_constraint` has already
+    ///   **removed** a destination whose established ceiling is below the
+    ///   requirement, and [`workload_tier_fit`] prices the fit of what is left;
+    /// - *satisfies the hard capabilities* — [`capability_fit`] prices an
+    ///   established-absent axis at `CAPABILITY_ESTABLISHED_ABSENT`, four times
+    ///   this term's magnitude, so a cheap resource established to lack what the
+    ///   task needs can never win on price;
+    /// - *healthy* — [`provider_health`] prices a refused credential and a
+    ///   cooling-down provider, and its penalties are larger again.
+    ///
+    /// So what is left for this term is the comparison the line is actually
+    /// about: two candidates the terms above could not separate, one of which
+    /// spends the user's money. It is `METERED_COST_PREFERENCE` for a metered
+    /// destination and `0.0` for a free one — a preference for the free
+    /// resource expressed as a cost on the paid one, so that a project with no
+    /// free resource configured is not scored as though every destination it has
+    /// were somehow deficient.
+    ///
+    /// # Why it is only pushed when a tier was established
+    ///
+    /// `score` pushes this term exactly where it pushes [`workload_tier_fit`]:
+    /// under `if let Some(required)`. The line's own subject is *"a candidate
+    /// that satisfies the required workload tier"*, and there is no required tier
+    /// until a task has been classified — so a launch or a `glasshouse route`
+    /// that states no task renders precisely the explanation it rendered before
+    /// this term existed, byte for byte. The same rule, and the same reason, as
+    /// the tier term beside it.
+    ///
+    /// `Cost` is [`super::Backend::cost`], which `main.rs::destination_backend`
+    /// resolves through `ProviderConfig::cost_of` — the user's own `free_models`
+    /// list. Nothing here infers a price from a model's name.
+
+### `routing/session/scoring.rs` — `fn expected_marginal_cost`
+
+    /// Map line 1538: *"include expected marginal cost in candidate scoring."*
+    ///
+    /// `Cost` — [`super::Cost`]'s own doc calls it *"whether using a model costs
+    /// the user anything at the margin"* — is still the only reading that can
+    /// ever make this term `0.0`: [`Cost::is_free`] returning `true` is a
+    /// **known** zero, never an unknown, and stays priced exactly as it always
+    /// was. Phase 32G's `PriceTable` (`crate::provider::pricing`) answers the
+    /// other half for a metered destination — a known per-million price, or an
+    /// honest unknown — but it changes only the **evidence**, never the
+    /// magnitude: there is still no per-call token estimate at this call site
+    /// (`SessionContextFacts` carries none), so a known price cannot yet be
+    /// converted into an actual expected dollar figure without inventing one.
+    /// Reporting the known rate is honest; reporting a dollar estimate from it
+    /// is map line 1298's job, once a size producer exists. A destination whose
+    /// price is unknown is priced identically to one whose price is known but
+    /// unconvertible — both metered, neither free — and the difference between
+    /// them is only ever textual, the same way [`AffinityFacet`]'s `known` and
+    /// `unknown` constructors both start every unattached facet as `0.0`.
+    ///
+    /// **Pushed unconditionally**, unlike [`cost_preference`], because line 1538
+    /// names no workload-tier precondition the way line 1558 does. That is also
+    /// why it must stay inert exactly where [`cost_preference`] is active: once a
+    /// tier is established, [`cost_preference`] already prices the same `Cost`
+    /// reading as its own deliberately small tie-break (line 1558's own doc).
+    /// Pricing it again here would score the identical fact in the identical
+    /// direction a second time — the double-count this term exists to avoid, not
+    /// to add — so the two conditions partition rather than overlap: exactly one
+    /// of them ever prices a given candidate.
+
+### `routing/session/scoring.rs` — `fn request_pool_cost`
+
+    /// Line 1302: what a request pool's own scarcity is worth, read from
+    /// [`Allowance`]'s remaining count and [`Destination::burn_forecast`]'s
+    /// persisted rate — never recomputed from ledger rows, and never folded into
+    /// `expected_marginal_cost`'s magnitude: a reader sees two terms, one for
+    /// money and one for a scarce unit money does not price.
+    ///
+    /// # Its own axis, never 1280's twice
+    ///
+    /// [`super::pressure::exhaustion_forecast_pressure`] already prices the case
+    /// where a resource will not make it to its reset. This term is inert
+    /// whenever [`crate::routing::burn::ExhaustionForecast::exhausts_well_before_reset`]
+    /// says that term is already carrying the penalty for this destination's
+    /// resource — `phase-32g.md`'s 1302 entry: one forecast, priced once. What is
+    /// left for this term is the case beside it: a pool that will make its reset
+    /// but is being spent fast enough to be worth naming.
+    ///
+    /// # Inert, and says so, in three cases
+    ///
+    /// - the allowance is [`Allowance::TokenPriced`] — "how many requests are
+    ///   left" has no answer for a resource priced per token, and pricing it
+    ///   anyway is exactly the conflation `free.rs`'s own module doc warns
+    ///   against;
+    /// - the pool's remaining count is not yet known, or the destination carries
+    ///   no burn forecast at all (too few rows, no measured remaining amount, or
+    ///   a non-positive rate — see [`crate::routing::burn::forecast`]);
+    /// - the forecast already exhausts well before the reset, which is the case
+    ///   above.
+
+### `routing/session/scoring.rs` — `fn estimated_cost`
+
+    /// Map line 1307: the marginal input cost this decision actually used, as a
+    /// monetary reading with its required confidence — never recomputed once
+    /// carried. [`SessionRouter::choose`] calls this exactly once, for the
+    /// destination it settled on, and the result travels on [`Routed`] to
+    /// whatever records it (`main.rs::record_entitlement_fallback`), rather than
+    /// being derived a second time at the writer from a `PriceTable` that may
+    /// have changed on disk since the decision was made.
+    ///
+    /// Free is a known zero, regardless of size — nothing is spent whatever the
+    /// input turns out to be, the same certainty [`expected_marginal_cost`]'s
+    /// free branch reads. A metered destination needs **both** a known price
+    /// and a known size; either half missing answers `None` — never a
+    /// fabricated zero, matching map line 1307's own rule that unknown size or
+    /// unknown price means no cost row at all.
+    ///
+    /// [`CostConfidence::Estimated`], always — including the cached-input split
+    /// below. `CostConfidence` distinguishes *provenance* (a provider-reported
+    /// invoice figure versus Glasshouse's own arithmetic versus nothing at all),
+    /// not how many of Glasshouse's own readings that arithmetic combines. A
+    /// split estimate is built from two of this build's own measurements — the
+    /// user's declared `cached_input_per_million_usd` and this route's own
+    /// observed `cache_read_ratio` — rather than one, but neither reading is a
+    /// provider-stated figure, so it has no more claim to [`CostConfidence::Exact`]
+    /// than the flat estimate above it did; migration 11's `CHECK` requires a
+    /// label to be chosen, and this is the one that says so.
+
+### `routing/session/scoring.rs` — `fn measured_cache_temperature`
+
+    /// Map lines 1535/1545: this destination's own measured prompt-cache read
+    /// history — [`Destination::route_responsiveness`]'s attached
+    /// [`RouteResponsiveness::cache_read_ratio`], read the same way
+    /// [`observed_pairing_reliability`] and [`tool_round_rate`] already read that
+    /// reading's other fields, so a caller that attaches none, or a route too
+    /// thin to summarize, leaves this term exactly as inert as those two already
+    /// are.
+    ///
+    /// This is a **different** signal from [`prompt_cache_state`], right below:
+    /// that term answers whether *this specific move* would preserve a cached
+    /// prefix (a locality fact); this one answers how often *this route in
+    /// general* has actually shown a cache read, over its own recorded history.
+    /// The two are pushed side by side deliberately, and see
+    /// [`MEASURED_CACHE_TEMPERATURE_MAGNITUDE_CEILING`]'s own doc for why this
+    /// one is bounded strictly below both of that term's magnitudes.
+    ///
+    /// `0.0`, saying so, when: no responsiveness reading is attached to this
+    /// destination; or the reading's ratio is `None` — fewer than
+    /// [`MIN_SAMPLE_FOR_SUMMARY`] rows carried a known input-token count for
+    /// this route. Otherwise the magnitude is linear in the ratio, centred on
+    /// `0.5`: a route with no measured warmth advantage either way scores
+    /// `0.0`, a perfectly warm observed history scores
+    /// `+MEASURED_CACHE_TEMPERATURE_MAGNITUDE_CEILING`, and a perfectly cold one
+    /// scores the negative of that. The `clamp` is defensive — the ratio's own
+    /// domain (`[0.0, 1.0]`) never reaches it, the same recorded shape as
+    /// [`observed_pairing_reliability`]'s own clamp.
+    ///
+    /// # `cooling_down_until` is the caller's conversion, and that is
+    /// deliberate
+    ///
+    /// [`Instant`] has no epoch, so a deadline that crossed a process
+    /// boundary as a wall-clock second can only be placed on this process's
+    /// monotonic clock by something holding **both clocks read at the same
+    /// moment**. This pool holds neither.
+    /// [`crate::provider::telemetry::GatewayHealthReading::cooling_down_until`]
+    /// is that conversion and states the rule this method depends on: a
+    /// deadline that has already elapsed arrives as `None` — *not cooling
+    /// down* — never as an `Instant` in the past manufactured for the sake of
+    /// carrying a value.
+    ///
+    /// Last write wins, exactly like `observe`: a resource this is called for
+    /// twice holds what the second call said.
+    ///
+    /// # `cooldown_cause` crosses honestly, never as a guess
+    ///
+    /// `GatewayHealthReading` persists `cooldown_cause` as an optional field,
+    /// serde-defaulted so a cache file written before it existed still
+    /// deserializes — as `None`, never a guess. The caller hands this method
+    /// exactly what that reading said: a genuinely recorded
+    /// [`CooldownCause::Declared`] or [`CooldownCause::Invented`] crosses as
+    /// itself, and an absent cause — no key in the file, or a resource that
+    /// simply is not cooling down — adopts as `None`, which
+    /// [`ResourceHealth::declared_wait_remaining`] reports as inert rather
+    /// than as a guess in either direction.
+
+### `routing/free.rs` — `fn withhold_in_flight`
+
+    /// Net the requests other dispatches already hold out of what this
+    /// credential's pool is known to have left — capability map line 1367,
+    /// on the reading side.
+    ///
+    /// `known_remaining` is what a real response actually stated is left, as
+    /// a caller read it back off disk; `in_flight` is how many of those a
+    /// concurrent process has already claimed and has not yet spent. The
+    /// difference is what a dispatcher deciding *now* may actually use, and
+    /// it is that difference this records, so
+    /// [`Allowance::is_exhausted`] — and therefore
+    /// [`FreePool::is_available`], which is the one gate
+    /// `crate::routing::disposable::DisposableRouting::choose` puts every
+    /// free candidate through — sees a pool that is empty when every
+    /// remaining request is spoken for.
+    ///
+    /// # Why this is not [`FreePool::record_pool`]
+    ///
+    /// `record_pool` carries *"what the provider claims is left"*, and no
+    /// provider claimed this. The subtraction is Glasshouse's own bookkeeping
+    /// about work it is itself about to do, and giving it its own name keeps
+    /// a reader of the allowance from mistaking a local claim for a
+    /// statement on the wire. It also keeps the two mutable in different
+    /// ways: a later real reading overwrites `remaining` outright, which is
+    /// correct, because a response is authoritative about the pool and a
+    /// reservation never was.
+    ///
+    /// A credential this pool has been told is [`Allowance::TokenPriced`] is
+    /// left exactly as it is: there is no request count to net anything out
+    /// of, and inventing one would be the conflation line 528 forbids.
+    /// Nothing here is a rule change — the rule that a pool with no requests
+    /// left cannot serve is [`Allowance::is_exhausted`]'s, unchanged, and
+    /// this only feeds it a truthful number.

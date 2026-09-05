@@ -141,30 +141,23 @@ impl ObservedIdentity {
 /// group, within a queried window — capability map line 1464's "measure
 /// routing-model token and request consumption separately from coding-agent
 /// consumption," and the absent aggregate
-/// [`EvidenceLedger::consumption_by_purpose`] builds: every other reader on
-/// this ledger requires the caller to already name an identity, and nothing
-/// before this grouped by the columns that answer *what a call was for* and
-/// *whether a harness was relaying it*.
+/// [`EvidenceLedger::consumption_by_purpose`] builds.
 ///
-/// `purpose` alone is not enough to separate coding-agent consumption from
-/// everything else: `purpose` is `None` for every row no producer has
-/// stamped, and today that is **both** every gateway relay exchange (line
-/// 1464's own "coding-agent consumption", `crate::gateway::session`, which
-/// always calls [`NewObservation::with_harness`]) **and** every
-/// memory-extraction call (`crate::memory::extract::ModelCall::observation`,
-/// which never does) — see [`NewObservation::with_purpose`]'s doc comment
-/// for why extraction's rows are not back-filled with one. `harness_recorded`
-/// is what tells those two `NULL`-purpose producers apart: `true` only when
-/// every row in the group named a harness, which today means gateway rows
-/// and gateway rows alone.
+/// `purpose` alone cannot separate coding-agent consumption from everything
+/// else: it is `None` for every row no producer has stamped, which today is
+/// both every gateway relay exchange and every memory-extraction call.
+/// `harness_recorded` tells those two `NULL`-purpose producers apart: `true`
+/// only when every row in the group named a harness, which today means
+/// gateway rows alone.
 ///
 /// `sample_count` is a real `COUNT(*)`, always defined. The three token
 /// fields are not: each is `None` when every row in the group left that
-/// column `NULL`, which is a different fact from `Some(0)` and must stay
-/// one — the hazard this whole aggregate exists to avoid rendering as a
-/// number. A group that mixes counted and uncounted rows sums only what was
-/// counted, exactly as [`NewObservation::with_tokens`] asks every producer to
-/// leave absent counts absent rather than zeroed.
+/// column `NULL`, a different fact from `Some(0)` that must stay one — the
+/// hazard this aggregate exists to avoid rendering as a number. A group
+/// mixing counted and uncounted rows sums only what was counted, as
+/// [`NewObservation::with_tokens`] asks every producer to leave absent
+/// counts absent rather than zeroed.
+// History: design-decisions.md, "Trims: routing module docs", routing/evidence/readers.rs `struct PurposeConsumption` doc.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PurposeConsumption {
     pub purpose: Option<String>,
@@ -420,27 +413,18 @@ impl SessionTranslationSavings {
 /// come back in the schema?) and 1421/1435 (how long does it take?) — read
 /// from the [`CLASSIFICATION_PURPOSE`] rows alone.
 ///
-/// Two counts and one median, each carrying its own denominator:
+/// `outcomes_recorded` counts rows carrying [`Outcome::Succeeded`] or
+/// [`Outcome::Failed`]; `parsed` is how many of those succeeded. `timed` is
+/// how many rows carry a duration, and `median_duration_ms` is their median
+/// only once there are at least [`MIN_SAMPLE_FOR_SUMMARY`] of them — below
+/// that floor the field is `None`, read as *unmeasured*, never as fast.
 ///
-/// - `outcomes_recorded` is the number of rows that carry a parse outcome
-///   at all — [`Outcome::Succeeded`] or [`Outcome::Failed`] — and `parsed`
-///   is how many of those succeeded. A row with no outcome (written by a
-///   build before the producer recorded one) counts in neither: it is not
-///   evidence of reliability in either direction.
-/// - `timed` is how many rows carry a duration, and `median_duration_ms`
-///   is their median **only** once there are at least
-///   [`MIN_SAMPLE_FOR_SUMMARY`] of them — the same floor every other figure
-///   on this ledger sits behind. Below it the field is `None`, which a
-///   consumer must read as *unmeasured*, never as fast.
-///
-/// **Resolution is one second.** `dispatched_at` and `completed_at` are
-/// whole Unix seconds (this module's header, on line 1332's gap), so every
-/// duration here is a multiple of 1000ms, and a ceiling compared against
-/// this median is honest only to the second.
-///
-/// Not split by [`ContextState`]: a classification call is a fresh prompt
-/// every time with nothing warm to keep, and its producer records
-/// [`ContextState::Unknown`] on every row.
+/// **Resolution is one second**: `dispatched_at`/`completed_at` are whole
+/// Unix seconds, so every duration is a multiple of 1000ms and a ceiling
+/// compared against this median is honest only to the second. Not split by
+/// [`ContextState`]: a classification call is a fresh prompt every time,
+/// and its producer records [`ContextState::Unknown`] on every row.
+// History: design-decisions.md, "Trims: routing module docs", routing/evidence/readers.rs `struct ClassificationRecord` doc.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClassificationRecord {
     pub provider: String,
@@ -488,22 +472,19 @@ pub struct LatencyRecord {
 /// testable without a database and is rendered with its denominators rather
 /// than as a bare ratio.
 ///
-/// "Spend" is **tokens**, input plus output as the provider reported them,
-/// because that is still the only currency this reading can rely on:
-/// `cost_micro_usd` has one producer (map line 1307,
-/// `main.rs::record_entitlement_fallback`), and it fires only on an
-/// entitlement-fallback event — coding-agent spend routed through the
-/// gateway relay, the volume this comparison exists to weigh, leaves the
-/// column `NULL` exactly as before. Cached input tokens are left out of the
-/// sum — providers disagree on whether they are already inside
-/// `input_tokens`, and a sum that might double-count is worse than one that
-/// names what it omits.
+/// "Spend" is **tokens**, since that is still the only currency this reading
+/// can rely on: `cost_micro_usd` has one producer (map line 1307), and it
+/// fires only on an entitlement-fallback event, leaving coding-agent spend's
+/// column `NULL`. Cached input tokens are left out of the sum — providers
+/// disagree on whether they are already inside `input_tokens`, and a sum
+/// that might double-count is worse than one that names what it omits.
 ///
 /// A `None` token figure means *no row in that side carried a count*, the
 /// same convention [`PurposeConsumption`] keeps; a side that mixes counted
 /// and uncounted rows sums only what was counted. [`Self::fraction`] is
 /// `None` whenever either side is uncounted or the task side is zero, and
 /// [`Self::exceeds`] never fires on an unmeasured comparison.
+// History: design-decisions.md, "Trims: routing module docs", routing/evidence/readers.rs `struct RoutingOverhead` doc.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RoutingOverhead {
     /// Rows whose `purpose` is [`CLASSIFICATION_PURPOSE`].
@@ -1420,28 +1401,21 @@ impl EvidenceLedger {
     /// Every observation in the window ending at `now_unix`, **whether or
     /// not it carries an outcome** — the row set a *consumption* reader
     /// needs, and the one [`Self::observations_in_window`] deliberately
-    /// cannot serve.
+    /// cannot serve, since it filters `outcome IS NOT NULL` for its own
+    /// callers, which classify *how exchanges went* and treat a row with no
+    /// recorded outcome as no evidence about that question.
     ///
-    /// # Why this is not `observations_in_window` with a flag
-    ///
-    /// [`Self::observations_in_window`] filters `outcome IS NOT NULL`
-    /// because its callers classify *how exchanges went* — a throttle scope,
-    /// a route correlation, a failure-class census — and a row with no
-    /// recorded outcome is not evidence about that question.
-    ///
-    /// Capability map lines 1274 and 1276 ask a different question: how much
-    /// of a resource was **consumed**. A request whose outcome nobody wrote
-    /// down still consumed the request. And the one producer that carries a
-    /// task class today — `main.rs::record_routing_latency`, which is the
-    /// only caller holding a `crate::routing::request::RouterAnswer` — records no
-    /// outcome at all, so every row line 1276 is about is invisible to the
-    /// other read. Widening that read instead would silently change what
-    /// four existing classifiers count, which is the opposite of what a new
-    /// line is allowed to do.
+    /// Capability map lines 1274 and 1276 ask how much of a resource was
+    /// **consumed** — a request whose outcome nobody wrote down still
+    /// consumed the request — and the one producer that carries a task
+    /// class today (`main.rs::record_routing_latency`) records no outcome at
+    /// all, so widening `observations_in_window` instead would silently
+    /// change what four existing classifiers count.
     ///
     /// Ordered by `observed_at` ascending, like its sibling, because
     /// [`crate::routing::burn`] buckets by time and an idle gap is a property of
     /// consecutive rows.
+    // History: design-decisions.md, "Trims: routing module docs", routing/evidence/readers.rs `fn consumption_in_window`.
     pub fn consumption_in_window(
         &self,
         now_unix: i64,
@@ -1650,46 +1624,26 @@ impl EvidenceLedger {
     /// 1464, and the aggregate this module's own header says nothing
     /// computes yet.
     ///
-    /// Grouped by `purpose` first, so a routing model's own spend (`purpose
-    /// = "classification"` today) never gets folded into anyone else's
-    /// total; and, within the `NULL`-purpose rows every other producer
-    /// leaves, split again by whether a harness was recorded, because that
-    /// is what actually separates coding-agent consumption
-    /// (`crate::gateway::session` always names a harness) from every other
-    /// `NULL`-purpose producer (`crate::memory::extract` never does) — a
-    /// distinction `purpose` alone cannot make. See [`PurposeConsumption`]'s
-    /// own doc comment for why grouping on `purpose` alone would still fold
-    /// two different producers together.
+    /// Grouped by `purpose` first, so a routing model's own spend never
+    /// folds into anyone else's total; within the `NULL`-purpose rows every
+    /// other producer leaves, split again by whether a harness was
+    /// recorded — the distinction `purpose` alone cannot make between
+    /// coding-agent and other `NULL`-purpose consumption.
     ///
-    /// `SUM(input_tokens)`, and its two siblings, are what SQLite's own
-    /// aggregate already does correctly: it skips `NULL` inputs and answers
-    /// `NULL` only when a group carried none at all, never `0` for an absent
-    /// count. The row reader reads that straight into the `Option<i64>`
-    /// [`PurposeConsumption`] declares, with no manual accumulate-and-default
-    /// in between for a mutation to weaken.
+    /// `SUM(input_tokens)` and its siblings rely on SQLite's own aggregate
+    /// skipping `NULL` inputs and answering `NULL` (never `0`) for a group
+    /// with none, read straight into `Option<i64>` with no manual
+    /// accumulate-and-default to weaken. `mean_time_to_first_byte_ms`
+    /// **prefers migration 25's measured offset** per row, falling back to
+    /// `first_byte_at - dispatched_at` only when a row lacks it, so a window
+    /// spanning the migration produces one mean rather than two incomparable
+    /// ones; `first_token_*`/`first_tool_call_*` are the identical triple.
+    /// `decode_output_tokens`/`decode_ms` (line 1349's pair) have **no**
+    /// seconds fallback, since at one-second resolution the denominator is
+    /// routinely `0`.
     ///
-    /// `first_byte_sample_count` is a genuine `COUNT(first_byte_at)`, so it
-    /// is honestly `0` — not absent — for a group nothing timed, and
-    /// `first_byte_ms_sample_count` is the same count over migration 25's
-    /// measured offset. `mean_time_to_first_byte_ms` **prefers the offset**:
-    /// each row contributes its own `first_byte_ms` when it has one and its
-    /// `first_byte_at - dispatched_at` difference in milliseconds when it
-    /// does not, so a window spanning the migration produces one mean over
-    /// every timed row rather than two incomparable ones. It is `NULL`
-    /// (`None`) exactly when no row offered either — SQLite's `AVG` over an
-    /// empty set is already `NULL`, so there is no manual zero-guard here.
-    /// `first_token_*`/`first_tool_call_*` are the identical triple.
-    ///
-    /// `decode_output_tokens` and `decode_ms` are line 1349's matched pair,
-    /// summed over exactly the rows carrying `output_tokens`,
-    /// `first_token_ms` and `completed_ms` with a non-negative gap — the one
-    /// figure here with **no** seconds fallback, because at one-second
-    /// resolution its denominator is routinely `0`. See
-    /// [`PurposeConsumption::decode_tokens_per_second`].
-    ///
-    /// Scoped to this ledger's own `project_id`, like [`Self::observed_identities`]
-    /// next door and for the same belt-and-suspenders reason: this reads
-    /// across every row in the table rather than one already-named identity.
+    /// Scoped to this ledger's own `project_id`, like [`Self::observed_identities`].
+    // History: design-decisions.md, "Trims: routing module docs", routing/evidence/readers.rs `fn consumption_by_purpose`.
     pub fn consumption_by_purpose(
         &self,
         now_unix: i64,

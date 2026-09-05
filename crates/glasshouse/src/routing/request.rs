@@ -2,34 +2,24 @@
 //! economy rule (Phase 34E, line 1467) that decides when the answer can be
 //! reused without asking again.
 //!
-//! # What reaches a routing model, and what structurally cannot
+//! [`RouterRequest`] is built only from values the caller already holds:
+//! the task, which harness, whether a warm session exists, each candidate's
+//! capacity *band*, and stated constraints. There is no field of type
+//! "file", "transcript", "environment" or "credential", and no constructor
+//! takes one — map lines 1425, 1426, 1455 and 1456 hold by the shape of the
+//! type. The one free-text field, the task, is bounded by
+//! [`TASK_TEXT_CEILING_BYTES`] and scrubbed by
+//! [`crate::memory::extract::Prompt::for_request`].
 //!
-//! [`RouterRequest`] is the whole of what a routing model is shown about a
-//! decision, and it is built from **values the caller already holds at the
-//! moment it decides**: the task a person typed, which harness they named,
-//! whether a warm session exists among the candidates, the capacity *band*
-//! of each candidate provider, and the constraints they stated. Every field
-//! is a typed, bounded value. There is no field of type "file", "transcript",
-//! "environment" or "credential", and no constructor takes one — so map lines
-//! 1425, 1426, 1455 and 1456 hold by the shape of the type rather than by a
-//! filter that could be bypassed. The one free-text field, the task, is
-//! bounded by [`TASK_TEXT_CEILING_BYTES`] and is the half
-//! [`crate::memory::extract::Prompt::for_request`] scrubs before anything
-//! leaves the process.
+//! Line 1449: quota reaches the model as one of five words
+//! ([`crate::provider::quota::CapacityBand`]), never a count, limit, reset
+//! time or spend.
 //!
-//! # Bands, never numbers
-//!
-//! Line 1449: a provider's remaining quota reaches the model as one of five
-//! words ([`crate::provider::quota::CapacityBand`]) and never as a remaining
-//! count, a limit, a reset time or a spend. The router needs to know whether
-//! a provider is tight; it does not need the billing figure that says so.
-//!
-//! # Purity
-//!
-//! The same rule as the rest of `routing`: no socket, no file, no clock. The
-//! sticky record ([`StickyClassification`]) is a value the caller persists and
-//! reloads; [`StickyClassification::reuse_for`] is a pure function of it and
-//! of what the caller can see right now.
+//! Same purity as the rest of `routing`: no socket, file or clock. The
+//! sticky record ([`StickyClassification`]) is a value the caller persists
+//! and reloads; [`StickyClassification::reuse_for`] is a pure function of
+//! it and what the caller can see right now.
+// History: design-decisions.md, "Trims: routing module docs", routing/request.rs module doc.
 
 use std::fmt;
 

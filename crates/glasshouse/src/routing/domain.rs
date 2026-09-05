@@ -1,27 +1,20 @@
 //! Two domains a failover candidate belongs to, and why they are two types —
 //! Phase 33C line 1371.
 //!
-//! # A quota domain needs no new type
-//!
-//! "Two keys for one router are two allowances" is [`super::free`]'s own
-//! module header, and its pool is already keyed by [`super::CredentialId`].
 //! A quota domain **is** a [`super::CredentialId`]: two different
 //! credentials are two different quota domains by that type's own
-//! `PartialEq`, and nothing here wraps it in a second type that would only
-//! ever compare the same way a `CredentialId` already does.
+//! `PartialEq`, so nothing here wraps it in a second type that would only
+//! compare the same way `CredentialId` already does.
 //!
-//! # A failure domain is a different question, with a different shape
-//!
-//! [`super::Backend`] carries no base URL — see that type's own doc comment
-//! on why it is deliberately narrower than [`crate::provider::Provider`] —
-//! so the only honest signal available for "does this request land on the
-//! same infrastructure" is the provider name. That signal answers "yes" with
-//! certainty and answers "no" with **no certainty at all**: a different
-//! provider is not evidence of a different failure domain, only the absence
-//! of evidence that it is the same one. [`FailureDomain`] is three states
-//! rather than a bool for exactly that reason — line 1371's "represent...
-//! separately" and line 1378's "prevent absent evidence from being
-//! interpreted as independence".
+//! A failure domain is a different question: [`super::Backend`] carries no
+//! base URL, so the only honest signal for "does this request land on the
+//! same infrastructure" is the provider name — which answers "yes" with
+//! certainty and "no" with **no certainty at all**, since a different
+//! provider is only the absence of evidence that it is the same one.
+//! [`FailureDomain`] is three states rather than a bool for exactly that
+//! reason — line 1371's "represent... separately" and line 1378's "prevent
+//! absent evidence from being interpreted as independence".
+// History: design-decisions.md, "Trims: routing module docs", routing/domain.rs module doc.
 
 use super::Backend;
 

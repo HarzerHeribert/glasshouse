@@ -272,26 +272,20 @@ fn protected_capacity_note(
 /// Decide whether `candidate` may be asked to classify — the four filters
 /// capability map lines 1427, 1436, 1432 and 1435 name, in that order.
 ///
-/// # The honesty rule, and the one place it is deliberately inverted
-///
-/// Reliability and latency are **measurements**, and a measurement that has
-/// not been taken never excludes: a candidate with no record, or with fewer
-/// than [`CLASSIFICATION_RELIABILITY_MIN_OBSERVATIONS`] outcomes, or with no
-/// median yet, is admitted with a note saying the requirement was inert —
-/// the same rule [`has_no_known_headroom`] applies to capacity, because
-/// turning "nothing measured" into "fails the bar" is a fabrication. Price
-/// is the same shape once more: a metered candidate with no entry in
-/// `pricing.toml` is *unpriced*, never excluded by the ceiling, exactly
-/// like an unmeasured latency.
+/// Reliability, latency and price are **measurements**: one not yet taken
+/// never excludes — a candidate with no record, fewer than
+/// [`CLASSIFICATION_RELIABILITY_MIN_OBSERVATIONS`] outcomes, no median, or no
+/// `pricing.toml` entry is admitted with a note that the requirement was
+/// inert, the same rule [`has_no_known_headroom`] applies to capacity,
+/// because turning "nothing measured" into "fails the bar" is a fabrication.
 ///
 /// Locality is **not a measurement**: it is a fact the provider registry
-/// states for every provider name, and a caller that attaches none has
-/// declined to say rather than failed to measure. Under
-/// [`ClassificationPolicy::local_only`] that fails **closed** — a candidate
-/// nobody could say is local is not sent anything — because this is a
-/// privacy constraint, and a privacy constraint that admits on silence
-/// would send a request off the machine on the strength of nobody having
-/// said where the model runs.
+/// states, and a caller that attaches none has declined to say rather than
+/// failed to measure. Under [`ClassificationPolicy::local_only`] that fails
+/// **closed** — a candidate nobody could say is local is not sent anything —
+/// because a privacy constraint that admits on silence would send a request
+/// off the machine on the strength of nobody having said where it runs.
+// History: design-decisions.md, "Trims: routing module docs", routing/disposable/classification.rs `fn classification_verdict`.
 pub(super) fn classification_verdict(
     policy: &ClassificationPolicy,
     candidate: &DisposableCandidate,
@@ -507,28 +501,22 @@ impl TimePricePreference {
 /// `metered` over `free` when `free`'s expected wasted retry time — `(1 -
 /// parsed_fraction) * median_ms` over its own classification record, above
 /// the reliability sample floor — **exceeds `metered`'s own median
-/// classification latency**, also above the floor and read from `metered`'s
-/// own [`ClassificationRecord`], and `metered`'s estimated call cost is at
-/// or below `policy`'s marginal-cost ceiling. `[routing] max_router_latency`
-/// plays no part here — that knob stays 1435's alone. No exchange rate
-/// between milliseconds and micro-dollars exists here or anywhere else in
-/// this build: the comparison this rule actually makes is between two
-/// *times*, and the cost half is still checked only against a ceiling the
-/// user stated in their own currency.
+/// classification latency**, also above the floor, and `metered`'s
+/// estimated call cost is at or below `policy`'s marginal-cost ceiling.
+/// `[routing] max_router_latency` plays no part here — that knob stays
+/// 1435's alone. No exchange rate between milliseconds and micro-dollars
+/// exists anywhere in this build: the comparison is between two *times*,
+/// and the cost half is checked only against the user's own ceiling.
 ///
-/// # Why the first version of this rule (comparing against `max_router_latency`) was withdrawn
-///
-/// `free`'s expected wasted time is at most `median_ms`, for any parsed
-/// fraction in `[0, 1]`. Comparing that wasted time against the same
-/// `max_router_latency` [`classification_verdict`]'s 1435 gate excludes on
-/// meant this rule could only ever fire on a candidate 1435 (and, below the
-/// 80% floor, 1432) had already excluded from
-/// [`DisposableRouting::choose_for_automatic_classification`]'s admitted
-/// list — an account of an exclusion, never a preference that could change a
-/// choice. Comparing `free`'s wasted time against `metered`'s **own**
-/// measured latency has no such relationship to either gate: both times come
-/// from candidates that pass 1432/1435/1436 on their own terms, so this rule
-/// can fire on a candidate the router was genuinely about to choose.
+/// This compares `free`'s wasted time against `metered`'s **own** measured
+/// latency rather than against `max_router_latency` (an earlier version of
+/// this rule, withdrawn): both times come from candidates that already pass
+/// 1432/1435/1436 on their own terms, so this rule can fire on a candidate
+/// the router was genuinely about to choose — comparing against
+/// `max_router_latency` instead could only ever fire on a candidate 1435
+/// had already excluded, an account of an exclusion rather than a
+/// preference that could change a choice.
+// History: design-decisions.md, "Trims: routing module docs", routing/disposable/classification.rs `fn time_price_preference`.
 pub(super) fn time_price_preference(
     policy: &ClassificationPolicy,
     free: &DisposableCandidate,

@@ -365,29 +365,24 @@ fn observed_pairing_reliability(
 }
 
 /// Map line 1382, joined to a task's hard capability requirements —
-/// `GH-ROUTING-CAPABILITY`'s package, and `capability::axis_for`'s own
-/// comparison function is what makes this ruling-1-safe: this function never
-/// compares a task's tier to a resource's tier, only a resource's registry
-/// entry to the specific axis a requirement names.
+/// `GH-ROUTING-CAPABILITY`'s package: this function never compares a task's
+/// tier to a resource's tier, only a resource's registry entry to the
+/// specific axis a requirement names.
 ///
-/// This is one of `TaskClassification::hard_capabilities`' two production
-/// consumers — the other is `is_adequate`, which `session::hard_constraint`
-/// asks the same question of to raise `HardConstraint::Capability` (map line
-/// 1517). `requirements.hard_capabilities` is where a caller of
+/// One of `TaskClassification::hard_capabilities`' two production
+/// consumers — the other is `is_adequate` (map line 1517).
+/// `requirements.hard_capabilities` is where a caller of
 /// [`SessionRouter::choose`] attaches it: `main.rs`'s `launch_session` and
-/// `route_recommendation` both build it from `classified.answer.requirements()`
-/// on every classified launch; a caller with no task in hand still passes
-/// `TaskRequirements::default()`, an empty list that contributes `0.0` here
-/// and excludes nothing at the gate.
+/// `route_recommendation` both build it from `classified.answer.requirements()`;
+/// a caller with no task passes `TaskRequirements::default()`, an empty list
+/// that contributes `0.0` and excludes nothing.
 ///
-/// Reads `destination.harness()` the same way [`harness_capability_fit`]
-/// does — the identity is already in hand at the point this term is
-/// computed — and combines it with [`Destination::resource_facts`] through
-/// [`capability::ResourceCapabilities::describe`]. No capability value and no
-/// resource identity is matched here: this function only asks the registry a
-/// question and applies the three named constants above, which is 1390's
-/// answer — a new resource, a new harness, or a corrected axis changes
-/// nothing in this function's body.
+/// Combines `destination.harness()` with [`Destination::resource_facts`]
+/// through [`capability::ResourceCapabilities::describe`] — no capability
+/// value or resource identity is matched here, only the registry question
+/// and the three named constants, which is 1390's answer: a new resource,
+/// harness or corrected axis changes nothing in this function's body.
+// History: design-decisions.md, "Trims: routing module docs", routing/session/scoring.rs `fn capability_fit`.
 pub fn capability_fit(destination: &Destination, requirements: &TaskRequirements) -> Contribution {
     if requirements.hard_capabilities.is_empty() {
         return Contribution::new(
@@ -507,42 +502,27 @@ pub fn workload_tier_fit(destination: &Destination, required: WorkloadTier) -> C
 /// Map line 1558: *"prefer the cheapest healthy candidate that satisfies the
 /// required workload tier and hard capabilities."*
 ///
-/// # What this term is, and what the three words before it already decide
+/// Three of the line's four properties are already decided before this
+/// function is reached: `hard_constraint` removes a below-ceiling
+/// destination and [`workload_tier_fit`] prices the tier fit of what's
+/// left; [`capability_fit`] prices an established-absent axis at four times
+/// this term's magnitude, so a cheap resource lacking what the task needs
+/// can never win on price; [`provider_health`] prices a refused credential
+/// or cooling-down provider still larger. What is left is the comparison
+/// the line is actually about: `METERED_COST_PREFERENCE` for a metered
+/// destination, `0.0` for a free one — the free preference expressed as a
+/// cost on the paid candidate, so a project with no free resource is not
+/// scored as though every destination it has were deficient.
 ///
-/// The line names four properties, and three of them are already decided
-/// before this function is reached, which is why it prices only the fourth:
+/// Pushed only under `if let Some(required)`, the same place and reason as
+/// [`workload_tier_fit`]: no required tier exists until a task is
+/// classified, so an untasked launch or `route` call renders byte-for-byte
+/// what it rendered before this term existed.
 ///
-/// - *satisfies the required workload tier* — `hard_constraint` has already
-///   **removed** a destination whose established ceiling is below the
-///   requirement, and [`workload_tier_fit`] prices the fit of what is left;
-/// - *satisfies the hard capabilities* — [`capability_fit`] prices an
-///   established-absent axis at `CAPABILITY_ESTABLISHED_ABSENT`, four times
-///   this term's magnitude, so a cheap resource established to lack what the
-///   task needs can never win on price;
-/// - *healthy* — [`provider_health`] prices a refused credential and a
-///   cooling-down provider, and its penalties are larger again.
-///
-/// So what is left for this term is the comparison the line is actually
-/// about: two candidates the terms above could not separate, one of which
-/// spends the user's money. It is `METERED_COST_PREFERENCE` for a metered
-/// destination and `0.0` for a free one — a preference for the free
-/// resource expressed as a cost on the paid one, so that a project with no
-/// free resource configured is not scored as though every destination it has
-/// were somehow deficient.
-///
-/// # Why it is only pushed when a tier was established
-///
-/// `score` pushes this term exactly where it pushes [`workload_tier_fit`]:
-/// under `if let Some(required)`. The line's own subject is *"a candidate
-/// that satisfies the required workload tier"*, and there is no required tier
-/// until a task has been classified — so a launch or a `glasshouse route`
-/// that states no task renders precisely the explanation it rendered before
-/// this term existed, byte for byte. The same rule, and the same reason, as
-/// the tier term beside it.
-///
-/// `Cost` is [`super::Backend::cost`], which `main.rs::destination_backend`
-/// resolves through `ProviderConfig::cost_of` — the user's own `free_models`
-/// list. Nothing here infers a price from a model's name.
+/// `Cost` is [`super::Backend::cost`], resolved by
+/// `main.rs::destination_backend` through `ProviderConfig::cost_of` — the
+/// user's own `free_models` list, never inferred from a model's name.
+// History: design-decisions.md, "Trims: routing module docs", routing/session/scoring.rs `fn cost_preference`.
 pub fn cost_preference(destination: &Destination) -> Contribution {
     if destination.backend().cost().is_free() {
         return Contribution::new(
@@ -567,32 +547,21 @@ pub fn cost_preference(destination: &Destination) -> Contribution {
 
 /// Map line 1538: *"include expected marginal cost in candidate scoring."*
 ///
-/// `Cost` — [`super::Cost`]'s own doc calls it *"whether using a model costs
-/// the user anything at the margin"* — is still the only reading that can
-/// ever make this term `0.0`: [`Cost::is_free`] returning `true` is a
-/// **known** zero, never an unknown, and stays priced exactly as it always
-/// was. Phase 32G's `PriceTable` (`crate::provider::pricing`) answers the
-/// other half for a metered destination — a known per-million price, or an
-/// honest unknown — but it changes only the **evidence**, never the
-/// magnitude: there is still no per-call token estimate at this call site
-/// (`SessionContextFacts` carries none), so a known price cannot yet be
-/// converted into an actual expected dollar figure without inventing one.
-/// Reporting the known rate is honest; reporting a dollar estimate from it
-/// is map line 1298's job, once a size producer exists. A destination whose
-/// price is unknown is priced identically to one whose price is known but
-/// unconvertible — both metered, neither free — and the difference between
-/// them is only ever textual, the same way [`AffinityFacet`]'s `known` and
-/// `unknown` constructors both start every unattached facet as `0.0`.
+/// `Cost` is still the only reading that can make this term `0.0`:
+/// [`Cost::is_free`] is a **known** zero, never an unknown. Phase 32G's
+/// `PriceTable` answers the metered half — a known per-million price or an
+/// honest unknown — but changes only the **evidence**, never the magnitude,
+/// since there is no per-call token estimate at this call site to convert a
+/// known price into a dollar figure (map line 1298's job, once a size
+/// producer exists). An unknown price and a known-but-unconvertible one are
+/// priced identically, the difference only ever textual.
 ///
-/// **Pushed unconditionally**, unlike [`cost_preference`], because line 1538
-/// names no workload-tier precondition the way line 1558 does. That is also
-/// why it must stay inert exactly where [`cost_preference`] is active: once a
-/// tier is established, [`cost_preference`] already prices the same `Cost`
-/// reading as its own deliberately small tie-break (line 1558's own doc).
-/// Pricing it again here would score the identical fact in the identical
-/// direction a second time — the double-count this term exists to avoid, not
-/// to add — so the two conditions partition rather than overlap: exactly one
-/// of them ever prices a given candidate.
+/// **Pushed unconditionally**, unlike [`cost_preference`], since line 1538
+/// names no workload-tier precondition — and inert exactly where
+/// [`cost_preference`] is active, since once a tier is established that
+/// term already prices the same `Cost` reading as its own tie-break, so the
+/// two conditions partition rather than overlap.
+// History: design-decisions.md, "Trims: routing module docs", routing/session/scoring.rs `fn expected_marginal_cost`.
 fn expected_marginal_cost(
     destination: &Destination,
     movement: Option<&TierMovement>,
@@ -774,27 +743,19 @@ fn expected_output_cost_evidence(
 /// `expected_marginal_cost`'s magnitude: a reader sees two terms, one for
 /// money and one for a scarce unit money does not price.
 ///
-/// # Its own axis, never 1280's twice
+/// Inert whenever
+/// [`crate::routing::burn::ExhaustionForecast::exhausts_well_before_reset`]
+/// says [`super::pressure::exhaustion_forecast_pressure`] already carries
+/// the penalty for this resource (one forecast, priced once) — what is left
+/// is the case beside it: a pool making its reset but spent fast enough to
+/// be worth naming.
 ///
-/// [`super::pressure::exhaustion_forecast_pressure`] already prices the case
-/// where a resource will not make it to its reset. This term is inert
-/// whenever [`crate::routing::burn::ExhaustionForecast::exhausts_well_before_reset`]
-/// says that term is already carrying the penalty for this destination's
-/// resource — `phase-32g.md`'s 1302 entry: one forecast, priced once. What is
-/// left for this term is the case beside it: a pool that will make its reset
-/// but is being spent fast enough to be worth naming.
-///
-/// # Inert, and says so, in three cases
-///
-/// - the allowance is [`Allowance::TokenPriced`] — "how many requests are
-///   left" has no answer for a resource priced per token, and pricing it
-///   anyway is exactly the conflation `free.rs`'s own module doc warns
-///   against;
-/// - the pool's remaining count is not yet known, or the destination carries
-///   no burn forecast at all (too few rows, no measured remaining amount, or
-///   a non-positive rate — see [`crate::routing::burn::forecast`]);
-/// - the forecast already exhausts well before the reset, which is the case
-///   above.
+/// Inert, and says so, when: the allowance is [`Allowance::TokenPriced`]
+/// (no "requests left" answer for a per-token resource, `free.rs`'s own
+/// conflation warning); the pool's remaining count is unknown or the
+/// destination carries no burn forecast; or the forecast already exhausts
+/// well before the reset.
+// History: design-decisions.md, "Trims: routing module docs", routing/session/scoring.rs `fn request_pool_cost`.
 pub fn request_pool_cost(destination: &Destination, pool: &FreePool) -> Contribution {
     let allowance = pool.allowance(destination.backend().credential());
     if !allowance.is_request_pool() {
@@ -848,29 +809,24 @@ pub fn request_pool_cost(destination: &Destination, pool: &FreePool) -> Contribu
 
 /// Map line 1307: the marginal input cost this decision actually used, as a
 /// monetary reading with its required confidence — never recomputed once
-/// carried. [`SessionRouter::choose`] calls this exactly once, for the
-/// destination it settled on, and the result travels on [`Routed`] to
-/// whatever records it (`main.rs::record_entitlement_fallback`), rather than
-/// being derived a second time at the writer from a `PriceTable` that may
-/// have changed on disk since the decision was made.
+/// carried. [`SessionRouter::choose`] calls this once, for the destination
+/// it settled on, and the result travels on [`Routed`] to whatever records
+/// it, rather than being derived again at the writer from a `PriceTable`
+/// that may have changed on disk since.
 ///
-/// Free is a known zero, regardless of size — nothing is spent whatever the
-/// input turns out to be, the same certainty [`expected_marginal_cost`]'s
-/// free branch reads. A metered destination needs **both** a known price
-/// and a known size; either half missing answers `None` — never a
-/// fabricated zero, matching map line 1307's own rule that unknown size or
-/// unknown price means no cost row at all.
+/// Free is a known zero regardless of size. A metered destination needs
+/// **both** a known price and a known size; either missing answers `None`,
+/// never a fabricated zero — map line 1307's rule that unknown size or
+/// price means no cost row at all.
 ///
-/// [`CostConfidence::Estimated`], always — including the cached-input split
-/// below. `CostConfidence` distinguishes *provenance* (a provider-reported
-/// invoice figure versus Glasshouse's own arithmetic versus nothing at all),
-/// not how many of Glasshouse's own readings that arithmetic combines. A
-/// split estimate is built from two of this build's own measurements — the
-/// user's declared `cached_input_per_million_usd` and this route's own
-/// observed `cache_read_ratio` — rather than one, but neither reading is a
-/// provider-stated figure, so it has no more claim to [`CostConfidence::Exact`]
-/// than the flat estimate above it did; migration 11's `CHECK` requires a
-/// label to be chosen, and this is the one that says so.
+/// [`CostConfidence::Estimated`], always, including the cached-input split:
+/// `CostConfidence` distinguishes *provenance* (provider-invoiced versus
+/// Glasshouse's own arithmetic versus nothing), not how many of
+/// Glasshouse's own readings combine. A split estimate uses two
+/// measurements — the user's `cached_input_per_million_usd` and this
+/// route's observed `cache_read_ratio` — but neither is provider-stated, so
+/// it has no more claim to [`CostConfidence::Exact`] than the flat estimate.
+// History: design-decisions.md, "Trims: routing module docs", routing/session/scoring.rs `fn estimated_cost`.
 pub(super) fn estimated_cost(
     destination: &Destination,
     prices: &PriceTable,
@@ -959,29 +915,23 @@ fn classification_note(answer: &RouterAnswer) -> Contribution {
 /// Map lines 1535/1545: this destination's own measured prompt-cache read
 /// history — [`Destination::route_responsiveness`]'s attached
 /// [`RouteResponsiveness::cache_read_ratio`], read the same way
-/// [`observed_pairing_reliability`] and [`tool_round_rate`] already read that
-/// reading's other fields, so a caller that attaches none, or a route too
-/// thin to summarize, leaves this term exactly as inert as those two already
-/// are.
+/// [`observed_pairing_reliability`] and [`tool_round_rate`] read that
+/// reading's other fields, so an unattached or too-thin route leaves this
+/// term inert the same way.
 ///
-/// This is a **different** signal from [`prompt_cache_state`], right below:
-/// that term answers whether *this specific move* would preserve a cached
-/// prefix (a locality fact); this one answers how often *this route in
-/// general* has actually shown a cache read, over its own recorded history.
-/// The two are pushed side by side deliberately, and see
-/// [`MEASURED_CACHE_TEMPERATURE_MAGNITUDE_CEILING`]'s own doc for why this
-/// one is bounded strictly below both of that term's magnitudes.
+/// A **different** signal from [`prompt_cache_state`] right below: that
+/// term answers whether *this move* would preserve a cached prefix; this
+/// one answers how often *this route in general* has shown a cache read.
+/// Bounded strictly below both of that term's magnitudes — see
+/// [`MEASURED_CACHE_TEMPERATURE_MAGNITUDE_CEILING`]'s own doc.
 ///
-/// `0.0`, saying so, when: no responsiveness reading is attached to this
-/// destination; or the reading's ratio is `None` — fewer than
-/// [`MIN_SAMPLE_FOR_SUMMARY`] rows carried a known input-token count for
-/// this route. Otherwise the magnitude is linear in the ratio, centred on
-/// `0.5`: a route with no measured warmth advantage either way scores
-/// `0.0`, a perfectly warm observed history scores
-/// `+MEASURED_CACHE_TEMPERATURE_MAGNITUDE_CEILING`, and a perfectly cold one
-/// scores the negative of that. The `clamp` is defensive — the ratio's own
-/// domain (`[0.0, 1.0]`) never reaches it, the same recorded shape as
-/// [`observed_pairing_reliability`]'s own clamp.
+/// `0.0`, saying so, when no reading is attached or the ratio is `None`
+/// (fewer than [`MIN_SAMPLE_FOR_SUMMARY`] rows). Otherwise linear in the
+/// ratio, centred on `0.5`: no warmth advantage scores `0.0`, perfectly
+/// warm scores `+MEASURED_CACHE_TEMPERATURE_MAGNITUDE_CEILING`, perfectly
+/// cold the negative of that. The `clamp` is defensive — the ratio's own
+/// domain never reaches it.
+// History: design-decisions.md, "Trims: routing module docs", routing/session/scoring.rs `fn measured_cache_temperature`.
 fn measured_cache_temperature(destination: &Destination) -> Contribution {
     const TERM: &str = "measured cache temperature";
     let Some(reading) = destination.route_responsiveness() else {

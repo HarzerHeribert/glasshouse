@@ -1,37 +1,22 @@
 //! Routing for bounded internal jobs — the second policy class (Phase 9I).
 //!
-//! # What a disposable job is, and why it does not share a router
-//!
 //! A disposable job is a bounded, non-conversational request Glasshouse makes
-//! for its own purposes: classifying a request before spending premium agent
-//! capacity, extracting memories from a finished session, reranking search
-//! results. Phase 9I line 530 names those three.
+//! for its own purposes: classifying a request, extracting memories from a
+//! finished session, reranking search results (Phase 9I line 530). None of
+//! them has a conversation prefix worth keeping warm, so line 533 asks that
+//! they be routed by a **separate policy class** — this policy prefers free
+//! capacity and re-decides every time, where the interactive policy keeps
+//! what it has and re-decides only after a real failure.
 //!
-//! Nothing about them resembles a live coding session. They have no
-//! conversation prefix worth keeping warm, no tools, no user watching a
-//! cursor, and no cost to being served by a different model than the last one
-//! was. Line 533 therefore asks that they be routed by a **separate policy
-//! class**, and the module header of [`mod@super`] lists the three
-//! independent ways that separation is made structural here.
-//!
-//! The practical content of the separation is one sentence: this policy
-//! **prefers free capacity and re-decides every time**, and the interactive
-//! policy **keeps what it has and re-decides only after a real failure**.
-//!
-//! # Glasshouse's own test and evaluation runs
-//!
-//! Phase 9I line 539 — *"allow Glasshouse's own automated evaluation and test
-//! runs to use configured zero-cost models, and never a metered resource
-//! without an explicit opt-in"* — is an acceptance condition, not a
-//! preference. A test run that silently spends the user's money is the worst
-//! outcome this module can produce, and it is worse than a failing test.
-//!
-//! It is enforced by construction rather than by a check a caller might
-//! forget: a routing policy is built with a [`MeteredUse`], the value that
-//! Glasshouse's own runs are built with is [`MeteredUse::Withheld`], and a
+//! Phase 9I line 539 — Glasshouse's own test and evaluation runs must use
+//! configured zero-cost models, never a metered resource without an
+//! explicit opt-in — is enforced by construction, not by a check a caller
+//! might forget: a routing policy is built with a [`MeteredUse`], the value
+//! Glasshouse's own runs use is [`MeteredUse::Withheld`], and a
 //! [`DisposableChoice`] on a metered resource cannot be produced from a
-//! policy holding it. There is no second door — [`DisposableChoice`]'s fields
-//! are private and nothing else in the crate constructs one.
+//! policy holding it. There is no second door — its fields are private and
+//! nothing else in the crate constructs one.
+// History: design-decisions.md, "Trims: routing module docs", routing/disposable/mod.rs module doc.
 
 use std::collections::BTreeSet;
 use std::time::Instant;

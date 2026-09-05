@@ -1,54 +1,30 @@
 //! Phase 37 — the basic session-aware router: which *destination* a piece of
 //! work goes to, and why.
 //!
-//! # What makes this a different router from the two beside it
+//! [`super::interactive`] and [`super::disposable`] both rank **backends**;
+//! this module ranks **destinations**, a strictly larger thing (an existing
+//! session that could be continued, or a fresh one to start) — map lines
+//! 1593/1594's *"prefer an existing relevant session"* against *"prefer a
+//! fresh session"*, unexpressable by a policy whose candidates are all
+//! backends. That difference is what makes the six `Consider X` lines
+//! (1595–1600) answerable here: [`Destination`] varies along harness,
+//! warmth, cache locality, credential and bootstrap cost, where a
+//! `crate::gateway::upstream::Upstream`-built candidate set varies only by
+//! route. Every contribution below has a test holding two destinations
+//! differing **only** in that axis and asserting they resolve differently.
 //!
-//! [`super::interactive`] answers "which backend serves this session", and
-//! [`super::disposable`] answers "which resource serves this throwaway job".
-//! Both rank **backends**. This module ranks **destinations**, and a
-//! destination is a strictly larger thing: an existing session that could be
-//! continued, or a fresh session that would have to be started. Map lines
-//! 1593 and 1594 are that comparison and nothing else — *"prefer an existing
-//! relevant session"* against *"prefer a fresh session"* — and neither can
-//! be expressed by a policy whose candidates are all backends.
+//! [`pairing_prior`] reads `classify`'s *vendor* axis, unlike
+//! [`harness_capability_fit`]'s capability axes, because a [`Destination`]'s
+//! [`Backend`] carries a model resolved **per launch profile**, so a
+//! candidate set built from two enabled profiles of one harness genuinely
+//! varies in `PairingClass` — unlike [`super::interactive`]'s
+//! `UpstreamBackend`, which takes one model for the whole set.
 //!
-//! That difference is also what makes the six `Consider X` lines (1595–1600)
-//! answerable here when their equivalents were not answerable one layer down.
-//! `docs/product/evidence/phase-9j.md`'s last entry records why: a signal
-//! that is **constant across the candidate set** cannot change a ranking, and
-//! every candidate set `crate::gateway::upstream::Upstream` can build varies
-//! only by route, because [`Backend`] carries a provider, a credential and a
-//! cost and no harness and no model of its own. A [`Destination`] carries its
-//! own [`IntegrationId`] and its own [`Continuation`], so a candidate set here
-//! genuinely varies along harness, warmth, cache locality, credential and
-//! bootstrap cost — the six axes the six lines name. Every contribution below
-//! has a test that holds two destinations differing **only** in that axis and
-//! asserts they resolve differently; a contribution that could not do that
-//! would be dead weight, and saying so is the finding rather than the failure.
-//!
-//! # The native-pairing prior, and why it belongs here and not one layer down
-//!
-//! `docs/product/evidence/phase-9j.md`'s 2026-09-02 entry corrects the
-//! sentence this paragraph used to carry: the constancy proof it cites is
-//! scoped to [`super::interactive`]'s `UpstreamBackend`, which has no model
-//! field of its own and takes one model for the whole candidate set at
-//! `SessionRouting::bind`. A [`Destination`]'s [`Backend`] carries a model
-//! resolved **per launch profile** (`main.rs::destination_backend` →
-//! `session_pairing`), so a candidate set built from two enabled profiles of
-//! one harness genuinely varies in `PairingClass` — a fact
-//! `docs/product/evidence/phase-56.md`'s "The question the orchestrator
-//! added" section establishes from current production code. [`pairing_prior`]
-//! reads `classify`'s *vendor* axis for exactly that reason, beside
-//! [`harness_capability_fit`], which reads its *capability* axes (protocol
-//! fit, model-behaviour fit, tool semantics) and does not.
-//!
-//! # Purity
-//!
-//! Same rule as the rest of `routing`: no socket, no credential resolution,
-//! no clock. `now` is an argument. Warmth, capacity and checkpoint quality
-//! are values the **caller looked up** — this module names neither
-//! `crate::session` nor `crate::checkpoint`, for the reason
-//! [`crate::config::pairing::ContinuitySource`] gives.
+//! Same purity as the rest of `routing`: no socket, credential resolution
+//! or clock; `now` is an argument, and this module names neither
+//! `crate::session` nor `crate::checkpoint`, taking warmth, capacity and
+//! checkpoint quality as values the caller looked up.
+// History: design-decisions.md, "Trims: routing module docs", routing/session/mod.rs module doc.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Instant;
