@@ -143,6 +143,7 @@ fn cheap_price() -> ModelPrice {
     ModelPrice {
         input_per_million_usd: 0.01,
         output_per_million_usd: 0.01,
+        cached_input_per_million_usd: None,
     }
 }
 
@@ -531,6 +532,7 @@ fn a_retained_free_pick_whose_inputs_now_fire_the_rule_is_overridden_and_not_reu
     let price = ModelPrice {
         input_per_million_usd: 0.001,
         output_per_million_usd: 0.001,
+        cached_input_per_million_usd: None,
     };
 
     let fixture = Fixture::new();

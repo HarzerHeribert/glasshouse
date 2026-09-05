@@ -65,13 +65,16 @@ const MAX_PRICE_PER_MILLION_USD: f64 = 1_000_000.0;
 
 /// One provider/model's price, in US dollars per million tokens.
 ///
-/// Input and output only — this package prices lines 1305 and 1306, which
-/// need no more than that, and a cached-input rate would be speculative
-/// structure with no consumer in this build (map line 1300, Cluster H).
+/// `cached_input_per_million_usd` is optional in the source file and stays
+/// optional here: `None` means the file's author never stated a cached-input
+/// rate, and is read by every consumer as *unknown*, never as *free* or as
+/// `input_per_million_usd`'s value — map line 1300, unblocked once
+/// `cache_read_ratio` (`routing::evidence::joins`) gave the signal a producer.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ModelPrice {
     pub input_per_million_usd: f64,
     pub output_per_million_usd: f64,
+    pub cached_input_per_million_usd: Option<f64>,
 }
 
 /// The on-disk shape of `pricing.toml`: an array of tables so a model name
@@ -88,6 +91,10 @@ struct RawEntry {
     model: String,
     input_per_million_usd: f64,
     output_per_million_usd: f64,
+    /// Absent in the file means unknown, never zero — see [`ModelPrice`]'s
+    /// own doc comment.
+    #[serde(default)]
+    cached_input_per_million_usd: Option<f64>,
 }
 
 /// Every price this build currently knows, keyed by exact provider and model
@@ -170,12 +177,24 @@ impl PriceTable {
                     entry.provider, entry.model
                 )
             })?;
+            let cached_input = entry
+                .cached_input_per_million_usd
+                .map(|value| {
+                    validate_price(value).ok_or_else(|| {
+                        format!(
+                            "{}/{}: cached_input_per_million_usd is not a valid price",
+                            entry.provider, entry.model
+                        )
+                    })
+                })
+                .transpose()?;
             entries.push((
                 entry.provider,
                 entry.model,
                 ModelPrice {
                     input_per_million_usd: input,
                     output_per_million_usd: output,
+                    cached_input_per_million_usd: cached_input,
                 },
             ));
         }
@@ -221,10 +240,52 @@ mod tests {
             .expect("the entry above must be found");
         assert_eq!(price.input_per_million_usd, 15.0);
         assert_eq!(price.output_per_million_usd, 75.0);
+        assert_eq!(
+            price.cached_input_per_million_usd, None,
+            "an entry with no cached_input_per_million_usd must parse as unknown, not zero"
+        );
         assert_eq!(table.price_for("openrouter", "a-different-model"), None);
         assert_eq!(
             table.price_for("a-different-provider", "anthropic/claude-opus-4"),
             None
+        );
+    }
+
+    #[test]
+    fn a_declared_cached_input_rate_parses_and_is_looked_up() {
+        let table = PriceTable::parse(
+            r#"
+            [[prices]]
+            provider = "openrouter"
+            model = "anthropic/claude-opus-4"
+            input_per_million_usd = 15.0
+            output_per_million_usd = 75.0
+            cached_input_per_million_usd = 1.5
+            "#,
+        )
+        .expect("a declared cached-input rate must parse");
+        let price = table
+            .price_for("openrouter", "anthropic/claude-opus-4")
+            .expect("the entry above must be found");
+        assert_eq!(price.cached_input_per_million_usd, Some(1.5));
+    }
+
+    #[test]
+    fn a_malformed_cached_input_rate_is_refused_naming_provider_and_model() {
+        let result = PriceTable::parse(
+            r#"
+            [[prices]]
+            provider = "openrouter"
+            model = "m"
+            input_per_million_usd = 1.0
+            output_per_million_usd = 1.0
+            cached_input_per_million_usd = -1.0
+            "#,
+        );
+        let error = result.expect_err("a negative cached-input rate must not parse");
+        assert!(
+            error.contains("openrouter") && error.contains('m') && error.contains("cached_input"),
+            "the error must name the provider, model and field: {error}"
         );
     }
 

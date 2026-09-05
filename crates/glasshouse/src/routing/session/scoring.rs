@@ -645,15 +645,30 @@ fn expected_marginal_cost(
             // double-count `cost_preference` — only the evidence gains the
             // conversion this package exists to make possible.
             Some(tokens) => {
-                let cost_usd = tokens as f64 * price.input_per_million_usd / 1_000_000.0;
+                let (micro_usd, split) =
+                    input_cost_micro_usd(tokens, price, cache_read_ratio(destination));
+                let cost_usd = micro_usd / 1_000_000.0;
+                let pricing_clause = match split {
+                    // Map line 1300: said once, as a clause, not a paragraph —
+                    // the reader can tell a cache-split estimate from a flat
+                    // one and by how much.
+                    Some(split) => format!(
+                        ", split at this route's measured {:.0}% cache-read ratio (${:.2} \
+                         cached vs ${:.2} uncached per million)",
+                        split.ratio * 100.0,
+                        split.cached_rate,
+                        price.input_per_million_usd,
+                    ),
+                    None => String::new(),
+                };
                 (
                     EXPECTED_MARGINAL_COST_PENALTY,
                     format!(
                         "`{}` is metered; its price is known — ${:.2} per million input \
                          tokens, ${:.2} per million output tokens — and this decision's own \
                          input-size estimate ({}) puts the expected marginal cost at roughly \
-                         ${:.4} for this call; no workload tier is established yet to price it \
-                         another way (line 1558 would once one is)",
+                         ${:.4} for this call{pricing_clause}; no workload tier is established \
+                         yet to price it another way (line 1558 would once one is)",
                         destination.id(),
                         price.input_per_million_usd,
                         price.output_per_million_usd,
@@ -846,10 +861,16 @@ pub fn request_pool_cost(destination: &Destination, pool: &FreePool) -> Contribu
 /// fabricated zero, matching map line 1307's own rule that unknown size or
 /// unknown price means no cost row at all.
 ///
-/// [`CostConfidence::Estimated`], always: every cost this function can
-/// produce is built from the user's own `pricing.toml` and Glasshouse's own
-/// token measurement, never a figure a provider reported — migration 11's
-/// `CHECK` requires a label to be chosen, and this is the one that says so.
+/// [`CostConfidence::Estimated`], always — including the cached-input split
+/// below. `CostConfidence` distinguishes *provenance* (a provider-reported
+/// invoice figure versus Glasshouse's own arithmetic versus nothing at all),
+/// not how many of Glasshouse's own readings that arithmetic combines. A
+/// split estimate is built from two of this build's own measurements — the
+/// user's declared `cached_input_per_million_usd` and this route's own
+/// observed `cache_read_ratio` — rather than one, but neither reading is a
+/// provider-stated figure, so it has no more claim to [`CostConfidence::Exact`]
+/// than the flat estimate above it did; migration 11's `CHECK` requires a
+/// label to be chosen, and this is the one that says so.
 pub(super) fn estimated_cost(
     destination: &Destination,
     prices: &PriceTable,
@@ -866,11 +887,64 @@ pub(super) fn estimated_cost(
         .name()
         .and_then(|model| prices.price_for(destination.backend().provider(), model))?;
     let tokens = destination.estimated_input_size().total_tokens()?;
-    let micro_usd = (tokens as f64 * price.input_per_million_usd).round() as i64;
+    let (micro_usd, _split) = input_cost_micro_usd(tokens, price, cache_read_ratio(destination));
     Some(ObservedCost {
-        micro_usd,
+        micro_usd: micro_usd.round() as i64,
         confidence: CostConfidence::Estimated,
     })
+}
+
+/// This destination's route's own measured prompt-cache read ratio, the same
+/// reading [`measured_cache_temperature`] scores — never re-derived from a
+/// ledger here (map line 1300's own "do not re-derive the ratio" rule).
+/// `None` whenever [`measured_cache_temperature`] would also read `None`: no
+/// responsiveness reading attached, or fewer than [`MIN_SAMPLE_FOR_SUMMARY`]
+/// rows.
+fn cache_read_ratio(destination: &Destination) -> Option<f64> {
+    destination
+        .route_responsiveness()
+        .and_then(|reading| reading.cache_read_ratio)
+}
+
+/// The cached rate and ratio a split was priced with, carried back only so
+/// the caller can describe the split — never recomputed from it.
+struct CachedInputSplit {
+    ratio: f64,
+    cached_rate: f64,
+}
+
+/// The one place `tokens * rate` is computed for an input-cost estimate,
+/// shared by [`estimated_cost`] (the recorded figure) and
+/// [`expected_marginal_cost`] (the evidence text), so the two can never say
+/// two different numbers about the same decision.
+///
+/// Returns the cost in **micro-USD before rounding** — `tokens as f64 *
+/// input_per_million_usd` already yields micro-dollars because "per million
+/// tokens" and "per million micro-dollars-per-dollar" are the same divisor,
+/// so no `/ 1_000_000.0` belongs here; a caller that wants dollars divides
+/// once, at display time.
+///
+/// Splits only when **both** a cached rate and a measured ratio are
+/// available; either missing prices every token at `input_per_million_usd`,
+/// byte-for-byte the same expression this crate priced before this package
+/// (map line 1300's "a missing rate is not a free cache" / "a missing ratio
+/// is not a cold route" rules) — required so REQUIRED BEHAVIOR 4 and 5's
+/// unchanged figures stay exactly unchanged, not merely close.
+fn input_cost_micro_usd(
+    tokens: u64,
+    price: crate::provider::pricing::ModelPrice,
+    cache_read_ratio: Option<f64>,
+) -> (f64, Option<CachedInputSplit>) {
+    match (price.cached_input_per_million_usd, cache_read_ratio) {
+        (Some(cached_rate), Some(ratio)) => {
+            let cached_tokens = tokens as f64 * ratio;
+            let uncached_tokens = tokens as f64 - cached_tokens;
+            let micro_usd =
+                cached_tokens * cached_rate + uncached_tokens * price.input_per_million_usd;
+            (micro_usd, Some(CachedInputSplit { ratio, cached_rate }))
+        }
+        _ => (tokens as f64 * price.input_per_million_usd, None),
+    }
 }
 
 /// The classification a decision acted on, as a zero-weight line in every

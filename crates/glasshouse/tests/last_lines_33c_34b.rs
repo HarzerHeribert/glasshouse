@@ -523,6 +523,7 @@ fn protected_price() -> ModelPrice {
     ModelPrice {
         input_per_million_usd: 1.0,
         output_per_million_usd: 1.0,
+        cached_input_per_million_usd: None,
     }
 }
 
@@ -530,6 +531,7 @@ fn scaled(price: ModelPrice, factor: f64) -> ModelPrice {
     ModelPrice {
         input_per_million_usd: price.input_per_million_usd * factor,
         output_per_million_usd: price.output_per_million_usd * factor,
+        cached_input_per_million_usd: None,
     }
 }
 

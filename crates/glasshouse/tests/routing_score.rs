@@ -34,13 +34,14 @@
 
 use glasshouse::harness::pairing::PairingOverrides;
 use glasshouse::integrations::IntegrationId;
+use glasshouse::provider::pricing::PriceTable;
 use glasshouse::routing::disposable::{
     CandidateCapacity, DisposableCandidate, DisposableRouting, JobKind, NoResource,
 };
-use glasshouse::routing::evidence::RouteResponsiveness;
+use glasshouse::routing::evidence::{CostConfidence, RouteResponsiveness};
 use glasshouse::routing::free::{FreePool, FreePreferences};
 use glasshouse::routing::session::{
-    Destination, RouterInputs, RoutingMoment, SessionRouter, TaskRequirements,
+    Destination, EstimatedInputSize, RouterInputs, RoutingMoment, SessionRouter, TaskRequirements,
 };
 use glasshouse::routing::{AssignedModel, Backend, Cost, CredentialId, ToolSemantics};
 use glasshouse::secret::SecretRef;
@@ -768,4 +769,225 @@ fn measured_cache_temperature_is_inert_without_a_reading_and_below_the_sample_fl
             .expect("the term is always present, even when inert");
         assert_eq!(contribution.magnitude(), 0.0, "{explanation:?}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// `GH-CACHED-INPUT-PRICE` — map line 1300: `estimated_cost` and
+// `expected_marginal_cost`'s evidence split a destination's estimated input
+// tokens at this route's own measured `cache_read_ratio` once the price
+// table declares a `cached_input_per_million_usd`, and price exactly as
+// before this package existed whenever either half is missing — the same
+// `PriceTable::load_from_dir` / `SessionRouter::with_price_table` seam
+// `tests/routing_pricing.rs` already proves the flat estimate through.
+// ---------------------------------------------------------------------------
+
+fn cached_price_temp_dir(label: &str) -> std::path::PathBuf {
+    std::env::temp_dir().join(format!(
+        "glasshouse-routing-score-cached-price-test-{label}-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ))
+}
+
+fn write_pricing_toml(dir: &std::path::Path, contents: &str) {
+    std::fs::create_dir_all(dir).expect("create temp config dir");
+    std::fs::write(dir.join("pricing.toml"), contents).expect("write pricing.toml");
+}
+
+/// A route responsiveness reading carrying only a cache-read ratio, at a
+/// sample comfortably past `MIN_SAMPLE_FOR_SUMMARY` — mirrors
+/// [`warm_cache_history`]/[`cold_cache_history`] above, generalized to an
+/// arbitrary ratio for this section's arithmetic-exactness assertions.
+fn cache_history(ratio: f64) -> RouteResponsiveness {
+    RouteResponsiveness {
+        raw_ttfc_ms: None,
+        raw_ttfc_sample: 0,
+        failure_rate: None,
+        failure_rate_sample: 0,
+        rounds_per_minute: None,
+        rounds_per_minute_sample: 0,
+        cache_read_ratio: Some(ratio),
+        cache_read_ratio_sample: 20,
+    }
+}
+
+fn cached_priced_destination(
+    dir: &std::path::Path,
+    pricing_toml: &str,
+    tokens: u64,
+    responsiveness: Option<RouteResponsiveness>,
+) -> (PriceTable, Destination) {
+    write_pricing_toml(dir, pricing_toml);
+    let prices = PriceTable::load_from_dir(dir);
+    let mut destination = Destination::fresh(
+        "fresh",
+        IntegrationId::ClaudeCode,
+        "default",
+        responsiveness_backend("openrouter", "some/model", "OPENROUTER_API_KEY"),
+        None,
+    )
+    .with_estimated_input_size(
+        EstimatedInputSize::UNESTIMATED.with_project_memory_tokens(Some(tokens)),
+    );
+    if let Some(reading) = responsiveness {
+        destination = destination.with_route_responsiveness(Some(reading));
+    }
+    (prices, destination)
+}
+
+fn choose_one(
+    prices: PriceTable,
+    destination: Destination,
+) -> glasshouse::routing::session::Routed {
+    let overrides = no_pairing_overrides();
+    let health = FreePool::new();
+    let inputs = RouterInputs {
+        overrides: &overrides,
+        health: &health,
+        now: Instant::now(),
+        requirements: TaskRequirements::default(),
+    };
+    SessionRouter::new()
+        .with_price_table(prices)
+        .choose(RoutingMoment::SessionStart, None, &[destination], &inputs)
+        .expect("a destination was offered")
+}
+
+const EXPECTED_MARGINAL_COST_TERM: &str = "expected marginal cost";
+
+fn expected_marginal_cost_evidence(
+    routed: &glasshouse::routing::session::Routed,
+    id: &str,
+) -> String {
+    let (_, explanation) = routed
+        .considered()
+        .iter()
+        .find(|(destination, _)| destination.id() == id)
+        .unwrap_or_else(|| panic!("`{id}` was scored"));
+    explanation
+        .contributions()
+        .iter()
+        .find(|c| c.name() == EXPECTED_MARGINAL_COST_TERM)
+        .expect("expected marginal cost is always present")
+        .evidence()
+        .to_owned()
+}
+
+/// REQUIRED BEHAVIOR 3: a declared cached rate and a measured ratio together
+/// price a destination below the flat estimate, by exactly the arithmetic
+/// the ratio implies — 1,000,000 tokens, a 90% measured ratio, $1.00/million
+/// cached and $5.00/million uncached: `900_000 * 1.00 + 100_000 * 5.00 =
+/// 1_400_000` micro-USD, well under the flat `1_000_000 * 5.00 =
+/// 5_000_000` a missing cached rate would have produced.
+#[test]
+fn a_declared_cached_rate_and_a_measured_ratio_together_split_the_estimate() {
+    let dir = cached_price_temp_dir("split");
+    let (prices, destination) = cached_priced_destination(
+        &dir,
+        r#"
+        [[prices]]
+        provider = "openrouter"
+        model = "some/model"
+        input_per_million_usd = 5.0
+        output_per_million_usd = 9.0
+        cached_input_per_million_usd = 1.0
+        "#,
+        1_000_000,
+        Some(cache_history(0.9)),
+    );
+
+    let routed = choose_one(prices, destination);
+    let cost = routed
+        .cost()
+        .expect("a priced, sized destination has a cost");
+    assert_eq!(
+        cost.micro_usd, 1_400_000,
+        "900_000 tokens at the cached rate plus 100_000 at the full rate must be exact"
+    );
+    assert_eq!(cost.confidence, CostConfidence::Estimated);
+
+    let evidence = expected_marginal_cost_evidence(&routed, "fresh");
+    assert!(
+        evidence.contains("split"),
+        "a cache-split estimate must be distinguishable from a flat one in the evidence: \
+         {evidence}"
+    );
+    assert!(evidence.contains("90%"), "{evidence}");
+}
+
+/// REQUIRED BEHAVIOR 4: a declared cached rate with **no** measured ratio
+/// (map line 1300's "a missing ratio is not a cold route") prices identically
+/// to a build with no cached rate at all — the exact micro-dollar figure,
+/// not just "unchanged": 1,000,000 tokens at $5.00/million is exactly
+/// 5,000,000 micro-USD.
+#[test]
+fn a_declared_cached_rate_with_no_measured_ratio_prices_exactly_as_the_flat_rate() {
+    let dir = cached_price_temp_dir("rate-no-ratio");
+    let (prices, destination) = cached_priced_destination(
+        &dir,
+        r#"
+        [[prices]]
+        provider = "openrouter"
+        model = "some/model"
+        input_per_million_usd = 5.0
+        output_per_million_usd = 9.0
+        cached_input_per_million_usd = 1.0
+        "#,
+        1_000_000,
+        None,
+    );
+
+    let routed = choose_one(prices, destination);
+    let cost = routed
+        .cost()
+        .expect("a priced, sized destination has a cost");
+    assert_eq!(
+        cost.micro_usd, 5_000_000,
+        "with no measured ratio, a declared cached rate must not change the price at all"
+    );
+
+    let evidence = expected_marginal_cost_evidence(&routed, "fresh");
+    assert!(
+        !evidence.contains("split"),
+        "with no measured ratio there is nothing to split: {evidence}"
+    );
+}
+
+/// REQUIRED BEHAVIOR 5: a measured ratio with **no** declared cached rate
+/// (map line 1300's "a missing rate is not a free cache") prices identically
+/// to the flat estimate — same exact-figure assertion as the previous test,
+/// this time with the ratio present and the rate absent.
+#[test]
+fn a_measured_ratio_with_no_declared_cached_rate_prices_exactly_as_the_flat_rate() {
+    let dir = cached_price_temp_dir("ratio-no-rate");
+    let (prices, destination) = cached_priced_destination(
+        &dir,
+        r#"
+        [[prices]]
+        provider = "openrouter"
+        model = "some/model"
+        input_per_million_usd = 5.0
+        output_per_million_usd = 9.0
+        "#,
+        1_000_000,
+        Some(cache_history(0.9)),
+    );
+
+    let routed = choose_one(prices, destination);
+    let cost = routed
+        .cost()
+        .expect("a priced, sized destination has a cost");
+    assert_eq!(
+        cost.micro_usd, 5_000_000,
+        "with no declared cached rate, a measured ratio must not change the price at all"
+    );
+
+    let evidence = expected_marginal_cost_evidence(&routed, "fresh");
+    assert!(
+        !evidence.contains("split"),
+        "with no declared cached rate there is nothing to split: {evidence}"
+    );
 }

@@ -505,3 +505,29 @@ Gates the worker ran (re-run the decisive ones yourself):
 - cargo test -p glasshouse --test routing_pricing --test route_command: test result: ok. 13 + 43 passed; 0 failed
 - scripts/blast-radius.sh --targeted (all six changed files): every traced target passed; 94 full-trace targets skipped (named)
 
+
+---
+
+## 1300 — COMPLETE 2026-09-05, the parked ruling resolved the day its condition was met
+
+`GH-CACHED-INPUT-PRICE` (Sonnet, Amber — a configuration field and a changed cost computation), worktree `.worktrees/cached-input-price`, report **`.agent-runtime/report-cached-input-price.md`**.
+
+**The ruling this entry parked** — *"whether `pricing.toml` grows an optional `cached_input_per_million_usd` (absent = unknown, no cached estimate) is decided after the translated-usage proof lands and shows the signal is real in production"* — resolved **yes** on 2026-09-05, when `GH-CACHE-TEMPERATURE` (`phase-35b.md`) proved `cached_input_tokens` end to end through the shipped writer and read the ratio back into scoring. The register's older row *"no cached-input signal exists"* was already stale; this entry's narrower blocker was the rate, and the rate is now optional in the file.
+
+### Estimate cached-input cost separately from uncached-input cost when provider pricing supports caching. (line 1300)
+
+Contract: Given a model whose `pricing.toml` entry declares a cached-input rate and a destination whose route has a measured prompt-cache read ratio over the standing sample floor, when Glasshouse estimates that destination's input cost, it prices the expected cached share at the cached rate and the rest at the full rate — while preserving that a model with no cached rate, or a route with no measured ratio, is priced exactly as today to the micro-dollar.
+
+State: **COMPLETE** — ruled 2026-09-05 by the orchestrator.
+
+Production: `provider/pricing.rs :: ModelPrice::cached_input_per_million_usd` (`Option<f64>`, `#[serde(default)]`, validated by the same `validate_price` naming provider and model); `routing/session/scoring.rs :: input_cost_micro_usd` — the one place `tokens × rate` is computed, splitting only when **both** the rate and `destination.route_responsiveness().cache_read_ratio` are `Some`, and otherwise the byte-identical flat expression; both `estimated_cost` and `expected_marginal_cost` call it, so the recorded cost and the printed explanation cannot disagree. Confidence stays `Estimated`: the tier names provenance, not how many of this build's own readings the arithmetic combines.
+
+Regression: `routing_score::a_declared_cached_rate_and_a_measured_ratio_split_the_estimate` and its two preservation siblings (rate without ratio; ratio without rate — each asserting the exact micro-dollar figure), plus `provider::pricing`'s malformed-rate load error; three fixture struct literals in `classification_cost_ceiling`, `classification_time_price` and `last_lines_33c_34b` gained the field.
+
+Mutation: a missing `cached_input_per_million_usd` treated as `0.0` — **KILLED**. *A missing rate is not a free cache* is the failure that would under-price silently and never crash, which is why it was the one mutation owed.
+
+Limits, the worker's and kept: the split is an estimate on a **historical** ratio, not a per-request fact; no test here proves any provider's actual cached-input billing matches the rate someone puts in the file; a route's first `MIN_SAMPLE_FOR_SUMMARY` exchanges are priced flat.
+
+Gates on the merged tree: `routing_score` 14/14 · `--lib provider::pricing` 10/10 · `--lib routing::session` 24/24 · the three fixture targets green · `blast-radius.sh --targeted` exit 0.
+
+**Phase 32G stands at 9 of 10.** Only 1303 (local compute cost through latency and occupancy) is open, on the standing reason: no occupancy concept exists anywhere.

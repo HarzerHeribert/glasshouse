@@ -171,10 +171,12 @@ fn an_overpriced_metered_candidate_is_excluded_and_a_cheaper_one_is_chosen() {
     let pricey_price = ModelPrice {
         input_per_million_usd: 1.0,
         output_per_million_usd: 1.0,
+        cached_input_per_million_usd: None,
     };
     let cheap_price = ModelPrice {
         input_per_million_usd: 0.001,
         output_per_million_usd: 0.001,
+        cached_input_per_million_usd: None,
     };
     let pricey_estimate = estimated_classification_cost_micro_usd(pricey_price);
     let cheap_estimate = estimated_classification_cost_micro_usd(cheap_price);
@@ -232,6 +234,7 @@ fn the_default_ceiling_admits_a_model_a_stricter_one_would_exclude() {
     let pricey_price = ModelPrice {
         input_per_million_usd: 1.0,
         output_per_million_usd: 1.0,
+        cached_input_per_million_usd: None,
     };
     let estimate = estimated_classification_cost_micro_usd(pricey_price);
     assert!(
@@ -325,6 +328,7 @@ fn a_zero_ceiling_admits_only_free_candidates() {
     let priced = ModelPrice {
         input_per_million_usd: 1.0,
         output_per_million_usd: 1.0,
+        cached_input_per_million_usd: None,
     };
 
     // d1: a free candidate survives a zero ceiling even when `pricing.toml`
@@ -398,6 +402,7 @@ fn the_estimate_uses_the_task_text_ceiling_not_zero() {
     let price = ModelPrice {
         input_per_million_usd: 2.0,
         output_per_million_usd: 3.0,
+        cached_input_per_million_usd: None,
     };
 
     let prompt_len = CLASSIFICATION_PROMPT_CONTRACT.len();
