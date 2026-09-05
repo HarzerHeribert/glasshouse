@@ -1,0 +1,16 @@
+# Every text file is checked out with LF on every platform.
+#
+# Without this, a Windows checkout with git's default core.autocrlf rewrites
+# LF to CRLF, and three tests that compare checked-in fixture bytes against
+# what the code regenerates fail on every GitHub Windows cell while passing
+# on the local VM, whose tree arrives as a tarball and is never rewritten
+# (2026-09-05, ci-extended run 33969574449: firewall_ladder_proof's
+# ratio_table_recomputed_from_reduce_is_byte_identical and
+# checked_in_corpus_matches_the_seeded_generator, subscription_pressure's
+# the_policy_does_not_invent_task_completion). The token estimates in the
+# ratio table differed too -- CRLF is more bytes -- so "byte-identical" was
+# the honest name for what broke.
+#
+# The Windows batch and PowerShell scripts under scripts/dev/windows/ already
+# run with LF from that tarball, so no exception is carved out for them.
+* text=auto eol=lf
