@@ -16894,3 +16894,1859 @@ package's whole job rather than a constraint on the fixups (the lead's correctio
     /// not compute the ranking in order to report what it would have chosen.
     /// `glasshouse route` still answers that question on demand, because
     /// asking it is a thing a person does deliberately.
+
+## Trims: the remaining module docs, second packet — history moved out of comments by `GH-TRIM-REST-DOCS-2`, 2026-09-06
+
+### `checkpoint/mod.rs` — module doc
+
+    //! # What this deliberately is not
+    //!
+    //! Phase 19's fixed architectural requirement: *Glasshouse checkpoints
+    //! contain portable Glasshouse metadata and bounded handoff context. They do
+    //! not attempt to clone or replace proprietary native harness session
+    //! formats.*
+    //!
+    //! So there is no field here for a transcript, a message history, a native
+    //! session identifier, a tool-call log, or a token count. Those are the
+    //! harness's own business and it keeps them itself; a Glasshouse checkpoint
+    //! that tried to hold them would be a worse copy of a file that already
+    //! exists, and it would stop being portable the moment two harnesses
+    //! disagreed about the shape. `the_format_holds_no_native_session_state`
+    //! pins the document's field list so that a field of that kind cannot arrive
+    //! by accident.
+    //!
+    //! The `harness` field is the exception that proves the rule: it records
+    //! *which* harness produced the checkpoint, which is portable metadata about
+    //! provenance, and says nothing whatever about that harness's format.
+    //!
+    //! # Small is a constraint, not an aspiration
+    //!
+    //! *Keep checkpoints deliberately small enough to bootstrap a fresh session
+    //! cheaply.* A handoff document that costs as much to read as the work it
+    //! describes has no reason to exist, so the bound is enforced three times
+    //! over, deliberately:
+    //!
+    //! 1. [`Checkpoint::fit`] trims the least load-bearing content until the
+    //!    rendered document fits, and records that it did;
+    //! 2. [`CheckpointStore::save`] calls `fit` itself, so a caller cannot skip
+    //!    step 1;
+    //! 3. the `checkpoints` table carries a `CHECK` on the document's byte
+    //!    length, so nothing that opens the file can store an oversized one
+    //!    either.
+    //!
+    //! # Where a checkpoint's *content* comes from
+    //!
+    //! Glasshouse fills in what it can know by itself — the session, the harness,
+    //! the timestamp, and the Git position read straight off the repository. It
+    //! does **not** invent the objective, the state, or the next actions. Those
+    //! are authored, by whoever asks for the checkpoint, and a checkpoint whose
+    //! objective Glasshouse had guessed from terminal output would be exactly the
+    //! kind of confident fiction this project refuses everywhere else.
+
+### `checkpoint/mod.rs` — `Checkpoint::fit`
+
+    /// # The order is the design
+    ///
+    /// Sections are given up least-useful-first, and "useful" means *useful
+    /// to somebody starting from nothing*: the objective and the current
+    /// state are what a fresh session cannot work without, so they are cut
+    /// last and truncated rather than dropped. Failed approaches go first —
+    /// they are the largest section in practice and the least costly to
+    /// rediscover — then the working tree's changed-file list (Glasshouse
+    /// read it off disk and can read it again), then the file list, then
+    /// decisions, then **project memory**, then the test state, then next
+    /// actions.
+    ///
+    /// Project memory sheds right after decisions and before the test state:
+    /// it is never disposable in the way a failed approach or a changed-file
+    /// list is — a binding record is a constraint the next session must not
+    /// silently violate, not a convenience this session happened to jot down
+    /// — but the test state and next actions are what tells a fresh session
+    /// where to resume at all, and those outrank everything else that can be
+    /// given up.
+
+### `database/bootstrap.rs` — `check_existing`
+
+    /// **A zero-byte file at this path has exactly one meaning, and it is
+    /// "truncated".** Glasshouse never creates a database *here*: a first creation
+    /// happens on a private sibling and arrives at this path whole, in one
+    /// [`hard link`](publish), with its schema and its project binding already
+    /// committed behind it. So there is no such thing as a database in the making
+    /// at this path, nothing to wait for, and nothing to tell apart — a zero-byte
+    /// file is a database that used to hold this project's sessions, memories and
+    /// checkpoints and was truncated by a crashed copy, an interrupted restore or
+    /// a disk-full write.
+    ///
+    /// It is therefore refused on the spot, without opening a connection and
+    /// without waiting: nothing here reads, writes or locks the file, because a
+    /// refusal that touched the file it refused would destroy the evidence the
+    /// user needs to recover it, and a refusal that waited would only be
+    /// pretending the question is still open. (This is what wave 108's
+    /// `wait_out_a_concurrent_creation` existed for, and what the private-file
+    /// creation below retired: the two meanings it had to tell apart no longer
+    /// both exist.)
+
+### `database/bootstrap.rs` — `prepare_file`
+
+    /// The invariant the rest of this module rests on falls out of that: a file at
+    /// `db_path` is always a complete, migrated, project-bound database or a
+    /// truncated one, and never one in the making. A caller arriving mid-creation
+    /// sees no file at all, does its own creation, and one of the two wins the
+    /// link; the loser discards its own finished database and opens the winner's,
+    /// which is complete by construction.
+    ///
+    /// In a burst of *n* first bootstraps this runs *n* small migrations on *n*
+    /// private files rather than making *n* − 1 callers queue on one lock behind a
+    /// migration of unbounded length, which is what [`configure`]'s five second
+    /// busy timeout used to be a bet against.
+
+### `database/mod.rs` — module doc
+
+    //! Each project owns exactly one SQLite database file, physically separate
+    //! from every other project's file, at `<state_dir>/glasshouse.db`. It is the
+    //! only future home for that project's memory (the Phase 20 memory table will
+    //! live here). Nothing else in Glasshouse is allowed to open a database file
+    //! anywhere else: the path is derived from [`crate::Runtime`], never accepted
+    //! from a caller.
+    //!
+    //! The module deliberately stays small: a deterministic migration mechanism
+    //! (`schema_migrations`), the `project_metadata` table that binds the database
+    //! to one project identifier, and the tables later phases have needed —
+    //! `sessions` and, from version 4, `memories` with its FTS5 index. It holds no
+    //! credentials, no WAL configuration, and no async wrappers; what a table
+    //! *means* lives with the module that owns it ([`crate::session::store`],
+    //! [`crate::memory`]), and only the schema itself lives here.
+    //!
+    //! Safety properties enforced on every open:
+    //!
+    //! - A newly created database file is owner-only (`0600` on Unix).
+    //! - A final database path that is a symbolic link is refused by an explicit
+    //!   `symlink_metadata` check performed on every launch. This handles the
+    //!   ordinary case; it is an open-time check, not a guarantee about files
+    //!   being swapped while Glasshouse runs.
+    //! - Any other non-regular entry at the final database path (directory,
+    //!   device, FIFO, socket) is refused as well; nothing but a regular file is
+    //!   ever opened or created there.
+    //! - A connection that SQLite could only open read-only (for example a
+    //!   mode-0400 file) is refused instead of silently degrading to a session
+    //!   that cannot store anything.
+    //! - A database whose recorded project identifier differs from the active
+    //!   project is refused; it must have been copied across projects.
+    //! - A database written by a newer Glasshouse (higher schema version) is
+    //!   refused. Corrupt or too-new databases are never deleted or recreated:
+    //!   the user keeps their data and decides what to do.
+
+### `database/schema.rs` — `SUPPORTED_SCHEMA_VERSION`
+
+    /// Version 1 is the empty-but-initialized schema plus the `project_metadata`
+    /// table. Version 2 adds `sessions`. Version 3 adds `sessions.launch_profile`
+    /// and `sessions.backend_resource`. Version 4 adds `memories` and its FTS5
+    /// index. Version 5 adds `lifecycle_events` and `checkpoints`. Version 6 adds
+    /// event provenance and decision provenance to `memories`, and rebuilds the
+    /// FTS5 index over the rationale. Version 7 admits `gateway_backend_changed`
+    /// to `lifecycle_events.kind` and adds the three columns that carry it,
+    /// rebuilding the table rather than altering its `CHECK` — see the
+    /// migration's own doc comment for why `seq` survives that rebuild unchanged.
+    /// Version 8 adds the rest of what Phase 10 line 645 requires a session to
+    /// record — `model`, `pairing_class`, `protocol`, `response_profile` and
+    /// `response_mechanism` — plus the two labels a person owns, `display_name`
+    /// and `purpose`. Version 9 adds the supervision columns Phase 10A needs — the
+    /// identity of the process a session was started in (`process_id`,
+    /// `process_started_at`, `process_host`) and what supervision has since
+    /// concluded about it (`supervision`, `supervision_reason`). Version 10 adds
+    /// Phase 21C's validity and invalidation conditions and the review/decay
+    /// bookkeeping Phase 21D needs (`review_reason`, `review_marked_at`,
+    /// `last_validated_at`). Version 11 adds `routing_observations`, Phase 33A's
+    /// append-oriented ledger of what actually happened on a routed turn — see the
+    /// migration's own doc comment for its shape and why it accepts no `UPDATE`.
+    /// Version 12 adds `sessions.source_session_id`, Phase 40 line 1646's record of
+    /// which session, if any, a session was bootstrapped from. Version 13 adds
+    /// `memories.superseded_reason`, map line 925's record of *why* a decision was
+    /// superseded — the sentence that stops a future agent resurrecting it without
+    /// context. Version 14 adds `checkpoints.seq`, the order checkpoints were
+    /// written in — `created_at` is whole seconds, so two written inside one
+    /// second were previously separated by a coin flip on a random identifier, and
+    /// *"the most recent checkpoint"* was wrong about half the time.
+    /// Version 15 adds `evaluation_observations`, Phase 51's record of a decision
+    /// Glasshouse made whose wisdom is only visible later — see the migration's
+    /// own doc comment for why its `kind` carries no `CHECK` and why it is the
+    /// first table in this schema that is *deliberately prunable*.
+    /// Version 16 adds `sessions.observed_compactions`, Phase 30's count of the
+    /// times a harness told Glasshouse it was about to compact its own context —
+    /// the one fact in that phase that was observed by the shipped binary and
+    /// then written down nowhere. See the migration's own doc comment for why it
+    /// is a counter on `sessions` rather than a twelfth `lifecycle_events` kind,
+    /// and for why it is the *only* column Phase 30 needed.
+    /// Version 17 adds `memory_files`, the first association in this schema
+    /// between a memory and a file — one row per (memory, path) pair, written
+    /// from what the working tree was observed to be at the moment extraction
+    /// ran. See the migration's own doc comment for why it is a join table
+    /// rather than a column, why `path` is repo-relative and `/`-separated, and
+    /// why its `provenance` says `observed` and must never say `referenced`.
+    /// Version 18 adds `routing_observations.failure_class`, capability map line
+    /// 1364's nine-way failure vocabulary — one nullable `TEXT` column with no
+    /// `CHECK`, for migration 15's reason. See the migration's own doc comment
+    /// for why it is a column beside `outcome` rather than a widening of it, and
+    /// [`FAILURE_CLASSES`] for where the vocabulary actually lives.
+    /// Version 19 adds `task_assumptions` and `assumption_transitions`, Phase
+    /// 21K's ledger of the premises an agent *states* a change rests on — two
+    /// tables, project-scoped by migration 15's two triggers and made append-only
+    /// by a third on each, prunable like migration 15's ledger and unlike
+    /// migration 5's stream. See the migration's own doc comment for why the
+    /// current state of an assumption is its latest transition and nothing is
+    /// ever `UPDATE`d, and [`crate::guardrails::store`] for the writer.
+    /// Version 20 adds `sessions.presentation_ref`, Phase 17 line 760's optional
+    /// presentation metadata — one nullable `TEXT` column naming the cmux
+    /// workspace a session is presented in, with no `CHECK` for migration 15's
+    /// reason. See the migration's own doc comment for why it is a column beside
+    /// `presentation` rather than a widening of it, and
+    /// [`crate::integrations::cmux`] for the only code that ever reads it back.
+    /// Version 21 adds `sessions.last_seen_commit` and
+    /// `memories.extraction_trigger`, capability map lines 1149 and 1153: where
+    /// HEAD stood the last time Glasshouse looked at a session, and which of
+    /// Phase 29's four memory-commit triggers produced a memory. See the
+    /// migration's own doc comment for why both live in one migration, why
+    /// neither carries a `CHECK`, and why the trigger is a column beside
+    /// `memories.source_commit` rather than something derived from it.
+    /// Version 22 adds `sessions.entitlement`, capability map line 1972: which
+    /// configured `[entitlements.<name>]` account served this session. See the
+    /// migration's own doc comment for why `backend_resource` could not answer
+    /// it, why the column holds a name and never a credential, and why it is
+    /// nullable with no `CHECK`.
+    /// Version 23 adds `routing_observations.task_class`, capability map line
+    /// 1276's *"requests consumed per task class"* — one nullable `TEXT` column
+    /// with no `CHECK`, migration 18's shape exactly. See the migration's own
+    /// doc comment for why the class is persisted rather than recomputed, why an
+    /// unrecognised stored word reads back as `None` rather than as an error
+    /// (unlike `failure_class`), and
+    /// [`crate::routing::burn`] for the only reader.
+    /// Version 24 adds `routing_observations.session_id`, `.effort_level` and
+    /// `.turn_shape` — capability map line 2019's *per-session* cache ratio and
+    /// line 2039's shadow measurement, both of which need a gateway-written row
+    /// to name the session it served. Three nullable `TEXT` columns with no
+    /// `CHECK`, no `REFERENCES` and no index, migration 23's shape exactly. See
+    /// the migration's own doc comment for each of those four choices and for
+    /// why an unrecognised stored word reads back as `None`, and
+    /// `docs/product/design-decisions.md`'s *A session identity on the routing
+    /// evidence rows* for the identity itself.
+    /// Version 25 adds `routing_observations.first_byte_ms`, `.first_token_ms`,
+    /// `.first_tool_call_ms` and `.completed_ms` — capability map lines 1347,
+    /// 1348, 1349 and 1355, whose TTFC, TTFT and decode-throughput figures a
+    /// one-second timestamp cannot express. Four nullable `INTEGER` columns,
+    /// each a number of milliseconds **since the upstream request was sent** and
+    /// never an absolute instant, each with the same column-scoped
+    /// `CHECK (col IS NULL OR col >= 0)` migration 11's token columns carry. See
+    /// the migration's own doc comment for why these are offsets rather than
+    /// instants, why their zero is not `dispatched_at`, and
+    /// `docs/product/design-decisions.md`'s *Millisecond offsets on the routing
+    /// row — Cluster G's second column set* for the design.
+    /// Version 26 admits the twelfth `lifecycle_events.kind`, `file_touched`,
+    /// and gives it the one payload column it carries — `path` — for capability
+    /// map line 1139, *"track file paths explicitly referenced by durable
+    /// memories"*. Migration 5's `kind` is a `CHECK` and SQLite cannot alter
+    /// one, so this is a table rebuild in migration 7's exact shape, `seq`
+    /// named explicitly so a memory's provenance range keeps pointing at the
+    /// same events. See the migration's own doc comment, and
+    /// `docs/product/design-decisions.md`'s *File paths a memory explicitly
+    /// references* for why the record is an event rather than a table.
+    /// Version 27 adds `file_claims`, Phase 60's soft file-coordination
+    /// claims — capability map lines 2392 to 2398. One row per (session, path),
+    /// which is what makes a renew a renew rather than a second claim; migration
+    /// 15's two project triggers; no `UNIQUE` on `path`, because two sessions
+    /// claiming one file is the overlap a later package reports and not an error
+    /// this schema refuses. See the migration's own doc comment for why the
+    /// owner is a session identifier and never a process id, and
+    /// [`crate::session::store::STALE_CLAIM_AFTER`] for the timeout that bounds
+    /// a claim nothing ever released.
+    /// Version 28 adds `task_progress_declarations`, the honest producer of
+    /// `provider::quota::ReserveDecisionInputs::task_nearly_complete` —
+    /// capability map lines 1294 and 1610. One row per session, because progress
+    /// is a fact about the session's current task and a session has one; two
+    /// project triggers as always; and deliberately no column that could hold
+    /// text describing the work, because a declaration is one bit, a scope and a
+    /// horizon. See the migration's own doc comment for why a proxy and a
+    /// configuration value were both refused, and
+    /// [`crate::session::store::TASK_PROGRESS_EXPIRES_AFTER`] for the horizon
+    /// that stops a declaration outliving the task it described.
+    /// Later migrations are appended to [`MIGRATIONS`], and this constant moves
+    /// with them.
+
+### `evaluation/mod.rs` — module doc
+
+    //! # What this ledger does **not** do, and why that is the deliverable
+    //!
+    //! Map line 1856 — *"keep evaluation data local and project-scoped unless the
+    //! user explicitly exports it"* — is carried in two halves, exactly as
+    //! [`crate::routing::evidence`] carries line 1343:
+    //!
+    //! - **Structurally, by the schema.** Migration 15's two triggers `RAISE`
+    //!   `ABORT` on an `INSERT` or an `UPDATE` that names any `project_id` but the
+    //!   one bound in `project_metadata`. A row for another project cannot be
+    //!   written by this store, by a future store, or by a hand-typed `INSERT` at
+    //!   a `sqlite3` prompt. The database path itself comes from
+    //!   [`crate::Runtime`] and nowhere else — there is no argument a caller can
+    //!   pass to reach another project's file.
+    //! - **Structurally, by this module's method list.** There is no `export`, no
+    //!   `to_json`, no `write_to`, no serialization of an observation to anything
+    //!   outside the process, and no method that hands out a [`Connection`]. Every
+    //!   read here returns counts or decoded rows to Rust callers in this process.
+    //!   *"Unless the user explicitly exports it"* is therefore a capability that
+    //!   does not exist yet rather than one guarded by a flag, which is the
+    //!   stronger of the two.
+    //!
+    //! And **no observation stores memory content.** A row carries a `memory_id`,
+    //! not a subject line and not a body: everything a count needs is already
+    //! durable in `memories`, so copying any of it here would be duplicating
+    //! project knowledge into a ledger with a shorter retention than the knowledge
+    //! itself.
+    //!
+    //! # Append-oriented, and prunable — which are not in tension
+    //!
+    //! There is a [`EvaluationObservations::record`] and there are reads, and
+    //! there is no method that edits a recorded observation: an outcome learned a
+    //! turn later is a *second row* with the same `memory_id`, never an `UPDATE`,
+    //! because a measurement edited in place is a falsified measurement.
+    //!
+    //! That is the [`crate::routing::evidence`] half. The other half is the one
+    //! `lifecycle_events` gets wrong: migration 5's append-only `DELETE` trigger
+    //! makes that table impossible to trim *even deliberately*, and an evaluation
+    //! ledger that grows per decision and can never be trimmed is a defect with a
+    //! delay. Migration 15 copies migration 11's two project-scope triggers and
+    //! **not** migration 5's three, and [`Retention`] is what fills the gap: 90
+    //! days or 100,000 rows, whichever binds first, trimmed oldest-first in the
+    //! writer's own transaction.
+    //!
+    //! Trimming happens on the connection that is already open and already
+    //! writing — never on a background thread with a second handle. Practice §65
+    //! is the reason: a SQLite handle opened on a path nobody asserts about is
+    //! free on the developer's machine and billed on Windows, where it hung six
+    //! tests for 37 minutes.
+    //!
+    //! # What a count means once rows are pruned
+    //!
+    //! A count over a window that reaches back past the oldest retained row is
+    //! wrong, and this module refuses it rather than returning a small number —
+    //! see [`EvaluationError::WindowNotRetained`]. Visible degradation, the same
+    //! rule the enum columns follow.
+    //!
+    //! The test is whether anything was *actually* trimmed, which `seq` answers
+    //! exactly: a ledger that has never pruned answers a window reaching back to
+    //! the epoch, because for that ledger the answer is simply everything it
+    //! holds.
+
+### `evaluation/readers.rs` — `impl EvaluationObservations` (memory readers)
+
+    /// # The proxy's join key, closed by `GH-TURN-OUTCOME-ROW`
+    ///
+    /// The design decision's proxy for 1821/1831 is *"the retrieving session's
+    /// turn ended `Completed` … with no failover, retry, override or early
+    /// abandonment recorded against it."* That needs a
+    /// [`EvaluationKind::MemoryRetrieved`] row's `session_id` to find "the
+    /// retrieving session" at all, and a same-session row saying how its turn
+    /// ended. `GH-RETRIEVAL-ATTRIBUTION` gave the launch-time briefing door —
+    /// `api/unix.rs::deliver_memory` — the first: a successful injection carries
+    /// the session it was delivered to. `main.rs::memory_search_grouped`'s two
+    /// callers still pass `None`: `glasshouse memory search` has no session to
+    /// attribute a person's own command to, and the machine door's
+    /// `query_memory` has no session field on its `Request::QueryMemory` to
+    /// thread one from at all.
+    ///
+    /// The second used to be [`EvaluationKind::RoutingOutcomeObserved`], and that
+    /// row **never arises for a door-spawned session**:
+    /// [`crate::evaluation::record_routing_outcome`] refuses to write anything for a session with no
+    /// prior routed destination, and only `main.rs::launch_session` (the CLI
+    /// `glasshouse launch` path) ever calls [`crate::evaluation::record_routed_session`] — the
+    /// door's own `Request::SpawnSession`/`Request::SendMessage`, which is what
+    /// actually calls `deliver_memory`, never routes a session at all. So the two
+    /// producers could never meet on one session (refusal register, *"Phase 51's
+    /// memory proxy — 1821 and 1831"*).
+    ///
+    /// The queries below join instead on [`EvaluationKind::TurnOutcomeObserved`]
+    /// — a row `record_turn_outcome` writes for **every** session that reaches
+    /// the hook's `TurnEnded` arm, routed or not. A door-spawned session's turn
+    /// end now lands a row on the same session id `deliver_memory` already
+    /// attached to its retrieval, so the join has a real producer on both sides
+    /// that actually meet. [`EvaluationKind::RoutingOutcomeObserved`] is
+    /// unchanged and still feeds the routing readers below; this join no longer
+    /// uses it.
+    ///
+    /// Of the four negative signals the design names — failover, retry,
+    /// override, early abandonment — only **override**
+    /// ([`EvaluationKind::RoutingOverrideDecided`], `subject = "overridden"`)
+    /// has a row shape this ledger can join on a session id at all, and that row
+    /// is written only for a routed (launched) session, so it never suppresses a
+    /// door-spawned session's proxy hit — there being no override row to find is
+    /// the correct answer for a session an override could never have applied to.
+    /// [`EvaluationKind::FailoverPrevented`] carries no `session_id` by its own
+    /// design (see that variant's doc comment), no evaluation kind here
+    /// observes a "retry", and [`crate::events::TurnOutcome`] has exactly two
+    /// values — `Completed` and `Failed` — so "early abandonment" is not a
+    /// state this ledger can tell apart from ordinary silence. Those three are
+    /// therefore omitted from the join by name, not invented.
+
+### `evaluation/readers.rs` — `route_outcomes_by`
+
+    /// # The window applies to every row counted
+    ///
+    /// Both the decision and the turn verdicts must fall inside `[from, to]`.
+    /// The alternative — decisions in the window, outcomes whenever — makes
+    /// the number depend on when it was asked, which is exactly the property
+    /// a rate is supposed not to have. A session routed at the very end of
+    /// the window therefore appears with no outcome, and appears in
+    /// [`RouteOutcomeCounts::sessions_without_outcome`] rather than nowhere.
+    ///
+    /// # The latest decision per session wins
+    ///
+    /// `MAX(seq)` with a bare `subject` beside it is SQLite's documented
+    /// behaviour — the bare column comes from the row the aggregate selected
+    /// — and it is what makes a session that was routed twice count once,
+    /// under the class it was last routed to.
+
+### `evaluation/readers.rs` — `pairing_prior_crossover`
+
+    /// # `k` counts a class's own history, never the window
+    ///
+    /// A session's `k` is the number of its pairing class's earlier sessions
+    /// with an outcome, ordered by when each was routed — never this
+    /// session's position in `[from, to]` as a whole.
+    /// `routing::session::PAIRING_PRIOR` is a per-destination decay, and a
+    /// bucket keyed on anything else would answer a different question than
+    /// the one line 1846 asks.
+    ///
+    /// # `k = 0` is scored as wrong, never skipped
+    ///
+    /// A session with no earlier same-class evidence has nothing for a local
+    /// success rate to be computed from. Excluding it from the count would
+    /// let an empty bucket claim it "agrees" with itself; scoring it as a
+    /// wrong local prediction is the honest reading, and the one the
+    /// packet's own contract requires.
+    ///
+    /// # Pure SQL, plus a small in-memory ordering pass
+    ///
+    /// The rows this needs — a session's decision timestamp, its pairing
+    /// class, its rated or proxied outcome — are one query, the same join
+    /// shape [`Self::route_outcomes_by_pairing_class`] already runs.
+    /// Ordering them per class and walking each class's history is
+    /// arithmetic no `GROUP BY` expresses, so it happens here instead of in
+    /// a second query.
+
+### `evaluation/writer.rs` — `record_memory_retrieval`
+
+    /// **This never fails a retrieval.** Memory search is on the user's path and
+    /// bookkeeping is not allowed to break it, so every error here is a
+    /// `tracing::warn!` and a return: the caller gets its results whether or not
+    /// the ledger could be written.
+    ///
+    /// The database handle is opened here, and only here, and only when there is
+    /// something to record — practice §65's rule that a resource is acquired where
+    /// its consumer starts. A search that returned nothing opens nothing.
+    ///
+    /// `session_id` is `None` whenever the caller has no session in scope —
+    /// never guessed. `GH-RETRIEVAL-ATTRIBUTION`'s two production callers today:
+    /// `main.rs::memory_search_grouped` passes `None` from the CLI's `memory
+    /// search` (no session to attribute a person's own command to) and from
+    /// `api::unix::query_memory` (the machine door's `QueryMemory` request
+    /// carries no session field to thread one from — see that caller's own doc
+    /// comment); `api::unix::deliver_memory` passes `Some` on every successful
+    /// launch-time injection, because that door already holds the `SessionId`
+    /// it is briefing.
+
+### `evaluation/writer.rs` — `record_disposable_route`
+
+    /// **This never fails a turn.** Its one caller is `glasshouse hook`, which
+    /// runs inside the user's coding session and whose non-zero exit Claude Code
+    /// treats as a veto on the user's prompt (see `main.rs::report_hook`). So
+    /// every error here is a `tracing::warn!` and a return, exactly as
+    /// [`record_memory_retrieval`] is, and for a sharper version of the same
+    /// reason: a retrieval that went uncounted cost a count, and a turn that went
+    /// unsent costs the user their words.
+    ///
+    /// The handle is opened here, and only here, and only when there is something
+    /// to record — practice §65's rule that a resource is acquired where its
+    /// consumer starts. A decision with nothing to say about itself opens no
+    /// database.
+    ///
+    /// # What is stored, and what is left absent
+    ///
+    /// `subject` is the job kind's own name and `detail` is `rationale` verbatim:
+    /// the string the routing decision produced, not a re-derivation of it. The
+    /// caller passes what production already renders, so what the ledger holds is
+    /// what the decision said.
+    ///
+    /// `routing_seq` is **absent, and stays absent.** This path makes no
+    /// `routing_observations` row — the disposable policy calls no model, so
+    /// there is no exchange to measure — and a `seq` pointing at some other
+    /// turn's measurement would be worse than no provenance at all. Map line
+    /// 1294's standing refusal is the rule: *a fabricated value here does not
+    /// degrade the policy, it inverts it.* `memory_id`, `feature` and `arm` are
+    /// absent for the same reason: this decision is about none of them.
+
+### `evaluation/writer.rs` — `record_session_route`
+
+    /// Its callers are `main.rs::launch_session`'s same two routed exits
+    /// [`record_routed_session`] has — called right beside it, with the same
+    /// `session_id` and the same `observed_at_unix`.
+    ///
+    /// **This never fails a launch**, exactly as [`record_routed_session`] does
+    /// not: it is on a person's own command path and a rationale row is not
+    /// worth a session.
+    ///
+    /// # What is stored
+    ///
+    /// `subject` is `destination_id`. `detail` is `explanation.contributions()`
+    /// as a compact JSON array of `{name, magnitude, evidence}`, in the
+    /// explanation's own order — built through this module's own
+    /// `encode_route_contributions`, never through `routing`'s own
+    /// [`crate::routing::RoutingExplanation::render`], because 1766 ranks by
+    /// magnitude and a rendered string cannot be ranked. An explanation with no
+    /// contributions still writes a row, `detail` `"[]"`: the decision happened
+    /// even when nothing weighed in.
+
+### `evaluation/writer.rs` — `record_routing_consumption_estimate`
+
+    /// Its callers are `main.rs::launch_session`'s same two routed exits
+    /// [`record_session_route`] has — called right beside it, with the same
+    /// `session_id` and the same `observed_at_unix`.
+    ///
+    /// **Written only when there is a real median to write.** `median_output_tokens`
+    /// is the caller's own
+    /// [`crate::routing::burn::ClassOutput::median_output_tokens`] for this
+    /// launch's task class, already `None` below
+    /// [`crate::routing::evidence::MIN_SAMPLE_FOR_SUMMARY`] comparable rows — a
+    /// launch with no comparable rows for its class calls this with nothing to
+    /// write, and this records nothing rather than a fabricated zero. This
+    /// function does not re-derive the median itself: the caller already read
+    /// it from the same evidence ledger this row is about, and re-reading it
+    /// here would be a second, possibly different, read of the same window.
+    ///
+    /// **This never fails a launch**, exactly as [`record_session_route`] does
+    /// not: it is on a person's own command path and an estimate row is not
+    /// worth a session.
+    ///
+    /// # What is stored
+    ///
+    /// `subject` is `task_class.as_str()`. `detail` is `median_output_tokens`,
+    /// rounded to the nearest whole token, as decimal text — never a raw float
+    /// string, so [`crate::routing::evidence::EvidenceLedger::output_estimate_accuracy`]
+    /// can parse it back without a locale-dependent format. `session_id` is the
+    /// session the decision produced.
+
+### `evaluation/writer.rs` — `record_reserve_availability`
+
+    /// Its callers are `commands::launch`'s two routed exits, called beside
+    /// [`record_routing_consumption_estimate`] on the same `observed_at_unix`.
+    ///
+    /// **Written only when the tier is [`crate::routing::classify::WorkloadTier::Heavy`]
+    /// or [`crate::routing::classify::WorkloadTier::Frontier`]** — the tiers the
+    /// reserve exists to protect. A launch classified at or below
+    /// [`crate::routing::classify::WorkloadTier::Standard`], or not classified at
+    /// all, returns without writing: *needed* is the line's own word, and a row
+    /// for routine support work would answer a question line 1837 does not ask.
+    ///
+    /// # What is stored
+    ///
+    /// `subject` is `band.map(CapacityBand::as_str).unwrap_or("unknown")` — the
+    /// destination's own band when the router read one, and the honest
+    /// `"unknown"` bucket when it did not, never a fabricated band. `detail` is
+    /// the tier word ([`RoutingTier::as_str`]); `session_id` is the launched
+    /// session's.
+    ///
+    /// **This never fails a launch**, exactly as [`record_routing_consumption_estimate`]
+    /// does not: it is on a person's own command path and an evaluation row is
+    /// not worth a session.
+
+### `evaluation/writer.rs` — `record_routing_decision`
+
+    /// **This never fails a launch.** Its one caller is
+    /// `main.rs::launch_session`, on the person's own command path, so every
+    /// error here is a `tracing::warn!` and a return, exactly as
+    /// [`record_disposable_route`] is.
+    ///
+    /// The handle is opened here, and only here, and only when there is a routed
+    /// decision to record — practice §65's rule that a resource is acquired
+    /// where its consumer starts.
+    ///
+    /// # What is stored, and what is left absent
+    ///
+    /// Two rows, always together: `destination_id` and `fresh` are known the
+    /// instant a destination is chosen, so neither one is ever the "nothing
+    /// meaningful to say" case the way an empty rationale is for
+    /// [`record_disposable_route`]. `subject` carries the boolean-shaped fact
+    /// each line asks about and `detail` carries a destination id — never a file
+    /// path, prompt text, or credential.
+    ///
+    /// `session_id` is left absent on both rows. A launch that continues an
+    /// existing session could name it, but a fresh launch has not minted one yet
+    /// at this point in `launch_session`, and a producer that filled the field on
+    /// one branch and not the other would make its absence look like a fact
+    /// about the decision rather than about when the row was written.
+
+### `evaluation/writer.rs` — `record_routed_session`
+
+    /// Its callers are `main.rs::launch_session`'s two routed exits: the branch
+    /// that continues a warm session, where the destination's id *is* the session
+    /// id, and the branch that creates a fresh session record, called once that
+    /// record exists and its id is real.
+    ///
+    /// **This never fails a launch**, exactly as [`record_routing_decision`]
+    /// never does, and for the same reason: it is on a person's own command path
+    /// and an evaluation row is not worth a session.
+    ///
+    /// # What is stored
+    ///
+    /// `cost` is [`None`] when no production fact states the destination's class
+    /// — a harness's own sign-in has no configured provider and no marked model —
+    /// and that is recorded as [`UNKNOWN_COST_CLASS`], its own bucket in every
+    /// reader here. `evidence` is whether the pool the router was handed held a
+    /// reading for this destination, which is the only thing about the router's
+    /// inputs that can be stated on this path.
+    ///
+    /// Both rows carry ids and vocabulary words and nothing else: a destination
+    /// id, a session id, and one word from a closed list.
+
+### `evaluation/writer.rs` — `record_routing_outcome`
+
+    /// Its one caller is `main.rs`'s `glasshouse hook` handler, on the arm that
+    /// has already translated the harness's event into
+    /// [`crate::events::LifecycleEvent::TurnEnded`]. **Nothing else may call it**,
+    /// because nothing else in this build holds a verdict a harness actually
+    /// stated: a process exit, output ending and a session going idle are all
+    /// silence, and silence is not an outcome.
+    ///
+    /// # A session with no routing decision records nothing
+    ///
+    /// [`EvaluationObservations::routed_destination`] answering [`None`] means
+    /// this session was never attributed to a route — it predates this build, or
+    /// it was created by a path that does not route — and there is nothing for an
+    /// outcome to be *about*. That is a `debug` line and no row, never a row
+    /// whose decision is invented.
+    ///
+    /// # One handle, opened here, dropped here (practice §65)
+    ///
+    /// The hook is a separate process the harness spawns on every event, and an
+    /// open SQLite handle is free on the developer's machine and billed on
+    /// Windows. The lookup and the write share the one handle this function
+    /// opens, and it is opened only after the caller has established that a turn
+    /// really ended.
+
+### `evaluation/writer.rs` — `record_turn_outcome`
+
+    /// Its one caller is `main.rs`'s `glasshouse hook` handler, on the same
+    /// `TurnEnded` arm [`record_routing_outcome`] reads — called first, so a
+    /// session this ledger has never routed still gets an outcome row.
+    ///
+    /// # Unlike `record_routing_outcome`, this asks no question about routing
+    ///
+    /// [`record_routing_outcome`] refuses to write for a session with no routed
+    /// destination because that row is a claim about *the route*. This row
+    /// makes no claim about a route at all — it is the harness's verdict on the
+    /// session's turn, full stop — so it is written unconditionally, a
+    /// door-spawned session (never routed) included. Design ruling: refusal
+    /// register, *"Phase 51's memory proxy — 1821 and 1831"*, option (b).
+    ///
+    /// # One handle, opened here, dropped here (practice §65)
+    ///
+    /// Same reasoning as [`record_routing_outcome`]: the hook is a separate
+    /// process the harness spawns on every event, and the write shares the one
+    /// handle this function opens.
+
+### `evaluation/writer.rs` — `record_failover_prevention`
+
+    /// Its one caller is the sink `main.rs::launch_session` hands the gateway,
+    /// invoked from the exchange thread that ranked the failover. Nothing else
+    /// may call it: the comparison it records can only be made where both
+    /// rankings exist, which is inside
+    /// [`crate::routing::interactive::InteractiveRouting::on_provider_failure`],
+    /// and a row written from anywhere else would be an assertion rather than an
+    /// observation.
+    ///
+    /// # One handle, opened here, dropped here (practice §65)
+    ///
+    /// This runs on a gateway exchange thread inside somebody's coding session.
+    /// The handle is opened only once a failover has actually been decided —
+    /// which is a small minority of exchanges — and closed before this returns,
+    /// so no connection is held across the provider hop and none is opened at all
+    /// by the exchanges that fail over nowhere.
+    ///
+    /// **This never fails an exchange.** Every error is one `warn` and a return,
+    /// exactly as [`record_routed_session`] and [`record_routing_outcome`] do,
+    /// and for the same reason: the session's own work outranks the books kept
+    /// about it.
+
+### `evaluation/writer.rs` — `record_memory_rating`
+
+    /// # This is allowed to fail loudly, unlike every producer above
+    ///
+    /// [`record_memory_retrieval`] and its neighbours never fail a search or a
+    /// launch, because bookkeeping must not break the door it is counting. This
+    /// producer has no door to protect: it *is* the command, typed by a person
+    /// or issued by an agent as its own last act, and a rating that silently
+    /// failed to record would tell its caller their verdict was kept when it
+    /// was not. Its caller (`main.rs::memory_rate`) propagates this with `?` and
+    /// prints nothing but a failure.
+    ///
+    /// `memory_id` is trusted to have already been resolved against this
+    /// project's own store — `glasshouse memory rate`'s project-isolation check
+    /// runs before this is ever called, the same way `memory_challenge` and
+    /// `memory_resolve_conflict` resolve an id before acting on it.
+    ///
+    /// **Carries the scope of the retrieval it judges — map line 939.** Before
+    /// writing, this looks up the [`RetrievalScope`] of the retrieval the
+    /// rating is about (`EvaluationObservations`'s own private attribution
+    /// lookup) and copies it onto the row's own `subject`, so `false positives by
+    /// retrieval scope` can be read out per scope rather than only per memory.
+    /// Every verdict is attributed the same way — the scope is a fact about
+    /// which retrieval produced the memory being rated, not a judgement the
+    /// verdict itself makes. A memory this rating never saw retrieved carries no
+    /// scope. **A lookup failure fails the command exactly as a write failure
+    /// does** — this producer has no door to protect, per this function's own
+    /// header above.
+
+### `firewall/reduce.rs` — module doc
+
+    //! One mechanism, applied at line granularity, covers every case the box
+    //! names: a duplicate search hit, a repeated log line, a repeated
+    //! test-progress line, and a repeated stack-trace line are all, at the
+    //! byte level, **the same exact line appearing again**. A stack trace that
+    //! recurs verbatim across several failures collapses because its own lines
+    //! are each exact repeats of the first occurrence's lines — no separate
+    //! "this looks like a stack trace" heuristic is needed or wanted, because a
+    //! heuristic is exactly the kind of guess line 1983 forbids: a line this
+    //! module cannot positively prove is a repeat is never touched.
+    //!
+    //! Two more rules, independently conservative: a run of blank lines
+    //! collapses to its first line, and a single unbroken, whitespace-free line
+    //! long enough to be generated noise (a base64 or hex dump on one line) has
+    //! its middle elided, prefix and suffix kept verbatim.
+    //!
+    //! Every byte this module forwards is a verbatim slice of the original —
+    //! `split_inclusive('\n')` hands out slices, not copies, and the blob rule
+    //! is the only place content is ever rewritten, and it rewrites with a
+    //! clearly marked elision note, never with generated replacement text (the
+    //! evidence ledger's "never generate evidence" constraint).
+
+### `firewall/reducer.rs` — module doc
+
+    //! # What this is, mirrored from
+    //!
+    //! This module is [`crate::memory::extract::model`] and
+    //! [`crate::memory::extract::disposable`]'s pattern, applied to a different
+    //! job: a trait ([`Reducer`]) a caller asks to decide over numbered
+    //! candidates, and the one disposable-backed implementation
+    //! ([`ConfiguredReducer`]) that actually calls a model, over the same
+    //! OpenAI-chat-completions wire protocol and through the same provider
+    //! plumbing. It is a second *type* because the request and reply shapes are
+    //! this job's own — never a second *idiom* for reaching a provider. Map line
+    //! 1997's "never a firewall-private provider client" is satisfied the same
+    //! way extraction's own client satisfies it: [`ConfiguredReducer`] is built
+    //! from a [`crate::provider::Provider`] the routing layer chose, and it
+    //! speaks the one protocol this build's disposable-job machinery already
+    //! speaks.
+    //!
+    //! # What may never leave this module
+    //!
+    //! Exactly [`crate::memory::extract::model`]'s own rule: no response body,
+    //! and no transport error's own words, ever reach a [`ReducerErrorKind`] —
+    //! every failure here is one of a fixed set of phrases, because a provider's
+    //! error body can echo the request, which is built from a tool result that
+    //! may itself contain user data.
+
+### `guardrails/mod.rs` — module doc
+
+    //! # The failure this counters, and the one thing Glasshouse never does
+    //!
+    //! Capability map line 996 names a model-independent failure mode: an
+    //! uncertain inference silently becomes the premise of a large
+    //! implementation, and is disproven only after substantial work. The
+    //! guardrail is a small, deterministic mechanism around that moment — before
+    //! a substantial change, ask for the few critical assumptions it rests on;
+    //! record each with its evidence; track it; and tell the person when one is
+    //! refuted.
+    //!
+    //! **Glasshouse never infers an assumption.** It reads no transcript, no
+    //! terminal output and no reasoning for one (line 998). Every record here was
+    //! *said* by an agent, in the fields of `api::protocol::Request` and their
+    //! MCP twins, and every field is treated as untrusted text: bounded, stripped
+    //! of anything that could act on a terminal, and never rendered into a block
+    //! that reaches an agent without the same discipline `crate::memory::inject`
+    //! applies (see [`quote`]). There is no column for a rationale, no column for
+    //! a chain of thought, and no request field that would carry one — the
+    //! argument types on the MCP door refuse unknown fields outright.
+    //!
+    //! # Deterministic and cheap, and therefore honest about what it is
+    //!
+    //! [`classify`] is a fixed ladder over the factors the agent states about an
+    //! intended change (line 1004): a migration, a destructive operation, a
+    //! security or data-integrity impact, an unfamiliar integration, an
+    //! architectural change, a broad refactor, a wide blast radius, an
+    //! irreversible edit, a weakly evidenced premise, or simply a large
+    //! footprint. The first rung that matches names the factor (line 1049), and
+    //! **trivial, local, reversible edits are never gated** (line 1005). There is
+    //! no model in the loop and no heuristic over text: a description is stored
+    //! for the person to read and is never classified.
+    //!
+    //! [`decide`] turns the class into a [`Verdict`] from the configured
+    //! [`GuardrailMode`] and the per-task [`GuardrailOverride`]. Advisory is the
+    //! default and is non-blocking; only the categories in `guardrails.blocking`
+    //! may ever answer [`Verdict::Gated`], and only under `risk_gated` (lines
+    //! 1052, 1008). Every gate carries who decided it and the override that lifts
+    //! it (line 1053).
+    //!
+    //! # A template, not a plan
+    //!
+    //! The preflight answers with **at most three** prompts (lines 1007, 1013)
+    //! chosen from the factors that fired, plus a fixed page of guidance whose
+    //! sentences are the map's own lines (997, 1009, 1024–1032, 1038, 1040–1044)
+    //! rendered for the agent. The guidance is what makes those lines true of
+    //! this build: Glasshouse cannot make an agent prefer direct evidence, but it
+    //! can put that instruction in front of the agent at the one moment it
+    //! matters, through a harness-independent door (line 1000).
+    //!
+    //! # Where the state lives
+    //!
+    //! [`store`] — two tables, one migration, append-only transitions. The
+    //! current state of an assumption is its latest transition and nothing is
+    //! ever `UPDATE`d; see that module's header for the schema and its triggers.
+
+### `guardrails/store.rs` — module doc
+
+    //! # Two tables, and what each row is
+    //!
+    //! `task_assumptions` holds the six fields an agent states about one premise
+    //! (capability map lines 1014, 1016): the claim, its current evidence, the
+    //! evidence's source class, the uncertainty, the affected scope, and the
+    //! cheapest useful verification step. **Nothing else.** There is no column
+    //! for a rationale, a transcript, or the reasoning that produced the claim,
+    //! and the row is never updated: a trigger refuses every `UPDATE`.
+    //!
+    //! `assumption_transitions` is the append-only history. A row with an
+    //! `assumption_id` moves that assumption to a [`AssumptionState`] (or
+    //! re-states the one it is in, with a response or a note); **the current
+    //! state is the latest such row**, read with `MAX(seq)`, and nothing is ever
+    //! `UPDATE`d — a second trigger refuses that too, so the guarantee is the
+    //! schema's and not only this module's method list. A row with no
+    //! `assumption_id` is a **session-level** event: a gate that fired, an
+    //! override a person recorded, a budget that was exceeded. See
+    //! [`TransitionKind`].
+    //!
+    //! # Project scope, the same way every ledger here has it
+    //!
+    //! Migration 15's two triggers, copied exactly: an `INSERT` or an `UPDATE OF
+    //! project_id` naming any project but the one bound in `project_metadata`
+    //! aborts. The database path comes from [`Runtime`] and nowhere else, and
+    //! every session-keyed request into this store goes through
+    //! `session::api::SessionApi` first, so a foreign session identifier is
+    //! refused before a row could be written for it.
+    //!
+    //! # Prunable, like the evaluation ledger and unlike `lifecycle_events`
+    //!
+    //! Task assumptions are transient by definition (line 1017): what is worth
+    //! keeping is promoted, explicitly, into `memories`. So this ledger keeps
+    //! [`Retention::DEFAULT`]'s 90 days or 100,000 transitions, whichever binds
+    //! first, trimmed oldest-first in the writer's own transaction — on the
+    //! handle that is already open and already writing, never on a second one
+    //! (practice §65). An assumption whose every transition has been trimmed is
+    //! removed with them.
+    //!
+    //! # Untrusted text
+    //!
+    //! Every free-text field is passed through [`super::sanitize`] before it is
+    //! stored: bounded, and stripped of anything that could act on a terminal.
+    //! A claim over [`super::MAX_CLAIM_CHARS`] is **refused**, not cut; the
+    //! other fields are cut visibly. Square brackets survive storage and are
+    //! rewritten by [`super::quote`] wherever text is rendered into a block an
+    //! agent reads.
+
+### `launch.rs` — module doc
+
+    //! # Honest scope
+    //!
+    //! This is structure within the sanctioned harness API, not a sandbox: the
+    //! underlying generic PTY APIs ([`TerminalCommand::new`] and
+    //! [`PtyProcess::spawn`]) stay public for genuinely generic terminal work,
+    //! and Rust cannot identify misuse of those. What this type guarantees is
+    //! that code which launches harnesses through it cannot get the working
+    //! directory, the launch-kind translation, or the environment semantics
+    //! wrong.
+
+### `launch.rs` — `unsupported_combination`
+
+    /// # The combination this exists for
+    ///
+    /// `cmd.exe` cannot hold a UNC path as its working directory. Asked to, it
+    /// does not fail: it prints a notice, silently substitutes the Windows
+    /// directory, and carries on. So a `.cmd` harness — which is how npm installs
+    /// most of them — started in a project on a network share would come up
+    /// running in `C:\Windows` instead. That is not merely a broken session; it
+    /// breaks the project-isolation guarantee the whole product rests on, and it
+    /// does so quietly, which is the worst way for it to break.
+    ///
+    /// Refusing with a diagnostic is strictly better than a session that looks
+    /// alive and is operating on the wrong directory.
+    ///
+    /// # Why this is not `cfg`-gated
+    ///
+    /// Like [`crate::platform::exec`]'s script-path conversion, this asks about
+    /// the *shape* of a path and the *kind* of an executable, not about the host.
+    /// Keeping it host-independent is what makes it testable somewhere other than
+    /// the platform where it matters — the same reasoning that would have caught
+    /// the verbatim-path defect before CI did.
+
+### `launch.rs` — `OwnedHarnessLaunch`
+
+    /// # Why this exists
+    ///
+    /// [`HarnessLaunch`] borrows the active [`Project`], which is right for the
+    /// one thing it was built for: a caller that has a project in hand and starts
+    /// one session with it. It is wrong for anything that has to launch the *same
+    /// harness twice*, because the borrow ties the launch to a scope that ended
+    /// when the first session started.
+    ///
+    /// Restarting a session is exactly that. `SessionRuntime` notices a harness
+    /// exit long after `start` returned, in `poll_exits`, with no project in
+    /// scope — so the only way it can put the same harness back is to have kept
+    /// the whole recipe. This is the recipe, and cloning a `Project` is cheap:
+    /// an identifier, a root, and two flags.
+    ///
+    /// It is deliberately a separate type rather than a lifetime parameter on
+    /// `HarnessLaunch`: making the project owned-or-borrowed would put that
+    /// choice into the signature of every function that takes a launch, including
+    /// [`crate::session::SessionRuntime::start`], whose type is written out in
+    /// the binary.
+
+### `onboarding/mod.rs` — module doc
+
+    //! # What this wizard records, and what it deliberately does not
+    //!
+    //! Five screens: a welcome, the integration list, an optional
+    //! bypass-acknowledgement step, an optional provider step, and an optional
+    //! routing-model step, then a summary. The last three are optional in the
+    //! strong sense — a user who presses `Tab` through all of them finishes with
+    //! a configuration that works, needs no API key, and asks nothing of a
+    //! subsystem that is not built yet.
+    //!
+    //! The routing-model step is the newest, and it shows where this module
+    //! draws its line. Phase 2C asks for three choices — Automatic, Choose
+    //! model, and Do later — and this wizard offers exactly those three and
+    //! *records which one the user picked*. It does not classify anything, does
+    //! not choose a model for "Automatic", and does not build a fallback chain;
+    //! those are Phases 34B and 34C, and a wizard that pretended to do them
+    //! would be a screen that looks finished and does nothing. The choice is
+    //! stored as a reference — a provider name and a model name, never a
+    //! credential (see [`crate::config::RoutingModelChoice`]) — and "Do later"
+    //! records nothing at all, leaving deterministic routing heuristics in
+    //! charge. Both the Summary and the routing screen itself say so in a line,
+    //! so a user who declines is told what they are getting rather than left to
+    //! infer it.
+    //!
+    //! The same restraint applies one step earlier: the provider step configures
+    //! a provider from a built-in template and stops there. The Glasshouse
+    //! gateway is Phase 9D and is not part of this setup.
+    //!
+    //! # Architecture
+    //!
+    //! The state machine ([`state::WizardState`]), the rendering
+    //! (`view::render`), and the event loop ([`run`]) are three separate
+    //! pieces — see `state`'s module documentation for why. Only [`run`] touches
+    //! a terminal; everything else is unit-tested directly.
+
+### `onboarding/state/mod.rs` — module doc
+
+    //! [`WizardState`] owns every piece of mutable wizard data — which step is
+    //! current, the cursor over the integration list, the text being typed into
+    //! the explicit-path field, and the pending enable/ignore decisions — and is
+    //! driven entirely through [`WizardState::handle_key`]. That function takes a
+    //! `crossterm` [`KeyEvent`] and returns an [`Action`] telling the caller what
+    //! to do next; it never touches a [`crate::tui::Screen`], never reads the
+    //! clock, and never consults process-global state. The one exception is
+    //! [`crate::platform::exec::resolve_explicit`], a synchronous, local
+    //! filesystem check with no network or subprocess involved — validating a
+    //! user-typed path is the whole point of the explicit-path step (Phase 2C:
+    //! "rather than accepting a path that will fail later at launch"), and it is
+    //! exactly as testable as everything else here because it is deterministic
+    //! given real files on disk (see the `tests` module, which creates real
+    //! executables in a `tempfile::tempdir`).
+    //!
+    //! This split is what makes the wizard testable at all: [`super::run`] pumps
+    //! a real terminal's events into `handle_key` and paints [`super::view`]
+    //! after every [`Action`] that says something changed, but none of the
+    //! actual decision logic lives there. Every test in this module drives
+    //! `handle_key` directly.
+
+### `onboarding/state/mod.rs` — `apply_to`
+
+    /// Assumes `WizardState::finalize_pending_decisions` has already run
+    /// (true for every reachable path to [`Action::Finish`] — see
+    /// `WizardState::handle_harnesses_key`); a row somehow still `None`
+    /// here is written as ignored rather than panicking, since a config
+    /// write is not the place to enforce an internal invariant with a crash.
+    ///
+    /// `pending_provider` is only ever `Some` after a completed "Configure
+    /// now" — see `WizardState::handle_provider_template_key` and
+    /// `WizardState::handle_provider_base_url_key` — so "Do later" leaves
+    /// `config.providers()` exactly as `existing` already had it: untouched,
+    /// never cleared. That is what satisfies both Phase 2C line 3 (no
+    /// provider, no credential, on a genuine first run, where `existing` had
+    /// none to begin with) and line 6 (a reopen that chooses "Do later"
+    /// keeps whatever was already configured) with the same code path.
+    ///
+    /// `pending_routing` is written verbatim, `None` included — see the
+    /// field's own documentation for why this one assigns where
+    /// `pending_provider` only ever adds. On a first run that declined the
+    /// routing step it is `None`, so the saved file has no `[routing]` table
+    /// at all and deterministic heuristics classify (Phase 2C line 4).
+    ///
+    /// A `BypassRow` is written only when this run actually changed it
+    /// (`acknowledged != seeded`, both starting equal on a fresh row, so an
+    /// untouched one is never written at all) — Amendment 1's acceptance
+    /// test 8: declining leaves `bypass_acknowledged` genuinely unset on a
+    /// first run, not overwritten with an explicit `false`. On a reopen,
+    /// the same rule is what makes revoking a previously granted
+    /// acknowledgement possible: un-checking a row that started `true`
+    /// writes `false`, rather than that change being swallowed by "only
+    /// write true".
+
+### `database/bootstrap.rs` — `publish`
+
+    /// [`std::fs::hard_link`] is `link(2)` on unix and `CreateHardLinkW` on
+    /// Windows (NTFS); the two paths are siblings, so this is never a cross-volume
+    /// link, which is the one thing either call refuses outright. A hard link is
+    /// the primitive this whole design turns on: the final directory entry appears
+    /// with the full, committed content already behind it, so there is no instant
+    /// at which that path exists and is incomplete. It shares the inode, so
+    /// removing the private name afterwards leaves the final one intact — with the
+    /// `0600` mode the private file was created with, since the mode belongs to
+    /// the inode and not to the name.
+    ///
+    /// **Never a rename.** A rename would silently *replace* whatever is at the
+    /// final path, and refusing a truncated database rather than overwriting it is
+    /// a promise this project keeps ([`DatabaseError::EmptyExisting`]).
+    ///
+    /// `AlreadyExists` is the race signal, and it is `AlreadyExists` on both
+    /// platforms: a sibling published first. That sibling's file is a complete
+    /// migrated database by construction, so this process discards its own
+    /// finished work and lets its caller open the sibling's. Losing here is
+    /// ordinary and costs one small migration; it is not an error.
+
+### `database/bootstrap.rs` — `sweep_abandoned_private_files`
+
+    /// A creator killed between `create_new` and its publish leaves its private
+    /// file (and possibly its `-journal`) behind. Nothing downstream will ever
+    /// look at those files again — the name carries a nonce, so the next creation
+    /// picks a different one — so they are pure leakage, and collecting them is
+    /// the honest thing to do the next time a launch finds no database here.
+    ///
+    /// The dangerous mistake is collecting a file whose creator is *still
+    /// working*: that is a live sibling's private database mid-migration, and
+    /// deleting it destroys work in flight for no gain. So the question asked here
+    /// is not "is this file old" or "does this look abandoned" but "is the process
+    /// named in this file's own name gone", answered by the crate's one production
+    /// liveness probe ([`crate::session::supervision::observe`], which has a
+    /// macOS, a Linux and a Windows arm).
+    ///
+    /// Every failure here is swallowed: a directory that cannot be listed, a file
+    /// that cannot be removed, a name that does not parse. None of them is a
+    /// reason to refuse to bootstrap a project, and the cost of each is a few
+    /// kilobytes.
+
+### `database/schema.rs` — `FAILURE_CLASSES`
+
+    /// **Deliberately not a SQL `CHECK`**, for [`EVALUATION_KINDS`]' reasons: a
+    /// failure vocabulary is exactly the kind that grows as providers invent new
+    /// ways to fail, and `outcome`'s own four-value `CHECK` two columns over is
+    /// what this column must not repeat. The vocabulary lives in Rust —
+    /// [`crate::routing::evidence::FailureClass`], an exhaustive `match` at the
+    /// single writer, and this constant pinned against it by
+    /// `every_failure_class_the_type_supports_is_one_the_schema_records`.
+    ///
+    /// Nine entries, and all nine are the map line's own words. `timeout` has a
+    /// mapping at the writer (`ureq::Error::Timeout`) but the upstream agent sets
+    /// no timeout today (`crate::gateway::upstream::agent`), so no row this build
+    /// writes will carry it until one does — recorded here rather than left for
+    /// the first reader to wonder about.
+    ///
+    /// `#[cfg(test)]` for [`MEMORY_FILE_PROVENANCE`]'s reason, not
+    /// [`EVALUATION_KINDS`]': the production reader
+    /// (`crate::routing::evidence::row_to_observation`) reports an unrecognised
+    /// value through `FailureClass::from_stored`, not through this list, so the
+    /// pinning test is this constant's only consumer.
+
+### `database/schema.rs` — `MEMORY_FILE_PROVENANCE`
+
+    /// **Deliberately not a SQL `CHECK`**, for [`EVALUATION_KINDS`]' reasons
+    /// exactly: this is a vocabulary that will grow — a narrower signal than the
+    /// working tree is the obvious next producer — and a `CHECK` on the one
+    /// column certain to grow is how `lifecycle_events` came to cost a table
+    /// rebuild for its eleventh value and to refuse its twelfth outright.
+    /// The vocabulary lives in Rust as [`crate::memory::FileAssociation`], with
+    /// an exhaustive `as_str` at the single writer and a test pinning the two
+    /// against each other.
+    ///
+    /// **One entry, and the second one is the whole point of having a column.**
+    /// `observed` means *"this file differed from the index at the moment the
+    /// memory was extracted"* — a correlation with the session, not a claim about
+    /// the memory. It is emphatically **not** *"the memory refers to this file"*,
+    /// which is what capability-map line 1139 asks for and what nothing in this
+    /// build can yet honestly produce. Recording *how* the association was made
+    /// is what stops a later, narrower producer from being silently averaged
+    /// together with this one.
+    ///
+    /// # Two values now, and why the second one is not a wider version of the
+    /// first
+    ///
+    /// `referenced` is what map line 1139 asked for and what nothing could
+    /// honestly produce until the context firewall's `PostToolUse` hook started
+    /// keeping the paths it already saw (`file_touched`, migration 26). It is a
+    /// **different producer**, not a better one: `observed` is the dirty index at
+    /// extraction time, `referenced` is a path the extraction model chose out of
+    /// the set of files the session demonstrably edited. A row says which, so a
+    /// reader can weigh them apart rather than averaging a correlation with a
+    /// claim.
+    ///
+    /// # Still `#[cfg(test)]`
+    ///
+    /// [`EVALUATION_KINDS`] is not gated because it reaches production through an
+    /// error message: something *reads* that table and has to say what it could
+    /// not interpret. `memory_files` is read by
+    /// [`crate::memory::MemoryStore::for_path`], but a provenance this build does
+    /// not know is dropped by [`crate::memory::FileAssociation::from_stored`]
+    /// rather than reported, so no production caller needs the list. The only
+    /// consumer of this constant is the test that pins it against
+    /// [`crate::memory::FileAssociation`], and an ungated constant with a
+    /// `#[cfg(test)]`-only consumer is dead code that `-D warnings` refuses.
+
+### `pty/mod.rs` — `next_chunk`
+
+    /// # Why an interrupted read is not an ending
+    ///
+    /// [`std::io::Read::read`] does not retry `EINTR` itself — only the
+    /// `read_exact`/`read_to_end` family does — so a signal arriving while a
+    /// reader thread is blocked in `read` surfaces here as
+    /// [`std::io::ErrorKind::Interrupted`], and it says nothing at all about the
+    /// far end.
+    ///
+    /// Every reader above this one is the *only* thing draining its terminal, and
+    /// none of them is ever restarted: `spawn_reader` is called from
+    /// `SessionRuntime::start` and `consider_restart` and nowhere else, and
+    /// `attach`'s two pumps are spawned once per session. Folding an interrupted
+    /// read in with a hangup therefore ends that drain for good, publishes
+    /// `OutputEnded` for a harness that is still alive, and leaves the
+    /// pseudo-terminal to fill until the harness blocks on its own `write` — the
+    /// same outcome the poisoned-lock arms in `pump` already refuse to cause, and
+    /// which those arms' own comment calls far worse than a gap in the history.
+    ///
+    /// Every other error kind still ends the loop, because that is what they mean
+    /// here: a pty reports the end of a session as end-of-file on some platforms
+    /// and as a read error on others, and neither is a fault to report — the exit
+    /// status comes from the process, not from this.
+    ///
+    /// Not platform-conditional. `Interrupted` is a Unix concept in practice and
+    /// Windows reads essentially never produce it, so retrying it there costs a
+    /// comparison on a branch that is not taken; making the arm `#[cfg(unix)]`
+    /// would buy nothing and leave two spellings of one decision.
+
+### `pty/mod.rs` — `LineDiscipline`
+
+    /// # Why anything above the pty needs to know
+    ///
+    /// A terminal line discipline in **canonical mode** assembles input one line
+    /// at a time in a kernel buffer, and that buffer has a hard ceiling. A write
+    /// that pushes a line past the ceiling loses data, and **the kernels do not
+    /// lose it the same way** — see [`CanonicalOverflow`], which names the two
+    /// behaviours that were measured and is why this type carries the hazard
+    /// rather than assuming the one the defect was first found on.
+    ///
+    /// In **raw** mode there is no line and no such ceiling: the same 2000-byte
+    /// write arrives intact. A harness TUI puts its own tty into raw mode as it
+    /// starts; a plain shell, and a harness before its first draw, does not. The
+    /// two cases need different answers, which is why
+    /// [`PtyProcess::line_discipline`] obtains one rather than assuming it.
+
+### `pty/mod.rs` — `CanonicalLine::max_bytes`
+
+    /// # These numbers are the kernel's, and they differ
+    ///
+    /// - **macOS and the BSDs**: `MAX_CANON`, `1024`, from
+    ///   `<sys/syslimits.h>`. The measurement in [`LineDiscipline`]'s doc
+    ///   comment is what establishes that the terminator is counted.
+    /// - **Linux**: `4096`, the `n_tty` line discipline's own buffer
+    ///   (`N_TTY_BUF_SIZE`). Linux's `<linux/limits.h>` says `MAX_CANON` is
+    ///   255 and `fpathconf(_PC_MAX_CANON)` agrees, but the driver does not
+    ///   — that constant is the POSIX minimum rather than the kernel's
+    ///   buffer, and enforcing it would refuse 256-byte lines that
+    ///   demonstrably arrive. `fpathconf` is the portable spelling and it is
+    ///   wrong on the platform where it differs most.
+    ///
+    ///   **This number was originally compiled in from that documented buffer
+    ///   size and not measured, and the description that came with it was
+    ///   BSD's.** The boundary has since been measured against a real Linux
+    ///   pty and 4096 is exactly right — 4096 total arrives whole, 4097 does
+    ///   not — but what happens above it is [`CanonicalOverflow::TruncatesTheLine`],
+    ///   not the wedge this constant was first documented with.
+    /// - **Everything else**, Windows included: no limit, and such a
+    ///   terminal is [`LineDiscipline::Unknown`] rather than
+    ///   [`LineDiscipline::Canonical`].
+    ///
+    /// Each is compiled in per target, and
+    /// `tests/canonical_line_limit.rs` measures it back on whichever platform
+    /// the test runs on — in both directions, so a value too high and a value
+    /// too low each fail there rather than in production.
+
+### `pty/mod.rs` — `CanonicalLine::PLATFORM`
+
+    /// See [`CanonicalLine::max_bytes`] for the numbers and
+    /// [`CanonicalOverflow`] for the two behaviours; both halves of each arm
+    /// below were measured against a real pty rather than read from a header,
+    /// which is how the Linux arm's description came to be corrected.
+    ///
+    /// # Why it is public, and why that is not a workaround
+    ///
+    /// It is a fact about the **platform**, not about any one terminal: a
+    /// caller sizing a delivery before it has a session to ask — the memory
+    /// injection ceiling is exactly such a caller — needs the number without
+    /// a pty in hand.
+    ///
+    /// It also has to be reachable on a target that compiles no reader for
+    /// it. `PtyProcess::line_discipline` is the only consumer and it is
+    /// `#[cfg(unix)]`, so as a private constant this was dead code on
+    /// Windows and `-D warnings` turned that into a failed build. Deleting
+    /// the Windows arm would have silenced it by throwing away the fact that
+    /// Windows has no ceiling, which is the one thing this constant is for
+    /// there.
+
+### `pty/mod.rs` — `open_pty`
+
+    /// # Why this retries
+    ///
+    /// macOS's `openpty(3)` has a race under concurrent allocation: when several
+    /// processes or threads ask for a pseudo-terminal at the same moment, it
+    /// intermittently fails even with the host nowhere near
+    /// `kern.tty.ptmx_max`. A local probe pinned this down precisely — 16
+    /// concurrent processes holding at most four pseudo-terminals each (64 live
+    /// against a cap of 511, with 17 in use on the host) reproduced it, while
+    /// the same total churn driven from a single process at 8000 allocations a
+    /// second produced none. The failure leaves `errno` at `-6`, which is not a
+    /// valid errno at all; that alone shows the failure path does not report
+    /// itself properly, so the condition cannot be classified from the error
+    /// value and must be handled by retrying.
+    ///
+    /// This is not a blind retry wrapper around spawning. It covers exactly one
+    /// call — the allocation — and nothing has been started when it fails: no
+    /// child process exists, no file has been written, no terminal has been
+    /// engaged. Retrying is therefore side-effect free by construction, which is
+    /// what makes it safe in a way that retrying a spawn would not be.
+    ///
+    /// A genuinely exhausted host still fails, just [`PTY_ALLOCATION_ATTEMPTS`]
+    /// times over roughly [`PTY_ALLOCATION_RETRY_DELAY`] each, and the caller
+    /// gets the last real error rather than a synthesized one.
+
+### `pty/mod.rs` — `end_abandoned_child`
+
+    /// `portable_pty::Child` is `std::process::Child` on Unix (portable-pty 0.9.0,
+    /// `src/lib.rs:271`), whose `Drop` neither kills nor reaps. Dropping one on an
+    /// error path therefore leaves the harness running with nobody holding its
+    /// terminal, and its pid unreaped for the life of this process — the two leaks
+    /// [`PtyProcess::drop`] exists to prevent, on the one path where there is no
+    /// `PtyProcess` yet to run it.
+    ///
+    /// The `wait` is unconditional rather than conditional on the kill having
+    /// succeeded: a child that had already exited is exactly the case that leaves
+    /// a permanent zombie, and a killed one returns from `wait` immediately.
+    ///
+    /// # Platform
+    ///
+    /// On Unix this reaches the child's whole process group, the same way
+    /// [`PtyProcess::signal`] does. On Windows it can only reach the direct child:
+    /// the Job Object that makes a kill reach grandchildren is created further
+    /// down `spawn`, after the point every caller of this function has failed at,
+    /// so a harness whose real work lives in a grandchild (`cmd.exe` shim around
+    /// `node.exe`) could still leave that grandchild behind here. That is strictly
+    /// better than today's leak of both and is the most this point in `spawn` can
+    /// do; moving the Job Object above the reader and writer would be the fix, and
+    /// is not attempted here.
+
+### `pty/mod.rs` — `PtyProcess::spawn_with` (slave-drop comment)
+
+    // On Unix this is what makes the output reader see EOF: the pty only
+    // reports end-of-file once every open fd for the slave side is
+    // closed, and this was the last one Glasshouse itself would
+    // otherwise still be holding.
+    //
+    // On Windows this line does *not* produce EOF. `ConPtySlavePty`
+    // shares an `Arc<Mutex<Inner>>` with the master, so dropping it
+    // closes no descriptor; the pipe's write end lives inside conhost
+    // and is released only by `ClosePseudoConsole`, which runs when the
+    // *master* — the `MasterPty` this `PtyProcess` owns — is dropped,
+    // not the slave. Dropping the slave here is still correct and
+    // necessary (a `SlavePty` has nothing left to do once
+    // `spawn_command` has returned, and Unix genuinely needs it gone),
+    // it just does not give Windows callers an EOF-based way to notice
+    // the child is done.
+    //
+    // Constraint this implies for a future interactive reader thread
+    // (Phase 4): it must not treat "no more bytes" as its stop
+    // condition, because on Windows that may never come while the pty is
+    // still held open. Treat "the process was observed to have exited"
+    // (`try_wait`/`wait`) as the authoritative stop condition on every
+    // platform instead. And because releasing the pty — dropping this
+    // `PtyProcess` — is what eventually lets `ClosePseudoConsole` run,
+    // and that call can block until buffered output has drained to a
+    // reader, that drop must never happen on a UI thread.
+
+### `pty/mod.rs` — `PtyProcess::line_discipline`
+
+    /// # Read every time, never cached
+    ///
+    /// A child owns its own tty and may change its mode at any instant: a
+    /// harness enters raw mode as it draws its first frame, leaves it while
+    /// it shells out, and re-enters it afterwards. A remembered answer would
+    /// be a lie with a timestamp, so this asks the kernel on every call and
+    /// callers are expected to call it immediately before the write it
+    /// governs. The residual race is one syscall wide and is stated where it
+    /// is acted on — see `SessionRuntime::send_text_from`.
+    ///
+    /// # What it reads
+    ///
+    /// `tcgetattr` on the **master** fd. A pty pair shares one `termios`
+    /// between its two ends, so the master's answer *is* the slave's line
+    /// discipline — which is the thing that matters and the only side
+    /// Glasshouse holds. Verified rather than assumed: a child that runs
+    /// `stty -icanon` on its own tty flips this from
+    /// [`LineDiscipline::Canonical`] to [`LineDiscipline::Raw`], measured in
+    /// `tests/canonical_line_limit.rs`.
+    ///
+    /// `portable-pty` exposes the fd through `MasterPty::as_raw_fd`. It is
+    /// borrowed for the duration of the call and never stored, closed, or
+    /// duplicated.
+
+### `secret/mod.rs` — module doc
+
+    //! # The boundary is structural, not a habit
+    //!
+    //! Two types carry the whole rule, and they are deliberately not the same
+    //! type:
+    //!
+    //! - A [`SecretRef`] is a **reference**. It names a source and nothing else,
+    //!   so configuration, session records, doctor output and diagnostics may
+    //!   hold one freely: holding it reveals nothing. This is the same move
+    //!   [`crate::provider::Provider::credential_env`] already makes with bare
+    //!   variable names, given a type so callers stop passing strings around and
+    //!   guessing what they mean.
+    //! - A [`Secret`] is a **value**, and it exists only between the
+    //!   [`SecretStore::resolve`] call that produced it and the child process
+    //!   that needed it.
+    //!
+    //! A [`Secret`] has no `Display`, no `Deref`, no `AsRef<str>`, no
+    //! `Serialize`, and a manual [`Debug`](std::fmt::Debug) that prints
+    //! [`REDACTED`] rather than any part of the value — not a prefix, not a
+    //! suffix, and **not a length**, because a length narrows a key space and is
+    //! therefore a real leak rather than a cosmetic one. The only way out is
+    //! [`Secret::expose`], whose name is the point: it should be conspicuous at
+    //! every call site, and there should be very few call sites.
+    //!
+    //! # Resolution happens at the moment of use
+    //!
+    //! [`SecretStore::resolve`] reads the source when it is called, not when the
+    //! reference was built. A [`SecretRef`] stored in configuration months ago
+    //! therefore reflects whatever the environment holds now, and nothing has to
+    //! keep a value alive in between to make that true.
+    //!
+    //! # What this module deliberately does not do
+    //!
+    //! - **It writes nothing to disk and reads no file.** A module that never
+    //!   opens a file cannot leak a credential into one, which is a stronger
+    //!   guarantee than enumerating the files it must avoid — the same argument
+    //!   `harness::resolving_a_launch_profile_touches_no_files` makes for
+    //!   [`mod@crate::profile`].
+    //! - **It reaches a launch path through exactly one call site.**
+    //!   [`crate::profile::resolve`] is the only thing in Glasshouse that calls
+    //!   [`SecretStore::resolve`] for a launch: it mints one [`Secret`], moves it
+    //!   into the launch overlay's environment for one child process, and drops
+    //!   it. Nothing here reaches back into [`mod@crate::profile`],
+    //!   [`crate::launch::HarnessLaunch`] or [`mod@crate::config`] — the
+    //!   dependency points one way, and a harness adapter is handed variable
+    //!   *names* rather than a [`Secret`], so it has nothing to leak.
+    //! - **It ships the native OS-backed stores it can prove, and no others.**
+    //!   [`SecretStore`] is the seam they are added at, one at a time, each with
+    //!   its own evidence. The macOS Keychain and Windows Credential Manager are
+    //!   here, in [`mod@native`]; a Secret Service-compatible keyring is not,
+    //!   because `keyring` 3.6's backend for it waits on an unlock prompt with
+    //!   no way to refuse one, so a locked collection would hang a launch rather
+    //!   than fall back — see that module's "Which platforms, and why not the
+    //!   third". On a platform with no backend the dependency is not linked at
+    //!   all, and [`native::PreferNativeSecretStore`] says out loud in
+    //!   [`SecretStore::describe`] which source is actually answering rather
+    //!   than degrading to the environment in silence.
+    //!
+    //! # `redact` is belt and braces, not the boundary
+    //!
+    //! The boundary is that a value is never held anywhere it could be printed.
+    //! [`redact`] exists for output Glasshouse does **not** fully control — a
+    //! harness's own stderr quoted into a diagnostic, for instance — where the
+    //! text has already been produced by something that never had this rule. It
+    //! is a second line of defence over foreign text, never a licence to hand a
+    //! credential to a formatter and clean up afterwards.
+
+### `shell/state/overview.rs` — `is_session_escape`
+
+    /// See the design note for why this chord: it is what `telnet` has used for
+    /// decades, no ordinary key produces it, and it is exactly one chord rather
+    /// than a prefix that would double the latency of escaping a runaway session.
+    ///
+    /// **It has more than one spelling, and all of them must be accepted.** The
+    /// chord is really the byte `0x1D` (ASCII group separator), and Crossterm's
+    /// Unix parser decodes the control range `0x1C..=0x1F` arithmetically, as
+    /// `Char((c - 0x1C + b'4'))` — so a real terminal's `Ctrl-]` arrives as
+    /// `Ctrl` + `'5'`, never as `Ctrl` + `']'`.
+    ///
+    /// Matching too narrowly is not a cosmetic bug: it leaves the user in session
+    /// mode with no way back, which is precisely the failure the single-chord
+    /// escape exists to prevent. It survived unit testing because a synthetic
+    /// `KeyEvent::new(KeyCode::Char(']'), CONTROL)` is not what any terminal
+    /// sends; only driving the real binary through a real pseudo-terminal caught
+    /// it — twice, once per platform.
+    ///
+    /// # Windows delivers a character chosen by the keyboard layout
+    ///
+    /// The `']'` spelling was written for Windows, where Crossterm reads console
+    /// records rather than a byte stream. That is right only by accident of
+    /// whoever wrote it having a US keyboard. Measured on the ARM64 CI machine,
+    /// whose input locale is `0x04070409` — US English on a **German** physical
+    /// layout — the byte `0x1D` arrives from ConPTY as this console record:
+    ///
+    /// ```text
+    /// vk=0xBB (VK_OEM_PLUS)  scan=0x1B  uChar=0x001D  ctrl=LEFT_CTRL_PRESSED
+    /// ```
+    ///
+    /// `uChar` is the right answer and Crossterm throws it away: its Windows
+    /// parser treats any `uChar` in `0x00..=0x1f` as "some chord produced a
+    /// control code, ask the layout which character that key really types" and
+    /// calls `ToUnicodeEx` on the *virtual key*. Scan code `0x1B` is the physical
+    /// key right of `P`; a US layout types `']'` there and a German one types
+    /// `'+'`. So Glasshouse is handed `Ctrl` + `'+'` on this machine and
+    /// `Ctrl` + `']'` on the machine the original spelling came from, for the
+    /// same keypress.
+    ///
+    /// **No fixed set of characters can be correct**, because the set is the set
+    /// of layouts. So on Windows the test is the modifier and the *shape* of the
+    /// character rather than its identity: any non-alphanumeric character with
+    /// Control. Its failure mode is a spurious escape — a user typing some other
+    /// `Ctrl`+punctuation chord lands back in control mode — which is the
+    /// direction to fail in, because the other direction traps them with no way
+    /// out. Nothing is lost by it either: [`encode`] has never translated
+    /// `Ctrl`+punctuation to a control byte, so those chords reached the harness
+    /// as bare punctuation, which is not what the user pressed.
+    ///
+    /// **`AltGr` is excluded, and that is measured too.** Windows reports `AltGr`
+    /// as `CONTROL | ALT`, so on a layout where `']'` itself needs `AltGr` — as
+    /// it does on the German one — typing a literal `']'` arrived as
+    /// `Ctrl` + `Alt` + `']'` and matched the old rule. Typing a bracket into a
+    /// harness would have thrown the user out of the session. The real chord
+    /// never carries `ALT`: the record above has `LEFT_CTRL_PRESSED` alone.
+    ///
+    /// The durable fix is upstream of here, in whatever reads the console
+    /// records: `uChar` already carries `0x1D` exactly. See the report for the
+    /// shape that would take.
+
+### `shell/state/route.rs` — `RouteDecisionRow`
+
+    /// # Why the rationale is text, and must stay text
+    ///
+    /// The decision behind one of these rows is a
+    /// `crate::routing::disposable::DisposableChoice`, whose fields are private
+    /// and which nothing outside its own module can construct. That is an
+    /// enforced safety invariant rather than a style choice — its module header
+    /// records that a choice on a metered resource must not be reproducible from
+    /// a policy that withheld it — so a stored decision is deliberately **not**
+    /// turned back into one. The producer renders the rationale at the moment it
+    /// decides and stores the sentence; this row carries that sentence; the view
+    /// draws it. Nothing anywhere reconstructs the choice.
+    ///
+    /// # Every field is what was recorded, and absent stays absent
+    ///
+    /// `session_id` and `rationale` are `Option` because the ledger's columns are
+    /// nullable and a row written by a later producer may not fill them. The view
+    /// says so plainly rather than drawing an empty column that reads as a value.
+
+### `shell/state/route.rs` — `RouteHealthRow`
+
+    /// # Why the fields are grouped and not summarised
+    ///
+    /// Line 1765 asks for route health, immediate availability, cadence, quota
+    /// reset and failure-domain evidence *"as separate concepts"*. They are five
+    /// different questions with five different answers and five different ways of
+    /// being unknown, and collapsing them is not a simplification — it is a lost
+    /// distinction:
+    ///
+    /// - a resource can be **healthy** (no failures) and **unavailable** (its
+    ///   credential was refused);
+    /// - it can be **available now** and still have a **cadence** that will stop
+    ///   it in one more request;
+    /// - a **cooldown** Glasshouse imposed and a **quota reset** the provider
+    ///   stated are different clocks owned by different parties, and neither is
+    ///   the other's estimate;
+    /// - **failure-domain evidence** is about a *pair* of resources and says
+    ///   nothing about either one alone.
+    ///
+    /// `crate::provider::resources::render_health` currently prints health,
+    /// availability and cadence as one `status` word on one line. That is the
+    /// shape this row exists not to reproduce.
+    ///
+    /// # "unknown" is a real answer, and it is `None`
+    ///
+    /// Three of the five concepts come from provider-stated headers that most
+    /// providers do not send. A `None` here is *"no response ever stated this"*,
+    /// never a zero and never a default — the same contract
+    /// `crate::provider::telemetry::RateLimitHeaders` keeps field by field.
+
+### `shell/state/settings/mod.rs` — `plan_provider_probe`
+
+    /// The preconditions come first because a request that cannot possibly work
+    /// is not worth opening a socket for — and because the failures here are the
+    /// ones a user can fix without leaving the screen they are on.
+    ///
+    /// `target` says which URL the probe will request. A provider whose
+    /// model-list endpoint is established gets [`ProbeTarget::ModelList`], which
+    /// is the better probe: one request exercises the base URL, TLS, the
+    /// credential and a real route. A provider whose model list nobody has
+    /// established gets [`ProbeTarget::BaseUrl`] instead — appending `/models`
+    /// anyway would be guessing at a path, which is the same failure
+    /// [`mod@crate::provider`] refuses for a base URL.
+    ///
+    /// **The first protocol's base URL, exactly as the precondition check has
+    /// always used.** A provider serving several protocols at different roots —
+    /// `openrouter` is the one that does — has one model list, and it is under
+    /// the OpenAI-shaped base URL rather than the Anthropic root. Should a
+    /// provider ever appear whose first protocol is not the one its model list
+    /// lives under, this is the line that has to grow a per-protocol answer.
+    ///
+    /// Presence is checked with [`SecretStore::is_present`], never
+    /// [`SecretStore::resolve`]: nothing here needs a credential's value, so
+    /// nothing here asks for one. The value is resolved once, later, by the run
+    /// loop, immediately before it is put in a header.
+
+### `shell/view.rs` — `render_route_evidence`
+
+    /// **Deliberately three columns, not line 1762's seven.** SAMPLES and WINDOW
+    /// are the two of the line's seven this producer can supply at all — TTFC,
+    /// effective TTFC, TTFT, decode throughput and rounds-per-minute have no
+    /// producer on this gateway (see `crate::routing::evidence`'s own module
+    /// header) — plus CONTEXT for line 1764. Rendering a column for any of the
+    /// five absent figures would be a fabricated measurement, which is exactly
+    /// what this phase's own "observability without spectacle" heading forbids,
+    /// so this function has no code path that could draw one. See
+    /// `no_fabricated_columns_appear_in_the_route_evidence_table` below, proved
+    /// at a wide viewport per practice §17.
+    ///
+    /// Line 1764's honesty: CONTEXT shows exactly what
+    /// [`crate::shell::state::RouteEvidenceRow::context_state`] already carries as a
+    /// plain string (`"warm"`, `"cold"`, or `"unknown"`) — and today, in real
+    /// production data, every row reads `"unknown"`, because nothing that
+    /// records a routing observation ever calls
+    /// `crate::routing::evidence::NewObservation::with_context_state`. This
+    /// table shows that plainly rather than omitting the column or guessing.
+
+### `shell/view.rs` — `render_route_decisions`
+
+    /// # This draws stored text and computes nothing
+    ///
+    /// The rationale on screen is the sentence
+    /// `main.rs::disposable_extraction_model` rendered at the moment it decided,
+    /// carried through `crate::evaluation` and
+    /// `crate::shell::build_route_decision_table` unchanged. This function splits
+    /// it into rendered rows and indents it under its own heading; it does not
+    /// parse it, does not rank the contributions, and does not summarise them.
+    ///
+    /// That is not modesty about effort — it is the same invariant
+    /// [`crate::shell::state::RouteDecisionRow`] documents. The decision behind a
+    /// row is a `crate::routing::disposable::DisposableChoice`, which nothing
+    /// outside its own module can construct, so there is no version of this
+    /// function that could re-derive a field the producer did not write. What was
+    /// not recorded is drawn as *not recorded*, never as a blank column.
+    ///
+    /// # The newest decisions are at the top, and a long list is clipped
+    ///
+    /// A decision is a heading plus one line per named contribution, so a full
+    /// [`crate::shell::ROUTE_DECISION_ROW_LIMIT`] of them is longer than a
+    /// terminal. Newest first means the clipping falls on the oldest, which is
+    /// the order a reader wants — the same trade `render_route_health` already
+    /// makes for a project with many resources.
+
+### `shell/view.rs` — `render_route_health`
+
+    /// # The line is about separation, and separation is the whole implementation
+    ///
+    /// Every resource gets **five labelled lines**, one per concept, in the order
+    /// the line names them. Nothing here computes a summary word across them,
+    /// because the five genuinely disagree in ordinary operation: a resource with
+    /// a refused credential is *unavailable* while its failure streak reads zero;
+    /// a resource Glasshouse is pacing is *available later* and perfectly healthy;
+    /// a provider's quota reset and Glasshouse's own cooldown are two clocks owned
+    /// by two parties. `crate::provider::resources::render_health` prints the
+    /// first three as one `status` word on one line today — that is the shape this
+    /// function exists not to reproduce, and
+    /// `route_health_keeps_line_1765s_five_concepts_on_separate_lines` fails if it
+    /// ever does.
+    ///
+    /// # Nothing is derived, and "unknown" is printed rather than guessed
+    ///
+    /// Every value comes from a field
+    /// [`crate::shell::state::RouteHealthRow`] already carries, which the run loop
+    /// read from a cache a gateway process wrote. Three of the five concepts
+    /// depend on headers most providers never send, and each of those prints
+    /// `unknown` — never `0`, never `never`, never an estimate. A zero would read
+    /// as a measurement, which is the thing this phase is named after not doing.
+    ///
+    /// # Two scope facts, both said on screen rather than assumed
+    ///
+    /// The caches are keyed by provider under
+    /// [`crate::paths::RuntimePaths::data_dir`], so these readings belong to the
+    /// installation, not to this project; the header line says so. And
+    /// failure-domain evidence can never read `independent` — see
+    /// [`crate::routing::domain::FailureDomain`], whose only producer cannot
+    /// return it — so the line says what the absence of evidence does and does
+    /// not mean.
+
+### `shutdown.rs` — `install_signal_handler`
+
+    /// "A second one" counts **signals**, not shutdown requests, and the difference
+    /// is not academic. This used to read `SHUTDOWN_REQUESTED` and treat a flag
+    /// that was already set as an impatient second Ctrl-C. That was true for as
+    /// long as a signal was the only thing that could set it — and it stopped being
+    /// true when `tui::event::wait_for_terminal` began answering a terminal hangup
+    /// by requesting shutdown itself. Closing a terminal delivers `SIGHUP` and a
+    /// `POLLHUP` at the same instant: two observations of one event. Whenever the
+    /// handler thread was scheduled second, one hangup looked like two interrupts
+    /// and the process was forced down through `force_exit` — no destructors,
+    /// exit code 130 — instead of shutting down cleanly and exiting 0. Measured at
+    /// roughly even odds on macOS and **ten times out of ten** inside a Linux
+    /// container.
+    ///
+    /// The residue of that same race — the handler arriving *after* the wind-down
+    /// has given the terminal back — is answered in `interpret_signal`, which is
+    /// where "while the terminal is not engaged" above stopped being the whole
+    /// story. (Named rather than linked: it is private, and a public doc comment
+    /// that links a private item is a `rustdoc` warning and a failed gate job.)
+
+### `shutdown.rs` — `interpret_signal`
+
+    /// This is the function that *asks* the policy; the handler above only acts on
+    /// the answer. It is separate because a handler can only be exercised by
+    /// ending the process, and the distinction it draws is worth a test.
+    ///
+    /// # Why a terminal that has been *given back* is not a terminal that was
+    /// never held
+    ///
+    /// This used to ask [`TERMINAL_ENGAGED`] alone: nothing owns the terminal, so
+    /// there is nothing to wind down, so leave. That is right for `glasshouse
+    /// sessions`, and it is wrong for the last few milliseconds of every TUI run,
+    /// because the two things that end a run when a terminal closes are **two
+    /// observations of one event**: `tui::event`'s `POLLHUP` detector, and the
+    /// `SIGHUP` the kernel delivers to the session at the same instant. The
+    /// detector's answer is to wind down, and winding down restores the terminal —
+    /// so if the handler thread is scheduled after that, the *same event* is read
+    /// as "nothing owns the terminal" and the run is forced down with exit 130
+    /// having done everything right.
+    ///
+    /// Measured before this changed: **2.3% of clean hangups** ended at
+    /// [`EXIT_INTERRUPTED`], on the tree that introduced `tui::event`'s watchdog
+    /// and on the tree before it — 8 in 350 and 15 in 600 in a loaded Linux
+    /// container. It is the tolerance `tests/terminal_loss.rs` used to carry, and
+    /// it is a race *lost by exiting too fast*.
+    ///
+    /// [`TERMINAL_EVER_ENGAGED`] is what tells the two apart, and the fix is to
+    /// **remove** the special case rather than add one: a process that has ever
+    /// held the terminal falls through to the ordinary counting rule, so the
+    /// hangup's `SIGHUP` is the first ask whichever side of the restore it lands
+    /// on, and the two interleavings stop having different answers. Nothing about
+    /// the wind-down gets slower; the branch that used to call
+    /// [`std::process::exit`] now returns and lets it finish.
+    ///
+    /// # What this costs, stated rather than buried
+    ///
+    /// Exactly **one** signal. A `SIGTERM` or `SIGINT` arriving after the terminal
+    /// has been given back is answered by [`request_shutdown`] instead of by
+    /// forcing, and the next one forces as it always did. That matters for
+    /// `tui::event`'s watchdog, which is why it sends its `SIGTERM` twice and says
+    /// so; and it is the reason this counts rather than swallowing.
+
+### `shutdown.rs` — `RawModeGuard`
+
+    /// This is what a session attached directly to the user's terminal needs.
+    /// [`TerminalGuard`] is wrong for that job: a harness draws its own TUI and
+    /// usually enters the alternate screen itself, so wrapping it in a second
+    /// one would put the session's own output on a screen that is thrown away
+    /// when Glasshouse leaves it — the user would watch their session scroll by
+    /// and then see it vanish on exit.
+    ///
+    /// Raw mode is what the session genuinely does need: it stops the local line
+    /// discipline from buffering lines, echoing keystrokes, and — the part that
+    /// matters most — turning Ctrl-C into a signal for *Glasshouse*. In raw mode
+    /// Ctrl-C arrives as a plain `0x03` byte that gets forwarded to the harness,
+    /// which is exactly where it belongs while a session owns the terminal.
+    ///
+    /// Restoration goes through the same [`restore_terminal`] and
+    /// `TERMINAL_ENGAGED` flag as [`TerminalGuard`], so a panic or a signal
+    /// restores a raw-mode session just as reliably as a full-screen one.
+    ///
+    /// That shared path also emits `LeaveAlternateScreen` on the way out, which
+    /// this guard never entered. That is deliberate, not an oversight to tidy
+    /// away: the *harness* very likely entered one, and a harness that dies
+    /// without leaving it would otherwise strand the user on a screen they
+    /// cannot get off. Sending it unconditionally repairs that case and costs
+    /// nothing in the case where no alternate screen was ever entered.
+
+### `paths.rs` — `reject_literal_tilde`
+
+    /// `~` only ever expands to the home directory inside a shell. None of the
+    /// five callers of this function run one — `--data-dir`/`--config-dir`/
+    /// `--log-file` land here as already-parsed [`Path`] arguments, and
+    /// `GLASSHOUSE_DATA_DIR`/`GLASSHOUSE_CONFIG_DIR` as raw environment strings —
+    /// so a literal `~` is unambiguous evidence of a shell-expansion step that
+    /// never ran (a non-interactive launcher such as a systemd unit, a CI job, or
+    /// a cmux pane setting the env var directly). Refusing costs no
+    /// home-directory lookup and matches this codebase's stated preference for
+    /// refusing untrusted input over guessing what it meant (see
+    /// `shim::check_name`'s doc).
+    ///
+    /// `source` names the flag or environment variable, so the error tells the
+    /// caller which of the two disagreed with what it received. `path` is
+    /// formatted with `{path:?}` (escaped, quoted) rather than `{path}` (raw):
+    /// on Unix, both a CLI argument and an environment variable may contain any
+    /// byte but NUL, so an unescaped echo could inject a newline into whatever
+    /// this error is logged into.
+    ///
+    /// `pub(crate)` so `cli.rs` can wire it under `--log-file`, the fifth input
+    /// sharing this hazard.
+
+### `platform/exec/mod.rs` — module doc
+
+    //! - On Windows, a great many CLIs installed through npm are `.cmd` (or
+    //!   `.bat`) shim scripts. `CreateProcess` cannot launch those directly —
+    //!   Windows itself only knows how to exec `.exe`/`.com` binaries — so the
+    //!   caller needs to know it must go through the command interpreter
+    //!   (`cmd.exe /C <script> <args...>`) instead of spawning the script path.
+    //! - Under WSL, `PATH` usually contains Windows interop entries
+    //!   (`/mnt/c/...`) alongside the real Linux ones, because Windows appends
+    //!   its own `PATH` to the WSL one by default. An executable found there
+    //!   would run in the *Windows* process namespace: a different filesystem, a
+    //!   different working-directory model, a different process tree. Spawning
+    //!   it as if it were a normal Linux child process would silently break
+    //!   Glasshouse's project isolation, because the Linux project-root path set
+    //!   as the working directory means nothing to a Windows process. Resolution
+    //!   under WSL must filter those out of the *usable* result, but still
+    //!   report them, so `glasshouse doctor` can tell the user what happened
+    //!   instead of just saying "not found".
+
+### `platform/exec/mod.rs` — `ResolvedExecutable::spawn_command`
+
+    /// For [`LaunchKind::Direct`] this is the resolved path and the given
+    /// arguments, unchanged: no shell is involved in spawning a `Direct`
+    /// executable, so there is nothing to validate. For
+    /// [`LaunchKind::WindowsScript`] the program becomes the command
+    /// interpreter (`%COMSPEC%`, falling back to `cmd.exe`) and the
+    /// arguments become `["/D", "/C", <script path>, ...args]`, which is how
+    /// `.cmd`/`.bat` files are actually launched.
+    ///
+    /// # Why this can fail
+    ///
+    /// `cmd.exe /C` is a shell invocation, and portable-pty's
+    /// [`CommandBuilder`](https://docs.rs/portable-pty/latest/portable_pty/struct.CommandBuilder.html)
+    /// only applies the standard CRT `ArgvQuote` quoting rules (space, tab,
+    /// newline, VT, `"`) when it builds the process command line —
+    /// `cmd.exe` does not parse with those rules. An argument like
+    /// `--session=a&calc.exe` contains no CRT-quote trigger, reaches `cmd`
+    /// verbatim, and `&` starts a second command (this is the BatBadBut /
+    /// CVE-2024-24576 shape). `%`, `^`, `|`, `<`, `>`, and backtick are
+    /// equally unhandled.
+    ///
+    /// Escaping correctly through `cmd.exe` is notoriously unreliable, and
+    /// Glasshouse does not need to try: harness arguments are flags, paths,
+    /// model names, and session ids — prompts are typed into the PTY, never
+    /// passed as argv. So instead of a clever escaper, every argument (and
+    /// the script path itself) is validated up front and rejected outright
+    /// if it contains a cmd.exe metacharacter. Once validated, no
+    /// metacharacter can trigger command-chaining, so passing the script
+    /// path and arguments as separate argv entries — letting
+    /// `CommandBuilder` do its normal CRT quoting — is safe.
+    ///
+    /// This branch is deliberately not `#[cfg(windows)]`-gated: the classic
+    /// deployment story for one of these launchers is npm-installed CLI
+    /// shims, and this logic needs to be exercised by tests on any host, not
+    /// just when actually compiled for Windows. What *is* platform-specific
+    /// is which files ever get classified as [`LaunchKind::WindowsScript`]
+    /// in the first place — see `classify_launch_kind`.
+
+### `platform/exec/mod.rs` — `is_windows_interop_path`
+
+    /// The signal is the well-known WSL drive-mount convention,
+    /// `/mnt/<single-letter>/...` (e.g. `/mnt/c/Users/...`), which is where WSL
+    /// exposes the Windows filesystem and where the Windows-appended `PATH`
+    /// entries point. This is checked case-insensitively on the drive letter,
+    /// matching how Windows drive letters work.
+    ///
+    /// An earlier version of this function also treated any `.exe` extension as
+    /// a secondary Windows-side signal, even outside `/mnt`. That rule was
+    /// removed: `which` does not append `PATHEXT` on Linux, so it could only
+    /// ever fire when the caller literally asked for a name ending in `.exe` —
+    /// in which case the hit is almost always under `/mnt/<letter>` anyway and
+    /// this rule alone already catches it — while it would wrongly reject a
+    /// genuinely Linux-built cross-compiled `.exe` artifact (e.g. a MinGW build)
+    /// sitting on `PATH`. Real WSL-interop coverage instead comes from
+    /// canonicalizing each candidate before classification (see
+    /// `resolve_with_interop_predicate`), which catches the much more common
+    /// case this drive-mount check alone would miss: a Linux-looking symlink
+    /// that actually resolves into `/mnt/<drive>`.
+    ///
+    /// Returns `false` outright for every platform other than
+    /// [`HostPlatform::Wsl`]: `/mnt/c` has no special meaning on real Linux,
+    /// macOS, or native Windows itself.
+
+### `policy/mod.rs` — module doc
+
+    //! # What a "policy" can honestly be here
+    //!
+    //! Every line in those three phases names something an *agent* should prefer,
+    //! avoid, weigh or check. Glasshouse does not read anybody's diff and has no
+    //! analyser that could enforce one of them. Its one honest mechanism is
+    //! therefore to **carry the policy to the agent** — as text Glasshouse wrote,
+    //! delivered the way a briefing is delivered, and inspectable by a person
+    //! before it is ever sent. That is what this module is: the rules as data,
+    //! and one renderer.
+    //!
+    //! So a line here is served in exactly the sense that the instruction reaches
+    //! the agent that could act on it. Line 970 in particular — *"flag unindexed
+    //! scans"* — is carried as an instruction to the agent and is **not** an
+    //! analyser Glasshouse runs; see [`Rule`]'s own note.
+    //!
+    //! # This is the *other* side of the trust boundary
+    //!
+    //! [`crate::memory::inject`] exists to keep extracted memory separated from
+    //! what a person actually wrote, because a memory body is untrusted content
+    //! that may itself read like an order. This text is the opposite case: it is
+    //! **Glasshouse's own**, constant, and an instruction on purpose. Nothing
+    //! from a project, a memory, a session or an environment is interpolated into
+    //! it — every byte below is a literal in this file — so there is no untrusted
+    //! input for a quoting rule to defend against.
+    //!
+    //! It still gets its own marker pair, distinct from
+    //! [`crate::memory::inject::MEMORY_MARKER`], for the reason the distinction
+    //! exists at all: a reader that cannot tell Glasshouse's instruction from a
+    //! quoted memory has lost the separation whichever way it errs. And because
+    //! `inject`'s `quote` rewrites `[` and `]` in every memory body, a memory can
+    //! no more forge *these* markers than it can forge its own — which is
+    //! asserted rather than assumed, in `tests/implementation_policy.rs`.
+    //!
+    //! # Why delivery is several lines and the ceiling is two numbers
+    //!
+    //! A delivery goes through [`crate::session::api::SessionApi::send_text`],
+    //! which appends a carriage return into a pseudo-terminal. A terminal in
+    //! canonical mode discards any line longer than `MAX_CANON` — 1024 bytes on
+    //! macOS and the BSDs — **and wedges that session's input permanently**;
+    //! `inject::MAX_INJECTED_BYTES` documents the measurement. Thirty rules do
+    //! not fit in one such line and never will, so the policy is delivered as
+    //! several, each independently under [`MAX_DELIVERY_BYTES`] and each carrying
+    //! the marker pair, its position, and enough legend to be read on its own.
+    //! [`POLICY_CEILING_BYTES`] is the separate bound on the whole rendered
+    //! policy — the "do not let this grow into a document" bound, which is the
+    //! one line 964 would object to losing.

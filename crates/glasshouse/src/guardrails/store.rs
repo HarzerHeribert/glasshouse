@@ -1,52 +1,23 @@
 //! The assumption ledger — `task_assumptions` and `assumption_transitions`,
 //! `crate::database` migration 19.
 //!
-//! # Two tables, and what each row is
+//! `task_assumptions` holds six agent-stated fields and nothing else, never
+//! updated: a trigger refuses every `UPDATE`. `assumption_transitions` is
+//! the append-only history — the current state is the latest row, read with
+//! `MAX(seq)`, a second trigger refusing `UPDATE` there too. A transition
+//! with no `assumption_id` is a session-level event (see [`TransitionKind`]).
+//! Project scope is migration 15's two triggers, copied exactly. Task
+//! assumptions are transient (line 1017) — what is worth keeping is
+//! promoted into `memories` — so this ledger keeps [`Retention::DEFAULT`]'s
+//! 90 days or 100,000 transitions, trimmed oldest-first on the handle
+//! already open and writing (practice §65).
 //!
-//! `task_assumptions` holds the six fields an agent states about one premise
-//! (capability map lines 1014, 1016): the claim, its current evidence, the
-//! evidence's source class, the uncertainty, the affected scope, and the
-//! cheapest useful verification step. **Nothing else.** There is no column
-//! for a rationale, a transcript, or the reasoning that produced the claim,
-//! and the row is never updated: a trigger refuses every `UPDATE`.
-//!
-//! `assumption_transitions` is the append-only history. A row with an
-//! `assumption_id` moves that assumption to a [`AssumptionState`] (or
-//! re-states the one it is in, with a response or a note); **the current
-//! state is the latest such row**, read with `MAX(seq)`, and nothing is ever
-//! `UPDATE`d — a second trigger refuses that too, so the guarantee is the
-//! schema's and not only this module's method list. A row with no
-//! `assumption_id` is a **session-level** event: a gate that fired, an
-//! override a person recorded, a budget that was exceeded. See
-//! [`TransitionKind`].
-//!
-//! # Project scope, the same way every ledger here has it
-//!
-//! Migration 15's two triggers, copied exactly: an `INSERT` or an `UPDATE OF
-//! project_id` naming any project but the one bound in `project_metadata`
-//! aborts. The database path comes from [`Runtime`] and nowhere else, and
-//! every session-keyed request into this store goes through
-//! `session::api::SessionApi` first, so a foreign session identifier is
-//! refused before a row could be written for it.
-//!
-//! # Prunable, like the evaluation ledger and unlike `lifecycle_events`
-//!
-//! Task assumptions are transient by definition (line 1017): what is worth
-//! keeping is promoted, explicitly, into `memories`. So this ledger keeps
-//! [`Retention::DEFAULT`]'s 90 days or 100,000 transitions, whichever binds
-//! first, trimmed oldest-first in the writer's own transaction — on the
-//! handle that is already open and already writing, never on a second one
-//! (practice §65). An assumption whose every transition has been trimmed is
-//! removed with them.
-//!
-//! # Untrusted text
-//!
-//! Every free-text field is passed through [`super::sanitize`] before it is
-//! stored: bounded, and stripped of anything that could act on a terminal.
-//! A claim over [`super::MAX_CLAIM_CHARS`] is **refused**, not cut; the
-//! other fields are cut visibly. Square brackets survive storage and are
-//! rewritten by [`super::quote`] wherever text is rendered into a block an
-//! agent reads.
+//! Every free-text field is passed through [`super::sanitize`]. A claim
+//! over [`super::MAX_CLAIM_CHARS`] is **refused**, not cut; other fields are
+//! cut visibly, and brackets are rewritten by [`super::quote`] wherever
+//! rendered into a block an agent reads. History: design-decisions.md,
+//! "Trims: the remaining module docs, second packet", guardrails/store.rs
+//! module doc.
 
 use std::fmt;
 use std::sync::Arc;

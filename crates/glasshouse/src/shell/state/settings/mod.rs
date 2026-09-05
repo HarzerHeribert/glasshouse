@@ -983,29 +983,21 @@ fn known_launch_harnesses() -> impl Iterator<Item = IntegrationId> {
 
 /// What a probe of `name` would ask for, or why it cannot be asked.
 ///
-/// The preconditions come first because a request that cannot possibly work
-/// is not worth opening a socket for — and because the failures here are the
-/// ones a user can fix without leaving the screen they are on.
-///
-/// `target` says which URL the probe will request. A provider whose
-/// model-list endpoint is established gets [`ProbeTarget::ModelList`], which
-/// is the better probe: one request exercises the base URL, TLS, the
-/// credential and a real route. A provider whose model list nobody has
-/// established gets [`ProbeTarget::BaseUrl`] instead — appending `/models`
-/// anyway would be guessing at a path, which is the same failure
-/// [`mod@crate::provider`] refuses for a base URL.
-///
-/// **The first protocol's base URL, exactly as the precondition check has
-/// always used.** A provider serving several protocols at different roots —
-/// `openrouter` is the one that does — has one model list, and it is under
-/// the OpenAI-shaped base URL rather than the Anthropic root. Should a
-/// provider ever appear whose first protocol is not the one its model list
-/// lives under, this is the line that has to grow a per-protocol answer.
-///
+/// Preconditions come first because a request that cannot possibly work is
+/// not worth opening a socket for. `target` says which URL the probe will
+/// request: a provider whose model-list endpoint is established gets
+/// [`ProbeTarget::ModelList`] (one request exercises the base URL, TLS, the
+/// credential and a real route); one whose model list nobody has
+/// established gets [`ProbeTarget::BaseUrl`] instead, since appending
+/// `/models` anyway would be guessing at a path. It is always the first
+/// protocol's base URL — a provider serving several protocols at different
+/// roots (`openrouter`) has one model list, under the OpenAI-shaped root.
 /// Presence is checked with [`SecretStore::is_present`], never
-/// [`SecretStore::resolve`]: nothing here needs a credential's value, so
-/// nothing here asks for one. The value is resolved once, later, by the run
+/// [`SecretStore::resolve`]: the value is resolved once, later, by the run
 /// loop, immediately before it is put in a header.
+///
+/// History: design-decisions.md, "Trims: the remaining module docs, second
+/// packet", `plan_provider_probe`.
 fn plan_provider_probe(
     name: &str,
     config: &ProviderConfig,

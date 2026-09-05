@@ -1,73 +1,22 @@
 //! Phase 51 — the project-local evaluation ledger.
 //!
 //! One row per **decision Glasshouse made whose wisdom is only visible
-//! later**, written at the moment of the decision, in
-//! `evaluation_observations` (`crate::database` migration 15). It answers
-//! *how often*, over a window; it deliberately answers nothing about *how
-//! much*, because cost, tokens and latency belong to
-//! [`crate::routing::evidence`] and a second column for any of them here would
-//! be a second source of truth for a fact that ledger already models.
+//! later**, written in `evaluation_observations` (migration 15). It answers
+//! *how often*, over a window, never *how much* — cost, tokens and latency
+//! belong to [`crate::routing::evidence`].
 //!
-//! # What this ledger does **not** do, and why that is the deliverable
+//! Map line 1856's project-scoping is enforced structurally: migration 15's
+//! triggers `RAISE ABORT` on any row not bound to the active project, and
+//! this module has no `export` or method that hands out a [`Connection`]. No
+//! observation stores memory content, only a `memory_id`.
+//! [`EvaluationObservations::record`] never edits a row — a new outcome is a
+//! new row, since an edited measurement is a falsified one. [`Retention`]
+//! trims oldest-first on the handle already open and writing (practice §65),
+//! and a window reaching past the oldest retained row is refused rather than
+//! undercounted (see [`EvaluationError::WindowNotRetained`]).
 //!
-//! Map line 1856 — *"keep evaluation data local and project-scoped unless the
-//! user explicitly exports it"* — is carried in two halves, exactly as
-//! [`crate::routing::evidence`] carries line 1343:
-//!
-//! - **Structurally, by the schema.** Migration 15's two triggers `RAISE`
-//!   `ABORT` on an `INSERT` or an `UPDATE` that names any `project_id` but the
-//!   one bound in `project_metadata`. A row for another project cannot be
-//!   written by this store, by a future store, or by a hand-typed `INSERT` at
-//!   a `sqlite3` prompt. The database path itself comes from
-//!   [`crate::Runtime`] and nowhere else — there is no argument a caller can
-//!   pass to reach another project's file.
-//! - **Structurally, by this module's method list.** There is no `export`, no
-//!   `to_json`, no `write_to`, no serialization of an observation to anything
-//!   outside the process, and no method that hands out a [`Connection`]. Every
-//!   read here returns counts or decoded rows to Rust callers in this process.
-//!   *"Unless the user explicitly exports it"* is therefore a capability that
-//!   does not exist yet rather than one guarded by a flag, which is the
-//!   stronger of the two.
-//!
-//! And **no observation stores memory content.** A row carries a `memory_id`,
-//! not a subject line and not a body: everything a count needs is already
-//! durable in `memories`, so copying any of it here would be duplicating
-//! project knowledge into a ledger with a shorter retention than the knowledge
-//! itself.
-//!
-//! # Append-oriented, and prunable — which are not in tension
-//!
-//! There is a [`EvaluationObservations::record`] and there are reads, and
-//! there is no method that edits a recorded observation: an outcome learned a
-//! turn later is a *second row* with the same `memory_id`, never an `UPDATE`,
-//! because a measurement edited in place is a falsified measurement.
-//!
-//! That is the [`crate::routing::evidence`] half. The other half is the one
-//! `lifecycle_events` gets wrong: migration 5's append-only `DELETE` trigger
-//! makes that table impossible to trim *even deliberately*, and an evaluation
-//! ledger that grows per decision and can never be trimmed is a defect with a
-//! delay. Migration 15 copies migration 11's two project-scope triggers and
-//! **not** migration 5's three, and [`Retention`] is what fills the gap: 90
-//! days or 100,000 rows, whichever binds first, trimmed oldest-first in the
-//! writer's own transaction.
-//!
-//! Trimming happens on the connection that is already open and already
-//! writing — never on a background thread with a second handle. Practice §65
-//! is the reason: a SQLite handle opened on a path nobody asserts about is
-//! free on the developer's machine and billed on Windows, where it hung six
-//! tests for 37 minutes.
-//!
-//! # What a count means once rows are pruned
-//!
-//! A count over a window that reaches back past the oldest retained row is
-//! wrong, and this module refuses it rather than returning a small number —
-//! see [`EvaluationError::WindowNotRetained`]. Visible degradation, the same
-//! rule the enum columns follow.
-//!
-//! The test is whether anything was *actually* trimmed, which `seq` answers
-//! exactly: a ledger that has never pruned answers a window reaching back to
-//! the epoch, because for that ledger the answer is simply everything it
-//! holds.
+//! History: design-decisions.md, "Trims: the remaining module docs, second
+//! packet", evaluation/mod.rs module doc.
 
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};

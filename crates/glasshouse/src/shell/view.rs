@@ -1015,23 +1015,19 @@ fn render_project_memory(state: &ShellState, frame: &mut Frame, area: Rect) {
 /// routing identities this project's gateway has actually recorded.
 ///
 /// **Deliberately three columns, not line 1762's seven.** SAMPLES and WINDOW
-/// are the two of the line's seven this producer can supply at all — TTFC,
-/// effective TTFC, TTFT, decode throughput and rounds-per-minute have no
-/// producer on this gateway (see `crate::routing::evidence`'s own module
-/// header) — plus CONTEXT for line 1764. Rendering a column for any of the
-/// five absent figures would be a fabricated measurement, which is exactly
-/// what this phase's own "observability without spectacle" heading forbids,
-/// so this function has no code path that could draw one. See
-/// `no_fabricated_columns_appear_in_the_route_evidence_table` below, proved
-/// at a wide viewport per practice §17.
+/// are the two of the line's seven this producer can supply at all — the
+/// other five have no producer on this gateway — plus CONTEXT for line
+/// 1764; rendering any of the five absent figures would be a fabricated
+/// measurement, which this phase's "observability without spectacle"
+/// heading forbids (see `no_fabricated_columns_appear_in_the_route_evidence_table`
+/// below). CONTEXT shows exactly what
+/// [`crate::shell::state::RouteEvidenceRow::context_state`] carries
+/// (`"warm"`, `"cold"`, or `"unknown"`) — today, in real production data,
+/// every row reads `"unknown"`, and this table shows that plainly rather
+/// than omitting the column or guessing.
 ///
-/// Line 1764's honesty: CONTEXT shows exactly what
-/// [`crate::shell::state::RouteEvidenceRow::context_state`] already carries as a
-/// plain string (`"warm"`, `"cold"`, or `"unknown"`) — and today, in real
-/// production data, every row reads `"unknown"`, because nothing that
-/// records a routing observation ever calls
-/// `crate::routing::evidence::NewObservation::with_context_state`. This
-/// table shows that plainly rather than omitting the column or guessing.
+/// History: design-decisions.md, "Trims: the remaining module docs, second
+/// packet", `render_route_evidence`.
 fn render_route_evidence(state: &ShellState, frame: &mut Frame, area: Rect) {
     let popup = centered(area, 84, 60);
     frame.render_widget(Clear, popup);
@@ -1091,29 +1087,19 @@ fn render_route_evidence(state: &ShellState, frame: &mut Frame, area: Rect) {
 
 /// Why Glasshouse routed its own recent support jobs the way it did.
 ///
-/// # This draws stored text and computes nothing
+/// This draws stored text and computes nothing: the rationale on screen is
+/// the sentence `main.rs::disposable_extraction_model` rendered at the
+/// moment it decided, carried through unchanged. This is the same invariant
+/// [`crate::shell::state::RouteDecisionRow`] documents — the decision
+/// behind a row is a `crate::routing::disposable::DisposableChoice`, which
+/// nothing outside its own module can construct, so there is no version of
+/// this function that could re-derive a field the producer did not write.
+/// What was not recorded is drawn as *not recorded*, never a blank column.
+/// Newest decisions are at the top so a long list clips the oldest, the
+/// same trade `render_route_health` makes for many resources.
 ///
-/// The rationale on screen is the sentence
-/// `main.rs::disposable_extraction_model` rendered at the moment it decided,
-/// carried through `crate::evaluation` and
-/// `crate::shell::build_route_decision_table` unchanged. This function splits
-/// it into rendered rows and indents it under its own heading; it does not
-/// parse it, does not rank the contributions, and does not summarise them.
-///
-/// That is not modesty about effort — it is the same invariant
-/// [`crate::shell::state::RouteDecisionRow`] documents. The decision behind a
-/// row is a `crate::routing::disposable::DisposableChoice`, which nothing
-/// outside its own module can construct, so there is no version of this
-/// function that could re-derive a field the producer did not write. What was
-/// not recorded is drawn as *not recorded*, never as a blank column.
-///
-/// # The newest decisions are at the top, and a long list is clipped
-///
-/// A decision is a heading plus one line per named contribution, so a full
-/// [`crate::shell::ROUTE_DECISION_ROW_LIMIT`] of them is longer than a
-/// terminal. Newest first means the clipping falls on the oldest, which is
-/// the order a reader wants — the same trade `render_route_health` already
-/// makes for a project with many resources.
+/// History: design-decisions.md, "Trims: the remaining module docs, second
+/// packet", `render_route_decisions`.
 fn render_route_decisions(state: &ShellState, frame: &mut Frame, area: Rect) {
     let popup = centered(area, 84, 60);
     frame.render_widget(Clear, popup);
@@ -1187,39 +1173,24 @@ fn describe_window(now: i64, start: i64, end: i64) -> String {
 
 /// Phase 47, map line 1765: *"show route health, immediate availability,
 /// cadence, quota reset, and failure-domain evidence as separate concepts."*
+/// Every resource gets **five labelled lines**, one per concept, with no
+/// summary word computed across them, because the five genuinely disagree
+/// in ordinary operation: a refused-credential resource is *unavailable*
+/// while its failure streak reads zero; a paced resource is *available
+/// later* and perfectly healthy. `crate::provider::resources::render_health`
+/// prints the first three as one `status` word today — the shape this
+/// function exists not to reproduce
+/// (`route_health_keeps_line_1765s_five_concepts_on_separate_lines` fails if
+/// it ever does). Every value comes straight from a field
+/// [`crate::shell::state::RouteHealthRow`] already carries; the three
+/// concepts depending on headers most providers never send print `unknown`,
+/// never `0` or an estimate. The caches are keyed by provider
+/// (installation-scoped, not project-scoped, and the header line says so),
+/// and failure-domain evidence can never read `independent` (its only
+/// producer cannot return it), so the line says what absent evidence means.
 ///
-/// # The line is about separation, and separation is the whole implementation
-///
-/// Every resource gets **five labelled lines**, one per concept, in the order
-/// the line names them. Nothing here computes a summary word across them,
-/// because the five genuinely disagree in ordinary operation: a resource with
-/// a refused credential is *unavailable* while its failure streak reads zero;
-/// a resource Glasshouse is pacing is *available later* and perfectly healthy;
-/// a provider's quota reset and Glasshouse's own cooldown are two clocks owned
-/// by two parties. `crate::provider::resources::render_health` prints the
-/// first three as one `status` word on one line today — that is the shape this
-/// function exists not to reproduce, and
-/// `route_health_keeps_line_1765s_five_concepts_on_separate_lines` fails if it
-/// ever does.
-///
-/// # Nothing is derived, and "unknown" is printed rather than guessed
-///
-/// Every value comes from a field
-/// [`crate::shell::state::RouteHealthRow`] already carries, which the run loop
-/// read from a cache a gateway process wrote. Three of the five concepts
-/// depend on headers most providers never send, and each of those prints
-/// `unknown` — never `0`, never `never`, never an estimate. A zero would read
-/// as a measurement, which is the thing this phase is named after not doing.
-///
-/// # Two scope facts, both said on screen rather than assumed
-///
-/// The caches are keyed by provider under
-/// [`crate::paths::RuntimePaths::data_dir`], so these readings belong to the
-/// installation, not to this project; the header line says so. And
-/// failure-domain evidence can never read `independent` — see
-/// [`crate::routing::domain::FailureDomain`], whose only producer cannot
-/// return it — so the line says what the absence of evidence does and does
-/// not mean.
+/// History: design-decisions.md, "Trims: the remaining module docs, second
+/// packet", `render_route_health`.
 fn render_route_health(state: &ShellState, frame: &mut Frame, area: Rect) {
     let popup = centered(area, 84, 70);
     frame.render_widget(Clear, popup);

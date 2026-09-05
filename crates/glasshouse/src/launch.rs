@@ -2,29 +2,22 @@
 //!
 //! [`HarnessLaunch`] ties together the two values every harness launch needs
 //! — a resolved executable ([`ResolvedExecutable`]) and the active project
-//! ([`Project`]) — and nothing else. It offers argument and child-environment
-//! builders and `spawn`; it deliberately offers no way to set the working
-//! directory or swap the program, because both are derived: the directory
-//! from the project (via `TerminalCommand::for_harness`), the program from
-//! the resolved executable (via
-//! [`ResolvedExecutable::spawn_command`], which owns the Windows
+//! ([`Project`]) — and nothing else, deliberately offering no way to set the
+//! working directory or swap the program, because both are derived: the
+//! directory from the project, the program from the resolved executable
+//! (via [`ResolvedExecutable::spawn_command`], which owns the Windows
 //! `.cmd`/`.bat` interpreter wrapping so no caller ever reimplements it).
+//! This is structure within the sanctioned harness API, not a sandbox — the
+//! underlying generic PTY APIs stay public for generic terminal work — but
+//! code launching harnesses through it cannot get the working directory, the
+//! launch-kind translation, or the environment semantics wrong.
 //!
-//! # Honest scope
+//! Environment overrides preserve [`TerminalCommand`]'s exact last-call-wins
+//! ordering: each key's operations are deduplicated so only its most recent
+//! `env` or `env_remove` is kept. Environment *values* are never logged.
 //!
-//! This is structure within the sanctioned harness API, not a sandbox: the
-//! underlying generic PTY APIs ([`TerminalCommand::new`] and
-//! [`PtyProcess::spawn`]) stay public for genuinely generic terminal work,
-//! and Rust cannot identify misuse of those. What this type guarantees is
-//! that code which launches harnesses through it cannot get the working
-//! directory, the launch-kind translation, or the environment semantics
-//! wrong.
-//!
-//! Environment overrides preserve [`TerminalCommand`]'s exact
-//! last-call-wins ordering: each key's operations are deduplicated at call
-//! time so only its most recent `env` or `env_remove` is kept, and what
-//! remains is applied in recorded order. Environment *values* are never
-//! logged.
+//! History: design-decisions.md, "Trims: the remaining module docs, second
+//! packet", launch.rs module doc.
 
 use std::ffi::OsString;
 
@@ -39,26 +32,19 @@ use crate::pty::{PtyOutput, PtyProcess, TerminalCommand, TerminalSize};
 /// Why a particular executable cannot be launched in a particular directory,
 /// or `None` when the combination is fine.
 ///
-/// # The combination this exists for
+/// `cmd.exe` cannot hold a UNC path as its working directory: asked to, it
+/// does not fail, it silently substitutes the Windows directory and carries
+/// on. So a `.cmd` harness started in a project on a network share would
+/// come up running in `C:\Windows` instead, quietly breaking the
+/// project-isolation guarantee the whole product rests on. Refusing with a
+/// diagnostic is strictly better than a session that looks alive and is
+/// operating on the wrong directory. This asks about the *shape* of a path
+/// and the *kind* of an executable, not about the host, so it is not
+/// `cfg`-gated — the same reasoning that would have caught the
+/// verbatim-path defect before CI did.
 ///
-/// `cmd.exe` cannot hold a UNC path as its working directory. Asked to, it
-/// does not fail: it prints a notice, silently substitutes the Windows
-/// directory, and carries on. So a `.cmd` harness — which is how npm installs
-/// most of them — started in a project on a network share would come up
-/// running in `C:\Windows` instead. That is not merely a broken session; it
-/// breaks the project-isolation guarantee the whole product rests on, and it
-/// does so quietly, which is the worst way for it to break.
-///
-/// Refusing with a diagnostic is strictly better than a session that looks
-/// alive and is operating on the wrong directory.
-///
-/// # Why this is not `cfg`-gated
-///
-/// Like [`crate::platform::exec`]'s script-path conversion, this asks about
-/// the *shape* of a path and the *kind* of an executable, not about the host.
-/// Keeping it host-independent is what makes it testable somewhere other than
-/// the platform where it matters — the same reasoning that would have caught
-/// the verbatim-path defect before CI did.
+/// History: design-decisions.md, "Trims: the remaining module docs, second
+/// packet", `unsupported_combination`.
 fn unsupported_combination(kind: LaunchKind, cwd: &Path) -> Option<String> {
     if kind == LaunchKind::WindowsScript && is_unc_path(cwd) {
         return Some(format!(
@@ -289,25 +275,19 @@ impl<'a> HarnessLaunch<'a> {
 
 /// A [`HarnessLaunch`] that owns everything it needs to be used again.
 ///
-/// # Why this exists
-///
-/// [`HarnessLaunch`] borrows the active [`Project`], which is right for the
-/// one thing it was built for: a caller that has a project in hand and starts
-/// one session with it. It is wrong for anything that has to launch the *same
-/// harness twice*, because the borrow ties the launch to a scope that ended
-/// when the first session started.
-///
-/// Restarting a session is exactly that. `SessionRuntime` notices a harness
-/// exit long after `start` returned, in `poll_exits`, with no project in
-/// scope — so the only way it can put the same harness back is to have kept
-/// the whole recipe. This is the recipe, and cloning a `Project` is cheap:
-/// an identifier, a root, and two flags.
-///
-/// It is deliberately a separate type rather than a lifetime parameter on
-/// `HarnessLaunch`: making the project owned-or-borrowed would put that
-/// choice into the signature of every function that takes a launch, including
+/// [`HarnessLaunch`] borrows the active [`Project`], right for a caller that
+/// starts one session with it, but wrong for restarting a harness:
+/// `SessionRuntime` notices a harness exit long after `start` returned, in
+/// `poll_exits`, with no project in scope, so the only way to put the same
+/// harness back is to have kept the whole recipe (cloning a `Project` is
+/// cheap — an identifier, a root, two flags). It is a separate type rather
+/// than a lifetime parameter on `HarnessLaunch` because owned-or-borrowed
+/// would put that choice into every function that takes a launch, including
 /// [`crate::session::SessionRuntime::start`], whose type is written out in
 /// the binary.
+///
+/// History: design-decisions.md, "Trims: the remaining module docs, second
+/// packet", `OwnedHarnessLaunch`.
 #[derive(Clone)]
 pub struct OwnedHarnessLaunch {
     executable: ResolvedExecutable,

@@ -1,25 +1,19 @@
 //! The wizard's state machine, kept deliberately free of the terminal.
 //!
-//! [`WizardState`] owns every piece of mutable wizard data — which step is
-//! current, the cursor over the integration list, the text being typed into
-//! the explicit-path field, and the pending enable/ignore decisions — and is
-//! driven entirely through [`WizardState::handle_key`]. That function takes a
-//! `crossterm` [`KeyEvent`] and returns an [`Action`] telling the caller what
-//! to do next; it never touches a [`crate::tui::Screen`], never reads the
-//! clock, and never consults process-global state. The one exception is
+//! [`WizardState`] owns every piece of mutable wizard data and is driven
+//! entirely through [`WizardState::handle_key`], which takes a `crossterm`
+//! [`KeyEvent`] and returns an [`Action`]; it never touches a
+//! [`crate::tui::Screen`], never reads the clock, and never consults
+//! process-global state. The one exception is
 //! [`crate::platform::exec::resolve_explicit`], a synchronous, local
-//! filesystem check with no network or subprocess involved — validating a
-//! user-typed path is the whole point of the explicit-path step (Phase 2C:
-//! "rather than accepting a path that will fail later at launch"), and it is
-//! exactly as testable as everything else here because it is deterministic
-//! given real files on disk (see the `tests` module, which creates real
-//! executables in a `tempfile::tempdir`).
-//!
+//! filesystem check — validating a user-typed path is the whole point of
+//! the explicit-path step — and it is deterministic given real files on disk.
 //! This split is what makes the wizard testable at all: [`super::run`] pumps
-//! a real terminal's events into `handle_key` and paints [`super::view`]
-//! after every [`Action`] that says something changed, but none of the
-//! actual decision logic lives there. Every test in this module drives
-//! `handle_key` directly.
+//! a real terminal's events into `handle_key` and paints [`super::view`],
+//! but none of the actual decision logic lives there.
+//!
+//! History: design-decisions.md, "Trims: the remaining module docs, second
+//! packet", onboarding/state/mod.rs module doc.
 
 use std::path::{Path, PathBuf};
 
@@ -1353,36 +1347,22 @@ impl WizardState {
     /// Apply every recorded decision to `config` and mark onboarding
     /// completed at this wizard's version.
     ///
-    /// Assumes `WizardState::finalize_pending_decisions` has already run
-    /// (true for every reachable path to [`Action::Finish`] — see
-    /// `WizardState::handle_harnesses_key`); a row somehow still `None`
-    /// here is written as ignored rather than panicking, since a config
-    /// write is not the place to enforce an internal invariant with a crash.
+    /// Assumes `WizardState::finalize_pending_decisions` has already run; a
+    /// row somehow still `None` here is written as ignored rather than
+    /// panicking, since a config write is not the place to enforce an
+    /// internal invariant with a crash. `pending_provider` is only ever
+    /// `Some` after a completed "Configure now", so "Do later" leaves
+    /// `config.providers()` untouched (Phase 2C lines 3 and 6, one code
+    /// path). `pending_routing` is written verbatim, `None` included, so a
+    /// declined routing step leaves no `[routing]` table and deterministic
+    /// heuristics classify (line 4). A `BypassRow` is written only when this
+    /// run actually changed it (`acknowledged != seeded`), so declining
+    /// leaves `bypass_acknowledged` genuinely unset rather than an explicit
+    /// `false`, and the same rule lets a reopen revoke a previously granted
+    /// acknowledgement.
     ///
-    /// `pending_provider` is only ever `Some` after a completed "Configure
-    /// now" — see `WizardState::handle_provider_template_key` and
-    /// `WizardState::handle_provider_base_url_key` — so "Do later" leaves
-    /// `config.providers()` exactly as `existing` already had it: untouched,
-    /// never cleared. That is what satisfies both Phase 2C line 3 (no
-    /// provider, no credential, on a genuine first run, where `existing` had
-    /// none to begin with) and line 6 (a reopen that chooses "Do later"
-    /// keeps whatever was already configured) with the same code path.
-    ///
-    /// `pending_routing` is written verbatim, `None` included — see the
-    /// field's own documentation for why this one assigns where
-    /// `pending_provider` only ever adds. On a first run that declined the
-    /// routing step it is `None`, so the saved file has no `[routing]` table
-    /// at all and deterministic heuristics classify (Phase 2C line 4).
-    ///
-    /// A `BypassRow` is written only when this run actually changed it
-    /// (`acknowledged != seeded`, both starting equal on a fresh row, so an
-    /// untouched one is never written at all) — Amendment 1's acceptance
-    /// test 8: declining leaves `bypass_acknowledged` genuinely unset on a
-    /// first run, not overwritten with an explicit `false`. On a reopen,
-    /// the same rule is what makes revoking a previously granted
-    /// acknowledgement possible: un-checking a row that started `true`
-    /// writes `false`, rather than that change being swallowed by "only
-    /// write true".
+    /// History: design-decisions.md, "Trims: the remaining module docs,
+    /// second packet", `apply_to`.
     pub fn apply_to(&self, config: &mut UserConfig) {
         for row in &self.rows {
             let entry = config.integrations_mut().entry(row.id);

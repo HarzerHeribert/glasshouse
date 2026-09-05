@@ -1,60 +1,22 @@
 //! Phase 21K — assumption guardrails: the few premises a change rests on,
 //! **stated by the agent through the door**, recorded, tracked and surfaced.
 //!
-//! # The failure this counters, and the one thing Glasshouse never does
-//!
 //! Capability map line 996 names a model-independent failure mode: an
 //! uncertain inference silently becomes the premise of a large
-//! implementation, and is disproven only after substantial work. The
-//! guardrail is a small, deterministic mechanism around that moment — before
-//! a substantial change, ask for the few critical assumptions it rests on;
-//! record each with its evidence; track it; and tell the person when one is
-//! refuted.
+//! implementation, disproven only after substantial work. **Glasshouse never
+//! infers an assumption** (line 998); every record here was *said* by an
+//! agent, treated as untrusted text with no column for a rationale.
 //!
-//! **Glasshouse never infers an assumption.** It reads no transcript, no
-//! terminal output and no reasoning for one (line 998). Every record here was
-//! *said* by an agent, in the fields of `api::protocol::Request` and their
-//! MCP twins, and every field is treated as untrusted text: bounded, stripped
-//! of anything that could act on a terminal, and never rendered into a block
-//! that reaches an agent without the same discipline `crate::memory::inject`
-//! applies (see [`quote`]). There is no column for a rationale, no column for
-//! a chain of thought, and no request field that would carry one — the
-//! argument types on the MCP door refuse unknown fields outright.
+//! [`classify`] is a fixed, model-free ladder over the factors the agent
+//! states (line 1004); trivial, local, reversible edits are never gated
+//! (line 1005). [`decide`] turns the class into a [`Verdict`] — advisory by
+//! default, [`Verdict::Gated`] only for `guardrails.blocking` categories
+//! under `risk_gated`, every gate carrying who decided it and the override
+//! that lifts it. The preflight answers with **at most three** prompts.
 //!
-//! # Deterministic and cheap, and therefore honest about what it is
-//!
-//! [`classify`] is a fixed ladder over the factors the agent states about an
-//! intended change (line 1004): a migration, a destructive operation, a
-//! security or data-integrity impact, an unfamiliar integration, an
-//! architectural change, a broad refactor, a wide blast radius, an
-//! irreversible edit, a weakly evidenced premise, or simply a large
-//! footprint. The first rung that matches names the factor (line 1049), and
-//! **trivial, local, reversible edits are never gated** (line 1005). There is
-//! no model in the loop and no heuristic over text: a description is stored
-//! for the person to read and is never classified.
-//!
-//! [`decide`] turns the class into a [`Verdict`] from the configured
-//! [`GuardrailMode`] and the per-task [`GuardrailOverride`]. Advisory is the
-//! default and is non-blocking; only the categories in `guardrails.blocking`
-//! may ever answer [`Verdict::Gated`], and only under `risk_gated` (lines
-//! 1052, 1008). Every gate carries who decided it and the override that lifts
-//! it (line 1053).
-//!
-//! # A template, not a plan
-//!
-//! The preflight answers with **at most three** prompts (lines 1007, 1013)
-//! chosen from the factors that fired, plus a fixed page of guidance whose
-//! sentences are the map's own lines (997, 1009, 1024–1032, 1038, 1040–1044)
-//! rendered for the agent. The guidance is what makes those lines true of
-//! this build: Glasshouse cannot make an agent prefer direct evidence, but it
-//! can put that instruction in front of the agent at the one moment it
-//! matters, through a harness-independent door (line 1000).
-//!
-//! # Where the state lives
-//!
-//! [`store`] — two tables, one migration, append-only transitions. The
-//! current state of an assumption is its latest transition and nothing is
-//! ever `UPDATE`d; see that module's header for the schema and its triggers.
+//! [`store`] holds the state: two tables, append-only transitions, never
+//! `UPDATE`d. History: design-decisions.md, "Trims: the remaining module
+//! docs, second packet", guardrails/mod.rs module doc.
 
 pub mod store;
 

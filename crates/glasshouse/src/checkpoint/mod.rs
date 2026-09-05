@@ -5,49 +5,19 @@
 //! what to do next. Small enough that reading it is cheap, plain enough that
 //! any harness can be given it.
 //!
-//! # What this deliberately is not
+//! It holds no native harness session state — no transcript, message
+//! history, native session identifier, tool-call log, or token count —
+//! which `the_format_holds_no_native_session_state` pins by asserting the
+//! document's exact field list; `harness` is the one exception, recording
+//! only *which* harness produced it. Smallness is enforced three times:
+//! [`Checkpoint::fit`] trims until the document fits, [`CheckpointStore::save`]
+//! calls `fit` itself, and the `checkpoints` table's `CHECK` on document
+//! length is the backstop. Glasshouse fills what it can know itself —
+//! session, harness, timestamp, git position — and never invents the
+//! objective, state, or next actions.
 //!
-//! Phase 19's fixed architectural requirement: *Glasshouse checkpoints
-//! contain portable Glasshouse metadata and bounded handoff context. They do
-//! not attempt to clone or replace proprietary native harness session
-//! formats.*
-//!
-//! So there is no field here for a transcript, a message history, a native
-//! session identifier, a tool-call log, or a token count. Those are the
-//! harness's own business and it keeps them itself; a Glasshouse checkpoint
-//! that tried to hold them would be a worse copy of a file that already
-//! exists, and it would stop being portable the moment two harnesses
-//! disagreed about the shape. `the_format_holds_no_native_session_state`
-//! pins the document's field list so that a field of that kind cannot arrive
-//! by accident.
-//!
-//! The `harness` field is the exception that proves the rule: it records
-//! *which* harness produced the checkpoint, which is portable metadata about
-//! provenance, and says nothing whatever about that harness's format.
-//!
-//! # Small is a constraint, not an aspiration
-//!
-//! *Keep checkpoints deliberately small enough to bootstrap a fresh session
-//! cheaply.* A handoff document that costs as much to read as the work it
-//! describes has no reason to exist, so the bound is enforced three times
-//! over, deliberately:
-//!
-//! 1. [`Checkpoint::fit`] trims the least load-bearing content until the
-//!    rendered document fits, and records that it did;
-//! 2. [`CheckpointStore::save`] calls `fit` itself, so a caller cannot skip
-//!    step 1;
-//! 3. the `checkpoints` table carries a `CHECK` on the document's byte
-//!    length, so nothing that opens the file can store an oversized one
-//!    either.
-//!
-//! # Where a checkpoint's *content* comes from
-//!
-//! Glasshouse fills in what it can know by itself — the session, the harness,
-//! the timestamp, and the Git position read straight off the repository. It
-//! does **not** invent the objective, the state, or the next actions. Those
-//! are authored, by whoever asks for the checkpoint, and a checkpoint whose
-//! objective Glasshouse had guessed from terminal output would be exactly the
-//! kind of confident fiction this project refuses everywhere else.
+//! History: design-decisions.md, "Trims: the remaining module docs, second
+//! packet", checkpoint/mod.rs module doc.
 
 pub mod git;
 pub mod store;
@@ -350,28 +320,17 @@ impl Checkpoint {
     /// Trim until the rendered document fits [`MAX_BYTES`], and say whether
     /// anything had to go.
     ///
-    /// # The order is the design
+    /// Sections are given up least-useful-first: failed approaches, then the
+    /// changed-file list, then the file list, then decisions, then project
+    /// memory, then the test state, then next actions, then — truncated
+    /// rather than dropped, because a fresh session cannot work without them
+    /// — the current state and the objective. Project memory sheds before
+    /// the test state because it is a binding constraint the next session
+    /// must not silently violate, not a convenience note. Whatever is
+    /// dropped sets `trimmed`, so a reader knows to go look at the session.
     ///
-    /// Sections are given up least-useful-first, and "useful" means *useful
-    /// to somebody starting from nothing*: the objective and the current
-    /// state are what a fresh session cannot work without, so they are cut
-    /// last and truncated rather than dropped. Failed approaches go first —
-    /// they are the largest section in practice and the least costly to
-    /// rediscover — then the working tree's changed-file list (Glasshouse
-    /// read it off disk and can read it again), then the file list, then
-    /// decisions, then **project memory**, then the test state, then next
-    /// actions.
-    ///
-    /// Project memory sheds right after decisions and before the test state:
-    /// it is never disposable in the way a failed approach or a changed-file
-    /// list is — a binding record is a constraint the next session must not
-    /// silently violate, not a convenience this session happened to jot down
-    /// — but the test state and next actions are what tells a fresh session
-    /// where to resume at all, and those outrank everything else that can be
-    /// given up.
-    ///
-    /// Nothing is ever silently perfect: whatever is dropped sets `trimmed`,
-    /// so a reader knows to go and look at the session itself.
+    /// History: design-decisions.md, "Trims: the remaining module docs,
+    /// second packet", `Checkpoint::fit`.
     pub fn fit(mut self) -> Self {
         // Per-field caps first, so one runaway paragraph cannot evict every
         // other section by itself.

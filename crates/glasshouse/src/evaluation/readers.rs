@@ -246,53 +246,21 @@ impl EvaluationObservations {
 /// §77's reason: a second worker's reader and this one must not be able to
 /// land on the same lines.
 ///
-/// # The proxy's join key, closed by `GH-TURN-OUTCOME-ROW`
+/// The proxy for 1821/1831 needs a [`EvaluationKind::MemoryRetrieved`] row's
+/// `session_id` to find "the retrieving session", and a same-session row
+/// saying how its turn ended. The queries below join on
+/// [`EvaluationKind::TurnOutcomeObserved`] — a row `record_turn_outcome`
+/// writes for **every** session that reaches the hook's `TurnEnded` arm,
+/// routed or not, unlike [`EvaluationKind::RoutingOutcomeObserved`] (which
+/// never arises for a door-spawned session and still feeds the routing
+/// readers below, unchanged). Of the four negative signals the design
+/// names — failover, retry, override, early abandonment — only **override**
+/// ([`EvaluationKind::RoutingOverrideDecided`], `subject = "overridden"`) has
+/// a row shape this ledger can join on a session id at all; the other three
+/// are omitted from the join by name, not invented.
 ///
-/// The design decision's proxy for 1821/1831 is *"the retrieving session's
-/// turn ended `Completed` … with no failover, retry, override or early
-/// abandonment recorded against it."* That needs a
-/// [`EvaluationKind::MemoryRetrieved`] row's `session_id` to find "the
-/// retrieving session" at all, and a same-session row saying how its turn
-/// ended. `GH-RETRIEVAL-ATTRIBUTION` gave the launch-time briefing door —
-/// `api/unix.rs::deliver_memory` — the first: a successful injection carries
-/// the session it was delivered to. `main.rs::memory_search_grouped`'s two
-/// callers still pass `None`: `glasshouse memory search` has no session to
-/// attribute a person's own command to, and the machine door's
-/// `query_memory` has no session field on its `Request::QueryMemory` to
-/// thread one from at all.
-///
-/// The second used to be [`EvaluationKind::RoutingOutcomeObserved`], and that
-/// row **never arises for a door-spawned session**:
-/// [`crate::evaluation::record_routing_outcome`] refuses to write anything for a session with no
-/// prior routed destination, and only `main.rs::launch_session` (the CLI
-/// `glasshouse launch` path) ever calls [`crate::evaluation::record_routed_session`] — the
-/// door's own `Request::SpawnSession`/`Request::SendMessage`, which is what
-/// actually calls `deliver_memory`, never routes a session at all. So the two
-/// producers could never meet on one session (refusal register, *"Phase 51's
-/// memory proxy — 1821 and 1831"*).
-///
-/// The queries below join instead on [`EvaluationKind::TurnOutcomeObserved`]
-/// — a row `record_turn_outcome` writes for **every** session that reaches
-/// the hook's `TurnEnded` arm, routed or not. A door-spawned session's turn
-/// end now lands a row on the same session id `deliver_memory` already
-/// attached to its retrieval, so the join has a real producer on both sides
-/// that actually meet. [`EvaluationKind::RoutingOutcomeObserved`] is
-/// unchanged and still feeds the routing readers below; this join no longer
-/// uses it.
-///
-/// Of the four negative signals the design names — failover, retry,
-/// override, early abandonment — only **override**
-/// ([`EvaluationKind::RoutingOverrideDecided`], `subject = "overridden"`)
-/// has a row shape this ledger can join on a session id at all, and that row
-/// is written only for a routed (launched) session, so it never suppresses a
-/// door-spawned session's proxy hit — there being no override row to find is
-/// the correct answer for a session an override could never have applied to.
-/// [`EvaluationKind::FailoverPrevented`] carries no `session_id` by its own
-/// design (see that variant's doc comment), no evaluation kind here
-/// observes a "retry", and [`crate::events::TurnOutcome`] has exactly two
-/// values — `Completed` and `Failed` — so "early abandonment" is not a
-/// state this ledger can tell apart from ordinary silence. Those three are
-/// therefore omitted from the join by name, not invented.
+/// History: design-decisions.md, "Trims: the remaining module docs, second
+/// packet", evaluation/readers.rs `impl EvaluationObservations` (memory readers).
 impl EvaluationObservations {
     /// **Map line 1821**: *"Measure how often retrieved memory is actually
     /// useful to the receiving agent."*
@@ -817,21 +785,17 @@ impl EvaluationObservations {
     /// and **map line 1854**'s sparse half with
     /// [`EvaluationKind::RoutingEvidenceObserved`].
     ///
-    /// # The window applies to every row counted
-    ///
-    /// Both the decision and the turn verdicts must fall inside `[from, to]`.
-    /// The alternative — decisions in the window, outcomes whenever — makes
-    /// the number depend on when it was asked, which is exactly the property
-    /// a rate is supposed not to have. A session routed at the very end of
-    /// the window therefore appears with no outcome, and appears in
+    /// Both the decision and the turn verdict must fall inside `[from, to]` —
+    /// counting outcomes whenever would make the number depend on when it
+    /// was asked, which a rate must not do — so a session routed at the very
+    /// end of the window appears in
     /// [`RouteOutcomeCounts::sessions_without_outcome`] rather than nowhere.
-    ///
-    /// # The latest decision per session wins
-    ///
     /// `MAX(seq)` with a bare `subject` beside it is SQLite's documented
-    /// behaviour — the bare column comes from the row the aggregate selected
-    /// — and it is what makes a session that was routed twice count once,
-    /// under the class it was last routed to.
+    /// behaviour, which makes a session routed twice count once, under the
+    /// class it was last routed to.
+    ///
+    /// History: design-decisions.md, "Trims: the remaining module docs,
+    /// second packet", `route_outcomes_by`.
     pub fn route_outcomes_by(
         &self,
         decision: EvaluationKind,
@@ -1023,31 +987,15 @@ impl EvaluationObservations {
     /// earlier evidence *of that session's own pairing class* this project
     /// already held when it was routed.
     ///
-    /// # `k` counts a class's own history, never the window
-    ///
-    /// A session's `k` is the number of its pairing class's earlier sessions
-    /// with an outcome, ordered by when each was routed — never this
-    /// session's position in `[from, to]` as a whole.
-    /// `routing::session::PAIRING_PRIOR` is a per-destination decay, and a
+    /// `k` counts a class's own earlier-sessions history, ordered by when
+    /// each was routed, never this session's position in `[from, to]` — a
     /// bucket keyed on anything else would answer a different question than
-    /// the one line 1846 asks.
+    /// line 1846 asks. `k = 0` is scored as a wrong local prediction rather
+    /// than skipped: an empty bucket has nothing to "agree" with itself
+    /// about, so excluding it would be dishonest, not neutral.
     ///
-    /// # `k = 0` is scored as wrong, never skipped
-    ///
-    /// A session with no earlier same-class evidence has nothing for a local
-    /// success rate to be computed from. Excluding it from the count would
-    /// let an empty bucket claim it "agrees" with itself; scoring it as a
-    /// wrong local prediction is the honest reading, and the one the
-    /// packet's own contract requires.
-    ///
-    /// # Pure SQL, plus a small in-memory ordering pass
-    ///
-    /// The rows this needs — a session's decision timestamp, its pairing
-    /// class, its rated or proxied outcome — are one query, the same join
-    /// shape [`Self::route_outcomes_by_pairing_class`] already runs.
-    /// Ordering them per class and walking each class's history is
-    /// arithmetic no `GROUP BY` expresses, so it happens here instead of in
-    /// a second query.
+    /// History: design-decisions.md, "Trims: the remaining module docs,
+    /// second packet", `pairing_prior_crossover`.
     pub fn pairing_prior_crossover(
         &self,
         from: i64,

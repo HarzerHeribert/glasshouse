@@ -1,71 +1,23 @@
 //! Where a provider credential comes from, and the only shape its value is
-//! ever allowed to take (Phase 9E).
+//! ever allowed to take (Phase 9E). Two types, deliberately not one: a
+//! [`SecretRef`] **references** a source,
+//! so config and diagnostics may hold one freely; a [`Secret`] is a
+//! **value**, existing only between [`SecretStore::resolve`] and the child
+//! process that needed it, with no `Display`/`Deref`/`Serialize` and a
+//! [`Debug`](std::fmt::Debug) that prints [`REDACTED`] — not even a length,
+//! which would narrow a key space. The only way out is [`Secret::expose`].
+//! `resolve` reads the source when called, not when built, so a stored
+//! `SecretRef` always reflects the environment now.
 //!
-//! # The boundary is structural, not a habit
-//!
-//! Two types carry the whole rule, and they are deliberately not the same
-//! type:
-//!
-//! - A [`SecretRef`] is a **reference**. It names a source and nothing else,
-//!   so configuration, session records, doctor output and diagnostics may
-//!   hold one freely: holding it reveals nothing. This is the same move
-//!   [`crate::provider::Provider::credential_env`] already makes with bare
-//!   variable names, given a type so callers stop passing strings around and
-//!   guessing what they mean.
-//! - A [`Secret`] is a **value**, and it exists only between the
-//!   [`SecretStore::resolve`] call that produced it and the child process
-//!   that needed it.
-//!
-//! A [`Secret`] has no `Display`, no `Deref`, no `AsRef<str>`, no
-//! `Serialize`, and a manual [`Debug`](std::fmt::Debug) that prints
-//! [`REDACTED`] rather than any part of the value — not a prefix, not a
-//! suffix, and **not a length**, because a length narrows a key space and is
-//! therefore a real leak rather than a cosmetic one. The only way out is
-//! [`Secret::expose`], whose name is the point: it should be conspicuous at
-//! every call site, and there should be very few call sites.
-//!
-//! # Resolution happens at the moment of use
-//!
-//! [`SecretStore::resolve`] reads the source when it is called, not when the
-//! reference was built. A [`SecretRef`] stored in configuration months ago
-//! therefore reflects whatever the environment holds now, and nothing has to
-//! keep a value alive in between to make that true.
-//!
-//! # What this module deliberately does not do
-//!
-//! - **It writes nothing to disk and reads no file.** A module that never
-//!   opens a file cannot leak a credential into one, which is a stronger
-//!   guarantee than enumerating the files it must avoid — the same argument
-//!   `harness::resolving_a_launch_profile_touches_no_files` makes for
-//!   [`mod@crate::profile`].
-//! - **It reaches a launch path through exactly one call site.**
-//!   [`crate::profile::resolve`] is the only thing in Glasshouse that calls
-//!   [`SecretStore::resolve`] for a launch: it mints one [`Secret`], moves it
-//!   into the launch overlay's environment for one child process, and drops
-//!   it. Nothing here reaches back into [`mod@crate::profile`],
-//!   [`crate::launch::HarnessLaunch`] or [`mod@crate::config`] — the
-//!   dependency points one way, and a harness adapter is handed variable
-//!   *names* rather than a [`Secret`], so it has nothing to leak.
-//! - **It ships the native OS-backed stores it can prove, and no others.**
-//!   [`SecretStore`] is the seam they are added at, one at a time, each with
-//!   its own evidence. The macOS Keychain and Windows Credential Manager are
-//!   here, in [`mod@native`]; a Secret Service-compatible keyring is not,
-//!   because `keyring` 3.6's backend for it waits on an unlock prompt with
-//!   no way to refuse one, so a locked collection would hang a launch rather
-//!   than fall back — see that module's "Which platforms, and why not the
-//!   third". On a platform with no backend the dependency is not linked at
-//!   all, and [`native::PreferNativeSecretStore`] says out loud in
-//!   [`SecretStore::describe`] which source is actually answering rather
-//!   than degrading to the environment in silence.
-//!
-//! # `redact` is belt and braces, not the boundary
-//!
-//! The boundary is that a value is never held anywhere it could be printed.
-//! [`redact`] exists for output Glasshouse does **not** fully control — a
-//! harness's own stderr quoted into a diagnostic, for instance — where the
-//! text has already been produced by something that never had this rule. It
-//! is a second line of defence over foreign text, never a licence to hand a
-//! credential to a formatter and clean up afterwards.
+//! This module writes and reads no file, reaches a launch through exactly
+//! one call site ([`crate::profile::resolve`], which mints, moves and drops
+//! one [`Secret`]; a harness adapter gets variable *names*, never a
+//! `Secret`), and ships only the native OS-backed stores it can prove
+//! ([`mod@native`]: Keychain, Credential Manager — no Secret Service
+//! keyring, which can hang a launch on an unlock prompt). [`redact`] is
+//! belt and braces for output not fully controlled, never a licence to
+//! format a credential and clean up after. History: design-decisions.md,
+//! "Trims: the remaining module docs, second packet", secret/mod.rs module doc.
 
 use std::fmt;
 

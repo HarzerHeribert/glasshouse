@@ -1,28 +1,19 @@
 //! Cross-platform harness executable resolution.
 //!
-//! Finding "the `claude` executable" is not just a `PATH` lookup:
+//! Finding "the `claude` executable" is not just a `PATH` lookup: on Windows,
+//! many npm-installed CLIs are `.cmd`/`.bat` shim scripts that
+//! `CreateProcess` cannot launch directly, so the caller must go through the
+//! command interpreter instead of spawning the script path; under WSL,
+//! `PATH` usually contains Windows interop entries (`/mnt/c/...`) whose
+//! executables would run in the Windows process namespace and silently
+//! break Glasshouse's project isolation, so resolution must filter those out
+//! of the *usable* result while still reporting them for `glasshouse
+//! doctor`. This module keeps the PATH search itself on the well-tested
+//! [`which`] crate, and layers the WSL-interop filter and the `.cmd`/`.bat`
+//! launch-kind classification on top.
 //!
-//! - On Windows, a great many CLIs installed through npm are `.cmd` (or
-//!   `.bat`) shim scripts. `CreateProcess` cannot launch those directly —
-//!   Windows itself only knows how to exec `.exe`/`.com` binaries — so the
-//!   caller needs to know it must go through the command interpreter
-//!   (`cmd.exe /C <script> <args...>`) instead of spawning the script path.
-//! - Under WSL, `PATH` usually contains Windows interop entries
-//!   (`/mnt/c/...`) alongside the real Linux ones, because Windows appends
-//!   its own `PATH` to the WSL one by default. An executable found there
-//!   would run in the *Windows* process namespace: a different filesystem, a
-//!   different working-directory model, a different process tree. Spawning
-//!   it as if it were a normal Linux child process would silently break
-//!   Glasshouse's project isolation, because the Linux project-root path set
-//!   as the working directory means nothing to a Windows process. Resolution
-//!   under WSL must filter those out of the *usable* result, but still
-//!   report them, so `glasshouse doctor` can tell the user what happened
-//!   instead of just saying "not found".
-//!
-//! This module keeps the PATH search itself on the well-tested [`which`]
-//! crate (it already implements Windows `PATHEXT` correctly), and layers the
-//! WSL-interop filter and the `.cmd`/`.bat` launch-kind classification on
-//! top.
+//! History: design-decisions.md, "Trims: the remaining module docs, second
+//! packet", platform/exec/mod.rs module doc.
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Component, Path, PathBuf};
@@ -60,42 +51,23 @@ impl ResolvedExecutable {
     /// Translate a logical `(program, args)` invocation into the concrete
     /// `(program, args)` the OS can actually spawn.
     ///
-    /// For [`LaunchKind::Direct`] this is the resolved path and the given
-    /// arguments, unchanged: no shell is involved in spawning a `Direct`
-    /// executable, so there is nothing to validate. For
-    /// [`LaunchKind::WindowsScript`] the program becomes the command
-    /// interpreter (`%COMSPEC%`, falling back to `cmd.exe`) and the
-    /// arguments become `["/D", "/C", <script path>, ...args]`, which is how
-    /// `.cmd`/`.bat` files are actually launched.
+    /// For [`LaunchKind::Direct`] this is unchanged: no shell is involved.
+    /// For [`LaunchKind::WindowsScript`] the program becomes the command
+    /// interpreter and the arguments become `["/D", "/C", <script path>,
+    /// ...args]` — but `cmd.exe /C` is a shell invocation whose metacharacter
+    /// set (`&`, `%`, `^`, `|`, `<`, `>`, backtick) portable-pty's CRT-quote
+    /// escaping does not cover (the BatBadBut / CVE-2024-24576 shape), and
+    /// escaping correctly through `cmd.exe` is notoriously unreliable. So
+    /// instead of a clever escaper, every argument (and the script path
+    /// itself) is validated up front and rejected outright if it contains a
+    /// cmd.exe metacharacter — harness arguments are flags, paths, model
+    /// names and session ids, never a prompt, so this never refuses real
+    /// input. Not `#[cfg(windows)]`-gated, so this is exercised by tests on
+    /// any host; only classification into [`LaunchKind::WindowsScript`] is
+    /// platform-specific (see `classify_launch_kind`).
     ///
-    /// # Why this can fail
-    ///
-    /// `cmd.exe /C` is a shell invocation, and portable-pty's
-    /// [`CommandBuilder`](https://docs.rs/portable-pty/latest/portable_pty/struct.CommandBuilder.html)
-    /// only applies the standard CRT `ArgvQuote` quoting rules (space, tab,
-    /// newline, VT, `"`) when it builds the process command line —
-    /// `cmd.exe` does not parse with those rules. An argument like
-    /// `--session=a&calc.exe` contains no CRT-quote trigger, reaches `cmd`
-    /// verbatim, and `&` starts a second command (this is the BatBadBut /
-    /// CVE-2024-24576 shape). `%`, `^`, `|`, `<`, `>`, and backtick are
-    /// equally unhandled.
-    ///
-    /// Escaping correctly through `cmd.exe` is notoriously unreliable, and
-    /// Glasshouse does not need to try: harness arguments are flags, paths,
-    /// model names, and session ids — prompts are typed into the PTY, never
-    /// passed as argv. So instead of a clever escaper, every argument (and
-    /// the script path itself) is validated up front and rejected outright
-    /// if it contains a cmd.exe metacharacter. Once validated, no
-    /// metacharacter can trigger command-chaining, so passing the script
-    /// path and arguments as separate argv entries — letting
-    /// `CommandBuilder` do its normal CRT quoting — is safe.
-    ///
-    /// This branch is deliberately not `#[cfg(windows)]`-gated: the classic
-    /// deployment story for one of these launchers is npm-installed CLI
-    /// shims, and this logic needs to be exercised by tests on any host, not
-    /// just when actually compiled for Windows. What *is* platform-specific
-    /// is which files ever get classified as [`LaunchKind::WindowsScript`]
-    /// in the first place — see `classify_launch_kind`.
+    /// History: design-decisions.md, "Trims: the remaining module docs,
+    /// second packet", `ResolvedExecutable::spawn_command`.
     pub fn spawn_command<I, S>(&self, args: I) -> Result<(PathBuf, Vec<OsString>), LaunchError>
     where
         I: IntoIterator<Item = S>,
@@ -433,27 +405,18 @@ fn classify_launch_kind(platform: HostPlatform, path: &Path) -> LaunchKind {
 /// a WSL `PATH`.
 ///
 /// The signal is the well-known WSL drive-mount convention,
-/// `/mnt/<single-letter>/...` (e.g. `/mnt/c/Users/...`), which is where WSL
-/// exposes the Windows filesystem and where the Windows-appended `PATH`
-/// entries point. This is checked case-insensitively on the drive letter,
-/// matching how Windows drive letters work.
+/// `/mnt/<single-letter>/...`, checked case-insensitively on the drive
+/// letter. An earlier version also treated any `.exe` extension as a
+/// secondary signal outside `/mnt`; that rule was removed because it would
+/// wrongly reject a genuinely Linux-built cross-compiled `.exe` (e.g. MinGW)
+/// — real WSL-interop coverage instead comes from canonicalizing each
+/// candidate before classification (`resolve_with_interop_predicate`), which
+/// catches the more common case this check alone would miss: a
+/// Linux-looking symlink that resolves into `/mnt/<drive>`. Returns `false`
+/// outright for every platform other than [`HostPlatform::Wsl`].
 ///
-/// An earlier version of this function also treated any `.exe` extension as
-/// a secondary Windows-side signal, even outside `/mnt`. That rule was
-/// removed: `which` does not append `PATHEXT` on Linux, so it could only
-/// ever fire when the caller literally asked for a name ending in `.exe` —
-/// in which case the hit is almost always under `/mnt/<letter>` anyway and
-/// this rule alone already catches it — while it would wrongly reject a
-/// genuinely Linux-built cross-compiled `.exe` artifact (e.g. a MinGW build)
-/// sitting on `PATH`. Real WSL-interop coverage instead comes from
-/// canonicalizing each candidate before classification (see
-/// `resolve_with_interop_predicate`), which catches the much more common
-/// case this drive-mount check alone would miss: a Linux-looking symlink
-/// that actually resolves into `/mnt/<drive>`.
-///
-/// Returns `false` outright for every platform other than
-/// [`HostPlatform::Wsl`]: `/mnt/c` has no special meaning on real Linux,
-/// macOS, or native Windows itself.
+/// History: design-decisions.md, "Trims: the remaining module docs, second
+/// packet", `is_windows_interop_path`.
 pub(crate) fn is_windows_interop_path(platform: HostPlatform, path: &Path) -> bool {
     if platform != HostPlatform::Wsl {
         return false;

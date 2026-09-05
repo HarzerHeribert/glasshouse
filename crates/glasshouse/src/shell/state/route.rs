@@ -58,23 +58,19 @@ impl RouteEvidenceState {
 /// directly, the same split [`RouteEvidenceRow`] keeps from
 /// `crate::routing::evidence`.
 ///
-/// # Why the rationale is text, and must stay text
-///
 /// The decision behind one of these rows is a
 /// `crate::routing::disposable::DisposableChoice`, whose fields are private
-/// and which nothing outside its own module can construct. That is an
-/// enforced safety invariant rather than a style choice — its module header
-/// records that a choice on a metered resource must not be reproducible from
-/// a policy that withheld it — so a stored decision is deliberately **not**
-/// turned back into one. The producer renders the rationale at the moment it
-/// decides and stores the sentence; this row carries that sentence; the view
-/// draws it. Nothing anywhere reconstructs the choice.
+/// and which nothing outside its own module can construct — an enforced
+/// safety invariant (a choice on a metered resource must not be
+/// reproducible from a policy that withheld it), so a stored decision is
+/// deliberately **not** turned back into one: the producer renders the
+/// rationale once and stores the sentence, and this row carries only that.
+/// `session_id` and `rationale` are `Option` because the ledger's columns
+/// are nullable, and the view says so plainly rather than drawing an empty
+/// column that reads as a value.
 ///
-/// # Every field is what was recorded, and absent stays absent
-///
-/// `session_id` and `rationale` are `Option` because the ledger's columns are
-/// nullable and a row written by a later producer may not fill them. The view
-/// says so plainly rather than drawing an empty column that reads as a value.
+/// History: design-decisions.md, "Trims: the remaining module docs, second
+/// packet", `RouteDecisionRow`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteDecisionRow {
     /// When the decision was made, as the ledger recorded it.
@@ -113,42 +109,22 @@ impl RouteDecisionsState {
 }
 
 /// One observed free resource, with map line 1765's five concepts carried as
-/// **five separate groups of fields** — Phase 47.
+/// **five separate groups of fields** — Phase 47. Built by
+/// `shell::build_route_health_table` from
+/// `crate::provider::telemetry::GatewayHealthCache` and `GatewayQuotaCache`.
 ///
-/// Built by `shell::build_route_health_table` from
-/// `crate::provider::telemetry::GatewayHealthCache` and `GatewayQuotaCache`,
-/// the two files a gateway process writes and any later process reads back.
-/// This module holds plain data rather than importing those types directly,
-/// the same split [`RouteEvidenceRow`] keeps from `crate::routing::evidence`.
+/// Line 1765 asks for route health, availability, cadence, quota reset and
+/// failure-domain evidence *"as separate concepts"* — five different
+/// questions with five different ways of being unknown, and collapsing them
+/// loses a real distinction (a resource can be healthy yet unavailable;
+/// available now yet about to stop on cadence; a Glasshouse-imposed cooldown
+/// and a provider-stated quota reset are different clocks). Three of the
+/// five concepts come from provider-stated headers most providers do not
+/// send, so a `None` here means *"no response ever stated this"*, never a
+/// zero or a default.
 ///
-/// # Why the fields are grouped and not summarised
-///
-/// Line 1765 asks for route health, immediate availability, cadence, quota
-/// reset and failure-domain evidence *"as separate concepts"*. They are five
-/// different questions with five different answers and five different ways of
-/// being unknown, and collapsing them is not a simplification — it is a lost
-/// distinction:
-///
-/// - a resource can be **healthy** (no failures) and **unavailable** (its
-///   credential was refused);
-/// - it can be **available now** and still have a **cadence** that will stop
-///   it in one more request;
-/// - a **cooldown** Glasshouse imposed and a **quota reset** the provider
-///   stated are different clocks owned by different parties, and neither is
-///   the other's estimate;
-/// - **failure-domain evidence** is about a *pair* of resources and says
-///   nothing about either one alone.
-///
-/// `crate::provider::resources::render_health` currently prints health,
-/// availability and cadence as one `status` word on one line. That is the
-/// shape this row exists not to reproduce.
-///
-/// # "unknown" is a real answer, and it is `None`
-///
-/// Three of the five concepts come from provider-stated headers that most
-/// providers do not send. A `None` here is *"no response ever stated this"*,
-/// never a zero and never a default — the same contract
-/// `crate::provider::telemetry::RateLimitHeaders` keeps field by field.
+/// History: design-decisions.md, "Trims: the remaining module docs, second
+/// packet", `RouteHealthRow`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteHealthRow {
     /// The provider these observations belong to — also the *only* signal
