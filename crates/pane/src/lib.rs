@@ -9,6 +9,7 @@ pub mod glasshouse;
 pub mod project;
 pub mod rollout;
 pub mod ruler;
+pub mod tui;
 pub mod wire;
 
 use std::io::{BufRead, Write};
