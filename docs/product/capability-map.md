@@ -2415,3 +2415,57 @@ Orchestrator handling (Maybe H)
 ☐ Allow the orchestrator to serialize only the conflicting portion of otherwise parallel tasks.
 ☐ Keep conflict handling transparent so the user can inspect why the orchestrator changed a worker's plan.
 
+
+Phase 61 — pane: the first-party harness
+
+Recorded from the user's decision of 2026-09-05. A harness Glasshouse can ship, that
+runs without Glasshouse, whose one distinguishing decision is that a tool result
+never becomes text in the conversation: it becomes a named object in a runtime the
+model addresses from code. Built in its own lane by a team lead on
+`pane/integration`, merged into `main` by the primary once per sub-phase. Design of
+record: the session artifact *The Glasshouse Native Harness*.
+
+61A — The ruler
+
+☐ Run one fixed task set through Claude Code and through a candidate harness and report tokens per completed task, wall-clock and outcome side by side.
+☐ Score per workload tier so a win on one tier is visible even when the aggregate is not.
+☐ Do not present a harness comparison that measures tokens per turn instead of tokens per completed task.
+
+61B — The crate and the adapter
+
+☐ Add `crates/pane` as a workspace member with its own binary and library; the default member set stays `glasshouse` alone so a bare `cargo build` at the root is unchanged.
+☐ Exclude `pane` from every `--workspace` invocation in `ci-local.sh` and the GitHub matrix, and give it its own job.
+☐ Add `Vendor::Glasshouse` and a `pane` adapter whose every declaration is `Verified` against the built binary.
+☐ Launch `pane` from Glasshouse as a session over a PTY, visible in the session list and typeable into.
+☐ Keep `pane` free of any compile-time dependency on the `glasshouse` crate; integration is by protocol only.
+
+61C — The loop and the three seams
+
+☐ Run a task in turns against the Anthropic Messages protocol, standalone, with resume from a rollout file.
+☐ Route through Glasshouse's gateway when `ANTHROPIC_BASE_URL` names it; behave identically otherwise except for the hop.
+☐ Read memory and checkpoints from Glasshouse's MCP surface when reachable, and from a local store when not.
+☐ Emit the harness hook protocol's events so Glasshouse's memory extraction, context firewall and event bus see `pane` unchanged.
+☐ Load `CLAUDE.md` and `AGENTS.md`, `.claude/settings.json` hooks and permissions, `.claude/commands`, the skills directories and `.mcp.json` from the project with nothing edited.
+☐ Show the two-region TUI — conversation column and telemetry sidebar — with the sidebar collapsing honestly when Glasshouse is absent.
+☐ Offer slash commands: `/model`, `/entitlements`, `/handles`, `/supervisor`, `/rollback`, `/budget`, `/memory`, and every project command and skill by name.
+☐ Show which entitlement served each request and what it cost, from the gateway's response and routing ledger.
+
+61D — The sandbox
+
+☐ Run every tool the model can reach under an OS sandbox — seatbelt, bubblewrap or landlock, Windows job objects — whose grants are derived from `.claude/settings.json` permissions.
+☐ Pass Phase 46's contamination tests against the sandboxed path on macOS, Linux and Windows.
+☐ Do not execute model-authored code before this sub-phase's lines are closed.
+
+61E — Code over live objects
+
+☐ Keep tool results as named objects in a runtime; the model receives a bounded preview and the name, never the payload.
+☐ Let the model act by returning a TypeScript program that calls tools by name on those objects.
+☐ Fire `PreToolUse` and `PostToolUse` per call inside a program, carrying the preview as the observed output.
+☐ Show a measured win on at least one workload tier by 61A's ruler, or record why not.
+☐ Do not add a second serialization of any result into the conversation.
+
+61F — The supervisor
+
+☐ Watch a compressed trajectory every N turns with a cheaper model and emit one decision: intervene or not.
+☐ Catch a planted three-turn loop within two turns without a human.
+☐ Show every nudge in the trajectory and in the sidebar.

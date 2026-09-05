@@ -4149,3 +4149,76 @@ exists, and relaxing it was never a way to close either line. And it does not
 make the declaration sticky: a declaration that outlives the task it described
 would re-create the inversion by a slower route, so it is scoped and expiring,
 like a claim.
+
+## pane, the first-party harness — the user, 2026-09-05, recorded as Phase 61
+
+Approved as a first-party harness built **in its own lane**, beside the final
+Glasshouse stretch rather than after it. Design of record: the session artifact
+*The Glasshouse Native Harness*. The map block is Phase 61, appended at the end of
+`capability-map.md` for the usual line-number reason; the hand-off that produced it
+is `.agent-runtime/pane/phase-61-draft.md`.
+
+**The one design decision that makes it a different harness, and the only one worth
+defending.** A tool result never becomes text in the conversation: it becomes a named
+object in a runtime the model addresses from code. The model receives a bounded
+preview and the handle; the object stays where it is. A 48k-token grep costs the
+model a preview line to know about and nothing to compute over, so tokens per turn
+stay roughly flat as a task grows. Everything else about the harness may be ordinary.
+
+**This is not "a better harness", and the claim must not drift into one.** Claude Code
+and Codex are better resourced and tuned against their own models; a head-on
+comparison is a bet lost slowly. `pane` arrives as *one row in the capability
+registry* — a destination with an unusual cost profile the router picks when the
+workload suits it and ignores when it does not. A router with two destinations that
+behave identically has learned nothing; two that fail differently is evidence. The
+success criterion is correspondingly narrow: **on at least one workload tier, measured
+over completed tasks rather than turns, native beats the adapter path on tokens or
+wall-clock without losing on outcome.** One tier is enough, and 61A exists to be able
+to say so honestly.
+
+**Protocol, not linkage — and that is what makes standalone free.** Neither side
+depends on the other at compile time. Glasshouse reaches `pane` exactly as it reaches
+Claude Code: a declared executable, declared args, a PTY. `pane` reaches Glasshouse as
+any harness does: `ANTHROPIC_BASE_URL` at the gateway, an MCP endpoint, a hook command
+— each optional, each degrading to a local default when nothing answers. "Standalone"
+is just the mode where nobody answers on the socket. Every Glasshouse-provided
+capability degrades to a **local** one, never to an error, and the harness never
+reimplements a Glasshouse subsystem: a local memory that is a table of notes is fine,
+a local memory with authority classes and decay is a second Phase 21.
+
+**Why it is a second crate, and why that is one line of manifest.** The workspace has
+no async runtime on purpose — `ureq` blocking with rustls, gzip dropped, so the
+gateway can stream a response through byte-identically. Codex, whose sandbox and
+code-mode crates are the borrow, is tokio top to bottom with an embedded V8. Inside
+`crates/glasshouse` the second constraint would eat the first. As its own member both
+hold: `cargo build -p glasshouse` stays async-free, and V8 compiles in its own unit.
+**The `--exclude pane` on every `--workspace` invocation, and `default-members`, are
+part of the decision, not housekeeping** — without them all twelve GitHub cells and
+the local gate would compile V8 on every run.
+
+**Build order, each phase shipping something usable on its own:** 61A the ruler (the
+evaluation hooks, because the interesting claim is exactly the kind that feels true
+and often isn't) · 61B the crate and the adapter · 61C the loop and the three seams ·
+**61D the sandbox, before any model-authored code executes — this ordering is not
+negotiable** · 61E code over live objects · 61F the supervisor.
+
+**Attribution is part of the borrow.** Codex is Apache-2.0 into MIT-OR-Apache-2.0,
+which works only in the Apache direction: keep the license headers, keep NOTICE, state
+the provenance, and **vendor** the crates taken rather than depending on
+`openai/codex` as a git dependency.
+
+**Four questions the user still owes an answer to, and 61B must not be taken as
+having settled them:** whether the README's single-binary promise scopes to
+`glasshouse` alone or the harness embeds its host; TypeScript-or-nothing, since taking
+Codex's V8 runtime is a permanent interface decision; whether
+`translate/canonical.rs` round-trips reasoning blocks byte-identically, which must be
+tested before 61C and not after; and the name, with the `Vendor` doc comment owing a
+sentence on the case where the publisher is us.
+
+**Its own lane in the SDLC.** A team lead owns `crates/pane/**` on `pane/integration`
+and pays review out of its own context; the primary owns `main`, the records, and
+everything outside `crates/pane/`. Contention lasts exactly one commit — the four
+Glasshouse-side files (workspace manifest, `harness/mod.rs`, `ci-local.sh`, the GitHub
+matrix) all change once, in the kickoff, and never again. Merges are per sub-phase,
+six across the whole build. Tiers: 61A Amber · 61B Green · 61C Amber · **61D Red**
+(Opus plus an independent verifier) · **61E Red** · 61F Amber.
