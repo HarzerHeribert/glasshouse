@@ -1,65 +1,21 @@
-//! Where the repository is standing, read cheaply.
+//! Where the repository is standing, read cheaply — without a `git`
+//! subprocess: a project need not be a Git repository at all, and
+//! Glasshouse must still be able to take a checkpoint, so this opens two or
+//! three small files under `.git` and parses them directly.
 //!
-//! The map asks a checkpoint to *include the current Git branch and commit
-//! when available*, and "when available" is doing real work: a project need
-//! not be a Git repository at all, and Glasshouse must still be able to take
-//! a checkpoint.
+//! [`last_change_commit`], [`is_ancestor`] and [`changed_paths`] are the
+//! deliberate exceptions: they do run `git`, but never on the checkpoint
+//! path, and each clears `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE` and
+//! `GIT_COMMON_DIR` from the child so an inherited value cannot silently
+//! point them at another repository. All three answer `None` — rendered by
+//! their consumers as *unknown* — rather than assume a clean tree or fresh
+//! memory when `git` is absent or the project is not a repository.
 //!
-//! # No subprocess
-//!
-//! This opens two or three small files and parses them. It does not run
-//! `git`, and that is deliberate rather than incidental:
-//!
-//! - a checkpoint can be taken at a task boundary, on a thread that is also
-//!   serving a terminal, and spawning a process there is a latency nobody
-//!   asked for;
-//! - `git` need not be installed for a `.git` directory to exist and be
-//!   readable — a repository cloned onto a machine whose Git was uninstalled
-//!   is still a repository;
-//! - a subprocess inherits an environment, and `GIT_DIR` in that environment
-//!   would silently point this at another repository.
-//!
-//! # The deliberate exceptions, and what they are scoped to
-//!
-//! [`last_change_commit`], [`is_ancestor`] and [`changed_paths`] **do** run
-//! `git`, and the objections above are answered rather than waived. None is
-//! on the checkpoint path: nothing takes a checkpoint through them, and no
-//! thread serving a terminal calls them. `last_change_commit` and
-//! `is_ancestor`'s caller is memory retrieval (`crate::memory::inject`'s file
-//! section and `glasshouse memory search --path`), which is already several
-//! database reads deep and is bounded at one `git log` per path and one
-//! `merge-base` per memory. `changed_paths`'s caller is the guardrail door's
-//! transition handler, bounded to one call per rollback-or-refutation
-//! transition — an assumption ledger write, not a terminal-serving path
-//! either. A machine with no `git`, or a project that is no repository,
-//! makes every one of the three answer `None`, which their consumers render
-//! as *unknown* rather than assuming a clean tree or fresh memory. And the
-//! environment objection is met head-on: all three clear `GIT_DIR`,
-//! `GIT_WORK_TREE`, `GIT_INDEX_FILE` and `GIT_COMMON_DIR` from the child
-//! rather than trusting the caller's, so an inherited `GIT_DIR` cannot
-//! silently point them at another repository.
-//!
-//! `changed_paths` does not reuse [`WorkingTreeStatus::detect`] — the index
-//! reader already on this path — because that reader is deliberately bounded
-//! to `MAX_CHANGED_FILES` tracked entries and never reports an untracked
-//! file at all; a preserve set that silently omitted a new, unclaimed file
-//! would be the one wrong direction line 1044 forbids.
-//!
-//! There is no file-reading version of *"which commit last changed this
-//! path"*: answering it means walking the commit graph and diffing trees out
-//! of packfiles, which is a decompressor and a delta resolver, not two small
-//! files. Map line 1142's freshness is worth one bounded subprocess and is
-//! not worth that.
-//!
-//! # Worktrees, which is the case that actually bites
-//!
-//! In a linked worktree `.git` is a **file** holding `gitdir: <path>`, that
-//! directory has its own `HEAD` and its own `commondir`, and the refs live in
-//! the *common* directory rather than beside the HEAD. Glasshouse's own
-//! development happens in linked worktrees, so a reader that only handled the
-//! `.git`-is-a-directory case would have reported nothing in exactly the
-//! situation this project runs in every day. Both shapes are handled, and
-//! both are tested against real fixtures.
+//! A linked worktree's `.git` is a file holding `gitdir: <path>`, with its
+//! own `HEAD` and refs living in a separate common directory — Glasshouse's
+//! own development runs this way, so both shapes are handled and tested.
+//
+// History: design-decisions.md, "Trims: the remaining module docs", checkpoint/git.rs module doc.
 
 use std::path::{Path, PathBuf};
 
@@ -410,28 +366,13 @@ fn is_object_name(value: &str) -> bool {
 /// Run one `git` subcommand in `root` and return its trimmed stdout, or
 /// `None`.
 ///
-/// The single place this module spawns a process, so the environment scrub
-/// the module documentation promises is made once rather than remembered
-/// twice.
-///
-/// - **`current_dir(root)` and no `-C`, no `--git-dir`.** The repository is
-///   named by the working directory and by nothing a caller can smuggle in.
-/// - **Four variables removed.** `GIT_DIR`, `GIT_WORK_TREE`,
-///   `GIT_COMMON_DIR` and `GIT_INDEX_FILE` each override the working
-///   directory, and Glasshouse's own development runs inside linked
-///   worktrees where at least one of them is routinely set. Inheriting them
-///   would answer about whichever repository the parent happened to be
-///   pointed at — silently, and with a real commit.
-/// - **No shell, ever.** `args` are argv elements, so a path is a literal
-///   however it is spelled; the caller puts a `--` in the list before any
-///   path so a file named `-n` cannot become a flag.
-/// - **`stdin(null)`.** `git` must never block waiting for input on a path
-///   whose whole purpose is to answer a label quickly.
-///
-/// `None` for every way of not getting an answer — `git` absent, not a
-/// repository, a nonzero exit, output that is not UTF-8, an empty answer —
-/// because the one consumer renders all of them as *unknown* and a caller
-/// that could tell them apart would still do nothing different.
+/// The single place this module spawns a process. `current_dir(root)` with
+/// no `-C`/`--git-dir`; the four worktree-pointing variables removed so an
+/// inherited one cannot silently point this at another repository; no
+/// shell, so a path is always a literal argv element; `stdin(null)` so a
+/// call can never block waiting on input. `None` for every way of not
+/// getting an answer, since the one consumer treats them all as *unknown*.
+// History: design-decisions.md, "Trims: the remaining module docs", checkpoint/git.rs `git_output`.
 fn git_output(root: &Path, args: &[&str]) -> Option<String> {
     let output = std::process::Command::new("git")
         .args(args)
@@ -611,27 +552,17 @@ pub fn is_ancestor(root: &Path, ancestor: &str, descendant: &str) -> Option<bool
 
 /// Every repo-relative, `/`-separated path the working tree reports as
 /// changed against the index — tracked or not — for the guardrail door's
-/// preserve set (`crate::guardrails::preserve_set`, capability map line
-/// 1044; see `docs/product/design-decisions.md`, *Rollback preserves what is
-/// not yours*).
+/// preserve set (capability map line 1044).
 ///
-/// `git status --porcelain=v1 -z --untracked-files=all`: `-z` gives NUL-
-/// terminated, unquoted records, which is the only spelling that survives a
-/// path with a space or a non-ASCII byte in it undamaged; `--untracked-files
-/// =all` is what makes a brand-new file the transitioning session never
-/// staged show up at all, which the index-only [`WorkingTreeStatus`] cannot
-/// do. A rename or copy prints two `-z` records — the old path with the
-/// status, then the bare new path — and this reports the new path, which is
-/// what the working tree currently holds at.
-///
-/// **Not through `git_output`**: that helper answers `None` for empty
-/// stdout, which is exactly what a clean tree prints, and collapsing *clean*
-/// into *unknown* is the one confusion line 1044 forbids — a caller reading
-/// `None` as "nothing to preserve" on an unreadable tree would preserve
-/// nothing when it should preserve everything. So this reads the process
-/// output itself: `None` for every way of not getting an answer (`git`
-/// absent, not a repository, a nonzero exit, output that is not UTF-8), and
-/// `Some(vec![])` only for a clean tree.
+/// Uses `git status --porcelain=v1 -z --untracked-files=all` directly
+/// rather than [`WorkingTreeStatus`] or `git_output`: `-z` survives paths
+/// with spaces or non-ASCII bytes, `--untracked-files=all` reports files the
+/// index-only reader cannot see, and `git_output`'s `None`-on-empty-stdout
+/// would collapse a clean tree into *unknown* — exactly the confusion line
+/// 1044 forbids, since a caller reading `None` as "nothing to preserve"
+/// would preserve nothing when it should preserve everything.
+/// `Some(vec![])` only for a genuinely clean tree.
+// History: design-decisions.md, "Trims: the remaining module docs", checkpoint/git.rs `changed_paths`.
 pub fn changed_paths(root: &Path) -> Option<Vec<String>> {
     let output = std::process::Command::new("git")
         .args([

@@ -11835,3 +11835,1106 @@ with it.
     /// Nothing here is a rule change — the rule that a pool with no requests
     /// left cannot serve is [`Allowance::is_exhausted`]'s, unchanged, and
     /// this only feeds it a truthful number.
+
+## Trims: commands module docs — history moved out of comments by `GH-TRIM-COMMANDS-DOCS`, 2026-09-05
+
+### `commands/context_firewall.rs` — `record_file_touches`
+
+    /// Map line 1139's producer: one `file_touched` lifecycle event per distinct
+    /// path a **writing** tool named, for the Glasshouse session this hook was
+    /// registered for.
+    ///
+    /// # Why the hook's response can never depend on this
+    ///
+    /// It returns `()`. There is no error for the caller to see, no value for it
+    /// to branch on, and every failure below ends in a `tracing::warn!` and a
+    /// `return`. That is not caution about a rare case — the whole tool call is
+    /// downstream of this function, and a bookkeeping write that could fail a
+    /// user's `Edit` would be a far worse defect than never learning which file
+    /// it touched. `the_hook_response_is_identical_whether_or_not_recording_works`
+    /// is the proof rather than this paragraph.
+    ///
+    /// # The four gates a path passes, in order
+    ///
+    /// 1. **A session**, or nothing is recorded. See
+    ///    `cli::ContextFirewallCommand::Hook`'s `--session` for why absent is a
+    ///    supported state and why the payload's own `session_id` is not a
+    ///    substitute.
+    /// 2. **A writing tool** — `firewall::eligibility::is_writing_tool`, which is
+    ///    the block list read the other way round. `Read`, `Grep` and `Glob`
+    ///    carry paths and are deliberately not recorded: *touched* means the
+    ///    session changed the file.
+    /// 3. **Under the project root.** An absolute path inside the root is made
+    ///    relative to it; a path outside it is **dropped and never stored**, which
+    ///    is the isolation invariant rather than a tidiness rule — a memory must
+    ///    not be able to name a file in another project, or in the user's home.
+    /// 4. **Normalisable**, through the one function `memory_files.path` already
+    ///    goes through, so the two producers spell a path identically or the
+    ///    association never matches.
+    ///
+    /// Distinct paths only: `MultiEdit` names the same file once per edit, and
+    /// sixty rows saying one file was edited is sixty times the storage for the
+    /// same fact.
+
+### `commands/context_firewall.rs` — `project_relative_path`
+
+    /// `raw` as a path under `root`, in `memory_files.path`'s spelling, or
+    /// `None`.
+    ///
+    /// Claude Code hands the hook an **absolute** path, and on Windows it hands
+    /// one with `\` separators. So: fold the separators first — before any
+    /// prefix test, because `C:\proj\src\a.rs` does not start with
+    /// `C:/proj/src` until it has been folded — then strip the root, then put
+    /// what is left through
+    /// [`glasshouse::memory::store::normalize_observed_path`], which is the
+    /// function the other writer of this column uses and the only definition of
+    /// the spelling.
+    ///
+    /// Both sides are reduced to one spelling before any prefix test, and the
+    /// separator fold is only half of that: on Windows the root is
+    /// `fs::canonicalize`'s output and therefore **verbatim** (`\\?\C:\proj`),
+    /// while a tool input or a shell argument is not, so the two would fail to
+    /// match for the same reason `\` and `/` did. See
+    /// [`folded_ordinary_spelling`].
+    ///
+    /// `None` for a path outside the root, and that is the isolation invariant:
+    /// nothing outside the project is stored, not even to be filtered out later.
+    /// A relative path is accepted as already being relative to the root, which
+    /// is what a relative path in a tool input means.
+    ///
+    /// `pub(crate)` for `commands::sessions::claimed_path`, which needs the same
+    /// answer for the same reason: `file_claims.path` and `memory_files.path`
+    /// hold the same spelling, and a second implementation of "inside this
+    /// project, spelled this way" is how the two would come to disagree.
+
+### `commands/gateway.rs` — `gateway_pairs_report`
+
+Orphaned from `entitlements_report`'s doc comment (that function moved to
+`commands/entitlements.rs`, leaving this text stranded above the next
+function in the file); moved here rather than kept, since it does not
+describe `gateway_pairs_report`.
+
+    /// `glasshouse entitlements` — map line 1972's inspectable view of the pool.
+    ///
+    /// A pure function returning a `String`, like [`status_report`] and
+    /// `resources_report`: what it prints is testable without a terminal, which
+    /// is the only reason a view of this kind can be asserted at all.
+    ///
+    /// # Every configured entitlement, including the ones nothing measured
+    ///
+    /// The rows come from the **configuration**, not from the telemetry and not
+    /// from the sessions table, so an account no reading describes still gets a
+    /// row and reads `unknown` on the facets it has no reading for. An
+    /// entitlement missing from the view because nothing had measured it is the
+    /// exact failure 56A step 2's Cluster E discipline exists to prevent: unknown
+    /// is a rendered word, never full, never empty, never a number.
+    ///
+    /// # Why `served` is *not* one of those unknowns
+    ///
+    /// The four telemetry facets are `unknown` when nobody looked. `served` is
+    /// different in kind: this function **does** look, at every session row this
+    /// project recorded, and an account with no rows has a *measured* zero. That
+    /// is `SessionRecord::observed_compactions`' distinction, and rendering
+    /// "nothing recorded" where the sessions table is empty rather than `unknown`
+    /// is what keeps the two apart.
+    ///
+    /// # Names, never credentials
+    ///
+    /// An entitlement is named by its `[entitlements.<name>]` key and described
+    /// by its kind and vendor. Its `credential` is a `config::SecretRef` and this
+    /// function never touches it — nothing here opens a secret store, and there
+    /// is no branch on which this view could print a value.
+
+### `commands/launch.rs` — `routed_cost_class`
+
+    /// The cost class of the destination a launch actually routed to — map line
+    /// 1835's *"low-cost or free route"* versus *"the premium route it
+    /// displaced"*, as a fact rather than a guess.
+    ///
+    /// # Why this is not `destination.backend().cost()`
+    ///
+    /// [`destination_backend`] hardcodes `Cost::Metered` for every destination it
+    /// builds, and says so: the session router reads a backend's provider,
+    /// credential, model and tool semantics and never its cost, so the field is
+    /// the fail-closed constant rather than a measurement. Recording *that* as a
+    /// route's class would give line 1835 one bucket for ever and report a
+    /// tautology.
+    ///
+    /// So the class is read where the fact actually lives:
+    /// [`ProviderConfig::cost_of`], the same one lookup `disposable_candidates`
+    /// and `gateway_upstream` use, applied to the destination's own provider and
+    /// model with the project layer winning over the user layer. `glasshouse::
+    /// profile` and `glasshouse::routing` may not import `glasshouse::config`, so
+    /// main.rs is where this can be answered at all.
+    ///
+    /// # `None` is the third answer, and it is honest
+    ///
+    /// A destination on a harness's own sign-in names no configured provider, and
+    /// a gateway-backed one assigns its model when the session starts. Neither
+    /// has a marked cost, and Glasshouse does not know what a subscription costs
+    /// at the margin. That is recorded as
+    /// [`glasshouse::evaluation::UNKNOWN_COST_CLASS`] and counted in its own
+    /// bucket — never folded into `metered`, which would be a number nobody
+    /// measured.
+
+### `commands/launch.rs` — `routing_evidence_for`
+
+    /// Whether the pool this launch handed the router held any observed health
+    /// reading for the destination it chose — map line 1854's *sparse* half.
+    ///
+    /// The key is built exactly as [`observed_provider_health`] builds it, from
+    /// the destination's own credential and model label, so a hit here means the
+    /// same resource and not a resource that merely renders the same.
+    ///
+    /// **Two of line 1854's three words now, not one.** `routing::evidence`'s
+    /// `Confidence` belongs to the gateway's aggregate ledger, which
+    /// `SessionRouter` never reads, and a
+    /// [`glasshouse::routing::free::FreePool`] health entry carries no
+    /// observation time — but the cache the pool was filled from does, per
+    /// provider file, and [`ObservedHealth`] carries it here. So *sparse* is
+    /// answered by whether the pool held this destination and *stale* by how old
+    /// the file that supplied it was, against
+    /// [`glasshouse::evaluation::HEALTH_EVIDENCE_HORIZON_SECONDS`].
+    ///
+    /// *Incorrectly segmented*, line 1854's third, still has no producer
+    /// anywhere on this path and is not invented: nothing in this build compares
+    /// a health reading's segmentation against the resource it was attributed
+    /// to, and the line stays open on that word alone.
+
+### `commands/launch.rs` — `record_entitlement_fallback`
+
+    /// Capability map line 1970: one ledger row per pool fallback the launch
+    /// path acted on. The same open-write-drop shape as
+    /// [`record_tier_movement`], for the same reasons — and **a decision that
+    /// made no fallback writes nothing**, because "the broker stayed put" is
+    /// the row's absence, exactly as a held tier is.
+    ///
+    /// The row carries the fallback whole **without a migration**: `purpose` is
+    /// the trigger, `quota_context` is the account the work LEFT (so the
+    /// entitlements view's own per-account reader finds it), and the account
+    /// the work went TO is the `sessions.entitlement` column migration 22
+    /// added, written by this same launch from this same decision. `provider`
+    /// and `model` are the chosen destination's.
+    ///
+    /// Map line 1307's own producer: `cost`, when given, is
+    /// [`glasshouse::routing::session::Routed::cost`] — the value **that
+    /// decision itself computed**, carried in rather than recomputed here from a
+    /// `PriceTable` that may since have changed on disk. This is the only launch
+    /// writer with a `Destination` in scope
+    /// (`record_tier_movement`'s `TierMovement` carries none), so it is the only
+    /// production caller `cost_micro_usd` has today; most rows still leave it
+    /// `NULL`, on every decision that made no fallback at all.
+
+### `commands/launch.rs` — `record_routing_latency`
+
+    /// Map line 1849: record what routing added to this launch, from the start
+    /// of the decision (`started`) to its end — the point after which profile
+    /// resolution, the gateway and the process spawn happen identically whether
+    /// or not a task was stated, and are therefore the launch's own cost rather
+    /// than routing's.
+    ///
+    /// Called only when a classification ran, so a launch that states no task
+    /// opens no ledger (practice §65) and leaves no row: the row's absence is
+    /// the honest reading of "nothing was added". Opened, written and dropped
+    /// here, before any gateway holds its own handle.
+    ///
+    /// The ledger's timing columns are unix **seconds** (migration 11), so a
+    /// sub-second decision reads back as `0` through `duration_ms()`; the
+    /// millisecond figure goes to the log beside it. A finer column is a schema
+    /// decision this package does not take.
+    ///
+    /// **This row carries no session id** — `glasshouse::database` migration
+    /// 24's `session_id` stays `NULL` here, deliberately and permanently. The
+    /// decision this row measures is taken *before* `store.create` mints a
+    /// session, so there is no id to write; and the row is about the routing
+    /// decision rather than about an exchange some session was served, which is
+    /// the only thing that column is for. Filling it from a session recorded
+    /// later would make "the launch decided this before any session existed"
+    /// indistinguishable from "this exchange belonged to that session", which is
+    /// the distinction the nullable column exists to keep.
+
+### `commands/launch.rs` — `install_edit_intent_hook`
+
+Orphaned from `briefing_announcement`'s doc comment (`briefing_announcement`
+is defined later in the file at its own, now-undocumented, `fn`); moved here
+rather than kept, since it does not describe `install_edit_intent_hook`.
+
+    /// The `briefed with ...` line both delivery rungs print, once, on a
+    /// successful delivery — never composed twice so the wording cannot drift
+    /// between rungs.
+    /// Map lines 2402-2405: register Phase 60's edit-intent `PreToolUse` hook
+    /// for a Claude Code session, unless a configuration layer turned
+    /// coordination off.
+    ///
+    /// **Never a second `--settings` flag**, for the reason
+    /// [`crate::commands::resume::install_context_firewall_hook`] states at
+    /// length: Claude Code keeps only the last one, so the only safe way to add
+    /// a hook is to merge it into the document `install_session_document`
+    /// already wrote. This reads that file back, adds one `PreToolUse` key, and
+    /// writes it in place; `args` is never touched.
+    ///
+    /// **`mode = "off"` installs nothing at all** — line 2405's own words, and
+    /// the reason this returns before reading the executable path or the session
+    /// directory. Not installed-and-inert: an inert hook would still spawn a
+    /// process for every `Edit` the session makes.
+    ///
+    /// Best effort, matching every other registration on this path: a failure
+    /// here is a session that starts without coordination rather than one that
+    /// fails to start, and it is logged rather than propagated. There is no
+    /// version floor and no probe — unlike the firewall's `updatedToolOutput`,
+    /// nothing this hook returns needs a Claude Code newer than the one that
+    /// first accepted a `PreToolUse` entry, and the worst a build that ignores
+    /// the entry can do is not run it.
+
+### `commands/memory_extraction.rs` — `run_extraction`
+
+    /// Run memory extraction over what this session has done — Phase 29's
+    /// **memory commit**, whatever started it.
+    ///
+    /// # One operation, four triggers, and no second pipeline
+    ///
+    /// Map line 1147 asks for *"a lightweight memory commit operation that
+    /// extracts durable project knowledge from recently completed work"* and
+    /// lines 1148-1151 ask for four ways to start one. This function is that
+    /// operation, and `trigger` is the whole of the difference between them:
+    /// `Manual` from `glasshouse memory commit`, `TaskCompleted` and `GitCommit`
+    /// from the `TurnEnded` arm of [`report_hook_with`], `BeforeCompaction` from
+    /// its `PreCompact` arm. A second extraction path for any of them would be a
+    /// second answer to what is worth remembering, a second credential screen and
+    /// a second duplicate check.
+    ///
+    /// # The outcome is returned, and the hook path still ignores it
+    ///
+    /// `Option<ExtractionOutcome>` rather than `()` so `glasshouse memory commit`
+    /// can print what its run actually did. It is not an error channel and does
+    /// not become one: `None` means the *preparation* failed or the bound expired
+    /// — both already logged here — and every failure of the extraction itself is
+    /// a field on the outcome, never a `Result`. The hook path discards it, which
+    /// is why nothing about its posture changes.
+    ///
+    /// # Nothing here can hurt the session, and that is the design
+    ///
+    /// Phase 21: *"keep memory-extraction failure non-fatal to the coding
+    /// session."* Four different failures are absorbed here and none of them
+    /// reaches [`report_hook`]:
+    ///
+    /// - the project database will not open, or the event log will not read —
+    ///   logged, and the function returns;
+    /// - the model is unavailable, refuses, or answers rubbish —
+    ///   [`glasshouse::memory::Extractor::run`] has no error channel at all and
+    ///   describes it on the outcome;
+    /// - the model **panics** — caught inside `run`, reported as an outcome;
+    /// - the model **hangs** — the work is on its own thread and this waits
+    ///   [`EXTRACTION_BOUND`], then leaves it behind. The thread dies when the
+    ///   process exits moments later, having written nothing: the store is only
+    ///   touched after the model answers.
+    ///
+    /// # Why a thread and not just a call
+    ///
+    /// The only thing that buys is the bound, and the bound is the whole point.
+    /// This codebase has no async runtime and [`glasshouse::memory::ExtractionModel`]
+    /// is deliberately synchronous, so a thread is the mechanism; `ExtractionModel`
+    /// is `Send + Sync` for precisely this reason.
+    ///
+    /// Everything cheap happens before the thread starts — opening the database,
+    /// reading a bounded window of the log, scrubbing and bounding the chunk — so
+    /// what is on the far side of the bound is the model call and the insert, and
+    /// a timeout means the model, not Glasshouse.
+
+### `commands/memory_extraction.rs` — `hook_extraction`
+
+    /// [`run_extraction`] on a hook's path, where a lost memory has to be said
+    /// out loud.
+    ///
+    /// # Why this exists at all, when `run_extraction` already logs every failure
+    ///
+    /// Because on this path nothing reads the log. `logging::LogConfig::resolve`
+    /// answers [`glasshouse::logging::LogSink::Disabled`] unless `GLASSHOUSE_LOG`
+    /// is set or a `--log-*` flag is given, and a harness spawning
+    /// `glasshouse hook` gives neither — so `run_extraction`'s
+    /// `"memory extraction produced nothing"` and its bound-expiry `warn!` are
+    /// both written to a subscriber that was never installed. Measured
+    /// 2026-08-31: a `PreCompact` hook whose model call failed exited **0**, with
+    /// **empty stderr**, having recorded nothing.
+    ///
+    /// That is the precise thing capability map line 1174 is about. *"Record
+    /// enough pre-compaction durable memory that important project decisions do
+    /// not depend solely on a lossy native compact summary"* is not satisfied by
+    /// a trigger that fires, fails, and says nothing: the person then believes
+    /// their decisions were captured and goes on to compact, which is worse than
+    /// knowing they were not.
+    ///
+    /// # Why stderr, and why one line
+    ///
+    /// `main.rs`'s own [`run`] already draws this distinction for the overridden
+    /// safety refusal, three lines into the program and for exactly this reason:
+    /// *"logging is off by default, so a `tracing::warn!` there can go completely
+    /// unseen … it always gets a line on stderr, log or no log."* A memory the
+    /// compaction trigger was supposed to record and did not is user-facing in
+    /// the same sense.
+    ///
+    /// Stderr and not stdout, and never a non-zero exit: Claude Code reads a
+    /// hook's exit code as a gate on the turn, and Phase 21's *"keep
+    /// memory-extraction failure non-fatal to the coding session"* is unchanged
+    /// by this. The hook still exits zero whatever extraction did.
+    ///
+    /// Not used by `glasshouse memory commit`: that trigger is
+    /// [`glasshouse::memory::ExtractionTrigger::Manual`], it runs in front of a
+    /// person who is watching, and it prints its own report. This is the wrapper
+    /// for the triggers that run inside somebody's session with nobody watching.
+
+### `commands/memory_extraction.rs` — `lost_extraction_notice`
+
+    /// What to tell the person about an extraction that recorded nothing, or
+    /// [`None`] when nothing was lost.
+    ///
+    /// Separated from [`hook_extraction`] so the decision can be tested without a
+    /// process: what this returns is the whole of the difference between a silent
+    /// loss and an observable one.
+    ///
+    /// # The four cases, and why two of them are silent
+    ///
+    /// - **no outcome at all.** [`run_extraction`] answers `None` for its two
+    ///   preparation failures and for [`EXTRACTION_BOUND`] expiring. All three
+    ///   are losses — a boundary went by and nothing was written — and the reason
+    ///   is in a log that, on this path, does not exist.
+    /// - **a failure.** The model was unavailable, refused, timed out, panicked,
+    ///   answered something the contract could not read, or the store could not
+    ///   be read for duplicate detection. Each is a memory that should exist and
+    ///   does not, and [`glasshouse::memory::extract::ExtractionFailure`]'s `Display` is a
+    ///   fixed phrase by construction — no provider body reaches this line.
+    /// - **[`glasshouse::memory::extract::ExtractionFailure::NothingToExtract`] is
+    ///   deliberately silent.** There was no session activity to extract from, so
+    ///   there is no memory to have lost. A warning here would fire on every
+    ///   compaction of a session that had not done anything yet, and a warning
+    ///   that cries wolf is how the real one gets ignored.
+    /// - **rejections without a failure.** The model answered and some of what it
+    ///   proposed did not survive the contract. Said out loud when *nothing*
+    ///   survived, and silent when something did: a run that stored two memories
+    ///   and rejected a third lost nothing a person needs to act on, and
+    ///   duplicates and speculative drops are the mechanism working rather than
+    ///   failing.
+
+### `commands/memory_extraction.rs` — `record_extraction_observation`
+
+    /// What the extraction model reported the call cost, into this project's
+    /// routing evidence ledger.
+    ///
+    /// # This is the first thing in this build that counts tokens
+    ///
+    /// `routing_observations` has carried `input_tokens`, `output_tokens` and
+    /// `cached_input_tokens` since migration 11 and nothing has ever written
+    /// one: `crate::gateway::ingress` relays a response body it is designed
+    /// never to parse, so the gateway producer leaves all three `NULL` and says
+    /// so in its own module header. Memory extraction is the other path —
+    /// Glasshouse builds the request itself and already deserializes the whole
+    /// reply — so the counts come from a document that was parsed anyway. See
+    /// [`glasshouse::memory::extract::ModelCall::observation`] for exactly what
+    /// one row carries and what it deliberately leaves empty.
+    ///
+    /// # Why the ledger is opened here and not beside the event log
+    ///
+    /// The same finding [`evidence_ledger`] carries, one path over.
+    /// [`glasshouse::routing::evidence::EvidenceLedger`] holds `Mutex<Connection>`
+    /// — an open SQLite handle for its whole lifetime — and a handle opened on a
+    /// path that turns out to have nothing to write blocks a later writer under
+    /// Windows' mandatory `LockFileEx` while being invisible under POSIX advisory
+    /// locks. So nothing is opened until `observation()` has already said there
+    /// is a row: that is [`None`] for every run that reached no provider, which
+    /// is every run under the default configuration, where extraction chooses a
+    /// resource and calls nothing at all.
+    ///
+    /// # A failure here is one log line
+    ///
+    /// [`run_extraction`]'s own posture, for its own reason: this is a hook
+    /// process running inside somebody's coding session, and Glasshouse's
+    /// bookkeeping is never more important than the session it keeps books
+    /// about. There is no error channel out of this function because no caller
+    /// should have one.
+
+### `commands/memory_extraction.rs` — `record_observed_files`
+
+    /// Which files were being worked on when these memories were learned, into
+    /// this project's `memory_files` — migration 17.
+    ///
+    /// # This records an observation and not a reference, deliberately
+    ///
+    /// `paths` is what the git index said differed from the working tree when
+    /// extraction began. It says *"this was learned while that file was being
+    /// worked on"*, which is a fact about the **session**: three memories out of a
+    /// session that dirtied twenty files get all sixty pairs, and each pair is
+    /// true. It is emphatically not capability-map line 1139's *"the files a
+    /// memory explicitly references"* — on this path the model's input carries no
+    /// prose at all, so a model asked to name files here would be fabricating from
+    /// an empty input, and line 1294's rule is that a fabricated value inverts the
+    /// policy rather than degrading it. Every row therefore carries
+    /// [`glasshouse::memory::FileAssociation::Observed`].
+    ///
+    /// # Why the store is opened here and not beside the event log
+    ///
+    /// [`record_extraction_observation`]'s finding, one function over, for the
+    /// same reason: an open SQLite handle on a path that turns out to have
+    /// nothing to write blocks a later writer under Windows' mandatory
+    /// `LockFileEx` while being invisible under POSIX advisory locks (practice
+    /// §65). So the guard comes first and nothing is opened at all when there is
+    /// no row — which is every extraction that stored nothing, and every one run
+    /// against a clean tree.
+    ///
+    /// This deliberately runs on the calling thread rather than inside the
+    /// extraction thread: the thread outlives its bound, and a write started
+    /// there after the process has already decided to move on would be a second
+    /// writable handle appearing at an unpredictable moment.
+    ///
+    /// # A failure here is one log line
+    ///
+    /// [`run_extraction`]'s posture, and the path is not named in it: a file path
+    /// is the user's own data, so the log says how many associations were lost
+    /// and never which files they were about.
+
+### `commands/memory.rs` — `memory_path_report`
+
+    /// `glasshouse memory search --path <p> [--for-edit]` — the CLI half of
+    /// capability map lines 1143, 1141 and 1142, and the flag the 1143 evidence
+    /// entry recorded as missing.
+    ///
+    /// Answers from [`glasshouse::memory::MemoryStore::for_path`], the same
+    /// reader the socket door and the briefing's file section use, so the three
+    /// surfaces cannot disagree about what a file is associated with. Not through
+    /// [`memory_search_grouped`]: that helper records every retrieval through it
+    /// as a *search* in the evaluation ledger, and a path lookup runs no query —
+    /// recording it as one would misreport what was asked, which is the same
+    /// reasoning `api::unix::query_memory_for_path` gives for opening the store
+    /// directly.
+    ///
+    /// # What each row says beyond the memory itself
+    ///
+    /// `assoc=` is read per row (line 1139's second provenance), `freshness=` is
+    /// line 1142's commit-order label, and the advisory line above the results is
+    /// line 1142's own sentence: **the source at the path is the evidence**. A
+    /// `stale` row is printed in its rank like any other — the label never
+    /// withholds, reorders or rescores.
+    ///
+    /// `for_edit` is line 1141: within each authority rung, constraints,
+    /// decisions and failed approaches sort ahead of features, findings and
+    /// todos. Off, the order is byte-for-byte what a `Lookup` gives.
+    ///
+    /// One `git log` for the whole report, since every row is about one file.
+
+### `commands/memory.rs` — `memory_challenge`
+
+    /// `glasshouse memory challenge <id> <reason>` — Phase 21F lines 937/938:
+    /// let the receiving agent say, explicitly, that current evidence
+    /// contradicts a memory, rather than silently distrusting it in a way
+    /// nothing records.
+    ///
+    /// Reuses Phase 21C's `mark_for_review` and its six reasons rather than
+    /// inventing a seventh state: a challenge *is* "something changed that may
+    /// invalidate this; a person or a stronger agent has to look" — the review
+    /// mechanism already built for that. The retrieval half of 937/938 is true
+    /// the moment this returns: `SearchScope::Current` only ever returns
+    /// `Active` memories (see `memory/search.rs`'s own documentation), so the
+    /// challenged memory drops out of every default search immediately and
+    /// stays reachable only as history — `glasshouse memory search --history`.
+    ///
+    /// 938's "before further automatic injection into the same task" has no
+    /// consumer in this build: Phase 27 (automatic injection) does not exist, so
+    /// there is nothing that injects a memory for this to gate. Closed on the
+    /// retrieval half only — see the packet's own reasoning, echoing §33's rule
+    /// of asking the capability as a question a user would ask: *can Glasshouse
+    /// stop presenting a challenged memory as settled?* Yes. *Can it stop an
+    /// automatic injection from using it?* There is no automatic injection to
+    /// stop.
+
+### `commands/memory.rs` — `memory_commit`
+
+Orphaned lead-in from `memory_extract`'s doc comment (`memory_extract` is
+defined later in the file at its own, now-undocumented, `fn`); moved here
+rather than kept, since it does not describe `memory_commit`.
+
+    /// `glasshouse memory extract` — Phase 21's manual run, for debugging and
+    /// evaluating extraction itself.
+    ///
+    /// Everything except the model call is the production path: the chunk is
+    /// bounded and scrubbed by `SessionChunk::build`, the reply goes through the
+    /// same contract validation, credential screen, conservative classification
+    /// and duplicate check, and what survives is written to the project's real
+    /// memory store.
+
+    /// # It is the same operation the harness triggers, not a hand-written twin
+    ///
+    /// This calls [`run_extraction`] with
+    /// [`glasshouse::memory::ExtractionTrigger::Manual`], which is the same
+    /// function the `TurnEnded` and `PreCompact` arms of [`report_hook_with`]
+    /// call. Everything a person could get wrong by hand — the event window, the
+    /// credential screen, the duplicate check, the bound, the working-tree
+    /// observation, the routing observation — is therefore identical by
+    /// construction rather than by two implementations agreeing.
+    ///
+    /// It is deliberately *not* [`memory_extract`]. That command exists to
+    /// evaluate the contract without a provider, takes its reply from a file, and
+    /// says so on every run; this one asks the model the user configured, which
+    /// is what makes it a memory commit rather than a harness.
+    ///
+    /// # Defaulting to the most recently active session
+    ///
+    /// `SessionStore::list` is ordered `last_activity_at DESC`, which is the
+    /// project's own answer to *"what was I just working on"* and the same order
+    /// `glasshouse sessions` prints. A project with no sessions is an error
+    /// naming the flag rather than a silent success: there is no honest
+    /// "recently completed work" to commit, and reporting *stored 0* would be
+    /// indistinguishable from a model that looked and found nothing.
+    ///
+    /// # One database handle at a time
+    ///
+    /// The session lookup is scoped so `ProjectSessions` is closed before
+    /// [`run_extraction`] opens the event log and the memory store. That is
+    /// practice §65's rule taken seriously on a path that has the choice: a
+    /// handle held across work that does not need it is free on this developer's
+    /// machine and billed under Windows' mandatory locks.
+
+### `commands/resources.rs` — `resources_report`
+
+    /// Render `glasshouse resources` — Phase 32B's production caller, and the
+    /// reason its boxes are closeable at all.
+    ///
+    /// # What this function is for, beyond printing
+    ///
+    /// Phase 32 recorded that `provider::registry::registry()` had no production
+    /// caller, and Phase 32A recorded that the launch path reads exactly one
+    /// projection out of `CapacityState` — its quota *shape* — with every pool,
+    /// window and rate ceiling below that proven only by tests. Both ledgers
+    /// named the same missing piece: something in the shipped binary that reads
+    /// the model. This is that, and every telemetry reader Phase 32B builds is
+    /// reached from here and from nowhere else in the binary.
+    ///
+    /// # The order of reads, and why the cheap one is not optional
+    ///
+    /// Harness status first, because it is a local process invocation of about a
+    /// quarter of a second that spends no quota and needs no credential — so the
+    /// bare command still takes a real reading, and a user who runs
+    /// `glasshouse resources` with no flags is not shown a screen of `unknown`
+    /// that Glasshouse could have filled in for free. Network probes are opt-in,
+    /// matching `glasshouse pairing` and `glasshouse response`, which is the
+    /// shape this command was modelled on.
+    ///
+    /// # It cannot fail on telemetry
+    ///
+    /// The `Result` here is for reading the user's own configuration files, which
+    /// is the same failure every other command in this file can have. No
+    /// telemetry read below can produce an `Err`: capability map line 1238 is
+    /// enforced in `provider::telemetry` and `provider::resources` by there being
+    /// no fallible signature to propagate.
+
+### `commands/resources.rs` — `render_routing_model`
+
+    /// Capability map line 1443 — *"show the currently selected routing model in
+    /// resource diagnostics"* — as the last block of `glasshouse resources`.
+    ///
+    /// # Why this surface, and why it is not the settings screen
+    ///
+    /// The Settings overlay already renders the configured
+    /// [`glasshouse::config::RoutingModelChoice`], and `docs/product/evidence/phase-34c.md`
+    /// ruled that showing a value on the screen where you set it is
+    /// configuration, not diagnosis. This is the diagnostic surface: the routing
+    /// model is named next to the capacity, health and quota of the very
+    /// resources it would be chosen from, which is where the question *"why did
+    /// routing behave that way"* is actually asked.
+    ///
+    /// # The honesty constraint, and it is the point of the block
+    ///
+    /// `Automatic` is an intent — the word the Settings overlay shows — and
+    /// naming only that would answer a different question than a person reading
+    /// `glasshouse resources` is asking. So the block runs the real decision
+    /// ([`automatic_classification_choice`], the same function `glasshouse
+    /// classify` calls) and names the resource it picked.
+    ///
+    /// **And it says `would`, in every arm.** Nothing in this build classifies
+    /// anything on its own: `routing::classify::classify`'s only production
+    /// caller is the `glasshouse classify` diagnostic, and nothing else asks a
+    /// routing model a question. Rendering a "currently selected routing model"
+    /// beside live capacity numbers with no signal that it classifies nothing is
+    /// the spectacle Phase 47 exists to prevent, so the `in use` row says so in
+    /// as many words and is not conditional on anything.
+    ///
+    /// # No credential, ever
+    ///
+    /// [`glasshouse::routing::disposable::DisposableChoice`] carries a
+    /// [`glasshouse::routing::CredentialId`], and nothing below reads it. A
+    /// provider name, a model name and the policy's own explanation are what this
+    /// block prints — the same rule `memory::extract::model`'s header states for
+    /// the label a classification is attributed to.
+
+### `commands/response.rs` — `response_request`
+
+Orphaned lead-in describing a harness-session launch path, not
+`response_request` (the file's only function); moved here rather than kept.
+
+    /// Open a harness session attached to this terminal.
+    ///
+    /// This is the production consumer of the sanctioned launch path: the harness
+    /// is chosen and its executable resolved from configuration (project level
+    /// overriding user level), the requested launch profile is resolved against
+    /// its adapter (Phase 9A/9F — see [`glasshouse::profile`]), and only then is
+    /// anything started through [`HarnessLaunch`] — the only route that exists,
+    /// and the one that derives the child's working directory from the active
+    /// project rather than from whatever directory Glasshouse happened to be run
+    /// in.
+    ///
+    /// Setup is deliberately not triggered here. A user who has named a harness
+    /// has already said what they want; interrupting that with a first-run wizard
+    /// would be answering a question they did not ask.
+
+### `commands/resume.rs` — `run_headless`
+
+    /// Run a harness session that never takes this terminal — Phase 4's headless
+    /// presentation mode.
+    ///
+    /// The mirror image of [`session::attach`]. The harness gets a real
+    /// pseudo-terminal in the project root exactly as it always does, but this
+    /// process's own terminal is never claimed: no raw mode, no alternate screen,
+    /// no output relayed to standard output. What the harness prints goes into
+    /// the session's own bounded scrollback, which is where an embedded session's
+    /// output goes too. That is the whole of "a PTY continues running without
+    /// occupying the visible session viewport" from the launch side; the shell
+    /// side is `shell::run`, which never makes a headless session the viewport's.
+    ///
+    /// Glasshouse stays in the foreground for the session's whole life on
+    /// purpose. Returning early would drop the [`SessionRuntime`], and with it
+    /// the pseudo-terminal the harness is writing to — a detached session needs a
+    /// supervisor process, which is a different capability from this one.
+    ///
+    /// **The terminal queries have to be answered here.** A headless session has
+    /// no emulator on the other end: on Windows nothing gets past ConPTY's
+    /// startup handshake without a reply, and on any platform a harness asking
+    /// `ESC[6n` waits forever for one. [`SessionRuntime`] knows how to answer but
+    /// cannot do it from its reader thread, so whoever owns the runtime must — in
+    /// the shell that is the tick, and here it is this loop.
+    ///
+    /// # A signal here is a forced exit, and that is why the cleanup exists
+    ///
+    /// [`shutdown::install_signal_handler`] ends the process immediately when the
+    /// terminal is not engaged, on the reasonable premise that a Glasshouse with
+    /// nothing to restore has nothing to wind down. **This path breaks that
+    /// premise**: it engages no terminal — that is what makes it headless — and
+    /// it owns a child process that stops receiving a hangup the moment Glasshouse
+    /// dies. Forced exit calls [`std::process::exit`], which runs no destructor,
+    /// so without the registration below a Ctrl-C would leave the harness running
+    /// with nothing left able to reach it.
+    ///
+    /// Found by sending a real `SIGINT` to a real headless launch and looking for
+    /// the child afterwards; it was still there. `shutdown`'s own documentation
+    /// had already named this as the thing a second caller would have to get
+    /// right, which is exactly what this is.
+    ///
+    /// Deliberately **not** solved by claiming the terminal is engaged. That flag
+    /// means "raw mode and the alternate screen are on", and `restore_terminal`
+    /// acts on it — setting it here would write escape sequences to a terminal
+    /// Glasshouse never touched.
+
+### `commands/resume.rs` — `close_before_forced_exit`
+
+    /// Close `id` on the way out of a forced exit, retrying briefly rather than
+    /// once.
+    ///
+    /// [`glasshouse::shutdown`]'s rule is that a forced-exit callback must never
+    /// wait indefinitely: failing to clean up is survivable, failing to exit is
+    /// not. A **single** `try_lock` honours the letter of that rule and still
+    /// gets the wrong answer. The headless poll loop takes this same lock every
+    /// `POLL`, so one attempt is a coin flip, and losing it orphans a real
+    /// harness permanently with no second chance — there is no retry anywhere
+    /// above this.
+    ///
+    /// That is not theoretical. It was **measured at 1 orphan in 100 runs under
+    /// 3x CPU load**, and it turned up first as an intermittent red
+    /// `test (macos-latest)` that passed on rerun against the identical commit.
+    ///
+    /// A bound keeps the guarantee that actually matters — this returns, always,
+    /// and quickly — while removing the coin flip. Poisoning is treated as
+    /// ownership rather than as a reason to give up, for the same reason
+    /// [`lock`] does: a panicked thread must not strand a live child, and a
+    /// poisoned mutex would otherwise make `try_lock` fail for as long as we were
+    /// willing to retry.
+    ///
+    /// Returns whether the runtime was reached.
+
+### `commands/resume.rs` — `evidence_ledger`
+
+Preceded by an orphaned doc for `resolve_resume_overlay` (defined later in
+the file, at its own plain `//` comment, undocumented as a doc comment);
+moved here rather than kept, since it does not describe `evidence_ledger`.
+
+    /// Re-resolve `profile_name`'s overlay for a resumed session — Phase 9A line
+    /// 368's resume half, production caller of `resume_session`.
+    ///
+    /// Exactly [`launch_session`]'s own resolution: the same lookup, the same
+    /// secret store, the same gateway start. A resumed session's overlay is not a
+    /// smaller thing than a fresh one's, so there is no separate, weaker path
+    /// here for it to take.
+    ///
+    /// # Errors here are never fatal to the resume
+    ///
+    /// The caller treats any `Err` as "resume without the overlay, and say why" —
+    /// never as a reason to refuse the resume outright. `open_for_resume` has
+    /// already proven this session is safe to continue; a bypass acknowledgement
+    /// withdrawn since the original launch, or a provider since removed from
+    /// configuration, is a reason to fall back to a plain native resume, not a
+    /// reason to make an otherwise-healthy session unresumable.
+
+    /// The routing evidence ledger for this project — **only when a gateway will
+    /// actually be started** — or `None` with a warning.
+    ///
+    /// # Why the gate, and what it cost to learn
+    ///
+    /// The first version opened the ledger unconditionally, before
+    /// `start_if_required_with_telemetry` decided whether a gateway was needed at
+    /// all. On macOS and Linux that was merely wasted work. On Windows it **hung
+    /// six memory-extraction tests indefinitely** — a 37-minute stall with no
+    /// output, on a tree whose local gate was 13/13 green.
+    ///
+    /// [`crate::routing::evidence::EvidenceLedger`] holds `Mutex<Connection>`: an
+    /// open SQLite handle for its whole lifetime. SQLite locks with advisory
+    /// POSIX locks on Unix and with mandatory `LockFileEx` on Windows, so a handle
+    /// this function opened on a launch that never needed it blocks a later writer
+    /// on Windows and is invisible on Unix. **Opening a database you may not use is
+    /// not free, and the platform that charges for it is not the one this project
+    /// develops on.**
+    ///
+    /// Gating on [`glasshouse::gateway::gateway_is_required`] makes the open happen
+    /// exactly when the gateway that consumes it is started, which is also what
+    /// `start_if_required_with_telemetry` would have decided a moment later.
+    ///
+    /// Phase 33A records an observation per forwarded gateway exchange. Opening
+    /// its store touches the project database, and both callers evaluate this
+    /// **before** `start_if_required_with_telemetry` decides whether a gateway is
+    /// needed at all — so this runs on every launch and every resume.
+    ///
+    /// It therefore must not fail the caller. A launch that refused to start
+    /// because a telemetry table could not be opened would trade the user's whole
+    /// session for a row nobody is waiting on, and this project's own product
+    /// invariant is that Glasshouse orchestrates real harnesses rather than
+    /// standing between the user and one. The warning is `tracing::warn!` for the
+    /// same reason `set_lifecycle`'s is: it belongs in the log, not on the
+    /// terminal the harness is about to take over.
+
+### `commands/resume.rs` — `install_context_firewall_hook`
+
+    /// Map lines 1991-1996: register the context firewall's `PostToolUse` hook
+    /// for a Claude Code session, when the effective configuration enables it.
+    ///
+    /// **Never a second `--settings` flag.** Claude Code 2.1.247 silently
+    /// discards every `--settings` but the last (verified in
+    /// `session::HarnessSelection::install_session_document`'s own doc), so the
+    /// only safe way to add a hook is to merge it into the SAME document
+    /// [`install_session_document`] already wrote — this function reads that
+    /// file back, adds one `PostToolUse` key, and writes it in place. `args`
+    /// itself is never touched, which is what makes `mode = "off"` byte-identical
+    /// to a session built before this phase existed: this function returns
+    /// before touching anything when the harness is not Claude Code or the
+    /// effective mode is `off`.
+    ///
+    /// Best effort, matching [`install_session_document`]'s own policy: any
+    /// failure here is a session that starts without the firewall bridge rather
+    /// than one that fails to start, and is logged rather than propagated.
+    ///
+    /// Map lines 2023/2024: `entitlement` and `backend` are read only to
+    /// *classify* the reduction policy (subscription, metered or local) and to
+    /// resolve its thresholds through `effective`'s new accessors — never baked
+    /// into the registered command line themselves. The firewall core and the
+    /// hook subprocess this command line invokes stay entitlement-blind, exactly
+    /// as before this package: only numbers and a mode word ever reach them.
+
+### `commands/resume.rs` — `EventRecorder`
+
+    /// Records lifecycle events durably from a command that is about to exit.
+    ///
+    /// # Why this is not the sink the shell uses
+    ///
+    /// [`glasshouse::events::EventLogSink`] queues behind a writer thread,
+    /// because the shell publishes from a thread that is sometimes draining a
+    /// pseudo-terminal and must never wait. None of that applies here: a
+    /// `glasshouse hook` process lives for a few milliseconds and then exits, and
+    /// queueing behind a thread it is about to drop would lose the event it was
+    /// run to record. So this writes synchronously.
+    ///
+    /// # Why there is a bus at all
+    ///
+    /// [`glasshouse::events::RecordedEvent`] cannot be built without a session
+    /// identifier and a timestamp — that is a property of the type rather than a
+    /// habit of its callers, and [`EventBus::publish`] is what stamps both. Using
+    /// it as the minting authority is what keeps "record every translated
+    /// lifecycle event with session ID and timestamp" true on this path as well
+    /// as in the interactive one. No sink is attached to it, so nothing is
+    /// written twice.
+    ///
+    /// # Every failure is swallowed into the log, deliberately
+    ///
+    /// This runs inside the user's own session — see [`report_hook`], which may
+    /// never fail — and it is also on the launch path, where a bookkeeping
+    /// failure must not turn into what looks like a harness failure. A project
+    /// whose database cannot be opened loses event history and keeps its session.
+
+    /// # Why the log is behind a `Mutex`
+    ///
+    /// [`EventLog`] owns a `rusqlite::Connection`, which is `Send` and **not**
+    /// `Sync`. Since [`DegradeRelay`], a recorder is no longer touched only by
+    /// the thread that built it: the gateway's own connection thread reports a
+    /// failed upstream through it, so `&EventRecorder` crosses a thread boundary
+    /// and the type has to be `Sync` to be shared at all. The lock is what makes
+    /// it so, and it is uncontended in practice — the two writers are a launch
+    /// path making one bookkeeping call at a time and a gateway thread that only
+    /// speaks when its upstream has just failed.
+
+### `commands/resume.rs` — `EventRecorder::degrade`
+
+    /// Record that one backend resource stopped serving — map line 1735's
+    /// durable half, on the path the shipped binary actually takes.
+    ///
+    /// # Why `degrade_resource` is called rather than reimplemented
+    ///
+    /// Which sessions a failing resource affects is one rule, and it lives in
+    /// [`glasshouse::events::degrade_resource`]: *a session is affected if,
+    /// and only if, its own record says it resolved to this backend
+    /// resource.* Selecting the sessions here instead would be a second copy
+    /// of that rule, and it would leave `degrade_resource` with no production
+    /// caller again — the exact state the evidence ledger refused this line
+    /// in.
+    ///
+    /// # Why it publishes on a bus that keeps nothing
+    ///
+    /// `degrade_resource` publishes each `GatewayUnhealthy` on the bus it is
+    /// given, and the durable write on this path is [`Self::append`], which
+    /// publishes on *this* recorder's bus to mint the record. Handing it
+    /// `self.bus` would mint every event twice. A history of zero makes the
+    /// bus purely the question-asking apparatus: nothing is kept, nothing is
+    /// dropped, and the returned [`glasshouse::events::Degradation`] is the
+    /// answer this method acts on.
+
+### `commands/resume.rs` — `DegradeRelay`
+
+    /// Where a gateway failure is recorded, given that the recorder does not
+    /// exist yet when the gateway starts.
+    ///
+    /// # The ownership problem, stated exactly
+    ///
+    /// [`glasshouse::gateway::DegradeSink`] has to be handed to the gateway at
+    /// `start_if_required_with_degrade_sink`, and **both** of this binary's
+    /// gateway starts happen before anything the sink needs exists:
+    /// `launch_session` starts the gateway 184 lines before it opens its
+    /// [`EventRecorder`], and it has no `SessionRecord` at all until the store
+    /// has created one. So the sink cannot close over a bus and a session list;
+    /// there is nothing to close over. This is the handle it closes over
+    /// instead, created before the gateway and filled by [`Self::install`] once
+    /// both halves exist.
+    ///
+    /// # Why the session records are a snapshot, and whose sessions they are
+    ///
+    /// [`glasshouse::events::degrade_resource`] takes the records it should
+    /// consider. This relay is given **the sessions this process owns** — one, on
+    /// either path — and not a fresh read of the project's whole session table.
+    /// Two reasons, and the second is the load-bearing one:
+    ///
+    /// - reading fresh would mean a `SessionStore` on the gateway's thread, which
+    ///   means a second open connection held for the life of the session for a
+    ///   read that fires only when an upstream has failed. §65's Windows hang was
+    ///   exactly that shape;
+    /// - and a gateway is **per instance**. Another Glasshouse process's session
+    ///   is served by *its* gateway, which does its own detecting. Degrading it
+    ///   from here would report a failure this process never observed on that
+    ///   session's behalf. The narrower snapshot is the honest claim.
+    ///
+    /// # Lifetime
+    ///
+    /// The sink holds an `Arc<DegradeRelay>` and the relay holds an
+    /// `Arc<EventRecorder>`; neither points back, so there is no cycle to leak.
+    /// No thread is started here and none is kept alive: the relay is inert
+    /// between calls, and the gateway's own guard is what stops the threads that
+    /// call it.
+
+### `commands/resume.rs` — `checkpoint_before_moving`
+
+    /// Check point the session this work is leaving, before it moves —
+    /// capability map line 1716.
+    ///
+    /// `moving_to` is where the work is going: a session identifier when this
+    /// launch or resume is continuing one, and `None` when it is starting a new
+    /// session. The session being **left** is whichever this project was most
+    /// recently active in, which is the same `active_session` rule
+    /// `glasshouse checkpoint save` and `Request::TakeCheckpoint` use for "the
+    /// current session".
+    ///
+    /// # Three of the four cases are a no-op, and each says which
+    ///
+    /// Nothing is being left when this project has no recorded session, when the
+    /// launch is starting a fresh one, or when the destination *is* the session
+    /// already in hand. Writing a checkpoint for any of those would produce a
+    /// handoff describing a migration that did not happen. The flag says so
+    /// instead of passing silently: a person who asked for a checkpoint and did
+    /// not get one needs to know which of the two occurred, and a silent no-op is
+    /// indistinguishable from a checkpoint that was taken (practice §68's shape).
+    ///
+    /// # It invents nothing, and it fails loudly
+    ///
+    /// The handoff records only what Glasshouse knows: which session was left,
+    /// where the work went, the Git position and this project's binding memories,
+    /// all through the same [`Checkpoint::capture`] the two existing checkpoint
+    /// paths use. It does not read the session's terminal for an objective —
+    /// `checkpoint_command`'s own doc says why that would be a confident fiction.
+    ///
+    /// A failure here **stops the launch**. The person asked for a checkpoint
+    /// before the move; moving anyway would lose exactly what they asked to keep.
+
+### `commands/resume.rs` — `report_task_boundary_routing`
+
+Preceded by an orphaned doc for `resume_session` (defined later in the
+file, now undocumented); moved here rather than kept, since it does not
+describe `report_task_boundary_routing`.
+
+    /// Reopen a recorded session in its own harness.
+    ///
+    /// The order here is the safety property. The store decides whether this
+    /// session may be resumed *at all* — it belongs to this project, it is not
+    /// still running, and it has a native identifier to resume to — before any
+    /// harness is selected and long before any process exists. A refusal costs
+    /// nothing; a session opened against the wrong project would be a breach of
+    /// the isolation the whole product rests on.
+    ///
+    /// The harness is then whichever one the record names, not whichever one is
+    /// configured now: resuming a Codex conversation in Claude Code would be
+    /// nonsense, so a record's own harness is what gets selected.
+
+    /// Line 1592's task-boundary caller, and line 1601's explanation on it.
+    ///
+    /// Prints where the router would have sent this work and what the named
+    /// session displaced. Never changes the destination — see `RouteOnResume`.
+    /// Everything it needs can fail (the session store, a deleted profile, a quota
+    /// cache that will not open), and none of those may cost a person their
+    /// resume, so the whole thing is best effort and silent when it has nothing to
+    /// say.
+    /// **It explains; it does not move the work.** The session was named on the
+    /// command line, and a router that answered "somewhere else" would overrule
+    /// the most explicit statement a person can make — so the named session goes
+    /// in as `RoutingOverride::to`, which is what line 1602 calls a user override,
+    /// and the ranking it displaced is printed beside it. Stated as a limit rather
+    /// than left to be discovered: **line 1593 is earned on the launch path**,
+    /// where the choice is genuinely open, and not here.
+
+## Trims: the remaining module docs — history moved out of comments by `GH-TRIM-REST-DOCS`, 2026-09-05
+
+### `checkpoint/git.rs` — module doc
+
+    //! Where the repository is standing, read cheaply.
+    //!
+    //! The map asks a checkpoint to *include the current Git branch and commit
+    //! when available*, and "when available" is doing real work: a project need
+    //! not be a Git repository at all, and Glasshouse must still be able to take
+    //! a checkpoint.
+    //!
+    //! # No subprocess
+    //!
+    //! This opens two or three small files and parses them. It does not run
+    //! `git`, and that is deliberate rather than incidental:
+    //!
+    //! - a checkpoint can be taken at a task boundary, on a thread that is also
+    //!   serving a terminal, and spawning a process there is a latency nobody
+    //!   asked for;
+    //! - `git` need not be installed for a `.git` directory to exist and be
+    //!   readable — a repository cloned onto a machine whose Git was uninstalled
+    //!   is still a repository;
+    //! - a subprocess inherits an environment, and `GIT_DIR` in that environment
+    //!   would silently point this at another repository.
+    //!
+    //! # The deliberate exceptions, and what they are scoped to
+    //!
+    //! [`last_change_commit`], [`is_ancestor`] and [`changed_paths`] **do** run
+    //! `git`, and the objections above are answered rather than waived. None is
+    //! on the checkpoint path: nothing takes a checkpoint through them, and no
+    //! thread serving a terminal calls them. `last_change_commit` and
+    //! `is_ancestor`'s caller is memory retrieval (`crate::memory::inject`'s file
+    //! section and `glasshouse memory search --path`), which is already several
+    //! database reads deep and is bounded at one `git log` per path and one
+    //! `merge-base` per memory. `changed_paths`'s caller is the guardrail door's
+    //! transition handler, bounded to one call per rollback-or-refutation
+    //! transition — an assumption ledger write, not a terminal-serving path
+    //! either. A machine with no `git`, or a project that is no repository,
+    //! makes every one of the three answer `None`, which their consumers render
+    //! as *unknown* rather than assuming a clean tree or fresh memory. And the
+    //! environment objection is met head-on: all three clear `GIT_DIR`,
+    //! `GIT_WORK_TREE`, `GIT_INDEX_FILE` and `GIT_COMMON_DIR` from the child
+    //! rather than trusting the caller's, so an inherited `GIT_DIR` cannot
+    //! silently point them at another repository.
+    //!
+    //! `changed_paths` does not reuse [`WorkingTreeStatus::detect`] — the index
+    //! reader already on this path — because that reader is deliberately bounded
+    //! to `MAX_CHANGED_FILES` tracked entries and never reports an untracked
+    //! file at all; a preserve set that silently omitted a new, unclaimed file
+    //! would be the one wrong direction line 1044 forbids.
+    //!
+    //! There is no file-reading version of *"which commit last changed this
+    //! path"*: answering it means walking the commit graph and diffing trees out
+    //! of packfiles, which is a decompressor and a delta resolver, not two small
+    //! files. Map line 1142's freshness is worth one bounded subprocess and is
+    //! not worth that.
+    //!
+    //! # Worktrees, which is the case that actually bites
+    //!
+    //! In a linked worktree `.git` is a **file** holding `gitdir: <path>`, that
+    //! directory has its own `HEAD` and its own `commondir`, and the refs live in
+    //! the *common* directory rather than beside the HEAD. Glasshouse's own
+    //! development happens in linked worktrees, so a reader that only handled the
+    //! `.git`-is-a-directory case would have reported nothing in exactly the
+    //! situation this project runs in every day. Both shapes are handled, and
+    //! both are tested against real fixtures.
+
+### `checkpoint/git.rs` — `fn git_output`
+
+    /// Run one `git` subcommand in `root` and return its trimmed stdout, or
+    /// `None`.
+    ///
+    /// The single place this module spawns a process, so the environment scrub
+    /// the module documentation promises is made once rather than remembered
+    /// twice.
+    ///
+    /// - **`current_dir(root)` and no `-C`, no `--git-dir`.** The repository is
+    ///   named by the working directory and by nothing a caller can smuggle in.
+    /// - **Four variables removed.** `GIT_DIR`, `GIT_WORK_TREE`,
+    ///   `GIT_COMMON_DIR` and `GIT_INDEX_FILE` each override the working
+    ///   directory, and Glasshouse's own development runs inside linked
+    ///   worktrees where at least one of them is routinely set. Inheriting them
+    ///   would answer about whichever repository the parent happened to be
+    ///   pointed at — silently, and with a real commit.
+    /// - **No shell, ever.** `args` are argv elements, so a path is a literal
+    ///   however it is spelled; the caller puts a `--` in the list before any
+    ///   path so a file named `-n` cannot become a flag.
+    /// - **`stdin(null)`.** `git` must never block waiting for input on a path
+    ///   whose whole purpose is to answer a label quickly.
+    ///
+    /// `None` for every way of not getting an answer — `git` absent, not a
+    /// repository, a nonzero exit, output that is not UTF-8, an empty answer —
+    /// because the one consumer renders all of them as *unknown* and a caller
+    /// that could tell them apart would still do nothing different.
+
+### `checkpoint/git.rs` — `fn changed_paths`
+
+    /// Every repo-relative, `/`-separated path the working tree reports as
+    /// changed against the index — tracked or not — for the guardrail door's
+    /// preserve set (`crate::guardrails::preserve_set`, capability map line
+    /// 1044; see `docs/product/design-decisions.md`, *Rollback preserves what is
+    /// not yours*).
+    ///
+    /// `git status --porcelain=v1 -z --untracked-files=all`: `-z` gives NUL-
+    /// terminated, unquoted records, which is the only spelling that survives a
+    /// path with a space or a non-ASCII byte in it undamaged; `--untracked-files
+    /// =all` is what makes a brand-new file the transitioning session never
+    /// staged show up at all, which the index-only [`WorkingTreeStatus`] cannot
+    /// do. A rename or copy prints two `-z` records — the old path with the
+    /// status, then the bare new path — and this reports the new path, which is
+    /// what the working tree currently holds at.
+    ///
+    /// **Not through `git_output`**: that helper answers `None` for empty
+    /// stdout, which is exactly what a clean tree prints, and collapsing *clean*
+    /// into *unknown* is the one confusion line 1044 forbids — a caller reading
+    /// `None` as "nothing to preserve" on an unreadable tree would preserve
+    /// nothing when it should preserve everything. So this reads the process
+    /// output itself: `None` for every way of not getting an answer (`git`
+    /// absent, not a repository, a nonzero exit, output that is not UTF-8), and
+    /// `Some(vec![])` only for a clean tree.
