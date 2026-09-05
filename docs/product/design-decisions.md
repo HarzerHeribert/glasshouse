@@ -4350,3 +4350,38 @@ git, or a session outside one, yields an empty `unclaimed_changes` marked
 *unknown*, never an empty list that reads as *nothing to preserve*. Package:
 `GH-ROLLBACK-PRESERVE` (Sonnet, Amber — one decision, the membership of the
 set; one mutation, the other-session filter).
+
+## Protected quota's availability is recorded when a high-tier task is routed, and read back as a rate — designing line 1837, 2026-09-05
+
+The register filed 1837 under RC-B (*no outcome is ever learned*) because its
+verb is *measure … when needed*, and held it behind the product question the
+user answered on 2026-09-03 (*explicit rating when given, the turn-outcome
+proxy otherwise*). Read again, the line needs no outcome at all: whether
+protected quota *remained available* for a high-tier task is decided at the
+moment the task is routed, from two facts the router already holds and nobody
+writes down together — the task's workload tier (`routed_tier`, the same value
+`RoutingTierObserved` records) and the chosen destination's capacity band
+(`Destination::capacity_facts().band`, computed by `routing_destinations` under
+the resource's own reserve thresholds, line 1287). That is RC-A's shape —
+*decided in production, announced to the user, dropped* — the cheap cluster
+the register says to check first.
+
+**The row.** `EvaluationKind::ReserveAvailabilityObserved`, written at the two
+routed exits of `launch` beside `record_routed_session`, **only** when the
+tier is above `ROUTINE_SUPPORT_CEILING` (`Heavy`, `Frontier` — the tiers the
+reserve exists to protect; a `Standard` launch writes nothing, because
+*needed* is the line's own word). `subject` is the band the router read, in
+`CapacityBand`'s own spelling, or `unknown` when the destination carried no
+reading; `detail` is the tier word; `session_id` the launched session's. No
+migration: the evaluation ledger is a kind/subject/detail row store and the
+vocabulary pin in `database::EVALUATION_KINDS` is the only schema-side change,
+as it was for 1855.
+
+**The reading.** `EvaluationObservations::counts_by_subject` already exists;
+`route_outcomes_section` prints one line — *protected quota for high-tier
+tasks (1837): available N · at reserve R · exhausted E · unknown U of K* —
+where *available* is every band above `Reserve`. Below `MIN_SAMPLE_FOR_SUMMARY`
+it says *not enough high-tier launches*. Package: `GH-RESERVE-AVAILABILITY`
+(Sonnet, Amber — one decision, which launches count; one mutation, the tier
+filter). 1846 is a different mechanism (the prior's predictiveness against an
+outcome) and gets its own note with the explicit-rating door.
