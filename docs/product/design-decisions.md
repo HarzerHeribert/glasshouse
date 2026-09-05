@@ -19952,3 +19952,17 @@ That is the Linux equivalent of macOS's `SecKeychainSetUserInteractionAllowed(0)
 ## Direct verified completion — decided directly, 2026-09-06
 
 The guarded-continuations handoff (2026-09-05) came out of a Codex discussion the user drove, and its plan (`.agent-runtime/report-guarded-continuations-plan.md`) waited on a Codex verification. On 2026-09-06 the user closed those sessions and ruled: *"yes do it directly … the codex inspiration was only so we wouldn't have to reinvent the wheel … we can implement directly and bypass codex completely."* So: guarded continuations need no new line (a guard is an expression in the model's own program, already what `runtime-contract.md` §1 and §5 give); **direct verified completion** is the one new capability — map line 2485, `runtime-contract.md` §9, `model-contract.md` §2 — and its eight open decisions are ruled in `phase-61.md` 61E. The same ruling settles the lane's two Codex-adjacent choices: pane embeds V8 through the `v8` crate directly rather than vendoring Codex's `deno_core` runtime, and nothing waits on Codex again. **Why:** the harness is not Codex; open-source concepts were to be borrowed, never depended on.
+
+## Seven experiment gates adopted as standing rules — the user, 2026-09-06
+
+Phases 52 and 53 carried seven criteria for features nobody has proposed — semantic retrieval with embeddings, and a graph database. They sat as *deferred gates awaiting a decision*. Put to the user as yes/no on 2026-09-06, the answer was yes to all seven; each is now a standing rule of this project and its map box is ticked **on that decision, not on a mechanism** — there is nothing in the build to mutate, because no embedding index and no graph store exist. The day a package proposes either, its Phase −1 cites this section and the phase entries, and the rule binds it:
+
+1. **1866** — before any embedding work starts, concrete retrieval cases that lexical (FTS5) search fails on are written down first (`phase-52.md` 1865 already records the miss on every production search door; those recorded misses are that list's source).
+2. **1867** — if semantic retrieval is added, it combines with lexical retrieval; it never replaces it.
+3. **1868** — embeddings stay physically project-isolated: one index per project, never a shared vector store, the same isolation the SQLite store keeps by trigger.
+4. **1869** — semantic retrieval respects memory lifecycle status: a superseded or retired memory never resurfaces as current truth through a vector match.
+5. **1870** — semantic retrieval is evaluated on real Glasshouse queries before it becomes any default path.
+6. **1879** — no graph database is ever added solely to visualize project memory (map line 1107's no-decorative-graph rule already guards the widget; this guards the store).
+7. **1882** — before any graph database, SQLite relations are shown insufficient for a real query; `phase-53.md`'s 1882 entry records today's evaluation — one relationship ever needed, built, and serving a real query — so the burden is on the proposal.
+
+**Why:** an open gate for a feature nobody wants counts as work pending and is not; a rule recorded and cited is the same protection at no upkeep. The Cluster Q refusals of 1867–1870, 1879 and 1882 are superseded by this decision.

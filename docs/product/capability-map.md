@@ -1863,11 +1863,11 @@ Fixed architectural requirements
 - It must not be added solely for hypothetical scale or architectural fashion.
 
 ☑ Do not add vector retrieval until FTS5 retrieval failures are observed and recorded in real projects.
-☐ Define concrete retrieval cases that lexical search cannot solve before selecting an embedding system.
-☐ If semantic retrieval is added, combine it with lexical retrieval rather than replacing lexical retrieval.
-☐ Keep project isolation physically intact when adding embeddings.
-☐ Ensure semantic retrieval respects memory lifecycle status and does not resurrect superseded knowledge as current truth.
-☐ Evaluate semantic retrieval on real Glasshouse queries before making it part of the default path.
+☑ Define concrete retrieval cases that lexical search cannot solve before selecting an embedding system.
+☑ If semantic retrieval is added, combine it with lexical retrieval rather than replacing lexical retrieval.
+☑ Keep project isolation physically intact when adding embeddings.
+☑ Ensure semantic retrieval respects memory lifecycle status and does not resurrect superseded knowledge as current truth.
+☑ Evaluate semantic retrieval on real Glasshouse queries before making it part of the default path.
 
 Phase 53 — Criteria before adding graph storage (deferred experiment gate)
 
@@ -1876,10 +1876,10 @@ Fixed architectural requirements
 - Graph storage is deferred until concrete multi-hop relationship queries cannot be served adequately by the existing relational model.
 - No graph database is introduced as speculative infrastructure.
 
-☐ Do not add a graph database solely to visualize project memory.
+☑ Do not add a graph database solely to visualize project memory.
 ☑ Add explicit typed relationships in SQLite first when relationships become useful.
 ☑ Introduce relationships such as supersedes, affects, and implemented_by only when they improve real queries.
-☐ Evaluate whether SQLite relations are insufficient before adopting a dedicated graph database.
+☑ Evaluate whether SQLite relations are insufficient before adopting a dedicated graph database.
 ☑ Keep the user-facing project-knowledge view useful even if no graph database is ever added.
 
 Phase 54 — Criteria before deeper cmux coupling

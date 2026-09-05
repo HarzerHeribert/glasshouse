@@ -159,3 +159,48 @@ Recorded scope limits — stated by the worker, not discovered later:
 ---
 
 ---
+
+## 1866–1870 — CLOSED 2026-09-06 by the user's decision: seven experiment gates adopted as standing rules
+
+The Cluster Q refusals above are superseded. Each line below is a rule the user adopted on 2026-09-06; the reasoning for treating a decided rule as a closed line is in `design-decisions.md`, *Seven experiment gates adopted as standing rules*.
+
+### Define concrete retrieval cases that lexical search cannot solve before selecting an embedding system. (line 1866)
+
+Contract: Given a proposal to add semantic retrieval, when its Phase −1 is written, it names concrete retrieval cases lexical search fails on — sourced from the misses `phase-52.md` 1865 records on every production search door — before an embedding system is selected.
+
+State: **COMPLETE** — ruled 2026-09-06 by the user ("i agree with you on all 7 items"), recorded in `design-decisions.md`, *Seven experiment gates adopted as standing rules*. Ticked on the decision, not on a mechanism: no embedding index or graph store exists in this build, so there is nothing to mutate and no test names it. The named successor 1866 once carried (a recorded-miss reader) is the source of that list.
+
+Limits: a standing rule, not a verified behaviour. Any package that adds what this line governs must cite this entry in its Phase −1 and carry the rule's own test; if such a package lands without one, this box comes back off.
+
+### If semantic retrieval is added, combine it with lexical retrieval rather than replacing lexical retrieval. (line 1867)
+
+Contract: Given semantic retrieval exists, when a query runs, lexical retrieval still runs and its results are combined, never replaced.
+
+State: **COMPLETE** — ruled 2026-09-06 by the user ("i agree with you on all 7 items"), recorded in `design-decisions.md`, *Seven experiment gates adopted as standing rules*. Ticked on the decision, not on a mechanism: no embedding index or graph store exists in this build, so there is nothing to mutate and no test names it. 
+
+Limits: a standing rule, not a verified behaviour. Any package that adds what this line governs must cite this entry in its Phase −1 and carry the rule's own test; if such a package lands without one, this box comes back off.
+
+### Keep project isolation physically intact when adding embeddings. (line 1868)
+
+Contract: Given embeddings exist, when they are stored, they live per project under the same physical isolation the SQLite store keeps by trigger — never a shared index.
+
+State: **COMPLETE** — ruled 2026-09-06 by the user ("i agree with you on all 7 items"), recorded in `design-decisions.md`, *Seven experiment gates adopted as standing rules*. Ticked on the decision, not on a mechanism: no embedding index or graph store exists in this build, so there is nothing to mutate and no test names it. 
+
+Limits: a standing rule, not a verified behaviour. Any package that adds what this line governs must cite this entry in its Phase −1 and carry the rule's own test; if such a package lands without one, this box comes back off.
+
+### Ensure semantic retrieval respects memory lifecycle status and does not resurrect superseded knowledge as current truth. (line 1869)
+
+Contract: Given a memory whose lifecycle status is superseded or retired, when semantic retrieval runs, that memory is never presented as current truth.
+
+State: **COMPLETE** — ruled 2026-09-06 by the user ("i agree with you on all 7 items"), recorded in `design-decisions.md`, *Seven experiment gates adopted as standing rules*. Ticked on the decision, not on a mechanism: no embedding index or graph store exists in this build, so there is nothing to mutate and no test names it. 
+
+Limits: a standing rule, not a verified behaviour. Any package that adds what this line governs must cite this entry in its Phase −1 and carry the rule's own test; if such a package lands without one, this box comes back off.
+
+### Evaluate semantic retrieval on real Glasshouse queries before making it part of the default path. (line 1870)
+
+Contract: Given semantic retrieval is built, when it is proposed as a default path, its evaluation on real Glasshouse queries is recorded first.
+
+State: **COMPLETE** — ruled 2026-09-06 by the user ("i agree with you on all 7 items"), recorded in `design-decisions.md`, *Seven experiment gates adopted as standing rules*. Ticked on the decision, not on a mechanism: no embedding index or graph store exists in this build, so there is nothing to mutate and no test names it. 
+
+Limits: a standing rule, not a verified behaviour. Any package that adds what this line governs must cite this entry in its Phase −1 and carry the rule's own test; if such a package lands without one, this box comes back off.
+

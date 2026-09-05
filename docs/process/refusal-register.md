@@ -1354,13 +1354,13 @@ declared variant with no production caller.
 
 | line | why it cannot be packaged |
 |---|---|
-| **1867** *"If semantic retrieval is added, combine it with lexical retrieval…"* | Cluster Q: no second retrieval path exists to combine with the lexical one. |
-| **1868** *"Keep project isolation physically intact when adding embeddings."* | Cluster Q: no embeddings table or column exists to isolate. |
-| **1869** *"Ensure semantic retrieval respects memory lifecycle status…"* | Cluster Q: nothing can resurrect a superseded memory while one retrieval path exists; the lexical precedent to copy is `memory/search.rs:44-54`. |
-| **1870** *"Evaluate semantic retrieval on real Glasshouse queries before making it part of the default path."* | Cluster Q in an evaluation gate's clothing: the object of the evaluation does not exist. |
-| **1879** *"Do not add a graph database solely to visualize project memory."* | Cluster Q: no graph database exists; line 1107's tripwire guards the widget, not a database, and would not tick this regardless. |
-| **1882** *"Evaluate whether SQLite relations are insufficient before adopting a dedicated graph database."* | Cluster Q on the restraint reading; the evaluation itself is recorded in `phase-53.md` (one relationship ever needed, ever built) and closes the line the day a graph database is proposed. |
-| **1866** *"Define concrete retrieval cases that lexical search cannot solve…"* | **Not Cluster Q** — a reachable question with no material: no recorded lexical failure exists. Successor: revisit after `GH-RETRIEVAL-CRITERIA`'s miss rows accumulate. |
+| ~~1867~~ **CLOSED 2026-09-06 (adopted as a standing rule by the user)** *"If semantic retrieval is added, combine it with lexical retrieval…"* | Cluster Q: no second retrieval path exists to combine with the lexical one. |
+| ~~1868~~ **CLOSED 2026-09-06 (adopted as a standing rule by the user)** *"Keep project isolation physically intact when adding embeddings."* | Cluster Q: no embeddings table or column exists to isolate. |
+| ~~1869~~ **CLOSED 2026-09-06 (adopted as a standing rule by the user)** *"Ensure semantic retrieval respects memory lifecycle status…"* | Cluster Q: nothing can resurrect a superseded memory while one retrieval path exists; the lexical precedent to copy is `memory/search.rs:44-54`. |
+| ~~1870~~ **CLOSED 2026-09-06 (adopted as a standing rule by the user)** *"Evaluate semantic retrieval on real Glasshouse queries before making it part of the default path."* | Cluster Q in an evaluation gate's clothing: the object of the evaluation does not exist. |
+| ~~1879~~ **CLOSED 2026-09-06 (adopted as a standing rule by the user)** *"Do not add a graph database solely to visualize project memory."* | Cluster Q: no graph database exists; line 1107's tripwire guards the widget, not a database, and would not tick this regardless. |
+| ~~1882~~ **CLOSED 2026-09-06 (adopted as a standing rule by the user)** *"Evaluate whether SQLite relations are insufficient before adopting a dedicated graph database."* | Cluster Q on the restraint reading; the evaluation itself is recorded in `phase-53.md` (one relationship ever needed, ever built) and closes the line the day a graph database is proposed. |
+| ~~1866~~ **CLOSED 2026-09-06 (adopted as a standing rule by the user)** *"Define concrete retrieval cases that lexical search cannot solve…"* | **Not Cluster Q** — a reachable question with no material: no recorded lexical failure exists. Successor: revisit after `GH-RETRIEVAL-CRITERIA`'s miss rows accumulate. |
 
 Packaged: **1865** (`GH-RETRIEVAL-CRITERIA`, Amber) and **1880, 1881, 1883**
 (`GH-RELATIONSHIP-PROOFS`, Green, tests only).
@@ -1504,3 +1504,7 @@ The first `--windows-vm` run in a day found, in order: a `libc::mktime` that lib
 | 1757, 1766 | `GH-ROUTE-RATIONALE-SINK` (Amber) | the session router's explanation, in hand at both `record_routed_session` sites, is one `SessionRouteDecided` row on the 2026-08-30 sink; `sessions show` prints the block, `status` the strongest three (`phase-47.md`). 4/4 KILLED, one after the worker strengthened a test a reversed sort had passed. The evaluation module's own pinning test forbids serde — the JSON is hand-written; and `database.rs`'s kind list gained the variant at integration. |
 
 **Cluster H now holds 1760, 1767 and 1769 only** — a cache-temperature estimate that does not exist, a correlation nothing computes, a durable extraction record. The 2026-08-30 scoping (*0 WOULD CLOSE, 5 NEEDS MORE*) is discharged for the five it named except 1763's sibling 1769; the sink paid for three boxes and a fourth (1763) on an earlier package.
+
+## 1866–1870, 1879, 1882 CLOSED — 2026-09-06, the user's decision
+
+Seven experiment-gate criteria (Phases 52 and 53) were put to the user as yes/no and adopted as standing rules; their Cluster Q refusals are superseded and the boxes are ticked on the decision (`design-decisions.md`, *Seven experiment gates adopted as standing rules*; `phase-52.md`, `phase-53.md`). Do not package them; cite them.
