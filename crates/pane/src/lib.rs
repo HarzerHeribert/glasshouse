@@ -11,6 +11,7 @@ pub mod rollout;
 pub mod ruler;
 pub mod sandbox;
 pub mod session;
+pub mod tools;
 pub mod tui;
 pub mod wire;
 
