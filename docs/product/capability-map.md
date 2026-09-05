@@ -2428,8 +2428,8 @@ record: the session artifact *The Glasshouse Native Harness*.
 61A — The ruler
 
 ☐ Run one fixed task set through Claude Code and through a candidate harness and report tokens per completed task, wall-clock and outcome side by side.
-☐ Score per workload tier so a win on one tier is visible even when the aggregate is not.
-☐ Do not present a harness comparison that measures tokens per turn instead of tokens per completed task.
+☑ Score per workload tier so a win on one tier is visible even when the aggregate is not.
+☑ Do not present a harness comparison that measures tokens per turn instead of tokens per completed task.
 
 61B — The crate and the adapter
 

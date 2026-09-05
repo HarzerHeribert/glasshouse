@@ -204,7 +204,7 @@ files in `crates/glasshouse/src` name `IntegrationId` — so adding the variant
 is a compile-error-driven propagation path, which is the cheapest kind.
 
 **`canonical.rs` must round-trip reasoning blocks byte-identically.** This one
-is **not parked; it is answered, and the answer is no.**
+is **not parked; it was answered *no* when written, and the answer became *yes* on 2026-09-05** — `Block::Thinking { thinking, signature }` and `Block::RedactedThinking { data }` landed in `a4d5911` with the byte-identity round-trip test `GH-CANONICAL-THINKING` was to write; the paragraph below is kept as the record of the question and is otherwise stale.
 `gateway::translate::canonical::Block`
 (`crates/glasshouse/src/gateway/translate/canonical.rs:302`) has exactly four
 variants — `Text`, `Image`, `ToolUse`, `ToolResult`. There is no thinking or
