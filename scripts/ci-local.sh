@@ -299,8 +299,11 @@ if [ "$DO_LINUX" -eq 1 ]; then
           # The Linux Secret Service backend (Phase 9E line 442) links libdbus
           # through libdbus-sys, whose build script needs the dev headers and
           # pkg-config on the build host -- accepted by the user 2026-09-05.
-          # Root here, before the ci user exists; the image ships neither.
-          apt-get update -q >/dev/null && apt-get install -y -q libdbus-1-dev pkg-config >/dev/null
+          # gnome-keyring and libsecret-tools are the CI fixture provider
+          # and its proof CLI (GH-SECRET-SERVICE-CI-FIXTURE); dbus is
+          # dbus-run-session, which the fixture uses for a private bus.
+          # Root here, before the ci user exists; the image ships none of it.
+          apt-get update -q >/dev/null && apt-get install -y -q libdbus-1-dev pkg-config dbus gnome-keyring libsecret-tools >/dev/null
           id -u ci >/dev/null 2>&1 || useradd -m -u 1000 ci
           # Wipe before extracting. `tar -x` writes over a tree, it never
           # removes what is no longer in the source — so a file deleted (or
@@ -327,7 +330,8 @@ if [ "$DO_LINUX" -eq 1 ]; then
     step "test (ubuntu) / build+test" run_linux \
       'set -e; rustup component add clippy rustfmt >/dev/null 2>&1 || true;
        cargo build --locked --workspace --exclude pane --all-targets;
-       cargo test --locked --workspace --exclude pane -- --nocapture < /dev/null'
+       . scripts/lib/secret-service-fixture.sh;
+       secret_service_fixture_run cargo test --locked --workspace --exclude pane -- --nocapture < /dev/null'
     step "lint (ubuntu) / clippy" run_linux \
       'set -e; rustup component add clippy >/dev/null 2>&1 || true;
        cargo clippy --locked --workspace --exclude pane --all-targets -- -D warnings'

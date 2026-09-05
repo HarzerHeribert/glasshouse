@@ -54,12 +54,12 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`█████████████████████████████████████░░░` **1301 closed** · **97 active committed open** (93%)
+`█████████████████████████████████████░░░` **1302 closed** · **96 active committed open** (93%)
 
 Separately tracked, and not release-blocking: **7 deferred gate criteria** (Phase 52, Phase 53) awaiting a decision, and **229 parked experimental lines** under Maybe / Experimental.
 
 <details>
-<summary>Per-phase breakdown (85 of 109 active phases complete)</summary>
+<summary>Per-phase breakdown (86 of 109 active phases complete)</summary>
 
 | Phase | Done |
 |---|---|
@@ -81,7 +81,7 @@ Separately tracked, and not release-blocking: **7 deferred gate criteria** (Phas
 | Phase 9B — Scoped harness wrappers and shims | 9/9 ✅ |
 | Phase 9C — Provider protocol model | 12/12 ✅ |
 | Phase 9D — Built-in provider templates | 14/14 ✅ |
-| Phase 9E — Secret storage | 12/13 |
+| Phase 9E — Secret storage | 13/13 ✅ |
 | Phase 9F — Direct provider launch profiles | 13/13 ✅ |
 | Phase 9G — Glasshouse local gateway process | 19/19 ✅ |
 | Phase 9H — Sticky gateway routing for harness-backed interactive sessions | 13/14 |

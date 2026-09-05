@@ -133,9 +133,13 @@ jobs:
       # The Linux Secret Service backend (Phase 9E line 442) links libdbus
       # through `libdbus-sys`, whose build script needs the dev headers and
       # pkg-config on the build host -- accepted by the user on 2026-09-05.
+      # gnome-keyring and libsecret-tools are the CI fixture's provider and
+      # its proof CLI (GH-SECRET-SERVICE-CI-FIXTURE); dbus is
+      # dbus-run-session, which the fixture uses for a private bus -- these
+      # images ship dbus and pkg-config already but not libdbus-1-dev.
       - name: Linux build-host packages (libdbus for the Secret Service backend)
         if: runner.os == 'Linux'
-        run: sudo apt-get update -q && sudo apt-get install -y -q libdbus-1-dev pkg-config
+        run: sudo apt-get update -q && sudo apt-get install -y -q libdbus-1-dev pkg-config dbus gnome-keyring libsecret-tools
 
       - name: Build
         run: cargo build --locked --workspace --exclude pane --all-targets
@@ -144,7 +148,20 @@ jobs:
       # first red so a developer gets an answer fast; the sweep runs everything
       # so one red cannot hide the others -- which is exactly how a Codex
       # catalogue drift sat behind a pty_smoke failure on 2026-09-05.
+      #
+      # Linux gets its own step so secret_native's round trip (Phase 9E line
+      # 442) runs against a real, unlocked Secret Service instead of skipping
+      # -- the same fixture ci-local.sh's run_linux() sources, so the local
+      # gate and this sweep agree. macOS and Windows are the unchanged step
+      # below; nothing here touches them.
+      - name: Test (Linux, under the Secret Service fixture)
+        if: runner.os == 'Linux'
+        run: |
+          . scripts/lib/secret-service-fixture.sh
+          secret_service_fixture_run cargo test --locked --workspace --exclude pane --no-fail-fast -- --nocapture
+
       - name: Test
+        if: runner.os != 'Linux'
         run: cargo test --locked --workspace --exclude pane --no-fail-fast -- --nocapture
 
       - name: Doctests

@@ -439,7 +439,7 @@ Fixed architectural requirements
 ☑ Define a SecretStore abstraction independent from project memory and provider configuration.
 ☑ Prefer the macOS Keychain for user-entered provider secrets on macOS when available.
 ☑ Prefer Windows Credential Manager for user-entered provider secrets on Windows when available.
-☐ Prefer a Secret Service-compatible keyring on Linux when available.
+☑ Prefer a Secret Service-compatible keyring on Linux when available.
 ☑ Allow environment-variable references as a cross-platform secret source.
 ☑ Provide a clearly labeled fallback when a native secure secret store is unavailable.
 ☑ Store only secret references in provider configuration whenever possible.
