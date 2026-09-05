@@ -73,7 +73,7 @@
 
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Barrier, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use clap::Parser;
@@ -852,13 +852,26 @@ fn a_rebind_during_an_in_flight_exchange_is_still_attributed_to_the_binding_that
     let tmp = tempfile::tempdir().unwrap();
     let ledger = evidence_ledger_fixture(tmp.path());
 
-    // Stalls before answering, so there is a real window between dispatch
-    // and completion for the test to re-bind into.
-    let fixture = FixtureUpstream::start(|_request, out| {
-        std::thread::sleep(Duration::from_millis(200));
-        let _ = write!(out, "HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{{}}");
-        let _ = out.flush();
-        let _ = out.shutdown(Shutdown::Write);
+    // Two rendezvous points replace the two sleeps that used to order
+    // dispatch against re-bind by guessing how long each side would take.
+    // `dispatched` releases once the fixture has the request in hand (before
+    // it does anything else), proving the exchange is genuinely in flight;
+    // the test then re-binds and releases `may_answer`, so the fixture's
+    // response cannot land until after the re-bind, whatever the runner's
+    // load. Neither wait can spuriously satisfy itself early: a `Barrier`
+    // only opens once both sides have called `wait`.
+    let dispatched = Arc::new(Barrier::new(2));
+    let may_answer = Arc::new(Barrier::new(2));
+    let fixture = FixtureUpstream::start({
+        let dispatched = Arc::clone(&dispatched);
+        let may_answer = Arc::clone(&may_answer);
+        move |_request, out| {
+            dispatched.wait();
+            may_answer.wait();
+            let _ = write!(out, "HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{{}}");
+            let _ = out.flush();
+            let _ = out.shutdown(Shutdown::Write);
+        }
     });
     let gateway = gateway_to_with_evidence_ledger(&fixture, Arc::clone(&ledger));
 
@@ -875,16 +888,17 @@ fn a_rebind_during_an_in_flight_exchange_is_still_attributed_to_the_binding_that
         as_text(&send_and_read(address, &messages_request(&token, "{}")))
     });
 
-    // The exchange above has been dispatched (it is blocked inside the
-    // fixture's 200ms stall) but has not completed. Re-bind now, before it
-    // does.
-    std::thread::sleep(Duration::from_millis(50));
+    // The exchange above is now provably dispatched (the fixture has the
+    // request and is waiting on `may_answer`) but not complete. Re-bind now,
+    // before releasing the response.
+    dispatched.wait();
     gateway.routing().bind(
         "harness-b",
         ANTHROPIC_MESSAGES,
         AssignedModel::named("model-b"),
         gateway.upstream(),
     );
+    may_answer.wait();
 
     let response = in_flight.join().expect("the client thread does not panic");
     assert!(
