@@ -442,6 +442,13 @@ pub struct WizardState {
     /// production, injected here so tests do not depend on the crate's
     /// actual version number).
     version: String,
+    /// Rows skipped from the top of the Summary body, in terminal rows.
+    /// Reset to `0` every time [`Step::Summary`] becomes current — see the
+    /// three assignment sites of `self.step = Step::Summary` — so the
+    /// Summary always opens at the top regardless of where a previous visit
+    /// left it. The view clamps this to the body's actual maximum scroll,
+    /// since this alone does not know the terminal's height.
+    summary_scroll: u16,
 }
 
 impl WizardState {
@@ -509,11 +516,19 @@ impl WizardState {
             project_name,
             project_root,
             version,
+            summary_scroll: 0,
         }
     }
 
     pub fn step(&self) -> Step {
         self.step
+    }
+
+    /// Rows skipped from the top of the Summary body. `0` on a fresh
+    /// wizard and every time the Summary step is (re-)entered; the view
+    /// clamps this to its own computed maximum before rendering.
+    pub fn summary_scroll(&self) -> u16 {
+        self.summary_scroll
     }
 
     pub fn project_name(&self) -> &str {
@@ -673,13 +688,36 @@ impl WizardState {
             Step::Bypass => self.handle_bypass_key(key),
             Step::Provider => self.handle_provider_key(key),
             Step::Routing => self.handle_routing_key(key),
-            Step::Summary => {
-                if matches!(key.code, KeyCode::Enter | KeyCode::Tab) {
-                    Action::Finish
-                } else {
-                    Action::None
+            Step::Summary => match key.code {
+                KeyCode::Enter | KeyCode::Tab => Action::Finish,
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.summary_scroll = self.summary_scroll.saturating_add(1);
+                    Action::Redraw
                 }
-            }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.summary_scroll = self.summary_scroll.saturating_sub(1);
+                    Action::Redraw
+                }
+                KeyCode::PageDown => {
+                    self.summary_scroll = self.summary_scroll.saturating_add(10);
+                    Action::Redraw
+                }
+                KeyCode::PageUp => {
+                    self.summary_scroll = self.summary_scroll.saturating_sub(10);
+                    Action::Redraw
+                }
+                // The view clamps this to the real maximum — this alone
+                // does not know the terminal's height.
+                KeyCode::End => {
+                    self.summary_scroll = u16::MAX;
+                    Action::Redraw
+                }
+                KeyCode::Home => {
+                    self.summary_scroll = 0;
+                    Action::Redraw
+                }
+                _ => Action::None,
+            },
         }
     }
 
@@ -1154,6 +1192,7 @@ impl WizardState {
                     RoutingChoice::Automatic => {
                         self.pending_routing = Some(RoutingModelChoice::Automatic);
                         self.step = Step::Summary;
+                        self.summary_scroll = 0;
                     }
                     RoutingChoice::ChooseModel => {
                         if self.configured_provider_names().is_empty() {
@@ -1178,6 +1217,7 @@ impl WizardState {
                     RoutingChoice::DoLater => {
                         self.pending_routing = None;
                         self.step = Step::Summary;
+                        self.summary_scroll = 0;
                     }
                 }
                 Action::Redraw
@@ -1188,6 +1228,7 @@ impl WizardState {
             // tabbing past it on a reopen preserves what is already there.
             KeyCode::Tab => {
                 self.step = Step::Summary;
+                self.summary_scroll = 0;
                 Action::Redraw
             }
             _ => Action::None,
