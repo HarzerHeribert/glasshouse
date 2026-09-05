@@ -139,9 +139,24 @@ one platform.
    is the one thing an allow-list must never produce. Tools that need network
    are **not registered** under the sandbox; `WebFetch` is absent from the
    registry in 61D rather than present and failing.
-2. **The OS keyring or credential store.** Keychain, Secret Service, DPAPI.
-3. **`$HOME` outside the project**, and by name because these are the ones
-   that matter: `~/.claude`, `~/.codex`, `~/.ssh`, `~/.aws`, `~/.config`.
+2. **The OS keyring or credential store.** Keychain, Secret Service, DPAPI —
+   and, for writing, the machine's own credential and identity store, by
+   name: `/etc/sudoers`, `/etc/sudoers.d`, `/etc/shadow`, `/etc/gshadow`,
+   `/etc/passwd`, `/etc/master.passwd`, `/etc/group`, `/etc/pam.d`,
+   `/etc/ssh`, `/etc/security`, and `%SystemRoot%\System32\config` where
+   that variable is set. Write-only on purpose: `/etc/hosts` is an ordinary
+   readable file and §3's own seatbelt example reads `/etc/passwd`, so the
+   read side is untouched. (Ruled 2026-09-05 after `GH-PANE-61D-VERIFY`
+   found `Write(/**)` reaching `/etc/sudoers`; the rule is implemented in
+   `sandbox/profile.rs::system_credential_paths`.)
+3. **`$HOME` outside the project** — the whole of it, by any pattern; the
+   names that matter most are `~/.claude`, `~/.codex`, `~/.ssh`, `~/.aws`,
+   `~/.config`, and they are examples, not the rule. A settings document
+   cannot grant `~/notes/`, a sibling project under `~/projects/`, or
+   `~/.cargo/registry` either; a project that needs scratch space gets it
+   inside its own root. (On Windows `%TEMP%` lives under the profile and
+   is refused for a project rooted elsewhere — untested until the Windows
+   pane cell runs.)
 4. **Glasshouse's own state and data directories**, including every SQLite
    database in them. A pane program that could write those could rewrite
    another project's memory, which is the boundary Phase 46 exists to hold.

@@ -193,7 +193,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       # The ruler cuts a worktree at a task's PARENT commit (crates/pane/src/ruler/
       # attempt.rs), and its tests do the same at HEAD^; a depth-1 checkout has

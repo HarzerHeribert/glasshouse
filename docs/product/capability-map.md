@@ -2441,13 +2441,13 @@ record: the session artifact *The Glasshouse Native Harness*.
 
 61C — The loop and the three seams
 
-☐ Run a task in turns against the Anthropic Messages protocol, standalone, with resume from a rollout file.
-☐ Route through Glasshouse's gateway when `ANTHROPIC_BASE_URL` names it; behave identically otherwise except for the hop.
-☐ Read memory and checkpoints from Glasshouse's MCP surface when reachable, and from a local store when not.
-☐ Emit the harness hook protocol's events so Glasshouse's memory extraction, context firewall and event bus see `pane` unchanged.
-☐ Load `CLAUDE.md` and `AGENTS.md`, `.claude/settings.json` hooks and permissions, `.claude/commands`, the skills directories and `.mcp.json` from the project with nothing edited.
-☐ Show the two-region TUI — conversation column and telemetry sidebar — with the sidebar collapsing honestly when Glasshouse is absent.
-☐ Offer slash commands: `/model`, `/entitlements`, `/handles`, `/supervisor`, `/rollback`, `/budget`, `/memory`, and every project command and skill by name.
+☑ Run a task in turns against the Anthropic Messages protocol, standalone, with resume from a rollout file.
+☑ Route through Glasshouse's gateway when `ANTHROPIC_BASE_URL` names it; behave identically otherwise except for the hop.
+☑ Read memory and checkpoints from Glasshouse's MCP surface when reachable, and from a local store when not.
+☑ Emit the harness hook protocol's events so Glasshouse's memory extraction, context firewall and event bus see `pane` unchanged.
+☑ Load `CLAUDE.md` and `AGENTS.md`, `.claude/settings.json` hooks and permissions, `.claude/commands`, the skills directories and `.mcp.json` from the project with nothing edited.
+☑ Show the two-region TUI — conversation column and telemetry sidebar — with the sidebar collapsing honestly when Glasshouse is absent.
+☑ Offer slash commands: `/model`, `/entitlements`, `/handles`, `/supervisor`, `/rollback`, `/budget`, `/memory`, and every project command and skill by name.
 ☐ Show which entitlement served each request and what it cost, from the gateway's response and routing ledger.
 
 61D — The sandbox
