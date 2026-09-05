@@ -4385,3 +4385,64 @@ it says *not enough high-tier launches*. Package: `GH-RESERVE-AVAILABILITY`
 (Sonnet, Amber — one decision, which launches count; one mutation, the tier
 filter). 1846 is a different mechanism (the prior's predictiveness against an
 outcome) and gets its own note with the explicit-rating door.
+
+## The routing half of RC-B: an explicit route rating when given, the turn-outcome proxy otherwise — designing `GH-ROUTING-RATING` and line 1846, 2026-09-05
+
+The user's answer of 2026-09-03 (*"Yes, both: explicit rating when given, the
+turn-outcome proxy otherwise"*) has been applied to the memory half
+(`MemoryRated`, `glasshouse memory rate`, the readers that label the other
+half *proxy*) and not yet to routing, where 1834, 1835 and 1852 closed on the
+proxy alone. This note is the routing half, in the memory half's own shape so
+the two never diverge.
+
+**The rating.** `EvaluationKind::RoutingRated`: `subject` is the destination
+id the session was routed to (the same word `RoutingCostClassObserved`'s
+`detail` carries), `outcome` is **`useful` or `not-useful`** — the memory
+rating's own words, reused on purpose: the judgment is *did this decision
+serve the task*, and two scales for one question is the mistake the reserve
+inputs already refused — `session_id` is required (a route rating is about a
+session's route, never a memory), `detail` is the operator's note, never
+parsed. **A rating is a new row, never an edit**, and never a rewrite of
+`RoutingOutcomeObserved`.
+
+**The door.** `glasshouse route rate <session-id> useful|not-useful [--note]`,
+modelled line for line on `memory rate` (`cli.rs::Rate`,
+`record_memory_rating`'s handle discipline). CLI only, as memory's is: the
+rating is the operator's act; a harness may issue it as a tool call the way
+`memory rate`'s doc already says. It refuses a session id that has no
+`RoutingCostClassObserved` row — one cannot rate a route that was never
+taken — and prints the row it wrote.
+
+**Precedence, and the one rule readers keep.** Where a reader counts a
+session's route as a success or a failure from `RoutingOutcomeObserved` (the
+proxy), a `RoutingRated` row for the same session **replaces** the proxy's
+verdict for that session, and the readout says so: every success count
+becomes *rated N / proxy M*, printed apart, never summed into one number. The
+memory readers hold exactly this rule; `route_outcomes_by` and the pairing
+block gain the split. A session with two ratings takes the latest — a rating
+may be revised by rating again, which is the append-only way to change one's
+mind.
+
+**Line 1846 — the prior's predictiveness against the outcome.** *"Measure how
+quickly local pairing evidence becomes more predictive than the initial
+same-vendor prior."* For every routed session with an outcome (rated first,
+proxy otherwise), take the pairing class the launch recorded
+(`sessions.pairing_class`, the join `route_outcomes_by_pairing_class` already
+makes) and *k*, the number of that pairing's outcome rows that preceded it.
+Two predictions are scored against the outcome: the **prior's** — a native
+pairing predicts success, a cross-vendor one predicts failure, which is
+exactly what `pairing_prior` contributes when *k* is below the evidence
+threshold — and the **local evidence's** — the pairing's success rate over
+those *k* rows, predicting success at or above one half. Bucket by *k* (0–4,
+5–9, 10–19, 20 and more), report both accuracies per bucket with the sample,
+and name the first bucket in which local evidence is at least as accurate as
+the prior over `MIN_SAMPLE_FOR_SUMMARY` sessions — *how quickly* is that
+bucket, or *not yet* when none qualifies. Printed under 1846 in the route
+outcomes section; *measures*, never re-tunes the prior.
+
+**Packages, in order, because they share `kinds.rs`, `schema.rs` and
+`route.rs`:** `GH-ROUTING-RATING` (Sonnet, Amber — the kind, the door, the
+rated/proxy split in the two readers; closes no line, it is the explicit
+half's producer), then `GH-PAIRING-CROSSOVER` (Sonnet, Amber — the 1846
+reader over rated-or-proxy outcomes). Both wait for `GH-RESERVE-AVAILABILITY`
+to land, for the same three files.
