@@ -1355,6 +1355,7 @@ dependencies = [
  "clap",
  "serde",
  "serde_json",
+ "ureq",
 ]
 
 [[package]]
