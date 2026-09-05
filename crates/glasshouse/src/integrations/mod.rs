@@ -51,6 +51,7 @@ pub enum IntegrationId {
     Cursor,
     Pi,
     Hermes,
+    Pane,
     Cmux,
     Ollama,
     LlamaCpp,
@@ -66,6 +67,7 @@ impl IntegrationId {
         IntegrationId::Cursor,
         IntegrationId::Pi,
         IntegrationId::Hermes,
+        IntegrationId::Pane,
         IntegrationId::Cmux,
         IntegrationId::Ollama,
         IntegrationId::LlamaCpp,
@@ -82,6 +84,7 @@ impl IntegrationId {
             IntegrationId::Cursor => "cursor",
             IntegrationId::Pi => "pi",
             IntegrationId::Hermes => "hermes",
+            IntegrationId::Pane => "pane",
             IntegrationId::Cmux => "cmux",
             IntegrationId::Ollama => "ollama",
             IntegrationId::LlamaCpp => "llama-cpp",
@@ -98,6 +101,7 @@ impl IntegrationId {
             IntegrationId::Cursor => "Cursor CLI",
             IntegrationId::Pi => "Pi",
             IntegrationId::Hermes => "Hermes Agent",
+            IntegrationId::Pane => "pane",
             IntegrationId::Cmux => "cmux",
             IntegrationId::Ollama => "Ollama",
             IntegrationId::LlamaCpp => "llama.cpp",
@@ -112,7 +116,8 @@ impl IntegrationId {
             | IntegrationId::OpenCode
             | IntegrationId::Cursor
             | IntegrationId::Pi
-            | IntegrationId::Hermes => IntegrationKind::Harness,
+            | IntegrationId::Hermes
+            | IntegrationId::Pane => IntegrationKind::Harness,
             IntegrationId::Cmux => IntegrationKind::Multiplexer,
             IntegrationId::Ollama | IntegrationId::LlamaCpp => IntegrationKind::LocalInference,
         }
@@ -152,7 +157,8 @@ impl IntegrationId {
             | IntegrationId::OpenCode
             | IntegrationId::Cursor
             | IntegrationId::Pi
-            | IntegrationId::Hermes => &[],
+            | IntegrationId::Hermes
+            | IntegrationId::Pane => &[],
         }
     }
 
@@ -758,6 +764,11 @@ fn config_evidence(id: IntegrationId, home: Option<&Path>) -> (ConfigEvidence, V
             }
             (evidence_result(found), notes)
         }
+        // `pane` (`crates/pane/src/main.rs`) reads a line from stdin and
+        // echoes it back; it has no credential, no configuration file, and
+        // no login step, so a usable executable is ready and available —
+        // the same reasoning `Cmux` and `LlamaCpp` already give below.
+        IntegrationId::Pane => (ConfigEvidence::Available, Vec::new()),
         // Antigravity requires credentials/login, but has no established
         // per-user config convention that can be safely verified non-destructively
         // from this environment. Present on the machine is not the same as set

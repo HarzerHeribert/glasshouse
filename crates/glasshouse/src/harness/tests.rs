@@ -299,6 +299,7 @@ fn every_adapter_declares_its_native_communication_style_and_session_cost() {
                     cache_invalidation: Declared::Unverified,
                 }),
             ),
+            (IntegrationId::Pane, None),
         ],
         "read any changed declaration from the named native artifact before changing this \
          table; unsupported or unobserved style mechanisms must remain unknown"
@@ -349,6 +350,7 @@ fn each_adapter_declares_the_approval_mode_its_binary_documents() {
             (IntegrationId::Cursor, Some(&["--auto-review"][..])),
             (IntegrationId::Pi, None),
             (IntegrationId::Hermes, None),
+            (IntegrationId::Pane, None),
         ],
         "an adapter's automatic-review declaration changed; if a harness \
          really gained or lost one, read it from the binary and update this \
@@ -585,11 +587,20 @@ fn resume_passes_the_identifier_as_one_whole_argument() {
 }
 
 #[test]
-fn every_supported_harness_can_be_resumed() {
-    // All seven document a resume mechanism in their own `--help`. This is
-    // what makes Phase 7's resume work possible at all, so losing one
-    // should be loud.
+fn every_supported_harness_can_be_resumed_except_pane() {
+    // All seven installed harnesses document a resume mechanism in their
+    // own `--help`. This is what makes Phase 7's resume work possible at
+    // all, so losing one should be loud. `pane` is the one adapter with a
+    // documented exception: its binary parses no arguments at all today, so
+    // `Pane::resume` honestly answers `None` rather than inventing a flag.
     for adapter in all() {
+        if adapter.id() == IntegrationId::Pane {
+            assert!(
+                adapter.resume("some-id").is_none(),
+                "pane declared a resume mechanism its binary does not have"
+            );
+            continue;
+        }
         assert!(
             adapter.resume("some-id").is_some(),
             "{} lost its resume mechanism",
@@ -1095,6 +1106,7 @@ fn no_adapter_depends_on_the_session_model() {
         ("harness/cursor.rs", include_str!("cursor.rs")),
         ("harness/hermes.rs", include_str!("hermes.rs")),
         ("harness/opencode.rs", include_str!("opencode.rs")),
+        ("harness/pane.rs", include_str!("pane.rs")),
         ("harness/pi.rs", include_str!("pi.rs")),
     ];
     for (name, source) in modules {
