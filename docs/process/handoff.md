@@ -41,6 +41,43 @@ validated and waiting on the commit. Next action: `.agent-runtime/CONTINUATION.m
 
 Last updated: 2026-09-02, late night (Europe/Berlin)
 
+## Checkpoint — 2026-09-05 (night), waves 118–136: 1313 / 1398 (93.9%) — pane 61B and 61C merged, Phase 37 complete, the served-by producers, sixteen trims, the first fully green sixteen-cell sweep
+
+Fable 5.1 orchestrators from ~18:00 (`b2416cc7`, then `c07a9ff3` from 20:42). The
+ledger's waves 118–136 are the account; `.agent-runtime/CONTINUATION.md` is the hot
+hand-off. This is the index.
+
+**Closed:** 2438, 2439 (the pane adapter) · 1158, 1534 (context size read off the
+gateway's own exchange) · 2431, 2432 (the ruler) · 442 · 1044 · 1837, 1846 (the route
+rating and local pairing evidence) · 2444–2450 (61C, merged as `a67358e` after the
+lead found and fixed its own no-production-caller shape) · **1594** (Phase 37
+complete). Phases 9E, 21K, 35B and 37 complete. Phase 59: sixteen files trimmed under
+2053; 2054 open only for 1294 and 1610.
+
+**Landed without a tick:** `routing-cost --json` (2430's meter) · the package-aware
+blast radius · the served-by headers and currency keys (2451's producers) ·
+terminal_loss's determinism · the Windows let-chain fix · the Codex non-interactive
+note · the `pane (windows-latest)` cell · sixty sibling worktrees and sixteen stale
+ones removed on the user's instruction · `.DS_Store` ignored.
+
+**Sweeps:** `33984063363` on `982a6f2` was the first fully green sixteen-cell run.
+Every red since was enumerated per cell: the conformance rebind test's three strikes
+(determinism packet live), one `session_supervision` flake, one test false positive
+fixed by the dogfooding session, and the new pane Windows cell red on a Unix-only
+import until the lead's 61D merge carries the fix.
+
+**Rulings of record:** 2451's response half gets a real producer · Codex is a stated
+duplication with the adapter as authority · 2456 is a Glasshouse-side Red package
+after 61D · `sandbox-grants.md` §4.2 and §4.3 · exec is granted on the resolved
+binary (the lead's) · 1594's size cap is a property of warmth (`design-decisions.md`).
+
+**Live at hand-off:** the pane lead on 61D (with `pane-61e-tools`, the sandbox's
+caller — nothing model-authored executes), `GH-CONFORMANCE-REBIND-DETERMINISM`,
+`GH-TRIM-ROUTING-DESTINATIONS`. **Next by risk:** the 61D merge and 2456 · the
+determinism report · trims `v1_to_v13.rs`, `profile/response.rs`, `profile/mod.rs` ·
+the next dogfooding session with a support-work provider configured and the firewall
+in `shadow`.
+
 ## Checkpoint — 2026-09-05 (evening), waves 116–117: 1295 / 1399 (92.6%) — pane stood up in its own lane, the dispatch defect fixed, 442 built and verified, seven lines closed
 
 Sole orchestrator from ~16:20 (`glasshouse-78`, Opus 5 xhigh; the user rules the
