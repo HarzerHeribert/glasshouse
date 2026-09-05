@@ -5398,3 +5398,19 @@ Closed these waves: **1304 → 1305**.
 
 37. **A stop condition that fires is the packet working, and the numbers it returns are worth more than the tolerance it was asked to pick.** The determinism-2 packet guessed at a slop-gated shape; the worker's measurements showed the gate would never engage where the failures happen and the 4 ms assertion never discriminated the defect. The ruling took twenty minutes and one relay because the worker brought a table instead of a number. Write the stop condition as a measurement threshold, not a judgment, and it does this every time.
 38. **`cli.rs` is not a trim candidate** despite 67 % comment lines: its `///` on clap arguments is the `--help` text, so a comment cut there is a behaviour change. Comment share alone does not pick a trim; whether the comment is *rendered* does.
+
+### Wave 135 — 2026-09-05, night: the Fable 5.1 successor's first wave — 61C merged and ticked, sixty sibling worktrees gone, the served-by producers dispatched
+
+| package | tier | result |
+|---|---|---|
+| `GH-PANE-61C` (the lead's sub-phase: loop, seams, project, TUI, session) | Opus xhigh lead; Sonnet high subs, Amber | merged at `5d63533` as `a67358e`; **2444–2450 closed**, 2451 PARTIAL; `cargo test -p pane` on the merged tree 87/87. The lead found and corrected the no-production-caller shape itself, before any tick (`.agent-runtime/pane/CORRECTION-61C-reachability.md`): nineteen of forty-eight `pub fn`s orphaned because `main.rs` was FORBIDDEN in every sub-packet and the caller was never packaged — practice §32 in one line, and the first of the eleven such cases found by the author rather than an audit. |
+| `GH-TRIM-ROUTING-EVIDENCE` | Sonnet medium, Green | 782 → 603 comment lines, four items, longest block 163 → 20; filtered diff empty, `--lib routing` 292 before and after. The tenth file under 2053. |
+| sweep 33984063363 on `982a6f2` | orchestrator | **16/16 green — the first fully green sixteen-cell run**, the first with the terminal_loss determinism fix. |
+| three rulings for the lead, one commit | orchestrator | 2451's *response* half gets a real producer (`GH-GATEWAY-SERVED-BY`, dispatched); Codex is option 2 — stated duplication, the adapter named as authority (`0be714d`, verified against codex-cli 0.153.3); 2456 is a Glasshouse-side Red package after 61D merges; `sandbox-grants.md` §4.2 names the machine's credential store and §4.3's title is the rule; the pane CI job gains `windows-latest` (run 33985317460 is its first). |
+| `GH-TRIM-PROVIDER-TELEMETRY` · `GH-GATEWAY-SERVED-BY` (live) | Sonnet medium, Green · Sonnet high, Amber | the 133-line module doc and six more blocks; two response headers on the served paths and two currency keys on the readout. |
+
+**Findings.**
+
+39. **Sixty sibling worktrees in `~/projects/` outlived their sessions, and the user noticed first.** Every one sat at zero commits ahead of `main` with a dirty tree holding the diff `integrate.sh` had applied by patch days earlier. Their diffs were archived as patches under `~/.cache/glasshouse-worktree-archive/2026-09-05-siblings/` and all sixty removed in one script; the sixteen stale trees inside `.worktrees/` went the same way. A worker tree lives in `.worktrees/` and nowhere else (practice §73), and a session that closes a worker removes its tree in the same act.
+40. **Four Finder `.DS_Store` files made `integrate.sh` refuse a clean tree.** The dirty-tree guard counts untracked files, which is right; `.gitignore` carries the pattern now (`2a97027`).
+41. **`new-packet.sh --worktree` prints the `git worktree add` line and does not run it**, and the validator then refuses the packet for paths that do not exist. Run the printed line; the skeleton is still worth it for the sections it gets right.
