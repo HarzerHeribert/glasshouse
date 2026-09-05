@@ -96,7 +96,7 @@ fn a_task_naming_no_observed_file_adds_no_section() {
         ))
         .unwrap();
 
-    let result = briefing(&store, "fix the bug", &HashSet::new(), None, None)
+    let result = briefing(&store, "fix the bug", &HashSet::new(), None, None, None)
         .unwrap()
         .into_injection();
     assert!(
@@ -142,6 +142,7 @@ fn briefing_adds_a_section_for_memories_observed_beside_a_named_file() {
         &store,
         "add a test for src/parser.rs",
         &HashSet::new(),
+        None,
         None,
         None,
     )
@@ -220,6 +221,7 @@ fn the_file_observed_section_excludes_memories_already_carried() {
         &store,
         "marmot handling: work on src/parser.rs",
         &already_injected,
+        None,
         None,
         None,
     )
@@ -304,6 +306,7 @@ fn the_file_observed_section_is_dropped_whole_rather_than_truncated() {
         &HashSet::new(),
         None,
         None,
+        None,
     )
     .unwrap()
     .into_injection()
@@ -363,7 +366,7 @@ fn a_task_naming_more_paths_than_the_bound_never_reaches_the_one_named_last() {
     paths.push("src/zzzlast.rs".to_owned());
     let task = format!("touch {}", paths.join(" "));
 
-    let result = briefing(&store, &task, &HashSet::new(), None, None)
+    let result = briefing(&store, &task, &HashSet::new(), None, None, None)
         .unwrap()
         .into_injection();
     if let Some(injection) = result {
@@ -402,7 +405,7 @@ fn the_file_observed_records_for_an_in_bounds_task_keep_the_old_order_and_count(
     }
 
     let task = "touch src/alpha.rs src/bravo.rs src/charlie.rs src/delta.rs";
-    let injection = briefing(&store, task, &HashSet::new(), None, None)
+    let injection = briefing(&store, task, &HashSet::new(), None, None, None)
         .unwrap()
         .into_injection()
         .expect("four observed paths must inject something");

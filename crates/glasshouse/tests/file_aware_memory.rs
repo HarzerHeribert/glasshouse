@@ -852,6 +852,7 @@ fn a_stale_memory_is_shown_in_its_rank_and_labelled_rather_than_withheld() {
         &HashSet::new(),
         None,
         Some(root.as_path()),
+        None,
     )
     .unwrap()
     .into_injection()
@@ -900,6 +901,7 @@ fn a_briefing_with_no_project_root_labels_every_row_unknown_and_withholds_nothin
         &store,
         "add a test for src/loader.rs",
         &HashSet::new(),
+        None,
         None,
         None,
     )

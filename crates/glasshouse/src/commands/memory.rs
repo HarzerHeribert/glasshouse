@@ -231,6 +231,10 @@ pub(crate) fn memory_search_explain(runtime: &Runtime, query: &str) -> anyhow::R
         // The same root the real briefing runs with, so `--explain`
         // describes the selection a session would actually get.
         Some(runtime.project().root()),
+        // `None`: `--explain` describes what the search and selection would
+        // pick, never whether line 1129 would withhold it — that decision is
+        // the real door's alone.
+        None,
     )?;
     drop(project);
     Ok(format!("{}\n", explain_line(&trace)))

@@ -793,6 +793,12 @@ pub(crate) fn estimated_project_memory_tokens(runtime: &Runtime, task: &str) -> 
         // `freshness=` token — a token per file-aware row is real bytes,
         // and this function's whole job is to count them.
         Some(runtime.project().root()),
+        // `None`: line 1129's confidence is read from the evaluation ledger
+        // by a `Runtime`-holding caller, and this diagnostic estimate is
+        // measuring the block a real briefing WOULD send, not deciding
+        // whether one actually goes out — the real door (`select_memory`)
+        // is where the withhold decision belongs.
+        None,
     )
     .ok();
     // The memory connection is dropped before the evaluation ledger opens —
@@ -812,7 +818,9 @@ pub(crate) fn estimated_project_memory_tokens(runtime: &Runtime, task: &str) -> 
             );
             None
         }
-        Some(BriefingOutcome::NothingNew) | None => None,
+        Some(BriefingOutcome::NothingNew)
+        | Some(BriefingOutcome::WithheldLowConfidence(_))
+        | None => None,
     }
 }
 

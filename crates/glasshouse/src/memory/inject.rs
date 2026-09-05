@@ -54,13 +54,24 @@
 //! [`super::extract::credentials`]; see this crate's `memory` module
 //! documentation for why the producer is the only place it can be made.
 //!
-//! # Line 1129 is refused here, and this is where the threshold would go
+//! # Line 1129 — closed on the door's measured precision, not a per-memory score
 //!
-//! *"Avoid injecting memory when retrieval confidence is low."* Glasshouse
-//! has no honest retrieval-confidence signal to threshold today, so this
-//! module does not invent one — see [`briefing`]'s own documentation for the
-//! evidence. Practice §79: a refusal belongs where the wiring would be
-//! attempted, not only in a handoff.
+//! *"Avoid injecting memory when retrieval confidence is low."* This module
+//! long refused the line: BM25 relevance is not a confidence, and every
+//! reachable transform of it measures the wrong thing — see [`briefing`]'s
+//! own documentation for the full accounting, kept because the reasoning
+//! still holds. What changed is not the relevance argument; it is that
+//! Glasshouse now has a different kind of confidence to threshold. **A
+//! relevance is not a confidence, and Glasshouse still has no per-query
+//! confidence. It does have an observed false-positive rate for the
+//! injection door, and that is a confidence about the door — which is the
+//! granularity this line's "avoid injecting" acts at, because injection is a
+//! per-door decision. 1129 is closed by the door's measured precision, not
+//! by a per-memory score.** [`InjectionConfidence`] is that rate, read from
+//! map line 939's own producer by this door's caller and passed in here —
+//! never computed by this module, which still has no ledger to compute it
+//! from (see this module's own header above: it takes a `MemoryStore`, not a
+//! `Runtime`).
 
 use std::collections::HashSet;
 
@@ -226,6 +237,17 @@ pub enum BriefingOutcome {
     /// what fits — leaving nothing to inject. **Not a miss: the search
     /// worked.**
     NothingNew,
+    /// The search found memories this door would otherwise have injected,
+    /// but withheld them — line 1129: this door's own observed
+    /// false-positive rate for past injections
+    /// ([`InjectionConfidence::rate`]) is above the withhold threshold.
+    /// Distinct from both misses above on purpose: the search worked and
+    /// selected real candidates, and withholding here is a deliberate
+    /// refusal rather than an absence of anything to say. Carries the
+    /// confidence that caused the refusal, so a caller can log or report
+    /// the rate and the counts it came from without a second read of the
+    /// ledger.
+    WithheldLowConfidence(InjectionConfidence),
 }
 
 impl BriefingOutcome {
@@ -235,8 +257,74 @@ impl BriefingOutcome {
     pub fn into_injection(self) -> Option<Injection> {
         match self {
             Self::Injected(injection) => Some(injection),
-            Self::NothingMatched | Self::NothingNew => None,
+            Self::NothingMatched | Self::NothingNew | Self::WithheldLowConfidence(_) => None,
         }
+    }
+}
+
+/// This door's own observed precision for past injections — line 1129's
+/// confidence, read at the granularity 1129 actually asks for: a fact about
+/// the door, not about one query. `None` is a supported answer, not a
+/// degraded one — the same shape [`briefing`]'s own `project_root` already
+/// uses: a caller with too few rated retrievals to trust a rate (below the
+/// evaluation ledger's own [`crate::routing::evidence::MIN_SAMPLE_FOR_SUMMARY`],
+/// which is every project on first use — see this crate's evaluation module,
+/// which reuses that same floor rather than keeping a second one) supplies
+/// `None`, and [`briefing_traced`] briefs exactly as it did before this type
+/// existed.
+///
+/// Built from map line 939's own reader,
+/// [`crate::evaluation::EvaluationObservations::false_positives_by_scope`],
+/// by this door's caller — never opened from inside this module, which has
+/// no [`crate::Runtime`] to open a ledger with (see this module's own header
+/// above).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InjectionConfidence {
+    /// That scope's `MemoryRetrieved` rows in the caller's chosen window —
+    /// the sample size the caller's own floor already checked before
+    /// constructing this as `Some`.
+    pub retrieved: i64,
+    /// That scope's `MemoryRated` rows carrying `not-useful` in the window.
+    pub not_useful: i64,
+    /// That scope's `MemoryRated` rows carrying `caused-complexity` in the
+    /// window.
+    pub caused_complexity: i64,
+}
+
+/// Above this observed false-positive rate, [`briefing_traced`] withholds
+/// rather than delivers — line 1129's threshold, applied to this door's own
+/// measured precision rather than to any one query's relevance (see this
+/// module's own header for why the latter was refused). A door whose rated
+/// deliveries are wrong or harmful more often than not has stopped being
+/// worth the trust an unlabelled injection asks for; below this bar the
+/// mistakes are outnumbered by the deliveries that helped, and the injection
+/// still fires.
+const INJECTION_CONFIDENCE_WITHHOLD_THRESHOLD: f64 = 0.5;
+
+impl InjectionConfidence {
+    /// `(not_useful + caused_complexity) / retrieved` — the same ratio
+    /// `glasshouse memory retrievals`' own "false positives by retrieval
+    /// scope" section already prints as "not-useful X / caused-complexity Y
+    /// of Z retrieved" (`commands::memory::render_memory_retrievals`).
+    ///
+    /// `0.0` when there is nothing to divide by. Callers of [`briefing_traced`]
+    /// never observe this from a `Some`: the floor that decides whether to
+    /// construct one at all already requires `retrieved` to be at least
+    /// [`crate::routing::evidence::MIN_SAMPLE_FOR_SUMMARY`], which is never
+    /// zero. Guarded here anyway because this is the one arithmetic step in
+    /// the whole decision, and a caller that skipped the floor must not get a
+    /// division by zero for it.
+    pub fn rate(self) -> f64 {
+        if self.retrieved <= 0 {
+            return 0.0;
+        }
+        (self.not_useful + self.caused_complexity) as f64 / self.retrieved as f64
+    }
+
+    /// Whether this door's own track record is bad enough to withhold —
+    /// [`INJECTION_CONFIDENCE_WITHHOLD_THRESHOLD`] applied to [`Self::rate`].
+    fn should_withhold(self) -> bool {
+        self.rate() > INJECTION_CONFIDENCE_WITHHOLD_THRESHOLD
     }
 }
 
@@ -277,26 +365,19 @@ impl BriefingOutcome {
 /// never promote a memory past a rung its own authority and currency did not
 /// earn it.
 ///
-/// # Line 1129 is refused, and here is the evidence
+/// # Line 1129 — a relevance is not a confidence, and this is not one either
 ///
 /// *"Avoid injecting memory when retrieval confidence is low"* needs a
-/// confidence a retrieval can actually report. Glasshouse reports a
-/// *relevance* and still has no *confidence*, and the gap between those two
-/// words is the whole refusal:
+/// confidence a retrieval can actually report, and no per-query signal in
+/// this module is one:
 ///
-/// - The raw BM25 relevance now survives the retrieval — it is on
+/// - The raw BM25 relevance survives the retrieval, on
 ///   [`super::search::RetrievalResult::relevance`], and this function's own
-///   `grouped` carries it. **This is the one bullet that has changed, and it
-///   changed the availability of a number, not the argument.** Read that
-///   method's documentation before reaching for it: BM25 is a *within-query*
-///   match score against this project's own corpus statistics, uncalibrated
-///   and with no natural zero, so there is no constant of which "below this,
-///   the retrieval was poor" is a true statement. It is a relevance, not a
-///   confidence, and the earlier form of this bullet — that exposing the
-///   score would mean editing `memory/search.rs`, which that work was
-///   forbidden to touch — was a note about one packet's scope rather than a
-///   fact about Glasshouse. It has expired; the three objections below have
-///   not.
+///   `grouped` carries it. Read that method's documentation before reaching
+///   for it: BM25 is a *within-query* match score against this project's own
+///   corpus statistics, uncalibrated and with no natural zero, so there is no
+///   constant of which "below this, the retrieval was poor" is a true
+///   statement. It is a relevance, not a confidence.
 /// - The blended score `search` actually sorts on — relevance ×
 ///   `policy::retrieval_weight` — is deliberately **not** exposed, and is the
 ///   one a threshold would be most tempted by. `retrieval_weight` reads
@@ -313,26 +394,44 @@ impl BriefingOutcome {
 ///   implementation whose ranking differed from the one that chose the
 ///   memories it was scoring.
 ///
-/// A fabricated number would silently gate every future injection decision,
-/// so none is fabricated. What this function does instead is the honest
-/// subset it can prove: a search that matches nothing injects nothing. That
-/// is an empty result, not a confidence threshold, and it is not claimed as
-/// one.
+/// A fabricated per-query number would silently gate every future injection
+/// decision, so none is fabricated here, and a search that matches nothing
+/// still injects nothing on its own terms — that is an empty result, not a
+/// confidence threshold.
+///
+/// **A relevance is not a confidence, and Glasshouse still has no per-query
+/// confidence. It does have an observed false-positive rate for the
+/// injection door, and that is a confidence about the door — which is the
+/// granularity line 1129's "avoid injecting" acts at, because injection is a
+/// per-door decision. 1129 is closed by the door's measured precision, not
+/// by a per-memory score.** `confidence`, below, is that rate — see
+/// [`InjectionConfidence`] for what it carries and [`BriefingOutcome::WithheldLowConfidence`]
+/// for what withholding on it looks like from the caller's side.
 ///
 /// `project_root` is where map line 1142's freshness is answered, and `None`
 /// is a supported answer rather than a degraded one: every file-aware row
 /// then reads `freshness=unknown` and the section is otherwise identical. A
 /// caller with a [`crate::Runtime`] has it (`runtime.project().root()`); one
-/// testing the rendering does not need it.
+/// testing the rendering does not need it. `confidence` is the same shape —
+/// see [`InjectionConfidence`]'s own doc comment.
 pub fn briefing(
     store: &MemoryStore<'_>,
     task: &str,
     already_injected: &HashSet<MemoryId>,
     model: Option<&dyn ExtractionModel>,
     project_root: Option<&std::path::Path>,
+    confidence: Option<InjectionConfidence>,
 ) -> Result<BriefingOutcome, MemoryStoreError> {
-    briefing_traced(store, task, already_injected, model, None, project_root)
-        .map(|(outcome, _)| outcome)
+    briefing_traced(
+        store,
+        task,
+        already_injected,
+        model,
+        None,
+        project_root,
+        confidence,
+    )
+    .map(|(outcome, _)| outcome)
 }
 
 /// [`briefing`], additionally returning the [`RetrievalTrace`] map line 1094
@@ -355,6 +454,7 @@ pub fn briefing_traced(
     model: Option<&dyn ExtractionModel>,
     diagnostics: Option<DiagnosticsRequest<'_>>,
     project_root: Option<&std::path::Path>,
+    confidence: Option<InjectionConfidence>,
 ) -> Result<(BriefingOutcome, RetrievalTrace), MemoryStoreError> {
     let query: String = task.chars().take(MAX_QUERY_CHARS).collect();
     let grouped =
@@ -418,8 +518,28 @@ pub fn briefing_traced(
         rerank::append_diagnostics(request.runtime, &trace);
     }
 
+    // Line 1129, and only here: the search already ran and `selected` is
+    // already chosen, so this decides only whether to deliver it, never what
+    // to select. `confidence.filter(...)` is the whole "unknown is not low"
+    // rule made concrete — `None` (no evidence, or too little to trust) falls
+    // straight through to `Injected` below, and only a confidence this
+    // door's caller actually trusted enough to construct as `Some` can turn
+    // into a withhold.
     let outcome = match render(&selected, &file_observed) {
-        Some(injection) => BriefingOutcome::Injected(injection),
+        Some(injection) => match confidence.filter(|c| c.should_withhold()) {
+            Some(confidence) => {
+                tracing::warn!(
+                    rate = confidence.rate(),
+                    retrieved = confidence.retrieved,
+                    not_useful = confidence.not_useful,
+                    caused_complexity = confidence.caused_complexity,
+                    "withholding this project's memory injection: this door's own observed \
+                     false-positive rate is above the threshold"
+                );
+                BriefingOutcome::WithheldLowConfidence(confidence)
+            }
+            None => BriefingOutcome::Injected(injection),
+        },
         None if text_search_matched_nothing => BriefingOutcome::NothingMatched,
         None => BriefingOutcome::NothingNew,
     };
@@ -448,9 +568,17 @@ pub fn select_briefing(
     already_injected: &HashSet<MemoryId>,
     model: Option<&dyn ExtractionModel>,
     project_root: Option<&std::path::Path>,
+    confidence: Option<InjectionConfidence>,
 ) -> Result<BriefingOutcome, MemoryStoreError> {
     match query {
-        Some(task) => briefing(store, task, already_injected, model, project_root),
+        Some(task) => briefing(
+            store,
+            task,
+            already_injected,
+            model,
+            project_root,
+            confidence,
+        ),
         None => standing_set(store, already_injected),
     }
 }
@@ -466,12 +594,15 @@ pub fn select_briefing_traced(
     model: Option<&dyn ExtractionModel>,
     diagnostics: Option<DiagnosticsRequest<'_>>,
     project_root: Option<&std::path::Path>,
+    confidence: Option<InjectionConfidence>,
 ) -> Result<(BriefingOutcome, Option<RetrievalTrace>), MemoryStoreError> {
     match query {
-        // `project_root` reaches only this half. The standing set is not a
-        // file-aware retrieval — it asks for binding memories and failed
-        // attempts by authority, naming no file — so there is nothing for a
-        // freshness to be about.
+        // `project_root` and `confidence` reach only this half. The standing
+        // set is not a file-aware retrieval and is not this door's own
+        // per-query briefing either — it asks for binding memories and failed
+        // attempts by authority, naming no file and running no search — so
+        // there is nothing for a freshness or a withhold decision to be
+        // about.
         Some(task) => briefing_traced(
             store,
             task,
@@ -479,6 +610,7 @@ pub fn select_briefing_traced(
             model,
             diagnostics,
             project_root,
+            confidence,
         )
         .map(|(outcome, trace)| (outcome, Some(trace))),
         None => standing_set(store, already_injected).map(|outcome| (outcome, None)),
@@ -1029,6 +1161,52 @@ pub(crate) fn quote(text: &str, budget: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Line 1129's threshold arithmetic, pinned without a real
+    /// [`MemoryStore`]: the ratio, the bar, and the division-by-zero guard a
+    /// caller's own floor should make unreachable but which this method
+    /// defends anyway.
+    #[test]
+    fn injection_confidence_rate_and_threshold() {
+        let below = InjectionConfidence {
+            retrieved: 10,
+            not_useful: 2,
+            caused_complexity: 1,
+        };
+        assert_eq!(below.rate(), 0.3);
+        assert!(!below.should_withhold(), "30% must not clear a 50% bar");
+
+        let above = InjectionConfidence {
+            retrieved: 10,
+            not_useful: 5,
+            caused_complexity: 1,
+        };
+        assert_eq!(above.rate(), 0.6);
+        assert!(above.should_withhold(), "60% must clear a 50% bar");
+
+        let exactly_at_bar = InjectionConfidence {
+            retrieved: 2,
+            not_useful: 1,
+            caused_complexity: 0,
+        };
+        assert_eq!(exactly_at_bar.rate(), 0.5);
+        assert!(
+            !exactly_at_bar.should_withhold(),
+            "the threshold is `>`, not `>=` — exactly at the bar is not above it"
+        );
+
+        let unreached_floor = InjectionConfidence {
+            retrieved: 0,
+            not_useful: 3,
+            caused_complexity: 0,
+        };
+        assert_eq!(
+            unreached_floor.rate(),
+            0.0,
+            "guarded against a division by zero rather than producing `inf`"
+        );
+        assert!(!unreached_floor.should_withhold());
+    }
 
     /// The containment property the whole module rests on, stated as one
     /// assertion: no matter what a memory body holds, the quoted form has no

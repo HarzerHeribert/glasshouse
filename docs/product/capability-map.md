@@ -1126,7 +1126,7 @@ Fixed architectural requirements
 ☑ Query project memory for memories relevant to the routed task.
 ☑ Inject only a bounded set of high-relevance memories into the target session.
 ☑ Keep memory injection separate from native harness session history.
-☐ Avoid injecting memory when retrieval confidence is low.
+☑ Avoid injecting memory when retrieval confidence is low.
 ☑ Clearly label injected information as Glasshouse project memory rather than user-authored instructions.
 ☑ Include active constraints and relevant failed approaches preferentially when they can prevent repeated mistakes.
 ☑ Do not inject stale ordinary decisions as binding instructions when their original assumptions have not been validated against current project state.

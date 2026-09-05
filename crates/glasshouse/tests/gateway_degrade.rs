@@ -249,9 +249,12 @@ fn a_real_gateway_failure_degrades_only_the_bound_session_and_moves_no_lifecycle
     // The connection thread's own bookkeeping (routing, quota, and this
     // sink) runs after `ingress::serve` has already closed the response
     // socket, so `send_and_read` returning is not proof the sink has been
-    // called yet — only that the client side of the exchange is over.
+    // called yet — only that the client side of the exchange is over. Wait on
+    // the bus history the assertion below reads, not on `calls`: the sink
+    // pushes onto `calls` one statement before it publishes to the bus, so a
+    // wait keyed on `calls` can release before the publish has landed.
     let deadline = Instant::now() + Duration::from_secs(5);
-    while calls.lock().unwrap().is_empty() && Instant::now() < deadline {
+    while bus.history_for(&on_gateway.id).is_empty() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(10));
     }
 

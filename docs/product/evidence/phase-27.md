@@ -433,3 +433,33 @@ Regression evidence (`tests/launch_briefing.rs`, shipped binary): `a_plain_launc
 Gates: fmt clean; clippy clean; `launch_briefing` 4/4; `--bin glasshouse` 80/80; `context_injection`+`firewall_bridge`+`memory_rating` 41/41; `--lib memory` 144; `--lib config` 157; `--lib cli` 31; `--lib session` 305 with one pre-existing PTY flake (`shell/mod.rs`, untouched, green on two solo re-runs); targeted blast over seven files green; rustdoc clean.
 
 Recorded scope limits — stated by the worker: rung two (headless, no additive mechanism) has no end-to-end test — no installed adapter pairs those two today; the opt-out's *byte-identical* is proven as identical flag-name sequences plus zero additive text and zero rows, the `firewall_bridge` pin's own shape; the standing set's candidates are bounded per source by `MAX_INJECTED_MEMORIES` before the final cap, so a project with more than three current binding memories relies on `binding()`'s recency order.
+
+---
+
+## 1129 — COMPLETE 2026-09-05, and the refusal above is superseded on one axis only
+
+`GH-INJECTION-CONFIDENCE` (Sonnet, Amber — one threshold that withholds a user-visible injection), worktree `.worktrees/injection-confidence`, packet `.agent-runtime/packet-injection-confidence.md`, report **`.agent-runtime/report-injection-confidence.md`**.
+
+**The orchestrator's ruling, and why the refusal above stands as written.** *"Glasshouse has no honest retrieval-confidence signal to threshold"* was correct about every alternative it enumerated: each was a transform of BM25 relevance, and a relevance is not a confidence. What it could not consider — because the producer did not exist when it was written — is a confidence **measured from outcomes**. Map line 939's producer landed on 2026-09-02: the injection door records one `MemoryRetrieved` row per memory it actually delivers, stamped `subject = "injection"` (distinct from the CLI door's `current`), and `glasshouse memory rate` attributes `NotUseful`/`CausedComplexity` verdicts to that scope. `EvaluationObservations::false_positives_by_scope` reads them back per scope and was already called in production by `glasshouse memory retrievals`. **That is a confidence about the door, which is the granularity injection is decided at.** 1129 is closed by the door's measured precision, not by a per-memory score, and `inject.rs`'s module doc now says so in those words. There is still no per-query confidence, and nothing here claims one.
+
+### Avoid injecting memory when retrieval confidence is low. (line 1129)
+
+Contract: Given a project whose injection-door retrievals have been rated often enough to meet the sample floor, when Glasshouse would brief a session with project memory and that door's observed false-positive rate is above the threshold, Glasshouse withholds the injection and records why — while preserving that a project with too few rated retrievals, which is every project on first use, briefs exactly as it did before, byte-for-byte.
+
+State: **COMPLETE** — ruled 2026-09-05 by the orchestrator after reading the withhold decision and the reader that feeds it.
+
+Production: `api/unix/memory.rs :: injection_confidence` (opens the evaluation ledger, reads `false_positives_by_scope` over a seven-day window, takes the `injection` row, applies `MIN_SAMPLE_FOR_SUMMARY` to `retrieved`, closes the ledger **before** the memory store opens — practice §65, the mirror of `deliver_memory`'s order); `memory/inject.rs :: InjectionConfidence`, `::should_withhold` (`rate() > INJECTION_CONFIDENCE_WITHHOLD_THRESHOLD`, `0.5`, strict), `BriefingOutcome::WithheldLowConfidence`, and the decision in `briefing_traced`: `confidence.filter(|c| c.should_withhold())` — so `None` injects. The confidence rides into the briefing functions as an `Option` argument exactly as `project_root` already does, and every other caller passes `None`.
+
+Regression: `context_injection::injection_withholds_once_this_doors_own_ratings_clear_the_floor_and_the_rate` and `context_injection::ratings_in_another_scope_never_change_the_injection_doors_behaviour` — both drive the real `glasshouse api serve` socket, real spawns, real `glasshouse memory rate --session <id>` commands, so the rows the confidence is computed from were written by production code in the same run; `memory::inject::tests::injection_confidence_rate_and_threshold` pins the arithmetic and the strict comparison.
+
+Mutation: the `None` arm of the confidence match made to withhold — **KILLED**, all 17 `context_injection` tests failing, because every pre-existing test runs on a fixture with zero ratings and every one of them expects its memory block. *Unknown is not low* is the decision most likely to be got wrong and the one whose failure is worst — silently disabling memory for every new project — and the suite holds it.
+
+**The packet's stop condition was met the honest way.** It required the `subject = "injection"` attribution to be proven by driving the real door, not by reading `api/unix/memory.rs:241` and agreeing with it. Both new tests do exactly that.
+
+Limits, stated by the worker and kept: a **per-door** confidence, not a per-query one; a project with sparse ratings is unaffected, which is essentially every project essentially always, since rating is a manual opt-in act; the denominator is `retrieved` not `rated`, so the observed rate is diluted by silence and is a lower bound — the same reading `glasshouse memory retrievals` already gives; the threshold `0.5` is a first cut with no prior value to anchor to, and `INJECTION_CONFIDENCE_WITHHOLD_THRESHOLD` is the one place to revisit it; requirement 5 (a ledger that cannot open leaves the briefing unchanged) is proven by shape against `writer.rs:80`'s rule, not by corrupting a database mid-request.
+
+Gates on the merged tree, re-run by the orchestrator: `context_injection` 17/17 · `memory_rating` 15/15 · `--lib memory::inject` 7/7 · `--lib evaluation` 6/6 · `--lib memory` 155 · `--bin glasshouse` 85 · `file_aware_memory` 17 · `file_memory_lookup` 8 · fmt and clippy clean · `blast-radius.sh --targeted` exit 0 over eight files.
+
+**One packet error, the orchestrator's.** The packet named two extra callers whose edit must be a trailing `None`; current source had seven — `commands/launch.rs:2045` (which also needed a match arm for the new variant, since `BriefingOutcome` is exhaustive there) and seven `briefing(...)` call sites across `tests/file_aware_memory.rs` and `tests/file_memory_lookup.rs`. Every one was the sanctioned shape; the count was wrong, and the worker flagged it rather than absorbing it.
+
+**Phase 27 is complete: 11 of 11.**

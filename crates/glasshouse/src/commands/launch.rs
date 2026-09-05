@@ -2049,6 +2049,10 @@ pub(crate) fn brief_launch_session(
         rerank_model.as_deref(),
         diagnostics,
         Some(runtime.project().root()),
+        // `None`: line 1129's confidence is `GH-INJECTION-CONFIDENCE`'s
+        // scope for the machine door's `select_memory` alone — this launch
+        // path is a different caller and is not part of that package.
+        None,
     ) {
         Ok((outcome, _trace)) => Some(outcome),
         Err(err) => {
@@ -2093,7 +2097,9 @@ pub(crate) fn brief_launch_session(
             drop(project);
             return LaunchBriefing::Nothing;
         }
-        Some(BriefingOutcome::NothingNew) | None => {
+        Some(BriefingOutcome::NothingNew)
+        | Some(BriefingOutcome::WithheldLowConfidence(_))
+        | None => {
             drop(project);
             return LaunchBriefing::Nothing;
         }

@@ -41,6 +41,7 @@ use glasshouse::memory::search::SearchScope;
 use glasshouse::memory::{
     DecisionProvenance, MemoryAuthority, MemoryKind, NewMemory, ProjectMemory,
 };
+use glasshouse::routing::evidence::MIN_SAMPLE_FOR_SUMMARY;
 use glasshouse::{Cli, Runtime};
 
 const TIMEOUT: Duration = Duration::from_secs(30);
@@ -188,6 +189,34 @@ fn plant_foreign_memory(conn: &Connection, id: &str, project_id: &str, subject: 
          END;",
     )
     .unwrap();
+}
+
+/// `glasshouse memory rate <memory> not-useful --session <session>` through
+/// the real shipped binary — line 1129's own producer for map line 939, run
+/// exactly the way a person rating a delivery would run it, attributed to
+/// one session's own retrieval so its scope is `injection` rather than
+/// whatever the CLI's own `current` search would otherwise attribute it to
+/// (`record_memory_rating`'s own doc comment).
+fn rate_not_useful(fixture: &Fixture, root: &Path, memory_id: &str, session: &str) {
+    let output = Command::new(env!("CARGO_BIN_EXE_glasshouse"))
+        .current_dir(root)
+        .arg("--data-dir")
+        .arg(fixture.base.join("data"))
+        .arg("--config-dir")
+        .arg(fixture.base.join("config"))
+        .arg("memory")
+        .arg("rate")
+        .arg(memory_id)
+        .arg("not-useful")
+        .arg("--session")
+        .arg(session)
+        .output()
+        .expect("the glasshouse binary must run");
+    assert!(
+        output.status.success(),
+        "`glasshouse memory rate` failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 /// A running `glasshouse api serve`, killed on drop.
@@ -1562,5 +1591,149 @@ fn line_934_an_unreaffirmed_idea_is_not_injected_until_it_is_reaffirmed() {
     assert!(
         reaffirmed_block.contains("parquet"),
         "a reaffirmed idea is not an old one, and is injected: {reaffirmed_block}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Line 1129 — withhold on this door's own observed false-positive rate, not
+// before the sample floor clears, and never on another scope's ratings.
+// ---------------------------------------------------------------------------
+
+/// [`MIN_SAMPLE_FOR_SUMMARY`] sessions are spawned with the same task, each
+/// genuinely retrieving and delivering the same memory through the real
+/// injection door — real `MemoryRetrieved` rows at `subject = "injection"`,
+/// proven by nothing subtler than real memory blocks landing on real
+/// harnesses. Each is then rated `not-useful` through the real `glasshouse
+/// memory rate` command, attributed to its own session so the rating is
+/// scoped to the `injection` retrieval it actually judges. That clears the
+/// evaluation ledger's own sample floor at a 100% false-positive rate, and
+/// one session more — the same task, the same memory still the best
+/// match — receives its task and nothing else.
+///
+/// # Below the floor, the control this test carries in its own loop
+///
+/// Every one of the first [`MIN_SAMPLE_FOR_SUMMARY`] spawns asserts the
+/// block still arrives, so "the last spawn got nothing" is read against a
+/// door that was genuinely briefing normally right up to the sample clearing
+/// — not against one that had stopped delivering for an unrelated reason.
+#[test]
+fn injection_withholds_once_this_doors_own_ratings_clear_the_floor_and_the_rate() {
+    let fixture = Fixture::new();
+    let root = fixture.project_root("alpha");
+    let runtime = fixture.runtime(&root);
+    let memory_id = ProjectMemory::open(&runtime)
+        .unwrap()
+        .store()
+        .record(
+            NewMemory::new(
+                MemoryKind::Constraint,
+                "the payment webhook handler must verify its signature before parsing",
+            )
+            .with_subject(Some("payment webhook"))
+            .with_authority(Some(MemoryAuthority::Constraint)),
+        )
+        .unwrap()
+        .id
+        .as_str()
+        .to_owned();
+
+    let server = Server::start(&fixture, &root);
+
+    for i in 0..MIN_SAMPLE_FOR_SUMMARY {
+        let session = server.spawn_with_task("payment webhook");
+        wait_for("a worker's harness to start", || {
+            fixture.argv(&root, &session).is_some()
+        });
+        let lines = deliveries(&fixture, &root, &session, 2);
+        let block = the_injected_block(&lines);
+        assert!(
+            block.contains("verify its signature"),
+            "spawn {i} of {MIN_SAMPLE_FOR_SUMMARY}: below the sample floor this door must still \
+             brief exactly as before: {block}"
+        );
+        rate_not_useful(&fixture, &root, &memory_id, &session);
+    }
+
+    let withheld = server.spawn_with_task("payment webhook");
+    wait_for("the withheld spawn's harness to start", || {
+        fixture.argv(&root, &withheld).is_some()
+    });
+    let lines = deliveries(&fixture, &root, &withheld, 1);
+    assert_eq!(
+        lines,
+        vec!["payment webhook".to_owned()],
+        "a door whose own injections have been rated not-useful {MIN_SAMPLE_FOR_SUMMARY} times \
+         out of {MIN_SAMPLE_FOR_SUMMARY} must withhold and deliver the task alone: {lines:#?}"
+    );
+}
+
+/// Line 1129's confidence is scoped per retrieval-scope word, not per memory:
+/// a run of `not-useful` ratings attributed to this door's own CLI text
+/// search (`current` scope) must never suppress the same memory's real
+/// injection (`injection` scope) — proving that the per-scope attribution
+/// `false_positives_by_scope` reads is load-bearing rather than decorative,
+/// exactly as the reader's own doc comment claims.
+///
+/// No server is even started for the rating half: `glasshouse memory search`
+/// and `glasshouse memory rate` both run as one-shot CLI calls, so the
+/// `current`-scope false-positive rate is cleared at 100% before the
+/// injection door is ever touched.
+#[test]
+fn ratings_in_another_scope_never_change_the_injection_doors_behaviour() {
+    let fixture = Fixture::new();
+    let root = fixture.project_root("alpha");
+    let runtime = fixture.runtime(&root);
+    let memory_id = ProjectMemory::open(&runtime)
+        .unwrap()
+        .store()
+        .record(
+            NewMemory::new(
+                MemoryKind::Constraint,
+                "the marmot loader must retry on a transient network error",
+            )
+            .with_subject(Some("marmot loader"))
+            .with_authority(Some(MemoryAuthority::Constraint)),
+        )
+        .unwrap()
+        .id
+        .as_str()
+        .to_owned();
+
+    let run = |args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_glasshouse"))
+            .current_dir(&root)
+            .arg("--data-dir")
+            .arg(fixture.base.join("data"))
+            .arg("--config-dir")
+            .arg(fixture.base.join("config"))
+            .args(args)
+            .output()
+            .expect("the glasshouse binary must run");
+        assert!(
+            output.status.success(),
+            "`glasshouse {}` failed: {}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    };
+
+    for _ in 0..MIN_SAMPLE_FOR_SUMMARY {
+        run(&["memory", "search", "marmot", "loader"]);
+        run(&["memory", "rate", &memory_id, "not-useful"]);
+    }
+
+    // The control: the same memory, retrieved through the real injection
+    // door, still delivered — a `current`-scope false-positive rate of 100%
+    // must not leak into `injection`'s own decision.
+    let server = Server::start(&fixture, &root);
+    let session = server.spawn_with_task("marmot loader");
+    wait_for("the worker's harness to start", || {
+        fixture.argv(&root, &session).is_some()
+    });
+    let lines = deliveries(&fixture, &root, &session, 2);
+    let block = the_injected_block(&lines);
+    assert!(
+        block.contains("retry on a transient network error"),
+        "a bad `current`-scope rating history must never suppress the `injection` door: {block}"
     );
 }

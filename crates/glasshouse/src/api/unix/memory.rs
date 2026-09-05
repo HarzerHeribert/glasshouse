@@ -3,10 +3,11 @@ use std::sync::{Arc, Mutex};
 
 use glasshouse::Runtime;
 use glasshouse::config::{self, EffectiveConfig, UserConfig};
-use glasshouse::evaluation::{self, RetrievalScope};
+use glasshouse::evaluation::{self, EvaluationObservations, RetrievalScope};
 use glasshouse::events::MessageOrigin;
-use glasshouse::memory::inject::{self, BriefingOutcome, Injection};
+use glasshouse::memory::inject::{self, BriefingOutcome, Injection, InjectionConfidence};
 use glasshouse::memory::{FileAssociation, MemoryId, ProjectMemory};
+use glasshouse::routing::evidence::MIN_SAMPLE_FOR_SUMMARY;
 use glasshouse::session::SessionId;
 use glasshouse::session::api::SessionApi;
 
@@ -69,6 +70,71 @@ const MAX_SNAPSHOT_SECTION_LIMIT: usize = 50;
 /// line forbids.
 const MAX_SNAPSHOT_BODY_CHARS: usize = 2000;
 
+/// How far back [`injection_confidence`] reads map line 939's own reader for
+/// this door's `injection`-scope precision — seven days, the same window
+/// `routing::evidence::CLASSIFICATION_EVIDENCE_WINDOW_SECONDS` already picks
+/// for a live decision reading its own evidence ledger, and for the same
+/// reason: long enough that a rating — a manual, opt-in act — has a real
+/// chance to accumulate past [`MIN_SAMPLE_FOR_SUMMARY`], short enough that a
+/// door whose precision has since recovered is not held to a stale verdict
+/// indefinitely.
+const INJECTION_CONFIDENCE_WINDOW_SECONDS: i64 = 7 * 24 * 60 * 60;
+
+/// Line 1129's confidence for [`select_memory`]'s door: this project's own
+/// observed false-positive rate for past `injection`-scope deliveries, read
+/// from map line 939's producer over [`INJECTION_CONFIDENCE_WINDOW_SECONDS`].
+///
+/// `None` — "unknown", never "low" — covers every case that is not a
+/// trustworthy rate: the ledger cannot be opened, the window is not
+/// retained, there is no `injection`-scope row at all (every project on
+/// first use), or there is one but its `retrieved` count has not cleared
+/// [`MIN_SAMPLE_FOR_SUMMARY`] — the evaluation ledger's own floor
+/// (`crate::evaluation::readers`'s `outcomes_by_tier` already reuses this
+/// same constant rather than keeping a second one; this does too). Every one
+/// of those is bookkeeping that must never fail a briefing (`writer.rs:80`'s
+/// rule, applied here even though this reader, unlike a writer, cannot
+/// itself corrupt anything): a `tracing::warn!` and `None`, so
+/// [`inject::briefing_traced`] falls through to its own "unknown is not low"
+/// handling and briefs exactly as it did before this function existed.
+fn injection_confidence(runtime: &Runtime) -> Option<InjectionConfidence> {
+    let ledger = match EvaluationObservations::open(runtime) {
+        Ok(ledger) => ledger,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "could not open the evaluation ledger to read this door's own confidence; \
+                 briefing unchanged"
+            );
+            return None;
+        }
+    };
+
+    let to = evaluation::now_unix();
+    let from = to - INJECTION_CONFIDENCE_WINDOW_SECONDS;
+    let by_scope = match ledger.false_positives_by_scope(from, to) {
+        Ok(by_scope) => by_scope,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "could not read this door's own false-positive rate; briefing unchanged"
+            );
+            return None;
+        }
+    };
+
+    let row = by_scope
+        .into_iter()
+        .find(|row| row.scope.as_deref() == Some(RetrievalScope::Injection.as_str()))?;
+    if row.retrieved < MIN_SAMPLE_FOR_SUMMARY as i64 {
+        return None;
+    }
+    Some(InjectionConfidence {
+        retrieved: row.retrieved,
+        not_useful: row.not_useful,
+        caused_complexity: row.caused_complexity,
+    })
+}
+
 /// Take the injection ledger's lock, ignoring poisoning, for the reason
 /// [`lock`] gives: a panicking handler must not permanently disable a
 /// bookkeeping record that only ever makes deliveries quieter.
@@ -114,6 +180,14 @@ pub(super) fn select_memory(
         .cloned()
         .unwrap_or_default();
 
+    // Line 1129: read and fully closed before the memory connection below
+    // opens, never alongside it — practice §65's rule, the same one
+    // `deliver_memory` follows in the other order (drop the memory
+    // connection, then open the ledger to write). Both open the same
+    // project database file through separate connections, and this door
+    // never holds two of them at once.
+    let confidence = injection_confidence(runtime);
+
     let project = match ProjectMemory::open(runtime) {
         Ok(project) => project,
         Err(err) => {
@@ -138,6 +212,7 @@ pub(super) fn select_memory(
         rerank_model.as_deref(),
         diagnostics,
         Some(runtime.project().root()),
+        confidence,
     ) {
         Ok((outcome, _trace)) => Some(outcome),
         Err(err) => {
@@ -166,7 +241,14 @@ pub(super) fn select_memory(
             );
             None
         }
-        Some(BriefingOutcome::NothingNew) | None => None,
+        // Line 1129: the search worked and found real candidates, but this
+        // door's own observed false-positive rate was too high to trust —
+        // already logged, with the rate and the counts it came from, inside
+        // `briefing_traced` itself. Nothing more to do here than treat it as
+        // no delivery, the same as `NothingNew`.
+        Some(BriefingOutcome::NothingNew)
+        | Some(BriefingOutcome::WithheldLowConfidence(_))
+        | None => None,
     }
 }
 

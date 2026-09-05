@@ -19,12 +19,12 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`█████████████████████████████████████░░░` **1290 closed** · **101 active committed open** (92%)
+`█████████████████████████████████████░░░` **1291 closed** · **100 active committed open** (92%)
 
 Separately tracked, and not release-blocking: **7 deferred gate criteria** (Phase 52, Phase 53) awaiting a decision, and **229 parked experimental lines** under Maybe / Experimental.
 
 <details>
-<summary>Per-phase breakdown (82 of 109 active phases complete)</summary>
+<summary>Per-phase breakdown (83 of 109 active phases complete)</summary>
 
 | Phase | Done |
 |---|---|
@@ -82,7 +82,7 @@ Separately tracked, and not release-blocking: **7 deferred gate criteria** (Phas
 | Phase 24 — Memory reranking | 6/6 ✅ |
 | Phase 25 — Project knowledge view | 10/10 ✅ |
 | Phase 26 — Memory query for agents | 6/6 ✅ |
-| Phase 27 — Context injection | 10/11 |
+| Phase 27 — Context injection | 11/11 ✅ |
 | Phase 28 — File-aware memory lookup | 5/5 ✅ |
 | Phase 29 — Memory commits | 8/8 ✅ |
 | Phase 30 — Session context metadata | 7/8 |
