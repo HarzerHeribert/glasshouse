@@ -102,61 +102,19 @@ pub(crate) const MIGRATIONS_V1_TO_V13: [&str; 13] = [
     // 4: durable project memory (Phase 20), its lifecycle (Phase 22) and the
     // full-text index it is searched through (Phase 23).
     //
-    // # Why `kind` and `authority` are two columns
+    // `kind` and `authority` are two columns, not one, because they answer
+    // different questions -- what sort of thing was remembered (Phase 20's
+    // six kinds), and how binding it is (Phase 21A's seven classes) -- and
+    // the two vocabularies overlap in spelling, so folding them would make
+    // "this finding is binding" unrepresentable. `authority` ships nullable
+    // and unused by any classifier yet, so Phase 21A adds classification
+    // rather than a migration. `memories` carries a rowid, unlike `sessions`,
+    // only because FTS5's external-content mode joins on `content_rowid`.
+    // The isolation and supersession triggers enforce migration 2's rule
+    // structurally rather than leaving it to callers to remember.
     //
-    // They answer different questions and Phase 21A depends on the answer to
-    // the second. `kind` is *what sort of thing was remembered* — Phase 20's
-    // six kinds. `authority` is *how binding it is* — Phase 21A's seven
-    // classes. The two lists overlap in spelling (`decision`, `constraint`
-    // appear in both) and that is precisely why they must not be one column: a
-    // `finding` can be an invariant, and a `decision` can have decayed to
-    // `historical`. Folding them together would make "this finding is binding"
-    // unrepresentable and would force Phase 21A to migrate the table.
-    //
-    // `authority` ships here, unused by any classifier yet, so that Phase 21A
-    // adds *classification* rather than a migration — the packet's explicit
-    // requirement. It is nullable on purpose: NULL means "no authority has
-    // been assigned", which is a different fact from every one of the seven
-    // classes, exactly as `sessions.launch_profile`'s NULL is a different fact
-    // from `'native'`. Retrieval must therefore treat NULL conservatively and
-    // never as an invariant; a sentinel default would have erased the
-    // distinction and quietly promoted unclassified text to some class.
-    //
-    // # Why `status` carries a seventh value
-    //
-    // Phase 20 requires "at least" active, superseded, rejected, resolved,
-    // needs_review and invalidated. Phase 22 requires "a conflict state for
-    // memories whose current truth cannot be resolved automatically", which is
-    // a lifecycle state and not an authority, so `conflicted` joins the same
-    // column rather than becoming a second flag two writers could disagree
-    // about.
-    //
-    // # Why this table has a rowid and `sessions` does not
-    //
-    // FTS5's external-content mode joins on `content_rowid`, so `memories`
-    // cannot be `WITHOUT ROWID`. That is the whole reason; nothing else about
-    // the table wants an implicit key.
-    //
-    // # Two triggers for project isolation, for the reason migration 2 gives
-    //
-    // A query can forget to filter by `project_id`; a `BEFORE INSERT` /
-    // `BEFORE UPDATE` guard cannot be forgotten. `IS NOT` rather than `<>` so
-    // that a missing binding row aborts instead of evaluating to NULL and
-    // letting the write through. The guard fails closed.
-    //
-    // # Two more for supersession, instead of a foreign key
-    //
-    // `PRAGMA foreign_keys` is off by default in SQLite, so a `REFERENCES`
-    // clause here would be decoration unless every connection remembered to
-    // turn it on. A trigger is enforced by the file itself no matter who opens
-    // it, and it is already this schema's idiom for exactly this reason.
-    //
-    // The two `CHECK`s beside them are the other half of Phase 22's
-    // "mark superseded memories as non-current": a row that names a
-    // superseder cannot also claim to be active, and nothing may supersede
-    // itself. A memory may still be `superseded` with `superseded_by` NULL —
-    // the map asks for the identifier only "when a direct supersession
-    // relationship is known".
+    // History: design-decisions.md, "Trims: migration and native-secret
+    // module docs", database/migrations/v1_to_v13.rs migration 4.
     "
     CREATE TABLE memories (
         id                TEXT PRIMARY KEY,
@@ -278,63 +236,22 @@ pub(crate) const MIGRATIONS_V1_TO_V13: [&str; 13] = [
     // 5: the append-only project event log (Phase 18) and portable session
     // checkpoints (Phase 19).
     //
-    // # Why `lifecycle_events` refuses UPDATE and DELETE
+    // `lifecycle_events` refuses UPDATE and DELETE by trigger, because Phase
+    // 18 requires that derived interpretation never overwrite or masquerade
+    // as the original event -- so nothing can prune this table. There is
+    // deliberately no column a conversation could reach: only an integration
+    // slug and an event name travel this far. No `REFERENCES sessions(id)`,
+    // because `PRAGMA foreign_keys` is off by default and an event for a
+    // session this database never heard of is a fact worth keeping.
     //
-    // Phase 18's fixed architectural requirement is that derived
-    // interpretation must not overwrite or masquerade as the original event.
-    // Two triggers enforce that against anything that opens this file, which
-    // is a different kind of promise from a rule every future query has to
-    // remember — the same argument migration 2 makes for project isolation.
+    // `checkpoints` is separate from `memories` because Phase 19 requires it:
+    // a checkpoint is bounded handoff context, a memory is durable project
+    // knowledge. `document` is the checkpoint; the three columns beside it
+    // are an index, each written from the document in one place so the row
+    // and the document cannot drift.
     //
-    // The cost is real and is stated rather than hidden: **nothing can prune
-    // this table.** Retention is then a migration and a decision, not a
-    // `DELETE` somebody adds one afternoon.
-    //
-    // # Why the raw observation gets its own two columns
-    //
-    // The same requirement asks that raw observations stay available as
-    // diagnostic source evidence while normalized records remain
-    // distinguishable from them. `kind` and its payload columns are
-    // Glasshouse's normalized reading; `observed_harness` and
-    // `observed_event` are the harness's own two words. Neither can be
-    // mistaken for the other, and an event Glasshouse observed itself — a
-    // process exiting — simply has NULL there.
-    //
-    // **There is deliberately no column a conversation could reach.** A hook
-    // payload carries the user's prompt and the model's last message; the
-    // handler drains that stream unread, and the only fields that travel this
-    // far are an integration slug and an event name. `RawObservation`'s
-    // `detail` — the one field an adapter could fill from a payload — has no
-    // column, so no future writer can persist one without a migration.
-    //
-    // # No `REFERENCES sessions(id)`, on purpose
-    //
-    // `PRAGMA foreign_keys` is off by default in SQLite, so the clause would
-    // be decoration unless every connection remembered to turn it on — the
-    // reason migration 4 uses triggers for supersession. And a foreign key
-    // here would be the wrong shape regardless: an event that arrives for a
-    // session this database has never heard of is a fact worth keeping, and
-    // refusing it would make the log lie by omission at exactly the moment
-    // something is wrong.
-    //
-    // # `checkpoints` is a separate table from `memories`, which is the point
-    //
-    // Phase 19 requires checkpoints to be stored separately from durable
-    // project memory. They are different things with different lifetimes: a
-    // checkpoint is bounded handoff context for one session, and a memory is
-    // durable project knowledge. The `CHECK` on the document's byte length is
-    // Phase 19's size constraint made structural — `length(CAST(x AS BLOB))`
-    // rather than `length(x)`, which counts characters and would let a
-    // checkpoint full of non-ASCII past a byte bound.
-    //
-    // **`document` is the checkpoint; the columns beside it are an index.**
-    // Only the three a query actually needs are lifted out, and every one of
-    // them is written from the document in one place, so there is nothing for
-    // the row and the document to drift about — see
-    // `a_stored_row_never_disagrees_with_its_own_document`. The harness and
-    // the Git position stay inside the document alone for exactly that
-    // reason: nothing queries on them, so a second copy would be a liability
-    // with no use.
+    // History: design-decisions.md, "Trims: migration and native-secret
+    // module docs", database/migrations/v1_to_v13.rs migration 5.
     "
     CREATE TABLE lifecycle_events (
         seq              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -433,81 +350,19 @@ pub(crate) const MIGRATIONS_V1_TO_V13: [&str; 13] = [
     ",
     // 6: where a memory came from, and why the decision in it was made.
     //
-    // # Two integers, because extraction reads a slice
+    // `source_event_first`/`_last` are two integers, both-or-neither, because
+    // a memory is rarely traceable to one event -- the honest reference is
+    // the range of `lifecycle_events.seq` a chunk covered. `rationale` and
+    // the eight provenance columns beside it are flat, nullable free text,
+    // never a related table, so NULL means "not known", never "none"; the
+    // credential control is on the producer side, in `memory::extract`.
+    // `memories_fts` is rebuilt rather than altered because FTS5 has no
+    // `ALTER` that adds a column, and only `rationale` joins the index --
+    // the other eight are attributes of a decision already found, not words
+    // someone would search for.
     //
-    // Phase 21's *"store the originating session and event references so
-    // extracted memory retains provenance"*. `source_session_id` has been
-    // here since migration 4; what was missing is *which part* of that
-    // session. Extraction is fed a bounded chunk of the project event log,
-    // so the honest reference is the range of `lifecycle_events.seq` that
-    // chunk covered — a memory is rarely traceable to one event, and naming
-    // a single one would be a precision the producer does not have.
-    //
-    // Nullable, and both-or-neither: a hand-written memory with **no** event
-    // range is a different fact from one with an empty range, and the two
-    // triggers below are what stop a half-filled range being stored at all.
-    // The same argument migration 5 makes for `observed_harness` /
-    // `observed_event`.
-    //
-    // # Phase 21B, one column per line of the map
-    //
-    // `rationale` is the one that already had a home: until this migration
-    // the extractor folded it into `body` behind a marker so that it stayed
-    // in the FTS index. That fold is removed with this migration and the
-    // index is rebuilt over the new column, so nothing that used to be
-    // findable stops being findable — see the rebuild below.
-    //
-    // The eight beside it are the assumptions and references Phase 21B asks
-    // to be preserved so that a remembered decision can be revalidated later
-    // rather than obeyed forever. They are deliberately **flat, concise, and
-    // nullable** rather than a related table: each holds one sentence, NULL
-    // means "not known" and never "none", and a decision that recorded no
-    // security assumption is thereby distinguishable from one that recorded
-    // that security was not a factor.
-    //
-    // `project_phase` is the only one of them drawn from a fixed set, so it
-    // is the only one with a `CHECK`; SQLite accepts a column `CHECK` in
-    // `ADD COLUMN` as long as it admits NULL, which every existing row is.
-    //
-    // # What these columns can hold, asked one at a time
-    //
-    // `rationale`, `problem`, the five assumption columns, `evidence` and
-    // `source_excerpt` are **free text, and free text can hold a
-    // credential** — exactly like `subject` and `body`, and unlike the
-    // nineteen fixed-vocabulary columns migration 5 added.
-    // `source_excerpt` is the sharpest of them, because it is verbatim
-    // session text rather than a model's paraphrase. Nothing in this schema
-    // can stop that, and this migration does not pretend otherwise: the
-    // control is on the producer side, where `memory::extract::chunk`
-    // scrubs everything on the way in and `memory::extract::schema::judge`
-    // screens each emitted element **whole, before any field of it is
-    // read** — which is what makes coverage of a new field automatic rather
-    // than a rule someone has to remember. See
-    // `the_project_database_schema_has_nowhere_to_put_a_credential`, which
-    // records the same judgement for migrations 4 and 5.
-    //
-    // # The FTS5 index is rebuilt, not altered
-    //
-    // `memories_fts` is an external-content index over `subject` and `body`.
-    // There is no `ALTER` that adds a column to an FTS5 table, so making the
-    // rationale searchable means dropping the index and its three triggers,
-    // recreating both over three columns, and asking FTS5 to rebuild itself
-    // from `memories`. The shadow tables go with the `DROP TABLE`.
-    //
-    // **Only `rationale` joins the index.** The other eight provenance
-    // columns are attributes of a decision somebody has already found, not
-    // the words they would search for, and every indexed column costs index
-    // size and shifts BM25's weighting of the ones that matter. The
-    // rationale is different only because it was inside `body` yesterday:
-    // indexing it keeps every search that worked before this migration
-    // working after it.
-    //
-    // **Existing folded bodies are left alone.** A body ending in the old
-    // marker is still a correct memory and is still indexed; splitting it
-    // automatically would mean guessing which occurrence of the marker was
-    // the fold, in text a person may have edited, for rows this project has
-    // never shipped a way to create automatically. The fold is gone from
-    // the producer, not retroactively from the store.
+    // History: design-decisions.md, "Trims: migration and native-secret
+    // module docs", database/migrations/v1_to_v13.rs migration 6.
     "
     ALTER TABLE memories ADD COLUMN source_event_first INTEGER;
     ALTER TABLE memories ADD COLUMN source_event_last  INTEGER;
@@ -593,40 +448,23 @@ pub(crate) const MIGRATIONS_V1_TO_V13: [&str; 13] = [
     // 7: `gateway_backend_changed` — Phase 9H's durable record of failover
     // changing the provider or model serving a live session.
     //
-    // # Why this rebuilds the table instead of altering its `CHECK`
-    //
-    // SQLite cannot add or drop a `CHECK` constraint. Migration 5's `kind`
-    // column is one, so admitting an eleventh value means rename, recreate,
-    // copy, drop, then recreate the index and all three triggers — the same
-    // cost migration 6 paid to add a column FTS5 could not `ALTER` in.
-    //
-    // # Why `seq` must survive this rebuild unchanged
-    //
-    // `lifecycle_events.seq` is `INTEGER PRIMARY KEY AUTOINCREMENT`, and
-    // migration 6 made `memories.source_event_first` and
-    // `memories.source_event_last` reference it. A rebuild that let `seq`
-    // renumber would silently re-point every extracted memory's provenance
-    // at the wrong events — nothing would fail, the data would just be
-    // wrong. So the copy below names `seq` explicitly in both the column
-    // list and the `SELECT`, rather than letting the new table's own
+    // This rebuilds `lifecycle_events` rather than altering its `CHECK`,
+    // because SQLite cannot add or drop one, and `seq` must survive the
+    // rebuild unchanged: migration 6 made `memories.source_event_first`/
+    // `_last` reference it, and a renumbered `seq` would silently re-point
+    // every extracted memory's provenance at the wrong events with nothing
+    // failing. The copy below therefore names `seq` explicitly in both the
+    // column list and the `SELECT` instead of letting the new table's own
     // `AUTOINCREMENT` assign fresh values, and the old table is dropped only
-    // after the copy has landed. SQLite's own `sqlite_sequence` bookkeeping
-    // follows an explicit-valued insert exactly as it follows a generated
-    // one, so the next event appended after this migration continues from
-    // the old table's highest `seq` rather than restarting at it.
+    // after the copy lands.
     // `a_memorys_provenance_survives_the_seq_rebuild` in
-    // `tests/events_lifecycle.rs` is the proof, exercised against a
-    // deliberately naive rebuild that lets `seq` renumber before this one
-    // was written.
+    // `tests/events_lifecycle.rs` is the proof. `provider`, `model` and
+    // `cause` are names only, never a credential, and prefixed `gateway_` so
+    // a bare `model` column beside `resource` cannot read as naming the same
+    // thing `gateway_unhealthy` already names with `resource`.
     //
-    // # The three new columns
-    //
-    // `provider`, `model` and `cause` are names only, never a credential —
-    // the same Phase 9 acceptance condition every other free-text column in
-    // this schema already meets. They are prefixed `gateway_` to keep them
-    // visually grouped with `gateway_reason` beside them, and because a bare
-    // `model` column beside `resource` would read as naming the same thing
-    // `gateway_unhealthy` already names with `resource`, when it does not.
+    // History: design-decisions.md, "Trims: migration and native-secret
+    // module docs", database/migrations/v1_to_v13.rs migration 7.
     "
     CREATE TABLE lifecycle_events_new (
         seq              INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -712,53 +550,19 @@ pub(crate) const MIGRATIONS_V1_TO_V13: [&str; 13] = [
     // as distinct session metadata"* — and the two labels lines 650 and 651
     // give the user.
     //
-    // # Seven columns, and why not fewer
+    // Seven columns, not one ambiguous agent identifier, because Phase 10's
+    // second fixed requirement asks these to remain separately represented.
+    // `ALTER TABLE ADD COLUMN` only, migration 7's reason. `model` holds
+    // `harness-default` or `named:<id>` rather than a bare id, because
+    // "Glasshouse assigned no model" is a different recorded fact from
+    // "never recorded"; `pairing_class` and `protocol` have `unknown` for
+    // the same reason. The three `CHECK`s copy vocabularies owned by
+    // `harness::pairing`/`harness`/`harness::response`, pinned against drift
+    // by `every_stored_vocabulary_is_one_the_schema_accepts`.
+    // `response_profile` gets no `CHECK`: five axes joined, not one word.
     //
-    // The phase's second fixed architectural requirement is that these things
-    // *"remain separately represented rather than collapsed into one
-    // ambiguous agent identifier"*. A column each is what that means at the
-    // storage layer, and the Rust side carries it further: each one reads
-    // back as its own type, so a build that assigned the pairing class from
-    // the launch profile would not compile. See `session::store`.
-    //
-    // # `ALTER TABLE ADD COLUMN`, never a rebuild
-    //
-    // Migration 3 is the shape: append a column, leave every existing row
-    // alone. A rewrite would be refused here for migration 7's reason —
-    // rebuilding a table risks the data that already lives in it — and none
-    // of these needs one, because none of them adds or drops a constraint on
-    // a column that already exists.
-    //
-    // # What NULL means, and what it must never be allowed to mean
-    //
-    // NULL is *"the build that wrote this row recorded nothing here"*, exactly
-    // as it is for `launch_profile`. That is why `model` does not simply hold
-    // a model id: *"Glasshouse assigned no model, so the harness chose"* is a
-    // real recorded answer and a different fact from *"this was never
-    // recorded"*, and a bare id column would have had one slot for both. So
-    // the column holds `harness-default` or `named:<id>`, which cannot
-    // collide however a model is named. `pairing_class` and `protocol` have
-    // the same problem and already have their own words for it: `unknown` is
-    // a recorded answer, NULL is not an answer at all.
-    //
-    // # The `CHECK`s copy three vocabularies, on purpose
-    //
-    // `pairing_class`, `protocol` and `response_mechanism` are owned by
-    // `harness::pairing`, `harness` and `harness::response` respectively, so
-    // the lists below are second copies and could drift. They are here for
-    // migration 2's reason — a future writer must not be able to store a
-    // value readers would have to guess about — and the drift is answered the
-    // way `LIFECYCLE_EVENT_KINDS` answers it: `session::store` encodes each
-    // one through an exhaustive `match` (so a new variant is a compile error
-    // there) and `every_stored_vocabulary_is_one_the_schema_accepts` inserts
-    // every variant through the schema.
-    //
-    // `response_profile` gets no `CHECK`. It is five axes joined, not one
-    // word, and pinning 4 x 3 x 3 x 3 x 3 combinations in SQL would be a
-    // vocabulary this file has no business holding. An encoding the reader
-    // does not recognise is reported as `SessionStoreError::UnknownValue`
-    // rather than guessed at, which is the same visible-degradation rule the
-    // enum columns follow when a row arrives from a newer build.
+    // History: design-decisions.md, "Trims: migration and native-secret
+    // module docs", database/migrations/v1_to_v13.rs migration 8.
     "
     ALTER TABLE sessions ADD COLUMN model TEXT
         CHECK (model IS NULL
@@ -800,53 +604,20 @@ pub(crate) const MIGRATIONS_V1_TO_V13: [&str; 13] = [
     // 9: Phase 10A — the durable process identity a session is supervised by,
     // and what supervision has concluded about it.
     //
-    // # Why a process id is not an identity
+    // A process id alone is not an identity: operating systems reuse them, so
+    // `process_started_at` -- the kernel's own start time, in milliseconds
+    // since the epoch -- makes the pair one. `process_host` is the third
+    // part: a record whose host is not this one is only ever reported
+    // unverifiable. NULL is "recorded nothing here", so a session predating
+    // this migration reads as `session::supervision::Verdict::Unrecorded`,
+    // never as stopped. Supervision is recorded rather than recomputed,
+    // because the process observed at quarantine time may be gone by the
+    // next open, and `supervision_reason` carries the sentence a person
+    // needs. `ALTER TABLE ADD COLUMN` only: `lifecycle_events` is untouched,
+    // so this is a column on `sessions`, never a new event kind.
     //
-    // Operating systems reuse process ids. A record holding `4711` alone will
-    // eventually match a stranger that happens to be `4711` today, and a
-    // control plane that trusted it would report someone else's process as
-    // this project's session — or, worse, refuse to start a session because a
-    // text editor is sitting on the number. `process_started_at` is what makes
-    // the pair an identity: the kernel's own start time for that process, in
-    // milliseconds since the Unix epoch, which no later process can inherit.
-    //
-    // Milliseconds since the epoch, rather than each platform's native unit,
-    // for one reason: Linux reports a process's start time in clock ticks
-    // *since boot*, which repeats after every reboot, so storing it raw would
-    // leave the same collision this column exists to close. `session::
-    // supervision` converts on the way in — see its `observe`.
-    //
-    // `process_host` is the third part. A project directory can be shared or
-    // synchronised between machines, and a process id from another host means
-    // nothing here. A record whose host is not this one is never verified and
-    // never assumed dead; it is reported as unverifiable, which is the second
-    // architectural requirement of this phase applied to a case that has
-    // nothing to do with processes dying.
-    //
-    // # Why supervision is recorded rather than recomputed each time
-    //
-    // Quarantine is a conclusion about a process that was observed at a
-    // particular moment. The next Glasshouse to open this database may not be
-    // able to observe the same thing — the process may have gone in between —
-    // and "there was something alive here that I could not account for" must
-    // survive that. `supervision_reason` carries the sentence a person needs,
-    // because "quarantined" on its own tells nobody what was seen.
-    //
-    // # NULL, here as everywhere in this schema
-    //
-    // NULL is *"the build that wrote this row recorded nothing here"*, never a
-    // default. A session recorded before this migration has no process
-    // identity, and supervision must therefore refuse to conclude anything
-    // about it rather than treating it as stopped — see
-    // `session::supervision::Verdict::Unrecorded`.
-    //
-    // # `ALTER TABLE ADD COLUMN`, and nothing else
-    //
-    // Migration 3's shape, for migration 8's reasons. No table is rebuilt, no
-    // existing `CHECK` is altered — SQLite cannot alter one — and no existing
-    // row is touched. In particular `lifecycle_events` is left alone: its
-    // `seq` is `AUTOINCREMENT` and `memories` references it, so a supervision
-    // conclusion is a column on `sessions` and never a new event kind.
+    // History: design-decisions.md, "Trims: migration and native-secret
+    // module docs", database/migrations/v1_to_v13.rs migration 9.
     "
     ALTER TABLE sessions ADD COLUMN process_id INTEGER
         CHECK (process_id IS NULL OR process_id > 0);
@@ -874,44 +645,21 @@ pub(crate) const MIGRATIONS_V1_TO_V13: [&str; 13] = [
     // 10: Phase 21C's validity and invalidation conditions, and the
     // review/decay bookkeeping Phase 21D needs.
     //
-    // # `ADD COLUMN` only, for migration 8's reasons
+    // `ADD COLUMN` only, migration 8's shape; `memories_fts` is untouched,
+    // because these five columns are attributes of a memory already found,
+    // not words a search would match on. `validity_conditions` and
+    // `invalidation_conditions` are free text like the Phase 21B provenance
+    // columns, for the same reason: a condition is a sentence, not a fixed
+    // vocabulary, and NULL means "no condition was recorded", never "none
+    // apply." `review_reason`'s six values are capability-map lines 885-890
+    // in order, and this `CHECK` is their only definition —
+    // [`crate::memory::ReviewReason`] reads it back so the two cannot drift.
+    // `review_marked_at` and `last_validated_at` follow this schema's
+    // standing rule that NULL is "unknown," never zero: a pre-migration
+    // memory must decay as never-yet-validated, not as stale-as-of-epoch-zero.
     //
-    // No table is rebuilt, no existing `CHECK` is altered, no existing row is
-    // touched. In particular `memories_fts` is left alone: none of these five
-    // columns joins it. They are attributes of a memory somebody has already
-    // found — a validity condition, why it was flagged, when, and whether it
-    // has since been rechecked — not words a search would match on, and every
-    // indexed column shifts BM25's weighting of the ones that matter. Making
-    // one searchable later is the same rebuild migration 6 paid for
-    // `rationale`; nothing here asks for it.
-    //
-    // # `validity_conditions` and `invalidation_conditions`
-    //
-    // Phase 21C's *"allow a durable memory to define explicit validity [or
-    // invalidation] conditions when known"*. Free text, like the Phase 21B
-    // provenance columns beside them, and for the same reason: a condition is
-    // a sentence someone wrote down, not a value from a fixed vocabulary, and
-    // `NULL` means "no condition was recorded" rather than "none apply."
-    //
-    // # `review_reason`, one value per map line
-    //
-    // The six values are lines 885-890 of the capability map, in order, and
-    // this `CHECK` is their only definition — [`crate::memory::ReviewReason`]
-    // reads it back the way `every_project_phase_the_type_supports_is_one_
-    // the_schema_accepts` reads migration 6's, so the two cannot silently
-    // drift apart.
-    //
-    // # `review_marked_at` and `last_validated_at`: `NULL` is "unknown," never zero
-    //
-    // The same argument every other nullable timestamp in this schema makes,
-    // sharpened by Phase 21D line 898: a memory written before this migration
-    // has no `last_validated_at`, and the decay policy must treat that as
-    // *unknown* — never reaffirmed, not yet due for one, no basis to prefer it
-    // over a memory that has one — rather than as *never validated as of
-    // epoch zero*, which would make every pre-migration memory look infinitely
-    // stale the instant this migration runs. `review_marked_at` carries the
-    // same distinction for the same reason: a memory nobody has flagged has no
-    // answer to "when," not an answer of zero.
+    // History: design-decisions.md, "Trims: migration and native-secret
+    // module docs", database/migrations/v1_to_v13.rs migration 10.
     "
     ALTER TABLE memories ADD COLUMN validity_conditions     TEXT;
     ALTER TABLE memories ADD COLUMN invalidation_conditions TEXT;
@@ -930,81 +678,23 @@ pub(crate) const MIGRATIONS_V1_TO_V13: [&str; 13] = [
     ",
     // 11: Phase 33A's routing evidence ledger — an append-oriented record of
     // what actually happened on a routed turn, so a routing decision can be
-    // audited and its aggregation recalibrated against the raw rows rather
-    // than a counter that has already forgotten what produced it.
+    // audited against the raw rows rather than a counter that already
+    // forgot what produced it.
     //
-    // # A new table, not more columns on `sessions`
+    // A new table, not more columns on `sessions`: migration 4's own
+    // argument for `lifecycle_events` over a `sessions` column applies here.
+    // `AUTOINCREMENT` and no `UPDATE` path, matching that
+    // [`crate::routing::evidence`]'s store offers `record` and reads, never
+    // an edit. `provider`, `model`, `route`, `harness`, `purpose` and
+    // `quota_context` are the six columns two turns must agree on to be the
+    // same evidence (line 1338, 1330); timing, token and cost columns are
+    // nullable for line 1331's reason -- "when the protocol exposes them".
+    // `context_state` is `NOT NULL DEFAULT 'unknown'`, because line 1337
+    // forbids averaging away cache effects. The two triggers are migration
+    // 4's isolation pair, for line 1343's project-scoping half.
     //
-    // `sessions` is one row per session and this is many rows per session —
-    // every measurable turn a session makes, at whatever rate its harness
-    // makes them. Folding that into `sessions` would mean either widening one
-    // row's meaning to "the latest turn" (losing every one before it, exactly
-    // what line 1329 forbids) or a one-to-many column nothing else in this
-    // schema does. A dedicated table with its own `seq` is migration 4's own
-    // argument for `lifecycle_events` over a column on `sessions`, applied
-    // here for the same reason.
-    //
-    // # `AUTOINCREMENT`, and no `UPDATE` path
-    //
-    // Append-oriented is a property of the code as much as the schema: this
-    // migration adds no trigger that would let a later migration alter a
-    // measurement in place, and [`crate::routing::evidence`]'s store offers a
-    // `record` method and reads, never a method that edits a recorded
-    // observation. `AUTOINCREMENT` (migration 4's own reasoning for
-    // `lifecycle_events` and `memories`) means a `seq` is never reused even
-    // after rows are pruned by some future retention policy, so a stored
-    // reference to one observation can never come to mean another.
-    //
-    // # Identity: six columns, because two turns are the same evidence only
-    // when all of them agree
-    //
-    // `provider`, `model` and `route` are line 1338's "materially different
-    // model versions, quantizations, routes, or changing stealth-model
-    // identities" kept apart rather than averaged together; `harness` and
-    // `purpose` are line 1330's own list; `quota_context` is the authenticated
-    // credential or account context a reading is scoped to, so two credentials
-    // against the same provider are never folded into one rate. All nullable
-    // except `provider` and `model`, because a row this schema will accept
-    // must at minimum say which provider and which model it is evidence
-    // about — see [`crate::routing::evidence`]'s own doc comment for which of
-    // these a real gateway exchange can actually supply today.
-    //
-    // # Timing, tokens, cost: nullable, every one, for the reason line 1331
-    // gives
-    //
-    // "When the protocol exposes them." A gateway that forwards bytes without
-    // parsing them cannot see inside a response stream, so
-    // `first_token_at`/`first_tool_call_at` are NULL from that producer today
-    // — not zero, not the dispatch time, `NULL`, which is this schema's
-    // standing rule for "the build that wrote this row recorded nothing
-    // here." The same is true of the token and cost columns: nothing in this
-    // migration invents a way to read them, it only makes room for a producer
-    // that can. `cost_confidence`'s `CHECK` is paired with `cost_micro_usd` so
-    // that a cost can never be stored without saying how well it is known —
-    // line 1333's "explicit confidence label" enforced at the storage layer
-    // rather than left to a caller's discipline, the same move migration 6
-    // makes for `project_phase` and migration 10 for `review_reason`.
-    //
-    // # `context_state` is the one column that is `NOT NULL`
-    //
-    // Every other column's NULL means "not recorded." This one may not be
-    // silently absent, because line 1337 forbids *averaging away* cache
-    // effects: a row that does not know whether its context was warm or cold
-    // must say `unknown` outright, so that a rolling summary can separate the
-    // three rather than one of them quietly vanishing into the others.
-    // `DEFAULT 'unknown'` is what makes that automatic for any future insert
-    // path that forgets to think about it.
-    //
-    // # Two triggers, migration 4's pair, unchanged
-    //
-    // `IS NOT` rather than `<>`, so a missing binding row aborts the write
-    // instead of the comparison evaluating to NULL and letting it through —
-    // migration 2's argument, copied verbatim rather than re-derived. This is
-    // the structural half of line 1343's "keep the evidence ledger physically
-    // project-scoped"; the second half — "require explicit export before
-    // observations leave the project" — is a property of which functions
-    // exist in [`crate::routing::evidence`], not of the schema, and is
-    // recorded there.
+    // History: design-decisions.md, "Trims: migration and native-secret
+    // module docs", database/migrations/v1_to_v13.rs migration 11.
     "
     CREATE TABLE routing_observations (
         seq                INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1074,84 +764,39 @@ pub(crate) const MIGRATIONS_V1_TO_V13: [&str; 13] = [
     // 12: Phase 40 line 1646 — which session, if any, a session was
     // bootstrapped from.
     //
-    // # `ALTER TABLE ADD COLUMN`, migration 3's shape, for migration 8's
-    // reasons
+    // `ALTER TABLE ADD COLUMN`, migration 8's shape. No `CHECK` and no
+    // foreign key: this column holds a `SessionId`, not user text, and names
+    // no `REFERENCES` because a source session can be in another project or
+    // already gone -- the same precedent `memories.source_session_id`
+    // (migration 6) sets. NULL means "not started from a checkpoint," never
+    // a placeholder. One direction only: no index, reverse table or
+    // descendants column, because `SessionStore::list()` already enumerates
+    // every session, so "what came from this session" is a filter over an
+    // existing enumeration, not a missing capability.
     //
-    // No table is rebuilt, no existing `CHECK` is altered, no existing row is
-    // touched.
-    //
-    // # No `CHECK`, and no foreign key
-    //
-    // Unlike `display_name` (migration 8), this column holds a `SessionId`,
-    // not user text, so there is no length or emptiness to police. Unlike a
-    // relational id, it names no `REFERENCES`: a source session can be in
-    // another project (this column does not resolve across the project
-    // boundary — see `session::store`), can already be gone, and the
-    // precedent this follows, `memories.source_session_id` (migration 6), is
-    // itself a bare nullable `TEXT` with no foreign key.
-    //
-    // # NULL, here as everywhere in this schema
-    //
-    // NULL is *"this session was not started from a checkpoint,"* never a
-    // placeholder value. A session recorded before this migration, and any
-    // session started without `--from-checkpoint`, has no source and must
-    // read back as `None` rather than some invented default.
-    //
-    // # One direction only
-    //
-    // This column answers "what did this session come from." It
-    // deliberately does not add an index, a reverse table, or a descendants
-    // column: `SessionStore::list()` already enumerates every session in the
-    // project with no required key, so "what came from this session" is a
-    // filter over an existing enumeration, not a missing capability.
+    // History: design-decisions.md, "Trims: migration and native-secret
+    // module docs", database/migrations/v1_to_v13.rs migration 12.
     "
     ALTER TABLE sessions ADD COLUMN source_session_id TEXT;
     ",
     // 13: capability map line 925 — "record why a decision was superseded so
     // future agents do not resurrect it without context."
     //
-    // # `ALTER TABLE ADD COLUMN`, migration 12's shape
+    // `ALTER TABLE ADD COLUMN`, migration 12's shape. Not `review_reason`:
+    // that is a six-value enumeration meaning *why this memory needs
+    // review*, constrained by migration 10's `CHECK`, and "why it was
+    // superseded" is a different question with a different answer type -- a
+    // sentence, not a vocabulary. No `CHECK` tying it to `status`, because
+    // `superseded_by`'s tying `CHECK` is a table constraint `ALTER TABLE ADD
+    // COLUMN` cannot add, and the rule is already enforced in code:
+    // `MemoryStore::set_status` clears this column in the same expression it
+    // clears `superseded_by`. The `CHECK` it does get is migration 8's shape
+    // for operator free text -- not empty, bounded at 512 rather than
+    // `display_name`'s 64, because this is a sentence explaining a decision.
+    // NULL is "no reason was recorded," never a placeholder for an empty one.
     //
-    // No table is rebuilt, no existing `CHECK` is altered, no existing row is
-    // touched. Every memory recorded before this migration reads back with no
-    // supersession reason, which is the truth about it.
-    //
-    // # Why not `review_reason`
-    //
-    // `review_reason` is a six-value enumeration meaning *why this memory
-    // needs review*, constrained by migration 10's own `CHECK`. "Why it was
-    // superseded" is a different question with a different answer type — a
-    // person's sentence, not a vocabulary — and reusing the column would
-    // either need that `CHECK` widened, which this file's own house rule
-    // forbids doing in place, or would silently store a value readers of
-    // `review_reason` would have to guess about. Adding a column is neither.
-    //
-    // # No `CHECK` tying it to `status`
-    //
-    // `superseded_by` has one — `CHECK (superseded_by IS NULL OR status =
-    // 'superseded')` — and it is a **table** constraint on the original
-    // `CREATE TABLE`. `ALTER TABLE ADD COLUMN` cannot add a table constraint,
-    // and rebuilding `memories` to gain one would risk the data already in it
-    // for a rule the store already enforces: `MemoryStore::set_status` clears
-    // this column in the same expression it clears `superseded_by`, so the two
-    // cannot drift apart through any door this binary has.
-    //
-    // # The `CHECK` it does get
-    //
-    // Migration 8's shape for operator free text: not empty, and bounded.
-    // Empty is refused because `--reason ""` must not read back as *"a reason
-    // was recorded"* — the store maps it to NULL before it ever gets here, and
-    // this is the constraint that makes that a property of the data rather
-    // than of one caller remembering. The bound is 512 rather than
-    // `display_name`'s 64: this is a sentence explaining a decision, not a
-    // label, and the whole point of the line is that it carries enough context
-    // to stop a resurrection.
-    //
-    // # NULL, here as everywhere in this schema
-    //
-    // NULL is *"no reason was recorded"* — for a memory superseded before this
-    // migration, and for one superseded today without `--reason`, which stays
-    // legal. It is never a placeholder for an empty reason.
+    // History: design-decisions.md, "Trims: migration and native-secret
+    // module docs", database/migrations/v1_to_v13.rs migration 13.
     "
     ALTER TABLE memories ADD COLUMN superseded_reason TEXT
         CHECK (superseded_reason IS NULL
