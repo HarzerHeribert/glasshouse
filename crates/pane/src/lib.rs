@@ -3,7 +3,13 @@
 //! a protocol boundary, never a compile-time dependency on the `glasshouse`
 //! crate. It builds and tests independently of the rest of the workspace.
 
+pub mod commands;
+pub mod contract;
+pub mod glasshouse;
+pub mod project;
+pub mod rollout;
 pub mod ruler;
+pub mod wire;
 
 use std::io::{BufRead, Write};
 
