@@ -6,5 +6,11 @@
 //! The V8 isolate that executes a model's program is a later package and
 //! nothing here executes anything.
 
+pub mod bindings;
+pub mod cell;
 pub mod handles;
+pub mod isolate;
+pub mod marshal;
+pub mod outcome;
 pub mod preview;
+pub mod state;
