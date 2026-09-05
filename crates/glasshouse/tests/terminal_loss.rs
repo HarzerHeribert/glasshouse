@@ -89,6 +89,14 @@
 //! does hit it now costs 0.3% of a core rather than 23.9%, which is the other
 //! half of the fix and is measured in `tui::event::Watch`'s own comment.
 //!
+//! GitHub run 33980693956 failed both at once: `macos-latest, declared` swallowed
+//! 2 of 8 at the 4ms gap (trials 12, 16); `ubuntu-latest, declared` forced 1 of
+//! 15 hangups (trial 6). Measured here under 8–56 spinners the 4ms gap never
+//! told the trees apart (fixed 0–1 of 8, reverted 0–2 of 8) and eight spinners
+//! alone left this host under threshold at 210µs — so neither [`MAX_STALLS`]'s
+//! 4ms tolerance nor the hangup retry gates on a slop measurement; both widen
+//! unconditionally, and the 500µs gap stays the proof that discriminates.
+//!
 //! # A related exit-code defect proved elsewhere, on purpose
 //!
 //! `Screen::drop` (`tui::mod`) can still panic on the way out here — Ratatui's
@@ -246,21 +254,29 @@ const RESIZE_TO_KEYSTROKE: [Duration; 2] = [Duration::from_millis(4), Duration::
 /// tolerates, index for index.
 ///
 /// **Both numbers are measurements, and they differ because the two gaps ask
-/// different questions.**
+/// different questions, and the 4ms gap no longer answers the one it was
+/// asked.**
 ///
-/// At 4ms the question is whether the fix is present at all, and the answer is
-/// not supposed to be probabilistic: **0 stalls in 60 trials on a quiet
-/// machine, and 0 in 48 with the rest of this file's tests running beside
-/// them**. The 1 is slack for a runner slower than any seen here, not an
-/// expectation.
+/// At 4ms the question was meant to be whether the fix is present at all, on
+/// the theory that the answer is not probabilistic: **0 stalls in 60 trials on
+/// a quiet machine, and 0 in 48 with the rest of this file's tests running
+/// beside them**. GitHub run 33980693956 broke that theory — `macos-latest,
+/// declared` swallowed 2 of 8 there — and measuring both trees side by side
+/// under 8–56 synthetic CPU-bound spinners here found the gap does not
+/// discriminate them at all: the fixed tree produced 0–1 of 8 and the
+/// **reverted rounding line 0–2 of 8**, the same range. A gap that cannot tell
+/// the two trees apart under load is not a proof under load, so its tolerance
+/// is widened to match the gap that is one, **unconditionally** — a slop-gated
+/// number would rarely even engage, since eight spinners alone measured this
+/// host at 210µs, under the threshold such a gate would use.
 ///
-/// At 500µs the question is whether one rounding line is still there, and the
-/// answer has to be read past a residual this test cannot remove: 1 stall in
-/// 96 trials of that gap under the same load, plus one in a full gate run.
-/// Three is comfortably above that and far below the **8 in 8** the reverted
-/// line produces, so the line stays proved without the residual failing a
-/// gate.
-const MAX_STALLS: [usize; 2] = [1, 3];
+/// At 500µs the question is whether one rounding line is still there, and it
+/// is the gap that actually answers it: the residual this test cannot remove
+/// is 1 stall in 96 trials of that gap under load, plus one in a full gate
+/// run, comfortably below the **5–8 in 8** the reverted line produces measured
+/// here. Three stays proved against that residual without the reverted line
+/// coming anywhere close.
+const MAX_STALLS: [usize; 2] = [3, 3];
 
 /// How many resize-then-type trials `a_resize_does_not_swallow_the_keystroke_
 /// that_follows_it` runs.
@@ -355,23 +371,49 @@ const CPU_SAMPLE_INTERVAL: Duration = Duration::from_millis(250);
 /// |---|---|---|
 /// | before | 50 | **35** |
 /// | after | 30 | **0** |
+///
+/// # Every forced trial gets one retry
+///
+/// Decompression rule 4's one rerun, moved inside the test rather than left to
+/// the gate — **unconditionally, not gated on [`measure_scheduling_slop`]**.
+/// A slop gate was tried first and dropped: eight background spinners, the
+/// load this file's own acceptance command builds, measured this host at
+/// 210µs against [`CALIBRATION_THRESHOLD`]'s 500µs, so a gate gets to decide
+/// "quiet" on exactly the load a real flake needs covered. A trial that ends
+/// [`Ending::Forced`] is re-run once, alone, and counts as forced only if it
+/// is forced again on the retry; a quiet run simply never has one to retry,
+/// so nothing changes there. Every run prints the measured slop, and a retry
+/// prints which trial it covered, so a `--nocapture` log always shows both.
 #[test]
 fn a_terminal_that_goes_away_ends_the_interface_instead_of_spinning() {
+    let scheduling_slop = measure_scheduling_slop();
+
     let mut forced = Vec::new();
+    let mut retried = 0;
     for trial in 1..=TRIALS {
+        if one_terminal_loss(trial) != Ending::Forced {
+            continue;
+        }
+        println!("retried trial {trial} once (slop {scheduling_slop:?})");
+        retried += 1;
         if one_terminal_loss(trial) == Ending::Forced {
             forced.push(trial);
         }
     }
+    println!(
+        "{TRIALS} hangups: {} forced, {retried} retried once (slop {scheduling_slop:?} against \
+         the {CALIBRATION_THRESHOLD:?} threshold).",
+        forced.len(),
+    );
     // Every trial above has already required the process to be *gone*. This
     // requires the interface to have got there itself, which is the thing the
     // watchdog would otherwise hide.
     assert!(
         forced.is_empty(),
         "{} of {TRIALS} hangups ended with the interface being put down rather than leaving on \
-         its own (trials {forced:?}). Two things reach this line: the loop no longer noticing \
-         its own terminal going away, and `shutdown::interpret_signal` going back to reading \
-         `TERMINAL_ENGAGED` alone.",
+         its own (trials {forced:?}), {retried} of them retried once first. Two things reach \
+         this line: the loop no longer noticing its own terminal going away, and \
+         `shutdown::interpret_signal` going back to reading `TERMINAL_ENGAGED` alone.",
         forced.len(),
     );
 }
