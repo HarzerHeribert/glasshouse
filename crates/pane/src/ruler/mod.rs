@@ -7,6 +7,7 @@
 //! decision in one of the siblings below.
 
 pub mod attempt;
+pub mod cli;
 pub mod meter;
 pub mod model;
 pub mod report;
