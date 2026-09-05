@@ -192,14 +192,23 @@ fn no_registered_tool_needs_the_network() {
 /// pane handed to `execvp`. A bare `bash` would print `bash`.
 #[test]
 fn exec_is_granted_on_the_resolved_binary() {
-    let grant = invoke::exec_grant(registry::lookup("read").unwrap().executable());
-    assert!(!grant.fell_back_to_roots, "{grant:?}");
-    assert!(grant.binary.is_absolute(), "{grant:?}");
-    assert_eq!(
-        grant.binary,
-        std::fs::canonicalize(&grant.binary).unwrap(),
-        "the grant is not on a canonical path"
-    );
+    // `registry::READ` declares `cat`, which this half resolves and checks
+    // is absolute and canonical. A Windows runner has no `cat` on `PATH` —
+    // Git for Windows' `usr\bin` is not on it — so resolution legitimately
+    // falls back there rather than exercising what this half is for.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    {
+        let grant = invoke::exec_grant(registry::lookup("read").unwrap().executable());
+        assert!(!grant.fell_back_to_roots, "{grant:?}");
+        assert!(grant.binary.is_absolute(), "{grant:?}");
+        assert_eq!(
+            grant.binary,
+            std::fs::canonicalize(&grant.binary).unwrap(),
+            "the grant is not on a canonical path"
+        );
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    eprintln!("skipped: registry::READ's `cat` does not resolve on this runner's PATH");
 
     let missing = invoke::exec_grant("pane-no-such-program-8f3a1c");
     assert!(
@@ -779,8 +788,13 @@ fn a_token_set_before_the_call_spawns_nothing() {
         !marker.exists(),
         "a child ran under a token that was set before the call"
     );
+    // Five seconds, not one: the call's cost here is two executions of the
+    // fake `glasshouse` hook script, freshly written for this test, which
+    // macOS's Gatekeeper scans on first exec (measured 1.39 s, three times in
+    // one evening). The bound only says the call came back promptly; the
+    // marker above is the assertion that nothing spawned.
     assert!(
-        elapsed < std::time::Duration::from_secs(1),
+        elapsed < std::time::Duration::from_secs(5),
         "the call took long enough to have run something: {elapsed:?}"
     );
 

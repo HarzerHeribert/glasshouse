@@ -22,10 +22,15 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// The binary the profile-text tests are rendered for. A real absolute path,
-/// because [`macos::exec_scope`] reads absoluteness as "pane resolved this"
-/// — `tools::invoke::exec_grant` produces the resolved case with
-/// `canonicalize`, which yields nothing else.
+/// The binary the profile-text tests are rendered for. A real absolute path
+/// on every host, because [`macos::exec_scope`] reads absoluteness as "pane
+/// resolved this" — `tools::invoke::exec_grant` produces the resolved case
+/// with `canonicalize`, which yields nothing else. `Path::is_absolute` needs
+/// a drive under Windows path semantics, which `/bin/cat` does not carry, so
+/// the constant is drive-qualified there and unchanged elsewhere.
+#[cfg(windows)]
+const RESOLVED: &str = r"C:\bin\cat.exe";
+#[cfg(not(windows))]
 const RESOLVED: &str = "/bin/cat";
 
 /// A name that resolves to no binary anywhere, for the fallback half. It is
@@ -37,7 +42,11 @@ const UNRESOLVED: &str = "pane-sandbox-apply-no-such-program";
 /// any project root — `~/.cargo/bin/cargo` is the real one. A literal string
 /// and no file, because `profile_text` is a pure function of its two
 /// arguments; the executing half of this case is
-/// `a_resolved_binary_outside_the_read_roots_still_starts`.
+/// `a_resolved_binary_outside_the_read_roots_still_starts`. Drive-qualified
+/// under Windows for the same reason [`RESOLVED`] is.
+#[cfg(windows)]
+const OUTSIDE_READ_ROOTS: &str = r"C:\pane-fixture\elsewhere\cat.exe";
+#[cfg(not(windows))]
 const OUTSIDE_READ_ROOTS: &str = "/pane-fixture/elsewhere/cat";
 
 /// The Windows applier's source, for the one invariant that is a property of
