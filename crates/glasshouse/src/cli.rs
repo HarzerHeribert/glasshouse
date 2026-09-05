@@ -949,14 +949,26 @@ pub enum Command {
     /// Groups every recorded observation by what it was for: `classification`
     /// is `glasshouse classify`'s own calls; the coding-agent group is every
     /// exchange the gateway relayed for a harness; everything else groups
-    /// together under no purpose and no harness. This build never parses the
-    /// coding-agent traffic the gateway relays, so that group always carries
-    /// a real request count and no token count at all — it prints as *not
-    /// counted*, never as a `0` this build never measured.
+    /// together under no purpose and no harness. A relayed exchange whose
+    /// reply the gateway could not read leaves the token columns `NULL`, and
+    /// a `NULL` column prints as *not counted* (prose) or `null` (`--json`),
+    /// never `0`.
     RoutingCost {
         /// How far back to look, in hours.
         #[arg(long, value_name = "N", default_value_t = 24)]
         hours: u32,
+        /// Print one `serde_json` object per observation instead of the
+        /// prose report — capability map line 2430's wire shape for the
+        /// pane's meter.
+        #[arg(long)]
+        json: bool,
+        /// Start the window at this Unix second instead of `--hours` ago;
+        /// the window still ends now.
+        #[arg(long, value_name = "UNIX", conflicts_with = "hours", requires = "json")]
+        since: Option<i64>,
+        /// Keep only this session's rows.
+        #[arg(long, value_name = "ID", requires = "json")]
+        session: Option<String>,
     },
     /// The context firewall — Phase 57's tool-output compaction between
     /// harness and model, map lines 1980-1990.

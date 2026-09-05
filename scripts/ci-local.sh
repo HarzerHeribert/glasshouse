@@ -134,15 +134,18 @@ accel_enable
 # and from the Linux container, whose environment is clean. Measured
 # 2026-09-05: 75/76 with it set, 76/76 with `env -u ANTHROPIC_BASE_URL`.
 #
-# This does NOT unset it. Scrubbing the caller's environment inside the gate
-# would make the gate pass in an environment the product itself would then
-# run in, which is the opposite of what a contamination test is for. It says
-# so, once, loudly, and lets the assertion fail honestly.
+# User ruling 2026-09-05 (.agent-runtime/answers/pty-smoke-env.txt): scrub
+# these three from the gate's own cargo children, so a gate run from any pane
+# is clean. This is not scrubbing the caller's shell -- ci-local.sh's own
+# process still sees them, and this loop still warns -- it is that every
+# cargo invocation below runs under `env -u`, so the *test process* pty_smoke
+# inspects never inherits them, matching the Linux container's environment.
+ENV_SCRUB=(env -u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_API_KEY)
 for leaked in ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY; do
   if [ -n "${!leaked:-}" ]; then
-    echo "ci-local: WARNING -- $leaked is set in this environment (inherited from the caller)." >&2
-    echo "          pty_smoke's overlay-leak assertion will fail on that alone. Run the gate" >&2
-    echo "          from a clean shell, or: env -u $leaked scripts/ci-local.sh ..." >&2
+    echo "ci-local: NOTE -- $leaked is set in this environment (inherited from the caller)." >&2
+    echo "          it is scrubbed for the gate's own cargo children below, so pty_smoke's" >&2
+    echo "          overlay-leak assertion sees a clean environment either way." >&2
   fi
 done
 
@@ -203,9 +206,9 @@ step() {           # step <label> <command...>
 
 # --- native macOS jobs -------------------------------------------------------
 if [ "$DO_MAC" -eq 1 ]; then
-  step "lint / fmt" cargo fmt --all -- --check
-  step "lint / clippy" cargo clippy --locked --workspace --exclude pane --all-targets -- -D warnings
-  step "lint / rustdoc" env RUSTDOCFLAGS='-D warnings' cargo doc --workspace --exclude pane --no-deps
+  step "lint / fmt" "${ENV_SCRUB[@]}" cargo fmt --all -- --check
+  step "lint / clippy" "${ENV_SCRUB[@]}" cargo clippy --locked --workspace --exclude pane --all-targets -- -D warnings
+  step "lint / rustdoc" "${ENV_SCRUB[@]}" env RUSTDOCFLAGS='-D warnings' cargo doc --workspace --exclude pane --no-deps
   step "lint / README progress" python3 scripts/progress.py --check
   step "lint / file sizes"      python3 scripts/check-file-sizes.py
   # Free-because-local checks. These never ran on GitHub Actions; they exist
@@ -232,13 +235,13 @@ if [ "$DO_MAC" -eq 1 ]; then
   if [ "$SCOPED" -eq 1 ]; then
     step "test (macos) / blast radius" scripts/blast-radius.sh
   else
-    step "test (macos) / build" cargo build --locked --workspace --exclude pane --all-targets
-    step "test (macos) / test"  sh -c 'cargo test --locked --workspace --exclude pane -- --nocapture < /dev/null'
+    step "test (macos) / build" "${ENV_SCRUB[@]}" cargo build --locked --workspace --exclude pane --all-targets
+    step "test (macos) / test"  env -u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_API_KEY sh -c 'cargo test --locked --workspace --exclude pane -- --nocapture < /dev/null'
   fi
   # `pane` is excluded from the workspace runs above and given its own step
   # here, unconditionally: it is a standalone process gated separately from
   # `glasshouse`, and it is cheap enough today that --scoped need not skip it.
-  step "test (macos) / pane build+test" sh -c 'cargo build --locked -p pane --all-targets && cargo test --locked -p pane -- --nocapture < /dev/null'
+  step "test (macos) / pane build+test" env -u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_API_KEY sh -c 'cargo build --locked -p pane --all-targets && cargo test --locked -p pane -- --nocapture < /dev/null'
   # Call the project's own script rather than `cargo +$MSRV`: its header
   # documents three traps, and `cargo +<v>` needs the rustup shim, which is
   # exactly how the first version of this file got a false red.
@@ -246,6 +249,10 @@ if [ "$DO_MAC" -eq 1 ]; then
 fi
 
 # --- Linux jobs, in a container ---------------------------------------------
+# No env -u prefix is needed here: `docker run` does not forward host
+# environment variables unless a bare `-e NAME` names them, and run_linux()
+# below only ever passes `-e CARGO_TERM_COLOR` and `-e STEP`. ANTHROPIC_BASE_URL
+# and friends never reach the container regardless of the caller's shell.
 if [ "$DO_LINUX" -eq 1 ]; then
   if ! docker info >/dev/null 2>&1; then
     RESULTS+=("SKIP  linux jobs — Docker is not running")

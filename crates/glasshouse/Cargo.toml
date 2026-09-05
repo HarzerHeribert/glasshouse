@@ -52,16 +52,31 @@ libc.workspace = true
 # appears outside such a section or without such a feature, because the mock is
 # a silent failure rather than a loud one — see `src/secret/native.rs`.
 #
-# **Linux is absent on purpose, and the reason is now stronger than
-# "unproven".** keyring 3.6.3's Secret Service backend reaches the bus through
-# `SecretService::connect`, which leaves `dbus-secret-service`'s prompt
-# timeout unset; that crate then defaults an unanswered unlock prompt to
-# `ONE_YEAR_SECONDS` and blocks the calling thread for it, one second at a
-# time. A locked collection would therefore freeze a launch, which is the
-# exact defect `SecKeychainSetUserInteractionAllowed(0)` exists to prevent on
-# macOS — and keyring 3.6 exposes no equivalent for this backend. It would
-# also add `libdbus-sys`, whose build script requires `libdbus-1-dev` and
-# `pkg-config` on the build host.
+# **Linux is present, and deliberately not through `keyring`.** keyring 3.6.3's
+# Secret Service backend reaches the bus through `SecretService::connect`,
+# which leaves `dbus-secret-service`'s prompt timeout unset; that crate then
+# defaults an unanswered unlock prompt to `ONE_YEAR_SECONDS` and blocks the
+# calling thread for it, one second at a time. It also unlocks a locked
+# collection on the way to reading an item, so a locked keyring would freeze a
+# launch — the exact defect `SecKeychainSetUserInteractionAllowed(0)` exists to
+# prevent on macOS.
+#
+# `dbus-secret-service` is the crate underneath that backend, and it *does*
+# expose the equivalent: `connect_with_max_prompt_timeout(_, 0)`, which its
+# documentation defines as "prevent the prompt from appearing at all: the
+# operation will immediately be canceled". keyring never calls it and gives a
+# caller no way to, so Glasshouse depends on it directly instead — see
+# `src/secret/native.rs`, "Which platforms, and how the third one refuses".
+# Every one of its D-Bus calls also carries a 2-second reply timeout
+# (`dbus-secret-service-4.1.0/src/proxy/mod.rs:17`), so the Linux probe is
+# bounded whatever the far end does.
+#
+# **The build-host cost, stated rather than discovered:** this adds
+# `libdbus-sys`, whose build script requires `libdbus-1-dev` and `pkg-config`
+# and panics without them. Every Linux build host and CI cell needs both. That
+# cost was accepted by the user on 2026-09-05
+# (`.agent-runtime/answers/linux-keyring-buildhost`) in exchange for a keyring
+# integration that can refuse rather than wait.
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring = { workspace = true, features = ["apple-native"] }
 
@@ -75,6 +90,9 @@ windows-sys.workspace = true
 # type-checked against libc's Windows bindings in isolation and then could not
 # name `libc` at all in a crate that only depended on it under `cfg(unix)`.
 libc.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+dbus-secret-service.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

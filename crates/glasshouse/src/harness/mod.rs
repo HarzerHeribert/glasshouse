@@ -45,6 +45,7 @@ pub mod cursor;
 pub mod hermes;
 pub mod opencode;
 pub mod pairing;
+pub mod pane;
 pub mod pi;
 pub mod response;
 
@@ -115,7 +116,10 @@ impl Declared<bool> {
 /// through a cloud reseller, or something else entirely through a gateway.
 /// Collapsing those three into one "vendor" field is how a router ends up
 /// believing a harness and a model are first-party partners because their
-/// names rhyme.
+/// names rhyme. That reasoning holds even when the publisher is us: `pane`
+/// is Glasshouse's program whether it ends up talking to Anthropic direct,
+/// through our own gateway, or to some other model behind it, and a router
+/// must not read `Vendor::Glasshouse` as a pairing signal for any model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Vendor {
     Anthropic,
@@ -125,6 +129,7 @@ pub enum Vendor {
     OpenCode,
     Pi,
     Hermes,
+    Glasshouse,
 }
 
 impl Vendor {
@@ -137,6 +142,7 @@ impl Vendor {
             Vendor::OpenCode => "opencode-ai",
             Vendor::Pi => "Pi",
             Vendor::Hermes => "Hermes Agent",
+            Vendor::Glasshouse => "Glasshouse",
         }
     }
 }
@@ -1358,6 +1364,7 @@ pub fn adapter_for(id: IntegrationId) -> Option<&'static dyn HarnessAdapter> {
         IntegrationId::Cursor => Some(&cursor::Cursor),
         IntegrationId::Pi => Some(&pi::Pi),
         IntegrationId::Hermes => Some(&hermes::Hermes),
+        IntegrationId::Pane => Some(&pane::Pane),
         IntegrationId::Cmux | IntegrationId::Ollama | IntegrationId::LlamaCpp => None,
     }
 }
@@ -1386,6 +1393,7 @@ pub fn structured_pre_tool_hook(id: IntegrationId) -> Option<&'static str> {
         | IntegrationId::Cursor
         | IntegrationId::Pi
         | IntegrationId::Hermes
+        | IntegrationId::Pane
         | IntegrationId::Cmux
         | IntegrationId::Ollama
         | IntegrationId::LlamaCpp => None,

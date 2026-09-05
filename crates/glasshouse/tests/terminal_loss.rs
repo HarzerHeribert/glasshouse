@@ -277,6 +277,24 @@ const MAX_STALLS: [usize; 2] = [1, 3];
 /// documentation above.
 const RESIZE_TRIALS: usize = 16;
 
+/// How many samples [`measure_scheduling_slop`] takes.
+///
+/// Same as each gap's share of [`RESIZE_TRIALS`] — enough to catch this
+/// host's worst scheduling hiccup without spending more wall clock deciding
+/// whether to run the trials than the trials themselves cost.
+const CALIBRATION_SAMPLES: usize = 8;
+
+/// How much longer than requested a `sleep` may run before the gap it was
+/// building is not trustworthy.
+///
+/// [`RESIZE_TO_KEYSTROKE`]'s shorter gap, deliberately: if this host cannot
+/// get a `sleep(500µs)` back within another 500µs, a keystroke `sleep`d
+/// "500µs after" a resize is not landing in a window that narrow — it lands
+/// wherever the scheduler next resumes the thread, which reaches into the
+/// 2–8ms region [`RESIZE_TO_KEYSTROKE`]'s own by-hand measurement names as
+/// the worst of the unfixed curve.
+const CALIBRATION_THRESHOLD: Duration = RESIZE_TO_KEYSTROKE[1];
+
 /// The size the terminal is changed to in the resize test, chosen only to be
 /// different in both directions from the 40x120 it starts at.
 const RESIZED_ROWS: u16 = 50;
@@ -699,20 +717,55 @@ fn a_resize_still_arrives_on_a_terminal_that_has_been_silent() {
 /// It runs against the real binary on a real pty for the same reason the test
 /// above does: the collision is a property of the kernel's readiness
 /// reporting, and no double has one.
+///
+/// # On a loaded host
+///
+/// This test decides whether the shorter gap can be judged here at all from
+/// a measurement taken every run, never from where it runs.
+/// [`measure_scheduling_slop`] carries the reasoning; when it says no, the
+/// run prints why and the longer gap is unaffected.
 #[test]
 fn a_resize_does_not_swallow_the_keystroke_that_follows_it() {
+    let scheduling_slop = measure_scheduling_slop();
+    let short_gap_unmeasurable = scheduling_slop >= CALIBRATION_THRESHOLD;
+    if short_gap_unmeasurable {
+        println!(
+            "{:?} gap's proof skipped: this host's std::thread::sleep({:?}) overran by \
+             {scheduling_slop:?} in the worst of {CALIBRATION_SAMPLES} samples, at or past the \
+             {CALIBRATION_THRESHOLD:?} threshold this test holds it to — a keystroke sent that \
+             long after a resize is not landing in a window that narrow here. The {:?} gap ran \
+             and was judged normally.",
+            RESIZE_TO_KEYSTROKE[1], RESIZE_TO_KEYSTROKE[1], RESIZE_TO_KEYSTROKE[0]
+        );
+    }
+
     let mut stalls: [Vec<usize>; 2] = [Vec::new(), Vec::new()];
     let mut last_screen = String::new();
     for trial in 1..=RESIZE_TRIALS {
         let which = trial % RESIZE_TO_KEYSTROKE.len();
+        if short_gap_unmeasurable && which == 1 {
+            continue;
+        }
         if let Some(drawn) = one_resize_then_keystroke(trial, RESIZE_TO_KEYSTROKE[which]) {
             stalls[which].push(trial);
             last_screen = drawn;
         }
     }
     // Judged gap by gap rather than pooled: see `MAX_STALLS` for why one of
-    // them asks about the fix and the other about a single line of it.
+    // them asks about the fix and the other about a single line of it. Printed
+    // unconditionally (practice §60: a rate, not a pass) so a `--nocapture`
+    // run reports the counts without needing a failure to see them.
     for (which, swallowed) in stalls.iter().enumerate() {
+        if short_gap_unmeasurable && which == 1 {
+            println!("{:?} gap: skipped", RESIZE_TO_KEYSTROKE[which]);
+            continue;
+        }
+        println!(
+            "{:?} gap: {} of {} swallowed",
+            RESIZE_TO_KEYSTROKE[which],
+            swallowed.len(),
+            RESIZE_TRIALS / RESIZE_TO_KEYSTROKE.len(),
+        );
         assert!(
             swallowed.len() <= MAX_STALLS[which],
             "{} of the {} keystrokes sent {:?} after a resize were swallowed by it, which is \
@@ -725,6 +778,32 @@ fn a_resize_does_not_swallow_the_keystroke_that_follows_it() {
             MAX_STALLS[which],
         );
     }
+}
+
+/// The worst of [`CALIBRATION_SAMPLES`] overruns of the exact call
+/// [`one_resize_then_keystroke`] uses to build its gap: `std::thread::sleep`.
+///
+/// # Why this probe, not one through the child
+///
+/// The obvious probe is a keystroke sent with no resize in flight, timed
+/// until the interface reacts. Measured by hand, quiet: 1.8–3.7ms every
+/// sample — the cost of a full re-render through a real pty, not the
+/// scheduling residual [`RESIZE_TO_KEYSTROKE`]'s doc describes. Comparing
+/// that to 500µs would call every host loaded, this one included.
+///
+/// `sleep`'s own overrun is the same quantity the trial's gap depends on,
+/// without the render cost riding along. Measured by hand, eight samples
+/// each, `sleep(500µs)`: 46–142µs quiet, 60µs–20.3ms with eight CPU-bound
+/// threads spinning alongside it.
+fn measure_scheduling_slop() -> Duration {
+    let mut worst = Duration::ZERO;
+    for _ in 0..CALIBRATION_SAMPLES {
+        let requested = RESIZE_TO_KEYSTROKE[1];
+        let before = Instant::now();
+        std::thread::sleep(requested);
+        worst = worst.max(before.elapsed().saturating_sub(requested));
+    }
+    worst
 }
 
 /// One trial. `None` when the keystroke arrived; the screen drawn since the

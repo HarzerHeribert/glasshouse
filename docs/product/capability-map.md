@@ -2435,8 +2435,8 @@ record: the session artifact *The Glasshouse Native Harness*.
 
 ☑ Add `crates/pane` as a workspace member with its own binary and library; the default member set stays `glasshouse` alone so a bare `cargo build` at the root is unchanged.
 ☑ Exclude `pane` from every `--workspace` invocation in `ci-local.sh` and the GitHub matrix, and give it its own job.
-☐ Add `Vendor::Glasshouse` and a `pane` adapter whose every declaration is `Verified` against the built binary.
-☐ Launch `pane` from Glasshouse as a session over a PTY, visible in the session list and typeable into.
+☑ Add `Vendor::Glasshouse` and a `pane` adapter whose every declaration is `Verified` against the built binary.
+☑ Launch `pane` from Glasshouse as a session over a PTY, visible in the session list and typeable into.
 ☑ Keep `pane` free of any compile-time dependency on the `glasshouse` crate; integration is by protocol only.
 
 61C — The loop and the three seams

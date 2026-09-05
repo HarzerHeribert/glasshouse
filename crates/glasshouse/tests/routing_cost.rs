@@ -10,9 +10,9 @@
 //!
 //! # The hazard this file exists to pin
 //!
-//! A row nobody counted (this build's gateway relay never parses a reply
-//! body, so every coding-agent exchange leaves its token columns `NULL`)
-//! must never print as `0`. "not counted" and "0" are different facts, and
+//! A relayed exchange whose reply the gateway could not read leaves its
+//! token columns `NULL`, and a row nobody counted must never print as `0`.
+//! "not counted" and "0" are different facts, and
 //! [`section`]/[`value_after`] below assert the *exact* rendered value for a
 //! token field precisely so a future change that coerces an absent count to
 //! `0` fails a string-equality assertion rather than a loose `contains`.
@@ -106,8 +106,8 @@ impl Fixture {
 
     /// Record one observation exactly the shape
     /// `crate::gateway::session::SessionRouting::record` writes for a real
-    /// coding-agent exchange: no purpose, a named harness, and no token
-    /// counts — the relay never parses a reply body to read any.
+    /// coding-agent exchange whose reply the gateway could not read: no
+    /// purpose, a named harness, and no token counts.
     fn record_gateway_exchange(&self, provider: &str, model: &str, harness: &str, at: i64) {
         let observation = NewObservation::new(provider, model).with_harness(Some(harness));
         self.ledger().record(observation, at).unwrap();
@@ -127,6 +127,36 @@ impl Fixture {
         if let Some(hours) = hours {
             command.arg("--hours").arg(hours.to_string());
         }
+        let output = command
+            .output()
+            .expect("the glasshouse binary must be runnable");
+        Report {
+            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            status: output.status,
+        }
+    }
+
+    /// Run `glasshouse routing-cost --json`, plus whatever extra flags the
+    /// caller passes (`--since`, `--session`) — exactly as a person runs it.
+    fn routing_cost_json(&self, extra_args: &[&str]) -> Report {
+        self.routing_cost_raw(&[&["--json"], extra_args].concat())
+    }
+
+    /// Run `glasshouse routing-cost` with exactly the args given — no
+    /// implicit `--json` or `--hours` — for the clap usage-error tests,
+    /// where the shape of the command line is the point.
+    fn routing_cost_raw(&self, args: &[&str]) -> Report {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_glasshouse"));
+        command
+            .arg("--scope")
+            .arg(&self.root)
+            .arg("--data-dir")
+            .arg(self.base.join("data"))
+            .arg("--config-dir")
+            .arg(self.base.join("config"))
+            .arg("routing-cost")
+            .args(args);
         let output = command
             .output()
             .expect("the glasshouse binary must be runnable");
@@ -274,10 +304,10 @@ fn the_classification_group_is_attributed_its_own_tokens_and_no_others() {
 // ---------------------------------------------------------------------------
 
 /// **The hazard this package exists to pin.** A group whose every row left
-/// its token columns `NULL` — the coding-agent shape, gateway rows this
-/// build never parses — renders the words *not counted*, and the token
-/// fields carry no digit at all, even though its request count is a real,
-/// nonzero number.
+/// its token columns `NULL` — the coding-agent shape, a relayed exchange
+/// whose reply the gateway could not read — renders the words *not
+/// counted*, and the token fields carry no digit at all, even though its
+/// request count is a real, nonzero number.
 #[test]
 fn a_group_with_no_counted_tokens_never_renders_a_digit_for_them() {
     let tmp = tempfile::tempdir().unwrap();
@@ -358,9 +388,10 @@ fn a_ledger_with_no_classification_row_still_reports_honestly() {
 /// **The orchestrator's own correction to this package.** `routing_observations`
 /// has three production writers, and two of them — memory extraction and the
 /// gateway relay — both leave `purpose` `NULL`. Extraction's rows carry real
-/// token counts; the gateway's never do (`gateway/ingress.rs` never parses a
-/// reply body). Grouping on `purpose` alone would fold a genuinely counted
-/// total into the one group line 1464 asks to be reported as *not counted*.
+/// token counts; a relayed exchange whose reply the gateway could not read
+/// leaves its token columns `NULL` instead. Grouping on `purpose` alone
+/// would fold a genuinely counted total into the one group line 1464 asks to
+/// be reported as *not counted*.
 /// `harness_recorded` — set only by the gateway's own producer — is what
 /// keeps them apart.
 #[test]
@@ -1231,4 +1262,271 @@ fn a_group_below_the_reliability_floor_prints_effective_ttfc_as_below_floor() {
         "{}",
         run.stdout
     );
+}
+
+// ---------------------------------------------------------------------------
+// `--json` (capability map line 2430): JSON Lines, one object per
+// observation, `null` never `0` for a column nobody counted.
+// ---------------------------------------------------------------------------
+
+/// **Requirements 1 and 2, and this package's one mutation.** A
+/// gateway-shaped row — no purpose, no tokens, no outcome, exactly the shape
+/// a relayed exchange whose reply the gateway could not read always has —
+/// prints one JSON line whose token columns are the literal substring
+/// `null`, in the exact key order the packet names, never `0`.
+///
+/// Mutation target: `.unwrap_or(0)` (or the `Serialize` equivalent) on
+/// `input_tokens` in `observation_json` must fail this assertion —
+/// `"input_tokens":null` becomes `"input_tokens":0`.
+#[test]
+fn a_row_with_no_tokens_prints_null_never_zero_in_json() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+    let at = now() - 60;
+
+    fixture.record_gateway_exchange("gateway-provider", "gateway-model", "claude-code", at);
+
+    let run = fixture.routing_cost_json(&[]);
+    assert!(run.status.success(), "stderr: {}", run.stderr);
+
+    let lines: Vec<&str> = run.stdout.lines().collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "one row must print exactly one line:\n{}",
+        run.stdout
+    );
+    let line = lines[0];
+    assert!(
+        line.contains("\"input_tokens\":null,\"output_tokens\":null,\"cached_input_tokens\":null"),
+        "a row with no counted tokens must print null, in this exact order, never 0: {line}"
+    );
+    assert!(
+        !line.contains("\"input_tokens\":0")
+            && !line.contains("\"output_tokens\":0")
+            && !line.contains("\"cached_input_tokens\":0"),
+        "a token column nobody counted must never print as 0: {line}"
+    );
+
+    let value: serde_json::Value = serde_json::from_str(line).unwrap();
+    assert_eq!(
+        value["outcome"],
+        serde_json::Value::Null,
+        "a row with no recorded outcome must print outcome:null (requirement 5): {line}"
+    );
+    for key in [
+        "failure_class",
+        "session_id",
+        "route",
+        "purpose",
+        "quota_context",
+        "tool_rounds",
+        "retries",
+        "repairs",
+        "failovers",
+        "dispatched_at",
+        "completed_at",
+        "first_byte_ms",
+        "completed_ms",
+    ] {
+        assert_eq!(
+            value[key],
+            serde_json::Value::Null,
+            "column {key:?} was never written and must print null: {line}"
+        );
+    }
+    assert_eq!(value["harness"], "claude-code");
+    assert_eq!(value["provider"], "gateway-provider");
+    assert_eq!(value["model"], "gateway-model");
+    assert!(value["seq"].is_i64(), "{line}");
+    assert_eq!(value["observed_at"], at);
+}
+
+/// **Requirement 1's ordering.** Two rows recorded out of insertion order
+/// print in `observed_at` ascending order.
+#[test]
+fn json_lines_are_ordered_by_observed_at_ascending() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+    let earlier = now() - 120;
+    let later = now() - 60;
+
+    fixture.record("later-provider", "later-model", None, None, later);
+    fixture.record("earlier-provider", "earlier-model", None, None, earlier);
+
+    let run = fixture.routing_cost_json(&[]);
+    assert!(run.status.success(), "stderr: {}", run.stderr);
+
+    let lines: Vec<&str> = run.stdout.lines().collect();
+    assert_eq!(lines.len(), 2, "{}", run.stdout);
+    let first: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    let second: serde_json::Value = serde_json::from_str(lines[1]).unwrap();
+    assert_eq!(first["provider"], "earlier-provider");
+    assert_eq!(second["provider"], "later-provider");
+}
+
+/// An empty window prints nothing and exits `0` — never a wrapper array,
+/// never an error.
+#[test]
+fn json_empty_window_prints_nothing_and_exits_zero() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+
+    let run = fixture.routing_cost_json(&[]);
+    assert!(run.status.success(), "stderr: {}", run.stderr);
+    assert_eq!(
+        run.stdout, "",
+        "an empty window must print nothing at all in --json mode: {}",
+        run.stdout
+    );
+}
+
+// ---------------------------------------------------------------------------
+// `--session` and `--since` (requirement 3).
+// ---------------------------------------------------------------------------
+
+/// `--session <ID>` keeps only that session's rows, filtered after the read.
+#[test]
+fn json_session_filters_to_that_sessions_rows_only() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+    let at = now() - 60;
+
+    let a = NewObservation::new("provider-a", "model-a").with_session_id(Some("session-a"));
+    fixture.ledger().record(a, at).unwrap();
+    let b = NewObservation::new("provider-b", "model-b").with_session_id(Some("session-b"));
+    fixture.ledger().record(b, at - 1).unwrap();
+
+    let run = fixture.routing_cost_json(&["--session", "session-a"]);
+    assert!(run.status.success(), "stderr: {}", run.stderr);
+
+    let lines: Vec<&str> = run.stdout.lines().collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "--session must keep only that session's rows:\n{}",
+        run.stdout
+    );
+    let value: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(value["session_id"], "session-a");
+    assert_eq!(value["provider"], "provider-a");
+}
+
+/// `--since <UNIX>` starts the window at that second and ends now, excluding
+/// a row observed before it even though it would fall inside the default
+/// `--hours` window.
+#[test]
+fn json_since_bounds_the_window() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+    let now_unix = now();
+    let old = now_unix - 7_200;
+    let recent = now_unix - 60;
+
+    fixture.record("old-provider", "old-model", None, None, old);
+    fixture.record("recent-provider", "recent-model", None, None, recent);
+
+    let since = now_unix - 300;
+    let run = fixture.routing_cost_json(&["--since", &since.to_string()]);
+    assert!(run.status.success(), "stderr: {}", run.stderr);
+
+    let lines: Vec<&str> = run.stdout.lines().collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "--since must exclude a row observed before it:\n{}",
+        run.stdout
+    );
+    let value: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(value["provider"], "recent-provider");
+}
+
+/// `--session` without `--json` is a clap usage error (exit 2) — the prose
+/// path takes neither new flag, so it stays byte-identical.
+#[test]
+fn session_flag_without_json_is_a_clap_usage_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+
+    let run = fixture.routing_cost_raw(&["--session", "session-a"]);
+    assert_eq!(
+        run.status.code(),
+        Some(2),
+        "--session without --json must be a clap usage error: {}",
+        run.stderr
+    );
+}
+
+/// `--since` without `--json` is a clap usage error (exit 2), same reason.
+#[test]
+fn since_flag_without_json_is_a_clap_usage_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+
+    let run = fixture.routing_cost_raw(&["--since", "0"]);
+    assert_eq!(
+        run.status.code(),
+        Some(2),
+        "--since without --json must be a clap usage error: {}",
+        run.stderr
+    );
+}
+
+/// `--since` and `--hours` together is a clap usage error (exit 2) —
+/// `--since` replaces `--hours`'s own start of window, not add to it.
+#[test]
+fn since_and_hours_together_is_a_clap_usage_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+
+    let run = fixture.routing_cost_raw(&["--json", "--hours", "1", "--since", "0"]);
+    assert_eq!(
+        run.status.code(),
+        Some(2),
+        "--since and --hours together must be a clap usage error: {}",
+        run.stderr
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Cross-project isolation (SECURITY / ISOLATION INVARIANTS): the same proof
+// `a_row_planted_under_another_projects_id_never_contributes_to_this_projects_totals`
+// gives the prose path, for `--json`.
+// ---------------------------------------------------------------------------
+
+/// A row planted under another project's id, inside this project's own
+/// database file, must never appear in this project's `--json` output.
+#[test]
+fn a_row_planted_under_another_projects_id_never_appears_in_json() {
+    let tmp = tempfile::tempdir().unwrap();
+    let alpha = Fixture::new(tmp.path(), "alpha");
+    let beta = Fixture::new(tmp.path(), "beta");
+    let at = now() - 60;
+
+    beta.record(
+        "beta-runner",
+        "beta-model",
+        Some("classification"),
+        Some((5, 6, 7)),
+        at,
+    );
+
+    let conn = beta.raw_connection();
+    plant_foreign_observation(&conn, alpha.project_id(), Some("classification"), at);
+    drop(conn);
+
+    let run = beta.routing_cost_json(&[]);
+    assert!(run.status.success(), "stderr: {}", run.stderr);
+
+    let lines: Vec<&str> = run.stdout.lines().collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "a foreign-project row must never appear in this project's --json output:\n{}",
+        run.stdout
+    );
+    let value: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
+    assert_eq!(value["provider"], "beta-runner");
+    assert!(!run.stdout.contains("foreign-provider"));
+    assert!(!run.stdout.contains("999"));
 }

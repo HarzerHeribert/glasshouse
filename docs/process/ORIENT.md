@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1295 closed · 103 active committed open (93%)** — across 26 phases.
+**1297 closed · 101 active committed open (93%)** — across 26 phases.
 
 Not in the work queue: **7 deferred gate criteria** (Phase 52, Phase 53) awaiting a user decision, and **229 parked experimental lines**. They are visible in the map; they are not release-blocking work.
 
@@ -49,7 +49,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 32A | Unified quota and capacity model | **7** | 14 | `1196` |
 | Phase 9K | Harness-aware response profiles | **8** | 29 | `578` |
 | Phase 51 | Evaluation hooks | **15** | 22 | `1818` |
-| Phase 61 | pane: the first-party harness | **31** | 3 | `2419` |
+| Phase 61 | pane: the first-party harness | **29** | 5 | `2419` |
 
 **Fully closed (83):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 7, Phase 8, Phase 9A, Phase 9B, Phase 9C, Phase 9D, Phase 9F, Phase 9G, Phase 9I, Phase 9J, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 16, Phase 17, Phase 18, Phase 19, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 21H, Phase 21I, Phase 21J, Phase 22, Phase 23, Phase 24, Phase 25, Phase 26, Phase 27, Phase 28, Phase 29, Phase 32, Phase 32B, Phase 32E, Phase 32F, Phase 33A, Phase 33C, Phase 34, Phase 34A, Phase 34B, Phase 34D, Phase 34E, Phase 34F, Phase 35, Phase 35A, Phase 35C, Phase 35D, Phase 36, Phase 39, Phase 40, Phase 41, Phase 42, Phase 43, Phase 44, Phase 45, Phase 46, Phase 47, Phase 48, Phase 49, Phase 50, Phase 54, Phase 54A, Phase 55, Phase 56, Phase 56A, Phase 57, Phase 58.
 
@@ -57,7 +57,7 @@ closures are usually at the top. Open the map at the line number given.
 
 Every phase with **three or fewer** open lines, quoted verbatim. These are
 where a single package finishes a phase, so they are listed here and the
-other ~81 open lines are not.
+other ~79 open lines are not.
 
 For any other phase: `scripts/discover.py --phase <id>` prints its open
 lines and evidence together. **Do not open the 178 KB map to read them.**
@@ -235,10 +235,10 @@ to do, and the orchestrator should follow its own rule.
 Newest first, from `docs/process/handoff.md`. Read the top one in full;
 the rest are context you probably do not need.
 
+- Checkpoint — 2026-09-05 (evening), waves 116–117: 1295 / 1399 (92.6%) — pane stood up in its own lane, the dispatch defect fixed, 442 built and verified, seven lines closed
 - Checkpoint — 2026-09-03, batch 96: 1270 / 1355 (93.7%) — four more Phase 59 splits land, the shell line closes, and the orchestrator moves to Opus 5
 - Checkpoint — 2026-09-03, batch 95: 1267 / 1355 (93.5%) — Phase 28 complete, the bootstrap creation atomic, and Phase 59's first splits landing
 - Checkpoint — 2026-09-02, batch 94: 1264 / 1347 (93.9%) — the bootstrap race closed under independent verification, ten accepted lines land, Phases 33C and 34B complete, and Phase 28's producer found in Phase 57's hook
-- Checkpoint — 2026-09-03, batch 93: 1254 / 1347 (93.1%) — the Windows leg fully green, migration 25's millisecond offsets, Phase 47 complete, and the board repackaged by mechanism
 
 ## Evidence ledger files
 

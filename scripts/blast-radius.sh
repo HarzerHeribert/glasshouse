@@ -331,23 +331,31 @@ while read -r hit; do
   # took src/config/tests/part_a.rs for a `--test part_a` crate that does not
   # exist (found by GH-DECOMP-CONFIG). Those files are lib test modules and
   # fall through to the src arm below.
+  #
+  # Every entry below is "pkg:label" -- the workspace gained a second package
+  # (crates/pane) and run_target() needs to know which one each target
+  # belongs to, not just glasshouse. Display sites strip the "pkg:" prefix
+  # back off (see *_DISPLAY below) so glasshouse-only output is unchanged.
   if [[ "$hit" =~ ^crates/[^/]+/tests/[^/]+\.rs$ ]]; then
-    TESTS+=("$(basename "$hit" .rs)"); continue
+    TESTS+=("$(echo "$hit" | cut -d/ -f2):$(basename "$hit" .rs)"); continue
   fi
   case "$hit" in
-    crates/*/src/main.rs) BINS+=("$(echo "$hit" | cut -d/ -f2)") ;;
+    crates/*/src/main.rs)
+      pkg="$(echo "$hit" | cut -d/ -f2)"
+      BINS+=("$pkg:$pkg") ;;
     crates/*/src/*.rs|crates/*/src/**/*.rs)
       if _binpkg="$(binary_crate_pkg "$hit")"; then
-        BINS+=("$_binpkg"); continue
+        BINS+=("$_binpkg:$_binpkg"); continue
       fi
       LIB=1
+      pkg="$(echo "$hit" | cut -d/ -f2)"
       # src/gateway/session.rs -> gateway::session ; src/foo.rs -> foo
       m="$(echo "$hit" | sed -E 's#^crates/[^/]+/src/##; s#\.rs$##; s#/mod$##; s#/#::#g')"
-      [ "$m" = "lib" ] || FILTERS+=("$m")
+      [ "$m" = "lib" ] || FILTERS+=("$pkg:$m")
       # A parent module's own `mod tests` (this crate's source-scanning tests)
       # runs only under the parent's filter, not the child's -- 2026-09-02's
       # trailing sweep found this red when only `gateway::session` was traced.
-      case "$m" in *::*) FILTERS+=("${m%%::*}") ;; esac
+      case "$m" in *::*) FILTERS+=("$pkg:${m%%::*}") ;; esac
       ;;
   esac
 done < "$HITS_FILE"
@@ -380,8 +388,9 @@ most_specific_integration_target() {  # <src-file> on stdout if one exists
 declare -a TARGETED_TESTS=() TARGETED_FILTERS=() TARGETED_BINS=()
 for f in "${FILES[@]}"; do
   # Same rule as above: only crates/<pkg>/tests/<name>.rs is an integration crate.
+  # "pkg:label" throughout, same reason as the full-trace arrays above.
   if [[ "$f" =~ ^crates/[^/]+/tests/[^/]+\.rs$ ]]; then
-    TARGETED_TESTS+=("$(basename "$f" .rs)")
+    TARGETED_TESTS+=("$(echo "$f" | cut -d/ -f2):$(basename "$f" .rs)")
   fi
 done
 for f in "${FILES[@]}"; do
@@ -397,15 +406,16 @@ for f in "${FILES[@]}"; do
       # covered whenever any commands/ file moves with it, and a main.rs-only
       # change is argument wiring the full sweep carries.
       if _tbinpkg="$(binary_crate_pkg "$f")"; then
-        TARGETED_BINS+=("$_tbinpkg"); continue
+        TARGETED_BINS+=("$_tbinpkg:$_tbinpkg"); continue
       fi
-      tgt="$(most_specific_integration_target "$f")" && [ -n "$tgt" ] && TARGETED_TESTS+=("$tgt")
+      pkg="$(echo "$f" | cut -d/ -f2)"
+      tgt="$(most_specific_integration_target "$f")" && [ -n "$tgt" ] && TARGETED_TESTS+=("$pkg:$tgt")
       m="$(echo "$f" | sed -E 's#^crates/[^/]+/src/##; s#\.rs$##; s#/mod$##; s#/#::#g')"
-      [ "$m" = "lib" ] || TARGETED_FILTERS+=("$m")
+      [ "$m" = "lib" ] || TARGETED_FILTERS+=("$pkg:$m")
       # A parent module's own `mod tests` (this crate's source-scanning tests)
       # runs only under the parent's filter, not the child's -- 2026-09-02's
       # trailing sweep found this red when only `gateway::session` was traced.
-      case "$m" in *::*) TARGETED_FILTERS+=("${m%%::*}") ;; esac
+      case "$m" in *::*) TARGETED_FILTERS+=("$pkg:${m%%::*}") ;; esac
       ;;
   esac
 done
@@ -518,8 +528,9 @@ fi
 # out of the parallel lane, and there is no cheap positive signal to check.
 BIN_IS_SERIAL=1
 
-is_serial_test() {   # is_serial_test <target-name> -- 0 (serial) or 1 (parallel)
-  local t="$1" k f="crates/glasshouse/tests/${t}.rs"
+is_serial_test() {   # is_serial_test <pkg> <target-name> -- 0 (serial) or 1 (parallel)
+  local pkg="$1" t="$2" k
+  local f="crates/$pkg/tests/${t}.rs"
   for k in "${KNOWN_SERIAL_TESTS[@]}"; do [ "$t" = "$k" ] && return 0; done
   # A missing/unreadable source can't be positively cleared as pure logic.
   [ -f "$f" ] || return 0
@@ -529,7 +540,7 @@ is_serial_test() {   # is_serial_test <target-name> -- 0 (serial) or 1 (parallel
 declare -a SERIAL_TESTS=() PARALLEL_TESTS=()
 for t in "${TESTS[@]-}"; do
   [ -n "$t" ] || continue
-  if is_serial_test "$t"; then SERIAL_TESTS+=("$t"); else PARALLEL_TESTS+=("$t"); fi
+  if is_serial_test "${t%%:*}" "${t#*:}"; then SERIAL_TESTS+=("$t"); else PARALLEL_TESTS+=("$t"); fi
 done
 
 # Bounded parallelism for the parallel lane: physical cores / 2 by default
@@ -547,11 +558,19 @@ fi
 [ "$PARALLEL_JOBS" -lt 1 ] 2>/dev/null && PARALLEL_JOBS=1
 [ "$PARALLEL_JOBS" -ge 1 ] 2>/dev/null || PARALLEL_JOBS=1
 
+# Display-only: every array above is "pkg:label" so run_target() knows which
+# package to pass to `-p`; the plan/--list output strips the prefix back off
+# so a glasshouse-only change prints exactly what it always has.
+declare -a TESTS_DISPLAY=() BINS_DISPLAY=() FILTERS_DISPLAY=()
+for t in "${TESTS[@]-}"; do [ -n "$t" ] && TESTS_DISPLAY+=("${t#*:}"); done
+for b in "${BINS[@]-}"; do [ -n "$b" ] && BINS_DISPLAY+=("${b#*:}"); done
+for f in "${FILTERS[@]-}"; do [ -n "$f" ] && FILTERS_DISPLAY+=("${f#*:}"); done
+
 echo
 printf '\033[1m=== plan ===\033[0m\n'
-[ "$LIB" -eq 1 ] && echo "  --lib  (module filters: ${FILTERS[*]-none})  [split serial/parallel by family]"
-[ ${#TESTS[@]} -gt 0 ] && echo "  --test ${TESTS[*]}"
-[ ${#BINS[@]}  -gt 0 ] && echo "  --bin  ${BINS[*]}  [serial]"
+[ "$LIB" -eq 1 ] && echo "  --lib  (module filters: ${FILTERS_DISPLAY[*]-none})  [split serial/parallel by family]"
+[ ${#TESTS[@]} -gt 0 ] && echo "  --test ${TESTS_DISPLAY[*]}"
+[ ${#BINS[@]}  -gt 0 ] && echo "  --bin  ${BINS_DISPLAY[*]}  [serial]"
 echo "  --targeted would skip ${SKIPPED_FULL_TARGET_COUNT} of this full-trace's target(s)"
 
 if [ "$LIST" -eq 1 ]; then
@@ -567,15 +586,15 @@ if [ "$LIST" -eq 1 ]; then
   fi
   for t in "${SERIAL_TESTS[@]-}"; do
     [ -n "$t" ] || continue
-    printf '  serial    --test %s\n' "$t"
+    printf '  serial    --test %s\n' "${t#*:}"
   done
   for b in "${BINS[@]-}"; do
     [ -n "$b" ] || continue
-    printf '  serial    --bin  %s\n' "$b"
+    printf '  serial    --bin  %s\n' "${b#*:}"
   done
   for t in "${PARALLEL_TESTS[@]-}"; do
     [ -n "$t" ] || continue
-    printf '  parallel  --test %s\n' "$t"
+    printf '  parallel  --test %s\n' "${t#*:}"
   done
   echo
   printf '  parallel lane: %d target(s), bounded to %d job(s)\n' \
@@ -585,14 +604,18 @@ if [ "$LIST" -eq 1 ]; then
 
   echo
   printf '\033[1m=== --targeted preview ===\033[0m\n'
-  [ "$TARGETED_LIB" -eq 1 ] && printf '  --lib  filters: %s\n' "${TARGETED_FILTERS[*]}"
+  if [ "$TARGETED_LIB" -eq 1 ]; then
+    declare -a _tf_display=()
+    for f in "${TARGETED_FILTERS[@]-}"; do _tf_display+=("${f#*:}"); done
+    printf '  --lib  filters: %s\n' "${_tf_display[*]}"
+  fi
   for b in "${TARGETED_BINS[@]-}"; do
     [ -n "$b" ] || continue
-    printf '  --bin %s\n' "$b"
+    printf '  --bin %s\n' "${b#*:}"
   done
   for t in "${TARGETED_TESTS[@]-}"; do
     [ -n "$t" ] || continue
-    printf '  --test %s\n' "$t"
+    printf '  --test %s\n' "${t#*:}"
   done
   printf '  would skip %d full-trace target(s)\n' "$SKIPPED_FULL_TARGET_COUNT"
 
@@ -646,11 +669,14 @@ trap 'rm -f "$SYMS_FILE" "${HITS_FILE:-}"; release_lock' EXIT
 rc=0
 FLAKY_PASS_COUNT=0
 FLAKY_FAIL_COUNT=0
-run_target() {                     # run_target <label> <cargo args...>
-  local label="$1"; shift
+run_target() {                     # run_target <pkg> <label> <cargo args...>
+  local pkg="$1" label="$2"; shift 2
   echo; printf '\033[1m=== %s ===\033[0m\n' "$label"
   local out; out="$(mktemp)"
-  cargo test -p glasshouse --all-features "$@" >"$out" 2>&1
+  # Scrubbed per the user's 2026-09-05 ruling: a gate run from any pane must
+  # not inherit the worker/harness's own ANTHROPIC_* vars into the tests it runs.
+  env -u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_API_KEY \
+    cargo test -p "$pkg" --all-features "$@" >"$out" 2>&1
   local status=$?
   # §68: a filter that matches nothing looks exactly like a pass, so always show
   # the result line, including the count.
@@ -681,7 +707,8 @@ run_target() {                     # run_target <label> <cargo args...>
     if is_rerun_eligible "$family"; then
       echo "  blast-radius: '$family' is a rule-4 load-sensitive family -- rerunning alone, once"
       local out2; out2="$(mktemp)"
-      cargo test -p glasshouse --all-features "$@" >"$out2" 2>&1
+      env -u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_API_KEY \
+        cargo test -p "$pkg" --all-features "$@" >"$out2" 2>&1
       local status2=$?
       local result_line2; result_line2="$(grep -E 'test result:' "$out2" | tail -1)"
       grep -E 'test result:|^error' "$out2" | tail -6
@@ -732,16 +759,16 @@ if [ "$TARGETED" -eq 1 ]; then
   printf '\033[1m=== --targeted: distance-zero targets only ===\033[0m\n'
   if [ "$TARGETED_LIB" -eq 1 ]; then
     for fl in "${TARGETED_FILTERS[@]}"; do
-      run_target "cargo test --lib $fl" --lib "$fl" || rc=1
+      run_target "${fl%%:*}" "cargo test --lib ${fl#*:}" --lib "${fl#*:}" || rc=1
     done
   fi
   for b in "${TARGETED_BINS[@]-}"; do
     [ -n "$b" ] || continue
-    run_target "cargo test --bin $b" --bin "$b" || rc=1
+    run_target "${b%%:*}" "cargo test --bin ${b#*:}" --bin "${b#*:}" || rc=1
   done
   for t in "${TARGETED_TESTS[@]-}"; do
     [ -n "$t" ] || continue
-    run_target "cargo test --test $t" --test "$t" || rc=1
+    run_target "${t%%:*}" "cargo test --test ${t#*:}" --test "${t#*:}" || rc=1
   done
   echo
   printf '\033[33mblast-radius: --targeted skipped %d FULL-trace target(s) -- this is a blocking gate, not the full sweep; run the default sweep before the real gate\033[0m\n' \
@@ -750,15 +777,15 @@ elif [ "$SERIAL" -eq 1 ]; then
   echo
   printf '\033[1m=== --serial: single lane, original order ===\033[0m\n'
   if [ "$LIB" -eq 1 ]; then
-    run_target "cargo test --lib" --lib || rc=1
+    run_target glasshouse "cargo test --lib" --lib || rc=1
   fi
   for t in "${TESTS[@]-}"; do
     [ -n "$t" ] || continue
-    run_target "cargo test --test $t" --test "$t" || rc=1
+    run_target "${t%%:*}" "cargo test --test ${t#*:}" --test "${t#*:}" || rc=1
   done
   for b in "${BINS[@]-}"; do
     [ -n "$b" ] || continue
-    run_target "cargo test --bin $b" --bin "$b" || rc=1
+    run_target "${b%%:*}" "cargo test --bin ${b#*:}" --bin "${b#*:}" || rc=1
   done
 else
   echo
@@ -804,16 +831,21 @@ else
       case "$job" in
         test:*)
           t="${job#test:}"
-          ( run_target "cargo test --test $t" --test "$t" ) >"$out" 2>&1 &
+          ( run_target "${t%%:*}" "cargo test --test ${t#*:}" --test "${t#*:}" ) >"$out" 2>&1 &
           ;;
         libskip)
           # `--skip` is a libtest (test-binary) argument, not a cargo one -- it
           # needs the `--` separator or cargo refuses it with "unexpected
           # argument '--skip' found" before ever reaching the test binary.
           # Measured while testing this packet's own change.
+          #
+          # Hardcoded glasshouse: this rest-of-lib invocation is driven by the
+          # LIB flag and the LIB_SERIAL_FAMILIES scan, neither of which is
+          # per-package -- unexercised by pane today (pane has no lib
+          # submodule beyond its root, which never sets a family here).
           declare -a _skip_args=()
           for fam in "${SKIP_LIB_FILTERS[@]}"; do _skip_args+=(--skip "$fam"); done
-          ( run_target "cargo test --lib (rest; skip: ${SKIP_LIB_FILTERS[*]})" --lib -- "${_skip_args[@]}" ) >"$out" 2>&1 &
+          ( run_target glasshouse "cargo test --lib (rest; skip: ${SKIP_LIB_FILTERS[*]})" --lib -- "${_skip_args[@]}" ) >"$out" 2>&1 &
           ;;
       esac
       _PIDS+=("$!"); _OUTS+=("$out")
@@ -829,16 +861,16 @@ else
   # unchanged from today's order.
   if [ "$LIB" -eq 1 ]; then
     for fam in "${SERIAL_LIB_FILTERS[@]}"; do
-      run_target "cargo test --lib $fam" --lib "$fam" || rc=1
+      run_target glasshouse "cargo test --lib $fam" --lib "$fam" || rc=1
     done
   fi
   for t in "${SERIAL_TESTS[@]-}"; do
     [ -n "$t" ] || continue
-    run_target "cargo test --test $t" --test "$t" || rc=1
+    run_target "${t%%:*}" "cargo test --test ${t#*:}" --test "${t#*:}" || rc=1
   done
   for b in "${BINS[@]-}"; do
     [ -n "$b" ] || continue
-    run_target "cargo test --bin $b" --bin "$b" || rc=1
+    run_target "${b%%:*}" "cargo test --bin ${b#*:}" --bin "${b#*:}" || rc=1
   done
 fi
 

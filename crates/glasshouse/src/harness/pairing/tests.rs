@@ -501,10 +501,17 @@ fn every_declared_support_list_cites_its_evidence() {
 /// A vendor whose own model line nothing established can never produce a
 /// vendor-native pairing, whatever its adapter declares. The table is the
 /// only comparison between a harness vendor and a model developer, and it
-/// is empty for four of the seven.
+/// is empty for five of the eight — `Vendor::Glasshouse` included, since
+/// publishing a harness is not developing a model.
 #[test]
 fn a_vendor_with_no_established_model_line_is_never_native() {
-    for vendor in [Vendor::Cursor, Vendor::OpenCode, Vendor::Pi, Vendor::Hermes] {
+    for vendor in [
+        Vendor::Cursor,
+        Vendor::OpenCode,
+        Vendor::Pi,
+        Vendor::Hermes,
+        Vendor::Glasshouse,
+    ] {
         assert_eq!(
             vendor_organisation(vendor),
             None,

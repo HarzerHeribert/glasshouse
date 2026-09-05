@@ -670,7 +670,13 @@ fn vendor_organisation(vendor: Vendor) -> Option<&'static str> {
         // `gemini-*` family under Google's own CLI alongside the models it
         // labels as other vendors'.
         Vendor::Google => Some("google"),
-        Vendor::Cursor | Vendor::OpenCode | Vendor::Pi | Vendor::Hermes => None,
+        // `Vendor::Glasshouse` is us, and never a model developer: see
+        // `Vendor`'s own doc comment. Collapsing "we publish this harness"
+        // into "we made this model" is exactly the mistake this table
+        // exists to refuse for every other vendor.
+        Vendor::Cursor | Vendor::OpenCode | Vendor::Pi | Vendor::Hermes | Vendor::Glasshouse => {
+            None
+        }
     }
 }
 
