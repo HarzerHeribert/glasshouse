@@ -10,28 +10,7 @@
 //! is a property of a codec and is tested per codec, by round trip through
 //! this form; per pair only the end-to-end test is owed.
 //!
-//! # What the form deliberately cannot say
-//!
-//! Every field here is one that **both** protocols with a codec can carry.
-//! A wire field with no home in this form is not dropped by the decoder that
-//! meets it — it is refused, by name, as an [`Unsupported`], and the refusal
-//! reaches the harness as a `4xx` whose body names the field. That is the
-//! whole of capability map line 1950's *"refuse the pairing by name when it
-//! cannot be kept"* at the level of one request: the form is the supported
-//! subset, and anything outside it is a named refusal rather than a silent
-//! degradation.
-//!
-//! # Tool calls are the point
-//!
-//! A harness's native tooling rides on three things surviving a round trip
-//! unchanged: the tool definitions it declares, the tool-use blocks the
-//! model answers with, and the tool-result blocks it sends back — with the
-//! **ids preserved**, because the id is how a result is matched to the call
-//! that asked for it. [`Block::ToolUse`]'s `id` is the same string on both
-//! wires: Anthropic's `tool_use.id` and OpenAI's `tool_calls[].id` are never
-//! rewritten, minted, or mapped through a table. A wrong id here runs the
-//! wrong tool, which is why the mutation on this mapping is the first one the
-//! package owes.
+//! History: design-decisions.md, "Trims: gateway module docs", translate/canonical.rs module doc.
 
 use serde_json::Value;
 

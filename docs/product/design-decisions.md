@@ -7848,3 +7848,306 @@ with it.
 /// then passed through [`crate::secret::redact`] anyway, because a *base URL*
 /// is user-supplied text that can carry anything and this string reaches both
 /// the terminal and the log.
+
+## Trims: gateway module docs — history moved out of comments by `GH-TRIM-GATEWAY-DOCS`, 2026-09-05
+
+### `gateway/conformance.rs` — module doc
+
+    //! # The properties
+    //!
+    //! 1. **A request body arrives byte-for-byte.** The payload carries a
+    //!    `tool_use` block with nested objects and arrays, and text in several
+    //!    scripts plus an emoji, so that its byte length and its character length
+    //!    differ. The assertion is on bytes and on that byte length, which is
+    //!    what makes it fail for a gateway that preserved *meaning* — a JSON
+    //!    round-trip that changed whitespace, key order or escaping would still
+    //!    parse to the same document and is exactly the regression the capability
+    //!    map forbids.
+    //! 2. **A provider's error reaches the harness intact, and the diagnostic
+    //!    keeps only its status.** Those are two halves of one rule and they pull
+    //!    in opposite directions: the harness must see the whole body, and the
+    //!    log must see none of it. Both are asserted on the same exchange, so an
+    //!    implementation cannot satisfy one by giving up the other.
+    //! 3. **No rendering carries either secret.** Every `Debug` this module can
+    //!    reach, every response byte the client was sent, and the transport
+    //!    error's own detail, scanned for a planted provider credential and for a
+    //!    gateway token. Asserted twice: once over the paths a single-protocol
+    //!    gateway had, and once over the three-protocol ones, because a routed
+    //!    exchange and a refused-before-routing one render different fields.
+    //! 4. **A request reaches the base URL its own protocol declared, and no
+    //!    other.** The gateway serves up to three wire protocols from one
+    //!    provider, each with its own base URL, and chooses between them on the
+    //!    request target alone. The load-bearing half of every assertion here is
+    //!    the negative one — the *other* base URLs were never connected to —
+    //!    because the implementation this replaced appended every target to a
+    //!    single base URL and would pass the positive half for all three.
+    //! 5. **Streaming survives on every ingress.** The Anthropic path's twin of
+    //!    this lives in [`mod@super`]; a gateway that started buffering only the
+    //!    two new ones would leave that test green. The fixture blocks until the
+    //!    client says it has the first chunk, so a buffering implementation
+    //!    cannot produce the second one at all.
+    //! 6. **A target belonging to no served protocol is refused, and nothing is
+    //!    opened upstream.** Claude Code sends one such target before its first
+    //!    request. The assertion is on the fixtures' *connection counts*: a
+    //!    gateway that opened a connection, thought better of it and answered
+    //!    `404` would pass an assertion on the status and would still have sent
+    //!    a request somewhere nobody asked for it to go.
+    //!
+    //! # Two planted values, and why the token is planted twice
+    //!
+    //! [`PROVIDER_CREDENTIAL`] and [`PLANTED_TOKEN`] are known strings, so
+    //! `!contains` on them is a real assertion rather than a shape check.
+    //!
+    //! The token is planted *and* a real minted one is used, because the two
+    //! answer different questions. A minted token is 64 hex characters, and
+    //! `mod.rs`'s `debug_on_a_gateway_token_prints_a_fixed_marker_and_never_the_token`
+    //! records what goes wrong when short fragments of one are scanned for: hex
+    //! runs occur in ordinary text, so the scan reports leaks that are
+    //! coincidences and the test fails at random. A test that fails at random is
+    //! worth less than no test. So the minted token — held by a real
+    //! [`Gateway`] that really answered a request — is scanned for whole, and the
+    //! *fragment* scan runs against a planted value drawn from an alphabet that
+    //! makes a coincidence impossible rather than merely unlikely.
+
+### `gateway/conformance.rs` — `an_answered_client_sees_an_end_of_stream_with_nothing_of_its_own_left_unread`
+
+    /// The exchange is the unreachable-provider refusal, because that is the
+    /// path that hands the request body to the outbound hop — where it is
+    /// dropped unread when the connection fails — and then answers `502` with
+    /// the body still on the wire. The body is 32 KiB deliberately: larger than
+    /// the ingress's `BufReader`, so some of it is provably still in the
+    /// kernel's receive queue rather than buffered in userspace, and far smaller
+    /// than a loopback receive buffer, so the client's own `write_all` completes
+    /// without the ingress reading anything for it to. Nothing is timed: the
+    /// channel below carries the client's "the request is written" and the join
+    /// carries "the response is complete", so there is no sleep standing in for
+    /// either wait.
+
+### `gateway/http.rs` — module doc
+
+    //! # What "byte-for-byte" honestly means
+    //!
+    //! A proxy terminates one connection and opens another, so *connection*
+    //! framing cannot survive: `content-length` is re-derived, `transfer-encoding`
+    //! is re-applied, and hop-by-hop headers belong to the hop they were written
+    //! for. What survives untouched is the part that carries meaning — the
+    //! method, the request target, every end-to-end header, and every byte of
+    //! the body, in order.
+    //!
+    //! Header *names* arrive here through [`HeaderName`], which lower-cases them.
+    //! That is the same normalisation HTTP/2 mandates and is semantically the
+    //! identity, so it is not a rewrite in any sense a client can observe.
+
+### `gateway/session/mod.rs` — module doc
+
+    //! # One lock, taken briefly
+    //!
+    //! A connection thread calls `SessionRouting::observe_exchange` after its
+    //! exchange is finished and its socket is closed, so the lock is never held
+    //! across I/O. The `Upstream` it may then switch is moved by a single atomic
+    //! store, and every connection thread reads its serving backend once at the
+    //! top of its own exchange — so a failover can never split one request
+    //! between two providers.
+
+### `gateway/translate/canonical.rs` — module doc
+
+    //! # What the form deliberately cannot say
+    //!
+    //! Every field here is one that **both** protocols with a codec can carry.
+    //! A wire field with no home in this form is not dropped by the decoder that
+    //! meets it — it is refused, by name, as an [`Unsupported`], and the refusal
+    //! reaches the harness as a `4xx` whose body names the field. That is the
+    //! whole of capability map line 1950's *"refuse the pairing by name when it
+    //! cannot be kept"* at the level of one request: the form is the supported
+    //! subset, and anything outside it is a named refusal rather than a silent
+    //! degradation.
+    //!
+    //! # Tool calls are the point
+    //!
+    //! A harness's native tooling rides on three things surviving a round trip
+    //! unchanged: the tool definitions it declares, the tool-use blocks the
+    //! model answers with, and the tool-result blocks it sends back — with the
+    //! **ids preserved**, because the id is how a result is matched to the call
+    //! that asked for it. [`Block::ToolUse`]'s `id` is the same string on both
+    //! wires: Anthropic's `tool_use.id` and OpenAI's `tool_calls[].id` are never
+    //! rewritten, minted, or mapped through a table. A wrong id here runs the
+    //! wrong tool, which is why the mutation on this mapping is the first one the
+    //! package owes.
+
+### `gateway/translate/mod.rs` — module doc
+
+    //! # Codecs around one canonical form, and a table of pairs
+    //!
+    //! [`canonical`] is the one form. `anthropic`, `openai_chat` and
+    //! `openai_responses` are the codecs, each decoding its wire into that form
+    //! and encoding out of it, in both the request and the response direction
+    //! and for streams. A **pair**
+    //! is a decoder and an encoder meeting in the middle, and [`pairs`] is the
+    //! table that lists every ordered pair of wire protocols exactly once —
+    //! supported, or refused with its reason. The table is consulted by two
+    //! production callers: `crate::provider::translation_available`, through
+    //! which `harness::pairing::protocol_fit` classes a pairing as translated,
+    //! and `super::ingress`, which answers a target the provider does not
+    //! serve either by translating it or with a `404` whose body names the
+    //! refused pair and the table's reason.
+    //!
+    //! # The relay rule, narrowed and not repealed
+    //!
+    //! A request whose target belongs to a protocol the provider serves is
+    //! relayed byte for byte, exactly as before this module existed, and never
+    //! enters a codec — `place` is asked only from the branch that used to
+    //! answer `404`, and refuses a served protocol a second time on its own
+    //! account. Only an unserved target with a supported pair is translated.
+    //! Parsing is bounded ([`MAX_BODY_BYTES`], [`stream::MAX_EVENT_BYTES`]);
+    //! streaming stays streaming, one event translated and flushed at a time;
+    //! and nothing is guessed from a body's shape, because the target decided
+    //! the protocol before a byte of the body was read.
+    //!
+    //! # Refused by name, never dropped
+    //!
+    //! A field a codec cannot carry is a [`TranslationRefusal`] naming the pair,
+    //! the field and the reason, sent to the harness as a `4xx` in its own
+    //! protocol's error shape **before anything is opened upstream**. There is
+    //! no path through this module that drops a field silently: the decoders
+    //! refuse unknown keys, and the handful of response fields they ignore are
+    //! listed by name so the table can show them.
+
+### `gateway/translate/openai_chat.rs` — module doc
+
+    //! **An erroring tool result is carried, and how.** OpenAI Chat's `tool`
+    //! message has no `is_error` flag. Refusing every failed tool call would
+    //! make the pair unusable the first time a command exited non-zero, and
+    //! dropping the flag would tell the model a failure was a success. So the
+    //! flag travels in the one channel the wire has: the tool message's content
+    //! begins with [`TOOL_ERROR_MARKER`] on a line of its own. The model sees a
+    //! labelled failure, and the reverse decoder restores the flag exactly, so
+    //! the round trip is byte-exact rather than lossy. It is recorded in this
+    //! codec's table rows as a carried field, not a silent one.
+
+### `gateway/translate/openai_responses/mod.rs` — module doc
+
+    //! **Server-side state is refused, not simulated.** `previous_response_id`,
+    //! `store: true`, background mode, stored prompts and item references all
+    //! ask the provider to hold conversation state between requests. A
+    //! translated upstream has no such store, and pretending otherwise would
+    //! fail on the *second* request, after the first had already misled the
+    //! client. Each is a named refusal — and the encoder always sends
+    //! `store: false`, because the Responses API stores responses by default and
+    //! the harness on the other side of a translated pair never asked for that.
+    //!
+    //! **An erroring tool result travels the same way as on OpenAI Chat.**
+    //! `function_call_output` has no error flag, so the flag rides as
+    //! [`TOOL_ERROR_MARKER`] on the output's first line — the identical
+    //! convention, deliberately, so the round trip through either OpenAI wire
+    //! restores `is_error` exactly.
+    //!
+    //! **A reasoning item that says nothing is skipped; one that says anything
+    //! is refused.** Responses upstreams emit `reasoning` output items even at
+    //! default settings, usually with an empty summary. An empty item carries no
+    //! information, so it is ignored by name; a summary, content, or encrypted
+    //! payload is model reasoning the canonical form cannot carry, and dropping
+    //! *that* silently is exactly what this directory never does.
+    //!
+    //! One canonical field has no home on this wire at all: `stop`. The
+    //! Responses API has no stop-sequence parameter, so this codec refuses a
+    //! request carrying one via [`Codec::refuse_unencodable`], before anything
+    //! is opened upstream, rather than letting the infallible encoder drop it.
+
+### `gateway/upstream.rs` — module doc
+
+    //! # One upstream, several protocols — and why not several upstreams
+    //!
+    //! The gateway serves more than one ingress protocol, and a provider
+    //! declares a **separate base URL for each one** — see
+    //! [`crate::provider::ProtocolSupport`], whose base URL is per protocol
+    //! precisely because a provider may serve them at different paths. So an
+    //! upstream is one provider, one credential, and a [`Route`] per protocol.
+    //!
+    //! The alternative shape — a set of `Upstream`s keyed by protocol — was
+    //! rejected on the one property this module exists for. Each of them would
+    //! need its own [`Secret`], and [`Secret`] is deliberately not `Clone` and
+    //! can only be minted inside [`mod@crate::secret`], so building that set
+    //! would mean either widening that module's API or resolving the same
+    //! credential once per protocol. Both turn "the credential lives here and
+    //! nowhere else" into "the credential lives in three places that happen to
+    //! agree". One owner, several destinations, keeps the sentence true.
+    //!
+    //! Several *providers* is a different question, and still refused: which
+    //! backend a session runs against is Phase 9H's sticky routing. See
+    //! [`crate::profile::gateway_upstream`].
+    //!
+    //! # Why `ureq`
+    //!
+    //! Glasshouse has no async runtime and this phase does not add one. `ureq`
+    //! is blocking, brings `rustls` rather than a system TLS stack, and — the
+    //! property that actually decided it — hands back a response body as a
+    //! [`Read`](std::io::Read). A body that is a reader is a body that can be
+    //! moved to the harness a piece at a time, which is what "preserve streaming
+    //! end-to-end" requires and what an implementation that returned `Vec<u8>`
+    //! could not offer at any price.
+    //!
+    //! Its default features are off: `gzip` would transparently decompress a
+    //! response and leave the `content-encoding` header describing something the
+    //! client is no longer being sent.
+
+### `gateway/usage.rs` — module doc
+
+    //! - **The forwarded bytes are preserved.** This module is handed a shared
+    //!   slice of a buffer `http::pump` has already read and is about to write. It
+    //!   takes `&[u8]`, returns no bytes, and cannot shorten, reorder or reframe
+    //!   what its caller then writes — `Extractor::feed` has no way to say
+    //!   "forward less".
+    //! - **Bounded, incremental, never the whole response.** [`Extractor`] holds
+    //!   one window: whatever chunk it was just handed, plus at most [`CARRY`]
+    //!   bytes retained from the previous one so a figure split across a read
+    //!   boundary is still read. The retained part is 512 bytes; the window's
+    //!   whole capacity is that plus one `pump` chunk. No accumulation, and no
+    //!   growth with response length.
+    //! - **Usage fields and protocol markers only.** [`Format`] is a table of
+    //!   literal JSON key spellings. The scan matches those keys and reads the
+    //!   integer after them; it never walks the response as a document, never
+    //!   turns a byte into text, and never records anything but four integers and
+    //!   two booleans.
+    //! - **Nothing is persisted.** The window is overwritten as it slides and
+    //!   dropped with the stream. What leaves this module is
+    //!   [`Extractor::usage`]'s three counts and [`Seen`]'s two flags, which is
+    //!   all `Exchange` has anywhere to put.
+    //! - **An instant is observed or it is absent.** [`Delivery`] records the two
+    //!   markers only on a streamed response, because a document's internal
+    //!   boundaries are not observable as instants and deriving one from
+    //!   `first_byte_at` would be the estimate the ruling forbids.
+    //! - **Unsupported is unknown, never estimated.** [`format_for`] answers
+    //!   `None` for a protocol that is not in the table — `gemini-generate-content`
+    //!   today — and [`Extractor::usage`] answers `None` unless the provider
+    //!   stated *both* an input and an output figure. No arithmetic anywhere in
+    //!   this file derives a count from anything but digits the provider wrote.
+    //!
+    //! # Why a key scan rather than a parser
+    //!
+    //! Two reasons, and the second is the load-bearing one.
+    //!
+    //! A parser needs a document, and a document is the thing the ruling forbids
+    //! buffering. A scan over a sliding window is the shape "bounded streaming or
+    //! incremental parsing" actually permits, and it is why
+    //! `gateway/tests.rs`'s `no_part_of_the_relay_deserializes_anything` still
+    //! covers this file unchanged: the relay gained a reader of two dozen key
+    //! spellings, not a deserializer.
+    //!
+    //! And a bare `"` cannot occur inside a JSON string — it would be `\"` there.
+    //! So a needle that *starts* with a quote, like `"input_tokens":`, can only
+    //! ever match a real object key, never text a model generated that happens to
+    //! spell one. That is what makes a scan safe here rather than merely cheap,
+    //! and it is why every needle in [`Format`] begins with a quote.
+    //!
+    //! # The one place this looks at a value rather than a key
+    //!
+    //! `first_token_at` means *the first real generated token*, and capability map
+    //! line 1332 excludes whitespace padding from it — `translate`'s own
+    //! `FirstEvents::note` refuses a text delta whose text is all whitespace. To
+    //! answer the same question the same way, [`text_at`] reads forward from a
+    //! text field's opening quote until it finds either a non-whitespace byte or
+    //! the end of the string. It yields one boolean, *is there a real character
+    //! here*; the bytes it walked are not retained, counted, classified further or
+    //! passed on. That is the whole of what this module reads that is not a key,
+    //! and it is stated here rather than buried because it is the one line of the
+    //! ruling that needed a judgement.

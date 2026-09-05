@@ -14,32 +14,7 @@
 //! Anthropic's `tool_use.id` — while item ids are ignored on decode and
 //! minted on encode, exactly because nothing downstream may depend on them.
 //!
-//! **Server-side state is refused, not simulated.** `previous_response_id`,
-//! `store: true`, background mode, stored prompts and item references all
-//! ask the provider to hold conversation state between requests. A
-//! translated upstream has no such store, and pretending otherwise would
-//! fail on the *second* request, after the first had already misled the
-//! client. Each is a named refusal — and the encoder always sends
-//! `store: false`, because the Responses API stores responses by default and
-//! the harness on the other side of a translated pair never asked for that.
-//!
-//! **An erroring tool result travels the same way as on OpenAI Chat.**
-//! `function_call_output` has no error flag, so the flag rides as
-//! [`TOOL_ERROR_MARKER`] on the output's first line — the identical
-//! convention, deliberately, so the round trip through either OpenAI wire
-//! restores `is_error` exactly.
-//!
-//! **A reasoning item that says nothing is skipped; one that says anything
-//! is refused.** Responses upstreams emit `reasoning` output items even at
-//! default settings, usually with an empty summary. An empty item carries no
-//! information, so it is ignored by name; a summary, content, or encrypted
-//! payload is model reasoning the canonical form cannot carry, and dropping
-//! *that* silently is exactly what this directory never does.
-//!
-//! One canonical field has no home on this wire at all: `stop`. The
-//! Responses API has no stop-sequence parameter, so this codec refuses a
-//! request carrying one via [`Codec::refuse_unencodable`], before anything
-//! is opened upstream, rather than letting the infallible encoder drop it.
+//! History: design-decisions.md, "Trims: gateway module docs", translate/openai_responses/mod.rs module doc.
 
 use serde_json::{Map, Value, json};
 

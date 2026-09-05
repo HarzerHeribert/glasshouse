@@ -17,40 +17,7 @@
 //! expose provider API keys to a child harness when the local gateway can
 //! hold the credential itself".
 //!
-//! # One upstream, several protocols — and why not several upstreams
-//!
-//! The gateway serves more than one ingress protocol, and a provider
-//! declares a **separate base URL for each one** — see
-//! [`crate::provider::ProtocolSupport`], whose base URL is per protocol
-//! precisely because a provider may serve them at different paths. So an
-//! upstream is one provider, one credential, and a [`Route`] per protocol.
-//!
-//! The alternative shape — a set of `Upstream`s keyed by protocol — was
-//! rejected on the one property this module exists for. Each of them would
-//! need its own [`Secret`], and [`Secret`] is deliberately not `Clone` and
-//! can only be minted inside [`mod@crate::secret`], so building that set
-//! would mean either widening that module's API or resolving the same
-//! credential once per protocol. Both turn "the credential lives here and
-//! nowhere else" into "the credential lives in three places that happen to
-//! agree". One owner, several destinations, keeps the sentence true.
-//!
-//! Several *providers* is a different question, and still refused: which
-//! backend a session runs against is Phase 9H's sticky routing. See
-//! [`crate::profile::gateway_upstream`].
-//!
-//! # Why `ureq`
-//!
-//! Glasshouse has no async runtime and this phase does not add one. `ureq`
-//! is blocking, brings `rustls` rather than a system TLS stack, and — the
-//! property that actually decided it — hands back a response body as a
-//! [`Read`](std::io::Read). A body that is a reader is a body that can be
-//! moved to the harness a piece at a time, which is what "preserve streaming
-//! end-to-end" requires and what an implementation that returned `Vec<u8>`
-//! could not offer at any price.
-//!
-//! Its default features are off: `gzip` would transparently decompress a
-//! response and leave the `content-encoding` header describing something the
-//! client is no longer being sent.
+//! History: design-decisions.md, "Trims: gateway module docs", upstream.rs module doc.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 

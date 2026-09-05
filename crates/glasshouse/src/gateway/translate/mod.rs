@@ -2,41 +2,7 @@
 //! 1956, under the ruling recorded in `docs/product/design-decisions.md` as
 //! *"the user's answer on pairs: all of them"*.
 //!
-//! # Codecs around one canonical form, and a table of pairs
-//!
-//! [`canonical`] is the one form. `anthropic`, `openai_chat` and
-//! `openai_responses` are the codecs, each decoding its wire into that form
-//! and encoding out of it, in both the request and the response direction
-//! and for streams. A **pair**
-//! is a decoder and an encoder meeting in the middle, and [`pairs`] is the
-//! table that lists every ordered pair of wire protocols exactly once —
-//! supported, or refused with its reason. The table is consulted by two
-//! production callers: `crate::provider::translation_available`, through
-//! which `harness::pairing::protocol_fit` classes a pairing as translated,
-//! and `super::ingress`, which answers a target the provider does not
-//! serve either by translating it or with a `404` whose body names the
-//! refused pair and the table's reason.
-//!
-//! # The relay rule, narrowed and not repealed
-//!
-//! A request whose target belongs to a protocol the provider serves is
-//! relayed byte for byte, exactly as before this module existed, and never
-//! enters a codec — `place` is asked only from the branch that used to
-//! answer `404`, and refuses a served protocol a second time on its own
-//! account. Only an unserved target with a supported pair is translated.
-//! Parsing is bounded ([`MAX_BODY_BYTES`], [`stream::MAX_EVENT_BYTES`]);
-//! streaming stays streaming, one event translated and flushed at a time;
-//! and nothing is guessed from a body's shape, because the target decided
-//! the protocol before a byte of the body was read.
-//!
-//! # Refused by name, never dropped
-//!
-//! A field a codec cannot carry is a [`TranslationRefusal`] naming the pair,
-//! the field and the reason, sent to the harness as a `4xx` in its own
-//! protocol's error shape **before anything is opened upstream**. There is
-//! no path through this module that drops a field silently: the decoders
-//! refuse unknown keys, and the handful of response fields they ignore are
-//! listed by name so the table can show them.
+//! History: design-decisions.md, "Trims: gateway module docs", translate/mod.rs module doc.
 //!
 //! # Structurally not a harness
 //!

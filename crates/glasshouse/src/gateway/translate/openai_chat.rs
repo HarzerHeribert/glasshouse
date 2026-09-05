@@ -6,15 +6,7 @@
 //! refusal. Two decisions particular to this wire are worth reading before
 //! the code:
 //!
-//! **An erroring tool result is carried, and how.** OpenAI Chat's `tool`
-//! message has no `is_error` flag. Refusing every failed tool call would
-//! make the pair unusable the first time a command exited non-zero, and
-//! dropping the flag would tell the model a failure was a success. So the
-//! flag travels in the one channel the wire has: the tool message's content
-//! begins with [`TOOL_ERROR_MARKER`] on a line of its own. The model sees a
-//! labelled failure, and the reverse decoder restores the flag exactly, so
-//! the round trip is byte-exact rather than lossy. It is recorded in this
-//! codec's table rows as a carried field, not a silent one.
+//! History: design-decisions.md, "Trims: gateway module docs", translate/openai_chat.rs module doc.
 //!
 //! **Tool-call ids are OpenAI's and stay OpenAI's.** A `call_…` id issued
 //! by the provider becomes the Anthropic `tool_use.id` the harness sees, and

@@ -17,14 +17,7 @@
 //! the reason there is no probe to write: there is nowhere here to make a
 //! request from.
 //!
-//! # One lock, taken briefly
-//!
-//! A connection thread calls `SessionRouting::observe_exchange` after its
-//! exchange is finished and its socket is closed, so the lock is never held
-//! across I/O. The `Upstream` it may then switch is moved by a single atomic
-//! store, and every connection thread reads its serving backend once at the
-//! top of its own exchange — so a failover can never split one request
-//! between two providers.
+//! History: design-decisions.md, "Trims: gateway module docs", session/mod.rs module doc.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
