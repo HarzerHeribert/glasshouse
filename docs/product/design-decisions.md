@@ -6985,3 +6985,202 @@ with it.
 /// of either could drift from the door it is talking to — and the ceiling in
 /// particular is not a client's to state, because a client cannot enforce
 /// it.
+
+## Trims: `commands/routing_destinations.rs` — history moved out of comments by `GH-TRIM-ROUTING-DESTINATIONS`, 2026-09-05
+
+### `DestinationScope::Launchable`
+
+    /// What *this* launch could actually enter: the sessions it could resume,
+    /// and exactly **one** fresh destination — the profile this launch would
+    /// have used anyway.
+    ///
+    /// # Why one profile and not all of them
+    ///
+    /// Phase 37 is a **session** router: lines 1593 and 1594 are *"prefer an
+    /// existing relevant session"* against *"prefer a fresh session"*, and
+    /// neither of them is about which launch profile a new session runs
+    /// under. Offering the launch path a fresh destination per profile makes
+    /// it one, and the consequence is not academic: an unadorned `glasshouse
+    /// launch` moved off the implied Native profile onto a configured direct
+    /// provider — a different credential, a different bill, and a pre-flight
+    /// request to a provider the user had not asked for. Two existing tests
+    /// caught it, and they were right.
+    ///
+    /// So the profile stays where it has always come from — `--profile`, or
+    /// Native — and the router decides the thing it is for: whether to start
+    /// that session at all, or continue one this project already has.
+    /// `glasshouse route` still ranks every profile, because a person reading
+    /// a diagnostic is choosing between them and a launch is not.
+
+### `estimated_project_memory_tokens`
+
+/// Map line 1304's project-memory component of a fresh-session cost
+/// estimate: [`glasshouse::firewall::estimate::estimate_tokens`] of the real
+/// text [`glasshouse::memory::inject::briefing`] would inject for `task` —
+/// measuring the actual injection rather than modeling it.
+///
+/// Nothing has been injected yet to skip: `glasshouse route`'s ranking is a
+/// diagnostic over what WOULD be sent, not a delivery, so this reads with an
+/// empty already-injected set on every call rather than a session's own
+/// delivery history the way the control API's own memory-selection door
+/// does (`api/unix.rs::select_memory`).
+///
+/// `None` — never `Some(0)` — whenever nothing was actually measured: the
+/// store could not be opened, `briefing` itself failed, or `briefing` found
+/// nothing to inject. All three degrade to "this component was not counted",
+/// never "this component counts as zero" — only
+/// [`glasshouse::routing::Cost::is_free`]'s zero is a fact this build is
+/// certain of.
+///
+/// A [`glasshouse::memory::inject::BriefingOutcome::NothingMatched`] here is
+/// map line 1865's retrieval miss and is recorded as one, at the `injection`
+/// scope — `glasshouse route` is a diagnostic rather than a delivery, but the
+/// search it runs is the same search a real launch would run, and a search
+/// this project's own `glasshouse route` invocations run is real usage.
+
+### `destination_backend`
+
+/// The backend a destination running `profile` would serve on, and every wire
+/// protocol its provider offers.
+///
+/// Two returns rather than one because `Destination::with_provider_protocols`
+/// is a builder step and an **empty** list is not the same as an absent one:
+/// the constructor's default is the backend's own single protocol, and
+/// overwriting that with an empty vector would make `ProtocolFit::Compatible`
+/// unreachable and every non-native destination `Incompatible` — see
+/// `routing::session`'s note on the field. `with_provider_protocols` below is
+/// the one place that distinction is applied.
+///
+/// `recorded_model` is a recorded session's own assigned model, which is a
+/// fact about that session and outranks re-deriving one from the profile.
+///
+/// `Cost` is the one fact that decides "premium" for the subscription-pressure
+/// terms (`routing::pressure`, lines 1570–1575): a direct-provider profile
+/// whose named model the user marked in that provider's `free_models` is
+/// `Cost::Free`, through `ProviderConfig::cost_of` — the same rule
+/// `disposable_candidates` and `gateway_upstream` already apply — and
+/// everything else is `Cost::Metered`, the fail-closed value the rest of this
+/// project uses when nobody has marked a model free. A native subscription
+/// and the gateway are always metered here: a subscription is the premium
+/// resource those lines are about, and the gateway's cost is whichever
+/// upstream it is bound to, which this launch does not know yet.
+
+### `destination_tier_ceiling`
+
+/// **Map line 1516's missing producer**, and the reason the tier gate stops
+/// being inert on the shipped binary: the highest workload tier this
+/// destination's model is established to serve, as the user configured it
+/// (`providers.<p>.model_ceilings`, map line 1796, or a Phase 34F capability
+/// record scoped to `query`).
+///
+/// Read off the [`glasshouse::routing::Backend`] rather than from the
+/// profile, because the backend is where the *resolved* model lives — a
+/// recorded session's own assigned model outranks re-deriving one, and
+/// `destination_backend` has already applied that rule. Reading the profile
+/// again here would give a warm session the ceiling of the model it *would*
+/// be started with rather than the one it is actually running.
+///
+/// `query` is `routing_destinations`' own launch context — harness, launch
+/// profile, and the wire protocol `destination_backend` resolved — which is
+/// map line 1482's closing half: a capability record scoped to one of those
+/// axes reaches exactly the destinations it applies to, through
+/// [`glasshouse::config::EffectiveConfig::model_ceiling_for`], rather than
+/// staying inert to every context-bearing caller.
+///
+/// `None` — no ceiling established, which the router never reads as a
+/// refusal — in three honest cases, none of them a guess:
+///
+/// - the harness picked its own model ([`AssignedModel::HarnessDefault`]),
+///   so there is no model identifier to look a ceiling up by;
+/// - the destination's provider is not a `[providers.*]` key at all, which
+///   is every native subscription and the gateway — a ceiling is a statement
+///   about a named model on a named provider, and inventing one for a
+///   resource the user never configured is exactly what
+///   `ProviderConfig::cost_of` refuses to do for cost;
+/// - the provider is configured and this model is simply not in its map.
+
+### `observed_provider_health`
+
+/// **Line 1599's bridge**: what a gateway has actually observed about these
+/// destinations' resources, in the shape `provider_health` reads.
+///
+/// A read of [`glasshouse::provider::telemetry::GatewayHealthCache`], which is
+/// [`destination_capacity`]'s own cost and its sibling directory under the
+/// same `--data-dir` — no network, no subprocess, no credential, and **no
+/// handle kept**: `load_all` reads the files and returns owned values, so
+/// nothing here is still open when this function returns (practice §65, which
+/// was paid for by a database handle opened on a path nobody was asserting
+/// about).
+///
+/// An empty pool when the cache is empty. That is the same inert `0.0`
+/// contribution for every destination this path produced before the bridge
+/// existed, and it is correct: an absent reading is an absent contribution,
+/// never an invented one.
+///
+/// # Hazard 1 — identity, which is what makes this a design and not a wiring
+///
+/// [`glasshouse::routing::free::FreeResource`] is keyed by a
+/// [`glasshouse::routing::CredentialId`]; a persisted
+/// [`glasshouse::provider::telemetry::GatewayHealthReading`] carries only the
+/// **rendered** `credential_label`. That rendering is not reversible —
+/// `CredentialId::label` prints `provider/var` for a `SecretRef::Environment`
+/// and `provider/service:account` for a `SecretRef::OsCredential`, so a parse
+/// would have to guess both where the provider ends and which variant it was
+/// looking at, and a guess here does not weaken the policy, it inverts it
+/// (map line 1294): the router would avoid a healthy resource on another's
+/// evidence.
+///
+/// **So nothing here parses a label.** The consumer already tells us the key
+/// it will look up — `provider_health` builds
+/// `FreeResource::new(destination.backend().credential().clone(),
+/// destination.backend().model().label())` — and both of those are in hand
+/// here, before `choose` is called. This walks the *destinations* and renders
+/// each one's label with the very function the write side rendered it with
+/// (`gateway::session::SessionRouting::health_readings_for` calls
+/// `credential().label()`, and `model_key` is `AssignedModel::label`). The
+/// match is string equality between two calls of one renderer, in the forward
+/// direction only.
+///
+/// # GH-POOL-ALLOWANCE — the allowance half, beside the health half
+///
+/// This is also where `FreePool::allowance` gets a value instead of
+/// answering `unknown_pool()` for every credential. For each destination's
+/// provider, the same [`glasshouse::provider::resources::observed_capacity`]
+/// [`destination_capacity`] already calls is asked again, from a freshly
+/// gathered [`glasshouse::provider::resources::GatheredTelemetry`] — the same
+/// cheap, local, no-network read `routing_destinations` performs per call,
+/// never shared with it because nothing here outlives one call (Hazard 1's
+/// own reasoning applies again: cheap enough to redo, too easy to get wrong
+/// to smuggle across a boundary). Its own remaining-requests reading, when
+/// the provider published one, becomes `FreePool::record_pool` — the
+/// provider's own numbers, nothing derived. Absent that, a `pricing.toml`
+/// entry for the pair, for a destination the user has not marked free, is
+/// `FreePool::declare_token_priced`. Neither: `unknown_pool()`, exactly as
+/// before this package.
+///
+/// Three things it therefore refuses to do:
+///
+/// - **attribute across providers.** The provider whose file a reading came
+///   from must be the credential's own provider. Two providers configured
+///   with the same `credential_env` variable are *"two separate allowances"*
+///   (`CredentialId`'s own doc) and share nothing; the label keeps them apart
+///   because the provider is part of it, and this check keeps a mislabelled
+///   file from getting around that.
+/// - **attribute across models.** Health is per credential *and* model —
+///   `FreeResource`'s own doc says a router sharing one entry across a
+///   provider's models would take every model out of service because one was
+///   busy.
+/// - **choose between two readings that name the same resource and disagree.**
+///   A file this program wrote cannot contain those, because
+///   `health_readings_for` maps over a pool already keyed by resource. A file
+///   it did not write can, and it is also the shape a genuine label collision
+///   would take — two distinct credentials rendering one label, which is
+///   exactly the ambiguity that must not be resolved by picking. Contradictory
+///   readings leave the resource unobserved.
+///
+/// # Hazard 2 — the time base
+///
+/// [`glasshouse::provider::telemetry::GatewayHealthReading::cooling_down_until`]
+/// does the conversion and documents it. Both clocks are read **once**, here,
+/// so every reading in one cache is placed against the same pair rather than
+/// against a clock that moved between them.
