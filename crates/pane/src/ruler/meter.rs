@@ -163,6 +163,10 @@ fn unix_secs(t: SystemTime) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Only the two `#[cfg(unix)]` tests below write a fake readout script,
+    // so on Windows this import has no user and `warnings = deny` makes an
+    // unused one a build failure rather than a lint.
+    #[cfg(unix)]
     use std::fs;
     use std::time::Duration;
 

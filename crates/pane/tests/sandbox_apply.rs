@@ -56,6 +56,11 @@ impl Fixture {
         profile.root().to_path_buf()
     }
 
+    /// Used only by the macOS and Linux execution tests, which are the only
+    /// ones that put a real file in front of a confined process. Windows has
+    /// no applier it can run, so the helper has no caller there and
+    /// `warnings = deny` makes a dead one a build failure.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     fn write(&self, path: &Path, contents: &str) -> PathBuf {
         std::fs::write(path, contents).unwrap();
         path.to_path_buf()
