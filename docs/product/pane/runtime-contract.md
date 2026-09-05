@@ -208,6 +208,18 @@ token.
 - **TypeScript and nothing else.** No second generated language, no Python
   escape hatch. `DECISION PARKED` — the brief's default, taken.
 
+## 8. Addendum — the batch handle (61G)
+
+`events-contract.md` adds exactly one object to this contract's world. A window of events is
+delivered as a handle named `batch`, type `Events.Batch`, and it is the **one** binding the runtime
+declares in the model's scope — the only exemption from §2's naming rule, which no model can satisfy
+for an object that did not exist when it last wrote a program. Everything else here holds unchanged:
+§2's replacement rule frees the previous batch and renders `batch  (replaced at cell 5)`; §3's
+256-token cap bounds its preview, and an event's `payload` is itself a handle that is never previewed
+inside that preview; §4 records it as one rollout line and `pane resume` returns it stale like any
+other. Its window length, dedup keys and `ack` semantics are `events-contract.md`'s, not this
+document's.
+
 CONTRACT
 behaviour:  A tool result becomes a named live object in pane's V8 isolate and the model receives its name and a preview capped at 256 tokens, never the payload.
 invariant:  A live handle is freed only by redeclaration, an explicit `free`, or the task ending — never by eviction — and a resumed handle is stale until its recorded pure call re-materialises it to an identical SHA-256.

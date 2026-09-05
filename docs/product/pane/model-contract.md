@@ -224,6 +224,15 @@ pane sends no tool-result blocks for it to reduce.
   (`gateway/translate/canonical.rs`). See `phase-minus-one.md` §5 for the one
   place that is not yet safe.
 
+## 10. Addendum — the `batch` row (61G)
+
+`events-contract.md` adds exactly one row to §4's handle table, named `batch` and rendered **always
+last**, so the model's own bindings keep the order it made them in. The row carries the batch preview
+that contract fixes — every interrupt in full, then counts by kind, then the first five of the rest —
+inside §4's 2,048-token table cap, and it changes nothing else here: a batch is not a message, it
+adds no section to §6's result block, and it never becomes a turn of its own. A turn whose batch is
+empty and whose user input is empty does not happen; the runtime waits rather than send the request.
+
 CONTRACT
 behaviour:  The model receives one cached system block of preamble, TypeScript tool declarations and project instructions, and answers each turn with exactly one ```pane fenced TypeScript program; it never sends or receives a tool-use or tool-result block.
 invariant:  The serialised request body is byte-identical with and without the Glasshouse gateway hop, and a message carrying two `pane` blocks executes neither.
