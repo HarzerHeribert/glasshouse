@@ -8,3 +8,6 @@ __pycache__/
 # Worker worktrees live inside the repo but are never part of it.
 # scripts/ci-local.sh excludes this from the tree it ships to the container.
 .worktrees/
+
+# Finder metadata (2026-09-05: four of these made integrate.sh call the tree dirty)
+.DS_Store
