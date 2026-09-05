@@ -67,7 +67,7 @@ use super::http::{self, RequestHead};
 use super::ingress::{
     Exchange, Framing, Outcome, StreamEnd, Tokens, millis_since, transport_detail,
 };
-use super::upstream::{Route, Upstream, UpstreamBackend, VERSION_SEGMENT, path_of};
+use super::upstream::{Route, ServedBy, Upstream, UpstreamBackend, VERSION_SEGMENT, path_of};
 use canonical::{BlockStart, Delta, Request, Response, StreamEvent, Unsupported};
 use stream::{SseEvent, SseReader};
 
@@ -677,6 +677,10 @@ pub(super) fn serve(
     let route = serving
         .route_named(pair.to)
         .expect("a pair is placed only against a protocol the serving backend routes");
+    // Capability map line 2451, for every writer below that reaches the
+    // provider: never used by `refuse`, since a refusal here is written
+    // before any upstream request exists and nothing served it.
+    let served_by = ServedBy::of(serving);
 
     // Written with the socket left open: every caller below either drains
     // the rest of the client's body through `settle` (which closes once it
@@ -686,7 +690,7 @@ pub(super) fn serve(
     // to deliver into the network error it exists to prevent.
     let refuse = |out: &mut TcpStream, status: StatusCode, message: &str| {
         let body = from.encode_error(from.error_kind(status.as_u16()), message);
-        let _ = write_document_open(out, status, &body);
+        let _ = write_document_open(out, status, &body, None);
     };
 
     if head.method != ureq::http::Method::POST {
@@ -943,7 +947,7 @@ pub(super) fn serve(
             .unwrap_or_else(|| String::from_utf8_lossy(&raw).into_owned());
         let document = from.encode_error(from.error_kind(upstream_status), &message);
         let written = document.len() as u64;
-        let ended = match write_document(out, status, &document) {
+        let ended = match write_document(out, status, &document, &served_by) {
             Ok(()) => StreamEnd::Complete,
             Err(_) => StreamEnd::ClientClosed,
         };
@@ -980,6 +984,7 @@ pub(super) fn serve(
                 &finish,
                 upstream_status,
                 dispatch,
+                &served_by,
             );
         }
         // The harness asked for a document and the provider streamed anyway:
@@ -1005,12 +1010,20 @@ pub(super) fn serve(
                                  a stream",
                             ),
                             &finish,
+                            &served_by,
                         );
                     }
                     match decoder.feed(&event) {
                         Ok(more) => gathered.extend(more),
                         Err(unsupported) => {
-                            return untranslatable(out, from, pair, unsupported, &finish);
+                            return untranslatable(
+                                out,
+                                from,
+                                pair,
+                                unsupported,
+                                &finish,
+                                &served_by,
+                            );
                         }
                     }
                 }
@@ -1020,7 +1033,7 @@ pub(super) fn serve(
                         break;
                     }
                     Err(unsupported) => {
-                        return untranslatable(out, from, pair, unsupported, &finish);
+                        return untranslatable(out, from, pair, unsupported, &finish, &served_by);
                     }
                 },
                 Err(_) => {
@@ -1030,6 +1043,7 @@ pub(super) fn serve(
                         pair,
                         Unsupported::new("stream", "the provider's stream failed"),
                         &finish,
+                        &served_by,
                     );
                 }
             }
@@ -1046,8 +1060,9 @@ pub(super) fn serve(
                 first_byte_ms,
                 &finish,
                 upstream_status,
+                &served_by,
             ),
-            Err(unsupported) => untranslatable(out, from, pair, unsupported, &finish),
+            Err(unsupported) => untranslatable(out, from, pair, unsupported, &finish, &served_by),
         };
     }
 
@@ -1060,12 +1075,15 @@ pub(super) fn serve(
                 pair,
                 Unsupported::new("body", "the provider's response could not be read whole"),
                 &finish,
+                &served_by,
             );
         }
     };
     let response = match to.decode_response(&raw) {
         Ok(response) => response,
-        Err(unsupported) => return untranslatable(out, from, pair, unsupported, &finish),
+        Err(unsupported) => {
+            return untranslatable(out, from, pair, unsupported, &finish, &served_by);
+        }
     };
     if request.stream {
         // The harness asked for a stream and the provider answered with a
@@ -1073,7 +1091,7 @@ pub(super) fn serve(
         let events = response.as_events();
         let mut encoder = from.stream_encoder();
         let mut written = 0u64;
-        if write_stream_head(out).is_err() {
+        if write_stream_head(out, &served_by).is_err() {
             return finish(
                 Outcome::ClientGone,
                 upstream_status,
@@ -1134,6 +1152,7 @@ pub(super) fn serve(
         first_byte_ms,
         &finish,
         upstream_status,
+        &served_by,
     )
 }
 
@@ -1263,6 +1282,7 @@ fn tokens_of(response: &Response) -> Tokens {
 /// [`FirstEvents::of_document`] needs both to derive the 1331/1332 pair and
 /// its millisecond siblings from `response.as_events()` before `finish`
 /// attaches them to the [`Exchange`].
+#[allow(clippy::too_many_arguments)]
 fn deliver_document(
     out: &mut TcpStream,
     from: &dyn Codec,
@@ -1271,10 +1291,11 @@ fn deliver_document(
     first_byte_ms: Option<i64>,
     finish: Finish<'_>,
     upstream_status: u16,
+    served_by: &ServedBy,
 ) -> (Exchange, RateLimitHeaders) {
     let document = from.encode_response(response);
     let written = document.len() as u64;
-    match write_document(out, StatusCode::OK, &document) {
+    match write_document(out, StatusCode::OK, &document, served_by) {
         Ok(()) => finish(
             Outcome::Forwarded {
                 upstream_status,
@@ -1314,12 +1335,13 @@ fn untranslatable(
     pair: &Pair,
     unsupported: Unsupported,
     finish: Finish<'_>,
+    served_by: &ServedBy,
 ) -> (Exchange, RateLimitHeaders) {
     let refusal = TranslationRefusal::new(pair, unsupported);
     let message = format!("the provider's answer could not be translated — {refusal}");
     let document = from.encode_error(from.error_kind(502), &message);
     let written = document.len() as u64;
-    let ended = match write_document(out, StatusCode::BAD_GATEWAY, &document) {
+    let ended = match write_document(out, StatusCode::BAD_GATEWAY, &document, served_by) {
         Ok(()) => StreamEnd::Complete,
         Err(_) => StreamEnd::ClientClosed,
     };
@@ -1337,6 +1359,7 @@ fn untranslatable(
 }
 
 /// Translate a provider's stream to the harness, one event at a time.
+#[allow(clippy::too_many_arguments)]
 fn stream_events<R: Read>(
     out: &mut TcpStream,
     events: &mut SseReader<BufReader<R>>,
@@ -1345,6 +1368,7 @@ fn stream_events<R: Read>(
     finish: Finish<'_>,
     upstream_status: u16,
     dispatch: Instant,
+    served_by: &ServedBy,
 ) -> (Exchange, RateLimitHeaders) {
     let mut encoder = from.stream_encoder();
     let mut written = 0u64;
@@ -1369,7 +1393,7 @@ fn stream_events<R: Read>(
             FirstEvents::default(),
         )
     };
-    if write_stream_head(out).is_err() {
+    if write_stream_head(out, served_by).is_err() {
         return client_gone(0);
     }
     let mut ended = StreamEnd::Complete;
@@ -1468,12 +1492,17 @@ fn stream_events<R: Read>(
 /// still owes the client a drain of whatever it is still sending — `out` is
 /// a `try_clone` of the same socket as the reader doing that draining, so a
 /// shutdown here would close the read half out from under it too.
+///
+/// `served_by` is `None` for exactly the refusals written before any
+/// upstream request exists — capability map line 2451 — and `Some` on every
+/// other path, which all go through [`write_document`] instead.
 fn write_document_open(
     out: &mut TcpStream,
     status: StatusCode,
     body: &[u8],
+    served_by: Option<&ServedBy>,
 ) -> std::io::Result<()> {
-    let headers = vec![
+    let mut headers = vec![
         ("content-type".to_owned(), b"application/json".to_vec()),
         (
             "content-length".to_owned(),
@@ -1481,21 +1510,30 @@ fn write_document_open(
         ),
         ("connection".to_owned(), b"close".to_vec()),
     ];
+    if let Some(served_by) = served_by {
+        served_by.push_onto(&mut headers);
+    }
     http::write_head(out, status, &headers)?;
     out.write_all(body)?;
     out.flush()
 }
 
 /// One document, and the connection closed after it: for every answer that
-/// is not followed by a drain of the client's own socket.
-fn write_document(out: &mut TcpStream, status: StatusCode, body: &[u8]) -> std::io::Result<()> {
-    write_document_open(out, status, body)?;
+/// is not followed by a drain of the client's own socket — always a served
+/// exchange, so `served_by` is required rather than optional.
+fn write_document(
+    out: &mut TcpStream,
+    status: StatusCode,
+    body: &[u8],
+    served_by: &ServedBy,
+) -> std::io::Result<()> {
+    write_document_open(out, status, body, Some(served_by))?;
     let _ = out.shutdown(Shutdown::Both);
     Ok(())
 }
 
-fn write_stream_head(out: &mut TcpStream) -> std::io::Result<()> {
-    let headers = vec![
+fn write_stream_head(out: &mut TcpStream, served_by: &ServedBy) -> std::io::Result<()> {
+    let mut headers = vec![
         (
             "content-type".to_owned(),
             b"text/event-stream; charset=utf-8".to_vec(),
@@ -1504,6 +1542,7 @@ fn write_stream_head(out: &mut TcpStream) -> std::io::Result<()> {
         ("transfer-encoding".to_owned(), b"chunked".to_vec()),
         ("connection".to_owned(), b"close".to_vec()),
     ];
+    served_by.push_onto(&mut headers);
     http::write_head(out, StatusCode::OK, &headers)
 }
 

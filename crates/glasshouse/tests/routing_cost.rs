@@ -30,7 +30,9 @@ use rusqlite::Connection;
 use glasshouse::gateway::{Route, Upstream};
 use glasshouse::integrations::IntegrationId;
 use glasshouse::profile::{BackendResource, LaunchProfile};
-use glasshouse::routing::evidence::{EvidenceLedger, NewObservation, ObservationQuery, Outcome};
+use glasshouse::routing::evidence::{
+    CostConfidence, EvidenceLedger, NewObservation, ObservationQuery, ObservedCost, Outcome,
+};
 use glasshouse::routing::{AssignedModel, CredentialId};
 use glasshouse::secret::{EnvironmentSecretStore, Secret, SecretRef, SecretStore};
 use glasshouse::{Cli, Runtime, bootstrap};
@@ -1328,6 +1330,8 @@ fn a_row_with_no_tokens_prints_null_never_zero_in_json() {
         "completed_at",
         "first_byte_ms",
         "completed_ms",
+        "cost_micro_usd",
+        "cost_confidence",
     ] {
         assert_eq!(
             value[key],
@@ -1340,6 +1344,43 @@ fn a_row_with_no_tokens_prints_null_never_zero_in_json() {
     assert_eq!(value["model"], "gateway-model");
     assert!(value["seq"].is_i64(), "{line}");
     assert_eq!(value["observed_at"], at);
+}
+
+/// GH-GATEWAY-SERVED-BY, requirement 6: a row that carries a cost prints
+/// `cost_micro_usd` and `cost_confidence` as its **last two keys**, after
+/// `failovers` — the widened key list `ObservationJson`'s own doc comment
+/// pins at twenty-four.
+#[test]
+fn a_planted_cost_prints_as_the_lines_last_two_keys() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+    let at = now() - 60;
+
+    fixture
+        .ledger()
+        .record(
+            NewObservation::new("cost-provider", "cost-model").with_cost(Some(ObservedCost {
+                micro_usd: 1234,
+                confidence: CostConfidence::Estimated,
+            })),
+            at,
+        )
+        .unwrap();
+
+    let run = fixture.routing_cost_json(&[]);
+    assert!(run.status.success(), "stderr: {}", run.stderr);
+    let lines: Vec<&str> = run.stdout.lines().collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "one row must print exactly one line:\n{}",
+        run.stdout
+    );
+    let line = lines[0];
+    assert!(
+        line.ends_with("\"cost_micro_usd\":1234,\"cost_confidence\":\"estimated\"}"),
+        "cost_micro_usd and cost_confidence must be the line's last two keys: {line}"
+    );
 }
 
 /// **Requirement 1's ordering.** Two rows recorded out of insertion order

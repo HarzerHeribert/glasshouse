@@ -633,6 +633,10 @@ pub(crate) fn routing_cost_json_report(
 /// `serde_json::Value::Object` built through the `json!` macro would instead
 /// sort them alphabetically, because this workspace does not enable
 /// `serde_json`'s `preserve_order` feature.
+///
+/// Twenty-four fields, in this exact declaration order: capability map line
+/// 2451 added `cost_micro_usd` and `cost_confidence` as the last two,
+/// after `failovers`.
 #[derive(serde::Serialize)]
 struct ObservationJson<'a> {
     seq: i64,
@@ -657,6 +661,8 @@ struct ObservationJson<'a> {
     retries: Option<i64>,
     repairs: Option<i64>,
     failovers: Option<i64>,
+    cost_micro_usd: Option<i64>,
+    cost_confidence: Option<&'static str>,
 }
 
 /// [`ObservationJson`]'s only constructor — every `None` stays `None`
@@ -693,5 +699,7 @@ fn observation_json(
         retries: observation.retries,
         repairs: observation.repairs,
         failovers: observation.failovers,
+        cost_micro_usd: observation.cost.map(|cost| cost.micro_usd),
+        cost_confidence: observation.cost.map(|cost| cost.confidence.as_str()),
     }
 }

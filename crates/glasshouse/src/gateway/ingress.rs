@@ -29,7 +29,7 @@ use crate::routing::evidence::{EffortLevel, TurnShape};
 use super::GatewayToken;
 use super::http::{self, HeadError};
 use super::translate;
-use super::upstream::{Route, Upstream, UpstreamBackend};
+use super::upstream::{Route, ServedBy, Upstream, UpstreamBackend};
 use super::usage;
 
 /// The `authorization` scheme the gateway accepts from a child harness.
@@ -670,6 +670,10 @@ fn forward(
     // does not wait for a second response on a socket that is about to
     // close.
     headers.push(("connection".to_owned(), b"close".to_vec()));
+
+    // Capability map line 2451: this response was actually served, by
+    // `serving` — never pushed on a refusal, since nothing served those.
+    ServedBy::of(serving).push_onto(&mut headers);
 
     // The framing, as known before a byte of the body has moved: what the
     // provider declared, and whether a body may follow at all. `relayed` is

@@ -382,6 +382,59 @@ impl std::fmt::Debug for UpstreamBackend {
     }
 }
 
+/// Capability map line 2451's two response header names: which entitlement
+/// served an exchange, on every response head the gateway writes for one —
+/// never on a refusal, since nothing served those. See [`ServedBy`].
+pub(super) const PROVIDER_HEADER: &str = "x-glasshouse-provider";
+pub(super) const ENTITLEMENT_HEADER: &str = "x-glasshouse-entitlement";
+
+/// The provider and entitlement label a served exchange's response head
+/// carries — never the secret, only [`UpstreamBackend::provider`] and
+/// [`UpstreamBackend::credential_id`]'s label, the same string the session
+/// already records as `quota_context`.
+///
+/// Threaded through the translated path's writers as one value rather than
+/// two loose strings (CLAUDE.md rule 8): both are known together, from the
+/// one backend that served the exchange, and travel together to the two
+/// writers that need them.
+pub(super) struct ServedBy {
+    provider: String,
+    entitlement: String,
+}
+
+impl ServedBy {
+    pub(super) fn of(backend: &UpstreamBackend) -> Self {
+        Self {
+            provider: backend.provider().to_owned(),
+            entitlement: backend.credential_id().label(),
+        }
+    }
+
+    /// A stand-in value for a test that exercises a writer directly, with no
+    /// backend to build one from — `translate::tests`'s own
+    /// `stream_events_refuses_a_delta_...` is the caller.
+    #[cfg(test)]
+    pub(super) fn for_test(provider: &str, entitlement: &str) -> Self {
+        Self {
+            provider: provider.to_owned(),
+            entitlement: entitlement.to_owned(),
+        }
+    }
+
+    /// Push this exchange's two response headers onto `headers`, in the
+    /// order every writer emits them.
+    pub(super) fn push_onto(&self, headers: &mut Vec<(String, Vec<u8>)>) {
+        headers.push((
+            PROVIDER_HEADER.to_owned(),
+            self.provider.clone().into_bytes(),
+        ));
+        headers.push((
+            ENTITLEMENT_HEADER.to_owned(),
+            self.entitlement.clone().into_bytes(),
+        ));
+    }
+}
+
 /// Where the gateway forwards, and the credential it forwards with.
 ///
 /// # One serving backend, and the ones it could move to
