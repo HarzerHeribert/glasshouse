@@ -7,6 +7,7 @@ pub mod commands;
 pub mod contract;
 pub mod glasshouse;
 pub mod project;
+pub mod prompt;
 pub mod rollout;
 pub mod ruler;
 pub mod runtime;
