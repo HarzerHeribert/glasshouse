@@ -19,6 +19,13 @@
 //! are the fallback for a name that cannot be resolved, and [`ExecGrant`]
 //! records when that happened so a caller sees it without reading a log.
 //!
+//! The fourth is cancellation, and it is deliberately the *weakest* thing
+//! that works: a [`CancellationToken`] the caller holds, checked once
+//! immediately before the spawn and then at a bounded interval while the
+//! child runs. It sits **below** the confinement rather than beside it, so
+//! the first invariant is untouched — the only expression that starts a
+//! child is still one that a `?` on [`confine`] has already passed.
+//!
 //! **Nothing model-authored runs here.** The only programs this module can
 //! spawn are the four in [`registry::ALL`], each resolved from a name fixed
 //! at compile time; there is no argument, no path and no branch through
@@ -26,9 +33,13 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::process::{Child, Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::thread::JoinHandle;
+use std::time::Duration;
 
 use serde_json::{Value, json};
 
@@ -45,6 +56,48 @@ use crate::tools::registry::{self, ArgKind, Argv, Tool};
 /// stated in bytes because that is what a truncation can actually be
 /// performed on.
 const PREVIEW_BYTES: usize = 2048;
+
+/// How often a running call asks whether it has been cancelled.
+///
+/// The bound is on *latency*, not on the child: 20 ms is far below the two
+/// seconds the acceptance test allows and far above anything that would make
+/// the poll itself measurable next to a process that is doing work.
+const CANCEL_POLL: Duration = Duration::from_millis(20);
+
+/// The cancellation facility, and it is the whole of it: a flag whoever
+/// started the call may set from another thread.
+///
+/// The invariant is that **setting it can never widen anything and never
+/// starts anything** — every path that observes it either returns before a
+/// child exists or kills one that does. It is deliberately not a channel,
+/// not a signal handler and not an async runtime: a call is cancellable
+/// between calls (the holder checks [`is_cancelled`](Self::is_cancelled)
+/// itself) and during one ([`run_cancellable`] checks it), and nothing else
+/// is needed for `runtime-contract.md` §5 to render the result, because a
+/// cancelled call lands in the shape a refusal already has.
+///
+/// Cloning is cheap and every clone names the same flag, which is what lets
+/// the holder keep one while the call borrows another.
+#[derive(Debug, Clone, Default)]
+pub struct CancellationToken(Arc<AtomicBool>);
+
+impl CancellationToken {
+    /// A fresh, un-cancelled token.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Cancels every call holding this token or a clone of it. Idempotent,
+    /// and there is no way back: a token is one call's decision, not a
+    /// reusable switch.
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.0.load(Ordering::SeqCst)
+    }
+}
 
 /// The arguments of one call, by declared name.
 ///
@@ -143,11 +196,18 @@ impl ToolResult {
 
 /// Everything that can come back other than a result.
 ///
-/// Two variants, and they are different in kind: [`ToolError::Denied`] is the
-/// profile's own answer and is a value the caller is expected to handle
-/// (§1.4), while [`ToolError::Spawn`] is the operating system failing to
-/// start a program pane had already decided to allow. Collapsing them would
-/// report a missing binary as a permission decision.
+/// Three variants, and they are different in kind: [`ToolError::Denied`] is
+/// the profile's own answer and is a value the caller is expected to handle
+/// (§1.4); [`ToolError::Spawn`] is the operating system failing to start a
+/// program pane had already decided to allow; [`ToolError::Cancelled`] is the
+/// caller having withdrawn the call. Collapsing any two would report one as
+/// the other — a missing binary as a permission decision, or a withdrawal as
+/// a refusal a person could fix by editing `settings.json`.
+///
+/// All three reach the model the same way, and that is the point of not
+/// inventing a fourth shape: `runtime-contract.md` §5 already says a throw is
+/// a result, so a cancelled call is an `Error` preview in the turn slot a
+/// yield would have used and the turn is not retried.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ToolError {
     Denied(PermissionDenied),
@@ -156,14 +216,21 @@ pub enum ToolError {
         program: PathBuf,
         error: String,
     },
+    Cancelled {
+        tool: String,
+    },
 }
 
 impl ToolError {
     /// The refusal, when this was one.
+    ///
+    /// A cancellation is **not** one: nothing about the profile decided it,
+    /// so a caller reporting `denied()` would name a settings file that has
+    /// nothing to do with what happened.
     pub fn denied(&self) -> Option<&PermissionDenied> {
         match self {
             ToolError::Denied(denied) => Some(denied),
-            ToolError::Spawn { .. } => None,
+            ToolError::Spawn { .. } | ToolError::Cancelled { .. } => None,
         }
     }
 }
@@ -187,6 +254,9 @@ impl fmt::Display for ToolError {
                 "{tool}: could not start {}: {error}",
                 program.to_string_lossy()
             ),
+            ToolError::Cancelled { tool } => {
+                write!(f, "Cancelled: {tool}() was cancelled before it completed")
+            }
         }
     }
 }
@@ -231,6 +301,26 @@ fn next_call_id() -> String {
 /// nothing. An unregistered name is not a call: it fires neither, because
 /// there is no tool for the event to name.
 pub fn run(ctx: &ToolContext<'_>, name: &str, args: &Args) -> Result<ToolResult, ToolError> {
+    run_cancellable(ctx, &CancellationToken::default(), name, args)
+}
+
+/// The same call, cancellable by whoever holds `token`.
+///
+/// The invariant this adds is that **a cancelled call reaches exactly the
+/// same two hook deliveries a completed one does**: `PreToolUse` fires before
+/// the pre-spawn check, so a call cancelled before it started anything still
+/// announces itself and still reports what it returned. A firewall that saw
+/// only the calls that ran would report an abandoned branch as never having
+/// been attempted.
+///
+/// [`run`] is this function with a token nobody can set, which is why its
+/// signature and its behaviour are unchanged.
+pub fn run_cancellable(
+    ctx: &ToolContext<'_>,
+    token: &CancellationToken,
+    name: &str,
+    args: &Args,
+) -> Result<ToolResult, ToolError> {
     let Some(tool) = registry::lookup(name) else {
         return Err(ToolError::Denied(PermissionDenied {
             tool: name.to_string(),
@@ -255,7 +345,7 @@ pub fn run(ctx: &ToolContext<'_>, name: &str, args: &Args) -> Result<ToolResult,
         }),
     );
 
-    let outcome = checked_call(ctx, tool, args);
+    let outcome = checked_call(ctx, token, tool, args);
 
     emit(
         ctx,
@@ -331,10 +421,15 @@ enum Checked {
     CommandLine(String),
 }
 
-fn checked_call(ctx: &ToolContext<'_>, tool: &Tool, args: &Args) -> Result<ToolResult, ToolError> {
+fn checked_call(
+    ctx: &ToolContext<'_>,
+    token: &CancellationToken,
+    tool: &Tool,
+    args: &Args,
+) -> Result<ToolResult, ToolError> {
     let checked = check_arguments(ctx.profile, tool, args)?;
     let argv = build_argv(tool, &checked)?;
-    spawn_confined(ctx.profile, tool, &argv)
+    spawn_confined(ctx.profile, token, tool, &argv)
 }
 
 /// Checks every declared argument, and refuses every undeclared one.
@@ -520,14 +615,29 @@ fn runnable(path: &Path) -> bool {
 /// Confines the child and spawns it, in that order and in no other.
 ///
 /// The `Command` is built, [`confine`] installs the platform's mechanism on
-/// it, and `output()` comes after. A `?` on the confinement is what makes
-/// "no unconfined path" mechanical rather than promised: the only expression
-/// that runs the child is below a confinement that returned `Ok`.
+/// it, and the spawn comes after. A `?` on the confinement is what makes "no
+/// unconfined path" mechanical rather than promised: the only expression that
+/// runs the child is below a confinement that returned `Ok`.
+///
+/// The child is spawned rather than run to completion because a cancellation
+/// needs a [`Child`] to kill; the two drain threads are what `output()` did
+/// internally, and the poll loop is where `token` is asked. Three outcomes:
+///
+/// - set before the spawn: no child is ever created, and the check is the
+///   last statement before `spawn()`, so "never created" is a property of the
+///   control flow and not of a race;
+/// - set while the child runs: `kill` then `wait`, because the `wait` is what
+///   leaves nothing behind for `init` to reap;
+/// - neither: exactly the `ToolResult` this function returned before.
 fn spawn_confined(
     profile: &Profile,
+    token: &CancellationToken,
     tool: &Tool,
     argv: &[std::ffi::OsString],
 ) -> Result<ToolResult, ToolError> {
+    let cancelled = || ToolError::Cancelled {
+        tool: tool.name().to_string(),
+    };
     let grant = exec_grant(tool.executable());
     let mut command = Command::new(&grant.binary);
     command.args(argv);
@@ -538,20 +648,89 @@ fn spawn_confined(
 
     let confinement = confine(profile, &grant.binary, tool.name(), &mut command)?;
 
-    let output = command.output().map_err(|error| ToolError::Spawn {
+    if token.is_cancelled() {
+        return Err(cancelled());
+    }
+
+    let spawn_failed = |error: std::io::Error| ToolError::Spawn {
         tool: tool.name().to_string(),
         program: grant.binary.clone(),
         error: error.to_string(),
-    })?;
+    };
+    let mut child = command.spawn().map_err(spawn_failed)?;
+
+    let stdout = drain(child.stdout.take());
+    let stderr = drain(child.stderr.take());
+
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if token.is_cancelled() => {
+                kill_and_reap(&mut child);
+                return Err(cancelled());
+            }
+            Ok(None) => std::thread::sleep(CANCEL_POLL),
+            // The wait itself failing leaves a running child nothing here
+            // can observe again, so it is killed on the way out. Reporting
+            // it as `Spawn` is not new lumping: `output()` raised the same
+            // variant for its own wait and read failures.
+            Err(error) => {
+                kill_and_reap(&mut child);
+                return Err(spawn_failed(error));
+            }
+        }
+    };
 
     Ok(ToolResult {
         tool: tool.name().to_string(),
-        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
-        exit_code: output.status.code(),
+        stdout: collect(stdout),
+        stderr: collect(stderr),
+        exit_code: status.code(),
         grant,
         confinement,
     })
+}
+
+/// Reads one of the child's pipes to EOF on a thread of its own.
+///
+/// The invariant is that neither pipe can fill while the other is being
+/// read, which is what `Command::output` did internally and what this
+/// function restores now that the wait is explicit.
+fn drain<R: Read + Send + 'static>(pipe: Option<R>) -> JoinHandle<Vec<u8>> {
+    std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        if let Some(mut pipe) = pipe {
+            let _ = pipe.read_to_end(&mut buffer);
+        }
+        buffer
+    })
+}
+
+/// What the drain thread read, or nothing if it panicked — which a
+/// `read_to_end` into a `Vec` does not do, so the `unwrap_or_default` is a
+/// shape and not a fallback.
+fn collect(handle: JoinHandle<Vec<u8>>) -> String {
+    let bytes = handle.join().unwrap_or_default();
+    String::from_utf8_lossy(&bytes).into_owned()
+}
+
+/// Kills the child and reaps it, in that order, so nothing is left for
+/// `init`.
+///
+/// The handle is the only thing addressed: no pid parsed from a string, and
+/// no process group, because pane did not create one and killing a group it
+/// did not create is how a cancellation becomes an outage. Both results are
+/// discarded deliberately — a child that exited between the poll and the
+/// `kill` is not an error, it is the race this function exists to be
+/// indifferent to.
+///
+/// The two drain threads are *not* joined here. Their output is discarded by
+/// a cancelled call, and joining them would make cancellation wait on a
+/// grandchild that inherited the pipe — the one thing a bounded cancellation
+/// must not do.
+fn kill_and_reap(child: &mut Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Installs this platform's confinement on `command`, or refuses.

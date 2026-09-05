@@ -7,3 +7,7 @@
 
 pub mod invoke;
 pub mod registry;
+
+/// The cancellation facility is a property of the tools surface rather than
+/// of one call site, so it is named here as well as where it is defined.
+pub use invoke::CancellationToken;

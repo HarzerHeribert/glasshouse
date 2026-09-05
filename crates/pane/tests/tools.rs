@@ -634,3 +634,254 @@ fn an_unregistered_name_is_a_refusal_and_fires_no_hook() {
             .all(|name| name != "webfetch")
     );
 }
+
+// --- cancellation ------------------------------------------------------
+
+/// A settings document for the cancellation tests, and the reason it is a
+/// second one: the long-running child is built entirely out of `bash`
+/// builtins, so its command line has segments the shared [`settings`] does
+/// not admit.
+///
+/// It is a *busy* loop rather than `sleep 30` on purpose, and the purpose is
+/// the sandbox: the seatbelt names the one resolved binary in `process-exec*`
+/// (the 61D exec-roots ruling), so a confined `bash` cannot exec `/bin/sleep`
+/// at all. A builtin loop is the only thing that reliably runs long inside
+/// the confinement these tests are supposed to be running inside.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn cancellable_settings() -> String {
+    // `Bash(do*)` admits `do` and `done`; every pattern here is argv
+    // admission and grants no file access whatsoever (§2).
+    r#"{"permissions":{"allow":["Bash(echo*)","Bash(while*)","Bash(do*)"]}}"#.to_string()
+}
+
+/// The command line the two cancellation tests share: write one file, then
+/// run until something stops us.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn writes_then_runs_forever(marker: &Path, contents: &str) -> String {
+    format!(
+        "echo {contents} > {}; while :; do :; done",
+        marker.display()
+    )
+}
+
+/// Decision 8 of the guarded-continuations plan: a call already in flight can
+/// be stopped, and stopping it leaves no process behind.
+///
+/// The three claims, and each has its own assertion: the call **returns**
+/// (within two seconds, against a child that would otherwise never exit), it
+/// returns `ToolError::Cancelled` rather than a refusal or a result, and the
+/// child is **reaped** — `kill -0` on its own recorded pid fails, which a
+/// zombie would not do, so this distinguishes `kill` alone from `kill` then
+/// `wait`.
+///
+/// The pid file is also this test's non-vacuity control: it exists only if a
+/// child really ran, which is what makes
+/// `a_token_set_before_the_call_spawns_nothing` mean anything.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn a_running_call_is_killed_reaped_and_returned_as_a_throw() {
+    let fixture = Fixture::new("cancel-running");
+    let pid_file = fixture.root.join("child.pid");
+    let profile = Profile::compile(&fixture.root, Some(&cancellable_settings()));
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("cancel-running");
+    let ctx = context(&profile, &glasshouse, &session);
+
+    let token = invoke::CancellationToken::new();
+    let setter = token.clone();
+    let canceller = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        setter.cancel();
+    });
+
+    let started = std::time::Instant::now();
+    let error = invoke::run_cancellable(
+        &ctx,
+        &token,
+        "bash",
+        &Args::new().with("command", writes_then_runs_forever(&pid_file, "$$")),
+    )
+    .expect_err("a cancelled call is not a result");
+    let elapsed = started.elapsed();
+    canceller.join().unwrap();
+
+    assert!(
+        matches!(&error, invoke::ToolError::Cancelled { tool } if tool == "bash"),
+        "{error:?}"
+    );
+    assert!(
+        error.denied().is_none(),
+        "a cancellation reported itself as a permission decision"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(2),
+        "the call did not return promptly: {elapsed:?}"
+    );
+
+    // The child ran (so the test is not vacuous), and it is gone — reaped,
+    // not a zombie, because `kill -0` succeeds against a zombie.
+    let pid = std::fs::read_to_string(&pid_file)
+        .expect("the child ran and recorded its pid")
+        .trim()
+        .to_string();
+    assert!(pid.parse::<u32>().is_ok(), "not a pid: {pid:?}");
+    let alive = std::process::Command::new("kill")
+        .arg("-0")
+        .arg(&pid)
+        .output()
+        .expect("`kill` runs");
+    assert!(
+        !alive.status.success(),
+        "pid {pid} is still addressable after the call returned: {alive:?}"
+    );
+}
+
+/// A token already set when the call starts: nothing is spawned at all, and
+/// both hook events still fire.
+///
+/// The marker is the assertion that no child ran, and it is credible only
+/// because `a_running_call_is_killed_reaped_and_returned_as_a_throw` runs the
+/// same command shape and finds its file written. The elapsed bound is the
+/// second half of the same claim: the command would never have terminated on
+/// its own, so returning in well under a second is not something a spawned
+/// child could have produced.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn a_token_set_before_the_call_spawns_nothing() {
+    let fixture = Fixture::new("cancel-before");
+    let marker = fixture.root.join("marker.txt");
+    let log = fixture.root.join("hook.log");
+    let script = fake_glasshouse(&fixture.root, &log);
+
+    let profile = Profile::compile(&fixture.root, Some(&cancellable_settings()));
+    let glasshouse = Glasshouse::Command { glasshouse: script };
+    let session = SessionId::new("cancel-before");
+    let ctx = context(&profile, &glasshouse, &session);
+
+    let token = invoke::CancellationToken::new();
+    token.cancel();
+
+    let started = std::time::Instant::now();
+    let error = invoke::run_cancellable(
+        &ctx,
+        &token,
+        "bash",
+        &Args::new().with("command", writes_then_runs_forever(&marker, "spawned")),
+    )
+    .expect_err("a cancelled call is not a result");
+    let elapsed = started.elapsed();
+
+    assert!(
+        matches!(&error, invoke::ToolError::Cancelled { tool } if tool == "bash"),
+        "{error:?}"
+    );
+    assert!(
+        !marker.exists(),
+        "a child ran under a token that was set before the call"
+    );
+    assert!(
+        elapsed < std::time::Duration::from_secs(1),
+        "the call took long enough to have run something: {elapsed:?}"
+    );
+
+    // A cancellation is an observed output, exactly as a refusal is: a
+    // firewall that saw only the calls that ran would report an abandoned
+    // branch as never having been attempted.
+    let recorded = std::fs::read_to_string(&log).expect("the hooks were delivered");
+    assert_eq!(
+        recorded
+            .matches(r#""hook_event_name":"PreToolUse""#)
+            .count(),
+        1,
+        "{recorded}"
+    );
+    assert_eq!(
+        recorded
+            .matches(r#""hook_event_name":"PostToolUse""#)
+            .count(),
+        1,
+        "{recorded}"
+    );
+    assert!(recorded.contains("Cancelled"), "{recorded}");
+}
+
+/// The token changes nothing about a call that finishes: `run` and
+/// `run_cancellable` with an unset token produce equal results, field for
+/// field.
+///
+/// This is what makes `run`'s unchanged signature a claim rather than a
+/// hope — `run` *is* `run_cancellable` with a token nobody can set, so an
+/// inequality here would be an inequality for every existing caller.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn a_call_that_finishes_first_is_unchanged_by_the_token() {
+    let fixture = Fixture::new("cancel-unset");
+    let profile = fixture.profile();
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("cancel-unset");
+    let ctx = context(&profile, &glasshouse, &session);
+    let args = Args::new().with("command", "echo finished-first");
+
+    let plain = invoke::run(&ctx, "bash", &args).expect("the command line is admitted");
+    let cancellable =
+        invoke::run_cancellable(&ctx, &invoke::CancellationToken::new(), "bash", &args)
+            .expect("the command line is admitted");
+
+    assert_eq!(plain.stdout, "finished-first\n");
+    assert_eq!(plain, cancellable);
+}
+
+/// The drain threads' whole reason to exist, executed: a child that writes
+/// more than a pipe buffer (64 KiB on both platforms) to stdout **completes**,
+/// and the call returns with all of it. `Command::output` drained both pipes
+/// before waiting; `spawn_confined` now waits while two threads drain, and
+/// this is the test that would hang if either thread were missing. The call
+/// runs on its own thread under a bounded wait, so a deadlock is a failure
+/// here and not a hung suite.
+///
+/// The loop is bash builtins only -- brace expansion, `echo`, `done` -- because
+/// the confined `bash` can exec nothing else, which is also why it is `bash`.
+/// It is stdout rather than stderr because `>&2` is split at the `&` by the
+/// command admission and refused; the drain is one function on either pipe,
+/// so the mechanism proven here is the one that serves both.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn a_call_whose_stdout_exceeds_the_pipe_buffer_completes() {
+    let fixture = Fixture::new("large-stdout");
+    let profile = Profile::compile(
+        &fixture.root,
+        Some(r#"{"permissions":{"allow":["Bash(for*)","Bash(do*)"]}}"#),
+    );
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("large-stdout");
+
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let root = fixture.root.clone();
+    std::thread::spawn(move || {
+        let profile = profile;
+        let ctx = context(&profile, &glasshouse, &session);
+        let line = "x".repeat(64);
+        let result = invoke::run(
+            &ctx,
+            "bash",
+            &Args::new().with(
+                "command",
+                format!("for i in {{1..2000}}; do echo {line}; done"),
+            ),
+        );
+        let _ = root;
+        let _ = sender.send(result);
+    });
+
+    let result = receiver
+        .recv_timeout(std::time::Duration::from_secs(30))
+        .expect("the call completed instead of deadlocking on a full stdout pipe")
+        .expect("the loop is admitted and runs");
+    assert_eq!(result.exit_code, Some(0), "{result:?}");
+    assert!(
+        result.stdout.len() > 65_536,
+        "the child did not write past a pipe buffer: {} bytes",
+        result.stdout.len()
+    );
+    assert!(result.stderr.is_empty(), "{result:?}");
+}
