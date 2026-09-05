@@ -6608,3 +6608,127 @@ test is the bound), does not fold compactions into the size term (1586 owns
 them), and does not read any new column. Package `GH-ROUTER-FRESH-OVER-BLOATED`
 (Amber); evidence in `phase-37.md`; the refusal-register row for 1594 closes
 with it.
+
+## Trims: `provider/telemetry/mod.rs` — history moved out of comments by `GH-TRIM-PROVIDER-TELEMETRY`, 2026-09-05
+
+### module doc
+
+//! # What was measured, and what was not
+//!
+//! **AnyRouter, 2026-08-27, unauthenticated `GET
+//! https://anyrouter.dev/api/v1/models`** — the exact endpoint
+//! [`crate::provider::discovery::model_catalogue`] already requests for that
+//! template — answered `200` with:
+//!
+//! ```text
+//! ratelimit-limit: 300
+//! ratelimit-policy: 300;w=60
+//! x-ratelimit-limit: 300
+//! x-ratelimit-tier: ip
+//! x-ratelimit-window: 60
+//! access-control-expose-headers: …,X-RateLimit-Limit,X-RateLimit-Remaining,
+//!   X-RateLimit-Reset,X-RateLimit-Tier,X-RateLimit-Window,RateLimit-Limit,
+//!   RateLimit-Policy,RateLimit-Remaining,RateLimit-Reset,Retry-After
+//! ```
+//!
+//! Two things follow and both are in [`RATE_LIMIT_HEADERS`]. The names this
+//! parser knows are the ones **that host itself names** in its CORS
+//! declaration plus the IETF `RateLimit-*` field names those follow; they are
+//! not a guess at what providers generally send. And the *ceiling* is what
+//! arrives here while the *remaining* count does not — asserted on a
+//! deliberately cache-busted request as well as a cached one — which is why
+//! [`RateLimitHeaders::apply_to`] fills a limit and leaves the matching
+//! remaining count [`Capacity::Unmeasured`] rather than deriving one.
+//!
+//! Seven other hosts Glasshouse ships templates for — OpenRouter, UnoRouter,
+//! Kilo, Nous, NVIDIA, opencode-zen and z.ai — sent **no** rate-limit header
+//! of any name on the same route on the same day. That is recorded in the
+//! evidence ledger as the reason line 1229 closes on one provider rather than
+//! on a family of them.
+//!
+//! # A second seam, on a different route: the provider named its own units
+//!
+//! **Groq, `POST /chat/completions`, 2026-08-26** — a real (free-model,
+//! one-token) inference response, the only kind of request that carries this
+//! seam at all — answered `200` with both halves of *two* pools, not one:
+//!
+//! ```text
+//! x-ratelimit-limit-requests: 7000
+//! x-ratelimit-limit-tokens: 6000
+//! x-ratelimit-remaining-requests: 6999
+//! x-ratelimit-remaining-tokens: 5991
+//! x-ratelimit-reset-requests: 12.342s
+//! x-ratelimit-reset-tokens: 90ms
+//! ```
+//!
+//! Two things distinguish this from AnyRouter's set. First, the header names
+//! themselves say which resource they bound — `-requests` and `-tokens` are
+//! separate suffixes rather than one ambiguous `x-ratelimit-limit` — so
+//! [`RateLimitHeaders`] reads the `-requests` pair into the same fields
+//! AnyRouter's unsuffixed spelling fills, and the `-tokens` pair into fields
+//! of their own, landing in [`crate::provider::quota::TokenBudget::combined`]
+//! rather than the request [`Pool`]. Second, the reset fields are not bare
+//! integers: `12.342s` and `90ms` are a duration with its unit attached, which
+//! this module's own duration parser reads apart from the plain-integer-seconds
+//! [`RateLimitHeaders::reset`] AnyRouter's field uses.
+//!
+//! **This route is the gateway's own forwarding path**, and nowhere else:
+//! `crate::provider::discovery` makes catalogue and base-URL reads only, on
+//! purpose, because Glasshouse must not spend a token to check a quota — see
+//! `crate::gateway::ingress`'s own header capture, which reads exactly this
+//! allowlist from a response the gateway was already forwarding.
+//!
+//! # The gateway may read a response header now — this reverses a decision
+//!
+//! Phase 9I line 528 held that the gateway must not parse anything in a
+//! response it exists to pass through, and an earlier packet for this phase
+//! read that as forbidding the header block along with the body. **That
+//! overreached.** The gateway already parses the status line and header block
+//! in order to forward them; the body is what it streams untouched. Reading a
+//! header is not reading the payload, so `crate::gateway::ingress` now reads
+//! this module's allowlist — headers only, never a byte of the body — from
+//! every response it forwards. See that module for where.
+
+### struct `ProviderUsage`
+
+/// The response also carries `usage`, `usage_daily`, `usage_weekly`,
+/// `usage_monthly` and `rate_limit.{requests,interval}`, none of which this
+/// reader applies to [`CapacityState`]. `usage*` is a **cumulative all-time
+/// spend counter**, a different quantity from "how much of a ceiling
+/// remains" — the only shape [`Pool::remaining`] has — and folding one into
+/// the other would assert a relationship the endpoint never stated,
+/// especially on an account whose `limit` is `null`. `rate_limit.interval`'s
+/// format was recorded only as a type (`str`), never a real value, so
+/// parsing it would be guessing at units nobody confirmed. Both are a
+/// decision for whoever holds a live account and a real response body to
+/// make, not this package's to invent — see the report's `PROBES I NEED RUN`.
+
+### fn `read_harness_plan`
+
+/// `claude auth status --json` was measured on 2026-08-27 emitting eight
+/// keys, of which **three identify the account holder** — an email address,
+/// an organisation id and an organisation name. `design-decisions.md`'s rule
+/// that a provider's response body may name the account, and must never be
+/// copied whole into anything a user might share, applies with more force to
+/// a harness's own account than to a provider's error text.
+
+### struct `GatewayQuotaCache`
+
+/// # Never resolved automatically — deliberately
+///
+/// This type never calls [`crate::paths::RuntimePaths::resolve`] itself.
+/// `crate::gateway` has never had a project or a data directory in scope —
+/// [`crate::gateway::start_if_required`] takes only launch profiles and an
+/// upstream closure — and every other cache in this crate
+/// ([`crate::provider::cache::ModelCache`] included) is handed an
+/// already-resolved [`crate::paths::RuntimePaths`] by whatever constructed
+/// [`crate::Runtime`] rather than resolving one of its own. A gateway that
+/// resolved its own OS-standard data directory would also fire inside every
+/// existing conformance test that runs a real accept loop, writing into
+/// whichever machine happens to run `cargo test` — which is exactly why
+/// `crate::gateway::Gateway::start` keeps taking no cache at all, and
+/// `crate::gateway::Gateway::start_with_quota_cache` takes one only when a
+/// caller explicitly supplies it. See this package's report for the caller
+/// neither of those is yet: wiring a real [`crate::paths::RuntimePaths`] into
+/// [`crate::gateway::start_if_required`]'s two call sites is
+/// `crates/glasshouse/src/main.rs`, which this package may not edit.
