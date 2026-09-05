@@ -41,7 +41,7 @@ validated and waiting on the commit. Next action: `.agent-runtime/CONTINUATION.m
 
 Last updated: 2026-09-02, late night (Europe/Berlin)
 
-## Checkpoint — 2026-09-05 (night), waves 118–136: 1313 / 1398 (93.9%) — pane 61B and 61C merged, Phase 37 complete, the served-by producers, sixteen trims, the first fully green sixteen-cell sweep
+## Checkpoint — 2026-09-05 (night), waves 118–137: 1311 / 1398 (93.8%) — pane 61B, 61C and 61D merged, Phase 37 complete, 2054 closed, three 61C ticks taken back off on the lane's own audit, the served-by producers, twenty-nine files trimmed, the first fully green sixteen-cell sweep
 
 Fable 5.1 orchestrators from ~18:00 (`b2416cc7`, then `c07a9ff3` from 20:42). The
 ledger's waves 118–136 are the account; `.agent-runtime/CONTINUATION.md` is the hot
@@ -51,8 +51,7 @@ hand-off. This is the index.
 gateway's own exchange) · 2431, 2432 (the ruler) · 442 · 1044 · 1837, 1846 (the route
 rating and local pairing evidence) · 2444–2450 (61C, merged as `a67358e` after the
 lead found and fixed its own no-production-caller shape) · **1594** (Phase 37
-complete). Phases 9E, 21K, 35B and 37 complete. Phase 59: sixteen files trimmed under
-2053; 2054 open only for 1294 and 1610.
+complete) · **2054** (every refused line the user named is settled by design). **Un-ticked** on the lead's own audit: 2446, 2449, 2450 — the screen drawn into a test double, the local store without a writer, the command list reached only by tests; they re-tick on a demonstration through the binary. Phases 9E, 21K, 35B and 37 complete. Phase 59 is open only on 2053: twenty-nine files trimmed, the remainder packaged by module (`.agent-runtime/CONTINUATION.md`, *Queue*).
 
 **Landed without a tick:** `routing-cost --json` (2430's meter) · the package-aware
 blast radius · the served-by headers and currency keys (2451's producers) ·
@@ -71,9 +70,7 @@ duplication with the adapter as authority · 2456 is a Glasshouse-side Red packa
 after 61D · `sandbox-grants.md` §4.2 and §4.3 · exec is granted on the resolved
 binary (the lead's) · 1594's size cap is a property of warmth (`design-decisions.md`).
 
-**Live at hand-off:** the pane lead on 61D (with `pane-61e-tools`, the sandbox's
-caller — nothing model-authored executes), `GH-CONFORMANCE-REBIND-DETERMINISM`,
-`GH-TRIM-ROUTING-DESTINATIONS`. **Next by risk:** the 61D merge and 2456 · the
+**Also this session:** 61D merged with nothing ticked (four escapes found by two verifiers, fixed); the rebind test's barriers passed their first macOS sweep; the first dogfooding session in two days (`docs/process/dogfooding.md`); the user's guarded-continuations design handoff assessed — plan and draft amendment in `.agent-runtime/report-guarded-continuations-{plan,spec-draft}.md`, held for the Codex session's verification (`phase-61.md` §61E). **Live at hand-off:** the pane lead on 61E's tools package and the 61C fixups; two remainder trims. **Next by risk:** the 61D merge and 2456 · the
 determinism report · trims `v1_to_v13.rs`, `profile/response.rs`, `profile/mod.rs` ·
 the next dogfooding session with a support-work provider configured and the firewall
 in `shadow`.

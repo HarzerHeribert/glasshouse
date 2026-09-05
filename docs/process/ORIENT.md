@@ -209,7 +209,7 @@ to do, and the orchestrator should follow its own rule.
 Newest first, from `docs/process/handoff.md`. Read the top one in full;
 the rest are context you probably do not need.
 
-- Checkpoint — 2026-09-05 (night), waves 118–136: 1313 / 1398 (93.9%) — pane 61B and 61C merged, Phase 37 complete, the served-by producers, sixteen trims, the first fully green sixteen-cell sweep
+- Checkpoint — 2026-09-05 (night), waves 118–137: 1311 / 1398 (93.8%) — pane 61B, 61C and 61D merged, Phase 37 complete, 2054 closed, three 61C ticks taken back off on the lane's own audit, the served-by producers, twenty-nine files trimmed, the first fully green sixteen-cell sweep
 - Checkpoint — 2026-09-05 (evening), waves 116–117: 1295 / 1399 (92.6%) — pane stood up in its own lane, the dispatch defect fixed, 442 built and verified, seven lines closed
 - Checkpoint — 2026-09-03, batch 96: 1270 / 1355 (93.7%) — four more Phase 59 splits land, the shell line closes, and the orchestrator moves to Opus 5
 - Checkpoint — 2026-09-03, batch 95: 1267 / 1355 (93.5%) — Phase 28 complete, the bootstrap creation atomic, and Phase 59's first splits landing
