@@ -13021,3 +13021,460 @@ already saw), and does not put the model's own text anywhere but the cell that p
 **Successor:** `GH-PANE-NOTEBOOK-VIEW` (Amber, pane-lead's lane), after `GH-PANE-61C-FIXUPS` lands the
 real `CrosstermBackend` renderer — the fixups worker should shape that renderer as a column of cells
 from the start rather than a chat transcript to be re-laid later.
+
+## Trims: routing module docs, second packet — history moved out of comments by `GH-TRIM-ROUTING-DOCS-2`, 2026-09-05
+
+### `routing/disposable/mod.rs` — `ReserveOverride`
+
+    /// The user's own override of protected-reserve protection — capability map
+    /// line 1290, *"allow the user to override reserve protection for a specific
+    /// task or session"*.
+    ///
+    /// # Why this is a pair and not a boolean
+    ///
+    /// [`crate::provider::quota::ReserveDecisionInputs::user_override`] is a
+    /// `bool`, and a `bool` is all a policy function should need. The scope
+    /// belongs one level up, here, because a boolean *setting* would be a
+    /// different capability from the one line 1290 asks for: set once, it would
+    /// spend protected reserve for every job in every session for ever, and no
+    /// reason string could say on whose behalf.
+    ///
+    /// So the scope is part of the value. One half is the set of sessions the
+    /// user named; the other is the session this routing instance is deciding
+    /// for; and [`ReserveOverride::applies`] is true only where the two meet.
+    /// **There is deliberately no constructor meaning "everywhere"** — a user who
+    /// wants two sessions overridden names two sessions — and
+    /// [`ReserveOverride::default`] is the empty override that every caller
+    /// predating this line already gets.
+    ///
+    /// # The task half of "task or session", which is not built
+    ///
+    /// Only the session half exists, because only the session half has an
+    /// identifier on this path. A disposable job carries a [`JobKind`] —
+    /// `memory-extraction` or `classification` — which names a *class* of work
+    /// rather than one task, so a `JobKind`-scoped override would be a
+    /// category-wide switch wearing a scope's clothes: precisely the shape the
+    /// paragraph above refuses. Nothing in this build gives one disposable job an
+    /// identity its successor does not share, so there is nothing narrower to
+    /// name. The line is a disjunction and the session half is real; the task
+    /// half is recorded here as absent rather than approximated.
+
+### `routing/disposable/mod.rs` — `DeclaredTaskProgress`
+
+    /// A declaration that a session's current task is nearly complete —
+    /// capability map lines 1294 and 1610.
+    ///
+    /// # Why this is a pair, and why it is not [`ReserveOverride`]
+    ///
+    /// [`crate::provider::quota::ReserveDecisionInputs::task_nearly_complete`]
+    /// is a `bool`, and a `bool` is all a policy function should need. The scope
+    /// belongs one level up, here, for [`ReserveOverride`]'s reason: a boolean
+    /// *setting* would spend protected reserve for every job in every session
+    /// for ever, and no reason string could say on whose behalf.
+    ///
+    /// It is a second type rather than a second use of `ReserveOverride`
+    /// because the two carry different statements from different places. An
+    /// override says *spend the reserve on this session anyway*, and it comes
+    /// from configuration, where being sticky is correct. A declaration says
+    /// *this session's current task is nearly done*, it comes from a store row
+    /// written by `glasshouse task-progress`, and being sticky would be the
+    /// defect: the field it feeds is the first branch the reserve policy takes,
+    /// so a statement outliving the task it described would keep the reserve
+    /// open on behalf of work that finished. Merging them would put one word on
+    /// two facts with opposite storage requirements.
+    ///
+    /// # Nothing here infers anything
+    ///
+    /// The set is what somebody declared, read back from
+    /// `crate::session::SessionStore::active_task_progress`, which reports no
+    /// declaration that has expired or whose session is no longer live. There is
+    /// deliberately no constructor meaning "everywhere" and no derivation from a
+    /// turn count, an elapsed time or any other observable — see the field's own
+    /// doc comment for why a proxy inverts the policy rather than approximating
+    /// it. [`DeclaredTaskProgress::default`] is the empty declaration that every
+    /// caller predating these lines already gets, and it can never match.
+
+### `routing/disposable/mod.rs` — `fn choose`
+
+    /// Choose a resource for one bounded job.
+    ///
+    /// # The order, and where each step comes from
+    ///
+    /// 1. **Hard constraints first, structurally** (map line 1553):
+    ///    [`apply_hard_constraints`] removes any candidate this policy could
+    ///    never use — a candidate whose entitlement's rules do not serve this
+    ///    job's kind (map line 1947's third clause, refused as
+    ///    [`HardConstraint::Entitlement`] by the entitlement's name; the
+    ///    refusal rides the winner's explanation, and when nothing survives
+    ///    the error names every one), and the metered candidates
+    ///    [`MeteredUse`] withholds, named [`HardConstraint::UserConstraint`]
+    ///    because line 568 calls a user's own opt-in rule exactly that. A
+    ///    candidate that fails this is unrepresentable to the scorer below,
+    ///    not merely given a large negative weight.
+    /// 2. **Zero-headroom candidates are removed, not merely ranked last**
+    ///    (map line 1434). A candidate whose [`CandidateCapacity`], carried on
+    ///    [`DisposableCandidate::with_capacity`], is *known* to read zero
+    ///    remaining headroom — no requests-per-minute (or other bound
+    ///    dimension) capacity left — cannot serve, so it is dropped here,
+    ///    before either the free loop or the metered-fallback loop below ever
+    ///    sees it. An **absent** reading never eliminates: nothing being known
+    ///    about a candidate is not the same claim as "this candidate is
+    ///    exhausted", and turning "no telemetry" into "full" is the
+    ///    fabrication this project refuses everywhere else — see
+    ///    `tests/routing_disposable_tier.rs`'s
+    ///    `an_absent_capacity_reading_never_eliminates_a_candidate`.
+    ///    Removing rather than scoring low also means this step runs *before*
+    ///    the free loop below walks the user's own order, so a candidate that
+    ///    survives is never reordered by it — only ever removed outright.
+    /// 3. **A pinned free resource wins outright** (line 536, 1552). If it
+    ///    cannot serve, the job fails rather than silently going elsewhere —
+    ///    a pin is a hard rule, never a scored preference, the same design
+    ///    decision Phase 9J's `PairingPreference::Pin` already made.
+    /// 4. **Free resources, in the user's own order**, skipping disabled ones
+    ///    (line 536) and any whose health or allowance says it cannot serve
+    ///    right now (lines 529, 535, 538). This is line 530's "prefer free
+    ///    models for bounded Glasshouse support work", and line 531 falls out
+    ///    of it: a model is in this list because the user marked it free, so
+    ///    an explicitly configured free model such as a Nemotron variant
+    ///    participates without this function knowing any model's name.
+    /// 5. **A metered resource**, only when [`MeteredUse`] permits it
+    ///    (line 539) *and* Phase 32F's protected-reserve policy allows
+    ///    spending it (line 1550) — ranked by this policy's own `score`
+    ///    when more than one survives the reserve gate.
+    ///
+    /// Every candidate this function actually reaches is scored by this
+    /// policy's own `score` method (map line 1530), and the winner's
+    /// [`RoutingExplanation`] travels home on
+    /// [`DisposableChoice::explanation`] (line 1554). The free-tier winner is
+    /// still the first available candidate in the user's own order, exactly
+    /// as before this batch — every input this build can populate for a free
+    /// candidate (cost, order position) is monotonic in that same order, and
+    /// an absent capacity or reset reading contributes `0.0` for every
+    /// candidate alike, so scoring never disagrees with it; see
+    /// `tests::scoring_never_reorders_the_existing_free_selection`.
+    ///
+    /// `classification` is this job's Phase 35 [`TaskClassification`], when a
+    /// caller has one — [`TaskClassification::conservative_workload_tier`]
+    /// becomes the metered-fallback path's [`WorkloadTier`] (map line 1550's
+    /// `tier` input), replacing the fixed [`WorkloadTier::Leaf`] this policy
+    /// used before a classification existed to ask. `None` keeps that fixed
+    /// [`WorkloadTier::Leaf`] behaviour exactly as it was: a caller with
+    /// nothing to classify is not made to guess.
+
+### `routing/disposable/mod.rs` — `fn choose_for_automatic_classification`
+
+    /// Map lines 1441 and 1442, for the one caller they name —
+    /// `automatic_classification_choice`'s `glasshouse classify` decision —
+    /// and deliberately not folded into [`Self::choose`] itself.
+    ///
+    /// # Why this is a second function rather than a flag on `choose`
+    ///
+    /// This module's own header states the separation as a design principle:
+    /// the disposable policy "prefers free capacity and re-decides every
+    /// time", against the interactive policy's "keeps what it has". Giving
+    /// `choose` a retained pick to consult would blur that for every
+    /// [`JobKind`] it serves — memory extraction, reranking, evaluation —
+    /// none of which map lines 1441/1442 name. Stickiness here is scoped to
+    /// automatic classification alone, so it stands beside `choose`, calling
+    /// it unchanged, rather than reaching inside it.
+    ///
+    /// # Purity is preserved the same way `choose` preserves it
+    ///
+    /// `tests::no_routing_policy_can_make_a_request` (`routing/mod.rs`) holds
+    /// this module to reading no telemetry itself. This function does not
+    /// break that: `retained` is supplied by the caller, exactly as
+    /// `candidates` and `pool` already are — nothing here opens a cache or a
+    /// connection. The caller is expected to be
+    /// `crate::provider::telemetry::RoutingStickyCache::load`, and to persist
+    /// the returned pick with `RoutingStickyCache::store` on the
+    /// [`AutomaticClassificationDecision::Fresh`] arm.
+    ///
+    /// # The honesty invariant (map line 1441)
+    ///
+    /// A retained pick is returned **only** when all three hold: it is still
+    /// inside [`AUTOMATIC_CLASSIFICATION_STICKY_WINDOW_SECONDS`], it names a
+    /// candidate still present in `candidates`, and that candidate is a free
+    /// resource `pool` still reports available. A pick that fails any of
+    /// these gets a fresh call to [`Self::choose`] instead — stickiness never
+    /// outlives the healthiness it was predicated on. A **metered** retained
+    /// pick always falls through to a fresh decision too: `pool` is the only
+    /// health signal this build has for a free resource
+    /// (`docs/product/evidence/phase-34c.md`'s 1433 entry: "the health pool
+    /// reaches only free candidates"), so there is nothing honest to check a
+    /// metered pick's continued health against, and inventing one would
+    /// repeat the same fabrication line 1434's elimination step refuses.
+    ///
+    /// # The retained arm's explanation is not `score`'s output
+    ///
+    /// No ranking runs when a pick is retained, so the [`DisposableChoice`]
+    /// built here carries a [`RoutingExplanation`] that says exactly that —
+    /// reused without re-ranking, and its age — rather than a synthesised
+    /// comparison that never happened. See [`DisposableChoice`]'s
+    /// `explanation` field doc.
+
+### `routing/disposable/mod.rs` — sort comment in `choose_for_automatic_classification`
+
+        // Capability map lines 1420, 1421, 1438 and 1419: among the
+        // candidates the user has *not* placed in an explicit free-resource
+        // order, the classification preferences decide the order `choose`'s
+        // free loop walks. A stable sort on the preference total, so two
+        // candidates nothing is known about keep the caller's order exactly
+        // as before — and `FreePreferences::arrange` re-sorts by the user's
+        // own order afterwards, so a ranked candidate is never moved by
+        // this. The scoring invariant `choose` documents therefore still
+        // holds: it consults no score to pick a free winner; the order it is
+        // handed is what changed.
+        //
+        // `notes` — the same `Vec<Contribution>` `classification_verdict`
+        // just built for this candidate — is summed in alongside
+        // `classification_preferences` rather than left for the explanation
+        // alone: every requirement note in it is a fixed `0.0` except the
+        // 1419 *protected capacity* term, which is the one note in that list
+        // ruled to carry a real magnitude (`design-decisions.md`, *"The
+        // premium capacity a classifier protects"* — *"this line only
+        // orders"*). Summing the whole `notes` list rather than picking that
+        // term out by name costs nothing today (every sibling note is
+        // `0.0`) and asks nothing of a future note beyond the same
+        // convention.
+
+### `routing/disposable/mod.rs` — `fn background_reserve_policy_note`
+
+    /// What the user's background reserve policy did to the decision above —
+    /// capability map line 1577, on the one path that can reach it.
+    ///
+    /// Always rendered beside a reserve decision rather than only when the
+    /// policy changed the answer, so a reader of a support job's rationale
+    /// can see *which* of the two configured policies was consulted. A line
+    /// that appeared only on the overriding case would leave the ordinary
+    /// case looking as though no scope had been chosen at all.
+    ///
+    /// The band is reported as it was read, and "unread" is said rather than
+    /// filled in: [`Self::choose`]'s gate substitutes
+    /// [`CapacityBand::Plenty`] for an absent reading because
+    /// `evaluate_reserve_spend` needs a band, and printing that substitution
+    /// here as though it were an observation is the fabrication this module
+    /// refuses everywhere else.
+    ///
+    /// The denied-and-`Protect` arm is unreachable from [`Self::choose`],
+    /// which drops such a candidate before scoring it. It is written out
+    /// rather than collapsed into an `unreachable!` because the pair is
+    /// total and a future caller that scores without gating should get a
+    /// true sentence rather than a panic.
+
+### `routing/disposable/mod.rs` — `fn cheaper_adequate_resource_exists`
+
+    /// Whether a resource *other than* `metered[index]` could serve this job
+    /// without spending anybody's protected reserve — capability map line 1288's
+    /// input to [`evaluate_reserve_spend`], and the only way that line's own
+    /// branch is reachable from production.
+    ///
+    /// # "Cheaper" is read here, not invented
+    ///
+    /// The question sounds like it needs a price list, and Glasshouse has none:
+    /// [`Cost`] knows only free-or-metered and never compares two metered models
+    /// against each other. But
+    /// [`ReserveDecisionInputs::cheaper_adequate_resource_exists`] states its own
+    /// meaning, in the phase that owns the policy — *"whether a resource outside
+    /// the reserve band could adequately serve this task instead"*. So "cheaper"
+    /// is already denominated in the currency this policy protects, which is
+    /// reserve capacity rather than money, and [`CapacityBand`] is [`Ord`] with
+    /// [`CapacityBand::Exhausted`] lowest precisely so a policy can ask that as a
+    /// comparison. Reading that definition is the whole of this function.
+    ///
+    /// # An unknown band is not a cheaper resource
+    ///
+    /// Only a candidate whose band has actually been *read* counts. A metered
+    /// resource nothing has been observed about may be deep in its own protected
+    /// reserve for all Glasshouse knows, and denying a spend on the strength of
+    /// it would invent exactly the judgement this input exists to avoid.
+    /// [`CandidateCapacity::band`]'s own `None` already refuses to withhold a
+    /// resource by a band never observed; this is the same refusal pointed the
+    /// other way, at the resource being offered as an alternative.
+    ///
+    /// # Free candidates are not consulted, and that is not an omission
+    ///
+    /// Reaching [`DisposableRouting::choose`]'s metered loop has already proved
+    /// no free resource can serve: that loop returns on the first available one,
+    /// and [`FreePreferences::arrange`] has already dropped the ones the user
+    /// disabled. A resource that cannot serve now is not one that "could
+    /// adequately serve this task instead".
+    ///
+    /// # What "adequately" leans on
+    ///
+    /// This module has no per-candidate capability model, and does not acquire
+    /// one here: every eligible candidate is a model the user configured for this
+    /// provider that survived [`apply_hard_constraints`]. Treating those as
+    /// interchangeable for a bounded internal job is the assumption the free loop
+    /// above already ships — it returns the first *available* candidate in the
+    /// user's own order, never the most capable one — and this function inherits
+    /// it rather than introducing it.
+
+### `routing/session/mod.rs` — `SessionContextFacts`
+
+    /// Phase 36 (lines 1581–1588): what the caller read about an existing
+    /// session's native context, beyond the warmth a [`WarmSession`] carries.
+    ///
+    /// Every field is a value the **caller looked up**, on the terms this
+    /// module's header sets — it names neither `crate::session` nor
+    /// `crate::checkpoint`, so the compaction count arrives as the integer the
+    /// session record holds, the last task as the classification the sticky
+    /// classification cache recorded against this session, and the touched
+    /// files as the paths this session's own latest checkpoint listed. The
+    /// production caller is `main.rs::routing_destinations`.
+    ///
+    /// `None` everywhere means **unknown**, never zero: the facet an absent
+    /// field feeds contributes nothing and says so in [`AffinityBreakdown`],
+    /// exactly as `capacity: None` is neither full nor empty. `Some(0)`
+    /// compactions is a counted clean history; `None` is a row nobody counted.
+    ///
+    /// `task_named_paths` is a fact about the *task* rather than the session,
+    /// carried here because it is the other half of line 1583's intersection
+    /// and the router holds no task text of its own: `main.rs` runs
+    /// [`paths_named_in`] once and attaches the same answer to every existing
+    /// destination. `None` is "no task was stated"; `Some(vec![])` is "a task
+    /// was stated and it names no path" — different facts, both unknown to
+    /// the facet, and both said in its evidence.
+
+### `routing/session/mod.rs` — `EstimatedInputSize`
+
+    /// Map lines 1298, 1299 and 1304: the components of one decision's own
+    /// input-size estimate, named rather than folded into a single number — a
+    /// reader of `glasshouse route --task` is owed which pieces were counted,
+    /// not just a total. Follows [`AffinityFacet`]'s `known`/`unknown` idiom at
+    /// the level of a whole estimate: every component is `Some(tokens)` when it
+    /// was actually measured and `None` when it was not — never a zero standing
+    /// in for "nobody looked" or "the read came back empty" (both degrade to
+    /// absent, by this package's own ruling — see `main.rs`'s producers).
+    ///
+    /// [`Self::total_tokens`] is `None` only when every component is `None`;
+    /// otherwise it sums the components that were measured, which is the same
+    /// "absent, not zero" rule applied to a sum instead of one field — the
+    /// component this build could not read simply does not enter the total,
+    /// rather than entering it as a zero that would understate a real cost.
+    ///
+    /// The production caller is `main.rs::routing_destinations`, which attaches
+    /// one of these per destination it builds: a fresh destination's carries the
+    /// project's own memory and checkpoint (line 1304, *"fresh-session cost
+    /// estimates"*), an existing session's carries that session's own latest
+    /// checkpoint only when the session is cold rather than live (line 1299),
+    /// and a live session's stays [`Self::UNESTIMATED`] entirely — `WarmSession`
+    /// already refuses to guess at accumulated context, and this estimate does
+    /// not overturn that refusal.
+
+### `routing/session/mod.rs` — `fn with_tier_ceiling`
+
+    /// State the highest workload tier this destination is established to
+    /// serve — map line 1516's input. `None` withdraws the fact.
+    ///
+    /// **The production caller is `main.rs::routing_destinations`**, which
+    /// attaches every destination the shipped binary builds with
+    /// `destination_tier_ceiling`'s reading of
+    /// [`crate::config::EffectiveConfig::model_ceiling`] — so the gate in
+    /// `hard_constraint` and the term in [`workload_tier_fit`] act on the
+    /// binary's path, not only on the library's.
+    ///
+    /// Phase 34F widened what that reading may establish without changing
+    /// this method or its caller: `model_ceiling` now reads
+    /// `providers.<p>.model_ceilings` (map line 1796) *or* a matching
+    /// `providers.<p>.model_capabilities` record's own ceiling, through
+    /// [`crate::config::capability::CeilingResolution::hard_ceiling`]. Only a
+    /// record the user assigned themselves can reach here — a
+    /// benchmark-provenance record's ceiling is a prior, never a hard
+    /// constraint, and never arrives as a `Some` this method sees (capability
+    /// map line 1484).
+    ///
+    /// It is still `None` for most destinations, and that is the design
+    /// rather than a gap: a ceiling exists only where the user stated one for
+    /// that specific model on that specific provider. Every destination in a
+    /// project that has configured none carries `None` and is treated exactly
+    /// as it was before the producer existed — "nobody has said" is not
+    /// "cannot".
+
+### `routing/session/mod.rs` — `TaskRequirements`
+
+    /// What the work itself requires, as facts a caller states rather than
+    /// preferences a router guesses.
+    ///
+    /// `needs_tool_calls` can **reject** a destination: a task that needs tool
+    /// calls cannot go somewhere tool calls are established not to work.
+    /// Anything a router would only *prefer* belongs in a contribution, not
+    /// here — that is design decision 1 ("additive, never a filter") carried
+    /// into this phase.
+    ///
+    /// `hard_capabilities` carries `TaskClassification::hard_capabilities()`'s own
+    /// output (`super::classify`) so [`capability_fit`] has something to compare
+    /// a destination's registry entry against, and so does the hard-constraint
+    /// gate (map line 1517): ruling 4 of the `GH-ROUTING-CAPABILITY` packet gives
+    /// capability mismatch exactly one rejecting exception — a hard capability
+    /// the resource is *established* to lack — and `session::hard_constraint`
+    /// raises `HardConstraint::Capability` from exactly that reading
+    /// (`session::is_adequate`). An unverified axis is "nobody has said," not
+    /// "cannot," and still only costs a candidate a `capability_fit` contribution.
+    ///
+    /// `minimum_tier` also rejects (map line 1516), and
+    /// it rejects only a destination whose ceiling is *established* below it —
+    /// see [`Destination::with_tier_ceiling`]. `classification` is the answer
+    /// the requirements were built from, carried so the explanation can say who
+    /// classified the work and whether line 1459's conservative rules fired;
+    /// `None` for a caller with no task in hand, which is every launch that
+    /// states none and therefore reproduces the pre-classification explanation
+    /// byte for byte.
+
+### `routing/session/mod.rs` — `fn choose`
+
+    /// Choose where this work goes — the router's one production entry point.
+    ///
+    /// `current` is where the work is now: `None` at a session start.
+    /// `destinations` is every place it could go, in the caller's own order,
+    /// which is the tiebreaker exactly as it is everywhere else in this
+    /// module's siblings.
+    ///
+    /// `None` only when `destinations` is empty **and** there is no current
+    /// destination to hold — there is nowhere for the work to go, and
+    /// inventing one would be worse than saying so.
+    ///
+    /// # Order
+    ///
+    /// 1. **Line 1592's boundary gate.** Mid-turn, nothing is ranked and the
+    ///    current destination is returned with an explanation saying why.
+    ///    [`RoutingOverride::and_route_now`] is the one thing that lifts it.
+    /// 2. **Hard constraints**, through
+    ///    [`super::apply_hard_constraints`] and therefore structurally: a
+    ///    task that needs tool calls cannot go where they are established not
+    ///    to work, a harness that cannot speak the route's protocol at all
+    ///    cannot serve it, and a destination established to serve below the
+    ///    classified minimum tier cannot serve the work (line 1516).
+    /// 3. **The soft contributions** (lines 1595–1600, the capability fit,
+    ///    and — when a tier is stated — line 1531's tier fit), summed by
+    ///    [`RoutingExplanation::total`]. None of them can exclude a
+    ///    destination; only step 2 can.
+    /// 4. **The user's override** (line 1602), applied over the ranking and
+    ///    never over step 2, with the automatic answer recorded so a reader
+    ///    can see what was overruled.
+
+### `routing/session/mod.rs` — post-ranking reselection comment in `fn choose`
+
+        // Step 5, map line 1970: the post-ranking reselection. It runs after
+        // the override and over the same already-gated list, so it can only
+        // move the work to a candidate every hard constraint already
+        // admitted — which is how line 1971's rules hold under fallback
+        // pressure without a second check.
+        //
+        // **It never moves an account the user named.** An override *"may
+        // overrule a ranking and not a fact about what can serve"*, and this
+        // is neither: it is Glasshouse preferring one admissible account
+        // over another, which is exactly the choice a person who named the
+        // account has already made. Their account being throttled is a thing
+        // the explanation tells them — the throttling term is right there in
+        // the block — not a thing to overrule them about.
+        //
+        // *Named the account*, and not merely used an override: `--to` with
+        // a bare `fresh:<harness>:<profile>` names the **profile**, and
+        // [`destination_answers_to`] records that the ranking still chooses
+        // the account among that profile's candidates (line 1969). So a
+        // prefix override, and `--fresh`, leave the account to Glasshouse
+        // and the fallback applies to it; only an exact id — `@<account>`
+        // included — and `--hold`, which says *stay where you are*, take the
+        // account out of Glasshouse's hands. An override that was refused
+        // leaves the ranking's own answer standing, and the fallback applies
+        // to that.

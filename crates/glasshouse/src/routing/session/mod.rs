@@ -181,27 +181,16 @@ impl CheckpointQuality {
 
 /// Phase 36 (lines 1581–1588): what the caller read about an existing
 /// session's native context, beyond the warmth a [`WarmSession`] carries.
+/// Every field is a value the **caller looked up** — this module names
+/// neither `crate::session` nor `crate::checkpoint` — and the production
+/// caller is `main.rs::routing_destinations`.
 ///
-/// Every field is a value the **caller looked up**, on the terms this
-/// module's header sets — it names neither `crate::session` nor
-/// `crate::checkpoint`, so the compaction count arrives as the integer the
-/// session record holds, the last task as the classification the sticky
-/// classification cache recorded against this session, and the touched
-/// files as the paths this session's own latest checkpoint listed. The
-/// production caller is `main.rs::routing_destinations`.
-///
-/// `None` everywhere means **unknown**, never zero: the facet an absent
-/// field feeds contributes nothing and says so in [`AffinityBreakdown`],
-/// exactly as `capacity: None` is neither full nor empty. `Some(0)`
-/// compactions is a counted clean history; `None` is a row nobody counted.
-///
-/// `task_named_paths` is a fact about the *task* rather than the session,
-/// carried here because it is the other half of line 1583's intersection
-/// and the router holds no task text of its own: `main.rs` runs
-/// [`paths_named_in`] once and attaches the same answer to every existing
-/// destination. `None` is "no task was stated"; `Some(vec![])` is "a task
-/// was stated and it names no path" — different facts, both unknown to
-/// the facet, and both said in its evidence.
+/// `None` everywhere means **unknown**, never zero: `Some(0)` compactions
+/// is a counted clean history, `None` is a row nobody counted.
+/// `task_named_paths` is a fact about the *task*, carried here because the
+/// router holds no task text of its own; `None` is "no task was stated",
+/// `Some(vec![])` is "a task was stated and names no path".
+// History: design-decisions.md, "Trims: routing module docs, second packet", routing/session/mod.rs `SessionContextFacts`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SessionContextFacts {
     observed_compactions: Option<i64>,
@@ -283,28 +272,19 @@ impl SessionContextFacts {
 }
 
 /// Map lines 1298, 1299 and 1304: the components of one decision's own
-/// input-size estimate, named rather than folded into a single number — a
-/// reader of `glasshouse route --task` is owed which pieces were counted,
-/// not just a total. Follows [`AffinityFacet`]'s `known`/`unknown` idiom at
-/// the level of a whole estimate: every component is `Some(tokens)` when it
-/// was actually measured and `None` when it was not — never a zero standing
-/// in for "nobody looked" or "the read came back empty" (both degrade to
-/// absent, by this package's own ruling — see `main.rs`'s producers).
-///
+/// input-size estimate, named rather than folded into a single number.
+/// Every component is `Some(tokens)` when actually measured and `None`
+/// when not — never a zero standing in for "nobody looked".
 /// [`Self::total_tokens`] is `None` only when every component is `None`;
-/// otherwise it sums the components that were measured, which is the same
-/// "absent, not zero" rule applied to a sum instead of one field — the
-/// component this build could not read simply does not enter the total,
-/// rather than entering it as a zero that would understate a real cost.
+/// otherwise it sums what was measured, so an unread component never
+/// understates the total as a zero would.
 ///
-/// The production caller is `main.rs::routing_destinations`, which attaches
-/// one of these per destination it builds: a fresh destination's carries the
-/// project's own memory and checkpoint (line 1304, *"fresh-session cost
-/// estimates"*), an existing session's carries that session's own latest
-/// checkpoint only when the session is cold rather than live (line 1299),
-/// and a live session's stays [`Self::UNESTIMATED`] entirely — `WarmSession`
-/// already refuses to guess at accumulated context, and this estimate does
-/// not overturn that refusal.
+/// The production caller is `main.rs::routing_destinations`: a fresh
+/// destination carries the project's own memory and checkpoint (line
+/// 1304), an existing cold session carries its own latest checkpoint
+/// (line 1299), and a live session stays [`Self::UNESTIMATED`] entirely —
+/// `WarmSession` already refuses to guess at accumulated context.
+// History: design-decisions.md, "Trims: routing module docs, second packet", routing/session/mod.rs `EstimatedInputSize`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct EstimatedInputSize {
     project_memory_tokens: Option<u64>,
@@ -695,29 +675,19 @@ impl Destination {
     /// State the highest workload tier this destination is established to
     /// serve — map line 1516's input. `None` withdraws the fact.
     ///
-    /// **The production caller is `main.rs::routing_destinations`**, which
-    /// attaches every destination the shipped binary builds with
+    /// **The production caller is `main.rs::routing_destinations`**, via
     /// `destination_tier_ceiling`'s reading of
-    /// [`crate::config::EffectiveConfig::model_ceiling`] — so the gate in
-    /// `hard_constraint` and the term in [`workload_tier_fit`] act on the
-    /// binary's path, not only on the library's.
+    /// [`crate::config::EffectiveConfig::model_ceiling`], which (Phase 34F)
+    /// reads `providers.<p>.model_ceilings` (map line 1796) *or* a matching
+    /// `providers.<p>.model_capabilities` ceiling through
+    /// [`crate::config::capability::CeilingResolution::hard_ceiling`] — only
+    /// a record the user assigned themselves, never a benchmark-provenance
+    /// prior (map line 1484).
     ///
-    /// Phase 34F widened what that reading may establish without changing
-    /// this method or its caller: `model_ceiling` now reads
-    /// `providers.<p>.model_ceilings` (map line 1796) *or* a matching
-    /// `providers.<p>.model_capabilities` record's own ceiling, through
-    /// [`crate::config::capability::CeilingResolution::hard_ceiling`]. Only a
-    /// record the user assigned themselves can reach here — a
-    /// benchmark-provenance record's ceiling is a prior, never a hard
-    /// constraint, and never arrives as a `Some` this method sees (capability
-    /// map line 1484).
-    ///
-    /// It is still `None` for most destinations, and that is the design
-    /// rather than a gap: a ceiling exists only where the user stated one for
-    /// that specific model on that specific provider. Every destination in a
-    /// project that has configured none carries `None` and is treated exactly
-    /// as it was before the producer existed — "nobody has said" is not
-    /// "cannot".
+    /// `None` for most destinations by design: a ceiling exists only where
+    /// the user stated one for that specific model on that provider —
+    /// "nobody has said" is not "cannot".
+    // History: design-decisions.md, "Trims: routing module docs, second packet", routing/session/mod.rs `fn with_tier_ceiling`.
     pub fn with_tier_ceiling(mut self, ceiling: Option<WorkloadTier>) -> Self {
         self.tier_ceiling = ceiling;
         self
@@ -863,30 +833,20 @@ impl Destination {
 /// What the work itself requires, as facts a caller states rather than
 /// preferences a router guesses.
 ///
-/// `needs_tool_calls` can **reject** a destination: a task that needs tool
-/// calls cannot go somewhere tool calls are established not to work.
-/// Anything a router would only *prefer* belongs in a contribution, not
-/// here — that is design decision 1 ("additive, never a filter") carried
-/// into this phase.
+/// `needs_tool_calls` can **reject** a destination — anything a router
+/// would only *prefer* belongs in a contribution instead (design decision
+/// 1, "additive, never a filter"). `hard_capabilities` carries
+/// `TaskClassification::hard_capabilities()`'s own output, feeding both
+/// [`capability_fit`] and the hard-constraint gate (map line 1517) — an
+/// unverified axis is "nobody has said", not "cannot", and only costs a
+/// `capability_fit` contribution.
 ///
-/// `hard_capabilities` carries `TaskClassification::hard_capabilities()`'s own
-/// output (`super::classify`) so [`capability_fit`] has something to compare
-/// a destination's registry entry against, and so does the hard-constraint
-/// gate (map line 1517): ruling 4 of the `GH-ROUTING-CAPABILITY` packet gives
-/// capability mismatch exactly one rejecting exception — a hard capability
-/// the resource is *established* to lack — and `session::hard_constraint`
-/// raises `HardConstraint::Capability` from exactly that reading
-/// (`session::is_adequate`). An unverified axis is "nobody has said," not
-/// "cannot," and still only costs a candidate a `capability_fit` contribution.
-///
-/// `minimum_tier` also rejects (map line 1516), and
-/// it rejects only a destination whose ceiling is *established* below it —
-/// see [`Destination::with_tier_ceiling`]. `classification` is the answer
-/// the requirements were built from, carried so the explanation can say who
-/// classified the work and whether line 1459's conservative rules fired;
-/// `None` for a caller with no task in hand, which is every launch that
-/// states none and therefore reproduces the pre-classification explanation
-/// byte for byte.
+/// `minimum_tier` also rejects (map line 1516), only when a destination's
+/// ceiling is *established* below it — see
+/// [`Destination::with_tier_ceiling`]. `classification` is `None` for a
+/// caller with no task in hand, reproducing the pre-classification
+/// explanation byte for byte.
+// History: design-decisions.md, "Trims: routing module docs, second packet", routing/session/mod.rs `TaskRequirements`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TaskRequirements {
     /// Whether the work needs the harness's tool-call protocol to work.
@@ -1879,35 +1839,24 @@ impl SessionRouter {
         self.gate(destinations, inputs).rejected
     }
 
-    /// Choose where this work goes — the router's one production entry point.
+    /// Choose where this work goes — the router's one production entry
+    /// point. `current` is where the work is now (`None` at session
+    /// start); `destinations` is every place it could go, in the caller's
+    /// order, the tiebreaker throughout this module's siblings. `None`
+    /// only when `destinations` is empty **and** there is no current
+    /// destination to hold.
     ///
-    /// `current` is where the work is now: `None` at a session start.
-    /// `destinations` is every place it could go, in the caller's own order,
-    /// which is the tiebreaker exactly as it is everywhere else in this
-    /// module's siblings.
-    ///
-    /// `None` only when `destinations` is empty **and** there is no current
-    /// destination to hold — there is nowhere for the work to go, and
-    /// inventing one would be worse than saying so.
-    ///
-    /// # Order
-    ///
-    /// 1. **Line 1592's boundary gate.** Mid-turn, nothing is ranked and the
-    ///    current destination is returned with an explanation saying why.
-    ///    [`RoutingOverride::and_route_now`] is the one thing that lifts it.
-    /// 2. **Hard constraints**, through
-    ///    [`super::apply_hard_constraints`] and therefore structurally: a
-    ///    task that needs tool calls cannot go where they are established not
-    ///    to work, a harness that cannot speak the route's protocol at all
-    ///    cannot serve it, and a destination established to serve below the
-    ///    classified minimum tier cannot serve the work (line 1516).
-    /// 3. **The soft contributions** (lines 1595–1600, the capability fit,
-    ///    and — when a tier is stated — line 1531's tier fit), summed by
-    ///    [`RoutingExplanation::total`]. None of them can exclude a
-    ///    destination; only step 2 can.
-    /// 4. **The user's override** (line 1602), applied over the ranking and
-    ///    never over step 2, with the automatic answer recorded so a reader
-    ///    can see what was overruled.
+    /// Order: (1) line 1592's boundary gate — mid-turn, nothing is ranked
+    /// and the current destination returns with an explanation, unless
+    /// [`RoutingOverride::and_route_now`] lifts it; (2) hard constraints
+    /// via [`super::apply_hard_constraints`], structurally excluding a
+    /// destination (tool calls, protocol, minimum tier — line 1516); (3)
+    /// soft contributions (lines 1595–1600, capability fit, tier fit),
+    /// summed by [`RoutingExplanation::total`] — none of these can
+    /// exclude; (4) the user's override (line 1602), applied over the
+    /// ranking and never over step 2, recorded so a reader can see what
+    /// was overruled.
+    // History: design-decisions.md, "Trims: routing module docs, second packet", routing/session/mod.rs `fn choose`.
     pub fn choose(
         &self,
         moment: RoutingMoment,
@@ -2084,30 +2033,19 @@ impl SessionRouter {
         let (ranked_index, refusal) = self.apply_override(&scored, current, &rejected);
         let overrode = (scored[ranked_index].0.id() != automatic_id).then(|| automatic_id.clone());
 
-        // Step 5, map line 1970: the post-ranking reselection. It runs after
-        // the override and over the same already-gated list, so it can only
-        // move the work to a candidate every hard constraint already
-        // admitted — which is how line 1971's rules hold under fallback
-        // pressure without a second check.
+        // Step 5, map line 1970: the post-ranking reselection. It runs
+        // after the override, over the same already-gated list, so it can
+        // only move the work to a candidate every hard constraint already
+        // admitted (line 1971).
         //
-        // **It never moves an account the user named.** An override *"may
-        // overrule a ranking and not a fact about what can serve"*, and this
-        // is neither: it is Glasshouse preferring one admissible account
-        // over another, which is exactly the choice a person who named the
-        // account has already made. Their account being throttled is a thing
-        // the explanation tells them — the throttling term is right there in
-        // the block — not a thing to overrule them about.
-        //
-        // *Named the account*, and not merely used an override: `--to` with
-        // a bare `fresh:<harness>:<profile>` names the **profile**, and
-        // [`destination_answers_to`] records that the ranking still chooses
-        // the account among that profile's candidates (line 1969). So a
-        // prefix override, and `--fresh`, leave the account to Glasshouse
-        // and the fallback applies to it; only an exact id — `@<account>`
-        // included — and `--hold`, which says *stay where you are*, take the
-        // account out of Glasshouse's hands. An override that was refused
-        // leaves the ranking's own answer standing, and the fallback applies
-        // to that.
+        // It never moves an account the user named: naming an exact id
+        // (`@<account>`) or `--hold` takes the account out of Glasshouse's
+        // hands, while a bare `fresh:<harness>:<profile>` or `--fresh`
+        // names only the profile, leaving the account — and the fallback
+        // — to Glasshouse (line 1969). An override that was refused leaves
+        // the ranking's own answer standing, and the fallback applies to
+        // that.
+        // History: design-decisions.md, "Trims: routing module docs, second packet", routing/session/mod.rs post-ranking reselection comment in `fn choose`.
         let user_chose = refusal.is_none()
             && match self.user_override.destination() {
                 Some(DestinationChoice::To(id)) => id == scored[ranked_index].0.id(),

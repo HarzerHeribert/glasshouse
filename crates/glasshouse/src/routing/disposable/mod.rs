@@ -204,34 +204,19 @@ impl std::fmt::Display for NoResource {
 /// line 1290, *"allow the user to override reserve protection for a specific
 /// task or session"*.
 ///
-/// # Why this is a pair and not a boolean
+/// The scope is part of the value rather than a bare `bool`: one half is the
+/// set of sessions the user named, the other is the session this routing
+/// instance is deciding for, and [`ReserveOverride::applies`] is true only
+/// where the two meet. There is deliberately no constructor meaning
+/// "everywhere" — a user who wants two sessions overridden names two
+/// sessions — and [`ReserveOverride::default`] is the empty override every
+/// caller predating this line already gets.
 ///
-/// [`crate::provider::quota::ReserveDecisionInputs::user_override`] is a
-/// `bool`, and a `bool` is all a policy function should need. The scope
-/// belongs one level up, here, because a boolean *setting* would be a
-/// different capability from the one line 1290 asks for: set once, it would
-/// spend protected reserve for every job in every session for ever, and no
-/// reason string could say on whose behalf.
-///
-/// So the scope is part of the value. One half is the set of sessions the
-/// user named; the other is the session this routing instance is deciding
-/// for; and [`ReserveOverride::applies`] is true only where the two meet.
-/// **There is deliberately no constructor meaning "everywhere"** — a user who
-/// wants two sessions overridden names two sessions — and
-/// [`ReserveOverride::default`] is the empty override that every caller
-/// predating this line already gets.
-///
-/// # The task half of "task or session", which is not built
-///
-/// Only the session half exists, because only the session half has an
-/// identifier on this path. A disposable job carries a [`JobKind`] —
-/// `memory-extraction` or `classification` — which names a *class* of work
-/// rather than one task, so a `JobKind`-scoped override would be a
-/// category-wide switch wearing a scope's clothes: precisely the shape the
-/// paragraph above refuses. Nothing in this build gives one disposable job an
-/// identity its successor does not share, so there is nothing narrower to
-/// name. The line is a disjunction and the session half is real; the task
-/// half is recorded here as absent rather than approximated.
+/// Only the session half of "task or session" is built: a disposable job's
+/// [`JobKind`] names a *class* of work, not one task, so a `JobKind`-scoped
+/// override would be a category-wide switch wearing a scope's clothes. The
+/// task half is recorded here as absent rather than approximated.
+// History: design-decisions.md, "Trims: routing module docs, second packet", routing/disposable/mod.rs `ReserveOverride`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ReserveOverride {
     /// The sessions the user named, as
@@ -297,35 +282,20 @@ impl ReserveOverride {
 /// A declaration that a session's current task is nearly complete —
 /// capability map lines 1294 and 1610.
 ///
-/// # Why this is a pair, and why it is not [`ReserveOverride`]
-///
-/// [`crate::provider::quota::ReserveDecisionInputs::task_nearly_complete`]
-/// is a `bool`, and a `bool` is all a policy function should need. The scope
-/// belongs one level up, here, for [`ReserveOverride`]'s reason: a boolean
-/// *setting* would spend protected reserve for every job in every session
-/// for ever, and no reason string could say on whose behalf.
-///
-/// It is a second type rather than a second use of `ReserveOverride`
-/// because the two carry different statements from different places. An
-/// override says *spend the reserve on this session anyway*, and it comes
-/// from configuration, where being sticky is correct. A declaration says
-/// *this session's current task is nearly done*, it comes from a store row
-/// written by `glasshouse task-progress`, and being sticky would be the
-/// defect: the field it feeds is the first branch the reserve policy takes,
-/// so a statement outliving the task it described would keep the reserve
-/// open on behalf of work that finished. Merging them would put one word on
-/// two facts with opposite storage requirements.
-///
-/// # Nothing here infers anything
+/// It is a second type rather than a second use of [`ReserveOverride`]: an
+/// override says *spend the reserve on this session anyway* and comes from
+/// configuration, where being sticky is correct. A declaration says *this
+/// session's current task is nearly done*, comes from a store row written by
+/// `glasshouse task-progress`, and being sticky would be the defect — a
+/// statement outliving the task it described would keep the reserve open on
+/// behalf of work that finished.
 ///
 /// The set is what somebody declared, read back from
 /// `crate::session::SessionStore::active_task_progress`, which reports no
-/// declaration that has expired or whose session is no longer live. There is
-/// deliberately no constructor meaning "everywhere" and no derivation from a
-/// turn count, an elapsed time or any other observable — see the field's own
-/// doc comment for why a proxy inverts the policy rather than approximating
-/// it. [`DeclaredTaskProgress::default`] is the empty declaration that every
-/// caller predating these lines already gets, and it can never match.
+/// expired or no-longer-live declaration. There is deliberately no
+/// constructor meaning "everywhere" and no derivation from a turn count, an
+/// elapsed time or any other observable.
+// History: design-decisions.md, "Trims: routing module docs, second packet", routing/disposable/mod.rs `DeclaredTaskProgress`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DeclaredTaskProgress {
     /// The sessions whose operators declared their current task nearly
@@ -598,68 +568,24 @@ impl DisposableRouting {
 
     /// Choose a resource for one bounded job.
     ///
-    /// # The order, and where each step comes from
+    /// Order: hard constraints (map line 1553) remove any candidate this
+    /// policy could never use, structurally; zero-headroom candidates
+    /// (line 1434) are removed outright, never merely ranked last — an
+    /// absent reading never eliminates, see
+    /// `an_absent_capacity_reading_never_eliminates_a_candidate`; a pinned
+    /// free resource wins outright or the job fails (line 536, 1552); free
+    /// resources are tried in the user's own order (line 530); a metered
+    /// resource is used only when [`MeteredUse`] permits it (line 539) and
+    /// the reserve policy allows it (line 1550), ranked by `score`.
     ///
-    /// 1. **Hard constraints first, structurally** (map line 1553):
-    ///    [`apply_hard_constraints`] removes any candidate this policy could
-    ///    never use — a candidate whose entitlement's rules do not serve this
-    ///    job's kind (map line 1947's third clause, refused as
-    ///    [`HardConstraint::Entitlement`] by the entitlement's name; the
-    ///    refusal rides the winner's explanation, and when nothing survives
-    ///    the error names every one), and the metered candidates
-    ///    [`MeteredUse`] withholds, named [`HardConstraint::UserConstraint`]
-    ///    because line 568 calls a user's own opt-in rule exactly that. A
-    ///    candidate that fails this is unrepresentable to the scorer below,
-    ///    not merely given a large negative weight.
-    /// 2. **Zero-headroom candidates are removed, not merely ranked last**
-    ///    (map line 1434). A candidate whose [`CandidateCapacity`], carried on
-    ///    [`DisposableCandidate::with_capacity`], is *known* to read zero
-    ///    remaining headroom — no requests-per-minute (or other bound
-    ///    dimension) capacity left — cannot serve, so it is dropped here,
-    ///    before either the free loop or the metered-fallback loop below ever
-    ///    sees it. An **absent** reading never eliminates: nothing being known
-    ///    about a candidate is not the same claim as "this candidate is
-    ///    exhausted", and turning "no telemetry" into "full" is the
-    ///    fabrication this project refuses everywhere else — see
-    ///    `tests/routing_disposable_tier.rs`'s
-    ///    `an_absent_capacity_reading_never_eliminates_a_candidate`.
-    ///    Removing rather than scoring low also means this step runs *before*
-    ///    the free loop below walks the user's own order, so a candidate that
-    ///    survives is never reordered by it — only ever removed outright.
-    /// 3. **A pinned free resource wins outright** (line 536, 1552). If it
-    ///    cannot serve, the job fails rather than silently going elsewhere —
-    ///    a pin is a hard rule, never a scored preference, the same design
-    ///    decision Phase 9J's `PairingPreference::Pin` already made.
-    /// 4. **Free resources, in the user's own order**, skipping disabled ones
-    ///    (line 536) and any whose health or allowance says it cannot serve
-    ///    right now (lines 529, 535, 538). This is line 530's "prefer free
-    ///    models for bounded Glasshouse support work", and line 531 falls out
-    ///    of it: a model is in this list because the user marked it free, so
-    ///    an explicitly configured free model such as a Nemotron variant
-    ///    participates without this function knowing any model's name.
-    /// 5. **A metered resource**, only when [`MeteredUse`] permits it
-    ///    (line 539) *and* Phase 32F's protected-reserve policy allows
-    ///    spending it (line 1550) — ranked by this policy's own `score`
-    ///    when more than one survives the reserve gate.
-    ///
-    /// Every candidate this function actually reaches is scored by this
-    /// policy's own `score` method (map line 1530), and the winner's
-    /// [`RoutingExplanation`] travels home on
-    /// [`DisposableChoice::explanation`] (line 1554). The free-tier winner is
-    /// still the first available candidate in the user's own order, exactly
-    /// as before this batch — every input this build can populate for a free
-    /// candidate (cost, order position) is monotonic in that same order, and
-    /// an absent capacity or reset reading contributes `0.0` for every
-    /// candidate alike, so scoring never disagrees with it; see
+    /// The free-tier winner is always the first available candidate in the
+    /// user's order — never reordered by score — per
     /// `tests::scoring_never_reorders_the_existing_free_selection`.
-    ///
-    /// `classification` is this job's Phase 35 [`TaskClassification`], when a
-    /// caller has one — [`TaskClassification::conservative_workload_tier`]
-    /// becomes the metered-fallback path's [`WorkloadTier`] (map line 1550's
-    /// `tier` input), replacing the fixed [`WorkloadTier::Leaf`] this policy
-    /// used before a classification existed to ask. `None` keeps that fixed
-    /// [`WorkloadTier::Leaf`] behaviour exactly as it was: a caller with
-    /// nothing to classify is not made to guess.
+    /// `classification`, when given, feeds the metered-fallback path's
+    /// [`WorkloadTier`] (map line 1550); `None` keeps the fixed
+    /// [`WorkloadTier::Leaf`] behaviour a caller with nothing to classify
+    /// always got.
+    // History: design-decisions.md, "Trims: routing module docs, second packet", routing/disposable/mod.rs `fn choose`.
     pub fn choose(
         &self,
         job: JobKind,
@@ -917,54 +843,24 @@ impl DisposableRouting {
         self.choice(job, candidate, reason, explanation)
     }
 
-    /// Map lines 1441 and 1442, for the one caller they name —
-    /// `automatic_classification_choice`'s `glasshouse classify` decision —
-    /// and deliberately not folded into [`Self::choose`] itself.
+    /// Map lines 1441 and 1442, for `automatic_classification_choice`'s
+    /// `glasshouse classify` decision, deliberately not folded into
+    /// [`Self::choose`]: stickiness here is scoped to automatic
+    /// classification alone.
     ///
-    /// # Why this is a second function rather than a flag on `choose`
+    /// `retained` is supplied by the caller — expected to be
+    /// `crate::provider::telemetry::RoutingStickyCache::load` — so this
+    /// function opens no cache or connection itself
+    /// (`tests::no_routing_policy_can_make_a_request`).
     ///
-    /// This module's own header states the separation as a design principle:
-    /// the disposable policy "prefers free capacity and re-decides every
-    /// time", against the interactive policy's "keeps what it has". Giving
-    /// `choose` a retained pick to consult would blur that for every
-    /// [`JobKind`] it serves — memory extraction, reranking, evaluation —
-    /// none of which map lines 1441/1442 name. Stickiness here is scoped to
-    /// automatic classification alone, so it stands beside `choose`, calling
-    /// it unchanged, rather than reaching inside it.
-    ///
-    /// # Purity is preserved the same way `choose` preserves it
-    ///
-    /// `tests::no_routing_policy_can_make_a_request` (`routing/mod.rs`) holds
-    /// this module to reading no telemetry itself. This function does not
-    /// break that: `retained` is supplied by the caller, exactly as
-    /// `candidates` and `pool` already are — nothing here opens a cache or a
-    /// connection. The caller is expected to be
-    /// `crate::provider::telemetry::RoutingStickyCache::load`, and to persist
-    /// the returned pick with `RoutingStickyCache::store` on the
-    /// [`AutomaticClassificationDecision::Fresh`] arm.
-    ///
-    /// # The honesty invariant (map line 1441)
-    ///
-    /// A retained pick is returned **only** when all three hold: it is still
-    /// inside [`AUTOMATIC_CLASSIFICATION_STICKY_WINDOW_SECONDS`], it names a
-    /// candidate still present in `candidates`, and that candidate is a free
-    /// resource `pool` still reports available. A pick that fails any of
-    /// these gets a fresh call to [`Self::choose`] instead — stickiness never
-    /// outlives the healthiness it was predicated on. A **metered** retained
-    /// pick always falls through to a fresh decision too: `pool` is the only
-    /// health signal this build has for a free resource
-    /// (`docs/product/evidence/phase-34c.md`'s 1433 entry: "the health pool
-    /// reaches only free candidates"), so there is nothing honest to check a
-    /// metered pick's continued health against, and inventing one would
-    /// repeat the same fabrication line 1434's elimination step refuses.
-    ///
-    /// # The retained arm's explanation is not `score`'s output
-    ///
-    /// No ranking runs when a pick is retained, so the [`DisposableChoice`]
-    /// built here carries a [`RoutingExplanation`] that says exactly that —
-    /// reused without re-ranking, and its age — rather than a synthesised
-    /// comparison that never happened. See [`DisposableChoice`]'s
-    /// `explanation` field doc.
+    /// A retained pick is returned only when still inside
+    /// [`AUTOMATIC_CLASSIFICATION_STICKY_WINDOW_SECONDS`], naming a
+    /// candidate still present and still available in `pool` — a metered
+    /// pick always falls through to a fresh decision, since `pool` is the
+    /// only health signal this build has for a free resource. No ranking
+    /// runs when a pick is retained; the [`DisposableChoice`] built here
+    /// says so directly, see its `explanation` field doc.
+    // History: design-decisions.md, "Trims: routing module docs, second packet", routing/disposable/mod.rs `fn choose_for_automatic_classification`.
     pub fn choose_for_automatic_classification(
         &self,
         candidates: &[DisposableCandidate],
@@ -1008,28 +904,18 @@ impl DisposableRouting {
             });
         }
 
-        // Capability map lines 1420, 1421, 1438 and 1419: among the
-        // candidates the user has *not* placed in an explicit free-resource
-        // order, the classification preferences decide the order `choose`'s
-        // free loop walks. A stable sort on the preference total, so two
-        // candidates nothing is known about keep the caller's order exactly
-        // as before — and `FreePreferences::arrange` re-sorts by the user's
-        // own order afterwards, so a ranked candidate is never moved by
-        // this. The scoring invariant `choose` documents therefore still
-        // holds: it consults no score to pick a free winner; the order it is
-        // handed is what changed.
-        //
-        // `notes` — the same `Vec<Contribution>` `classification_verdict`
-        // just built for this candidate — is summed in alongside
-        // `classification_preferences` rather than left for the explanation
-        // alone: every requirement note in it is a fixed `0.0` except the
-        // 1419 *protected capacity* term, which is the one note in that list
-        // ruled to carry a real magnitude (`design-decisions.md`, *"The
-        // premium capacity a classifier protects"* — *"this line only
-        // orders"*). Summing the whole `notes` list rather than picking that
-        // term out by name costs nothing today (every sibling note is
-        // `0.0`) and asks nothing of a future note beyond the same
-        // convention.
+        // Capability map lines 1420, 1421, 1438 and 1419: among candidates
+        // the user has not placed in an explicit free-resource order, the
+        // classification preferences decide the order `choose`'s free loop
+        // walks — a stable sort so two candidates nothing is known about
+        // keep the caller's order, and `FreePreferences::arrange` re-sorts
+        // by the user's own order afterwards, so a ranked candidate is
+        // never moved by this. `notes` is summed in alongside
+        // `classification_preferences` because the 1419 *protected
+        // capacity* term is the one note with a real magnitude
+        // (`design-decisions.md`, "The premium capacity a classifier
+        // protects").
+        // History: design-decisions.md, "Trims: routing module docs, second packet", routing/disposable/mod.rs sort comment in `choose_for_automatic_classification`.
         admitted.sort_by(|(left, left_notes), (right, right_notes)| {
             let of = |candidate: &DisposableCandidate, notes: &[Contribution]| {
                 self.classification_preferences(candidate)
@@ -1381,26 +1267,23 @@ impl DisposableRouting {
     }
 
     /// What the user's background reserve policy did to the decision above —
-    /// capability map line 1577, on the one path that can reach it.
+    /// capability map line 1577, on the one path that can reach it. Always
+    /// rendered beside a reserve decision, not only when the policy changed
+    /// the answer, so a reader can see which of the two configured policies
+    /// was consulted.
     ///
-    /// Always rendered beside a reserve decision rather than only when the
-    /// policy changed the answer, so a reader of a support job's rationale
-    /// can see *which* of the two configured policies was consulted. A line
-    /// that appeared only on the overriding case would leave the ordinary
-    /// case looking as though no scope had been chosen at all.
-    ///
-    /// The band is reported as it was read, and "unread" is said rather than
-    /// filled in: [`Self::choose`]'s gate substitutes
-    /// [`CapacityBand::Plenty`] for an absent reading because
-    /// `evaluate_reserve_spend` needs a band, and printing that substitution
-    /// here as though it were an observation is the fabrication this module
-    /// refuses everywhere else.
+    /// The band is reported as it was read; "unread" is said rather than
+    /// filled in, since [`Self::choose`]'s gate substitutes
+    /// [`CapacityBand::Plenty`] for an absent reading only to satisfy
+    /// `evaluate_reserve_spend`'s own input, and printing that substitution
+    /// as an observation would be the fabrication this module refuses
+    /// everywhere else.
     ///
     /// The denied-and-`Protect` arm is unreachable from [`Self::choose`],
-    /// which drops such a candidate before scoring it. It is written out
-    /// rather than collapsed into an `unreachable!` because the pair is
-    /// total and a future caller that scores without gating should get a
-    /// true sentence rather than a panic.
+    /// which drops such a candidate before scoring it; it is written out
+    /// rather than collapsed into `unreachable!` because a future caller
+    /// that scores without gating should get a true sentence, not a panic.
+    // History: design-decisions.md, "Trims: routing module docs, second packet", routing/disposable/mod.rs `fn background_reserve_policy_note`.
     fn background_reserve_policy_note(
         &self,
         value: &DisposableCandidate,
@@ -1601,50 +1484,24 @@ impl DisposableRouting {
 }
 
 /// Whether a resource *other than* `metered[index]` could serve this job
-/// without spending anybody's protected reserve — capability map line 1288's
-/// input to [`evaluate_reserve_spend`], and the only way that line's own
-/// branch is reachable from production.
+/// without spending anybody's protected reserve — capability map line
+/// 1288's input to [`evaluate_reserve_spend`], and the only way that
+/// line's own branch is reachable from production.
 ///
-/// # "Cheaper" is read here, not invented
+/// "Cheaper" is read here, not invented: [`Cost`] knows only
+/// free-or-metered, so [`CapacityBand`]'s own [`Ord`] (with
+/// [`CapacityBand::Exhausted`] lowest) is the comparison
+/// [`ReserveDecisionInputs::cheaper_adequate_resource_exists`] asks for.
+/// Only a candidate whose band has actually been *read* counts — an
+/// unknown band is never a cheaper resource, the same refusal
+/// [`CandidateCapacity::band`]'s own `None` makes, pointed the other way.
 ///
-/// The question sounds like it needs a price list, and Glasshouse has none:
-/// [`Cost`] knows only free-or-metered and never compares two metered models
-/// against each other. But
-/// [`ReserveDecisionInputs::cheaper_adequate_resource_exists`] states its own
-/// meaning, in the phase that owns the policy — *"whether a resource outside
-/// the reserve band could adequately serve this task instead"*. So "cheaper"
-/// is already denominated in the currency this policy protects, which is
-/// reserve capacity rather than money, and [`CapacityBand`] is [`Ord`] with
-/// [`CapacityBand::Exhausted`] lowest precisely so a policy can ask that as a
-/// comparison. Reading that definition is the whole of this function.
-///
-/// # An unknown band is not a cheaper resource
-///
-/// Only a candidate whose band has actually been *read* counts. A metered
-/// resource nothing has been observed about may be deep in its own protected
-/// reserve for all Glasshouse knows, and denying a spend on the strength of
-/// it would invent exactly the judgement this input exists to avoid.
-/// [`CandidateCapacity::band`]'s own `None` already refuses to withhold a
-/// resource by a band never observed; this is the same refusal pointed the
-/// other way, at the resource being offered as an alternative.
-///
-/// # Free candidates are not consulted, and that is not an omission
-///
-/// Reaching [`DisposableRouting::choose`]'s metered loop has already proved
-/// no free resource can serve: that loop returns on the first available one,
-/// and [`FreePreferences::arrange`] has already dropped the ones the user
-/// disabled. A resource that cannot serve now is not one that "could
-/// adequately serve this task instead".
-///
-/// # What "adequately" leans on
-///
-/// This module has no per-candidate capability model, and does not acquire
-/// one here: every eligible candidate is a model the user configured for this
-/// provider that survived [`apply_hard_constraints`]. Treating those as
-/// interchangeable for a bounded internal job is the assumption the free loop
-/// above already ships — it returns the first *available* candidate in the
-/// user's own order, never the most capable one — and this function inherits
-/// it rather than introducing it.
+/// Free candidates are not consulted: reaching this loop has already
+/// proved no free resource can serve. No per-candidate capability model
+/// is consulted either — every eligible candidate already survived
+/// [`apply_hard_constraints`], the same interchangeable-candidate
+/// assumption the free loop above ships.
+// History: design-decisions.md, "Trims: routing module docs, second packet", routing/disposable/mod.rs `fn cheaper_adequate_resource_exists`.
 fn cheaper_adequate_resource_exists(
     metered: &[&EligibleCandidate<DisposableCandidate>],
     index: usize,
