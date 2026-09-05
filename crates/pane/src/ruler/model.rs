@@ -48,8 +48,16 @@ pub struct Task {
     pub commit: &'static str,
     /// What the harness is told to do. Equal across harnesses, by construction.
     pub statement: &'static str,
-    /// The commit's own test command, run by the ruler after the harness stops.
-    pub test: &'static [&'static str],
+    /// The commit's own test commands, run by the ruler after the harness
+    /// stops, in order; the task completes only if every one of them exits 0.
+    ///
+    /// Each inner slice is a **complete command** — program first, arguments
+    /// after — because four tasks carry two invocations (`ruler.md` §2's
+    /// `S1`, `H1`, `H2`, `H4`) and one carries a shell script rather than
+    /// cargo (`H3`). A single flat argv could express neither: concatenating
+    /// two cargo invocations turns the second target selector into a
+    /// test-name filter over both, which runs something else entirely.
+    pub test: &'static [&'static [&'static str]],
     /// The commit's own changed-line count. An attempt whose diff is under a
     /// tenth of this is reported `pass (suspect)` with the figure — the ruler
     /// does not judge the diff, it prints the number that makes a human look.
