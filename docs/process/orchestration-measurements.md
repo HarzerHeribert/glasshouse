@@ -5384,3 +5384,17 @@ Closed these waves: **1304 → 1305**.
 **Findings.**
 
 36. **The first sweep to finish all sixteen cells since 15:46 was `d91cd7a` at 19:40, and it read: 12 green — every msrv cell, lint, audit, both pane cells — and four `declared` reds, each attributed from one grep per cell within twenty minutes.** Two were the load-sensitive `terminal_loss` family (macOS resize 2/8 at 4 ms; Ubuntu hangup 1/15) on `declared` runners while the same tests passed on the sibling msrv cells of the same run — the shape §91 describes, and the third strike that buys a determinism packet. One was a Windows-only clippy lint that no local clippy can see and that `--target x86_64-pc-windows-msvc` cannot check here because `ring`'s C build wants Windows headers; the Windows cells are that check. Read the failed *step*, not the cell colour: two of the four reds were not tests.
+
+### Waves 132–134 — 2026-09-05, night: two more trims, a stop condition that fired correctly, and a ruling decided by the worker's numbers
+
+| package | tier | result |
+|---|---|---|
+| `GH-TRIM-GATEWAY-MOD` · `GH-TRIM-API-PROTOCOL` | Sonnet medium, Green | 584 → 489 and 468 → 392 comment lines; six and seven items moved verbatim behind pointers; filtered diffs empty; test counts unchanged. `gateway/mod.rs`'s module doc stays at 43 lines as the packet's one allowed exception — five security invariants. Seven files trimmed under 2053. |
+| `GH-TERMINAL-LOSS-DETERMINISM-2` | Sonnet high, Amber | **partial, then complete.** The packet asked for slop-gated tolerances; the worker measured first, hit the stop condition, and reported: the reverted rounding line yields at most 2 of 8 stalls at 4 ms even under 56 spinners (the fixed tree 0–1), and eight spinners leave this box at ~270 µs slop, under the 500 µs threshold. Ruling from those numbers: `MAX_STALLS[0] = 3` unconditionally (the 4 ms gap never discriminated the defect; the 500 µs gap is the proof), hangup retry-once unconditional and printed. Mutation KILLED in both regimes; spinners killed by PID. Fixes the resize red on macOS declared (three runs). |
+| rule 4 rerun, run 33982138652 | orchestrator | `gateway::conformance::a_rebind_during_an_in_flight_exchange_is_still_attributed_to_the_binding_that_dispatched_it` (a fixed 2 s deadline inside the parallel `--lib` run) red on both macOS cells, green on both after one rerun — a flaky-pass, no write-up; the resize test alone stayed red until `982a6f2`. 15/16, then 16/16 expected on `982a6f2`. |
+| `GH-TRIM-MIGRATIONS-V14` · `GH-TRIM-GATEWAY-INGRESS` (live) | Sonnet, Green | the 132- and 184-line blocks; the ingress packet carries an extra rule for rulings other records cite by wording. |
+
+**Findings.**
+
+37. **A stop condition that fires is the packet working, and the numbers it returns are worth more than the tolerance it was asked to pick.** The determinism-2 packet guessed at a slop-gated shape; the worker's measurements showed the gate would never engage where the failures happen and the 4 ms assertion never discriminated the defect. The ruling took twenty minutes and one relay because the worker brought a table instead of a number. Write the stop condition as a measurement threshold, not a judgment, and it does this every time.
+38. **`cli.rs` is not a trim candidate** despite 67 % comment lines: its `///` on clap arguments is the `--help` text, so a comment cut there is a behaviour change. Comment share alone does not pick a trim; whether the comment is *rendered* does.
