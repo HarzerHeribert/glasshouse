@@ -1,37 +1,22 @@
 //! Free-text search over project memory (Phase 23).
 //!
-//! Declared ahead of its implementation so that the module owning it never has
-//! to edit `memory/mod.rs`, which another worker holds.
-//!
 //! # Free-form text is not FTS5 syntax
 //!
-//! FTS5's query language treats `"`, `*`, `:`, `^`, `-`, `(`, `)`, `NEAR`,
-//! `AND`, `OR` and `NOT` as operators. A user is typing a question, not a
-//! query language, so `sanitize_query` tokenizes on anything that is not a
-//! letter or digit and wraps every token in double quotes — a quoted phrase
-//! is FTS5's escape hatch for "treat this text literally" — doubling any
-//! embedded `"` the way SQL string literals do. The result is passed to
-//! `MATCH` as a bound parameter, never interpolated: the only SQL this module
-//! ever builds from something other than a fixed literal is a column list it
-//! wrote itself.
+//! FTS5's query language treats `"`, `*`, `:`, `^`, `-`, `(`, `)`, `NEAR`, `AND`, `OR` and `NOT` as
+//! operators. The result is passed to `MATCH` as a bound parameter, never interpolated: the only
+//! SQL this module ever builds from something other than a fixed literal is a column list it wrote
+//! itself.
 //!
 //! # What the index covers
 //!
-//! `memories_fts` indexes `subject`, `body` and — from migration 6 —
-//! `rationale`. The rationale is searchable because until that migration it
-//! *was* the body: the extractor folded it in behind a marker precisely so a
-//! search for the reason would find the decision. The eight other Phase 21B
-//! provenance columns are deliberately not indexed; they describe a decision
-//! somebody has already found rather than supplying the words they would
-//! look for, and every indexed column shifts BM25's weighting of the ones
-//! that matter.
+//! `memories_fts` indexes `subject`, `body` and — from migration 6 — `rationale`.
 //!
 //! # BM25 direction
 //!
-//! SQLite's `bm25()` returns a *more negative* number for a *better* match.
-//! `ORDER BY bm25(memories_fts) ASC` therefore puts the best match first —
-//! this is asserted directly in the integration tests rather than trusted by
-//! reading the manual once.
+//! SQLite's `bm25()` returns a *more negative* number for a *better* match. `ORDER BY
+//! bm25(memories_fts) ASC` therefore puts the best match first — this is asserted directly in the
+//! integration tests rather than trusted by reading the manual once.
+// History: design-decisions.md, "Trims: memory/search.rs", module doc.
 
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -69,30 +54,19 @@ pub const DEFAULT_SEARCH_LIMIT: usize = 20;
 
 /// What a file-path retrieval is *for* — map line 1141.
 ///
-/// The map asks Glasshouse to *"prefer constraints, decisions, and failed
-/// approaches when retrieving memory for an intended code edit"*, and the
-/// operative words are **for an intended code edit**: the same file, asked
-/// about for two different reasons, should not come back in two different
-/// orders unless the caller said which reason it had. So this is an argument
-/// to [`MemoryStore::for_path`] rather than a mode the store guesses from
-/// context.
-///
 /// # Where the preference is allowed to act, and where it is not
 ///
-/// Inside a [`LadderRung`] and nowhere else. Phase 21E's rule — an idea never
-/// outranks an invariant, however well it matched — is the rung ordering, and
-/// it stays the primary key under both intents. A `CodeEdit` retrieval
-/// reorders *within* a rung and cannot promote anything across one; a
-/// constraint-shaped memory that is not current is still below a current
-/// decision afterwards.
+/// Inside a [`LadderRung`] and nowhere else. Phase 21E's rule — an idea never outranks an
+/// invariant, however well it matched — is the rung ordering, and it stays the primary key under
+/// both intents.
 ///
 /// # A fixed kind class, never a number
 ///
-/// The preference is expressed as [`MemoryKind`] membership, not as a weight
-/// added to `retrieval_weight`. A number would have to be calibrated against
-/// BM25 relevance and against decay — neither of which is on a scale anything
-/// here can compare a kind to — and would silently change how far the
-/// preference reaches as either of those moved.
+/// The preference is expressed as [`MemoryKind`] membership, not as a weight added to
+/// `retrieval_weight`. A number would have to be calibrated against BM25 relevance and against
+/// decay — neither of which is on a scale anything here can compare a kind to — and would silently
+/// change how far the preference reaches as either of those moved.
+// History: design-decisions.md, "Trims: memory/search.rs", `RetrievalIntent` doc.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RetrievalIntent {
     /// *"What is this file associated with?"* — today's order, byte for
@@ -191,65 +165,12 @@ impl RetrievalResult {
     /// `None` is a real answer and the only honest one for a memory this
     /// retrieval never saw: there is no relevance to report, and a zero would
     /// be a fabrication that reads as "matched as badly as possible" rather
-    /// than "was not asked about". A search that matched nothing therefore
-    /// answers `None` to every question, rather than `Some(0.0)` to some of
-    /// them.
-    ///
-    /// It is also the answer for **every** memory in a result
-    /// [`MemoryStore::for_path`] produced, and for the same reason one step
-    /// further out: that door retrieves by an exact file-path match and asks
-    /// no question, so none of the memories it returns was scored by
-    /// anything. "Was not asked about" is exactly what happened to them.
-    ///
-    /// # This is a relevance, and it is deliberately not a confidence
-    ///
-    /// SQLite's `bm25()` scores how well one memory's indexed text matched
-    /// one query against **this project's own corpus statistics** — term
-    /// frequency, document length, and how many other memories in this table
-    /// contain the same terms. More negative is a better match (see the
-    /// module documentation), so the scale is unbounded below and has no
-    /// natural zero.
-    ///
-    /// Three consequences, and each one is a reason not to threshold it:
-    ///
-    /// - **It is not calibrated.** The same number means different things for
-    ///   two different queries, and for the same query against two different
-    ///   projects. There is no constant of which *"below this, the retrieval
-    ///   was poor"* is a true statement, so a threshold would be a number
-    ///   somebody picked rather than a fact about the retrieval.
-    /// - **It is not the order the results came back in.**
-    ///   [`MemoryStore::search`] ranks by [`LadderRung`] first, breaks ties
-    ///   *within* one rung by this number multiplied by a decay weight, and
-    ///   then `demote_thin_decisions` permutes again. Reading it as "why this
-    ///   memory came first" is wrong across rungs.
-    /// - **It measures the match, not the memory.** Whether a memory is worth
-    ///   putting into a session's context is a question about the memory's
-    ///   authority, currency and scope. None of those is in here.
+    /// than "was not asked about".
     ///
     /// So map line 1129 — *"avoid injecting memory when retrieval confidence
     /// is low"* — is **not** satisfied by comparing this against a constant,
-    /// and [`super::inject::briefing`] still refuses it. That function's
-    /// documentation carries the three objections that survive this method
-    /// existing.
-    ///
-    /// # Why the raw match and not the blended ranking score
-    ///
-    /// [`MemoryStore::search`] also computes `relevance × retrieval_weight` —
-    /// the number it actually sorts on inside a rung. That one is not offered
-    /// here, and the difference is the whole reason this method is worth
-    /// having: `super::policy::retrieval_weight` reads a memory's authority,
-    /// age, validation state and project phase and **never sees the query
-    /// text**. Blending it in yields a number that is high for an ancient
-    /// invariant no matter what was asked — exactly the query-blind signal
-    /// `inject.rs` refuses to build a gate from. It is also wall-clock
-    /// dependent, so the same store and the same query yield a different
-    /// value tomorrow.
-    ///
-    /// The raw match is the one quantity in this module that varies with the
-    /// query and with nothing else. Anything inside this module that
-    /// genuinely wants the blend can compute it: the record carries its own
-    /// authority, timestamps and phase, and `retrieval_weight` is the same
-    /// function [`MemoryStore::search`] calls.
+    /// and [`super::inject::briefing`] still refuses it.
+    // History: design-decisions.md, "Trims: memory/search.rs", `RetrievalResult::relevance`.
     pub fn relevance(&self, id: &MemoryId) -> Option<f64> {
         self.relevances.get(id).copied()
     }
@@ -291,19 +212,11 @@ impl RetrievalResult {
 ///
 /// # `None` is *"was not asked about"*, and it is why this is an `Option`
 ///
-/// [`MemoryStore::for_path`] retrieves by an exact `memory_files.path` match.
-/// **It runs no query, so there is no relevance for it to supply** — and the
-/// alternative was to hand `group` a `0.0`, which would put a manufactured
-/// number into [`RetrievalResult`]'s private relevance map for a memory no
-/// query ever matched. That is precisely what the map is private to prevent,
-/// and [`RetrievalResult::relevance`] already says a zero there *"would be a
-/// fabrication that reads as 'matched as badly as possible' rather than 'was
-/// not asked about'"*.
-///
 /// Making the absence representable **strengthens** that invariant rather
 /// than piercing it: the map still holds only relevances an actual query
 /// produced, because `group` inserts nothing for a `None`, and the third door
 /// still gets the one grouping and the one ranking the other two get.
+// History: design-decisions.md, "Trims: memory/search.rs", `Scored` doc.
 #[derive(Debug, Clone)]
 struct Scored {
     record: MemoryRecord,
@@ -400,39 +313,12 @@ fn group(hits: Vec<Scored>) -> RetrievalResult {
 /// outrank an invariant regardless of how well it matched. Only within the
 /// same rung does the weight below decide the order.
 ///
-/// # Within a rung, and why the query-less door is not a second ranking
-///
-/// A queried hit is ordered by `relevance × retrieval_weight`, ascending.
-/// SQLite's `bm25()` is *more negative* for a better match (see the module
-/// documentation) and [`retrieval_weight`] is strictly positive, so ascending
-/// puts the best-matching, highest-weighted memory first — exactly the
-/// comparison [`MemoryStore::search`] has always made.
-///
-/// A hit with no relevance ([`MemoryStore::for_path`]) is ordered by
-/// `retrieval_weight` alone, descending, which is the **same** comparison
-/// with the one factor it does not have left out rather than replaced.
-/// Substituting a number for the missing factor is what this whole change
-/// exists to avoid: a `0.0` would collapse every product to zero and order
-/// the results by nothing at all, while still looking like a ranking.
-/// `retrieval_weight` never sees the query text — that is stated at
-/// [`RetrievalResult::relevance`] as the reason the blend is not offered to
-/// callers — so it remains an honest key when there is no query.
-///
-/// The mixed case cannot arise: a retrieval either ran a `MATCH` or did not,
-/// and both doors build every one of their hits the same way. [`Ordering::Equal`]
-/// is the answer that adds no claim if it ever does.
-///
 /// # Map line 1141, and where it sits in the comparison
 ///
 /// `intent` inserts **one** key, between the rung and the weight: under
 /// [`RetrievalIntent::CodeEdit`], a constraint, decision or failed attempt
-/// sorts ahead of a feature, finding or todo *in the same rung*. Above the
-/// weight so the preference is not something a large enough
-/// `retrieval_weight` can outvote — a kind preference that a number can
-/// overturn is not a preference — and below the rung so Phase 21E's rule
-/// still decides first. Under [`RetrievalIntent::Lookup`] the key is constant
-/// across every hit, so the comparison is byte-for-byte the one this function
-/// made before the argument existed.
+/// sorts ahead of a feature, finding or todo *in the same rung*.
+// History: design-decisions.md, "Trims: memory/search.rs", `rank` doc.
 fn rank(hits: &mut [Scored], now: i64, intent: RetrievalIntent) {
     let weight = |record: &MemoryRecord| {
         retrieval_weight(
@@ -567,78 +453,17 @@ const SUBJECT_COLUMN: &str = "subject";
 /// ("a" "b" "c") OR ({subject} : ("a" OR "b" OR "c"))
 /// ```
 ///
-/// — today's conjunctive query, unchanged, `OR`ed with a disjunctive one
-/// restricted to the `subject` column.
-///
-/// # The left half: nothing that is retrieved today stops being retrieved
-///
-/// `sanitize_query` joins its quoted tokens with spaces, which FTS5 reads as
-/// implicit `AND`: every word must appear in the same memory. That is right
-/// for a search box, where a person adds a word to narrow the result set, and
-/// it is wrong for a routed task, which is prose. *"Please look at the kestrel
-/// export and make sure it cannot write a partial file"* demands that one
-/// memory contain `please` and `look` and `sure` and `up`, so injection
-/// retrieved **nothing** for any task written as a sentence — the limit Phase
-/// 27 closed line 1126 with, named rather than hidden.
-///
 /// That expression is kept verbatim as the left disjunct, so the result set
 /// here is a **superset** of the one the search box gets, by construction
 /// rather than by test: whatever a keyword-shaped task retrieves today it
 /// still retrieves. This step only ever adds recall.
-///
-/// # The right half is line 930, and it is in the query rather than after it
-///
-/// *"Inject only memories whose scope overlaps the current task."* Joining
-/// prose with a bare `OR` makes membership almost free — one incidental word
-/// and a memory is a candidate — and `MemoryStore::search` ranks by
-/// [`LadderRung`] **before** relevance, so the top of a wide candidate set is
-/// this project's highest-authority memories whatever the task was about.
-/// Measured on a fifteen-memory corpus: a bare `OR` answered *"update the
-/// README with the new installation instructions"* with three binding
-/// invariants about pseudo-terminals, secrets and project isolation, matched
-/// on the word `the` alone.
 ///
 /// So the added disjunct is restricted to the `subject` column — the field
 /// where a memory records what it is *about*, and the field
 /// [`contradicts`] already treats as a memory's identity when deciding that
 /// two memories concern the same thing. A memory joins the candidate set on
 /// prose only if the task names its subject.
-///
-/// **Why this is not a relevance threshold wearing a different name.** It
-/// reads no score, sorts nothing, and cannot be satisfied by matching the
-/// same word harder; a memory whose body mentions the task's words a hundred
-/// times is still out if its subject is about something else. More to the
-/// point, a relevance threshold would not have worked: in the measurement
-/// above the noise was selected by *rung*, not by score, so no cut on `bm25()`
-/// could have removed it, and a stop-word or corpus-frequency filter could
-/// not either — for the task *"make sure it is up to date"* no term matched
-/// more than 47% of that corpus and every one of the three injected memories
-/// was still irrelevant.
-///
-/// A memory that records **no** subject cannot be judged this way and is not
-/// judged: it matches only through the left disjunct, which is exactly the
-/// behaviour it has today. That is the direction this project's requirement
-/// points — injection is strictly more recall, never less — and it is a real
-/// limit, recorded in `phase-27.md` rather than papered over.
-///
-/// # This is a second expression, not a second retrieval
-///
-/// Phase 27 refused line 1129 partly because a second BM25 query issued from
-/// `inject.rs` *"would be a second retrieval implementation ranking
-/// differently from the one that chose the memories it was scoring."* That
-/// objection is about **ranking**, and nothing here ranks: this function
-/// returns a `MATCH` expression and `MemoryStore::search_matching` — the same
-/// table, the same `bm25()`, the same ladder, the same decay weighting, the
-/// same thin-decision demotion — does the rest for both doors.
-///
-/// # The quoting is inherited, not re-implemented
-///
-/// Every token is built by `sanitize_query` itself and only the join is
-/// changed. A token is alphanumeric-only by construction there, so no quoted
-/// token can contain a space and splitting that output on spaces recovers
-/// exactly the tokens it produced. A task containing `OR`, `NEAR`, `*`, `"`
-/// or `-` is therefore quoted here by the same code that quotes it for the
-/// search box, and the containment property has one home rather than two.
+// History: design-decisions.md, "Trims: memory/search.rs", `injection_query` doc.
 fn injection_query(text: &str) -> Option<String> {
     let conjunctive = sanitize_query(text)?;
     let scoped = conjunctive.split(' ').collect::<Vec<&str>>().join(" OR ");
@@ -660,56 +485,14 @@ impl<'a> MemoryStore<'a> {
     /// [`SearchScope`]. `limit` bounds how many results come back — there is
     /// no way to ask this method for the whole table.
     ///
-    /// Every result already carries its own provenance
-    /// ([`MemoryRecord::source_session_id`], [`MemoryRecord::source_commit`])
-    /// as `Option`, so a memory recorded without one reports it absent
-    /// instead of inventing an empty string.
-    ///
     /// # Phase 21E: the ladder ranks before the weight does
     ///
     /// Every candidate is first placed on a [`LadderRung`] ([`ladder_rung`]),
     /// and results are ordered by rung before anything else — a validated
     /// current constraint outranks an older ordinary decision, and a
     /// binding invariant outranks everything, regardless of how well any of
-    /// them matched the query text. The weight described below is only ever
-    /// a tie-breaker *within* one rung; it never lets a memory cross into a
-    /// rung its own authority and currency do not earn it.
-    ///
-    /// # Phase 21D: decay is applied here, after the match
-    ///
-    /// The raw BM25 relevance of every candidate is multiplied by
-    /// `retrieval_weight` before the final ordering, so an old, low-
-    /// authority memory that happens to match the query text well still
-    /// ranks below a fresh, high-authority memory that matches it poorly —
-    /// line 904's *"avoid resurfacing low-authority stale memories merely
-    /// because of high lexical similarity."* This has to run in Rust rather
-    /// than in the `ORDER BY`: the weight depends on the wall clock and on a
-    /// per-authority policy (`super::policy::retrieval_weight`), neither of
-    /// which SQLite's `bm25()` has access to. See `overfetch_limit` for why
-    /// the SQL `LIMIT` is not simply `limit`.
-    ///
-    /// # Phase 22 line 1063: conflicts are detected here too
-    ///
-    /// Before decay runs, every pair of still-[`MemoryStatus::Active`]
-    /// candidates in *this* result set is checked for contradiction — see
-    /// `contradicts` — and a contradicting pair is moved to
-    /// [`MemoryStatus::Conflicted`] via [`MemoryStore::mark_conflicted`]
-    /// before being returned, so a caller never receives two mutually
-    /// contradictory memories presented as equally settled. Detection is
-    /// scoped to the memories this query actually matched, not the whole
-    /// project: Phase 22 asks that a conflict be flagged, not that every
-    /// memory be compared against every other one on every search.
-    ///
-    /// # The relevance is no longer thrown away
-    ///
-    /// This method still returns bare records, because a caller that wanted a
-    /// list of memories before wants one now. The BM25 relevance every hit
-    /// earned survives the call on the other door:
-    /// [`MemoryStore::search_grouped`] returns a [`RetrievalResult`], and
-    /// [`RetrievalResult::relevance`] reads it back by
-    /// [`super::store::MemoryId`]. **Read that method before using the
-    /// number** — it is a within-query match score, not a confidence, and it
-    /// must not be thresholded.
+    /// them matched the query text.
+    // History: design-decisions.md, "Trims: memory/search.rs", `MemoryStore::search` doc.
     pub fn search(
         &self,
         text: &str,
@@ -897,52 +680,11 @@ impl<'a> MemoryStore<'a> {
     /// the read door onto migration 17's `memory_files` rows, grouped the
     /// same way [`MemoryStore::search_grouped`] groups a query's answer.
     ///
-    /// `path` is repo-relative and `/`-separated; it is put through
-    /// [`super::store::normalize_observed_path`] — **the same function
-    /// [`MemoryStore::record_observed_files`] put the column through** — so a
-    /// caller may spell it `./src//a.rs` or `src\a.rs` and still match the
-    /// row the writer stored. A path that function refuses is a path no row
-    /// can hold, and the answer is an empty result rather than an error:
-    /// nothing was observed against a file that cannot be named here.
-    ///
     /// # There is no relevance here, and none is invented
     ///
     /// This runs no `MATCH`, so [`RetrievalResult::relevance`] answers `None`
     /// for every memory it returns, and that is the true answer — the memory
-    /// was not asked about. See `Scored` for why the alternative, a `0.0`,
-    /// would have been a fabricated number in the one map this module keeps
-    /// private to stop exactly that.
-    ///
-    /// # Ordering is `rank`'s, not this function's
-    ///
-    /// The hits go through the same `rank` and the same
-    /// `demote_thin_decisions` the other two doors go through, so a memory
-    /// cannot rank one way when a query found it and another way when a path
-    /// did. Within a rung the ordering falls back to `retrieval_weight`
-    /// alone, which is the query-blind half of the comparison a search makes
-    /// — see `rank`.
-    ///
-    /// # What this door deliberately does not do
-    ///
-    /// It does not flag contradictions. That is a **write**
-    /// ([`MemoryStore::mark_conflicted`]), and Phase 22 line 1063 scopes
-    /// detection to *"the memories this query actually matched"* — a path
-    /// lookup matched no query, and a read door that mutates the table on
-    /// behalf of a caller that only asked what a file is associated with is
-    /// a larger claim than this package makes. A consumer that needs
-    /// conflict flagging should say so, and the argument belongs where that
-    /// consumer is built.
-    ///
-    /// It also does not **narrow** by [`super::store::FileAssociation`], and
-    /// that is now a choice rather than the absence of one. There are two
-    /// associations to narrow by since migration 26 — `observed` and
-    /// `referenced` — and a door that returned only the stronger would hide
-    /// every memory learned beside a file from a caller that asked what the
-    /// file is associated with. So both come back, and each row **reports**
-    /// which it is through [`RetrievalResult::association`], which is the
-    /// answer a caller can act on without this function deciding for it. A
-    /// consumer that genuinely wants only referenced rows filters on that;
-    /// none does today.
+    /// was not asked about.
     ///
     /// # `intent`, map line 1141
     ///
@@ -951,6 +693,7 @@ impl<'a> MemoryStore<'a> {
     /// and failed attempts *within* each ladder rung — see
     /// [`RetrievalIntent`] for why the rung stays primary and why the
     /// preference is a kind class rather than a weight.
+    // History: design-decisions.md, "Trims: memory/search.rs", `MemoryStore::for_path` doc.
     pub fn for_path(
         &self,
         path: &str,
@@ -968,10 +711,7 @@ impl<'a> MemoryStore<'a> {
         // `DISTINCT` because `memory_files` carries no uniqueness constraint
         // — migration 17 argued one would be an index on speculation — so a
         // memory associated with the same path twice must still be returned
-        // once. Both `project_id` predicates are deliberate: the association
-        // row's scoping is what the triggers maintain, and the memory row's
-        // is what a row that reached the file by some other route would have
-        // to defeat as well.
+        // once.
         //
         // The SQL `ORDER BY` decides only which candidates survive the
         // overfetch, never the order returned: `rank` runs in Rust for the
@@ -979,15 +719,6 @@ impl<'a> MemoryStore<'a> {
         // reads the wall clock and a per-authority policy, neither of which
         // SQLite has. Newest memory first is the honest candidate rule when
         // there is no relevance to rank candidates by.
-        // `GROUP BY memories.id` rather than migration 17's original
-        // `DISTINCT`, and the reason is the second provenance value. A memory
-        // may now hold both an `observed` and a `referenced` row for one path,
-        // and `DISTINCT` over a column set that includes the provenance would
-        // return that memory **twice** — once under each word — spending the
-        // caller's `LIMIT` on one memory and leaving the fold below to decide
-        // which duplicate to keep. Grouping returns it once; every selected
-        // `memories` column is functionally dependent on the grouped primary
-        // key, which is exactly the case SQLite defines bare columns for.
         //
         // `group_concat(DISTINCT ...)` rather than an aggregate that knows the
         // vocabulary (`MAX(provenance = 'referenced')`, say): the column
@@ -995,6 +726,7 @@ impl<'a> MemoryStore<'a> {
         // which words exist is Rust's to say, through
         // `FileAssociation::from_stored`. A word this build does not know is
         // dropped there rather than compared here.
+        // History: design-decisions.md, "Trims: memory/search.rs", the `for_path` SQL comment.
         let sql = format!(
             "SELECT {QUALIFIED_COLUMNS}, \
                     group_concat(DISTINCT memory_files.provenance) AS provenance_words \
@@ -1131,36 +863,20 @@ fn normalize_subject(subject: &str) -> String {
 ///
 /// # Why this is a permutation and not an `ORDER BY`
 ///
-/// The obvious implementation — sorting thin decisions to the bottom of the
-/// whole result set — reads the line as *"lower-confidence than
-/// everything"*, which is not what it says and would be a real search
-/// regression: a perfectly relevant decision would fall behind a
-/// barely-relevant memory of some unrelated kind. The line has two
-/// qualifiers and both are load-bearing. It compares a decision against **a
-/// decision**, and against one **of the same authority class**.
+/// The line has two qualifiers and both are load-bearing. It compares a
+/// decision against **a decision**, and against one **of the same
+/// authority class**.
 ///
-/// So the relevance order BM25 produced is left almost entirely alone: every
-/// record that is not a [`MemoryKind::Decision`] keeps its position exactly,
-/// and so does every authority class as a whole. The only thing that moves
-/// is the order of the decisions *within* one authority class, where a
-/// decision that recorded neither why it was made nor what it assumed is put
-/// behind one that did.
+/// So the relevance order BM25 produced is left almost entirely alone:
+/// every record that is not a [`MemoryKind::Decision`] keeps its position
+/// exactly, and so does every authority class as a whole. The only thing
+/// that moves is the order of the decisions *within* one authority class,
+/// where a decision that recorded neither why it was made nor what it
+/// assumed is put behind one that did.
 ///
-/// A search returning one decision is therefore unchanged, and so is a
-/// search returning a decision and a finding. A search returning two
-/// `decision`-class decisions puts the better-proven one first however the
-/// text happened to match.
-///
-/// Unclassified memories (`authority IS NULL`) form their own group, because
-/// `None` is a distinct fact from every class and not a class to merge into.
-///
-/// The sort is stable, so two decisions that are both thin, or both
-/// well-proven, keep their BM25 order relative to each other.
-///
-/// Operates on [`Scored`] rather than bare records so that a memory keeps the
-/// relevance it earned when this permutation moves it. The permutation reads
-/// only `authority`, `kind` and [`MemoryRecord::is_lower_confidence_decision`]
-/// — never the relevance — so attaching the score changed no ordering.
+/// Operates on [`Scored`] rather than bare records so that a memory keeps
+/// the relevance it earned when this permutation moves it.
+// History: design-decisions.md, "Trims: memory/search.rs", `demote_thin_decisions` doc.
 fn demote_thin_decisions(hits: &mut [Scored]) {
     let classes: Vec<Option<MemoryAuthority>> = {
         let mut seen: Vec<Option<MemoryAuthority>> = Vec::new();

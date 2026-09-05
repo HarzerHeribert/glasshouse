@@ -88,3 +88,16 @@ Measured at the ruling and again after each wave. **25 production files carried 
 | `GH-TESTS-OUT-GATEWAY` | `gateway/{session.rs, mod.rs}`, `translate/{mod.rs, gemini.rs, openai_responses.rs}` (1,094 / 883 / 720 / 719 / 553) | `gateway/tests.rs`, `gateway/session/{mod,tests}.rs`, `translate/tests.rs`, two more `{mod,tests}.rs` pairs; `--lib gateway` 210/210 run **whole**, so `gateway/mod.rs`'s `crate::session` scan ran | `.agent-runtime/report-tests-out-gateway.md` — eleven of `gateway/mod.rs`'s twelve `include_str!` paths stay valid because the module moved to a sibling in the same directory; only `session.rs` → `session/mod.rs` changed |
 
 After these four: **11 files remain**, and packages for ten of them are in flight (`provider` ×5, `routing/{interactive,burn}`, `main.rs` + `harness/{mod,pairing}`). `events/mod.rs` (527) is the last one and is the most heavily self-scanned file in the crate — seven `include_str!` sites of its own plus `tests/reserve_inputs.rs:521`.
+
+---
+
+### Keep doc comments to the invariant and the reason it holds now, moving the history of how a decision was reached to the design or measurements record behind a one-line pointer. (line 2053)
+
+State: **PARTIALLY VERIFIED** — trims land file by file; the line closes when the files the design record names are done. Each trim is Green, comments only, verified by a filtered diff that shows no non-comment line changed, the same test count before and after, rustdoc clean, and read by the orchestrator for the kept invariant.
+
+| file | package | before → after (comment lines) | blocks trimmed | history |
+|---|---|---|---|---|
+| `crates/glasshouse/src/memory/search.rs` | `GH-TRIM-MEMORY-SEARCH` (2026-09-05), report `.agent-runtime/report-trim-memory-search.md` | 749 → 465 of 1,204 → 920 production lines; longest block 81 → 20 | 10 (module doc, `RetrievalIntent`, `RetrievalResult::relevance`, `Scored`, `rank`, `injection_query`, `MemoryStore::search`, `MemoryStore::for_path` and its SQL comment, `demote_thin_decisions`) | `design-decisions.md`, *Trims: `memory/search.rs`*, one sub-heading per item, ten `// History:` pointers in the code |
+
+Limits: `tests/memory_store.rs` reads the file by `include_str!` and skips comment lines, so no test asserts a comment literal; the trim proves nothing about behaviour beyond *unchanged*.
+
