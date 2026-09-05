@@ -859,3 +859,48 @@ pub fn record_memory_revalidation(
         );
     }
 }
+
+/// Record an operator's or agent's own verdict on a session's route — the
+/// producer for [`EvaluationKind::RoutingRated`], and `glasshouse rate-route`'s
+/// one write. Returns the appended `seq`.
+///
+/// **This is allowed to fail loudly**, exactly as [`record_memory_rating`]
+/// is and for the same reason: it *is* the command, typed by a person or
+/// issued by an agent as its own last act, and a rating that silently failed
+/// to record would tell its caller their verdict was kept when it was not.
+/// Its caller (`commands::route::rate_route`) propagates this with `?` and
+/// prints nothing but a failure.
+///
+/// # `session_id` must already have a routed destination
+///
+/// [`EvaluationObservations::routed_destination`] answering [`None`] means
+/// this session was never attributed to a route, and this refuses rather
+/// than writing a rating with no destination to carry as `subject` — *"one
+/// cannot rate a route that was never taken"* (design decision, *"The
+/// routing half of RC-B"*, 2026-09-05). This is the same lookup
+/// [`record_routing_outcome`] already uses to decide whether to write at
+/// all; here the answer decides whether to refuse the command outright.
+pub fn record_route_rating(
+    runtime: &Runtime,
+    session_id: &str,
+    verdict: EvaluationOutcome,
+    note: Option<&str>,
+    observed_at_unix: i64,
+) -> anyhow::Result<i64> {
+    let ledger = EvaluationObservations::open(runtime)?;
+    let Some(destination) = ledger.routed_destination(session_id)? else {
+        anyhow::bail!(
+            "session `{session_id}` has no recorded route; cannot rate a route that was never \
+             taken"
+        );
+    };
+
+    let mut observation = NewObservation::new(EvaluationKind::RoutingRated)
+        .with_subject(destination)
+        .with_session_id(session_id)
+        .with_outcome(verdict);
+    if let Some(note) = note {
+        observation = observation.with_detail(note);
+    }
+    Ok(ledger.record(observation, observed_at_unix)?)
+}

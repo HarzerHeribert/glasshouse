@@ -248,6 +248,19 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
                 return Ok(ExitCode::FAILURE);
             }
         },
+        Some(Command::RateRoute {
+            session,
+            verdict,
+            note,
+        }) => {
+            match crate::commands::route::rate_route(&runtime, session, *verdict, note.as_deref()) {
+                Ok(report) => print!("{report}"),
+                Err(err) => {
+                    eprintln!("glasshouse: {err:#}");
+                    return Ok(ExitCode::FAILURE);
+                }
+            }
+        }
         Some(Command::RoutingCost {
             hours,
             json,

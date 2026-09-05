@@ -274,6 +274,27 @@ pub enum EvaluationKind {
     /// `"unknown"` when the destination carried no reading; `detail` is the
     /// tier word; `session_id` is the launched session's.
     ReserveAvailabilityObserved,
+    /// An operator's or agent's own verdict on a session's route —
+    /// `glasshouse rate-route <session-id> useful|not-useful` — the explicit
+    /// half of map line 1846's own design note, *"The routing half of RC-B:
+    /// an explicit route rating when given, the turn-outcome proxy
+    /// otherwise"* (2026-09-05). `subject` is the destination id the session
+    /// was routed to (the same word [`Self::RoutingCostClassObserved`]'s
+    /// `detail` carries); `outcome` is [`EvaluationOutcome::Useful`] or
+    /// [`EvaluationOutcome::NotUseful`] only — [`ROUTE_RATING_VERDICTS`]'
+    /// closed two-word vocabulary, reusing [`EvaluationKind::MemoryRated`]'s
+    /// own words rather than inventing a second scale for the same question;
+    /// `session_id` is required — a route rating is about a session's route,
+    /// never a memory; `detail` is the operator's own note, never parsed.
+    ///
+    /// **A rating is a new row, never an edit** — the same append-only shape
+    /// [`Self::MemoryRated`] keeps, and never a rewrite of
+    /// [`Self::RoutingOutcomeObserved`]. **Replaces the proxy, never sums
+    /// with it**: every reader that counts a session's route as a success or
+    /// a failure from [`Self::RoutingOutcomeObserved`] substitutes this row's
+    /// verdict for that session instead, and prints the two counts apart. A
+    /// session with two ratings takes the latest.
+    RoutingRated,
 }
 
 /// The `subject` this ledger writes for a destination whose cost class no
@@ -494,6 +515,7 @@ impl EvaluationKind {
             Self::SessionRouteDecided => "session_route_decided",
             Self::RoutingConsumptionEstimated => "routing_consumption_estimated",
             Self::ReserveAvailabilityObserved => "reserve_availability_observed",
+            Self::RoutingRated => "routing_rated",
         }
     }
 
@@ -521,6 +543,7 @@ impl EvaluationKind {
             "session_route_decided" => Some(Self::SessionRouteDecided),
             "routing_consumption_estimated" => Some(Self::RoutingConsumptionEstimated),
             "reserve_availability_observed" => Some(Self::ReserveAvailabilityObserved),
+            "routing_rated" => Some(Self::RoutingRated),
             _ => None,
         }
     }
@@ -606,6 +629,14 @@ pub const MEMORY_RATING_VERDICTS: [EvaluationOutcome; 8] = [
     EvaluationOutcome::ChallengeJustified,
     EvaluationOutcome::ChallengeUnjustified,
 ];
+
+/// [`EvaluationKind::RoutingRated`]'s own closed vocabulary — two of
+/// [`MEMORY_RATING_VERDICTS`]' eight words, reused rather than a second
+/// scale for the same question (design decision, *"The routing half of
+/// RC-B"*, 2026-09-05). `glasshouse rate-route`'s CLI parser refuses every
+/// other word, including the six memory-only verdicts, by name.
+pub const ROUTE_RATING_VERDICTS: [EvaluationOutcome; 2] =
+    [EvaluationOutcome::Useful, EvaluationOutcome::NotUseful];
 
 /// The `subject` vocabulary for [`EvaluationKind::MemoryRetrieved`] and
 /// [`EvaluationKind::MemoryRetrievalMiss`]: which of the questions the search

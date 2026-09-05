@@ -93,6 +93,27 @@ fn parse_rating_verdict(value: &str) -> Result<crate::evaluation::EvaluationOutc
     }
 }
 
+/// clap value parser for `glasshouse rate-route`'s `<VERDICT>`: the same
+/// shape as [`parse_rating_verdict`], against
+/// [`crate::evaluation::ROUTE_RATING_VERDICTS`]' own closed two words rather
+/// than the memory rating's eight — a route rating refuses every word it
+/// does not share with a memory rating, `unknown` included, by name.
+fn parse_route_rating_verdict(value: &str) -> Result<crate::evaluation::EvaluationOutcome, String> {
+    use crate::evaluation::{EvaluationOutcome, ROUTE_RATING_VERDICTS};
+
+    match EvaluationOutcome::from_stored(value) {
+        Some(outcome) if ROUTE_RATING_VERDICTS.contains(&outcome) => Ok(outcome),
+        _ => Err(format!(
+            "`{value}` is not a route rating verdict; use one of {}",
+            ROUTE_RATING_VERDICTS
+                .iter()
+                .map(|verdict| verdict.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        )),
+    }
+}
+
 /// Non-interactive commands.
 ///
 /// Every one of these is project scoped: it operates on the project resolved
@@ -306,6 +327,34 @@ pub enum Command {
         /// as it behaves today.
         #[arg(long, value_name = "TEXT")]
         task: Option<String>,
+    },
+    /// Record an operator's or agent's own verdict on a session's route — the
+    /// explicit half of map line 1846's own design note, *"The routing half
+    /// of RC-B: an explicit route rating when given, the turn-outcome proxy
+    /// otherwise"*, 2026-09-05.
+    ///
+    /// `<VERDICT>` is `useful` or `not-useful` —
+    /// [`crate::evaluation::EvaluationKind::MemoryRated`]'s own two words,
+    /// reused rather than a second scale for the same question. A flat
+    /// command, not a group under `route`, because `route` is already flat
+    /// with its own flags (`--moment`, `--to`, `--fresh`).
+    ///
+    /// Refuses a session with no recorded route: a route can only be rated
+    /// once it was actually taken. This records a new observation; it is
+    /// never an edit of the routing outcome it judges, and a session rated
+    /// twice keeps both rows — the readers that count it take the latest.
+    RateRoute {
+        /// The routed session to rate.
+        session: String,
+
+        /// `useful` or `not-useful`.
+        #[arg(value_name = "VERDICT", value_parser = parse_route_rating_verdict)]
+        verdict: crate::evaluation::EvaluationOutcome,
+
+        /// A short note, printed back in this project's own readout. Your
+        /// own text; never a memory's body.
+        #[arg(long, value_name = "TEXT")]
+        note: Option<String>,
     },
     /// List the sessions Glasshouse has recorded for this project, or act on
     /// one of them.

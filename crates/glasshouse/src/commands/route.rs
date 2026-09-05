@@ -310,6 +310,38 @@ fn writeln_str(out: &mut String, line: String) -> std::fmt::Result {
     writeln!(out, "{line}")
 }
 
+/// `glasshouse rate-route <session> useful|not-useful [--note TEXT]` — the
+/// door for [`glasshouse::evaluation::record_route_rating`], and map line
+/// 1846's own design note, *"The routing half of RC-B"* (2026-09-05).
+///
+/// Modelled on `commands::memory::memory_rate`: the write is the command's
+/// whole act, so a failure — including "this session was never routed" —
+/// propagates with `?` rather than being swallowed the way a bookkeeping
+/// side-effect would be. The destination printed back is read fresh after
+/// the write, rather than threaded through the return value, because
+/// [`glasshouse::evaluation::record_route_rating`]'s own signature (modelled
+/// line for line on [`glasshouse::evaluation::record_memory_rating`]) hands
+/// back only the appended `seq`.
+pub(crate) fn rate_route(
+    runtime: &Runtime,
+    session: &str,
+    verdict: glasshouse::evaluation::EvaluationOutcome,
+    note: Option<&str>,
+) -> anyhow::Result<String> {
+    use glasshouse::evaluation::{EvaluationObservations, now_unix, record_route_rating};
+
+    let seq = record_route_rating(runtime, session, verdict, note, now_unix())?;
+
+    let destination = EvaluationObservations::open(runtime)?
+        .routed_destination(session)?
+        .unwrap_or_default();
+
+    Ok(format!(
+        "{seq} {session} routed to {destination} rated {}\n",
+        verdict.as_str()
+    ))
+}
+
 /// Map lines 1834, 1835, 1845 and 1854, printed for a person — the consumer
 /// half of this package, and the reason its producers are not Cluster B.
 ///
@@ -1039,6 +1071,12 @@ fn render_route_outcome_rows(counts: &[glasshouse::evaluation::RouteOutcomeCount
 /// turns it is out of.** The two denominators are different quantities —
 /// turns a harness reported on, and sessions that were routed — and a
 /// rendering that dropped either would let a reader divide the wrong pair.
+///
+/// **Rated and proxy counts are never summed** (map line 1846's design note,
+/// *"The routing half of RC-B"*, 2026-09-05): a bucket with no rated session
+/// prints exactly what it always has, byte-identical, and only a bucket
+/// carrying a rated session gains a trailing clause naming the rated counts
+/// apart from the proxy figures above.
 fn render_route_outcome_line(counts: &glasshouse::evaluation::RouteOutcomeCounts) -> String {
     let reported = counts.reported_turns();
     let verdicts = if reported == 0 {
@@ -1054,14 +1092,21 @@ fn render_route_outcome_line(counts: &glasshouse::evaluation::RouteOutcomeCounts
         counts.sessions,
         if counts.sessions == 1 { "" } else { "s" }
     );
-    if counts.sessions_without_outcome > 0 {
+    let mut line = if counts.sessions_without_outcome > 0 {
         format!(
             "{verdicts}; {sessions}, {} with no turn end reported",
             counts.sessions_without_outcome
         )
     } else {
         format!("{verdicts}; {sessions}")
+    };
+    if counts.rated_useful > 0 || counts.rated_not_useful > 0 {
+        line.push_str(&format!(
+            " · rated {} useful / {} not-useful",
+            counts.rated_useful, counts.rated_not_useful
+        ));
     }
+    line
 }
 
 /// Map line 1845, the whole line: task success (from `by_pairing`, the same

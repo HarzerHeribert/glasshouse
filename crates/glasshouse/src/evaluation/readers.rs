@@ -749,13 +749,25 @@ pub struct RouteOutcomeCounts {
     /// unknown bucket, and it is reported rather than dropped.** A quiet
     /// process is not a failure and an exited one is not a success; a count
     /// that silently omitted these would make every ratio here a fraction of
-    /// an unstated denominator.
+    /// an unstated denominator. Never includes a session that was rated:
+    /// [`Self::rated_useful`] and [`Self::rated_not_useful`] hold those.
     pub sessions_without_outcome: i64,
+    /// Sessions in this bucket whose **latest** [`EvaluationKind::RoutingRated`]
+    /// row carries [`EvaluationOutcome::Useful`] — map line 1846's design
+    /// note, *"The routing half of RC-B"* (2026-09-05). Counted apart from
+    /// [`Self::completed`], never summed into it: an explicit rating
+    /// **replaces** the [`EvaluationKind::RoutingOutcomeObserved`] proxy for
+    /// that session rather than adding to it, so [`Self::completed`] and
+    /// [`Self::failed`] exclude every session counted here.
+    pub rated_useful: i64,
+    /// The same rule for [`EvaluationOutcome::NotUseful`].
+    pub rated_not_useful: i64,
 }
 
 impl RouteOutcomeCounts {
     /// The denominator for the success ratio: turns a harness actually
-    /// reported on. Never includes [`Self::sessions_without_outcome`].
+    /// reported on. Never includes [`Self::sessions_without_outcome`] or
+    /// either rated count.
     pub fn reported_turns(&self) -> i64 {
         self.completed + self.failed
     }
@@ -850,14 +862,28 @@ impl EvaluationObservations {
                         AND observed_at >= ?2
                         AND observed_at <= ?3
                       GROUP BY session_id
+                 ),
+                 rating AS (
+                     SELECT session_id AS session_id,
+                            outcome    AS outcome,
+                            MAX(seq)   AS seq
+                       FROM evaluation_observations
+                      WHERE kind = ?8
+                        AND session_id IS NOT NULL
+                        AND observed_at >= ?2
+                        AND observed_at <= ?3
+                      GROUP BY session_id
                  )
                  SELECT COALESCE(d.bucket, ?7),
                         COUNT(*),
-                        COALESCE(SUM(v.completed), 0),
-                        COALESCE(SUM(v.failed), 0),
-                        SUM(CASE WHEN v.session_id IS NULL THEN 1 ELSE 0 END)
+                        COALESCE(SUM(CASE WHEN r.session_id IS NULL THEN v.completed ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN r.session_id IS NULL THEN v.failed ELSE 0 END), 0),
+                        SUM(CASE WHEN r.session_id IS NULL AND v.session_id IS NULL THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN r.outcome = ?9 THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN r.outcome = ?10 THEN 1 ELSE 0 END)
                    FROM decision AS d
                    LEFT JOIN verdict AS v ON v.session_id = d.session_id
+                   LEFT JOIN rating AS r ON r.session_id = d.session_id
                   GROUP BY COALESCE(d.bucket, ?7)
                   ORDER BY COALESCE(d.bucket, ?7)",
             )
@@ -872,6 +898,9 @@ impl EvaluationObservations {
                     TURN_COMPLETED,
                     TURN_FAILED,
                     UNKNOWN_COST_CLASS,
+                    EvaluationKind::RoutingRated.as_str(),
+                    EvaluationOutcome::Useful.as_str(),
+                    EvaluationOutcome::NotUseful.as_str(),
                 ],
                 read_outcome_row,
             )
@@ -921,16 +950,30 @@ impl EvaluationObservations {
                         AND observed_at >= ?2
                         AND observed_at <= ?3
                       GROUP BY session_id
+                 ),
+                 rating AS (
+                     SELECT session_id AS session_id,
+                            outcome    AS outcome,
+                            MAX(seq)   AS seq
+                       FROM evaluation_observations
+                      WHERE kind = ?9
+                        AND session_id IS NOT NULL
+                        AND observed_at >= ?2
+                        AND observed_at <= ?3
+                      GROUP BY session_id
                  )
                  SELECT COALESCE(s.pairing_class, ?7),
                         COUNT(*),
-                        COALESCE(SUM(v.completed), 0),
-                        COALESCE(SUM(v.failed), 0),
-                        SUM(CASE WHEN v.session_id IS NULL THEN 1 ELSE 0 END)
+                        COALESCE(SUM(CASE WHEN r.session_id IS NULL THEN v.completed ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN r.session_id IS NULL THEN v.failed ELSE 0 END), 0),
+                        SUM(CASE WHEN r.session_id IS NULL AND v.session_id IS NULL THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN r.outcome = ?10 THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN r.outcome = ?11 THEN 1 ELSE 0 END)
                    FROM decision AS d
                    LEFT JOIN sessions AS s
                           ON s.id = d.session_id AND s.project_id = ?8
                    LEFT JOIN verdict AS v ON v.session_id = d.session_id
+                   LEFT JOIN rating AS r ON r.session_id = d.session_id
                   GROUP BY COALESCE(s.pairing_class, ?7)
                   ORDER BY COALESCE(s.pairing_class, ?7)",
             )
@@ -946,6 +989,9 @@ impl EvaluationObservations {
                     TURN_FAILED,
                     UNKNOWN_COST_CLASS,
                     self.project_id,
+                    EvaluationKind::RoutingRated.as_str(),
+                    EvaluationOutcome::Useful.as_str(),
+                    EvaluationOutcome::NotUseful.as_str(),
                 ],
                 read_outcome_row,
             )
@@ -1146,6 +1192,11 @@ fn read_harness_outcome_row(
             completed: row.get(3)?,
             failed: row.get(4)?,
             sessions_without_outcome: row.get(5)?,
+            // Map line 1951's own reader has no rating split — see this
+            // function's header — so every session here is still counted
+            // by its proxy, exactly as before `RoutingRated` existed.
+            rated_useful: 0,
+            rated_not_useful: 0,
         },
     ))
 }
@@ -1203,6 +1254,8 @@ fn read_outcome_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RouteOutcomeCou
         completed: row.get(2)?,
         failed: row.get(3)?,
         sessions_without_outcome: row.get(4)?,
+        rated_useful: row.get(5)?,
+        rated_not_useful: row.get(6)?,
     })
 }
 
