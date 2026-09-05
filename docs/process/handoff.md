@@ -41,6 +41,41 @@ validated and waiting on the commit. Next action: `.agent-runtime/CONTINUATION.m
 
 Last updated: 2026-09-02, late night (Europe/Berlin)
 
+## Checkpoint — 2026-09-05 (evening), waves 116–117: 1295 / 1399 (92.6%) — pane stood up in its own lane, the dispatch defect fixed, 442 built and verified, seven lines closed
+
+Sole orchestrator from ~16:20 (`glasshouse-78`, Opus 5 xhigh; the user rules the
+next is Fable 5.1). Two waves, seventeen packages, nine commits pushed and two
+held for a sweep. The full account is the ledger's waves 116 and 117 and
+`.agent-runtime/CONTINUATION.md`; this is the index.
+
+**Closed:** 1535, 1545 (prompt-cache temperature measured, stamped, scored —
+Phase 35B 24/25) · 1129 (per-door observed false-positive rate — Phase 27
+complete) · 1300 (cached-input rate splits the estimate — Phase 32G 9/10) ·
+2436, 2437, 2440 (pane is a workspace member nothing else compiles). **442 is
+LOCALLY VERIFIED** with a Red verifier's ACCEPT; the CI fixture that ticks it
+is live. **Recorded:** Phase 61, 34 lines (61A–61G), the design entry, six
+specifications under `docs/product/pane/`, and the pane lead launched on
+`pane/integration`.
+
+**Defects fixed:** Windows `glasshouse claim` refused every path (verbatim
+root; confirmed on all four Windows cells) · the Codex catalogue tripwire, then
+its CI pin · the `gateway_degrade` barrier race · **the launch prompt losing a
+1 KB chunk** (5 of 14 launches; typed prompt under 700 bytes, chunked, proven
+before Enter) · thinking blocks not surviving translation.
+
+**Process:** `board-watch.sh` — one digest per window instead of one turn per
+monitor line — armed live and in CLAUDE.md; the gate's cargo children run
+under `env -u` of the provider variables (rule 3 amended); the ledger's
+findings 16–25.
+
+**Live at hand-off:** resize-determinism (rule 4's packet, `a_resize…` 4/5 red
+on macos-msrv), pane-adapter (2438/2439), blast-radius-package (the `-p
+glasshouse` hardcode the second crate exposed), secret-service-ci-fixture
+(ticks 442), and the pane lead. **Next by risk:** integrate those; then
+`GH-ROUTING-RATING` (1837/1846, the user's answer is in
+`answers/phase51-routing-rating.txt`, design note first), 1044 (design owed),
+Phase 51's RC-C producers, and the lead's sub-phase merges.
+
 ## Checkpoint — 2026-09-03, batch 96: 1270 / 1355 (93.7%) — four more Phase 59 splits land, the shell line closes, and the orchestrator moves to Opus 5
 
 Session `b783bdfc` (Fable 5.1), inherited hot from `1ee4f96b`. The
