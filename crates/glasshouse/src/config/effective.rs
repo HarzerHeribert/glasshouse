@@ -135,68 +135,23 @@ impl<'a> EffectiveConfig<'a> {
     }
 
     /// Whether the launch profile `name` may be *started*, reporting which
-    /// layer decided it. See [`ProfileConfig::enabled`], the field this
-    /// reads.
-    ///
-    /// # Why this is a separate query rather than a filter inside `profile_names`
-    ///
-    /// [`EffectiveConfig::profile_names`] means *every configured profile
-    /// name*, and the surfaces that list profiles need exactly that: a user
-    /// has to be able to see a disabled profile in order to re-enable it,
-    /// which is the whole of that field's "disable is not delete" rule.
-    /// Filtering inside a general accessor would make a disabled profile
-    /// invisible rather than unavailable, and would do it to every caller at
-    /// once — including [`ProfileLookupError::Unknown`]'s own list of valid
-    /// names, where a missing name reads as a typo. So the filter belongs at
-    /// the one site that decides which profiles the router may *consider*
-    /// (`main.rs`'s `routing_destinations`, under its `Everything` scope),
-    /// and this is the question that site asks.
-    ///
-    /// # Which layer wins, and why the whole definition decides it
-    ///
-    /// Project first, then user, then [`Layer::Default`] — the same order as
-    /// [`EffectiveConfig::enabled`] and every other lookup on this type
-    /// except [`EffectiveConfig::bypass_acknowledged`].
-    ///
-    /// The layer is picked exactly as [`EffectiveConfig::launch_profile`]
-    /// picks it, and that is not a free choice. `launch_profile` takes the
-    /// winning layer's [`ProfileConfig`] **whole** — harness, backend,
-    /// model, approval and preset all come out of one file — so resolving
-    /// `enabled` on its own could produce a profile whose body came from the
-    /// project and whose enable decision came from the user, which is a
-    /// profile neither layer ever wrote.
-    ///
-    /// The consequence, recorded because it is real: a project that defines
-    /// `[profiles.foo]` at all supplies `enabled` for it, defaulting to
-    /// `true` — so it re-enables a `foo` the user disabled.
-    /// [`ProfileConfig::enabled`] is a plain `bool` rather than
-    /// [`IntegrationConfig::enabled`]'s tri-state `Option<bool>`, so a
-    /// project has no way to say "I define this profile and leave the enable
-    /// decision alone". This grants a project nothing it did not already
-    /// have — it can define `[profiles.anything-else]` and have that offered
-    /// — and it cannot escalate approval, because
-    /// [`ProfileApproval::Bypass`] still needs
-    /// [`EffectiveConfig::bypass_acknowledged`], which is read from the user
-    /// layer alone.
-    ///
-    /// # The implied Native profile is always enabled
+    /// layer decided it — project first, then user, then [`Layer::Default`],
+    /// matching every other lookup on this type except
+    /// [`EffectiveConfig::bypass_acknowledged`], and matching the layer
+    /// [`EffectiveConfig::launch_profile`] picks: `launch_profile` takes the
+    /// winning layer's [`ProfileConfig`] whole, so resolving `enabled` from a
+    /// different layer could report a profile neither layer ever wrote.
     ///
     /// [`crate::profile::NATIVE_PROFILE_NAME`] answers `true` at
-    /// [`Layer::Default`] without consulting either table, mirroring
-    /// `launch_profile`'s own short circuit: the Native profile exists for
-    /// every harness *by construction* rather than as a configuration entry
-    /// — see [`ProfileTable`], which never stores it — so there is no entry
-    /// to disable. That is what keeps a person from configuring their way
-    /// into having nowhere to launch: `profile_names` always contains it,
-    /// `launch_profile` always resolves it, so the enabled candidate set is
-    /// never empty and the "you have disabled everything" refusal this would
-    /// otherwise need is unreachable rather than merely unwritten.
+    /// [`Layer::Default`] without consulting either table: it exists for
+    /// every harness by construction, never stored in a [`ProfileTable`], so
+    /// there is nothing to disable and the enabled candidate set is never
+    /// empty. An unknown name also answers `true` at [`Layer::Default`]:
+    /// "disabled" and "never configured" are different facts, and
+    /// [`EffectiveConfig::launch_profile`] already reports the second one as
+    /// [`ProfileLookupError::Unknown`].
     ///
-    /// An unknown name answers `true` at [`Layer::Default`] too. "Disabled"
-    /// and "never configured" are different facts and `launch_profile`
-    /// already reports the second one as [`ProfileLookupError::Unknown`];
-    /// answering "disabled" here would hand a caller a second, wronger
-    /// refusal for the same typo.
+    /// History: design-decisions.md, "Trims: config, checkpoint, evaluation and codex module docs", effective.rs `profile_enabled`.
     pub fn profile_enabled(&self, name: &str) -> Layered<bool> {
         if name == crate::profile::NATIVE_PROFILE_NAME {
             return Layered::new(true, Layer::Default);
@@ -1039,27 +994,18 @@ impl<'a> EffectiveConfig<'a> {
         }
     }
 
-    /// Every entitlement this configuration describes — Phase 56 line 1946
-    /// — with the rules of each already resolved (line 1947).
-    ///
-    /// Two sources, in this order:
-    ///
-    /// 1. **The configured entries**, by name, project over user — a project's
-    ///    `[entitlements.<name>]` replaces the user's entry of that name
-    ///    whole, exactly as [`EffectiveConfig::configured_provider`] reads a
-    ///    provider. Not per field: an allow-list that merged across layers
-    ///    would have no readable answer to "does the project's list replace or
-    ///    extend mine".
-    /// 2. **A default entry for every harness's own sign-in** that no
-    ///    configured entry claims through `native_harness` — named by the
-    ///    harness's slug, with no `kind` (Glasshouse does not know which plan a
-    ///    person signed a harness in with, and *unknown is an answer*) and
-    ///    [`crate::routing::EntitlementRules::UNRESTRICTED`]. This is what
-    ///    keeps a user who configured nothing exactly where they were: every
-    ///    native launch has an entitlement to announce, and none has a rule.
+    /// Every entitlement this configuration describes (Phase 56 line 1946),
+    /// rules already resolved (line 1947): the configured entries by name,
+    /// project over user whole (not per field), plus a default entry for
+    /// every harness's own sign-in that no configured entry claims through
+    /// `native_harness` — [`crate::routing::EntitlementRules::UNRESTRICTED`],
+    /// so a user who configured nothing keeps every native launch announcing
+    /// an entitlement with no rule.
     ///
     /// Refused rather than resolved by guessing when the two layers together
     /// contradict — see [`EntitlementLookupError`].
+    ///
+    /// History: design-decisions.md, "Trims: config, checkpoint, evaluation and codex module docs", effective.rs `entitlements`.
     pub fn entitlements(&self) -> Result<Vec<ResolvedEntitlement>, EntitlementLookupError> {
         let mut names: BTreeSet<&str> = self.user.entitlements().names().collect();
         if let Some(project) = self.project {
@@ -1366,26 +1312,20 @@ impl<'a> EffectiveConfig<'a> {
 
     /// The highest workload tier `model` on `provider` is established to
     /// serve — map line 1796, read from the layer that configures the
-    /// provider (project over user), exactly as
-    /// [`EffectiveConfig::model_cost`] reads the cost beside it.
+    /// provider (project over user). `None` when the configuring layer states
+    /// no ceiling, and `None` when no layer configures the provider at all —
+    /// both are *not established*, and the tier gate does nothing to a
+    /// destination carrying one. The layer is still reported, so a reader can
+    /// tell "no ceiling stated" from "nothing configures this provider".
     ///
-    /// `None` when the configuring layer states no ceiling for that model,
-    /// and `None` when no layer configures the provider at all. Both are
-    /// *not established*, and the tier gate does nothing to a destination
-    /// carrying one — a provider nobody configured is not a provider anybody
-    /// capped. The layer is still reported, so a reader can tell "the project
-    /// layer states no ceiling for this model" from "nothing configures this
-    /// provider"; the value is the same either way.
-    ///
-    /// Reads through [`ProviderConfig::resolved_ceiling`] rather than
-    /// [`ProviderConfig::ceiling_of`] directly — Phase 34F widens this same
-    /// call, the one `main.rs::destination_tier_ceiling` makes for every
-    /// destination the shipped binary builds, to also honour a
-    /// capability-record ceiling once no override states one.
-    /// [`capability::CeilingResolution::hard_ceiling`] is what keeps a
+    /// Reads through [`ProviderConfig::resolved_ceiling`], which also honours
+    /// a Phase 34F capability-record ceiling once no override states one —
+    /// [`capability::CeilingResolution::hard_ceiling`] keeps a
     /// benchmark-provenance record out of this value: only the user's own
     /// word, override or capability record, may narrow what a destination is
     /// established to serve.
+    ///
+    /// History: design-decisions.md, "Trims: config, checkpoint, evaluation and codex module docs", effective.rs `model_ceiling`.
     pub fn model_ceiling(
         &self,
         provider: &str,

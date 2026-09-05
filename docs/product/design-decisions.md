@@ -19248,3 +19248,505 @@ Best-effort in the same sense every other writer in this module is:
 an I/O failure answers [`None`], and the caller's own documentation
 says what it does with that — never a failed dispatch over a full
 disk.
+
+## Trims: config, checkpoint, evaluation and codex module docs — history moved out of comments by `GH-TRIM-CONFIG-CHECKPOINT-EVALUATION-CODEX-DOCS`, 2026-09-06
+
+### `config/effective.rs` — `profile_enabled`
+
+    /// Whether the launch profile `name` may be *started*, reporting which
+    /// layer decided it. See [`ProfileConfig::enabled`], the field this
+    /// reads.
+    ///
+    /// # Why this is a separate query rather than a filter inside `profile_names`
+    ///
+    /// [`EffectiveConfig::profile_names`] means *every configured profile
+    /// name*, and the surfaces that list profiles need exactly that: a user
+    /// has to be able to see a disabled profile in order to re-enable it,
+    /// which is the whole of that field's "disable is not delete" rule.
+    /// Filtering inside a general accessor would make a disabled profile
+    /// invisible rather than unavailable, and would do it to every caller at
+    /// once — including [`ProfileLookupError::Unknown`]'s own list of valid
+    /// names, where a missing name reads as a typo. So the filter belongs at
+    /// the one site that decides which profiles the router may *consider*
+    /// (`main.rs`'s `routing_destinations`, under its `Everything` scope),
+    /// and this is the question that site asks.
+    ///
+    /// # Which layer wins, and why the whole definition decides it
+    ///
+    /// Project first, then user, then [`Layer::Default`] — the same order as
+    /// [`EffectiveConfig::enabled`] and every other lookup on this type
+    /// except [`EffectiveConfig::bypass_acknowledged`].
+    ///
+    /// The layer is picked exactly as [`EffectiveConfig::launch_profile`]
+    /// picks it, and that is not a free choice. `launch_profile` takes the
+    /// winning layer's [`ProfileConfig`] **whole** — harness, backend,
+    /// model, approval and preset all come out of one file — so resolving
+    /// `enabled` on its own could produce a profile whose body came from the
+    /// project and whose enable decision came from the user, which is a
+    /// profile neither layer ever wrote.
+    ///
+    /// The consequence, recorded because it is real: a project that defines
+    /// `[profiles.foo]` at all supplies `enabled` for it, defaulting to
+    /// `true` — so it re-enables a `foo` the user disabled.
+    /// [`ProfileConfig::enabled`] is a plain `bool` rather than
+    /// [`IntegrationConfig::enabled`]'s tri-state `Option<bool>`, so a
+    /// project has no way to say "I define this profile and leave the enable
+    /// decision alone". This grants a project nothing it did not already
+    /// have — it can define `[profiles.anything-else]` and have that offered
+    /// — and it cannot escalate approval, because
+    /// [`ProfileApproval::Bypass`] still needs
+    /// [`EffectiveConfig::bypass_acknowledged`], which is read from the user
+    /// layer alone.
+    ///
+    /// # The implied Native profile is always enabled
+    ///
+    /// [`crate::profile::NATIVE_PROFILE_NAME`] answers `true` at
+    /// [`Layer::Default`] without consulting either table, mirroring
+    /// `launch_profile`'s own short circuit: the Native profile exists for
+    /// every harness *by construction* rather than as a configuration entry
+    /// — see [`ProfileTable`], which never stores it — so there is no entry
+    /// to disable. That is what keeps a person from configuring their way
+    /// into having nowhere to launch: `profile_names` always contains it,
+    /// `launch_profile` always resolves it, so the enabled candidate set is
+    /// never empty and the "you have disabled everything" refusal this would
+    /// otherwise need is unreachable rather than merely unwritten.
+    ///
+    /// An unknown name answers `true` at [`Layer::Default`] too. "Disabled"
+    /// and "never configured" are different facts and `launch_profile`
+    /// already reports the second one as [`ProfileLookupError::Unknown`];
+    /// answering "disabled" here would hand a caller a second, wronger
+    /// refusal for the same typo.
+
+### `config/effective.rs` — `entitlements`
+
+    /// Every entitlement this configuration describes — Phase 56 line 1946
+    /// — with the rules of each already resolved (line 1947).
+    ///
+    /// Two sources, in this order:
+    ///
+    /// 1. **The configured entries**, by name, project over user — a project's
+    ///    `[entitlements.<name>]` replaces the user's entry of that name
+    ///    whole, exactly as [`EffectiveConfig::configured_provider`] reads a
+    ///    provider. Not per field: an allow-list that merged across layers
+    ///    would have no readable answer to "does the project's list replace or
+    ///    extend mine".
+    /// 2. **A default entry for every harness's own sign-in** that no
+    ///    configured entry claims through `native_harness` — named by the
+    ///    harness's slug, with no `kind` (Glasshouse does not know which plan a
+    ///    person signed a harness in with, and *unknown is an answer*) and
+    ///    [`crate::routing::EntitlementRules::UNRESTRICTED`]. This is what
+    ///    keeps a user who configured nothing exactly where they were: every
+    ///    native launch has an entitlement to announce, and none has a rule.
+    ///
+    /// Refused rather than resolved by guessing when the two layers together
+    /// contradict — see [`EntitlementLookupError`].
+
+### `config/effective.rs` — `model_ceiling`
+
+    /// The highest workload tier `model` on `provider` is established to
+    /// serve — map line 1796, read from the layer that configures the
+    /// provider (project over user), exactly as
+    /// [`EffectiveConfig::model_cost`] reads the cost beside it.
+    ///
+    /// `None` when the configuring layer states no ceiling for that model,
+    /// and `None` when no layer configures the provider at all. Both are
+    /// *not established*, and the tier gate does nothing to a destination
+    /// carrying one — a provider nobody configured is not a provider anybody
+    /// capped. The layer is still reported, so a reader can tell "the project
+    /// layer states no ceiling for this model" from "nothing configures this
+    /// provider"; the value is the same either way.
+    ///
+    /// Reads through [`ProviderConfig::resolved_ceiling`] rather than
+    /// [`ProviderConfig::ceiling_of`] directly — Phase 34F widens this same
+    /// call, the one `main.rs::destination_tier_ceiling` makes for every
+    /// destination the shipped binary builds, to also honour a
+    /// capability-record ceiling once no override states one.
+    /// [`capability::CeilingResolution::hard_ceiling`] is what keeps a
+    /// benchmark-provenance record out of this value: only the user's own
+    /// word, override or capability record, may narrow what a destination is
+    /// established to serve.
+
+### `config/entitlement.rs` — module doc `EntitlementConfig`
+
+    /// One configured entitlement — a specific subscription or API-credit
+    /// account, the unit of capacity — as stored in an `[entitlements.<name>]`
+    /// table. Map lines 1946, 1947, 1962 and 1963.
+    ///
+    /// The entitlement's *name* is its key in [`EntitlementTable`], as a
+    /// provider's is in [`ProviderTable`]. What it is (`kind`), who bills it
+    /// (`vendor`), what backs it (`native_harness` **or** `provider`, never
+    /// both), its own authentication (`credential` — a **reference**, never a
+    /// value), and six rule lists in three allow/deny pairs.
+    ///
+    /// # The five layers, and which field is which (map line 1964)
+    ///
+    /// An entitlement sits in a stack of five separately replaceable layers,
+    /// and this entry deliberately owns only its own two:
+    ///
+    /// 1. **harness** — [`IntegrationId`], chosen per launch profile
+    ///    ([`crate::profile::LaunchProfile::harness`]); an entitlement's rules
+    ///    may refuse one, but the choice is the user's.
+    /// 2. **protocol adapter** — [`crate::harness::WireProtocol`], declared by
+    ///    the provider template a backing names, never by this entry.
+    /// 3. **authentication** — the `credential` reference on this entry: which
+    ///    key or token proves the account. Two entries of one vendor differ
+    ///    here and nowhere else, and that is enough to make them two accounts.
+    /// 4. **entitlement** — this entry itself: the named account whose capacity
+    ///    is spent.
+    /// 5. **inference model** — [`crate::profile::LaunchProfile::model`], again
+    ///    per profile.
+    ///
+    /// Replacing any one layer leaves the other four standing: the same
+    /// entitlement can serve two harnesses, the same harness can run under two
+    /// entitlements, the same entitlement can serve two models, and one vendor
+    /// and protocol can stand behind two credentials — which is what makes the
+    /// entitlement, not the vendor or the harness, the unit of capacity.
+    ///
+    /// # Backing
+    ///
+    /// `native_harness = "claude-code"` says *this entry is Claude Code's own
+    /// sign-in* — the resource `crate::provider::registry::ResourceKind::
+    /// NativeSubscription` describes — and replaces the default entry
+    /// [`EffectiveConfig::entitlements`] would otherwise supply for that
+    /// harness. Such an entry carries **no `credential` of its own**
+    /// ([`EntitlementLookupError::NativeSignInWithOwnCredential`]): the harness
+    /// authenticates itself, and what the registry's `NativeSubscription` names
+    /// is exactly *one shape of an entitlement, not the shape*. `provider =
+    /// "<name>"` says *this entry is the account behind that configured
+    /// provider*, which is how an API key becomes an entitlement with rules.
+    /// Naming both is refused when resolved
+    /// ([`EntitlementLookupError::TwoBackings`]). Naming neither is allowed: an
+    /// account with its own `credential` and no backing is a pool member —
+    /// listed by [`EffectiveConfig::entitlement_resources`], carrying its own
+    /// capacity and reset slots — that no launch profile charges yet; the 56A
+    /// broker packages are what will place work on it.
+    ///
+    /// # Rules
+    ///
+    /// Resolved by [`crate::routing::EntitlementRules`] and nowhere else: deny
+    /// wins over allow, an empty allow-list admits everything not denied. The
+    /// spellings are the routing types' own — [`IntegrationId::slug`],
+    /// [`crate::routing::classify::WorkloadTier::as_str`],
+    /// [`crate::routing::disposable::JobKind::as_str`] — through the three
+    /// `Configured*` newtypes above, so an unknown spelling is refused by the
+    /// loader rather than read as "no rule".
+    ///
+    /// `deny_unknown_fields` is load-bearing for the same reason those newtypes
+    /// are, one level up: the fields are plural, `deny_harness` for
+    /// `deny_harnesses` is the natural typo, and a rule that silently does not
+    /// exist is not a cosmetic default — an empty deny-list *admits*. The
+    /// forward-compatibility story `ConfigError::UnsupportedVersion` tells is
+    /// about `version`, and it already refuses to *write* a file it does not
+    /// understand; refusing to read a rule it does not understand is the same
+    /// fail-closed choice applied to the one table that grants capacity.
+
+### `config/entitlement.rs` — `with_telemetry`
+
+    /// Map line 1965's producer — populate the four telemetry facets from
+    /// what `telemetry` actually holds, each reading carrying its scope.
+    ///
+    /// - **Capacity and reset**, for a remote-provider backing: the
+    ///   gateway-captured per-provider reading
+    ///   ([`crate::provider::telemetry::GatewayQuotaCache`]) folded into the
+    ///   provider's own capacity shape. The cache is keyed by provider and
+    ///   the gateway's write is settled, so the reading cannot be narrowed
+    ///   to one credential: it is [`TelemetryScope::ProviderWide`], shared
+    ///   verbatim by every entitlement of that provider. A local-inference
+    ///   provider is skipped outright — a local server has no account
+    ///   allowance, and the capacity model's local-inference estimate is not
+    ///   a reading about *this account*.
+    /// - **Recent throttling**: the ledger rows' informative throttles for
+    ///   the provider, narrowed to this account's own
+    ///   ([`crate::routing::evidence::recent_credential_throttles`]) when
+    ///   every throttle row names its account, provider-wide otherwise.
+    /// - **Models**: the provider's own declared catalogue
+    ///   ([`crate::provider::cache::ModelCache`]), when one was ever
+    ///   fetched; a native sign-in is [`EntitlementModels::HarnessDecided`]
+    ///   — the harness picks, and Glasshouse does not know the plan's
+    ///   models, so no list is ever invented for one.
+    ///
+    /// Every facet a source cannot answer stays `None` — unknown, never
+    /// full, never empty, never zero-observed.
+
+### `checkpoint/store.rs` — `latest_for`
+
+    /// The most recent checkpoint for one session.
+    ///
+    /// This is what "the most recent checkpoint survives a crash" means in
+    /// practice: the session's process is gone and its checkpoint is still
+    /// here, because it was written to the project database rather than kept
+    /// in the process that died. Proved end to end against a real harness
+    /// process in `tests/checkpoint_portability.rs`, both for a worker that
+    /// died and for one that was put back afterwards.
+    ///
+    /// # "Most recent" is write order, not clock order
+    ///
+    /// `created_at` comes from [`CheckpointStore::now`], which is
+    /// `session::store::system_clock` and reads **whole seconds**, so it
+    /// cannot separate two checkpoints written inside one second — and a
+    /// manual `glasshouse checkpoint save` beside the task-boundary
+    /// checkpoint `shell::checkpoint_task_boundaries` takes lands there
+    /// easily. Until schema version 14 the tie was broken by `id DESC` on
+    /// 16 bytes of `randomblob`, which is a coin flip: measured over 800
+    /// back-to-back pairs through this function, 798 of which shared a
+    /// second, **414 resolved to the older checkpoint**.
+    ///
+    /// The order is now `checkpoints.seq DESC`, a counter stamped by
+    /// [`CheckpointStore::save`] inside the insert. It is a write count and
+    /// not a time, so a clock that steps backwards — NTP, a resumed laptop —
+    /// cannot make an older checkpoint win either. `id DESC` remains only as
+    /// a last tiebreak for rows that never went through `save` and so carry
+    /// the schema default of 0; those sort oldest, together, in a stable
+    /// order.
+    ///
+    /// Rows written before version 14 were backfilled from
+    /// `(created_at, id)`, so their between-second order is exactly what it
+    /// always was and their within-second order is what the old query
+    /// reported — see migration 14, which says why nothing better is
+    /// available for them.
+
+### `evaluation/kinds.rs` — `EvaluationKind::RoutingCostClassObserved`
+
+    /// The cost class of the destination a launch actually routed to,
+    /// attributed to **the session that launch produced** — map line 1835.
+    /// `subject` is `"free"`, `"metered"` or `"unknown"`
+    /// ([`crate::routing::Cost::as_str`], plus the third state this ledger
+    /// adds); `detail` is the chosen destination's id; `session_id` is the
+    /// session, which is what makes an outcome attachable to it later.
+    ///
+    /// **This is the link row, and it is a third row rather than a rewrite of
+    /// the two above.** [`crate::evaluation::record_routing_decision`] runs before a fresh
+    /// launch has minted a session id, and its `session_id` is absent on
+    /// purpose. Moving that call later — the other way to link a decision to
+    /// a session — would change what lines 1829 and 1830 count: a launch that
+    /// is refused while resolving its profile reaches the router and never
+    /// reaches a session record, and those two lines are about the decision,
+    /// not about what became of it. So the decision keeps its own moment and
+    /// this row records the session it turned into.
+    ///
+    /// **`unknown` is a real answer, not a gap.** A destination on a
+    /// harness's own sign-in has no configured provider and no marked model,
+    /// and Glasshouse does not know what that costs at the margin; saying so
+    /// is the [`crate::routing::Cost`] doc's own fail-closed stance carried
+    /// into a count, and a reader that folded it into `metered` would report
+    /// a number nobody measured.
+
+### `evaluation/kinds.rs` — `EvaluationKind::RoutingTierObserved`
+
+    /// The workload tier the launch-path classifier decided this session's
+    /// work needed, and whether line 1459's conservative rule moved it —
+    /// **map line 1834**. `subject` is [`RoutingTier::as_str`]'s closed
+    /// vocabulary (the tier, with `-escalated` when the tier the decision
+    /// used is not the tier the classifier stated, plus `unclassified`);
+    /// `detail` is the tier the classifier itself stated, absent for a
+    /// launch that stated no task; `session_id` is the session the launch
+    /// produced, which is what lets [`Self::RoutingOutcomeObserved`] be
+    /// counted against it.
+    ///
+    /// **A launch with no `--task` records `unclassified`, never nothing.**
+    /// The alternative — writing no row — would make *"this project never
+    /// states its tasks"* indistinguishable from *"this project never
+    /// launches"*, which is [`Self::RoutingOverrideDecided`]'s own argument
+    /// one line over. The bucket is its own; it is never folded into a tier.
+    ///
+    /// **The tier and the escalation are one bucket rather than two
+    /// columns**, because line 1834's question is about the pair: *does a
+    /// tier predict a successful turn **without** escalation?* A reader
+    /// grouping on `subject` alone therefore already has the comparison,
+    /// with no second key and no join.
+
+### `evaluation/kinds.rs` — `EvaluationKind::MemoryRated`
+
+    /// A person's or an agent's own verdict on a memory Glasshouse retrieved
+    /// — `glasshouse memory rate <memory-id> <verdict>` — map lines 1821,
+    /// 1823, 1824, 1825, 1831 and **939**'s explicit half. `subject` carries
+    /// the [`RetrievalScope`] word of the retrieval this rating judges (see
+    /// [`crate::evaluation::record_memory_rating`]'s own doc comment), or is absent when the
+    /// memory was never retrieved; `outcome` carries the verdict word itself
+    /// ([`EvaluationOutcome`]'s eight non-[`EvaluationOutcome::Unknown`]
+    /// values), `memory_id` is the rated memory, `session_id` is the
+    /// session the rating is about when one was given, and `detail` is the
+    /// operator's own note, never parsed.
+    ///
+    /// Design decision, "Phase 51, the memory half of RC-B: an explicit
+    /// rating when given, a labelled proxy otherwise — user ruling
+    /// 2026-09-02": *"Both: explicit rating when given, the labelled proxy
+    /// otherwise."* This is the explicit half; every reader here labels the
+    /// other half `proxy` and never folds the two together.
+    ///
+    /// **A rating is a new row, never an edit.** It judges a
+    /// [`Self::MemoryRetrieved`] row (or, for 1823/1824/1825, a memory that
+    /// was never retrieved in this exact window at all) without touching it
+    /// — the same append-only shape every kind in this ledger keeps.
+
+### `evaluation/kinds.rs` — `EvaluationKind::TurnOutcomeObserved`
+
+    /// The harness's own verdict on one turn of **any** session that runs
+    /// the hook — map lines 1821 and 1831's proxy denominator, and the row
+    /// [`Self::RoutingOutcomeObserved`] cannot be for this purpose, because
+    /// that row refuses to write for a session with no routed destination.
+    /// `subject` is `"completed"` or `"failed"`, spelled exactly as
+    /// [`Self::RoutingOutcomeObserved`]'s own vocabulary — the same
+    /// [`crate::events::TurnOutcome`], not a second word for the same fact.
+    ///
+    /// Design ruling, refusal register *"Phase 51's memory proxy — 1821 and
+    /// 1831"*: option (b), because `api::unix::spawn_session` makes no
+    /// routing decision, and writing a routed row for it would fabricate
+    /// one. This row makes no claim about a route at all — it is the
+    /// harness's verdict on the session's turn, full stop.
+    ///
+    /// **Written for every session that reaches the hook's `TurnEnded` arm,
+    /// routed or not.** `main.rs`'s hook handler records this row and then
+    /// [`Self::RoutingOutcomeObserved`] as before — a door-spawned session
+    /// that was never routed gets this row and never a
+    /// `RoutingOutcomeObserved` one; a CLI-launched session gets both. The
+    /// memory-quality readers (1821, 1831) join a session-attributed
+    /// retrieval to this row rather than to the routing row, because the
+    /// proxy's definition is about the *session's* turn, not the *route's*.
+
+### `harness/codex.rs` — module doc `HOOK_EVENTS`
+
+    /// Codex's own hook event catalogue, in the spelling its `hooks.json` uses.
+    ///
+    /// The catalogue of what Codex *supports*, not of what Glasshouse asks for
+    /// (see [`REPORTED_EVENTS`]). `Interrupt` is here but deliberately absent
+    /// from `REPORTED_EVENTS`: an aborted turn is the harness's own business and
+    /// says nothing a `SessionLifecycle` records that `Stop` does not.
+    ///
+    /// **Re-read from Codex 0.153.3** (`strings` on the real binary behind any
+    /// `codex` wrapper, grepped for these descriptions — see git history for the
+    /// 0.149.1/0.150.1/0.151.0 readings and the earlier wrong-artifact one). Same
+    /// twelve events, same spelling, same order, same descriptions:
+    ///
+    /// ```text
+    ///   Event                 Description
+    ///   PreToolUse            Before a tool executes
+    ///   PermissionRequest     When permission is requested
+    ///   PostToolUse           After a tool executes
+    ///   PreCompact            Before context compaction
+    ///   PostCompact           After context compaction
+    ///   SessionStart          When a new session starts
+    ///   SessionEnd            Right before a session ends
+    ///   UserPromptSubmit      When the user submits a prompt
+    ///   SubagentStart         When a subagent is created
+    ///   SubagentStop          Right before a subagent ends its turn
+    ///   Stop                  Right before Codex ends its turn
+    ///   Interrupt             Right before an interrupted turn is aborted
+    /// ```
+
+### `harness/codex.rs` — `CATALOGUE_OBSERVED_VERSION`
+
+    /// The Codex version `HOOK_EVENTS` was last read from.
+    ///
+    /// **This catalogue is observed, not documented.** Codex publishes no
+    /// machine-readable list of its hook events — `codex --help`, `codex debug`
+    /// and `codex features` all say nothing about them, and a `hooks.json`
+    /// naming an event Codex does not recognise is accepted in silence. So the
+    /// sole thing a test can cheaply hold Codex to is that the version this was
+    /// read from is still the version installed.
+    ///
+    /// See `tests/session_hook.rs::the_codex_hook_catalogue_was_read_from_the_installed_codex`.
+    /// When it fails, re-read the catalogue, reconcile `HOOK_EVENTS` with it, and
+    /// move this constant — **in that order**. Bumping the constant alone is the
+    /// one edit that makes the check worthless.
+    ///
+    /// Re-read it from the binary, not from the TUI. Codex ships as a native
+    /// executable (behind whatever `codex` on `PATH` happens to wrap), and it
+    /// carries two independent tables that agree: the one-line descriptions
+    /// above, and the `HookEventsToml` variant-name list. Both are literal
+    /// `&str` constants, so `strings` reads them without running anything:
+    ///
+    /// ```text
+    /// strings -n 4 <the real codex binary> | grep -o 'HookEventsToml.\{0,150\}'
+    /// ```
+    ///
+    /// The interactive *Review hooks* screen is the same data rendered, and it
+    /// remains a valid reading — but it cannot be driven from a tool call, which
+    /// made this check unactionable for any agent until 2026-09-05.
+
+### `harness/codex.rs` — `COMMUNICATION_STYLE`
+
+    /// Codex has one, `--help` is not where it lives, and it is still
+    /// `Unverified` — because half a fact is not a declaration.
+    ///
+    /// The earlier reading concluded from a complete `codex --help` that no
+    /// persona or tone mechanism existed. The command was read correctly and the
+    /// conclusion was wrong: on 0.150.1, `codex features list` reports
+    /// `personality  stable  true`, the binary's own status line reads "Use
+    /// /personality to customize how Codex communicates", and its bundled prompt
+    /// catalogue carries one overlay per personality (`personality_friendly`,
+    /// `personality_pragmatic`) templated into the base instructions at
+    /// `{{ personality }}`. The field also sits *beside* `model_reasoning_effort`
+    /// and `model_verbosity` in the same settings list rather than inside either,
+    /// which is what makes it communication policy and not reasoning effort.
+    ///
+    /// So [`super::CommunicationStyle`]'s `mechanism` half is established. Its
+    /// `change` half is not: whether `/personality` re-styles the running
+    /// conversation or only one started afterwards cannot be read out of any
+    /// artifact this environment offers, and settling it needs an interactive TUI
+    /// driven through a real turn. A slash command *looks* like an in-place
+    /// mechanism, and recording `InPlace` on that basis is exactly the guess
+    /// [`Declared`] exists to make impossible — a wrong `InPlace` here would have
+    /// Glasshouse silently fail to apply a profile, and a wrong `NewSession`
+    /// would throw away a warm session to apply one it already had.
+    ///
+    /// The experiment that would close this: start `codex`, run `/personality
+    /// friendly` mid-conversation, and see whether the *current* thread changes
+    /// voice or only the next one does.
+
+### `harness/codex.rs` — `direct_provider_launch`
+
+    /// A custom provider composed entirely out of `-c` overrides, so **no
+    /// file is written at all** — not `~/.codex/config.toml`, not a generated
+    /// profile beside it, not anything.
+    ///
+    /// That is the strongest possible form of "avoid overwriting the user's
+    /// normal configuration": there is nothing to overwrite and nothing to
+    /// clean up. Every override below was accepted by Codex 0.149.1 under
+    /// `--strict-config`, which rejects a key it does not know, so the set is
+    /// verified rather than assumed.
+    ///
+    /// The base URL goes through verbatim. Codex appends `/responses` to it —
+    /// a `base_url` of `http://127.0.0.1:8731/v1` was observed producing
+    /// `POST /v1/responses` — so the `/v1` belongs to the provider's own
+    /// declared URL and this adapter neither adds nor removes a path segment.
+    ///
+    /// `env_key` names an environment variable **of the child process**;
+    /// its value is what Codex sends as `authorization: Bearer <value>`. With
+    /// that variable absent Codex refuses outright ("Missing environment
+    /// variable: `…`") rather than falling back to the user's own paid
+    /// account — which is why the credential's absence is a refusal here too
+    /// rather than a launch that quietly costs the user money.
+    ///
+    /// `http_headers` is one more override in the same set, present only
+    /// when the provider declares headers at all — see `http_headers_table`
+    /// below.
+
+### `harness/codex.rs` — `read_session_record`
+
+    /// Read a Codex rollout header.
+    ///
+    /// Evidence, all read from Codex 0.149.0 across the 555 real rollout
+    /// files in `~/.codex/sessions/` on the development machine, on
+    /// 2026-08-25:
+    ///
+    /// - Every rollout's first line is a JSON object with
+    ///   `"type":"session_meta"` — 555 of 555.
+    /// - `payload.id` is present in all 555 and always equals the UUID in the
+    ///   file name. `payload.session_id` is present in only 527 of 555. This
+    ///   reads `id`, never `session_id`.
+    /// - `payload.cwd` is present in all 555; `payload.timestamp` is an
+    ///   RFC3339 UTC instant (`"2026-06-02T20:14:47.633Z"`), present in every
+    ///   interactive record.
+    /// - `payload.originator` is one of `codex-tui` (241), `Codex Desktop`
+    ///   (229), `codex_exec` (81), `codex_work_desktop` (4).
+    /// - `payload.parent_thread_id` marks a subagent thread (173 rollouts
+    ///   have it); a subagent's `cwd` is the same as its parent's, so `cwd`
+    ///   alone cannot tell them apart.
+    /// - `originator == "codex-tui"` with `parent_thread_id` absent or null
+    ///   selects exactly the 70 real interactive CLI sessions in the 555
+    ///   files, zero counterexamples — all 70 also carry `source == "cli"`,
+    ///   which corroborates but is deliberately not required, so an
+    ///   unrelated Codex update to `source` cannot break this rule.
+    ///   `forked_from_id` is not treated as disqualifying: every one of its
+    ///   128 occurrences is already excluded by the rule above.
