@@ -1532,7 +1532,7 @@ Fixed architectural requirements
 ☑ Include hard capability satisfaction as a prerequisite rather than a soft bonus.
 ☑ Include existing session affinity in candidate scoring.
 ☐ Include context quality in candidate scoring.
-☐ Include prompt-cache temperature in candidate scoring.
+☑ Include prompt-cache temperature in candidate scoring.
 ☑ Include normalized remaining capacity in candidate scoring.
 ☑ Include provider health in candidate scoring.
 ☑ Include expected marginal cost in candidate scoring.
@@ -1542,7 +1542,7 @@ Fixed architectural requirements
 ☑ Prefer observed success and reliability over same-vendor alignment when evidence is sufficient.
 ☑ Prefer effective TTFC over raw TTFC for tool-using gateway routes when reliability evidence is sufficient.
 ☑ Include successful tool rounds per minute as supporting evidence without treating it as a universal quality score.
-☐ Include cache affinity and the distinction between warm, cold, and unknown observations.
+☑ Include cache affinity and the distinction between warm, cold, and unknown observations.
 ☑ Include current cadence availability separately from general route health.
 ☑ Include failure-domain diversity when ranking fallback and failover candidates.
 ☑ Reduce the influence of performance observations with small samples, low confidence, or stale windows.

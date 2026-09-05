@@ -241,6 +241,8 @@ fn fast_and_flaky() -> RouteResponsiveness {
         failure_rate_sample: 10,
         rounds_per_minute: None,
         rounds_per_minute_sample: 0,
+        cache_read_ratio: None,
+        cache_read_ratio_sample: 0,
     }
 }
 
@@ -257,6 +259,8 @@ fn slower_and_sound() -> RouteResponsiveness {
         failure_rate_sample: 10,
         rounds_per_minute: None,
         rounds_per_minute_sample: 0,
+        cache_read_ratio: None,
+        cache_read_ratio_sample: 0,
     }
 }
 
@@ -412,6 +416,8 @@ fn responsiveness_is_inert_below_the_sample_floor() {
         failure_rate_sample: 10,
         rounds_per_minute: None,
         rounds_per_minute_sample: 0,
+        cache_read_ratio: None,
+        cache_read_ratio_sample: 0,
     };
     let only_candidate = Destination::fresh(
         "only",
@@ -468,6 +474,8 @@ fn responsiveness_is_inert_below_the_sample_floor_on_the_failure_rate_half() {
         failure_rate_sample: 2,
         rounds_per_minute: None,
         rounds_per_minute_sample: 0,
+        cache_read_ratio: None,
+        cache_read_ratio_sample: 0,
     };
     let only_candidate = Destination::fresh(
         "only",
@@ -525,6 +533,8 @@ fn tool_rounds_per_minute_never_outranks_a_candidate_a_full_term_ahead() {
         failure_rate_sample: 0,
         rounds_per_minute: Some(1000.0),
         rounds_per_minute_sample: 10,
+        cache_read_ratio: None,
+        cache_read_ratio_sample: 0,
     };
 
     // Session affinity's own "warmth" facet (line 1596) — a resumable warm
@@ -574,4 +584,188 @@ fn tool_rounds_per_minute_never_outranks_a_candidate_a_full_term_ahead() {
         "a quarter-term supporting signal must not overturn a full term: {:?}",
         routed.explanation()
     );
+}
+
+// ---------------------------------------------------------------------------
+// `GH-CACHE-TEMPERATURE` — map lines 1535/1545, through `SessionRouter::choose`
+// the same way the responsiveness terms above are: this destination's own
+// attached `RouteResponsiveness`, this time its `cache_read_ratio` half.
+// ---------------------------------------------------------------------------
+
+/// A route whose measured history shows a strongly warm prompt cache — a
+/// 90% read ratio over twenty rows, comfortably past
+/// `MIN_SAMPLE_FOR_SUMMARY`.
+fn warm_cache_history() -> RouteResponsiveness {
+    RouteResponsiveness {
+        raw_ttfc_ms: None,
+        raw_ttfc_sample: 0,
+        failure_rate: None,
+        failure_rate_sample: 0,
+        rounds_per_minute: None,
+        rounds_per_minute_sample: 0,
+        cache_read_ratio: Some(0.9),
+        cache_read_ratio_sample: 20,
+    }
+}
+
+/// The mirror: a route whose measured history shows almost no cache reads,
+/// at the same sample size.
+fn cold_cache_history() -> RouteResponsiveness {
+    RouteResponsiveness {
+        raw_ttfc_ms: None,
+        raw_ttfc_sample: 0,
+        failure_rate: None,
+        failure_rate_sample: 0,
+        rounds_per_minute: None,
+        rounds_per_minute_sample: 0,
+        cache_read_ratio: Some(0.05),
+        cache_read_ratio_sample: 20,
+    }
+}
+
+/// Map lines 1535/1545: with every other term equal, a destination whose
+/// measured cache-read history is warm scores strictly positive and wins
+/// over one whose history is cold, which scores strictly negative.
+///
+/// Mutation target `invert-sign`: swapping which end of the ratio scores
+/// positive must fail this test.
+#[test]
+fn measured_cache_temperature_prefers_a_destination_with_a_warmer_measured_history() {
+    let overrides = no_pairing_overrides();
+    let health = FreePool::new();
+    let now = Instant::now();
+    let inputs = RouterInputs {
+        overrides: &overrides,
+        health: &health,
+        now,
+        requirements: TaskRequirements::default(),
+    };
+
+    let warm = Destination::fresh(
+        "warm",
+        IntegrationId::ClaudeCode,
+        "default",
+        responsiveness_backend("anthropic", "claude-opus-4", "WARM_KEY"),
+        None,
+    )
+    .with_route_responsiveness(Some(warm_cache_history()));
+    let cold = Destination::fresh(
+        "cold",
+        IntegrationId::ClaudeCode,
+        "default",
+        responsiveness_backend("anthropic", "claude-opus-4", "COLD_KEY"),
+        None,
+    )
+    .with_route_responsiveness(Some(cold_cache_history()));
+
+    let routed = SessionRouter::new()
+        .choose(RoutingMoment::SessionStart, None, &[warm, cold], &inputs)
+        .expect("destinations were offered");
+    assert_eq!(
+        routed.chosen().id(),
+        "warm",
+        "with every other term equal, the warmer measured history must win: {:?}",
+        routed.explanation()
+    );
+
+    for (destination, explanation) in routed.considered() {
+        let contribution = explanation
+            .contributions()
+            .iter()
+            .find(|c| c.name() == "measured cache temperature")
+            .expect("the term is always present, even when inert");
+        if destination.id() == "warm" {
+            assert!(
+                contribution.magnitude() > 0.0,
+                "a warm measured history must score positive: {contribution:?}"
+            );
+            assert!(
+                contribution.evidence().contains("90.0%"),
+                "{}",
+                contribution.evidence()
+            );
+            assert!(
+                contribution.evidence().contains("20 rows"),
+                "{}",
+                contribution.evidence()
+            );
+        } else {
+            assert!(
+                contribution.magnitude() < 0.0,
+                "a cold measured history must score negative: {contribution:?}"
+            );
+            assert!(
+                contribution.evidence().contains("5.0%"),
+                "{}",
+                contribution.evidence()
+            );
+        }
+    }
+}
+
+/// Map lines 1535/1545: inert — exactly `0.0`, and saying so — for a
+/// destination with no responsiveness reading attached at all, and for one
+/// whose reading carries too few rows to summarize a ratio. A ranking
+/// computed on a build that reads no cache observations must be
+/// byte-for-byte what it was before this term existed.
+///
+/// Mutation target `floor-dropped`: removing the `MIN_SAMPLE_FOR_SUMMARY`
+/// gate on the cache-read ratio (in [`RouteResponsiveness::from_observations`])
+/// must fail this test.
+#[test]
+fn measured_cache_temperature_is_inert_without_a_reading_and_below_the_sample_floor() {
+    let overrides = no_pairing_overrides();
+    let health = FreePool::new();
+    let now = Instant::now();
+    let inputs = RouterInputs {
+        overrides: &overrides,
+        health: &health,
+        now,
+        requirements: TaskRequirements::default(),
+    };
+
+    let no_reading = Destination::fresh(
+        "no-reading",
+        IntegrationId::ClaudeCode,
+        "default",
+        responsiveness_backend("anthropic", "claude-opus-4", "NO_READING_KEY"),
+        None,
+    );
+
+    let below_floor = RouteResponsiveness {
+        raw_ttfc_ms: None,
+        raw_ttfc_sample: 0,
+        failure_rate: None,
+        failure_rate_sample: 0,
+        rounds_per_minute: None,
+        rounds_per_minute_sample: 0,
+        cache_read_ratio: None,
+        cache_read_ratio_sample: 2,
+    };
+    let thin_sample = Destination::fresh(
+        "thin-sample",
+        IntegrationId::ClaudeCode,
+        "default",
+        responsiveness_backend("anthropic", "claude-opus-4", "THIN_KEY"),
+        None,
+    )
+    .with_route_responsiveness(Some(below_floor));
+
+    let routed = SessionRouter::new()
+        .choose(
+            RoutingMoment::SessionStart,
+            None,
+            &[no_reading, thin_sample],
+            &inputs,
+        )
+        .expect("destinations were offered");
+
+    for (_, explanation) in routed.considered() {
+        let contribution = explanation
+            .contributions()
+            .iter()
+            .find(|c| c.name() == "measured cache temperature")
+            .expect("the term is always present, even when inert");
+        assert_eq!(contribution.magnitude(), 0.0, "{explanation:?}");
+    }
 }

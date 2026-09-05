@@ -796,3 +796,57 @@ State: **COMPLETE**. Phase 35B stands at 19 of 25; 1534, 1535/1545, 1542,
 Per-destination readings reach the router through `Destination::with_route_responsiveness`, computed at the three destination sites in `main.rs` from the rows the launch path already holds. Gates and limits: see the `phase-33b.md` entry above. **Not extended, by instruction:** `ObservedEvidenceSource` (no production caller).
 
 State: **COMPLETE** for 1542, 1543 and 1544. Phase 35B stands at 22 of 25 (1534, 1535, 1545 refused — no source in this build).
+
+---
+
+# Lines 1535 and 1545 — COMPLETE 2026-09-05, and the refusal above is superseded rather than overturned
+
+`GH-CACHE-TEMPERATURE` (Sonnet, Amber — a persisted field's first producer and a new ranking term), worktree `.worktrees/cache-temperature`, packet `.agent-runtime/packet-cache-temperature.md`, report **`.agent-runtime/report-cache-temperature.md`**.
+
+**Why the refusal ended, since it was correct when it was written.** Every entry above refuses 1535/1545 as *"no source in this build"*, and 1545's refusal names the missing thing exactly: *"1545 needs a real producer for `ContextState`."* The source landed afterwards. `gateway/session/mod.rs`'s per-exchange observation has carried the provider's own prompt-cache read count — `exchange.tokens.cached`, into `routing_observations.cached_input_tokens` — since Phase 56's usage work, and `TranslationSavings::cache_read_ratio` reads it back for two shipped commands. **A refusal ends when its producer lands; this one did.** Nothing in the earlier reasoning is retracted.
+
+## Include prompt-cache temperature in candidate scoring. (line 1535)
+
+Contract: Given a destination whose `route_responsiveness` reading carries a measured cache-read ratio over at least `MIN_SAMPLE_FOR_SUMMARY` rows, when the session router scores candidates, Glasshouse adds a `measured cache temperature` contribution that is positive for a warm ratio and negative for a cold one, bounded strictly below `prompt_cache_state`'s weaker magnitude — while preserving that a destination with no reading or too few samples contributes exactly `0.0` and says so, leaving a ranking on a build with no cache observations byte-for-byte what it was.
+
+State: **COMPLETE** — ruled 2026-09-05 by the orchestrator after reading the term and the reading it consumes.
+
+Production: `routing/session/scoring.rs :: measured_cache_temperature`, pushed in `score()` beside `observed_pairing_reliability`; `routing/evidence/joins.rs :: RouteResponsiveness::from_observations` (`cache_read_ratio`, `cache_read_ratio_sample`, computed from the rows it already iterates, using `TranslationSavings::cache_read_ratio`'s own formula); `routing/session/mod.rs :: MEASURED_CACHE_TEMPERATURE_MAGNITUDE_CEILING`. No new ledger open and no new call site: `commands/routing_destinations.rs :: route_responsiveness_for` already passed the rows carrying `input_tokens`/`cached_input_tokens`, so extending that one function wired the reading through to `launch`, `route` and `resume` unchanged.
+
+Regression: `routing_score::measured_cache_temperature_prefers_a_destination_with_a_warmer_measured_history`, `routing_score::measured_cache_temperature_is_inert_without_a_reading_and_below_the_sample_floor`.
+
+Mutation: `(ratio - 0.5)` → `(0.5 - ratio)` — **KILLED** by `measured_cache_temperature_prefers_a_destination_with_a_warmer_measured_history`, which reports the 5%-ratio candidate scoring `+0.09` and winning over the 90%-ratio one.
+
+**This is not `prompt_cache_state` (line 1597) again, and the two must not be merged.** That term is a *locality* fact — would this specific move preserve a cached prefix — computed from backend identity by `CacheLocality::between`. This one is a *history*: how often this route has actually shown a cache read. Its magnitude ceiling (`0.1`) is deliberately below `CACHE_LIKELY_LOST` (`0.2`), because a historical average about a route must not outweigh a structural fact about the move in front of it. `prompt_cache_state`'s doc claimed *"Glasshouse observes neither a provider cache's presence nor its lifetime"*; that sentence was true and is now false, and it was corrected in place. Its behaviour is unchanged.
+
+Limits: the ceiling and the linear-centred-at-`0.5` mapping are chosen and justified, not measured — the standing of every other magnitude in this module. A ratio of exactly `0.5` scores `0.0`.
+
+## Include cache affinity and the distinction between warm, cold, and unknown observations. (line 1545)
+
+Contract: Given a translated exchange whose provider reported prompt-cache usage, when the gateway records its routing observation, Glasshouse stamps `context_state` as `warm` (cache read > 0), `cold` (usage reported, cache read == 0) or `unknown` (no cache-read count ever stated) — while preserving that `unknown` and `cold` never collapse into one another and every non-producing path keeps the column's own `'unknown'` default.
+
+State: **COMPLETE** — ruled 2026-09-05 by the orchestrator.
+
+Production: `gateway/session/mod.rs :: SessionRouting::record_routing_observation`, which now calls `NewObservation::with_context_state` — its **first non-test caller**, closing the Cluster B shape that `shell/tests/mod_tests.rs` documented in its own fixture comment. The column, its `CHECK (context_state IN ('warm','cold','unknown'))`, the decoder at `readers.rs:889`, the `AND context_state = ?5` filter and the shell's renderer have all existed since migration 11 and are unchanged.
+
+Regression: `gateway::session::tests::record_routing_observation_stamps_warm_cold_and_unknown_context_state_from_the_providers_own_cache_read` — four cases driven through the real writer against a real ledger and read back through `EvidenceLedger::recent`.
+
+Mutation: `None => ContextState::Unknown` → `None => ContextState::Cold` — **KILLED** by that test's third case, the exchange for which no usage was reported at all.
+
+**`Unknown` is not `Cold`, and that is half of what the line asks for.** "The provider said nothing" is not "the cache was empty"; the rule is the one `with_tokens` states two lines above the new code, and the mutation exists to hold it.
+
+Limits: proves the producer through the shipped writer against a real ledger; does not prove every provider's usage payload decodes `cached` correctly upstream of `Exchange.tokens` — that decode is Phase 56's territory and is untouched here.
+
+## Gates on the merged tree, re-run by the orchestrator before the commit
+
+`routing_score` 11/11 · `--lib gateway` **229/229 run whole**, so `gateway/mod.rs`'s own `crate::session` boundary scan actually ran · `--lib routing::session` 24/24 · `--lib routing::evidence` 62/62 · `--lib shell` 314/314 · fmt and clippy `-D warnings` clean · `blast-radius.sh --targeted` exit 0 over seven changed files, rustdoc clean, size ratchet ok.
+
+## Three packet errors, all the orchestrator's
+
+The packet named `routing/evidence/readers.rs` as the conditional home of the reading; `RouteResponsiveness` is defined in `routing/evidence/joins.rs`, and `readers.rs` was never touched. It also failed to name `joins.rs` or `commands/routing_destinations.rs` while asking the worker to "find that builder's production caller". And its OBJECTIVE prose listed a third inert condition — a fresh destination — that its own numbered contract did not; the worker implemented the numbered contract and said why, correctly: this term is a sibling of `observed_pairing_reliability`, which has no freshness gate, not of `prompt_cache_state`, whose gate exists because it is a comparison and a session start has no `from`.
+
+**Phase 35B now stands at 24 of 25.** Only **1534** (context quality in candidate scoring) is open, and it stays open on the reasoning at *Lines 1537, 1538 — 1534 investigated and OPEN with its link named* above; that reasoning is about a different missing input and is untouched by this package.
+
+## One successor line, recorded and not chased
+
+`session/store/context.rs:63` carries the same *"Glasshouse observes neither a provider cache's presence nor its lifetime"* sentence, in the session store's own advisory estimate rather than in routing scoring. It was outside this packet and was not touched. Whether that subsystem should now read the measured ratio is a real question and a small one; it is Debt, not a defect.

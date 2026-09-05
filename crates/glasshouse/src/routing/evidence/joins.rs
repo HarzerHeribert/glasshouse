@@ -619,6 +619,21 @@ pub struct RouteResponsiveness {
     /// two groupings.
     pub rounds_per_minute: Option<f64>,
     pub rounds_per_minute_sample: usize,
+    /// Map lines 1535/1545: prompt-cache reads over total input tokens —
+    /// [`TranslationSavings::cache_read_ratio`]'s own formula, recomputed
+    /// here for the same reason [`Self::rounds_per_minute`] is: this scope
+    /// is neither of that reader's two groupings. `None` below
+    /// [`MIN_SAMPLE_FOR_SUMMARY`] rows carrying a known `input_tokens` —
+    /// the same floor every *rate* on this ledger sits behind — never a
+    /// ratio computed on too thin a sample.
+    ///
+    /// [`TranslationSavings::cache_read_ratio`]: super::TranslationSavings::cache_read_ratio
+    pub cache_read_ratio: Option<f64>,
+    /// Rows carrying a known `input_tokens` — every relayed row this scope
+    /// held is excluded before this count, exactly as
+    /// [`EvidenceLedger::translation_cache_savings`]'s own `WHERE
+    /// input_tokens IS NOT NULL` excludes it at the SQL layer.
+    pub cache_read_ratio_sample: usize,
 }
 
 impl RouteResponsiveness {
@@ -656,6 +671,22 @@ impl RouteResponsiveness {
         let rounds_per_minute = (rounds_per_minute_sample > 0 && serving_seconds_sum > 0)
             .then(|| rounds_sum as f64 * 60.0 / serving_seconds_sum as f64);
 
+        let mut input_tokens_sum: i64 = 0;
+        let mut cached_input_tokens_sum: i64 = 0;
+        let mut cache_read_ratio_sample = 0usize;
+        for observation in observations {
+            if let Some(input_tokens) = observation.input_tokens {
+                input_tokens_sum += input_tokens;
+                cached_input_tokens_sum += observation.cached_input_tokens.unwrap_or(0);
+                cache_read_ratio_sample += 1;
+            }
+        }
+        let cache_read_ratio = (cache_read_ratio_sample >= MIN_SAMPLE_FOR_SUMMARY
+            && input_tokens_sum + cached_input_tokens_sum > 0)
+            .then(|| {
+                cached_input_tokens_sum as f64 / (input_tokens_sum + cached_input_tokens_sum) as f64
+            });
+
         Self {
             raw_ttfc_ms,
             raw_ttfc_sample,
@@ -663,6 +694,8 @@ impl RouteResponsiveness {
             failure_rate_sample,
             rounds_per_minute,
             rounds_per_minute_sample,
+            cache_read_ratio,
+            cache_read_ratio_sample,
         }
     }
 

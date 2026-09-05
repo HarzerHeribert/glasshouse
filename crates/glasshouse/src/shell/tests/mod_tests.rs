@@ -2856,10 +2856,13 @@ mod route_evidence_tests {
         );
     }
 
-    /// Line 1764: a row recorded with no context state — the honest default
-    /// every real production row has today, since
-    /// `NewObservation::with_context_state` has zero non-test callers (see
-    /// `routing::evidence`'s own module header) — comes back labelled
+    /// Line 1764: a row recorded through a bare `NewObservation::new` — this
+    /// test's own construction, not `gateway::session::SessionRouting`'s
+    /// producer — carries no context state and falls back to the type's own
+    /// default. Since `GH-CACHE-TEMPERATURE`, that producer *does* call
+    /// `NewObservation::with_context_state`, so this default is no longer
+    /// what every real row gets; it is still what any caller that skips the
+    /// builder gets, and this proves that default comes back labelled
     /// `"unknown"`, never blank and never upgraded to a measurement.
     #[test]
     fn a_row_with_no_recorded_context_state_reads_unknown() {

@@ -37,8 +37,8 @@ use crate::config::pairing::{
 };
 use crate::provider::telemetry::RateLimitHeaders;
 use crate::routing::evidence::{
-    EvidenceLedger, FailureClass, HARNESS_TURN_PURPOSE, NewObservation, ObservedEvidenceSource,
-    Outcome as RoutingOutcome, RouteCorrelations,
+    ContextState, EvidenceLedger, FailureClass, HARNESS_TURN_PURPOSE, NewObservation,
+    ObservedEvidenceSource, Outcome as RoutingOutcome, RouteCorrelations,
 };
 use crate::routing::free::{FreePool, FreeResource, WorkloadOutcome};
 use crate::routing::interactive::{
@@ -49,6 +49,8 @@ use crate::routing::interactive::{
 use crate::routing::request::TaskClass;
 use crate::routing::{AssignedModel, Backend, CacheLocality};
 
+#[cfg(test)]
+use super::ingress::Tokens;
 use super::ingress::{Exchange, Framing, Outcome, StreamEnd, TRANSPORT_TIMEOUT_DETAIL};
 use super::upstream::Upstream;
 
@@ -607,7 +609,20 @@ impl SessionRouting {
                 .tokens
                 .and_then(|tokens| tokens.cached)
                 .and_then(|cached| i64::try_from(cached).ok()),
-        );
+        )
+        // Line 1545: a provider's own prompt-cache read count is the only
+        // observation this relay ever makes of the session's context, so a
+        // read greater than zero is the evidence it was warm. `cached`
+        // follows `with_tokens`' own rule immediately above -- `None`
+        // there meant "the provider stated no usage at all"; here it also
+        // covers "usage was stated but the cache count was not," and both
+        // collapse to `Unknown` rather than to `Cold`, exactly as that
+        // rule requires.
+        .with_context_state(match exchange.tokens.and_then(|tokens| tokens.cached) {
+            Some(0) => ContextState::Cold,
+            Some(_) => ContextState::Warm,
+            None => ContextState::Unknown,
+        });
 
         // Best-effort, exactly like `observe_quota_headers`'s own write to
         // `GatewayQuotaCache`: the accept loop cannot fail a real session's

@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1288 closed · 103 active committed open (93%)** — across 27 phases.
+**1290 closed · 101 active committed open (93%)** — across 27 phases.
 
 Not in the work queue: **7 deferred gate criteria** (Phase 52, Phase 53) awaiting a user decision, and **229 parked experimental lines**. They are visible in the map; they are not release-blocking work.
 
@@ -34,6 +34,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 32C | Subscription capacity estimation | **1** | 11 | `1242` |
 | Phase 32D | Normalized remaining-capacity score | **1** | 11 | `1257` |
 | Phase 34C | Automatic routing-model selection | **1** | 12 | `1429` |
+| Phase 35B | Candidate scoring | **1** | 24 | `1523` |
 | Phase 37 | Basic session-aware router | **1** | 10 | `1590` |
 | Phase 38 | Quota-preserving routing | **1** | 6 | `1604` |
 | Phase 9 | Antigravity adapter | **2** | 5 | `330` |
@@ -42,7 +43,6 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 33 | Resource health | **2** | 13 | `1309` |
 | Phase 59 | Decompression: the code's physical shape catches up with its architecture | **2** | 6 | `2043` |
 | Phase 33B | Reliability-adjusted agent performance | **3** | 11 | `1345` |
-| Phase 35B | Candidate scoring | **3** | 22 | `1523` |
 | Phase 60 | Parallel-session file coordination | **3** | 13 | `2374` |
 | Phase 21E | Decision ladder and conflict handling | **4** | 8 | `907` |
 | Phase 31 | Compaction-aware behavior | **5** | 2 | `1167` |
@@ -107,6 +107,10 @@ these unwrapped.
 
 - **1440** ☐ Avoid using a scarce premium subscription session as the classifier when a cheaper adequate routing resource exists.
 
+### Phase 35B — Candidate scoring  (1 open, 24 closed)
+
+- **1534** ☐ Include context quality in candidate scoring.
+
 ### Phase 37 — Basic session-aware router  (1 open, 10 closed)
 
 - **1594** ☐ Prefer a fresh session when existing relevant sessions are cold, bloated, or semantically poor and a good checkpoint exists.
@@ -150,12 +154,6 @@ these unwrapped.
 - **1354** ☐ Count empty completions, unusable tool calls, stream aborts, and apparently successful but non-actionable turns as distinct unsuccessful outcomes.
 - **1356** ☐ Avoid comparing TTFC across tasks with materially different tool requirements unless the comparison is explicitly normalized or segmented.
 - **1360** ☐ Never infer precise TTFC or token timing from terminal text when the adapter cannot distinguish protocol events reliably.
-
-### Phase 35B — Candidate scoring  (3 open, 22 closed)
-
-- **1534** ☐ Include context quality in candidate scoring.
-- **1535** ☐ Include prompt-cache temperature in candidate scoring.
-- **1545** ☐ Include cache affinity and the distinction between warm, cold, and unknown observations.
 
 ### Phase 60 — Parallel-session file coordination  (3 open, 13 closed)
 

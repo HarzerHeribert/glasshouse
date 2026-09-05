@@ -404,6 +404,105 @@ fn record_routing_observation_writes_the_class_the_failover_count_and_zero_retri
     }
 }
 
+/// Map line 1545: warm, cold and unknown must not collapse into one
+/// another. Driven through the real writer against a real ledger, exactly
+/// like this test's neighbour above, so this proves the shipped binary's
+/// own producer rather than a hand-mirrored mapping.
+///
+/// Four cases: a real cache read stamps `warm`; a stated usage with a zero
+/// cache read stamps `cold`; no usage at all stamps `unknown`; and — the
+/// distinction the packet calls out by name — usage stated with the cache
+/// count itself unstated *also* stamps `unknown`, never `cold`, because
+/// "the provider said nothing about the cache" is not "the cache was
+/// empty".
+#[test]
+fn record_routing_observation_stamps_warm_cold_and_unknown_context_state_from_the_providers_own_cache_read()
+ {
+    use crate::routing::evidence::{ContextState, ObservationQuery};
+
+    let tmp = tempfile::tempdir().unwrap();
+    let ledger = ledger_fixture(tmp.path());
+    let upstream = Upstream::with_failover(vec![upstream_backend("openrouter")])
+        .expect("one backend is not none");
+    let routing = SessionRouting::new();
+    routing.bind(
+        "claude-code",
+        "anthropic-messages",
+        AssignedModel::named("the-routed-model"),
+        &upstream,
+    );
+    let assignment = routing.assignment();
+
+    fn with_tokens(tokens: Option<Tokens>) -> Exchange {
+        Exchange {
+            tokens,
+            ..forwarded_exchange("openrouter", 200, Some(64), Some(64), StreamEnd::Complete)
+        }
+    }
+
+    let cases = [
+        (
+            with_tokens(Some(Tokens {
+                input: 100,
+                output: 20,
+                cached: Some(30),
+            })),
+            ContextState::Warm,
+        ),
+        (
+            with_tokens(Some(Tokens {
+                input: 100,
+                output: 20,
+                cached: Some(0),
+            })),
+            ContextState::Cold,
+        ),
+        (with_tokens(None), ContextState::Unknown),
+        (
+            with_tokens(Some(Tokens {
+                input: 100,
+                output: 20,
+                cached: None,
+            })),
+            ContextState::Unknown,
+        ),
+    ];
+    for (i, (exchange, _)) in cases.iter().enumerate() {
+        routing.record_routing_observation(
+            &ledger,
+            exchange,
+            ExchangeReading {
+                quota: &no_headers(),
+                dispatched_at_unix: 1_700_000_000 + i as i64,
+                completed_at_unix: 1_700_000_001 + i as i64,
+                assignment: assignment.clone(),
+                effect: ExchangeEffect::Unchanged,
+            },
+        );
+    }
+
+    let mut rows = ledger
+        .recent(
+            ObservationQuery {
+                provider: "openrouter",
+                model: "the-routed-model",
+                route: Some("anthropic-messages"),
+                harness: Some("claude-code"),
+            },
+            10,
+        )
+        .unwrap();
+    rows.sort_by_key(|row| row.dispatched_at_unix);
+    assert_eq!(rows.len(), cases.len());
+    for (row, (_, expected)) in rows.iter().zip(cases.iter()) {
+        assert_eq!(
+            row.context_state, *expected,
+            "row dispatched at {:?}: {row:?}",
+            row.dispatched_at_unix
+        );
+    }
+}
+
 /// What `observe_exchange` says it did is what it did: a real failover
 /// answers `FailedOver`, a rotation within the provider answers
 /// `RotatedCredential` and is not counted as a failover, and an exchange

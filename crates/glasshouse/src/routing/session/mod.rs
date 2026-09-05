@@ -1082,6 +1082,24 @@ const CACHE_PRESERVED: f64 = 0.6;
 /// [`CacheLocality::LikelyLost`] exists as a separate variant at all.
 const CACHE_LIKELY_LOST: f64 = 0.2;
 
+/// Map lines 1535/1545. What a destination's own measured prompt-cache read
+/// history is worth, at either end of
+/// [`crate::routing::evidence::RouteResponsiveness::cache_read_ratio`].
+///
+/// Strictly below [`CACHE_LIKELY_LOST`] — the *weaker* of [`prompt_cache_state`]'s
+/// two magnitudes ([`CACHE_PRESERVED`] is the other) — on purpose:
+/// [`prompt_cache_state`] establishes a locality **fact** about this specific
+/// move (same backend, same credential, or neither), where this term is a
+/// historical **average** over past exchanges against this destination's
+/// `(provider, model)`, which says nothing about whether *this* move
+/// preserves a prefix. A measured signal must never outrank the weakest
+/// structural one it sits beside, so even a destination with a perfect
+/// observed warm-cache record scores less than a destination merely
+/// *likely* to have kept its cache from the last move.
+///
+/// [`prompt_cache_state`]: scoring::prompt_cache_state
+const MEASURED_CACHE_TEMPERATURE_MAGNITUDE_CEILING: f64 = 0.1;
+
 /// Line 1598. The full weight of a destination's remaining quota, multiplied
 /// by [`RemainingCapacityScore::routing_fraction`] — so a resource at 100%
 /// contributes this and one at 10% contributes a tenth of it.

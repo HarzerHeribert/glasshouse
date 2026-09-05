@@ -882,6 +882,67 @@ fn classification_note(answer: &RouterAnswer) -> Contribution {
     Contribution::new("task classification", 0.0, answer.explain())
 }
 
+/// Map lines 1535/1545: this destination's own measured prompt-cache read
+/// history — [`Destination::route_responsiveness`]'s attached
+/// [`RouteResponsiveness::cache_read_ratio`], read the same way
+/// [`observed_pairing_reliability`] and [`tool_round_rate`] already read that
+/// reading's other fields, so a caller that attaches none, or a route too
+/// thin to summarize, leaves this term exactly as inert as those two already
+/// are.
+///
+/// This is a **different** signal from [`prompt_cache_state`], right below:
+/// that term answers whether *this specific move* would preserve a cached
+/// prefix (a locality fact); this one answers how often *this route in
+/// general* has actually shown a cache read, over its own recorded history.
+/// The two are pushed side by side deliberately, and see
+/// [`MEASURED_CACHE_TEMPERATURE_MAGNITUDE_CEILING`]'s own doc for why this
+/// one is bounded strictly below both of that term's magnitudes.
+///
+/// `0.0`, saying so, when: no responsiveness reading is attached to this
+/// destination; or the reading's ratio is `None` — fewer than
+/// [`MIN_SAMPLE_FOR_SUMMARY`] rows carried a known input-token count for
+/// this route. Otherwise the magnitude is linear in the ratio, centred on
+/// `0.5`: a route with no measured warmth advantage either way scores
+/// `0.0`, a perfectly warm observed history scores
+/// `+MEASURED_CACHE_TEMPERATURE_MAGNITUDE_CEILING`, and a perfectly cold one
+/// scores the negative of that. The `clamp` is defensive — the ratio's own
+/// domain (`[0.0, 1.0]`) never reaches it, the same recorded shape as
+/// [`observed_pairing_reliability`]'s own clamp.
+fn measured_cache_temperature(destination: &Destination) -> Contribution {
+    const TERM: &str = "measured cache temperature";
+    let Some(reading) = destination.route_responsiveness() else {
+        return Contribution::new(
+            TERM,
+            0.0,
+            "inert: no responsiveness reading attached to this destination",
+        );
+    };
+    let Some(ratio) = reading.cache_read_ratio else {
+        return Contribution::new(
+            TERM,
+            0.0,
+            format!(
+                "inert: fewer than {MIN_SAMPLE_FOR_SUMMARY} rows carry a known input-token \
+                 count for this route ({} seen) — not yet enough to measure a cache-read ratio",
+                reading.cache_read_ratio_sample,
+            ),
+        );
+    };
+    let magnitude = ((ratio - 0.5) * 2.0 * MEASURED_CACHE_TEMPERATURE_MAGNITUDE_CEILING).clamp(
+        -MEASURED_CACHE_TEMPERATURE_MAGNITUDE_CEILING,
+        MEASURED_CACHE_TEMPERATURE_MAGNITUDE_CEILING,
+    );
+    Contribution::new(
+        TERM,
+        magnitude,
+        format!(
+            "measured prompt-cache read ratio of {:.1}% over {} rows for this route",
+            ratio * 100.0,
+            reading.cache_read_ratio_sample,
+        ),
+    )
+}
+
 /// Line 1597: what this destination does to provider-side prompt caching.
 ///
 /// Two different questions, and the answer is the *worse* of them:
@@ -915,11 +976,14 @@ pub fn prompt_cache_state(
         // [`CacheLocality`] is defined as a comparison — `between(from, to)`
         // — and a session start has no `from`. Crediting an existing
         // destination with `Preserved` here would assert that a cached
-        // prefix survived a move that was never made, and Glasshouse
-        // observes neither a provider cache's presence nor its TTL (see
-        // `WARM_SESSION_RELEVANCE_WINDOW_SECONDS`' own doc, which says those
-        // expire in minutes). It would also double-count warmth, which
-        // [`session_affinity`] already prices once.
+        // prefix survived a move that was never made. Since
+        // `GH-CACHE-TEMPERATURE`, Glasshouse *does* observe a provider's own
+        // prompt-cache read count — [`measured_cache_temperature`] prices it
+        // — but that is a historical average over this destination's past
+        // exchanges, not a fact about the (nonexistent) move this term asks
+        // about, so it has nothing to credit here either. It would also
+        // double-count warmth, which [`session_affinity`] already prices
+        // once.
         //
         // The consequence, stated rather than hidden: **line 1597's
         // contribution is inert at a session start** and live at a task
@@ -930,8 +994,8 @@ pub fn prompt_cache_state(
             0.0,
             format!(
                 "`{}` is not being moved from anything — a session start has no prior backend \
-                 for a cached prefix to have survived, and Glasshouse observes neither a \
-                 provider cache's presence nor its lifetime",
+                 for a cached prefix to have survived; a route's own measured cache-read \
+                 history is `measured cache temperature`'s term, not this one's",
                 destination.id()
             ),
         );
@@ -1183,6 +1247,11 @@ pub(super) fn score(
     ));
     explanation.push(tool_round_rate(destination));
     explanation.push(observed_pairing_reliability(destination, inputs));
+    // Lines 1535/1545, beside the structural locality term right after it:
+    // this destination's own measured cache-read history, from the same
+    // attached `Destination::route_responsiveness` reading
+    // `observed_pairing_reliability` and `tool_round_rate` already read.
+    explanation.push(measured_cache_temperature(destination));
     explanation.push(prompt_cache_state(destination, current));
     explanation.push(quota_pressure(destination, weights));
     // Phase 35D, lines 1570–1577: the band the quota reading falls in, and

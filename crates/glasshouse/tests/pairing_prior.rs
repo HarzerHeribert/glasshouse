@@ -918,6 +918,8 @@ fn vendor_native_with_reliability(
         failure_rate_sample: sample,
         rounds_per_minute: None,
         rounds_per_minute_sample: 0,
+        cache_read_ratio: None,
+        cache_read_ratio_sample: 0,
     }))
 }
 

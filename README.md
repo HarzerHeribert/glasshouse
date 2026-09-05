@@ -19,7 +19,7 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`█████████████████████████████████████░░░` **1288 closed** · **103 active committed open** (92%)
+`█████████████████████████████████████░░░` **1290 closed** · **101 active committed open** (92%)
 
 Separately tracked, and not release-blocking: **7 deferred gate criteria** (Phase 52, Phase 53) awaiting a decision, and **229 parked experimental lines** under Maybe / Experimental.
 
@@ -108,7 +108,7 @@ Separately tracked, and not release-blocking: **7 deferred gate criteria** (Phas
 | Phase 34F — Model capability and tier calibration | 11/11 ✅ |
 | Phase 35 — Lightweight task classification | 14/14 ✅ |
 | Phase 35A — Candidate generation | 11/11 ✅ |
-| Phase 35B — Candidate scoring | 22/25 |
+| Phase 35B — Candidate scoring | 24/25 |
 | Phase 35C — Capacity-aware tier escalation and downgrade | 9/9 ✅ |
 | Phase 35D — Routing under subscription pressure | 8/8 ✅ |
 | Phase 36 — Session affinity | 8/8 ✅ |
