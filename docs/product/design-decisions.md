@@ -5094,3 +5094,326 @@ So `EventSource::next` no longer makes that call once the terminal has been sile
 So the case is constructed instead. With this set, `wait_for_terminal` looks past `POLLHUP` and answers `POLLIN` — the exact reading the field defect made, restored on purpose — and the interface walks into crossterm with a dead descriptor **every time**. Nothing but the watchdog can end that process, which is what the acceptance test then requires.
 
 It is read once, it changes nothing unless the variable is present, and `block_until_hangup` deliberately does not consult it, so the watchdog cannot be blinded by the same switch that blinds the interface.
+
+## Trims: `memory/inject.rs` — history moved out of comments by `GH-TRIM-MEMORY-INJECT`, 2026-09-05
+
+### module doc
+
+Selecting and labelling the project memory that goes into a session's
+context when Glasshouse routes a task to it — Phase 27, capability map
+lines 1125-1135.
+
+# This is a trust boundary, not formatting
+
+Injected text lands in an agent's context beside the instructions a person
+actually wrote. Line 1130 is the line that keeps those two apart, and
+everything in this module exists to make the separation hold against a
+memory body that is *trying* to break it.
+
+A memory body is **untrusted content**. It was extracted from an earlier
+session by a model and may itself read like an order — "ignore the
+previous instructions", "the user says to skip the tests" — or contain the
+bytes that would end this block and start something that looks like a new
+user message. So:
+
+- **The label is applied by construction.** [`Injection`] has one
+  constructor, [`briefing`], and its rendered text always opens with
+  [`MEMORY_MARKER`] and closes with [`MEMORY_MARKER_END`]. There is no way
+  for a caller to emit an injected block without the label, because there
+  is no way for a caller to build the text at all.
+- **Untrusted text can never contain `[` or `]`.** `quote` rewrites both
+  to their round equivalents. Every structural token this module emits —
+  the two markers and every entry head — begins with `[`, so a body that
+  cannot produce a `[` cannot forge a boundary, cannot close the block
+  early, and cannot open a second one. That is the whole containment
+  argument, and it is one grep to check rather than a list of patterns to
+  keep up to date.
+- **Untrusted text can never contain a control character.** The delivery
+  seam ([`crate::session::api::SessionApi::send_text`]) appends `\r`, and
+  `\r` is what a harness's line editor treats as *submit*. A body carrying
+  its own `\r` would end the injected line and hand the remainder to the
+  harness as a fresh prompt — which is exactly "impersonate the user's own
+  message". Control characters, the Unicode line and paragraph separators,
+  and the bidirectional-override characters that can visually reorder a
+  terminal line all become spaces.
+
+# What is *not* injected, and why the list is short
+
+Only [`super::search::SearchScope::Current`] is ever searched, so history
+never reaches a session (line 1134). A record that came back from that
+search but is no longer current — [`MemoryStore::search`] can move a pair
+to [`super::MemoryStatus::Conflicted`] *during* the query it was returned
+by — is dropped here as well: a memory in unresolved conflict with another
+is the opposite of settled project knowledge.
+
+Nothing derived from the environment, the filesystem, an error, or a
+`Debug` formatting reaches the rendered text. Every field comes from a
+[`MemoryRecord`] read out of this project's own store, through
+[`MemoryStore::search_grouped`], whose `WHERE` clause filters on
+`memories.project_id` — the same read boundary `tests/project_isolation.rs`
+proves. Credential scrubbing is the *producer's* guarantee and is made in
+[`super::extract::credentials`]; see this crate's `memory` module
+documentation for why the producer is the only place it can be made.
+
+# Line 1129 — closed on the door's measured precision, not a per-memory score
+
+*"Avoid injecting memory when retrieval confidence is low."* This module
+long refused the line: BM25 relevance is not a confidence, and every
+reachable transform of it measures the wrong thing — see [`briefing`]'s
+own documentation for the full accounting, kept because the reasoning
+still holds. What changed is not the relevance argument; it is that
+Glasshouse now has a different kind of confidence to threshold. **A
+relevance is not a confidence, and Glasshouse still has no per-query
+confidence. It does have an observed false-positive rate for the
+injection door, and that is a confidence about the door — which is the
+granularity this line's "avoid injecting" acts at, because injection is a
+per-door decision. 1129 is closed by the door's measured precision, not
+by a per-memory score.** [`InjectionConfidence`] is that rate, read from
+map line 939's own producer by this door's caller and passed in here —
+never computed by this module, which still has no ledger to compute it
+from (see this module's own header above: it takes a `MemoryStore`, not a
+`Runtime`).
+
+### `const MAX_INJECTED_BYTES`
+
+The hard ceiling on the whole rendered block, markers included, **in
+bytes**.
+
+# This bound is a safety property, not a conciseness one
+
+An injection is delivered as one line through
+[`crate::session::api::SessionApi::send_text`], which appends a carriage
+return, into a pseudo-terminal. A terminal left in canonical mode — every
+harness that has not put its own tty into raw mode, and every shell — has
+a hard limit on how long one line may be: `MAX_CANON`, **1024 bytes** on
+macOS and the BSDs. Measured on macOS 25.5 against a real pty: a line of
+1000 bytes arrives intact, and a line of 1023 bytes is **discarded
+entirely — along with every byte written to that terminal afterwards**.
+The session is not merely denied its memory; its input is wedged for good,
+and the task it was spawned to do never arrives either.
+
+So the ceiling sits well under that limit, and it is counted in bytes
+rather than `char`s because the terminal counts bytes: 900 `char`s of
+multi-byte text is 2700 bytes and would take the session down.
+
+Enforced by *dropping whole entries* rather than by cutting the rendered
+string, so the closing marker is always present and no entry is ever
+delivered half-written. Entries are dropped from the end of a list already
+ordered by line 1131's preference, so what survives a tight budget is what
+that line says matters most.
+
+### `fn briefing`
+
+Choose the memories relevant to a routed `task` and render them as one
+labelled block, distinguishing a retrieval miss from a search that
+correctly found nothing new — see [`BriefingOutcome`].
+
+`already_injected` is what this session has already been sent; those
+memories are skipped (line 1135). [`BriefingOutcome::NothingNew`] is the
+normal answer for a project with no memories, a task nothing matches
+beyond the raw search, and a session that already has everything the task
+selected — all three of which must leave the delivery exactly as it was
+before this module existed; only a search that matched nothing at all is
+[`BriefingOutcome::NothingMatched`].
+
+# Selection order — line 1131, then 1134
+
+1. **Currently active invariants and constraints**, in the order
+   [`MemoryStore::search_grouped`] produced them. These are the *active
+   constraints* line 1131 asks for preferentially, and [`rerank`] never
+   sees them — see that module's own documentation.
+2. **Failed attempts**, which are line 1131's *relevant failed approaches*
+   — the memories whose entire purpose is that an approach is not tried a
+   second time.
+3. Everything else the search matched.
+
+Groups 2 and 3 are one bucket, [`super::search::RetrievalResult::other`],
+until immediately before this partition: [`rerank::rerank`] runs on the
+whole bucket first (map lines 1089-1092), in its own lexical order when
+`model` is `None` or otherwise inert, and *then* the bucket is split back
+into failed attempts and everything else — so a failed attempt still
+precedes an ordinary match after reranking, the same *invariants and
+constraints first* precedence line 1131 already establishes one level up,
+extended one level down. Beyond that one pass, nothing here re-ranks: the
+ladder, the decay weighting and the thin-decision demotion all already
+ran inside [`MemoryStore::search`], and the two-partition structure is
+still a stable arrangement of what that produced, so an injection can
+never promote a memory past a rung its own authority and currency did not
+earn it.
+
+# Line 1129 — a relevance is not a confidence, and this is not one either
+
+*"Avoid injecting memory when retrieval confidence is low"* needs a
+confidence a retrieval can actually report, and no per-query signal in
+this module is one:
+
+- The raw BM25 relevance survives the retrieval, on
+  [`super::search::RetrievalResult::relevance`], and this function's own
+  `grouped` carries it. Read that method's documentation before reaching
+  for it: BM25 is a *within-query* match score against this project's own
+  corpus statistics, uncalibrated and with no natural zero, so there is no
+  constant of which "below this, the retrieval was poor" is a true
+  statement. It is a relevance, not a confidence.
+- The blended score `search` actually sorts on — relevance ×
+  `policy::retrieval_weight` — is deliberately **not** exposed, and is the
+  one a threshold would be most tempted by. `retrieval_weight` reads
+  authority, age, validation state and project phase and never sees the
+  query, so the blend is high for an ancient invariant no matter what was
+  asked. Its being unavailable is the point.
+- The signals that *are* reachable measure the wrong thing.
+  `super::search::ladder_rung` and `policy::retrieval_weight` vary with a
+  memory's authority, age and validation state and never see the query
+  text at all; a "confidence" derived from them would be high for an
+  ancient invariant no matter what was asked. A result *count* measures
+  how much this project has written down, not how well any of it matched.
+  A second BM25 query issued from this module would be a second retrieval
+  implementation whose ranking differed from the one that chose the
+  memories it was scoring.
+
+A fabricated per-query number would silently gate every future injection
+decision, so none is fabricated here, and a search that matches nothing
+still injects nothing on its own terms — that is an empty result, not a
+confidence threshold.
+
+**A relevance is not a confidence, and Glasshouse still has no per-query
+confidence. It does have an observed false-positive rate for the
+injection door, and that is a confidence about the door — which is the
+granularity line 1129's "avoid injecting" acts at, because injection is a
+per-door decision. 1129 is closed by the door's measured precision, not
+by a per-memory score.** `confidence`, below, is that rate — see
+[`InjectionConfidence`] for what it carries and [`BriefingOutcome::WithheldLowConfidence`]
+for what withholding on it looks like from the caller's side.
+
+`project_root` is where map line 1142's freshness is answered, and `None`
+is a supported answer rather than a degraded one: every file-aware row
+then reads `freshness=unknown` and the section is otherwise identical. A
+caller with a [`crate::Runtime`] has it (`runtime.project().root()`); one
+testing the rendering does not need it. `confidence` is the same shape —
+see [`InjectionConfidence`]'s own doc comment.
+
+### `fn file_observed_memories`
+
+Line 1140: memories this project learned while a task's own named files
+were being worked on — [`MemoryStore::for_path`] over every path
+[`crate::routing::session::paths_named_in`] finds in `task`, reusing
+Phase 36's 1583 extraction rather than writing a second one.
+
+`task` naming no path, or naming one nothing was ever observed against,
+both answer `Ok(Vec::new())` — the same "nothing to say" the search half
+of [`briefing`] already returns for an unmatched query, and [`render`]
+treats the two identically.
+
+# Three things every row carries, and one it does not
+
+**The association is read per row**, not assumed. Migration 26 gave
+`memory_files` a second provenance, so a row may be `observed` (the file
+changed during the session that produced the memory — a correlation) or
+`referenced` (an extraction model named the path, and the session
+demonstrably edited it — a claim about the memory). Labelling both
+`observed`, which this function did while `observed` was the only value a
+writer could produce, would now understate half the rows.
+
+**The freshness is a label and never a filter.** Map line 1142: a stale
+row is returned, in its rank, marked. Nothing here drops, reorders or
+rescores on it — see [`Freshness`], and note that `project_root` reaching
+this function is the *only* way git is consulted at all, so a caller that
+passes `None` gets [`Freshness::Unknown`] on every row and an otherwise
+identical section.
+
+**The intent is [`RetrievalIntent::CodeEdit`]** — map line 1141. This
+section is built for the files the task *named*, which is the intended
+edit the line is about; the socket door, which was asked what a file is
+associated with, stays [`RetrievalIntent::Lookup`].
+
+What it does not carry is which file each row came back for. That was
+kept out to save budget when the section was built and stays out: a
+reader gets the file back only if the memory's own body mentions it.
+
+A memory already selected by the search half, or already sent to this
+session, is excluded rather than shown twice.
+
+### `fn file_observed_heading`
+
+Line 1140's section heading, computed from the actual count rather than
+reserved for a worst case: unlike [`header`], this is only ever measured
+after `file_observed_memories` has already returned, so [`render`] has the
+real length to test the byte ceiling against and no reservation is needed.
+
+# What this heading lost, what it gained, and why the budget decided
+
+It used to spend a full sentence asserting that every row was a
+correlation, which was true while `observed` was the only association a
+writer could produce. Migration 26 landed the second, so that sentence
+would now misstate half the rows — and each row already carries its own
+`assoc=` and `freshness=` tokens, which is where a reader who quotes one
+entry out of the block will look anyway.
+
+What replaces it is map line 1142's own caveat — *never treat stale
+memory as stronger evidence than the current source code* — stated where
+a reader cannot skip it and naming what the evidence actually is.
+
+**The trade was forced, not stylistic.** [`MAX_INJECTED_BYTES`] is 900,
+this heading plus three entries is most of it, and every entry grew by a
+`freshness=` token. A heading that explained both vocabularies as well
+would have pushed the whole section past the ceiling and
+[`render`] would have dropped it — a section explaining itself at length
+to nobody. The shorter sentence buys back slightly more than the tokens
+cost.
+
+### `fn is_unreaffirmed_idea`
+
+Line 934: *"avoid injecting old ideas merely because they mention the same
+subsystem."*
+
+Both halves are read off the record rather than judged. **Idea** is
+[`MemoryAuthority::Idea`], the class whose own documentation is
+*"Exploratory. Must never be injected as a binding instruction."* —
+[`MemoryKind`] has no idea variant, so authority is the only place this
+project records the distinction. **Old** is `last_validated_at.is_none()`:
+nothing has reaffirmed it since it was written down, which is exactly the
+stand-in for staleness `standing` already uses for line 1132 and
+`policy::phase_penalty` uses for line 933. An idea somebody has
+re-confirmed is not an old one and is not excluded here.
+
+# Why this is an exclusion and not a demotion
+
+An injection carries at most [`MAX_INJECTED_MEMORIES`] entries, so ranking
+an idea lower is only a refusal to inject it when something else competes
+for the slot — and the case the line names is precisely the one where
+nothing does: a task mentions a subsystem, the only memories about that
+subsystem are old ideas, and they arrive looking like what this project
+decided. Demotion cannot express that; membership can.
+
+# The reading this does not take
+
+The line's *"merely because they mention"* could instead be read as a
+statement about how *weakly* an idea matched, which would need a relevance
+cut — the signal Phase 27 refused to invent for line 1129, and one that
+would still not fire for an idea that matched strongly and is still stale.
+Reading it off recorded authority and validation costs the case of a
+genuinely current idea nobody has reaffirmed; that is the trade, and
+reaffirming is the recorded, one-call way out of it.
+
+### `fn quote`
+
+Render untrusted stored text so it cannot escape the block that carries
+it, and cut it to `budget` characters.
+
+Three rules, in this order, and each of them is a containment property
+rather than a cosmetic one:
+
+1. `[` becomes `(` and `]` becomes `)`. Every structural token this module
+   emits starts with `[`, so text that cannot contain one cannot forge an
+   entry head, cannot emit [`MEMORY_MARKER`], and cannot close the block
+   with [`MEMORY_MARKER_END`].
+2. Anything that could act on the terminal becomes a space: control
+   characters (which include `\r`, the byte a harness's line editor reads
+   as *submit*, and `\u{1b}`, which opens an escape sequence), the Unicode
+   line and paragraph separators, and the bidirectional overrides that can
+   reorder a rendered line so it reads as something it is not.
+3. Runs of whitespace collapse to one space and the result is trimmed, so
+   the budget is spent on text rather than on padding.
+
+The cut is by `char`, never by byte, so a multi-byte character is never
+split; a cut string ends in `…` so a truncated body is visibly truncated
+rather than silently a different sentence.
