@@ -4405,7 +4405,9 @@ session's route, never a memory), `detail` is the operator's note, never
 parsed. **A rating is a new row, never an edit**, and never a rewrite of
 `RoutingOutcomeObserved`.
 
-**The door.** `glasshouse route rate <session-id> useful|not-useful [--note]`,
+**The door.** `glasshouse rate-route <session-id> useful|not-useful [--note]`
+— a top-level command, because `route` is a flat command whose flags are the
+ranking's own and turning it into a group would break `route --moment …`;
 modelled line for line on `memory rate` (`cli.rs::Rate`,
 `record_memory_rating`'s handle discipline). CLI only, as memory's is: the
 rating is the operator's act; a harness may issue it as a tool call the way
