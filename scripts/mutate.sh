@@ -149,7 +149,8 @@ run_test() {
 
 # Perform the whole ritual for one mutation. Returns 0 on KILLED (or SURVIVED
 # with --expect-survive), 1 on an unexpected SURVIVED, 2 on a setup refusal
-# (bad occurrence count, dirty tree, missing file).
+# (bad occurrence count, dirty tree, missing file), 3 on COMPILE-ERROR: the
+# mutated tree did not build, so no test ran and the verdict proves nothing.
 mutate_one() {
   local file="$1" find="$2" replace="$3" name="$4"
 
@@ -239,12 +240,27 @@ PY
   else
     verdict=KILLED
   fi
+  # A non-zero exit from a tree that did not BUILD is not a kill: no test ran.
+  # Under `warnings = "deny"` that is the common case -- a deleted call leaves
+  # its bindings unused -- and four verdicts in one day were false for it
+  # (pane-lead, 2026-09-05). The tell: a compile error and no failing test.
+  local failing compile_error
+  failing="$(grep -E '^test .*\.\.\. FAILED$' "$out")"
+  compile_error="$(sed "s/$(printf '\033')\[[0-9;]*m//g" "$out" \
+    | grep -E '^error(\[E[0-9]+\])?: |could not compile' \
+    | grep -v '^error: test failed' | head -3)"
+  if [ "$verdict" = KILLED ] && [ -z "$failing" ] && [ -n "$compile_error" ]; then
+    verdict=COMPILE-ERROR
+  fi
 
   # Step 6: decide, loudly.
-  if [ "$verdict" = KILLED ]; then
+  if [ "$verdict" = COMPILE-ERROR ]; then
+    echo "mutation $label: COMPILE-ERROR -- the tree did not build, so no test ran and nothing is proven"
+    echo "  This is NOT a kill. Rewrite the mutation so it compiles -- keep every binding"
+    echo "  ({ let _ = (a, &b); Ok(()) } or if false { ... }) -- and re-run. First error(s):"
+    sed 's/^/  /' <<< "$compile_error"
+  elif [ "$verdict" = KILLED ]; then
     echo "mutation $label: KILLED"
-    local failing
-    failing="$(grep -E '^test .*\.\.\. FAILED$' "$out")"
     [ -n "$failing" ] && printf '%s\n' "$failing"
     local assertion
     assertion="$(grep -E 'panicked at|assertion' "$out" | head -3)"
@@ -292,6 +308,7 @@ PY
   if [ "$verdict" = SURVIVED ] && [ "$EXPECT_SURVIVE" -ne 1 ]; then
     return 1
   fi
+  [ "$verdict" = COMPILE-ERROR ] && return 3
   return 0
 }
 

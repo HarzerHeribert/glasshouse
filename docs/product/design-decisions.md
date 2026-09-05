@@ -13018,9 +13018,10 @@ sequence of input/output blocks keyed by cell, scrollable, with a cell's outputs
 preview line. It does not decide execution (a notebook re-runs cells; pane never re-runs a turn, §5),
 does not add a second serialization of any result (2465 — the outputs are the previews the model
 already saw), and does not put the model's own text anywhere but the cell that produced it.
-**Successor:** `GH-PANE-NOTEBOOK-VIEW` (Amber, pane-lead's lane), after `GH-PANE-61C-FIXUPS` lands the
-real `CrosstermBackend` renderer — the fixups worker should shape that renderer as a column of cells
-from the start rather than a chat transcript to be re-laid later.
+**Successor:** `GH-PANE-NOTEBOOK-VIEW` (Amber, pane-lead's lane), after `pane-61e-handles` integrates.
+`GH-PANE-61C-FIXUPS` had already merged (`118b772`) when this was recorded, so the notebook shape is that
+package's whole job rather than a constraint on the fixups (the lead's correction,
+`.agent-runtime/pane/ask-primary-notebook-view-timing.md`, 2026-09-06).
 
 ## Trims: routing module docs, second packet — history moved out of comments by `GH-TRIM-ROUTING-DOCS-2`, 2026-09-05
 
