@@ -18,6 +18,29 @@ repository = "https://github.com/HarzerHeribert/glasshouse"
 [workspace.metadata.ci]
 toolchain = "1.98.0"
 
+# Warnings are denied HERE, not through RUSTFLAGS, and the difference is worth
+# a paragraph because it was costing hours a day.
+#
+# RUSTFLAGS is part of cargo's fingerprint, and it applies to every unit in the
+# build including dependencies. The gate used to carry `-D warnings` on the
+# build and test steps, an explicitly empty `RUSTFLAGS=` on the clippy step
+# (mirroring ci.yml, which sets it on neither), and nothing at all on a
+# developer's interactive `cargo build`. Three values, one target/, each one
+# invalidating what the last had produced. On 2026-09-04 that tree held 1203
+# fingerprint entries for `glasshouse` and 24 for `thiserror` -- a dependency
+# that should have one -- and 60G of coexisting rebuilds of the same code.
+# Every gate run was recompiling the world two or three times to answer one
+# question.
+#
+# `[lints]` is not a compiler flag: cargo applies it per workspace member, the
+# same way for every invocation, so interactive builds, the clippy step, the
+# test step and CI all land in ONE fingerprint namespace. It also stops at the
+# workspace boundary, so a dependency emitting a warning after `cargo update`
+# is no longer a build failure in someone else's code -- which is what
+# `-D warnings` in RUSTFLAGS actually meant, and never what the gate wanted.
+[workspace.lints.rust]
+warnings = "deny"
+
 [workspace.dependencies]
 anyhow = "1"
 thiserror = "2"

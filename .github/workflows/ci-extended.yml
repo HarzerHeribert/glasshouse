@@ -1,0 +1,190 @@
+name: CI (extended)
+
+# Deliberately LARGE, and deliberately not the gate.
+#
+# scripts/ci-local.sh is the blocking gate and stays that way: it is faster on
+# the developer's machine than any hosted runner, and it is what every worker
+# runs before reporting. This workflow is the trailing sweep with a matrix one
+# laptop cannot host -- more operating systems, more architectures, more
+# compilers, and the real harnesses installed so the adapters' `Declared`
+# facts are re-verified against live binaries on every run instead of only
+# when a developer remembers to. Wall-clock is not a constraint here; the
+# green tick is.
+#
+# COST, and why the trigger below is still manual: GitHub-hosted standard
+# runners are free for PUBLIC repositories and metered for private ones, with
+# macOS billed at 10x. This matrix is roughly a dozen jobs. The repository was
+# made public on 2026-09-05 and these triggers were enabled in the same change;
+# if it is ever made private again, drop `push` and `pull_request` in that
+# same commit or a single push will spend most of a month's included minutes.
+on:
+  workflow_dispatch:
+  push:
+    branches: ["**"]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  # Compile cache backed by the Actions cache service. Swatinem/rust-cache
+  # keeps a whole target/ and this workspace's 160 test binaries blow through
+  # the 10 GB per-repository cap in one run; sccache stores per-crate outputs
+  # and survives that.
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: sccache
+  CARGO_INCREMENTAL: "0"
+
+jobs:
+  # Everything a runner can answer about the tree: every OS and architecture
+  # GitHub hosts, on the declared compiler and on the MSRV floor. Beta and
+  # nightly ride along on one OS as early warning, allowed to fail.
+  test:
+    name: test (${{ matrix.os }}, ${{ matrix.toolchain }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    continue-on-error: ${{ matrix.toolchain == 'beta' || matrix.toolchain == 'nightly' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest        # x86_64 Linux
+          - ubuntu-24.04-arm     # aarch64 Linux
+          - macos-latest         # aarch64 macOS (the development machine's shape)
+          - windows-latest       # x86_64 Windows -- what most users have
+          - windows-11-arm       # aarch64 Windows -- what the local VM tests
+        toolchain: [declared, msrv]
+        include:
+          - { os: ubuntu-latest, toolchain: beta }
+          - { os: ubuntu-latest, toolchain: nightly }
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # Both versions are declared once, in Cargo.toml, and read from there
+      # the same way scripts/ci-local.sh reads them -- the two cannot drift.
+      - name: Resolve the toolchain for this cell
+        id: tc
+        shell: bash
+        run: |
+          case "${{ matrix.toolchain }}" in
+            declared) v="$(grep -m1 '^toolchain' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')" ;;
+            msrv)     v="$(grep -m1 '^rust-version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')" ;;
+            *)        v="${{ matrix.toolchain }}" ;;
+          esac
+          test -n "$v"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          echo "toolchain for this cell: $v"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.tc.outputs.version }}
+          components: clippy, rustfmt
+
+      - name: Compile cache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      # The harnesses, for real. Several adapters state facts about the
+      # installed binary as `Declared::Verified` and a few tests compare those
+      # facts against what is actually on PATH -- session_hook's Codex hook
+      # catalogue, for one. Without the binaries those tests SKIP, which is
+      # honest but proves nothing; with them, a harness release that renames
+      # an event goes red here before it reaches a developer's machine.
+      #
+      # continue-on-error on purpose: an install URL that moves must not turn
+      # every cell red, because the tests skip cleanly when a harness is
+      # absent. A missing harness is a smaller loss than a lost matrix.
+      - name: Install Node (harness installers need it)
+        if: matrix.toolchain == 'declared'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install harnesses
+        if: matrix.toolchain == 'declared'
+        continue-on-error: true
+        shell: bash
+        run: |
+          npm install -g @anthropic-ai/claude-code @openai/codex opencode-ai
+          if [ "$RUNNER_OS" != "Windows" ]; then
+            curl -fsS https://cursor.com/install | bash || true
+            echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          fi
+          for h in claude codex opencode cursor-agent; do
+            printf '%-14s ' "$h"; command -v "$h" >/dev/null 2>&1 && "$h" --version 2>/dev/null | head -1 || echo "(absent -- its tests will skip)"
+          done
+
+      - name: Build
+        run: cargo build --locked --workspace --all-targets
+
+      # --no-fail-fast: this is the sweep, not the gate. The gate stops at the
+      # first red so a developer gets an answer fast; the sweep runs everything
+      # so one red cannot hide the others -- which is exactly how a Codex
+      # catalogue drift sat behind a pty_smoke failure on 2026-09-05.
+      - name: Test
+        run: cargo test --locked --workspace --no-fail-fast -- --nocapture
+
+      - name: Doctests
+        run: cargo test --locked --workspace --doc
+
+      - name: Clippy
+        if: matrix.toolchain == 'declared'
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+
+      - name: Rustdoc
+        if: matrix.toolchain == 'declared'
+        run: cargo doc --workspace --no-deps
+        env:
+          RUSTDOCFLAGS: -D warnings
+
+      - name: Cache statistics
+        if: always()
+        run: sccache --show-stats
+
+  # The checks that never cost a compiler: formatting, the README progress
+  # block, the file-size ratchet, the doc boundary, evidence coverage, and the
+  # orchestration scripts' own tests.
+  lint:
+    name: lint
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve the declared toolchain
+        id: tc
+        shell: bash
+        run: |
+          v="$(grep -m1 '^toolchain' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"; test -n "$v"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.tc.outputs.version }}
+          components: rustfmt
+      - name: Formatting
+        run: cargo fmt --all -- --check
+      - name: README progress block
+        run: python3 scripts/progress.py --check
+      - name: File-size ratchet
+        run: python3 scripts/check-file-sizes.py
+      - name: Doc boundary
+        run: scripts/check-doc-boundary.sh
+      - name: Evidence coverage
+        run: python3 scripts/check-evidence-coverage.py --strict --strict-consistency
+      - name: Script tests
+        run: for t in scripts/tests/test_*.py; do python3 "$t" || exit 1; done
+
+  # Known-vulnerable dependencies, from the RustSec advisory database. Free
+  # to run, and the only check in this file that can go red with no change
+  # to the tree at all -- which is the point.
+  audit:
+    name: audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: rustsec/audit-check@v2
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}

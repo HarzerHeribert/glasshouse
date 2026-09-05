@@ -49,15 +49,17 @@ jobs:
       - name: Cache cargo registry and target
         uses: Swatinem/rust-cache@v2
 
+      # No RUSTFLAGS here, and that is not a relaxation. Warnings are denied by
+      # [workspace.lints.rust] in Cargo.toml, which applies to every invocation
+      # identically instead of only to the two steps that remembered to set it.
+      # Carrying it in the environment made this job's fingerprint differ from
+      # the lint job's and from a developer's, so each one recompiled what the
+      # last had built -- see the Cargo.toml comment for the measurement.
       - name: Build
         run: cargo build --locked --workspace --all-targets
-        env:
-          RUSTFLAGS: -D warnings
 
       - name: Test
         run: cargo test --locked --workspace -- --nocapture
-        env:
-          RUSTFLAGS: -D warnings
 
   lint:
     name: lint

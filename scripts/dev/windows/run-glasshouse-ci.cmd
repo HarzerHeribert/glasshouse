@@ -44,7 +44,6 @@ goto done
 :build
 echo.
 echo === Windows ARM64 stable build ===
-set "RUSTFLAGS=-D warnings"
 cargo +stable build --locked --workspace --all-targets
 if errorlevel 1 set "OVERALL=1"
 exit /b 0
@@ -52,7 +51,6 @@ exit /b 0
 :test
 echo.
 echo === Windows ARM64 stable tests ===
-set "RUSTFLAGS=-D warnings"
 cargo +stable test --locked --workspace --no-fail-fast -- --nocapture
 if errorlevel 1 set "OVERALL=1"
 exit /b 0
@@ -60,7 +58,6 @@ exit /b 0
 :msrv
 echo.
 echo === Windows ARM64 MSRV 1.88 check ===
-set "RUSTFLAGS="
 cargo +1.88.0-aarch64-pc-windows-msvc check --locked --workspace --all-targets
 if errorlevel 1 set "OVERALL=1"
 exit /b 0

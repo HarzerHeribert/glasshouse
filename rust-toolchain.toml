@@ -1,0 +1,19 @@
+# The compiler every `cargo` invocation in this tree uses, when `cargo` is a
+# rustup shim. It repeats [workspace.metadata.ci] toolchain in Cargo.toml on
+# purpose: that key is read by scripts and CI, this file is read by rustup, and
+# neither can read the other. Bump both in one commit.
+#
+# What this closes: the gate pins its own compiler (scripts/ci-local.sh), but an
+# interactive `cargo build` in the same tree used whatever `cargo` PATH named,
+# and rustc's version is part of every artifact's fingerprint -- so one tree
+# quietly held two complete builds and every developer paid for both.
+#
+# What this does NOT close: a non-rustup `cargo` ahead of the shims on PATH
+# (a Homebrew `rust` formula, say) ignores this file entirely and builds with
+# its own compiler. `scripts/ci-local.sh` warns when that is the compiler it
+# would otherwise have used; an interactive build gets no such warning. On a
+# machine where `cargo -V` and this file disagree, put ~/.cargo/bin first on
+# PATH or `brew unlink rust`.
+[toolchain]
+channel = "1.98.0"
+components = ["clippy", "rustfmt"]

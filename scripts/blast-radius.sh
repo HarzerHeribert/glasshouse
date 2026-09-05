@@ -160,6 +160,21 @@ if [ "$TARGETED" -eq 1 ] && [ "$SERIAL" -eq 1 ]; then
   exit 1
 fi
 
+# Compiler cache, if this machine has one; a no-op otherwise. This is the
+# script that runs in a worker's fresh worktree, where target/ is empty and
+# every cargo invocation below would otherwise recompile the dependency graph
+# and the library from nothing before the first test binary links. See
+# scripts/lib/accel.sh for why it is sourced rather than configured.
+#
+# Not for the modes that run no cargo: --dry-run, --list and --status print a
+# plan and exit, and starting an sccache server to do it would be noise in
+# output whose whole contract is that it changes nothing.
+# shellcheck source=scripts/lib/accel.sh
+. "$REPO/scripts/lib/accel.sh"
+if [ "$DRY" -eq 0 ] && [ "$LIST" -eq 0 ] && [ "$STATUS" -eq 0 ]; then
+  accel_enable
+fi
+
 # ---- one gate per tree at a time ------------------------------------------
 # Two blast radii in the SAME tree at once are never what anyone meant, and
 # they lie in both directions: each one's cargo load pushes the other's

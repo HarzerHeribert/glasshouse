@@ -9,10 +9,13 @@
 # Until the quota returns, THIS script is the gate. Run it before every commit.
 #
 # It mirrors .github/workflows/ci.yml deliberately and closely — `--locked`,
-# `RUSTFLAGS=-D warnings` on build and test, clippy without `--all-features`,
-# and the README progress check — because a local gate that tests something
-# easier than CI is not a gate, it is a rehearsal. If you change ci.yml, change
-# this in the same commit.
+# clippy without `--all-features`, and the README progress check — because a
+# local gate that tests something easier than CI is not a gate, it is a
+# rehearsal. If you change ci.yml, change this in the same commit.
+#
+# Warnings are denied by [workspace.lints.rust] in Cargo.toml rather than by
+# RUSTFLAGS here, so every invocation shares one fingerprint namespace --
+# see that file for the measurement that forced it.
 #
 # WHAT IT COVERS, HONESTLY
 #   lint            ubuntu   -> Linux container
@@ -40,6 +43,7 @@
 #
 # USAGE
 #   scripts/ci-local.sh              # macOS + Linux  (the default gate)
+#   scripts/ci-local.sh --scoped     # fast tier: lints + blast radius, macOS only
 #   scripts/ci-local.sh --macos      # native jobs only, fastest
 #   scripts/ci-local.sh --linux      # container jobs only
 #   scripts/ci-local.sh --windows    # add the compile-only cross check
@@ -83,7 +87,12 @@ fi
 
 cd "$REPO" || exit 1
 
-DO_MAC=0; DO_LINUX=0; DO_WIN=0; DO_FLAKE=0; DO_WINVM=0
+# Compiler cache, if this machine has one. No-ops otherwise -- see the file's
+# own header for why this is sourced rather than set in .cargo/config.toml.
+# shellcheck source=scripts/lib/accel.sh
+. "$REPO/scripts/lib/accel.sh"
+
+DO_MAC=0; DO_LINUX=0; DO_WIN=0; DO_FLAKE=0; DO_WINVM=0; SCOPED=0
 if [ $# -eq 0 ]; then DO_MAC=1; DO_LINUX=1; fi
 for a in "$@"; do
   case "$a" in
@@ -92,9 +101,49 @@ for a in "$@"; do
     --windows) DO_WIN=1 ;;
     --flake)   DO_FLAKE=1 ;;
     --windows-vm) DO_WINVM=1 ;;
+    --scoped)  SCOPED=1 ;;
     --all)     DO_MAC=1; DO_LINUX=1; DO_WIN=1 ;;
     *) echo "unknown option: $a" >&2; exit 2 ;;
   esac
+done
+
+# --scoped is a TIER, not a mode of the gate, and the two must never be
+# confused. The full run's contract is that it mirrors ci.yml closely enough
+# that passing it predicts passing CI; a run that chose its targets from a
+# diff cannot make that claim about anything the diff did not touch. So it is
+# refused wherever the run would otherwise be presented as authoritative --
+# a Linux or Windows leg is a platform claim, and there is no such thing as a
+# platform claim about targets you did not build.
+if [ "$SCOPED" -eq 1 ] && { [ "$DO_LINUX" -eq 1 ] || [ "$DO_WIN" -eq 1 ] || [ "$DO_WINVM" -eq 1 ]; }; then
+  echo "ci-local: --scoped is macOS-only -- it selects targets from the diff, which is not a platform claim." >&2
+  echo "          Run 'scripts/ci-local.sh --scoped' for the fast tier, then the full gate before pushing." >&2
+  exit 2
+fi
+# Bare `--scoped` means the macOS leg, not the default macOS+Linux pair.
+if [ "$SCOPED" -eq 1 ]; then DO_MAC=1; DO_LINUX=0; fi
+
+accel_enable
+
+# A provider variable inherited from the CALLER fails the gate for a reason
+# that has nothing to do with the tree. tests/pty_smoke.rs asserts that a
+# launch overlay's ANTHROPIC_BASE_URL never leaks into the parent process --
+# a Phase 46 contamination check, and correct. Claude Code exports exactly that
+# variable into every child it spawns, so a gate run from inside a Claude Code
+# session (every worker pane, and the orchestrator's own Bash tool) fails that
+# one assertion deterministically while the same tree passes from a terminal
+# and from the Linux container, whose environment is clean. Measured
+# 2026-09-05: 75/76 with it set, 76/76 with `env -u ANTHROPIC_BASE_URL`.
+#
+# This does NOT unset it. Scrubbing the caller's environment inside the gate
+# would make the gate pass in an environment the product itself would then
+# run in, which is the opposite of what a contamination test is for. It says
+# so, once, loudly, and lets the assertion fail honestly.
+for leaked in ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY; do
+  if [ -n "${!leaked:-}" ]; then
+    echo "ci-local: WARNING -- $leaked is set in this environment (inherited from the caller)." >&2
+    echo "          pty_smoke's overlay-leak assertion will fail on that alone. Run the gate" >&2
+    echo "          from a clean shell, or: env -u $leaked scripts/ci-local.sh ..." >&2
+  fi
 done
 
 MSRV="$(grep -m1 '^rust-version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
@@ -104,6 +153,35 @@ MSRV="$(grep -m1 '^rust-version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
 # and every bump silently threw away the whole Linux build cache.
 TOOLCHAIN="$(grep -m1 '^toolchain' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
 [ -n "$TOOLCHAIN" ] || { echo "could not read [workspace.metadata.ci] toolchain from Cargo.toml" >&2; exit 2; }
+
+# ...and now actually USE it on this machine, which until 2026-09-04 it did not.
+# $TOOLCHAIN pinned the Linux image and nothing else, so the container built
+# with 1.98.0 while the macOS leg beside it built with whatever `cargo` PATH
+# happened to name -- a Homebrew rust 1.96.1, with rustup's own `stable` a
+# staler 1.94.0 behind it. Three compilers, one declared version, and the
+# "declared once, cannot drift" guarantee stopping at the container boundary.
+# Two costs: the native leg was not testing what CI tests, and rustc's version
+# is part of cargo's fingerprint, so each compiler kept invalidating the others'
+# artifacts in one target/.
+#
+# Prepending the toolchain's own bin directory fixes both, and fixes the trap
+# scripts/msrv-check.sh documents at its head: `rustup run <v> cargo` is not
+# enough because cargo then resolves `rustc` from PATH, where a Homebrew rustc
+# silently wins. Both binaries live in this one directory, so both are pinned.
+# msrv-check.sh is unaffected -- it resolves absolute paths per toolchain itself.
+if command -v rustup >/dev/null 2>&1; then
+  TOOLCHAIN_BIN="$(dirname "$(rustup which --toolchain "$TOOLCHAIN" cargo 2>/dev/null)" 2>/dev/null)"
+  if [ -n "$TOOLCHAIN_BIN" ] && [ -x "$TOOLCHAIN_BIN/cargo" ]; then
+    PATH="$TOOLCHAIN_BIN:$PATH"; export PATH
+    echo "ci-local: using the declared toolchain $TOOLCHAIN from $TOOLCHAIN_BIN"
+  else
+    # Loud, not silent: building with an undeclared compiler is the defect this
+    # block exists to remove, so it must never be what happens by accident.
+    echo "ci-local: WARNING -- declared toolchain $TOOLCHAIN is not installed." >&2
+    echo "          Native jobs will build with $(cargo -V 2>/dev/null), which is NOT what CI runs." >&2
+    echo "          Fix: rustup toolchain install $TOOLCHAIN --profile minimal --component clippy rustfmt" >&2
+  fi
+fi
 
 RESULTS=()
 FAILED=0
@@ -126,7 +204,7 @@ step() {           # step <label> <command...>
 # --- native macOS jobs -------------------------------------------------------
 if [ "$DO_MAC" -eq 1 ]; then
   step "lint / fmt" cargo fmt --all -- --check
-  step "lint / clippy" env RUSTFLAGS= cargo clippy --locked --workspace --all-targets -- -D warnings
+  step "lint / clippy" cargo clippy --locked --workspace --all-targets -- -D warnings
   step "lint / rustdoc" env RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
   step "lint / README progress" python3 scripts/progress.py --check
   step "lint / file sizes"      python3 scripts/check-file-sizes.py
@@ -139,8 +217,24 @@ if [ "$DO_MAC" -eq 1 ]; then
   # when a worker is finished; both are cheap to break and expensive to
   # have wrong.
   step "lint / script tests" sh -c 'for t in scripts/tests/test_*.py; do python3 "$t" || exit 1; done'
-  step "test (macos) / build" env RUSTFLAGS='-D warnings' cargo build --locked --workspace --all-targets
-  step "test (macos) / test"  env RUSTFLAGS='-D warnings' sh -c 'cargo test --locked --workspace -- --nocapture < /dev/null'
+  # The two heaviest steps in the whole gate, and the reason --scoped exists.
+  # `--all-targets` is 160 separate integration-test crates: 160 compilations
+  # and 160 link steps against the whole library, every one of them redone
+  # when any library file changes, whether or not the diff can reach them.
+  # `--workspace` then RUNS all of them, including the process-spawning ones
+  # that sleep through deliberate health windows.
+  #
+  # The scoped tier hands both jobs to scripts/blast-radius.sh, which already
+  # knows how to trace a changed file to the targets that can observe it and
+  # which of those must run serially. It is a different question -- "did I
+  # break what I touched" rather than "does this tree pass CI" -- and the
+  # summary says so rather than letting a fast pass read as the real one.
+  if [ "$SCOPED" -eq 1 ]; then
+    step "test (macos) / blast radius" scripts/blast-radius.sh
+  else
+    step "test (macos) / build" cargo build --locked --workspace --all-targets
+    step "test (macos) / test"  sh -c 'cargo test --locked --workspace -- --nocapture < /dev/null'
+  fi
   # Call the project's own script rather than `cargo +$MSRV`: its header
   # documents three traps, and `cargo +<v>` needs the rustup shim, which is
   # exactly how the first version of this file got a false red.
@@ -216,8 +310,8 @@ if [ "$DO_LINUX" -eq 1 ]; then
     }
     step "test (ubuntu) / build+test" run_linux \
       'set -e; rustup component add clippy rustfmt >/dev/null 2>&1 || true;
-       RUSTFLAGS="-D warnings" cargo build --locked --workspace --all-targets;
-       RUSTFLAGS="-D warnings" cargo test --locked --workspace -- --nocapture < /dev/null'
+       cargo build --locked --workspace --all-targets;
+       cargo test --locked --workspace -- --nocapture < /dev/null'
     step "lint (ubuntu) / clippy" run_linux \
       'set -e; rustup component add clippy >/dev/null 2>&1 || true;
        cargo clippy --locked --workspace --all-targets -- -D warnings'
@@ -317,7 +411,7 @@ if [ "$DO_FLAKE" -eq 1 ]; then
   printf '\n\033[1m=== flake rate over %s runs ===\033[0m\n' "$RUNS"
   fails=0
   for i in $(seq 1 "$RUNS"); do
-    if RUSTFLAGS='-D warnings' cargo test --locked -p glasshouse \
+    if cargo test --locked -p glasshouse \
          --test pty_smoke --test events_lifecycle -- --nocapture < /dev/null >/dev/null 2>&1; then
       printf '  run %2s/%s ok\n' "$i" "$RUNS"
     else
@@ -357,11 +451,17 @@ fi
 
 printf '\n\033[1m=== summary ===\033[0m\n'
 printf '%s\n' "${RESULTS[@]}"
+accel_report
 # Three different true statements, and the run picks the one it earned. The
 # old version keyed on `--windows` alone, so `--windows-vm` could run the
 # whole Windows suite on a real machine and still be told Windows was not
 # exercised at all — and a `--windows` whose target was not installed was
 # told the opposite.
+if [ "$SCOPED" -eq 1 ]; then
+  printf '\n\033[33mNOTE\033[0m  SCOPED run. Targets were selected from the diff, so this is evidence about\n'
+  printf '      what you changed and about nothing else. It is not a CI prediction and it\n'
+  printf '      does not replace the pre-push gate: run scripts/ci-local.sh with no flags.\n'
+fi
 if [ "$WIN_VM_RAN" -eq 1 ]; then
   printf '\n\033[33mNOTE\033[0m  Windows ran for real on the ARM64 VM. Those lines ARE evidence about Windows.\n'
 elif [ "$WIN_CROSS_RAN" -eq 1 ]; then
