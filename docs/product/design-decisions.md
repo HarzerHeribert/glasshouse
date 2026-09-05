@@ -5417,3 +5417,67 @@ rather than a cosmetic one:
 The cut is by `char`, never by byte, so a multi-byte character is never
 split; a cut string ends in `…` so a truncated body is visibly truncated
 rather than silently a different sentence.
+
+## Trims: `commands/hook.rs` — history moved out of comments by `GH-TRIM-COMMANDS-HOOK`, 2026-09-05
+
+### `checkpoint_after_turn`
+
+It never blocks past a synchronous read of a couple of small files and one write — there is no model call here, so there is nothing to bound with a thread and a timeout the way extraction needs.
+
+So this carries forward the handoff from the session's most recent checkpoint, restamped with the current time and the repository's current position — the same shape `shell::checkpoint_task_boundaries` already uses in the interactive shell, for the same reason.
+
+### `checkpoint_before_compaction`
+
+A compaction is not a turn ending, so stamping `TaskBoundary` would misdescribe why the checkpoint exists — and `CheckpointReason` has exactly two variants, both pinned by a SQL `CHECK`, so there is no third value honest enough to invent instead. What moves is `created_at` and the Git position; the reason a person or agent already gave the checkpoint does not change because the harness is about to compact.
+
+### `PAYLOAD_DRAIN_BOUND`
+
+Not hypothetical, and not Windows-specific either, though Windows is where it was found: reached over an `ssh` channel whose far end never sees end of input — which is how the local gate's Windows leg runs the suite, and which its macOS leg avoids only because that one redirects from `/dev/null` — the six tests that call this function block for ever, and every other test in the target passes. Measured on both batch 50 and its own base commit, so the wait is older than the batch that surfaced it.
+
+Any wait that reaches the bound is already the pathological case, and the answer to it is to get on with the bookkeeping rather than to keep waiting.
+
+### observed-compaction counter
+
+That switch decides whether Glasshouse *does* something about a compaction; the compaction happened either way, and a count that silently stopped when a user turned extraction off would be a number no reader could trust. It is also ordered first, so a count is recorded even if extraction takes the full `EXTRACTION_BOUND` and this process is torn down by the harness while waiting.
+
+Best-effort: a compaction is the harness's business and a hook that failed to write a counter must not fail the turn over it, which is the same stance every other write on this path takes.
+
+`record_observed_compaction` itself has no such check (it is an unconditional `UPDATE ... WHERE id = ?1`, by design, so a session created before migration 16 still gets counted), so the check belongs at this call site, the same way `may_apply` belongs at the lifecycle-event call site below rather than inside the write it guards.
+
+### `TurnEnded` trigger ordering
+
+Ordered **after** the event is recorded, on purpose: the log is the material extraction reads, and a turn's own closing event should be in it. Ordered **before** the state change for no reason at all beyond it reading better; neither `run_extraction` nor `checkpoint_after_turn` can fail in a way the rest of this function could notice.
+
+Map lines 1834, 1835, 1845 and 1854's outcome half — and the whole of what Glasshouse is allowed to learn about how a route turned out. `TurnEnded` is the only event that carries a harness's own verdict, `session::lifecycle::event_for` is its single construction site, and **both** outcomes are recorded: a turn that ended badly is a fact about the route as much as one that succeeded, and counting only completions would make every ratio here a fraction of an unstated denominator.
+
+A `SessionEnd`, a process exit and output going quiet all arrive somewhere else or nowhere, and none of them writes a row. The decision they belong to simply stays *unknown*, which is what the readers count it as.
+
+Ordered **before** the extraction and checkpoint triggers below, for the reason the compaction counter above is ordered first: those run on their own thread up to `EXTRACTION_BOUND`, and this process can be torn down by the harness while one is still going. A verdict the harness actually stated must not be lost to work Glasshouse chose to do about it.
+
+Map lines 1821 and 1831's proxy denominator — a second row, on every session this arm reaches rather than only routed ones. `record_routing_outcome` refuses a session with no routed destination, so a door-spawned session (never routed) would otherwise record nothing about how its turn went; `record_turn_outcome` asks no routing question at all. Called first, so a session with no routing decision still gets its outcome counted before the routed call below returns early for it. Refusal register, *"Phase 51's memory proxy — 1821 and 1831"*, ruling (b).
+
+### claim release ordering
+
+Ordered first in this arm, ahead of the evaluation writes and well ahead of extraction: it is one `DELETE`, and it is the one write here that another *session* can observe. Extraction runs on its own thread up to `EXTRACTION_BOUND` and this process can be torn down by the harness while it does, which must not cost a claim its release.
+
+Best-effort, like every other write on this path: a hook that failed to release a claim must not fail the user's turn over it, and `STALE_CLAIM_AFTER` is what bounds a claim this line missed.
+
+### `note_head_commit`
+
+Reporting the first turn of every session as a landed commit would make the trigger fire hardest on sessions that have done nothing yet.
+
+Everything else on this path takes that stance and this is not more important than the compaction counter beside it. The cost of the failure is that the next turn re-reads the same position and calls it a boundary once — a duplicate extraction the duplicate check already absorbs, which is a far better failure than a hook that fell over inside somebody's coding session.
+
+### `edit_intent_hook`
+
+A coordination layer that broke a user's edit because its own lookup failed would be worse than no coordination at all.
+
+[`glasshouse::session::SessionStore::active_claims`] is read **before** this session claims anything, so the answer cannot include a claim this very call just wrote. It would be filtered by session identity anyway; reading first means that invariant does not depend on the filter.
+
+### `notify_orchestrator_of_conflict`
+
+Called once per colliding path, never once per hook call: line 2415's granularity requirement is that a conflict on one path names only that path, and a single call bundling every notice into one message would have made a conflict on `src/a.rs` indistinguishable from one on `src/b.rs` at the one reader — the orchestrator — that is supposed to act on the difference.
+
+The one live orchestrator being either `editor` or `holder` is not "ambiguous" and is not logged as undeliverable: it is already a party to this exact conflict and was told through the hook response itself (the three channels [`glasshouse::firewall::adapter::pre_tool_use_response`] writes), for the same reason `edit_intent::a_session_does_not_conflict_with_its_own_claim` exists — telling it again through a second channel would not be new information.
+
+[`glasshouse::session::api::SessionApi::send_text`] is the delivery path design-decisions.md names — *"Glasshouse already has an orchestrator delivery path: the Phase 15 wake-up flow, `SessionApi::send_text`, and `api/unix/events.rs`. Reuse it… do not design another transport."* This function is that seam's caller from a new site: a `PreToolUse` hook subprocess, which owns no pseudo-terminal of its own, so the [`SessionRuntime`] it constructs starts empty and [`SessionApi::send_text`] answers `NotLive` unless something else in *this* process already holds the target session — nothing here does. That is requirement 5's **best-effort** outcome, logged at `debug` and never surfaced as the `warn` ambiguity gets: the recipient was resolved correctly and the seam is wired for the moment a process that does hold a live handle reaches it, or reads this claim itself. See this packet's `packet_errors` for why that gap is recorded rather than closed with a second transport.

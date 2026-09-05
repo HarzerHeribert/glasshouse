@@ -71,27 +71,17 @@ fn automatic_checkpoint_enabled(runtime: &Runtime) -> bool {
 /// Take an automatic checkpoint for `id` at a task boundary, after a
 /// completed turn.
 ///
-/// # Nothing here can hurt the session
-///
 /// Matching [`run_extraction`]'s own policy for its neighbour: a
-/// checkpoint that cannot be taken is logged and this returns. It never
-/// propagates an error to [`report_hook_with`] and never blocks past a
-/// synchronous read of a couple of small files and one write — there is no
-/// model call here, so there is nothing to bound with a thread and a
-/// timeout the way extraction needs.
-///
-/// # What it carries forward
+/// checkpoint that cannot be taken is logged and this returns.
 ///
 /// A checkpoint's objective, state and next actions are authored —
 /// Glasshouse does not know them and will not guess them from a session's
 /// terminal output, for the same reason nothing else in this codebase reads
-/// state out of scrollback. So this carries forward the handoff from the
-/// session's most recent checkpoint, restamped with the current time and the
-/// repository's current position — the same shape
-/// `shell::checkpoint_task_boundaries` already uses in the interactive shell,
-/// for the same reason. A session that has never had a checkpoint taken gets
-/// nothing here, silently: there is no handoff to carry forward and nothing
-/// honest to invent.
+/// state out of scrollback. A session that has never had a checkpoint taken
+/// gets nothing here, silently: there is no handoff to carry forward and
+/// nothing honest to invent.
+///
+/// History: design-decisions.md, "Trims: commands/hook.rs", checkpoint_after_turn.
 fn checkpoint_after_turn(runtime: &Runtime, id: &SessionId, harness: &str) {
     let outcome = (|| -> anyhow::Result<()> {
         let checkpoints = ProjectCheckpoints::open(runtime)?;
@@ -125,29 +115,19 @@ fn checkpoint_after_turn(runtime: &Runtime, id: &SessionId, harness: &str) {
 /// bootstrap from reflects where the repository actually stands rather than
 /// wherever it stood at the last completed turn.
 ///
-/// # Refresh, not a new kind of checkpoint
-///
 /// This mirrors [`checkpoint_after_turn`] in every respect but one: it
 /// preserves `previous.checkpoint.reason` instead of stamping
-/// [`CheckpointReason::TaskBoundary`]. A compaction is not a turn ending, so
-/// stamping `TaskBoundary` would misdescribe why the checkpoint exists — and
-/// `CheckpointReason` has exactly two variants, both pinned by a SQL `CHECK`,
-/// so there is no third value honest enough to invent instead. What moves is
-/// `created_at` and the Git position; the reason a person or agent already
-/// gave the checkpoint does not change because the harness is about to
-/// compact.
-///
-/// # `store.latest_for(id)?` returning `None` is the whole of "when practical"
+/// [`CheckpointReason::TaskBoundary`].
 ///
 /// A session that has never had a checkpoint taken gets nothing here,
 /// silently — there is no previous handoff to carry forward and nothing
 /// honest to invent, exactly as [`checkpoint_after_turn`] already declines.
 ///
-/// # Nothing here can hurt the session
-///
 /// Same stance as its neighbour: a checkpoint that cannot be refreshed is
 /// logged and this returns, never propagating an error back to the hook that
 /// is running inside somebody's coding session.
+///
+/// History: design-decisions.md, "Trims: commands/hook.rs", checkpoint_before_compaction.
 fn checkpoint_before_compaction(runtime: &Runtime, id: &SessionId, harness: &str) {
     let outcome = (|| -> anyhow::Result<()> {
         let checkpoints = ProjectCheckpoints::open(runtime)?;
@@ -179,8 +159,6 @@ fn checkpoint_before_compaction(runtime: &Runtime, id: &SessionId, harness: &str
 /// How long a hook process will wait for the harness to finish writing the
 /// payload it is about to throw away.
 ///
-/// # Why draining the payload needs a bound at all
-///
 /// [`report_hook_with`] drains its standard input so that a harness writing a
 /// payload is not left writing into a closed pipe. Copying *to end of input*
 /// is an **unbounded** wait, and the harness is the thing that decides when
@@ -189,22 +167,11 @@ fn checkpoint_before_compaction(runtime: &Runtime, id: &SessionId, harness: &str
 /// session, on the event Claude Code treats as a gate on the turn. That is
 /// exactly what [`report_hook`]'s own doc comment says may never happen here.
 ///
-/// Not hypothetical, and not Windows-specific either, though Windows is where
-/// it was found: reached over an `ssh` channel whose far end never sees end of
-/// input — which is how the local gate's Windows leg runs the suite, and which
-/// its macOS leg avoids only because that one redirects from `/dev/null` — the
-/// six tests that call this function block for ever, and every other test in
-/// the target passes. Measured on both batch 50 and its own base commit, so
-/// the wait is older than the batch that surfaced it.
-///
-/// # Why one second
-///
 /// Shorter than [`EXTRACTION_BOUND`] because there is far less on the other
-/// side of it. The harness writes the payload as it starts this process, so a
-/// live harness is finished before the first database is even open and the
-/// normal cost of this wait is nothing at all. Any wait that reaches the bound
-/// is already the pathological case, and the answer to it is to get on with
-/// the bookkeeping rather than to keep waiting.
+/// side of it: the harness writes the payload as it starts this process, so a
+/// live harness is finished before the first database is even open.
+///
+/// History: design-decisions.md, "Trims: commands/hook.rs", PAYLOAD_DRAIN_BOUND.
 const PAYLOAD_DRAIN_BOUND: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Run `work` on its own thread and stop waiting for it after `bound`,
@@ -323,31 +290,16 @@ pub(crate) fn report_hook_with(
                 // Capability map line 1159 — *"track the number of observed
                 // compactions for a session when known"* — and this is the
                 // only place in the shipped binary that knows one is coming.
-                //
-                // **Outside the `memory_extraction` gate, deliberately.**
-                // That switch decides whether Glasshouse *does* something
-                // about a compaction; the compaction happened either way, and
-                // a count that silently stopped when a user turned extraction
-                // off would be a number no reader could trust. It is also
-                // ordered first, so a count is recorded even if extraction
-                // takes the full `EXTRACTION_BOUND` and this process is torn
-                // down by the harness while waiting.
-                //
-                // Best-effort: a compaction is the harness's business and a
-                // hook that failed to write a counter must not fail the turn
-                // over it, which is the same stance every other write on this
-                // path takes.
+                // **Outside the `memory_extraction` gate, deliberately**: that
+                // switch decides whether Glasshouse *does* something about a
+                // compaction, and the compaction happened either way.
                 //
                 // Gated on liveness for the reason `session::lifecycle::may_apply`
                 // gates every lifecycle transition: a hook process outlives its
                 // harness, and a `PreCompact` report arriving after the session
-                // is recorded as finished must not move the record either —
-                // `record_observed_compaction` itself has no such check (it is
-                // an unconditional `UPDATE ... WHERE id = ?1`, by design, so a
-                // session created before migration 16 still gets counted), so
-                // the check belongs at this call site, the same way `may_apply`
-                // belongs at the lifecycle-event call site below rather than
-                // inside the write it guards.
+                // is recorded as finished must not move the record either.
+                //
+                // History: design-decisions.md, "Trims: commands/hook.rs", observed-compaction counter.
                 if record.lifecycle.is_live()
                     && let Err(err) = store.record_observed_compaction(&id)
                 {
@@ -411,47 +363,12 @@ pub(crate) fn report_hook_with(
         // construction site, and a source-scanning test fails if a second one
         // appears. So this is where both triggers belong.
         //
-        // Ordered **after** the event is recorded, on purpose: the log is the
-        // material extraction reads, and a turn's own closing event should be
-        // in it. Ordered **before** the state change for no reason at all
-        // beyond it reading better; neither `run_extraction` nor
-        // `checkpoint_after_turn` can fail in a way the rest of this function
-        // could notice.
-        //
         // The two triggers are gated independently — `memory_extraction` and
         // `automatic_checkpoint` are separate config fields, read by separate
         // `EffectiveConfig` methods — so turning one off leaves the other
         // exactly as it was.
-        // Map lines 1834, 1835, 1845 and 1854's outcome half — and the whole
-        // of what Glasshouse is allowed to learn about how a route turned
-        // out. `TurnEnded` is the only event that carries a harness's own
-        // verdict, `session::lifecycle::event_for` is its single construction
-        // site, and **both** outcomes are recorded: a turn that ended badly
-        // is a fact about the route as much as one that succeeded, and
-        // counting only completions would make every ratio here a fraction of
-        // an unstated denominator.
         //
-        // A `SessionEnd`, a process exit and output going quiet all arrive
-        // somewhere else or nowhere, and none of them writes a row. The
-        // decision they belong to simply stays *unknown*, which is what the
-        // readers count it as.
-        //
-        // Ordered **before** the extraction and checkpoint triggers below,
-        // for the reason the compaction counter above is ordered first: those
-        // run on their own thread up to `EXTRACTION_BOUND`, and this process
-        // can be torn down by the harness while one is still going. A verdict
-        // the harness actually stated must not be lost to work Glasshouse
-        // chose to do about it.
-        //
-        // Map lines 1821 and 1831's proxy denominator — a second row, on
-        // every session this arm reaches rather than only routed ones.
-        // `record_routing_outcome` refuses a session with no routed
-        // destination, so a door-spawned session (never routed) would
-        // otherwise record nothing about how its turn went; `record_turn_outcome`
-        // asks no routing question at all. Called first, so a session with no
-        // routing decision still gets its outcome counted before the routed
-        // call below returns early for it. Refusal register, *"Phase 51's
-        // memory proxy — 1821 and 1831"*, ruling (b).
+        // History: design-decisions.md, "Trims: commands/hook.rs", TurnEnded trigger ordering.
         if let LifecycleEvent::TurnEnded { outcome } = translated {
             // Map line 2393 — *"release a session's file claim automatically
             // when the relevant turn completes."* This is the only place in
@@ -463,17 +380,7 @@ pub(crate) fn report_hook_with(
             // finished, and a claim outliving it would describe work nobody
             // is doing.
             //
-            // Ordered first in this arm, ahead of the evaluation writes and
-            // well ahead of extraction: it is one `DELETE`, and it is the one
-            // write here that another *session* can observe. Extraction runs
-            // on its own thread up to `EXTRACTION_BOUND` and this process can
-            // be torn down by the harness while it does, which must not cost
-            // a claim its release.
-            //
-            // Best-effort, like every other write on this path: a hook that
-            // failed to release a claim must not fail the user's turn over
-            // it, and `STALE_CLAIM_AFTER` is what bounds a claim this line
-            // missed.
+            // History: design-decisions.md, "Trims: commands/hook.rs", claim release ordering.
             match store.release_claims_of(&id) {
                 Ok(0) => {}
                 Ok(released) => {
@@ -599,19 +506,10 @@ pub(crate) fn report_hook_with(
 ///   first turn this is, and on every session created before the column
 ///   existed. The position is recorded, and it is **not** a boundary: a
 ///   boundary is a *change*, and there is nothing here to have changed from.
-///   Reporting the first turn of every session as a landed commit would make
-///   the trigger fire hardest on sessions that have done nothing yet.
 /// - **HEAD has not moved.** The ordinary case, and the one the comparison
 ///   exists for. Nothing is written, because nothing changed.
 ///
-/// # A failed write is one debug line
-///
-/// Everything else on this path takes that stance and this is not more
-/// important than the compaction counter beside it. The cost of the failure
-/// is that the next turn re-reads the same position and calls it a boundary
-/// once — a duplicate extraction the duplicate check already absorbs, which
-/// is a far better failure than a hook that fell over inside somebody's
-/// coding session.
+/// History: design-decisions.md, "Trims: commands/hook.rs", note_head_commit.
 fn note_head_commit(
     runtime: &Runtime,
     store: &glasshouse::session::SessionStore<'_>,
@@ -680,8 +578,6 @@ const EDIT_INTENT_READ_BOUND: std::time::Duration = PAYLOAD_DRAIN_BOUND;
 /// to change, compares it with other live sessions' claims, and writes the
 /// hook response on stdout.
 ///
-/// # It always allows, and that is the whole contract
-///
 /// `PreToolUse` is a **gate**: a `deny` here stops a user's `Edit` dead, and
 /// a hook that exited non-zero would veto the tool call outright. Steering
 /// decision 4 (design-decisions.md) rules soft coordination with an explicit
@@ -695,15 +591,7 @@ const EDIT_INTENT_READ_BOUND: std::time::Duration = PAYLOAD_DRAIN_BOUND;
 /// - a project database that cannot be opened, a session not in it, a claim
 ///   that cannot be written → allow, and say so only in the debug log.
 ///
-/// A coordination layer that broke a user's edit because its own lookup
-/// failed would be worse than no coordination at all.
-///
-/// # Order: read the claims, then take one
-///
-/// [`glasshouse::session::SessionStore::active_claims`] is read **before**
-/// this session claims anything, so the answer cannot include a claim this
-/// very call just wrote. It would be filtered by session identity anyway;
-/// reading first means that invariant does not depend on the filter.
+/// History: design-decisions.md, "Trims: commands/hook.rs", edit_intent_hook.
 pub(crate) fn edit_intent_hook(runtime: &Runtime, session: Option<&str>) {
     let payload = read_pre_tool_use_payload();
     let conflict = edit_intent_conflict(runtime, session, payload.as_deref());
@@ -871,15 +759,6 @@ fn edit_intent_conflict(
 /// `path`, between `editor` (this call's session) and `holder` (the session
 /// whose existing claim it collided with).
 ///
-/// Called once per colliding path, never once per hook call: line 2415's
-/// granularity requirement is that a conflict on one path names only that
-/// path, and a single call bundling every notice into one message would
-/// have made a conflict on `src/a.rs` indistinguishable from one on
-/// `src/b.rs` at the one reader — the orchestrator — that is supposed to
-/// act on the difference.
-///
-/// # Ambiguity is reported, not guessed — the map's own architectural note
-///
 /// design-decisions.md's *A bounded file-coordination capability*: *"where
 /// there is no unambiguous active orchestrator, surface that the conflict
 /// could not be delivered rather than inventing a worker-ownership or push
@@ -888,34 +767,7 @@ fn edit_intent_conflict(
 /// `--log-file` the way every other diagnostic on this path is — rather
 /// than picking a guess, broadcasting to every one, or the first row.
 ///
-/// # No self-notification
-///
-/// The one live orchestrator being either `editor` or `holder` is not
-/// "ambiguous" and is not logged as undeliverable: it is already a party to
-/// this exact conflict and was told through the hook response itself (the
-/// three channels [`glasshouse::firewall::adapter::pre_tool_use_response`]
-/// writes), for the same reason
-/// `edit_intent::a_session_does_not_conflict_with_its_own_claim` exists —
-/// telling it again through a second channel would not be new information.
-///
-/// # Delivery reuses the Phase 15 wake-up seam, and why it is `debug`-only
-/// here today
-///
-/// [`glasshouse::session::api::SessionApi::send_text`] is the delivery path
-/// design-decisions.md names — *"Glasshouse already has an orchestrator
-/// delivery path: the Phase 15 wake-up flow, `SessionApi::send_text`, and
-/// `api/unix/events.rs`. Reuse it… do not design another transport."* This
-/// function is that seam's caller from a new site: a `PreToolUse` hook
-/// subprocess, which owns no pseudo-terminal of its own, so the
-/// [`SessionRuntime`] it constructs starts empty and
-/// [`SessionApi::send_text`] answers `NotLive` unless something else in
-/// *this* process already holds the target session — nothing here does.
-/// That is requirement 5's **best-effort** outcome, logged at `debug` and
-/// never surfaced as the `warn` ambiguity gets: the recipient was resolved
-/// correctly and the seam is wired for the moment a process that does hold
-/// a live handle reaches it, or reads this claim itself. See this packet's
-/// `packet_errors` for why that gap is recorded rather than closed with a
-/// second transport.
+/// History: design-decisions.md, "Trims: commands/hook.rs", notify_orchestrator_of_conflict.
 fn notify_orchestrator_of_conflict(
     store: &glasshouse::session::SessionStore<'_>,
     path: &str,
