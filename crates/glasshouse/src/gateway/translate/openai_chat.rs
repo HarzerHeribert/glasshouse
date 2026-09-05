@@ -99,6 +99,11 @@ pub(super) const REFUSED_FIELDS: &[(&str, &str)] = &[
         "name",
         "a per-message participant name has no Anthropic Messages equivalent",
     ),
+    (
+        "thinking block",
+        "an Anthropic thinking or redacted_thinking block is another provider's private \
+         reasoning and has no OpenAI Chat equivalent",
+    ),
 ];
 
 /// [`CacheDisposition::Carried`]'s note for this codec's `prompt_cache_key`
@@ -152,6 +157,22 @@ impl Codec for OpenAiChat {
 
     fn endpoint(&self) -> &'static str {
         ENDPOINT
+    }
+
+    fn refuse_unencodable(&self, request: &Request) -> Result<(), Unsupported> {
+        let carries_thinking = request.messages.iter().any(|message| {
+            message.blocks.iter().any(|block| {
+                matches!(
+                    block,
+                    Block::Thinking { .. } | Block::RedactedThinking { .. }
+                )
+            })
+        });
+        if carries_thinking {
+            Err(Unsupported::new("thinking block", reason("thinking block")))
+        } else {
+            Ok(())
+        }
     }
 
     fn decode_request(&self, body: &[u8]) -> Result<Request, Unsupported> {
@@ -742,6 +763,9 @@ pub(super) fn encode_request(request: &Request) -> Vec<u8> {
                                 "text": format!("[tool_use {id} {name}] {input}"),
                             }));
                         }
+                        Block::Thinking { .. } | Block::RedactedThinking { .. } => {
+                            unreachable!("refused by `refuse_unencodable` before this point")
+                        }
                     }
                 }
                 if parts.is_empty() {
@@ -770,6 +794,9 @@ pub(super) fn encode_request(request: &Request) -> Vec<u8> {
                             ImageSource::Base64 { .. } => "[image]",
                         }),
                         Block::ToolResult { content, .. } => texts.push(content.as_str()),
+                        Block::Thinking { .. } | Block::RedactedThinking { .. } => {
+                            unreachable!("refused by `refuse_unencodable` before this point")
+                        }
                     }
                 }
                 let mut entry = Map::new();
@@ -1053,7 +1080,13 @@ pub(super) fn encode_response(response: &Response) -> Vec<u8> {
             Block::ToolUse { id, name, input } => {
                 calls.push(tool_call_json(calls.len(), id, name, &input.to_string()));
             }
-            Block::Image(_) | Block::ToolResult { .. } => {}
+            // `decode_response` on no codec produces any of these in an
+            // answer — a thinking block least of all: `decode_response_block`
+            // refuses one outright (see its own doc comment).
+            Block::Image(_)
+            | Block::ToolResult { .. }
+            | Block::Thinking { .. }
+            | Block::RedactedThinking { .. } => {}
         }
     }
     let mut message = Map::new();
@@ -1475,6 +1508,34 @@ mod tests {
         let wire = drop_key(&wire, "prompt_cache_key");
         let decoded = decode_request(&wire).expect("the codec reads what it wrote");
         assert_eq!(decoded, request);
+    }
+
+    #[test]
+    fn a_thinking_block_is_refused_rather_than_dropped() {
+        let mut request = full_request();
+        request.messages.push(Message {
+            role: Role::Assistant,
+            blocks: vec![Block::Thinking {
+                thinking: "reasoning the harness never sees".to_owned(),
+                signature: "sig".to_owned(),
+            }],
+        });
+        let refusal = OpenAiChat
+            .refuse_unencodable(&request)
+            .expect_err("a thinking block has no OpenAI Chat equivalent");
+        assert_eq!(refusal.field, "thinking block");
+        assert!(!refusal.reason.contains("reasoning the harness never sees"));
+
+        let mut request = full_request();
+        request.messages.push(Message {
+            role: Role::Assistant,
+            blocks: vec![Block::RedactedThinking {
+                data: "opaque".to_owned(),
+            }],
+        });
+        OpenAiChat
+            .refuse_unencodable(&request)
+            .expect_err("a redacted thinking block has no OpenAI Chat equivalent either");
     }
 
     #[test]

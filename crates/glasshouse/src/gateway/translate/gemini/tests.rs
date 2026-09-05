@@ -165,6 +165,38 @@ fn a_tool_result_whose_id_names_no_call_is_refused_rather_than_guessed() {
     assert!(refusal.reason.contains("by NAME"), "{}", refusal.reason);
 }
 
+/// An Anthropic thinking block is another provider's private reasoning —
+/// the same category this codec already refuses in the other direction as
+/// a `thought` part (`REFUSED_FIELDS`) — so it is refused, not silently
+/// dropped, before anything is opened upstream.
+#[test]
+fn a_thinking_block_is_refused_rather_than_dropped() {
+    let mut request = tool_round();
+    request.messages.push(Message {
+        role: Role::Assistant,
+        blocks: vec![Block::Thinking {
+            thinking: "reasoning the harness never sees".to_owned(),
+            signature: "sig".to_owned(),
+        }],
+    });
+    let refusal = Gemini
+        .refuse_unencodable(&request)
+        .expect_err("a thinking block has no Gemini equivalent");
+    assert_eq!(refusal.field, "thinking block");
+    assert!(!refusal.reason.contains("reasoning the harness never sees"));
+
+    let mut request = tool_round();
+    request.messages.push(Message {
+        role: Role::Assistant,
+        blocks: vec![Block::RedactedThinking {
+            data: "opaque".to_owned(),
+        }],
+    });
+    Gemini
+        .refuse_unencodable(&request)
+        .expect_err("a redacted thinking block has no Gemini equivalent either");
+}
+
 /// The model is a path segment on this wire, so a name that could not
 /// be one is refused rather than smuggled into the request line — and
 /// Gemini's own `models/<id>` spelling is not doubled.

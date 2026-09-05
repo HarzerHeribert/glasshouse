@@ -34,7 +34,11 @@ pub(super) const ENDPOINT: &str = "/messages";
 pub(super) const REFUSED_FIELDS: &[(&str, &str)] = &[
     (
         "thinking block",
-        "a thinking or redacted_thinking block cannot be replayed to an OpenAI Chat model",
+        "a live response's thinking block is refused, streamed or not: its signature arrives \
+         as its own stream delta on the real Anthropic wire, and neither this codec's \
+         streaming decoder nor Response::as_events/accumulate assembles one intact yet — a \
+         request's message history carries the same block shape instead, decoded and encoded \
+         byte-for-byte",
     ),
     ("citations", "citations have no OpenAI Chat equivalent"),
     ("top_k", "OpenAI Chat has no top_k sampling parameter"),
@@ -499,8 +503,19 @@ fn decode_block(value: Value, path: &str, cache: &mut bool) -> Result<Block, Uns
                 is_error,
             })
         }
-        "thinking" | "redacted_thinking" => {
-            Err(Unsupported::new(block.at("type"), reason("thinking block")))
+        "thinking" => {
+            let thinking = block.require_string("thinking")?;
+            let signature = block.require_string("signature")?;
+            block.finish()?;
+            Ok(Block::Thinking {
+                thinking,
+                signature,
+            })
+        }
+        "redacted_thinking" => {
+            let data = block.require_string("data")?;
+            block.finish()?;
+            Ok(Block::RedactedThinking { data })
         }
         "document" => Err(Unsupported::new(block.at("type"), reason("document block"))),
         other => Err(Unsupported::new(
@@ -670,6 +685,11 @@ fn encode_block(block: &Block) -> Value {
             }
             Value::Object(entry)
         }
+        Block::Thinking {
+            thinking,
+            signature,
+        } => json!({"type": "thinking", "thinking": thinking, "signature": signature}),
+        Block::RedactedThinking { data } => json!({"type": "redacted_thinking", "data": data}),
     }
 }
 
@@ -743,6 +763,21 @@ fn decode_response_block(value: Value, path: &str) -> Result<Block, Unsupported>
         Block::ToolResult { .. } => Err(Unsupported::new(
             path.to_owned(),
             "a response cannot carry a tool result",
+        )),
+        // A live response's thinking block would need to survive
+        // `Response::as_events`/`accumulate` too — which means a
+        // `BlockStart`/`Delta` that can carry a `signature` assembled from
+        // streaming deltas, exactly the case this codec's streaming decoder
+        // above already refuses by name. Carrying it only on the
+        // non-streamed body would make the two paths disagree on the same
+        // wire shape, so both refuse until that streaming work is done.
+        Block::Thinking { .. } => Err(Unsupported::new(
+            path.to_owned(),
+            "a response cannot carry a thinking block",
+        )),
+        Block::RedactedThinking { .. } => Err(Unsupported::new(
+            path.to_owned(),
+            "a response cannot carry a redacted thinking block",
         )),
     }
 }
@@ -1177,6 +1212,77 @@ pub(super) mod tests {
     }
 
     #[test]
+    fn a_thinking_and_redacted_thinking_block_round_trip_the_anthropic_wire_byte_for_byte() {
+        let wire = br#"{
+            "model": "claude-x",
+            "max_tokens": 4096,
+            "messages": [
+                {"role": "user", "content": "Think about it."},
+                {"role": "assistant", "content": [
+                    {"type": "thinking", "thinking": "Let me work through this.", "signature": "sig-abc123=="},
+                    {"type": "redacted_thinking", "data": "opaque-redacted-bytes=="},
+                    {"type": "text", "text": "Here is my answer."}
+                ]}
+            ]
+        }"#;
+        let request = decode_request(wire).expect("a signed thinking block decodes");
+        assert_eq!(
+            request.messages[1].blocks,
+            vec![
+                Block::Thinking {
+                    thinking: "Let me work through this.".to_owned(),
+                    signature: "sig-abc123==".to_owned(),
+                },
+                Block::RedactedThinking {
+                    data: "opaque-redacted-bytes==".to_owned(),
+                },
+                Block::Text("Here is my answer.".to_owned()),
+            ]
+        );
+
+        // Byte-identity, not merely struct equality: compare the wire's own
+        // JSON, where a normalised or truncated signature would show up even
+        // if some future encoder path built an equal-looking struct by
+        // another route.
+        let re_encoded = encode_request(&request);
+        let original: Value = serde_json::from_slice(wire).expect("fixture is valid JSON");
+        let round_tripped: Value =
+            serde_json::from_slice(&re_encoded).expect("the codec's own output is valid JSON");
+        assert_eq!(
+            round_tripped["messages"][1]["content"], original["messages"][1]["content"],
+            "the assistant turn's thinking and redacted_thinking blocks must re-encode identically"
+        );
+
+        let redecoded = decode_request(&re_encoded).expect("the codec reads what it wrote");
+        assert_eq!(redecoded, request);
+    }
+
+    #[test]
+    fn a_response_carrying_a_live_thinking_block_is_refused_by_name() {
+        // `Response::as_events`/`accumulate` cannot yet carry a thinking
+        // block's signature through a synthesised stream (see
+        // `canonical::Response::blocks`'s doc comment), so the non-streamed
+        // response path refuses one rather than accepting it only there.
+        let wire = br#"{
+            "id": "msg_1",
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-x",
+            "content": [
+                {"type": "thinking", "thinking": "reasoning the harness never sees", "signature": "sig"}
+            ],
+            "stop_reason": "end_turn"
+        }"#;
+        let refusal =
+            decode_response(wire).expect_err("a live response's thinking block is refused");
+        assert!(refusal.reason.contains("thinking"));
+        assert!(
+            !refusal.reason.contains("reasoning the harness never sees"),
+            "the refusal names the block type, never its content"
+        );
+    }
+
+    #[test]
     fn the_request_claude_code_sends_decodes_including_a_block_system_and_string_content() {
         // The shape from the wire, not from the encoder: an array system, a
         // string user content, `metadata`, `stream`.
@@ -1318,10 +1424,6 @@ pub(super) mod tests {
             (
                 r#"{"model": "m", "max_tokens": 1, "messages": [{"role": "user", "content": [{"type": "text", "text": "x", "citations": []}]}]}"#.to_owned(),
                 "messages[0].content[0].citations",
-            ),
-            (
-                r#"{"model": "m", "max_tokens": 1, "messages": [{"role": "assistant", "content": [{"type": "thinking", "thinking": "hmm", "signature": "s"}]}]}"#.to_owned(),
-                "messages[0].content[0].type",
             ),
             (
                 r#"{"model": "m", "max_tokens": 1, "messages": [{"role": "user", "content": [{"type": "document", "source": {}}]}]}"#.to_owned(),

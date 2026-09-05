@@ -92,6 +92,12 @@ pub(super) const REFUSED_FIELDS: &[(&str, &str)] = &[
         "a reasoning item cannot be carried across a translated pair",
     ),
     (
+        "thinking block",
+        "an Anthropic thinking or redacted_thinking block is model reasoning this codec never \
+         carries — the same rule as this file's own `reasoning item`, just arriving from the \
+         other wire",
+    ),
+    (
         "item_reference",
         "an item reference points at server-side stored state, which a translated pair does not \
          have",
@@ -221,14 +227,24 @@ impl Codec for OpenAiResponses {
     }
 
     fn refuse_unencodable(&self, request: &Request) -> Result<(), Unsupported> {
-        if request.stop.is_empty() {
-            Ok(())
-        } else {
+        if !request.stop.is_empty() {
             // Named in the one spelling that can reach this codec: the only
             // supported pair *into* openai-responses decodes Anthropic
             // Messages, whose field is `stop_sequences`.
-            Err(Unsupported::new("stop_sequences", reason("stop_sequences")))
+            return Err(Unsupported::new("stop_sequences", reason("stop_sequences")));
         }
+        let carries_thinking = request.messages.iter().any(|message| {
+            message.blocks.iter().any(|block| {
+                matches!(
+                    block,
+                    Block::Thinking { .. } | Block::RedactedThinking { .. }
+                )
+            })
+        });
+        if carries_thinking {
+            return Err(Unsupported::new("thinking block", reason("thinking block")));
+        }
+        Ok(())
     }
 
     fn decode_request(&self, body: &[u8]) -> Result<Request, Unsupported> {
@@ -893,6 +909,9 @@ pub(super) fn encode_request(request: &Request) -> Vec<u8> {
                             "type": "input_text",
                             "text": format!("[tool_use {id} {name}] {input}"),
                         })),
+                        Block::Thinking { .. } | Block::RedactedThinking { .. } => {
+                            unreachable!("refused by `refuse_unencodable` before this point")
+                        }
                     }
                 }
                 if !parts.is_empty() {
@@ -926,6 +945,9 @@ pub(super) fn encode_request(request: &Request) -> Vec<u8> {
                         })),
                         Block::ToolResult { content, .. } => {
                             parts.push(json!({"type": "output_text", "text": content}));
+                        }
+                        Block::Thinking { .. } | Block::RedactedThinking { .. } => {
+                            unreachable!("refused by `refuse_unencodable` before this point")
                         }
                     }
                 }
@@ -1336,8 +1358,12 @@ fn output_items(blocks: &[Block]) -> Vec<Value> {
                 "status": "completed",
             })),
             // A response never carries these — `decode_response` on either
-            // codec cannot produce them.
-            Block::Image(_) | Block::ToolResult { .. } => {}
+            // codec cannot produce them, a thinking block least of all:
+            // `decode_response_block` refuses one outright.
+            Block::Image(_)
+            | Block::ToolResult { .. }
+            | Block::Thinking { .. }
+            | Block::RedactedThinking { .. } => {}
         }
     }
     let mut output = Vec::new();

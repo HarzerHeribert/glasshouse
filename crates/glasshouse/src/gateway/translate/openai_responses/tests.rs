@@ -42,6 +42,34 @@ fn a_request_round_trips_through_the_openai_responses_wire() {
 }
 
 #[test]
+fn a_thinking_block_is_refused_rather_than_dropped() {
+    let mut request = responses_request();
+    request.messages.push(Message {
+        role: Role::Assistant,
+        blocks: vec![Block::Thinking {
+            thinking: "reasoning the harness never sees".to_owned(),
+            signature: "sig".to_owned(),
+        }],
+    });
+    let refusal = OpenAiResponses
+        .refuse_unencodable(&request)
+        .expect_err("a thinking block has no OpenAI Responses equivalent");
+    assert_eq!(refusal.field, "thinking block");
+    assert!(!refusal.reason.contains("reasoning the harness never sees"));
+
+    let mut request = responses_request();
+    request.messages.push(Message {
+        role: Role::Assistant,
+        blocks: vec![Block::RedactedThinking {
+            data: "opaque".to_owned(),
+        }],
+    });
+    OpenAiResponses
+        .refuse_unencodable(&request)
+        .expect_err("a redacted thinking block has no OpenAI Responses equivalent either");
+}
+
+#[test]
 fn effort_is_carried_as_nested_reasoning_effort_and_omitted_when_the_harness_asked_for_none() {
     use super::super::canonical::EffortRequest;
 

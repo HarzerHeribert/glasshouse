@@ -223,6 +223,12 @@ pub(super) const REFUSED_FIELDS: &[(&str, &str)] = &[
         "a thought part is the model's own reasoning and has no equivalent in the canonical form",
     ),
     (
+        "thinking block",
+        "an Anthropic thinking or redacted_thinking block is another provider's private \
+         reasoning and has no Gemini equivalent, matching this codec's own refusal of a \
+         `thought` part in the other direction",
+    ),
+    (
         "executableCode",
         "Gemini's code-execution tool is a server-side tool no other protocol declares",
     ),
@@ -417,6 +423,9 @@ impl Codec for Gemini {
                     }
                     Block::Image(ImageSource::Url(_)) => {
                         return Err(Unsupported::new("image", reason("image")));
+                    }
+                    Block::Thinking { .. } | Block::RedactedThinking { .. } => {
+                        return Err(Unsupported::new("thinking block", reason("thinking block")));
                     }
                     Block::Text(_) | Block::Image(_) | Block::ToolUse { .. } => {}
                 }
@@ -957,6 +966,9 @@ pub(super) fn encode_request(request: &Request) -> Vec<u8> {
                         "functionResponse": {"name": name, "response": payload},
                     }));
                 }
+                Block::Thinking { .. } | Block::RedactedThinking { .. } => {
+                    unreachable!("refused by `refuse_unencodable` before this point")
+                }
             }
         }
         contents.push(json!({"role": role, "parts": Value::Array(parts)}));
@@ -1199,7 +1211,10 @@ fn response_parts(blocks: &[Block]) -> Vec<Value> {
                 Some(json!({"functionCall": {"name": name, "args": input}}))
             }
             // `decode_response` on no codec produces these in an answer.
-            Block::Image(_) | Block::ToolResult { .. } => None,
+            Block::Image(_)
+            | Block::ToolResult { .. }
+            | Block::Thinking { .. }
+            | Block::RedactedThinking { .. } => None,
         })
         .collect()
 }
@@ -1377,9 +1392,14 @@ impl StreamDecoder for ChunkDecoder {
                             delta: Delta::InputJson(input.to_string()),
                         });
                     }
-                    // A streamed answer carries neither, and `decode_parts`
-                    // only produces them from a request's own shapes.
-                    Block::Image(_) | Block::ToolResult { .. } => {}
+                    // A streamed answer carries none of these, and
+                    // `decode_parts` only produces the first two from a
+                    // request's own shapes; Gemini has no thinking-block
+                    // equivalent to decode into the other two at all.
+                    Block::Image(_)
+                    | Block::ToolResult { .. }
+                    | Block::Thinking { .. }
+                    | Block::RedactedThinking { .. } => {}
                 }
             }
         }

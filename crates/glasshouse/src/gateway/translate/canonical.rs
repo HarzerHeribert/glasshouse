@@ -316,6 +316,26 @@ pub enum Block {
         content: String,
         is_error: bool,
     },
+    /// The model's own extended-thinking output, and the provider's proof
+    /// that it produced it. `signature` is opaque provider state, not data:
+    /// it must be carried byte-for-byte, never normalised, trimmed,
+    /// re-encoded, or logged, because the provider checks it against the
+    /// `thinking` text on the next turn and rejects the exchange if either
+    /// changed. Contrast [`cache_control`](Message), which the same
+    /// `decode_block` consumes into a flag rather than carrying: a cache hint
+    /// is advice the codec is free to drop, a thinking signature is a value
+    /// the *provider* will verify, so it survives untouched or the block is
+    /// void.
+    Thinking {
+        thinking: String,
+        signature: String,
+    },
+    /// A thinking block the provider redacted before it left the response.
+    /// `data` is as opaque as [`Block::Thinking`]'s `signature` and is
+    /// carried under the same rule.
+    RedactedThinking {
+        data: String,
+    },
 }
 
 /// Where an image's bytes come from. A URL carries no media type on either
@@ -355,7 +375,12 @@ pub enum ToolChoice {
 pub struct Response {
     pub id: String,
     pub model: String,
-    /// Only [`Block::Text`] and [`Block::ToolUse`] can appear here.
+    /// Only [`Block::Text`] and [`Block::ToolUse`] can appear here. A live
+    /// thinking block is refused by every `decode_response`, not carried:
+    /// `Response` folds to and from [`StreamEvent`] in [`Response::as_events`]
+    /// and [`accumulate`], and a thinking block's `signature` arrives over a
+    /// real Anthropic stream as its own delta — carrying it through that fold
+    /// needs a `BlockStart`/`Delta` shape this form does not have yet.
     pub blocks: Vec<Block>,
     pub stop_reason: StopReason,
     pub stop_sequence: Option<String>,
@@ -504,7 +529,10 @@ impl Response {
                 // A response never carries these — `decode_response` on either
                 // codec cannot produce them — so a stream of one has nothing
                 // to say about them either.
-                Block::Image(_) | Block::ToolResult { .. } => {}
+                Block::Image(_)
+                | Block::ToolResult { .. }
+                | Block::Thinking { .. }
+                | Block::RedactedThinking { .. } => {}
             }
             events.push(StreamEvent::BlockStop { index });
         }
@@ -587,7 +615,13 @@ pub fn accumulate(events: &[StreamEvent]) -> Result<Response, Unsupported> {
                             "a text delta arrived for a tool-use block",
                         ));
                     }
-                    (Block::Image(_) | Block::ToolResult { .. }, _) => {
+                    (
+                        Block::Image(_)
+                        | Block::ToolResult { .. }
+                        | Block::Thinking { .. }
+                        | Block::RedactedThinking { .. },
+                        _,
+                    ) => {
                         unreachable!("a block opened here is always a text or tool-use block")
                     }
                 }
