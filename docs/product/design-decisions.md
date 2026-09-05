@@ -7336,3 +7336,515 @@ with it.
         // this project — the `generateContent` route is documented, not
         // probed, and nothing here upgrades a document into a measurement.
         // `USAGE_ENDPOINTS` therefore gains no row.
+
+## Trims: `profile/mod.rs` — history moved out of comments by `GH-TRIM-PROFILE-MOD`, 2026-09-05
+
+### module doc
+
+//! The launch-profile abstraction and its resolution into a per-launch
+//! overlay.
+//!
+//! Three things live here, and they are deliberately not the same type:
+//!
+//! - A [`LaunchProfile`] is **inert configuration** — a name, a harness, a
+//!   backend resource, an optional model, an optional expected protocol, an
+//!   approval selection, and an optional named response preset. Nothing
+//!   about it has touched a real adapter yet.
+//! - A [`LaunchOverlay`] is the **ephemeral, per-launch result** of asking
+//!   one [`HarnessAdapter`] whether a profile can actually be honoured. It
+//!   applies to exactly one child process and is consumed by
+//!   [`LaunchOverlay::apply`].
+//! - [`resolve`] is the only place allowed to turn a profile's declaration
+//!   into arguments or environment for a child process, and it **refuses
+//!   rather than invents**: a combination the adapter does not declare comes
+//!   back as a [`Refusal`], never as a best-effort substitute.
+//!
+//! # Why this module never imports `crate::config` or `crate::database`
+//!
+//! A launch profile is configuration, not project memory. It is read from
+//! [`crate::config`], resolved here, and applied to one child process; none
+//! of that touches the project's SQLite database, and it must not start to.
+//! Only a *reference* to which profile a session ran under belongs in the
+//! database — see `session/store.rs` — and a reference is not a definition.
+//!
+//! [`crate::provider`] and [`crate::secret`] *are* imported, because a
+//! direct-provider profile cannot be resolved without knowing what the
+//! provider serves and where its credential comes from. [`crate::config`]
+//! still is not: the **caller** looks a configured provider up by name and
+//! hands the resolved [`crate::provider::Provider`] in through
+//! [`Resolution::provider`]. That keeps resolution a pure function of what it
+//! was given — no file, no ambient environment, no configuration search — and
+//! `harness::resolving_a_launch_profile_touches_no_files` enforces it.
+//!
+//! # The credential boundary
+//!
+//! [`resolve`] is the **only** place in Glasshouse where a
+//! [`crate::secret::Secret`] exists. It is held in a local, moved into the
+//! overlay's environment, and dropped there. No type in this module stores
+//! one: not [`LaunchProfile`], not [`MechanismNote`], and not any
+//! [`Refusal`]. A [`crate::harness::DirectProviderPlan`] cannot hold one
+//! either — an adapter is handed variable *names* and never a value, so the
+//! boundary is structural rather than a habit.
+
+### `response_preset` field doc
+
+    /// Line 353's sixth axis: the named [`response::Preset`] this profile
+    /// asks for, or `None` for a profile that says nothing about
+    /// communication policy.
+    ///
+    /// A name, not a resolved [`response::ResponseProfile`] — the same reason
+    /// [`LaunchProfile::backend`]'s `DirectProvider` variant carries a
+    /// provider *name* rather than a looked-up [`crate::provider::Provider`]:
+    /// resolving a preset name against `response::presets()` is cheap and
+    /// total, so there is nothing to gain by asking the caller to resolve it
+    /// before handing the profile over, and something to lose — a
+    /// `LaunchProfile` that could hold an unresolvable preset would need a
+    /// second refusal path this module does not otherwise have.
+    ///
+    /// Consulted by `main.rs::launch_session`, which folds it into the
+    /// session's [`crate::config::response::ResponseRequest`] as the
+    /// `PrecedenceLayer::Session` layer when the command line named no
+    /// preset of its own — an explicit `--response-preset` always wins,
+    /// because a person typing one on the command line is a stronger request
+    /// than a profile's standing default. See that function's own comment
+    /// for why this could not become a seventh [`response::PrecedenceLayer`]:
+    /// the map's line 596 fixes the chain at exactly six named layers, and
+    /// that box is already closed.
+
+### `fn install`
+
+    /// Write this overlay's generated configuration documents into `site`,
+    /// point the child at them, and return the guard that removes them again.
+    ///
+    /// # Why this is separate from [`resolve`] and from [`LaunchOverlay::apply`]
+    ///
+    /// Resolution happens **before** a session record exists, because a
+    /// refusal must cost nothing — no row, no process. So at resolution time
+    /// there is no session directory and no path to put in an environment
+    /// variable. The adapter therefore declares a
+    /// [`crate::harness::ConfigPathPlacement`] instead of a path, and this
+    /// step fills it in once the caller knows where the session lives.
+    ///
+    /// `apply` cannot do it: it is infallible, and a write that failed there
+    /// would have to be swallowed, leaving the child pointed at a document
+    /// that does not exist.
+    ///
+    /// # Forgetting to call this fails loudly, by construction
+    ///
+    /// The mechanism note and the *selection* arguments — OpenCode's
+    /// `--model <provider>/<model>` — are added during resolution; only the
+    /// document and the variable naming it are added here. An overlay that
+    /// was applied without being installed therefore starts a harness that
+    /// has been told to use a provider it has never heard of, which OpenCode
+    /// refuses outright ("Model not found: …") rather than silently falling
+    /// back to the user's own paid account. That ordering is deliberate: the
+    /// two halves are split so that the loud failure is the one that
+    /// survives a mistake.
+    ///
+    /// # Ephemeral means ephemeral, and this is what makes it true
+    ///
+    /// The returned [`EphemeralConfigs`] removes every file it wrote when it
+    /// drops, so a caller holding it across `session::attach` gets a document
+    /// that exists for exactly the life of the child process. Dropping it
+    /// early would delete a file the running harness may still re-read;
+    /// dropping it late — or never — is the surprise file in somebody's
+    /// state directory that the map's "temporary or Glasshouse-owned" line
+    /// exists to prevent. It also registers a
+    /// [`crate::shutdown::on_forced_exit`] cleanup, because the forced path
+    /// calls [`std::process::exit`] and runs no destructor.
+    ///
+    /// An overlay with nothing to write returns a guard that owns nothing, so
+    /// a caller never has to ask whether it has any.
+
+### `GatewayPairing` doc
+
+/// Phase 9J line 576: the native-pairing preference and corrections a
+/// gateway-backed launch resolves once from configuration, then hands to the
+/// gateway it points the child at — `apply_gateway` passes this to
+/// [`crate::gateway::session::SessionRouting::set_pairing_preference`] beside
+/// its own call to [`crate::gateway::session::SessionRouting::bind`].
+///
+/// A parameter on [`resolve_with_gateway`] rather than a field on
+/// [`Resolution`], for the reason that function's own doc comment gives for
+/// keeping `gateway` off `Resolution` too: this is a property of *this
+/// gateway-backed call*, not of the profile or the adapter, and every
+/// existing caller that resolves a [`Resolution`] by hand (`config`'s and
+/// `onboarding`'s tests, `tests/pty_smoke.rs`, `tests/launch_overlay.rs`) can
+/// go on doing so unchanged.
+///
+/// `preference_slug` is [`crate::config::pairing::PairingPreference::slug`]'s
+/// own spelling, not that type itself: this module may not import
+/// `crate::config` (see the module documentation), the same reason
+/// [`gateway_upstream`]'s `free` closure answers a plain `bool` instead of a
+/// `crate::config` type. [`SessionRouting::set_pairing_preference`] parses it
+/// back and degrades an unrecognised spelling to
+/// [`PairingPreference::Strong`], never refusing a launch over it.
+///
+/// [`PairingPreference::Strong`]: crate::config::pairing::PairingPreference::Strong
+/// [`SessionRouting::set_pairing_preference`]: crate::gateway::session::SessionRouting::set_pairing_preference
+
+### `fn resolve`
+
+/// Resolve `profile` against `cx.adapter`, producing the overlay for exactly
+/// one child process — or refusing, which starts nothing.
+///
+/// [`Resolution::acknowledged_bypass`] is the caller's answer to "has this
+/// harness's blanket-bypass risk been shown to and accepted by the user",
+/// read from user-level configuration only — see
+/// [`crate::config::EffectiveConfig::bypass_acknowledged`].
+///
+/// # The one place a credential exists
+///
+/// A [`crate::secret::Secret`] is minted here, moved into the returned
+/// overlay's environment, and dropped. It is never stored on a profile, a
+/// plan, a mechanism note or a refusal — see the module documentation.
+///
+/// # Why automatic review depends on the backend
+///
+/// Claude Code's `--permission-mode auto` is decided by a **safety
+/// classifier, which is itself a model call**. Pointed at the harness's own
+/// backend that call is served; pointed at a gateway it is a request the
+/// gateway receives and cannot answer as Anthropic would, and auto mode fails
+/// closed — the session comes up with its tools blocked.
+///
+/// The evidence, stated at its real strength: a working multi-gateway
+/// launcher on the development machine drives Claude Code through exactly the
+/// four variables this module injects and deliberately does **not** select
+/// auto mode, its own comment giving that reason; and Claude Code 2.1.245's
+/// bundle references no separate classifier endpoint, every API path in it
+/// being an ordinary one. That is a strong reading corroborated by a working
+/// implementation. It is **not** a controlled experiment, and nothing here
+/// should be read as one.
+///
+/// So the approval arm is keyed on the **backend**, not on the harness — it
+/// is a property of "this approval mechanism is served by whatever the
+/// harness talks to", which is equally true of a
+/// [`BackendResource::DirectProvider`] and of a
+/// [`BackendResource::GlasshouseGateway`]:
+///
+/// - [`ApprovalSelection::Default`] contributes no approval argument, exactly
+///   as it already does for a harness declaring no automatic-review mode, and
+///   records a [`MechanismNote`] saying so.
+/// - [`ApprovalSelection::AutomaticReview`] is **refused**. A default that
+///   falls back is not a request that is refused.
+/// - [`ApprovalSelection::Bypass`] is unchanged, acknowledgement and all:
+///   nothing about a backend relaxes that.
+///
+/// [`BackendResource::Native`] behaviour does not change by one byte.
+
+### `fn resolve_with_gateway`
+
+/// [`resolve`], for a caller that has a running local gateway to offer.
+///
+/// # Why this is a second entry point rather than a field on [`Resolution`]
+///
+/// A gateway is not a property of the profile or of the adapter: it is a
+/// *process* the caller started, and only a caller that decided to start one
+/// has anything to pass. Callers that never can — the configuration tests
+/// that resolve a Native profile to check a lookup — keep the argument-free
+/// [`resolve`] and are unaffected.
+///
+/// `None` here is not "no gateway configured"; it is "this call site has no
+/// gateway to give". A gateway-backed profile therefore refuses with
+/// [`Refusal::GatewayNotRunning`], which is the honest thing to say, rather
+/// than being silently resolved against something else.
+///
+/// # What a gateway-backed profile resolves into
+///
+/// Exactly what a direct-provider profile resolves into, through the same
+/// adapter method, with two substitutions: the base URL is the gateway's own
+/// loopback address, and the credential written into the child is the
+/// **gateway's token** rather than any provider key. That is line 2 of Phase
+/// 9G in one sentence — the provider credential stays in this process, held
+/// by the gateway, and the child is given something that is worthless
+/// anywhere else.
+///
+/// Reusing [`HarnessAdapter::direct_provider_launch`] is deliberate. The
+/// variables Claude Code reads are the harness's own declared knowledge, and
+/// naming `ANTHROPIC_BASE_URL` here instead would put that knowledge in a
+/// second place, where the two copies could disagree.
+///
+/// `pairing` is [`GatewayPairing::default`] for every caller that has no
+/// [`crate::config::EffectiveConfig`] to resolve one from — the same
+/// pre-Phase-9J-line-576 behaviour every caller other than `main.rs`'s own
+/// two production sites gets today. Ignored entirely unless `gateway` is
+/// `Some` and the profile's backend actually resolves through it.
+
+### `fn resolve_checked`
+
+/// [`resolve_with_gateway`], plus Phase 9F line 466's precondition: refuse a
+/// direct-provider or gateway-backed profile before doing anything else if
+/// `harness_executable` says the harness's executable is not installed and
+/// usable. [`BackendResource::Native`] is unaffected — this check is never
+/// even consulted for one, so a `Native` profile's behaviour cannot change by
+/// so much as which branch runs.
+///
+/// # Why this takes the answer rather than finding it
+///
+/// [`resolve`] and [`resolve_with_gateway`] stay pure functions of the values
+/// in [`Resolution`] — no real `PATH` lookup as a side effect of resolving a
+/// profile whose caller never asked for one. That is not incidental: every
+/// existing caller of those two functions (`main.rs`'s own production launch
+/// path, `config`'s and `onboarding`'s tests, `tests/pty_smoke.rs`, and this
+/// module's own test suite) constructs profiles naming real harnesses —
+/// `Codex`, `Pi` — that are not all installed on every machine those tests
+/// run on, and none of them expects a `PATH` search to happen underneath it.
+/// A third, additional entry point that takes the executable check as a
+/// value keeps that guarantee intact while still letting a production caller
+/// opt in.
+///
+/// A caller that has already resolved the harness's executable — as
+/// `main.rs`'s `session::select::select` already does, before any launch
+/// profile is resolved — should hand back the [`crate::harness::ExecutablePresence::Usable`]
+/// it already established rather than pay for a second search. A caller that
+/// has not should call [`crate::harness::ExecutablePresence::detect`] itself,
+/// which performs the real check this precondition asks for.
+///
+/// Always resolves with [`GatewayPairing::default`] — this entry point has no
+/// production caller today (only this module's own tests use it), so there is
+/// no resolved `EffectiveConfig` value for it to thread through yet.
+
+### `fn apply_gateway`
+
+/// Point one child process at the local gateway, or refuse.
+///
+/// The three things that make this different from a direct provider, and
+/// nothing else is:
+///
+/// 1. the base URL is the gateway's own loopback address rather than a
+///    provider's;
+/// 2. the credential written into the child is the gateway's token, which is
+///    already in memory, so **no [`crate::secret::Secret`] is resolved here
+///    at all** — the provider's key was resolved once, at gateway start, and
+///    lives in the gateway;
+/// 3. no provider headers are forwarded, because the child is not talking to
+///    a provider. A provider's own extra headers are the gateway's business
+///    on the hop the gateway makes.
+///
+/// Everything else — the arguments, the environment, the credential's
+/// destination variable — comes from the adapter's own declaration, so a
+/// harness that changes how it is pointed at a backend changes it in one
+/// place.
+///
+/// 4. Phase 9J line 576: `pairing` is recorded on the gateway's routing
+///    state beside the assignment `Gateway::routing().bind` just made, so a
+///    later failover (`crate::gateway::session::SessionRouting::observe_exchange`)
+///    scores candidates against what the user actually configured.
+
+### `fn gateway_upstream`
+
+/// Which configured providers the local gateway may forward to: the one it
+/// assigns now, and the ones a real provider failure may move a session to.
+///
+/// # Phase 9G refused to choose here. Phase 9H chooses, and says so.
+///
+/// The previous version of this function refused a configuration in which more
+/// than one provider served the ingress, with a message explaining that
+/// *"choosing a backend per session is sticky routing rather than something a
+/// launch profile decides"*. That was right at the time and it is the line
+/// this phase exists to cross.
+///
+/// The objection Phase 9G actually raised was to a **silent** choice: *"a
+/// gateway that picked the alphabetically first of three routers would be
+/// making exactly the routing decision the map defers"*. What makes the
+/// choice legitimate now is not that this phase is allowed to be arbitrary —
+/// it is that the choice is no longer invisible or final:
+///
+/// - it is **recorded** as a [`crate::routing::interactive::Assignment`] the
+///   moment a profile binds a session, and reported in the launch's own
+///   mechanism note (Phase 9H lines 505 and 507);
+/// - the user can **pin** the session to one provider and turn automatic
+///   failover off (line 518);
+/// - the user can **migrate** the session to another provider at a task
+///   boundary (line 511);
+/// - and every change is **recorded** with its cache consequence (lines 515
+///   and 516).
+///
+/// A choice that is announced, pinnable and reversible is a different thing
+/// from a choice made behind the user's back, and the refusal was about the
+/// second. The order is the order the caller presents the providers in, which
+/// is the user's own configuration order; nothing here ranks providers on
+/// quality, because that is Phase 9J's job and it has no evidence yet.
+///
+/// **This is a judgement, and it is the one thing in this batch most worth
+/// disagreeing with.** The alternative — keep refusing until a launch profile
+/// can name its gateway provider — is defensible and costs a field on
+/// `BackendResource::GlasshouseGateway`. It was not taken because, with the
+/// refusal in place, a user with two configured routers cannot start a
+/// gateway-backed session at all, and every one of Phase 9H's failover lines
+/// is unreachable in production by construction.
+///
+/// # Several credentials for one provider are several backends
+///
+/// Phase 9E's last line allows *"several credentials for one provider to be
+/// held as a pool"*, and [`Provider::credential_env`] has always been a list.
+/// The previous version took *"the first that currently resolves"* and
+/// discarded the rest. Each one that resolves is now its own backend, which
+/// is what makes Phase 9I line 537's rotation — *"treat a single key's
+/// exhaustion as that key's limit rather than the provider's"* — something
+/// the gateway can actually do rather than something it can only describe.
+///
+/// # One provider, every protocol it serves
+///
+/// Unchanged from Phase 9G, and its reasoning is unchanged with it. A provider
+/// is a candidate if it serves at least one ingress protocol with a base URL,
+/// and it gets a [`Route`] for **each** protocol it serves. Requiring all
+/// three would refuse every real configuration — no built-in template serves
+/// more than two.
+///
+/// Every credential is resolved here, once, at start, and moved into the
+/// [`Upstream`]. Unlike [`resolve`]'s direct-provider path they do not end at
+/// a child process: they stay in this process for the gateway's lifetime,
+/// which is the entire point of holding them here instead.
+/// `free` answers, by provider name, whether that provider has at least one
+/// model the user has marked free-tier — Phase 9I line 527's marking,
+/// reaching this path per line 532. `crate::profile` may not import
+/// `crate::config`, where that marking actually lives, so the caller passes
+/// the answer in rather than this function looking it up; `main.rs`'s own
+/// wrapper is where `ProviderConfig::free_models` and this closure meet. A
+/// provider `free` was never asked about — because a caller has nothing to
+/// mark, not because it is somehow known metered — answers `false`, which is
+/// [`Cost::Metered`]'s own fail-closed default carried one level up.
+
+### `fn capability_probe`
+
+/// Build the [`CapabilityProbe`] for `profile`, or say why none is possible.
+///
+/// # Why a `Native` or gateway-backed profile always answers `Unavailable`
+///
+/// A [`BackendResource::Native`] profile talks to the harness's own account
+/// through a mechanism this crate never sees the credential or base URL
+/// for — there is nothing here to build a request from.
+///
+/// A [`BackendResource::GlasshouseGateway`] profile talks to Glasshouse's
+/// own local listener, not to a provider directly, and which upstream
+/// provider actually answers behind it is Phase 9H's sticky-routing
+/// decision — made per session, not by this profile. Probing the gateway's
+/// own loopback address would only prove the gateway this process just
+/// started is listening, which is not "this credential, at this base URL,
+/// for this protocol, answers" in the sense line 465 asks for; it is
+/// reported as unavailable rather than as a check that answers a different
+/// question than the one asked.
+///
+/// # Why a resolvable [`BackendResource::DirectProvider`] is always available
+///
+/// Once a protocol and base URL can be chosen at all — the same choice
+/// `apply_direct_provider` makes — [`crate::provider::discovery::ProbeTarget::BaseUrl`]
+/// is always a valid target, even when the provider has no established
+/// model-list endpoint. So "no check available" for a direct-provider
+/// profile only ever means the combination itself could not be resolved
+/// (unconfigured provider, no shared protocol, no base URL) — the same
+/// conditions under which [`resolve`] would refuse for an entirely separate
+/// reason, so there is nothing new for a probe to report either.
+///
+/// The credential is resolved the same way `apply_direct_provider` does — the
+/// first declared variable that currently has a value — but unlike there, a
+/// probe with none is still built: [`crate::provider::discovery`] sends no
+/// credential header when given `None`, and the resulting outcome
+/// ("reachable" or "unreachable" with no credential involved) is still
+/// information a report can use.
+
+### `PREFLIGHT_TIMEOUTS`
+
+/// The timeout budget a pre-flight check runs under, and why it is
+/// deliberately not [`crate::provider::discovery::ProbeTimeouts::default`].
+///
+/// Every existing caller of [`crate::provider::discovery::connectivity`] is
+/// answering a question a keystroke just asked, and can afford the default's
+/// 5/10/20 seconds because waiting *is* what the user asked for.
+///
+/// A pre-flight check is the opposite. Nobody asked for it, it sits between
+/// `glasshouse launch` and the session, and its entire justification is the
+/// qualifier capability map line 468 puts on the requirement itself: **when a
+/// cheap capability check is available**. A launch that stalls twenty seconds
+/// on an unreachable host has already cost more than the check could be
+/// worth, so this budget is the worst delay a launch may pay — four seconds,
+/// once, and only for a profile that has a check at all.
+///
+/// The numbers are not arbitrary. Every provider catalogue probed on
+/// 2026-08-26 answered in well under a second — see
+/// [`crate::provider::discovery::RESPONSE_TIMEOUT`]'s own doc — so two and a
+/// half seconds is still an order of magnitude of headroom over every
+/// measured healthy answer. A host that misses it is reported as "did not
+/// answer", which, because a pre-flight check never refuses a launch, costs
+/// the user a line of text rather than their session.
+
+### `Preflight` doc
+
+/// What a pre-flight check found — capability map line 468.
+///
+/// # There is no `Refuse` variant, and that is the ruling
+///
+/// The map's verb is *verify*, and the obvious reading of "verify before
+/// starting" is that a failed check refuses the launch. It was considered and
+/// rejected, for reasons that are about this check specifically rather than
+/// about caution in general:
+///
+/// 1. **No outcome of this check is unambiguous evidence that the combination
+///    is wrong.** [`crate::provider::discovery::ProbeTarget::BaseUrl`] — the
+///    target for every provider whose model-list endpoint nobody has
+///    established, which is most of them — sends `GET <base>`, and a `404` or
+///    `405` from a base URL that serves no `GET` is the *healthy* answer.
+///    Refusing on that would refuse correct configurations.
+/// 2. **Reachability is not correctness.** Three of the twenty-two provider
+///    hosts probed for Phase 9D answer identically to a real path and a
+///    nonsense one, so a negative result from a single request is a claim
+///    about whether the host routed at all, never about whether this
+///    credential would work. Turning that into a refusal is the mistake that
+///    nearly deleted a correct URL from the provider table.
+/// 3. **The failure it would prevent is cheaper than the failure it would
+///    cause.** A wrong combination costs one harness startup and the
+///    provider's own error — the status quo. A false refusal costs the user
+///    the ability to start work at all, on a path (the network) that fails
+///    independently of anything they configured.
+/// 4. **[`resolve`] already owns refusal, and owns it better.** It refuses
+///    from declarations — deterministically, offline, with a message naming
+///    what was asked for. Putting a second, network-dependent authority
+///    beside it would make whether a session may start depend on a remote
+///    host's mood.
+///
+/// So this check *reports*, and the launch proceeds. The corollary is that it
+/// needs no "start anyway" key: a refusal before start would need one, and the
+/// reason it would need one — that the check can be wrong about a working
+/// setup — is the same reason it does not refuse.
+///
+/// # What each variant means the caller should do
+///
+/// [`Preflight::NotChecked`] and [`Preflight::Answered`] are for the log.
+/// [`Preflight::CredentialRejected`] and [`Preflight::Unreachable`] are the
+/// two outcomes a user can act on before the harness takes the screen, and
+/// [`Preflight::warning`] returns exactly those.
+
+### `fn preflight`
+
+/// Run the pre-flight capability check for `profile` — capability map line
+/// 468 — or report that there was none to run.
+///
+/// # This is the one function in this module that touches the network
+///
+/// [`resolve`] and [`resolve_with_gateway`] are pure functions of the values
+/// in [`Resolution`], and stay that way: nothing here is called by either of
+/// them, and **this runs after resolution, never before it**. That ordering
+/// is not incidental — it is what makes
+/// `a_capability_probe_cannot_influence_which_backend_resolve_selects` true
+/// by construction on the production path rather than by inspection. A check
+/// that ran first, and whose result reached `resolve`, would be a router; the
+/// backend is chosen from the profile's declaration and nothing this function
+/// learns can change it.
+///
+/// It costs nothing at all for a profile with no check available — no
+/// request, no socket, no thread — which is every `Native` and every
+/// gateway-backed profile, and therefore every launch that did not name a
+/// direct provider. For one that does, it costs exactly one bounded HTTP
+/// request; see [`PREFLIGHT_TIMEOUTS`] for the ceiling.
+///
+/// # The credential
+///
+/// The summary is built from the provider's name, the protocol slug, the URL
+/// the probe requested and [`describe_probe_outcome`] — none of which is the
+/// credential, and the last of which
+/// [`crate::provider::discovery::ProbeOutcome::Unreachable`] deliberately
+/// builds from a fixed set of phrases rather than an error's own words. It is
+/// then passed through [`crate::secret::redact`] anyway, because a *base URL*
+/// is user-supplied text that can carry anything and this string reaches both
+/// the terminal and the log.
