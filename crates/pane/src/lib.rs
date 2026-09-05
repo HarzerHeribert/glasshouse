@@ -3,6 +3,8 @@
 //! a protocol boundary, never a compile-time dependency on the `glasshouse`
 //! crate. It builds and tests independently of the rest of the workspace.
 
+pub mod ruler;
+
 use std::io::{BufRead, Write};
 
 /// Reads one line from `input` and writes it back to `output`, unchanged.
