@@ -2050,7 +2050,7 @@ Recorded from the user's ruling of 2026-09-03: *Glasshouse is not sloppy; it is 
 ☑ Split the configuration module by concern — loading and layering, entitlements and plans, routing policy, firewall, response profiles — so that a change to one concern touches one file.
 ☑ Split the routing evidence module into the ledger that writes rows, the readers that summarise them, and the joins across tables.
 ☑ Split the shell into state, view and per-screen modules so that a screen's behaviour lives in one file.
-☐ Keep doc comments to the invariant and the reason it holds now, moving the history of how a decision was reached to the design or measurements record behind a one-line pointer.
+☑ Keep doc comments to the invariant and the reason it holds now, moving the history of how a decision was reached to the design or measurements record behind a one-line pointer.
 ☑ Re-open the refused lines the user named as product-relevant — context quality (1534), cache temperature and affinity (1535, 1545), low-confidence memory (1129), preserving user changes on rollback (1044), and nearly-complete tasks under a reserve or quota threshold (1294, 1610) — and settle each by design and risk rather than by the count of open boxes.
 
 
