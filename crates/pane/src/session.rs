@@ -5,13 +5,13 @@
 //! this module exists to close.
 
 use std::fs;
-use std::io::{self, BufRead};
+use std::io::{self, BufRead, IsTerminal};
 use std::path::PathBuf;
 use std::time::SystemTime;
 
 use clap::Parser;
 use ratatui::Terminal;
-use ratatui::backend::TestBackend;
+use ratatui::backend::{CrosstermBackend, TestBackend};
 
 use crate::commands::{self, CommandStatus};
 use crate::contract::{Block, Conversation, Message, ProjectConfig, Role, ServedBy, SessionId};
@@ -104,17 +104,51 @@ fn message_text(message: &Message) -> String {
         .join("")
 }
 
-/// Draws the two-region screen into an in-memory buffer. A live interactive
-/// terminal (raw mode, an alternate screen, a resize-aware redraw loop) is
-/// out of scope for this package -- see the report's limits -- so every call
-/// here, scripted or interactive, renders the same way `tui.rs`'s own tests
-/// do: nothing in `pane session`'s ordinary path requires a real tty, which
-/// is exactly what lets every acceptance test below drive it as a
-/// subprocess with piped stdio.
+/// Draws the two-region screen where a user or a test can actually see it.
+/// A live interactive terminal (raw mode, an alternate screen, a
+/// resize-aware redraw loop) is out of scope for this package -- see the
+/// report's limits -- so this draws one frame per turn either way, through
+/// the same unmodified `tui::render`: to a real `CrosstermBackend` when
+/// stdout is a tty, and to stdout as plain lines otherwise, so a pipe never
+/// makes the session's output disappear the way it used to.
 fn render(conversation: &Conversation, served_by: &ServedBy) {
+    if io::stdout().is_terminal() {
+        render_to_terminal(conversation, served_by);
+    } else {
+        render_as_lines(conversation, served_by);
+    }
+}
+
+fn render_to_terminal(conversation: &Conversation, served_by: &ServedBy) {
+    let Ok(mut terminal) = Terminal::new(CrosstermBackend::new(io::stdout())) else {
+        return;
+    };
+    let _ = terminal.draw(|frame| tui::render(frame, conversation, served_by));
+}
+
+/// Every acceptance test below, and any real pipe, takes this path. Draws
+/// through the identical `tui::render` a live terminal uses, into an
+/// in-memory buffer exactly as `tui.rs`'s own tests do, then prints each
+/// non-blank row as a line of text -- so the conversation column and the
+/// sidebar's content (including its honest "not connected" collapse) reach
+/// stdout rather than a dropped `TestBackend`.
+fn render_as_lines(conversation: &Conversation, served_by: &ServedBy) {
     let backend = TestBackend::new(100, 40);
     let mut terminal = Terminal::new(backend).expect("an in-memory backend never fails to init");
     let _ = terminal.draw(|frame| tui::render(frame, conversation, served_by));
+    let buffer = terminal.backend().buffer();
+    for y in 0..buffer.area.height {
+        let mut line = String::new();
+        for x in 0..buffer.area.width {
+            if let Some(cell) = buffer.cell((x, y)) {
+                line.push_str(cell.symbol());
+            }
+        }
+        let line = line.trim_end();
+        if !line.is_empty() {
+            println!("{line}");
+        }
+    }
 }
 
 /// Runs `session`, in the order the packet's OBJECTIVE fixes: load the
@@ -239,8 +273,9 @@ fn process_input(
     conversation: &mut Conversation,
     rollout: &mut Rollout,
 ) -> Result<(), String> {
-    if let Some(name) = input.strip_prefix('/') {
-        answer_command(name, session);
+    if let Some(rest) = input.strip_prefix('/') {
+        let (name, argument) = split_command(rest);
+        answer_command(rest, name, argument, session);
         render(conversation, &ServedBy::default());
         return Ok(());
     }
@@ -269,29 +304,53 @@ fn process_input(
     Ok(())
 }
 
+/// Splits a slash command's name from whatever follows it -- `/memory a
+/// note` is a name and an argument, `/model` is a name and nothing. Empty
+/// input (a bare `/`) yields an empty name, which [`answer_command`] treats
+/// the same as `/help`.
+fn split_command(rest: &str) -> (&str, Option<&str>) {
+    match rest.split_once(char::is_whitespace) {
+        Some((name, argument)) => (name, Some(argument.trim())),
+        None => (rest, None),
+    }
+}
+
 /// Answers a slash command. `commands::resolve` only ever *decides* what a
-/// command is; acting on one is this function's job, and `/memory` is the
-/// only built-in with an action so far.
+/// command is; acting on one is this function's job. `/memory` is the only
+/// built-in with an action beyond naming itself, and a bare `/` or `/help`
+/// is this package's chosen way to reach map line 2450's other half: the
+/// full list `commands::all` has decided since it was written, and that
+/// nothing before this package ever printed.
 ///
 /// **`/memory` is where map line 2446 reaches the binary.** The seam and its
 /// local fallback were built and tested by `GH-PANE-61C-SEAMS`, and then
 /// nothing called them: `commands` was scoped to decide and never to act, and
 /// no package was given the acting half. A capability nothing invokes is not
 /// a capability, whatever its tests say.
-fn answer_command(name: &str, session: &Session<'_>) {
+fn answer_command(rest: &str, name: &str, argument: Option<&str>, session: &Session<'_>) {
+    // A bare `/` or `/help` lists rather than resolves, so `commands::all`
+    // has a caller and the binary actually *offers* what 2450 names.
+    if name.is_empty() || name == "help" {
+        offer_commands(session.project);
+        return;
+    }
+
     // `/tool` is answered before `commands::resolve` is consulted, because
     // it is not a project command: it carries its own arguments on the same
     // line, and a resolver keyed on a bare name would look up
     // `tool read path=…` and answer "unknown".
-    if let Some(rest) = tool_invocation(name) {
-        answer_tool(rest, session);
+    // `tool_invocation` reads the **whole** line, not the split-off name:
+    // `/tool read path=…` carries its arguments after the command word, and
+    // a resolver keyed on the bare name would look up `tool` and lose them.
+    if let Some(call) = tool_invocation(rest) {
+        answer_tool(call, session);
         return;
     }
     match commands::resolve(session.project, name) {
         Some(resolved) => match resolved.status {
             CommandStatus::Available => {
                 if name == "memory" {
-                    answer_memory(session.glasshouse, session.memory);
+                    answer_memory(session.glasshouse, session.memory, argument);
                 } else {
                     println!("/{name} ({:?})", resolved.source);
                 }
@@ -304,14 +363,35 @@ fn answer_command(name: &str, session: &Session<'_>) {
     }
 }
 
+/// Prints every command `commands::all` names, in its own order -- the
+/// built-ins, then the project's own commands and skills. `all` had a
+/// production caller nowhere before this package; this is that caller.
+fn offer_commands(project: &ProjectConfig) {
+    for resolved in commands::all(project) {
+        println!("/{} ({:?})", resolved.name, resolved.source);
+    }
+}
+
 /// Reads memory and the latest checkpoint through Glasshouse's MCP surface,
-/// falling back to the local store when nothing answers — map line 2446.
+/// falling back to the local store when nothing answers — map line 2446. A
+/// non-empty `argument` is a note to save instead: `/memory <text>` is this
+/// package's chosen writer, and it always lands in the local store, the only
+/// store `pane` itself owns -- Glasshouse's own memory tool is written to by
+/// Glasshouse's own harness, not by a second writer invented here.
 ///
-/// Both readers degrade rather than fail, so this prints what it found and
+/// The readers degrade rather than fail, so a read prints what it found and
 /// says plainly when that was nothing; it never reports an error and never
 /// distinguishes "Glasshouse is absent" from "Glasshouse had nothing", which
 /// is `glasshouse.rs`'s own contract and not this function's to re-decide.
-fn answer_memory(glasshouse: &Glasshouse, memory: &LocalMemory) {
+fn answer_memory(glasshouse: &Glasshouse, memory: &LocalMemory, argument: Option<&str>) {
+    if let Some(text) = argument.filter(|text| !text.is_empty()) {
+        match memory.add(text) {
+            Ok(()) => println!("/memory: saved"),
+            Err(e) => println!("/memory: could not save: {e}"),
+        }
+        return;
+    }
+
     let notes = glasshouse::search_memory(glasshouse, memory, "");
     if notes.is_empty() {
         println!("/memory: no notes");

@@ -1,5 +1,5 @@
-//! Acceptance tests for `pane session` (map lines 2444, 2447, 2448, 2450 and
-//! 2457). Every test here drives the **built `pane` binary** as a subprocess
+//! Acceptance tests for `pane session` (map lines 2444, 2446, 2447, 2448,
+//! 2449, 2450 and 2457). Every test here drives the **built `pane` binary** as a subprocess
 //! (`env!("CARGO_BIN_EXE_pane")`) -- the packet these prove exists precisely
 //! because the six modules session.rs wires together were, until now,
 //! correct and reachable from nothing but their own unit tests.
@@ -462,31 +462,196 @@ fn the_binary_reads_memory_through_the_mcp_surface() {
     );
 }
 
-/// The other half of 2446: with no `glasshouse` at all, `/memory` still
-/// answers from the local store rather than failing the session.
+/// The other half of 2446, and the replacement for
+/// `the_binary_falls_back_to_the_local_store_when_glasshouse_is_absent`,
+/// whose assertion (`stdout.contains("/memory")`) was satisfied by
+/// `"/memory: no notes"` -- the string reporting that the fallback found
+/// nothing. This writes a note through one invocation's `/memory <text>` and
+/// asserts a second invocation, with Glasshouse still absent both times,
+/// reads that exact note back: a message saying nothing was found cannot
+/// satisfy this, only the note's own text can.
 #[test]
-fn the_binary_falls_back_to_the_local_store_when_glasshouse_is_absent() {
-    let root = scratch_dir("memory-fallback-root");
+fn a_note_written_through_the_binary_is_read_back_by_a_later_run() {
+    let root = scratch_dir("memory-roundtrip-root");
+    let rollout = root.join("rollout.jsonl");
+    let absent = root.join("no-such-glasshouse");
+
+    let write = run_session(
+        &root,
+        &rollout,
+        "memory-write",
+        "/memory PANE-WROTE-THIS-NOTE",
+        &refused_base_url(),
+        Some(&absent),
+    );
+    assert!(
+        write.status.success(),
+        "an absent glasshouse must not fail the session; stderr:\n{}",
+        String::from_utf8_lossy(&write.stderr)
+    );
+
+    let read = run_session(
+        &root,
+        &rollout,
+        "memory-read",
+        "/memory",
+        &refused_base_url(),
+        Some(&absent),
+    );
+    assert!(
+        read.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&read.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&read.stdout);
+    assert!(
+        stdout.contains("PANE-WROTE-THIS-NOTE"),
+        "a note written through the binary was not read back by a later run:\n{stdout}"
+    );
+}
+
+/// 2449: the shipped binary must show something, not build a `TestBackend`
+/// and drop it. `run_session` always captures stdout as a pipe, which is
+/// exactly the non-tty path every real pipe takes, so a regression back to
+/// the dropped `TestBackend` fails this the same way it would fail a user
+/// piping the binary's output anywhere.
+#[test]
+fn a_piped_session_prints_the_models_reply() {
+    let root = scratch_dir("print-reply-root");
+    let rollout = root.join("rollout.jsonl");
+    let absent = root.join("no-such-glasshouse");
+    let (base_url, _bodies) =
+        start_fake_provider(vec![assistant_reply("PANE-PRINTED-REPLY-MARKER")]);
+
+    let output = run_session(
+        &root,
+        &rollout,
+        "sess-print-reply",
+        "hello",
+        &base_url,
+        Some(&absent),
+    );
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        !stdout.is_empty(),
+        "a piped session must print something to stdout"
+    );
+    assert!(
+        stdout.contains("PANE-PRINTED-REPLY-MARKER"),
+        "the assistant's reply never reached stdout:\n{stdout}"
+    );
+}
+
+/// 2449's other clause: the sidebar's content reaches stdout too, including
+/// its honest collapse when Glasshouse is absent. Before this package,
+/// stdout was zero bytes and this assertion could not have passed on any
+/// string; it is not satisfied by an empty capture, only by the sidebar's
+/// own collapsed text actually being printed.
+#[test]
+fn a_piped_session_prints_the_sidebar_content() {
+    let root = scratch_dir("print-sidebar-root");
+    let rollout = root.join("rollout.jsonl");
+    let absent = root.join("no-such-glasshouse");
+    let (base_url, _bodies) = start_fake_provider(vec![assistant_reply("ack")]);
+
+    let output = run_session(
+        &root,
+        &rollout,
+        "sess-print-sidebar",
+        "hello",
+        &base_url,
+        Some(&absent),
+    );
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Glasshouse not connected"),
+        "the sidebar's collapsed content never reached stdout:\n{stdout}"
+    );
+}
+
+/// 2450: `commands::all` decided the full list from the day it was written;
+/// this is the first test asserting the binary actually offers it, with a
+/// project command and a project skill both present so neither source is
+/// standing in for the other.
+#[test]
+fn the_command_list_is_offered_by_the_binary() {
+    let root = scratch_dir("command-list-root");
+    fs::create_dir_all(root.join(".claude").join("commands")).unwrap();
+    fs::write(
+        root.join(".claude").join("commands").join("deploy.md"),
+        "deploy the project",
+    )
+    .unwrap();
+    fs::create_dir_all(root.join(".claude").join("skills").join("reviewer")).unwrap();
+
     let rollout = root.join("rollout.jsonl");
     let absent = root.join("no-such-glasshouse");
 
     let output = run_session(
         &root,
         &rollout,
-        "memory-fallback",
-        "/memory",
+        "sess-command-list",
+        "/help",
         &refused_base_url(),
         Some(&absent),
     );
 
     assert!(
         output.status.success(),
-        "an absent glasshouse must not fail the session; stderr:\n{}",
+        "stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("/memory"),
-        "the local fallback produced no answer:\n{stdout}"
+        stdout.contains("deploy"),
+        "the project command never appeared in the offered list:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("reviewer"),
+        "the project skill never appeared in the offered list:\n{stdout}"
+    );
+}
+
+/// 2450's uncovered branch: `commands::resolve`'s `ProjectSkill` arm, which
+/// no test in the crate exercised even though it is the branch the binary
+/// itself uses for a bare `/<skill-name>`.
+#[test]
+fn a_project_skill_resolves_by_name() {
+    let root = scratch_dir("skill-resolve-root");
+    fs::create_dir_all(root.join(".claude").join("skills").join("reviewer")).unwrap();
+
+    let rollout = root.join("rollout.jsonl");
+    let absent = root.join("no-such-glasshouse");
+
+    let output = run_session(
+        &root,
+        &rollout,
+        "sess-skill-resolve",
+        "/reviewer",
+        &refused_base_url(),
+        Some(&absent),
+    );
+
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("ProjectSkill"),
+        "resolving a bare project skill by name never reached the binary's ProjectSkill branch:\n{stdout}"
     );
 }
