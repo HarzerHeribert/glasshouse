@@ -496,10 +496,62 @@ fn route_outcomes_section(runtime: &Runtime) -> String {
     out.push_str(&expected_vs_actual_output_tokens_block(runtime, from, to));
     out.push_str(&render_failover_preventions(&preventions));
     out.push_str(&render_reserve_availability(&reserve_availability));
+    out.push_str(&render_pairing_prior_crossover(&ledger, from, to));
     out.push_str(
         "\nA session whose harness never reported a turn end is counted as neither a success \
          nor a failure; a quiet or exited process is never read as either.\n",
     );
+    out
+}
+
+/// Map line 1846: from what point local pairing evidence predicts a routed
+/// session's outcome at least as well as the same-vendor prior did, beside
+/// [`render_reserve_availability`]'s own 1837 block and read from the same
+/// already-open ledger (practice §65 — one handle, opened once in
+/// [`route_outcomes_section`]).
+///
+/// **This section measures; it decides nothing.** It reads
+/// [`glasshouse::evaluation::EvaluationObservations::pairing_prior_crossover`]
+/// and renders what it found — nothing here touches
+/// `glasshouse::routing::session::PAIRING_PRIOR`, which stands regardless of
+/// what this comparison shows.
+fn render_pairing_prior_crossover(
+    ledger: &glasshouse::evaluation::EvaluationObservations,
+    from: i64,
+    to: i64,
+) -> String {
+    use glasshouse::routing::evidence::MIN_SAMPLE_FOR_SUMMARY;
+
+    let header = "\n  local pairing evidence vs the same-vendor prior (1846):\n";
+    let crossover = match ledger.pairing_prior_crossover(from, to) {
+        Ok(crossover) => crossover,
+        Err(err) => return format!("{header}    {err}\n"),
+    };
+
+    let mut out = header.to_owned();
+    for bucket in &crossover.buckets {
+        if bucket.sessions == 0 {
+            out.push_str(&format!("    k {}: none\n", bucket.bucket));
+        } else {
+            out.push_str(&format!(
+                "    k {}: prior right {}/{} \u{b7} local right {}/{}\n",
+                bucket.bucket,
+                bucket.prior_correct,
+                bucket.sessions,
+                bucket.local_correct,
+                bucket.sessions
+            ));
+        }
+    }
+    match crossover.crossover {
+        Some(bucket) => out.push_str(&format!(
+            "    local evidence at least as predictive from bucket {bucket}\n"
+        )),
+        None => out.push_str(&format!(
+            "    not yet: no bucket with at least {MIN_SAMPLE_FOR_SUMMARY} sessions where local \
+             evidence matches the prior\n"
+        )),
+    }
     out
 }
 

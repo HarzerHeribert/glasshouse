@@ -1843,7 +1843,7 @@ Phase 51 — Evaluation hooks
 ☐ Compare guardrails disabled, advisory, and risk-gated modes on comparable tasks.
 ☐ Measure whether fresh-session or cross-harness verification contributes independent evidence rather than agreement alone.
 ☑ Measure native versus cross-vendor harness-model pairings by task success, usable tool calls, repair loops, effective TTFC, reliability, and user overrides.
-☐ Measure how quickly local pairing evidence becomes more predictive than the initial same-vendor prior.
+☑ Measure how quickly local pairing evidence becomes more predictive than the initial same-vendor prior.
 ☐ Measure output-token reduction, time to actionable information, profile overrides, missing caveats, and additional steering for each response profile.
 ☐ Measure response-profile effects separately by harness-model pairing and application mechanism.
 ☑ Measure routing latency added before interactive task execution.

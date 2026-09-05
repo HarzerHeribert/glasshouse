@@ -1,5 +1,6 @@
 use rusqlite::{OptionalExtension, params};
 
+use crate::harness::pairing::PairingClass;
 use crate::routing::evidence::{MIN_SAMPLE_FOR_SUMMARY, UNKNOWN_HARNESS};
 
 use super::{
@@ -998,6 +999,268 @@ impl EvaluationObservations {
             .map_err(sql_err("read routed sessions by pairing class"))?;
         collect_outcome_counts(rows)
     }
+}
+
+/// **Map line 1846**'s own question, kept in its own block (practice §77) so
+/// it cannot land on the same lines as another worker's: from what point
+/// does local pairing evidence predict a routed session's outcome at least
+/// as well as the same-vendor prior (`routing::session::PAIRING_PRIOR`) did
+/// before any local evidence existed.
+///
+/// **This measures the prior's predictiveness; it never re-tunes it.**
+/// Nothing here reads or writes `routing::session::PAIRING_PRIOR` or
+/// `routing::session::PAIRING_PRIOR_EVIDENCE_THRESHOLD` (both private to
+/// that module) — the design note behind this line (*"The routing half of
+/// RC-B"*, 2026-09-05) has the prior stand regardless of what this
+/// comparison finds; it exists for a person reading the numbers to argue
+/// with, not for this reader to act on.
+impl EvaluationObservations {
+    /// One row per session in `[from, to]` with a routing decision, a
+    /// pairing class, and an outcome — the latest
+    /// [`EvaluationKind::RoutingRated`] verdict when one exists, the
+    /// [`EvaluationKind::RoutingOutcomeObserved`] proxy otherwise, the same
+    /// substitution [`Self::route_outcomes_by`] makes — bucketed by how much
+    /// earlier evidence *of that session's own pairing class* this project
+    /// already held when it was routed.
+    ///
+    /// # `k` counts a class's own history, never the window
+    ///
+    /// A session's `k` is the number of its pairing class's earlier sessions
+    /// with an outcome, ordered by when each was routed — never this
+    /// session's position in `[from, to]` as a whole.
+    /// `routing::session::PAIRING_PRIOR` is a per-destination decay, and a
+    /// bucket keyed on anything else would answer a different question than
+    /// the one line 1846 asks.
+    ///
+    /// # `k = 0` is scored as wrong, never skipped
+    ///
+    /// A session with no earlier same-class evidence has nothing for a local
+    /// success rate to be computed from. Excluding it from the count would
+    /// let an empty bucket claim it "agrees" with itself; scoring it as a
+    /// wrong local prediction is the honest reading, and the one the
+    /// packet's own contract requires.
+    ///
+    /// # Pure SQL, plus a small in-memory ordering pass
+    ///
+    /// The rows this needs — a session's decision timestamp, its pairing
+    /// class, its rated or proxied outcome — are one query, the same join
+    /// shape [`Self::route_outcomes_by_pairing_class`] already runs.
+    /// Ordering them per class and walking each class's history is
+    /// arithmetic no `GROUP BY` expresses, so it happens here instead of in
+    /// a second query.
+    pub fn pairing_prior_crossover(
+        &self,
+        from: i64,
+        to: i64,
+    ) -> Result<PairingCrossover, EvaluationError> {
+        self.refuse_unretained_window(from)?;
+        let rows: Vec<(String, i64, String, i64, i64, Option<String>)> = {
+            let conn = self.lock();
+            let mut statement = conn
+                .prepare(
+                    "WITH decision AS (
+                         SELECT session_id AS session_id, MAX(seq) AS seq
+                           FROM evaluation_observations
+                          WHERE kind = ?1
+                            AND session_id IS NOT NULL
+                            AND observed_at >= ?2
+                            AND observed_at <= ?3
+                          GROUP BY session_id
+                     ),
+                     decision_row AS (
+                         SELECT d.session_id AS session_id, o.observed_at AS decided_at
+                           FROM decision AS d
+                           JOIN evaluation_observations AS o
+                             ON o.kind = ?1 AND o.session_id = d.session_id AND o.seq = d.seq
+                     ),
+                     verdict AS (
+                         SELECT session_id AS session_id,
+                                SUM(CASE WHEN subject = ?5 THEN 1 ELSE 0 END) AS completed,
+                                SUM(CASE WHEN subject = ?6 THEN 1 ELSE 0 END) AS failed
+                           FROM evaluation_observations
+                          WHERE kind = ?4
+                            AND session_id IS NOT NULL
+                            AND observed_at >= ?2
+                            AND observed_at <= ?3
+                          GROUP BY session_id
+                     ),
+                     rating AS (
+                         SELECT session_id AS session_id, outcome AS outcome, MAX(seq) AS seq
+                           FROM evaluation_observations
+                          WHERE kind = ?7
+                            AND session_id IS NOT NULL
+                            AND observed_at >= ?2
+                            AND observed_at <= ?3
+                          GROUP BY session_id
+                     )
+                     SELECT d.session_id, dr.decided_at, COALESCE(s.pairing_class, ?9),
+                            COALESCE(v.completed, 0), COALESCE(v.failed, 0), r.outcome
+                       FROM decision AS d
+                       JOIN decision_row AS dr ON dr.session_id = d.session_id
+                       LEFT JOIN sessions AS s ON s.id = d.session_id AND s.project_id = ?8
+                       LEFT JOIN verdict AS v ON v.session_id = d.session_id
+                       LEFT JOIN rating AS r ON r.session_id = d.session_id",
+                )
+                .map_err(sql_err("read sessions for the pairing-prior crossover"))?;
+            let mapped = statement
+                .query_map(
+                    params![
+                        EvaluationKind::RoutingCostClassObserved.as_str(),
+                        from,
+                        to,
+                        EvaluationKind::RoutingOutcomeObserved.as_str(),
+                        TURN_COMPLETED,
+                        TURN_FAILED,
+                        EvaluationKind::RoutingRated.as_str(),
+                        self.project_id,
+                        UNKNOWN_COST_CLASS,
+                    ],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, i64>(3)?,
+                            row.get::<_, i64>(4)?,
+                            row.get::<_, Option<String>>(5)?,
+                        ))
+                    },
+                )
+                .map_err(sql_err("read sessions for the pairing-prior crossover"))?;
+            let mut rows = Vec::new();
+            for row in mapped {
+                rows.push(
+                    row.map_err(sql_err("read one session for the pairing-prior crossover"))?,
+                );
+            }
+            rows
+        };
+
+        // One vector per pairing class, in the order each session was
+        // routed — the history [`Self`]'s local prediction walks.
+        let mut by_class: std::collections::BTreeMap<String, Vec<(i64, String, bool)>> =
+            std::collections::BTreeMap::new();
+        for (session_id, decided_at, pairing_class, completed, failed, rating) in rows {
+            let success =
+                if let Some(outcome) = rating.as_deref().and_then(EvaluationOutcome::from_stored) {
+                    match outcome {
+                        EvaluationOutcome::Useful => true,
+                        EvaluationOutcome::NotUseful => false,
+                        // `ROUTE_RATING_VERDICTS` never writes another value —
+                        // treated as no rating rather than guessed at.
+                        _ => continue,
+                    }
+                } else if completed > 0 || failed > 0 {
+                    completed > failed
+                } else {
+                    // No rating and no reported turn: nothing for an outcome to
+                    // be. Not evidence, not scored, not counted toward `k`.
+                    continue;
+                };
+            by_class
+                .entry(pairing_class)
+                .or_default()
+                .push((decided_at, session_id, success));
+        }
+
+        let mut buckets = [
+            CrossoverBucket::new("0-4"),
+            CrossoverBucket::new("5-9"),
+            CrossoverBucket::new("10-19"),
+            CrossoverBucket::new("20+"),
+        ];
+
+        for (pairing_class, mut group) in by_class {
+            // Earliest-routed first; the session id breaks a tie so two
+            // decisions landing in the same second stay deterministic.
+            group.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+            let prior_predicts_success = pairing_class == PairingClass::VendorNative.slug();
+            let mut earlier_successes = 0usize;
+            for (k, (_, _, success)) in group.into_iter().enumerate() {
+                let prior_correct = prior_predicts_success == success;
+                // k = 0: no history to predict from, scored wrong outright.
+                let local_correct =
+                    k > 0 && (earlier_successes as f64 / k as f64 >= 0.5) == success;
+
+                let bucket = &mut buckets[bucket_index(k)];
+                bucket.sessions += 1;
+                if prior_correct {
+                    bucket.prior_correct += 1;
+                }
+                if local_correct {
+                    bucket.local_correct += 1;
+                }
+
+                if success {
+                    earlier_successes += 1;
+                }
+            }
+        }
+
+        let crossover = buckets
+            .iter()
+            .find(|bucket| {
+                bucket.sessions >= MIN_SAMPLE_FOR_SUMMARY as i64
+                    && bucket.local_correct >= bucket.prior_correct
+            })
+            .map(|bucket| bucket.bucket);
+
+        Ok(PairingCrossover {
+            buckets: buckets.to_vec(),
+            crossover,
+        })
+    }
+}
+
+/// The k-bucket [`EvaluationObservations::pairing_prior_crossover`] groups
+/// on — the four widths the packet's own contract fixes: `0-4`, `5-9`,
+/// `10-19` and `20+`.
+fn bucket_index(k: usize) -> usize {
+    match k {
+        0..=4 => 0,
+        5..=9 => 1,
+        10..=19 => 2,
+        _ => 3,
+    }
+}
+
+/// One [`EvaluationObservations::pairing_prior_crossover`] bucket: how many
+/// sessions carried that much prior same-class evidence, and how often each
+/// of the two predictions — the same-vendor prior's and the local success
+/// rate's — matched what actually happened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CrossoverBucket {
+    /// `0-4`, `5-9`, `10-19` or `20+` — never a derived label.
+    pub bucket: &'static str,
+    pub sessions: i64,
+    pub prior_correct: i64,
+    pub local_correct: i64,
+}
+
+impl CrossoverBucket {
+    fn new(bucket: &'static str) -> Self {
+        Self {
+            bucket,
+            sessions: 0,
+            prior_correct: 0,
+            local_correct: 0,
+        }
+    }
+}
+
+/// [`EvaluationObservations::pairing_prior_crossover`]'s result — map line
+/// 1846's own question, answered as a bucket table plus the first bucket (if
+/// any) where local evidence caught up to the prior.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PairingCrossover {
+    /// Always the four buckets in order, sessions zero where nothing landed
+    /// there — never a sparse list a renderer must fill in itself.
+    pub buckets: Vec<CrossoverBucket>,
+    /// The first bucket, in order, with at least
+    /// [`crate::routing::evidence::MIN_SAMPLE_FOR_SUMMARY`] sessions where
+    /// local evidence was at least as often correct as the prior. [`None`]
+    /// when no bucket qualifies yet.
+    pub crossover: Option<&'static str>,
 }
 
 /// Map line 1480's own reader — kept in its own block, practice §77, so it

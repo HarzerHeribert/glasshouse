@@ -736,3 +736,23 @@ State: **COMPLETE** for 1837. Phase 51 stands at 23 of 37.
 
 Report **`.agent-runtime/report-routing-rating.md`**. Design of record: `design-decisions.md`, *The routing half of RC-B: an explicit route rating when given, the turn-outcome proxy otherwise*. `EvaluationKind::RoutingRated` (subject the routed destination, outcome `useful`/`not-useful` — the memory rating's own two words, on purpose — `session_id` required, the note in `detail`); `glasshouse rate-route <session> useful|not-useful [--note]`, a top-level command modelled on `memory rate`, refusing a session with no routing row (*cannot rate a route that was never taken*); `route_outcomes_by` and `route_outcomes_by_pairing_class` count a rated session by its latest rating instead of its proxy and carry `rated_useful`/`rated_not_useful` apart from the proxy figures — printed as ` · rated N useful / M not-useful` only when non-zero, so a window with no ratings renders byte-identical. Tests (`tests/route_rating.rs`, seven, through the shipped binary): the door writes and prints its row, refuses an unrouted session, the latest rating wins, the proxy count drops by one when a session is rated, the readout stays byte-identical without ratings. Mutation `rated-counted-twice` (the proxy exclusion dropped) KILLED by `route_rating::a_rated_session_is_counted_by_its_rating_and_the_proxy_count_drops_by_one`. Scope overflow, accepted: the kind-count pin in `evaluation/tests.rs`, and `read_harness_outcome_row`'s struct literal gaining the two zero fields (that reader, line 1951's, has no rating split by design). No migration; `EVALUATION_KINDS` is 17.
 
+## 1846 — CLOSED 2026-09-05 (`GH-PAIRING-CROSSOVER`, Amber, Sonnet high): the same-vendor prior measured against local evidence, bucket by bucket
+
+Design of record: `design-decisions.md`, *The routing half of RC-B*, last paragraph. The outcome used is the explicit rating when one exists and the turn-outcome proxy otherwise — the user's 2026-09-03 answer applied as the ground truth for *predictive*.
+
+### Measure how quickly local pairing evidence becomes more predictive than the initial same-vendor prior. (line 1846)
+
+Contract: Given routed sessions with an outcome and the pairing class each launch recorded, when `glasshouse route` prints its outcomes section, Glasshouse reports per bucket of a pairing class's prior evidence count (`0–4`, `5–9`, `10–19`, `20+`) how often the same-vendor prior's prediction and the local success rate's prediction each matched the outcome, and names the first bucket at or above `MIN_SAMPLE_FOR_SUMMARY` where local evidence is at least as predictive — while preserving that the prior is never re-tuned, that a bucket under the floor says *not yet*, and that no schema changes.
+
+Production: `evaluation/readers.rs :: pairing_prior_crossover` (`CrossoverBucket`, `PairingCrossover`; k is a session's own pairing class's earlier outcome-bearing sessions, ordered by routing time and tie-broken by session id; k = 0 is scored wrong for local evidence unconditionally — the rule that keeps a uniform history from crossing over in the first bucket); `commands/route.rs :: render_pairing_prior_crossover`, beside the 1837 line. `PairingClass::VendorNative` is read; nothing in `routing/**` changes.
+
+Regression (through the shipped binary, rows seeded through the public writers): `pairing_crossover::vendor_native_always_succeeds_prior_right_everywhere_local_catches_up_at_5_9`, `pairing_crossover::vendor_native_always_fails_prior_wrong_everywhere_crossover_is_first_bucket_at_the_floor`, `pairing_crossover::a_rated_session_overrides_its_completed_proxy`, and the under-the-floor *not yet* test.
+
+| mutation | change | result | killed by |
+|---|---|---|---|
+| prior-inverted | the vendor-native prior predicts failure | KILLED | every test in `pairing_crossover.rs` — bucket `0–4`'s `prior right 5/5` became `prior right 0/5` |
+
+Limits (the worker's): says nothing about `PAIRING_PRIOR`'s magnitude, only how often its prediction and the local rate's match outcomes; a session with mixed completed/failed turns and no rating is scored by simple majority, and no fixture produces one.
+
+State: **COMPLETE** for 1846. Phase 51 stands at 24 of 37.
+

@@ -54,7 +54,7 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`█████████████████████████████████████░░░` **1304 closed** · **94 active committed open** (93%)
+`█████████████████████████████████████░░░` **1305 closed** · **93 active committed open** (93%)
 
 Separately tracked, and not release-blocking: **7 deferred gate criteria** (Phase 52, Phase 53) awaiting a decision, and **229 parked experimental lines** under Maybe / Experimental.
 
@@ -161,7 +161,7 @@ Separately tracked, and not release-blocking: **7 deferred gate criteria** (Phas
 | Phase 48 — CLI ergonomics | 8/8 ✅ |
 | Phase 49 — Configuration | 16/16 ✅ |
 | Phase 50 — Tracked project knowledge as an optional feature | 7/7 ✅ |
-| Phase 51 — Evaluation hooks | 23/37 |
+| Phase 51 — Evaluation hooks | 24/37 |
 | Phase 52 — Criteria before adding semantic/vector retrieval (deferred experiment gate) | 1/6 |
 | Phase 53 — Criteria before adding graph storage (deferred experiment gate) | 3/5 |
 | Phase 54 — Criteria before deeper cmux coupling | 4/4 ✅ |
