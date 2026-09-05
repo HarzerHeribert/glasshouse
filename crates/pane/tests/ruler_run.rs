@@ -418,3 +418,37 @@ fn the_accepted_flags_are_exactly_these() {
         ]
     );
 }
+
+/// The seam with Glasshouse, pinned on the producer's own wire shape.
+///
+/// `meter.rs` reads four keys out of a row that carries twenty-two, and the
+/// join between the two crates is nothing but string equality of those key
+/// names -- there is no shared type, because map line 2440 forbids `pane`
+/// depending on `glasshouse`. So the fixture below is the full row
+/// `commands/routing_cost.rs`'s `ObservationJson` serializes, every key in
+/// its declared order, rather than the four-key subset the other tests use.
+/// If the producer renames a token column, this fails; without it the meter
+/// would silently sum nothing and report an honest-looking absent figure.
+///
+/// The `null`s are the other half of the contract: an absent column is
+/// `null` and never `0`, so the second row here contributes a turn and no
+/// tokens.
+#[test]
+fn the_meter_parses_the_readouts_full_twenty_two_key_row() {
+    let counted = r#"{"seq":1,"observed_at":1757100000,"session_id":null,"harness":"claude-code","provider":"anthropic","model":"claude-opus-5","route":"relay","purpose":null,"quota_context":null,"dispatched_at":1757099880,"completed_at":1757100000,"first_byte_ms":420,"completed_ms":120000,"input_tokens":18204,"output_tokens":3311,"cached_input_tokens":140200,"outcome":"succeeded","failure_class":null,"tool_rounds":9,"retries":0,"repairs":0,"failovers":0}"#;
+    let uncounted = r#"{"seq":2,"observed_at":1757100010,"session_id":null,"harness":"claude-code","provider":"anthropic","model":"claude-opus-5","route":"relay","purpose":null,"quota_context":null,"dispatched_at":null,"completed_at":null,"first_byte_ms":null,"completed_ms":null,"input_tokens":null,"output_tokens":null,"cached_input_tokens":null,"outcome":null,"failure_class":null,"tool_rounds":null,"retries":null,"repairs":null,"failovers":null}"#;
+
+    let from = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1757099000);
+    let to = std::time::UNIX_EPOCH + std::time::Duration::from_secs(1757101000);
+    let (tokens, turns) = Readout::for_window([counted, uncounted], from, to);
+
+    assert_eq!(tokens.input, Some(18204));
+    assert_eq!(tokens.output, Some(3311));
+    assert_eq!(tokens.cached_input, Some(140200));
+    assert_eq!(tokens.total(), Some(18204 + 3311 + 140200));
+    assert_eq!(
+        turns,
+        Some(2),
+        "both rows are exchanges; only one of them was metered"
+    );
+}
