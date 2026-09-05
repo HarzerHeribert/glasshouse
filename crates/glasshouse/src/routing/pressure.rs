@@ -11,6 +11,11 @@
 //! is *read*, not re-decided, from existing sources — inventing a second
 //! copy of any of them would be two scales for one question.
 //!
+//! What is tunable is configuration, never a hierarchy in this source:
+//! `routing.capacity_band_thresholds`, a provider's `reserve_percent`, and
+//! `routing.reserve.*` — `tests/subscription_pressure.rs` scans this file
+//! for those names and for the absence of any provider's or model's.
+//!
 //! Every contribution below has a test in `tests/subscription_pressure.rs`
 //! holding two destinations that differ **only** in its axis and resolving
 //! differently; a term that cannot separate anything (no reading, unknown
