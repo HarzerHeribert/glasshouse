@@ -483,8 +483,22 @@ fn a_row_planted_under_another_projects_id_never_contributes_to_this_projects_to
     assert_eq!(value_after(&classification, INPUT_TOKENS), "5");
     assert_eq!(value_after(&classification, OUTPUT_TOKENS), "6");
     assert_eq!(value_after(&classification, CACHED_TOKENS), "7");
+    // The header names the project id, a hex hash that can itself contain
+    // "999" (CI saw `beta-599c7cd8455a0a67b12c08e9999f9925` fail this test
+    // with correct totals), so the planted row is looked for in the body
+    // only. The header check keeps the strip honest: it must remove the
+    // header line and never a line of totals.
+    let (header, body) = run
+        .stdout
+        .split_once('\n')
+        .expect("the report must have a header line");
     assert!(
-        !run.stdout.contains("999"),
+        header.starts_with("Routing consumption for project "),
+        "the first line must be the report header:\n{}",
+        run.stdout
+    );
+    assert!(
+        !body.contains("999"),
         "a row planted under another project's id must never appear in this project's totals:\n{}",
         run.stdout
     );
@@ -1566,8 +1580,21 @@ fn a_row_planted_under_another_projects_id_never_appears_in_json() {
         "a foreign-project row must never appear in this project's --json output:\n{}",
         run.stdout
     );
-    let value: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
-    assert_eq!(value["provider"], "beta-runner");
-    assert!(!run.stdout.contains("foreign-provider"));
-    assert!(!run.stdout.contains("999"));
+    // Every line is judged by its parsed fields, never by a substring of the
+    // raw text: a line also carries `seq` and unix-second timestamps, and a
+    // timestamp can spell "999" on its own. The planted row would show up
+    // as `foreign-provider`/`foreign-model` with 999 in every token column;
+    // the one line here must be beta's own row and nothing of the foreign
+    // one.
+    for line in &lines {
+        let value: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(value["provider"], "beta-runner", "line: {line}");
+        assert_eq!(value["model"], "beta-model", "line: {line}");
+        assert_eq!(value["purpose"], "classification", "line: {line}");
+        assert_eq!(value["input_tokens"], 5, "line: {line}");
+        assert_eq!(value["output_tokens"], 6, "line: {line}");
+        assert_eq!(value["cached_input_tokens"], 7, "line: {line}");
+        assert_ne!(value["provider"], "foreign-provider", "line: {line}");
+        assert_ne!(value["model"], "foreign-model", "line: {line}");
+    }
 }
