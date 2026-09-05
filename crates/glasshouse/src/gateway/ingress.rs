@@ -1,187 +1,20 @@
 //! One connection, from the harness's request line to the last byte of the
-//! provider's response.
+//! provider's response: read the head, check the bearer token, rewrite the
+//! target, `authorization` and `host` for the provider, forward every other
+//! byte unchanged, then relay the status, headers and body back untouched.
 //!
-//! # The shape of the whole thing
-//!
-//! Read the request head. Check the bearer token against this instance's
-//! own. Append the request target to the provider's base URL, attach the
-//! *provider's* credential in place of whatever the child sent, and forward
-//! every other header and every body byte unchanged. Then write the
-//! provider's status and headers back and move its body across a piece at a
-//! time.
-//!
-//! That is the entire ingress, and its shortness is the design. Three things
-//! are rewritten and named as such in [`forward`]; nothing else is even
-//! looked at. A tool-call payload survives because no code here can tell a
-//! tool-call payload from any other bytes.
-//!
-//! # Line 9: the ingress is not a public API
-//!
-//! "Require every interactive gateway ingress to be consumed through a
-//! compatible installed harness launch profile" is satisfied by the token
-//! rather than by a registry. The token is minted per Glasshouse instance,
-//! held only in memory, and reaches exactly one place: the environment of a
-//! child harness started by [`crate::profile::resolve`] for a
-//! gateway-backed profile. **Possession of it therefore is the proof** that
-//! a request came from such a launch — there is no other way for a process
-//! to have it.
-//!
-//! A second mechanism — a session registry, an allow-list, a handshake —
-//! would add state without adding a fact, because it would have to be keyed
-//! on something the token already establishes.
-//!
-//! # Line 10: what may be recorded, and what may not
-//!
-//! [`Exchange`] is the only thing that reaches `tracing`, and it is
-//! structurally incapable of carrying a body: it holds an outcome, two
-//! statuses, a byte count, two names and one optional clock reading.
-//! Glasshouse's logging is already off unless `GLASSHOUSE_LOG` is set — see
-//! [`crate::logging`] — so "opt-in" is the existing mechanism rather than a
-//! new flag.
-//!
-//! **The packet asked for the provider error's `error.type` and
-//! `error.message` to reach the diagnostic. They deliberately do not.**
-//! Extracting either means parsing the response body, which this module is
-//! forbidden to do and which is a stop condition for the whole slice. The
-//! status is recorded; the body is forwarded to the harness, which is the
-//! thing that actually needed to read it.
-//!
-//! # A second thing may now be recorded: a response *header*, never a body
-//!
-//! Capability map line 1229's gateway half. [`forward`] reads
-//! [`crate::provider::telemetry::RATE_LIMIT_HEADERS`] — the same allowlist
-//! [`crate::provider::discovery`] reads on the catalogue path — off every
-//! response before relaying it, and hands the result to [`serve`]'s caller
-//! alongside [`Exchange`]. This is not [`Exchange`] growing a body-shaped
-//! field: [`RateLimitHeaders`] is structurally the same kind of thing this
-//! module already forwards unread, a handful of integers and the fixed set of
-//! header *names* Glasshouse chose, never a header value stored as text and
-//! never a byte of the response body. See [`mod@crate::provider::telemetry`]
-//! for why a header is not the payload this module exists to be unable to
-//! read, and [`mod@crate::provider::discovery`] for the seam this one
-//! completes — a real inference response is the only kind of request that
-//! has ever been observed to carry a token pool's own headers, and
-//! `discovery` is forbidden from making one.
-//!
-//! # A third thing may now be recorded: when the first response byte arrived
-//!
-//! Capability map line 1331's gateway half. [`forward`] reads the clock the
-//! instant [`Agent::run`] returns with the provider's status and headers —
-//! before a byte of the body is read — and carries that reading on
-//! [`Exchange`] as `first_byte_at`. It is `None` on every path that never
-//! reached a provider at all: refused before a route was chosen, or the
-//! provider could not be reached. Reading the clock here costs nothing this
-//! module was forbidden to pay — a status and a set of headers are already
-//! read to relay them, and the clock is read after they land rather than
-//! after any of the body that follows, so this stays a timing read and never
-//! a parse of what the bytes mean.
-//!
-//! # A fourth thing may now be recorded: how the stream was framed, and how it ended
-//!
-//! Capability map line 1364's `stream abort` and `empty completion`, under
-//! the ruling recorded in `docs/product/design-decisions.md` as *"framing is
-//! not content — the relay may count and timestamp what it never reads"*.
-//! [`forward`] already handles the length the provider declared (it re-states
-//! it on the way out), already counts the bytes it moves (`Outcome::Forwarded`
-//! has carried that count since this module was written), and already learns
-//! from `ureq` whether the provider's stream ended cleanly or failed short —
-//! because a short read is an `io::Error` it has to handle to relay at all.
-//! [`Framing`] carries those three facts, and nothing else: a declared
-//! length, a relayed count, and a [`StreamEnd`]. The observer that counts is
-//! [`Counted`], which sees how many bytes each `read` returned and never the
-//! buffer they landed in. No byte of the body is inspected, decoded, buffered
-//! beyond what forwarding already buffers, or matched against anything — the
-//! boundary that stays is the one this module has always kept, and the
-//! source-scan tests in `tests/gateway_failure_taxonomy.rs` hold it.
-//!
-//! # A fifth thing may now be recorded: the first real token and the first tool call
-//!
-//! Capability map lines 1331 and 1332, under the ruling recorded in
-//! `docs/product/design-decisions.md` as *"first real token and first tool
-//! call on the translated path — the 1331/1332 ruling"*. This module still
-//! decodes nothing: [`super::translate`] already decodes every provider
-//! event into its own canonical form in order to re-encode it for the
-//! harness, and a translated [`Exchange`] carries the instant a qualifying
-//! canonical event passed that seam, exactly as it carries `first_byte_at` —
-//! a clock reading, never a byte of the response. A **relayed** exchange
-//! never enters a codec, so it writes `None` for both, the same restraint
-//! `Tokens` already keeps.
-//!
-//! # A sixth thing may now be recorded: tool rounds and repairs
-//!
-//! Capability map line 1334's last two quantities and line 1350, under the
-//! ruling recorded in `docs/product/design-decisions.md` as *"tool rounds
-//! and repairs on the translated path."* [`super::translate`] already
-//! decodes the request into canonical blocks and the response into
-//! canonical events in order to translate both; `tool_rounds` counts the
-//! response's tool-use block starts and `repairs` counts the request's
-//! `is_error: true` tool-result blocks — two more integers derived from
-//! decoding this module still never does itself. `None` on every relayed
-//! exchange (this module never decodes one) and on a translated exchange
-//! whose request never decoded; `Some(0)` is the seam's own honest reading
-//! of "looked and found none," a different fact from not looking, which is
-//! why it is never conflated with `None` here.
-//!
-//! # A seventh thing may now be recorded: what the provider said it billed
-//!
-//! **The relay rule was narrowed again on 2026-09-03, by the user**
-//! (`docs/product/design-decisions.md`, *Steering decisions of record* §1):
-//! accurate usage and evaluation data is worth more than byte-for-byte
-//! opacity, so the gateway may inspect a **supported** relayed body far
-//! enough to extract structured usage and timing. A relayed exchange now
-//! carries [`Tokens`], `first_token_at` and `first_tool_call_at` — the same
-//! three things a translated one has carried since Phase 56, and no more.
-//!
-//! **This file still decodes nothing.** The reading is [`super::usage`]'s:
-//! a table of JSON key spellings scanned over a sliding window of at most
-//! 512 retained bytes, which is why `gateway/tests.rs`'s
-//! `no_part_of_the_relay_deserializes_anything` covers that file too and
-//! still passes. [`Counted`] hands it a shared borrow of the buffer
+//! This module never parses a response body, with one exception: **a
+//! seventh thing may now be recorded**, under the user's 2026-09-03 ruling
+//! narrowing that rule (`docs/product/design-decisions.md`, *Steering
+//! decisions of record* §1). [`super::usage`] scans a **supported** relayed
+//! body over a sliding window of at most 512 retained bytes, for a fixed
+//! table of JSON key spellings, to extract [`Tokens`], `first_token_at` and
+//! `first_tool_call_at`; this file still decodes nothing itself —
+//! [`Counted`] hands it a shared borrow of the buffer
 //! [`super::http::pump`] is about to write and returns exactly the `read` it
-//! was given — there is no path here that can forward less, later or
-//! differently because a figure was read out of the bytes on their way past.
+//! was given.
 //!
-//! Four rules from the ruling decide what a row says, and each is visible in
-//! [`forward`] rather than promised here:
-//!
-//! - **The format comes from the route's protocol slug**, which
-//!   `route_for` chose from the request target alone. A slug with no entry
-//!   in [`super::usage`]'s table — `gemini-generate-content` today — means
-//!   nothing is looked at at all and the row says unknown.
-//! - **Both counts or neither.** A provider that stated an input figure and
-//!   not an output one leaves both columns `NULL`; there is nothing to put in
-//!   the second that would not be invented.
-//! - **Only a stream that ended where its framing said.** A `Truncated`,
-//!   `Aborted` or `ClientClosed` stream records no usage, however much of it
-//!   arrived first.
-//! - **The two instants are observations, not estimates**, so they survive a
-//!   stream that ended badly: a token that passed the seam passed it — and
-//!   they are recorded only on a `text/event-stream` delivery, because an
-//!   instant inside a document is a reading of the socket rather than of the
-//!   provider. See [`usage::Delivery`].
-//!
-//! # The relay rule, narrowed and not repealed (Phase 56)
-//!
-//! Capability map lines 1948–1950, under the ruling recorded in
-//! `docs/product/design-decisions.md` as *"codecs around one canonical
-//! form; the relay rule narrowed, not repealed"*. A request whose target
-//! belongs to a protocol the provider serves is relayed exactly as above —
-//! [`forward`] is unchanged for it, and it never enters a codec. Only a
-//! target the provider does **not** serve — the branch that used to answer
-//! `404` with nothing opened upstream — is asked a second question, in
-//! [`unrouted`]: does the pair table name a supported pair from the
-//! target's protocol to one this provider serves? If so, the exchange is
-//! [`super::translate`]'s, recorded under the pair's own name; if the pair
-//! is refused, the `404` stays and its body names the pair and the reason;
-//! otherwise the `404` is exactly what it was.
-//!
-//! **This file still decodes nothing.** The decision is made from the
-//! target alone, before a byte of the body is read, and every parse lives
-//! in `translate/` — the source scan in `tests/gateway_failure_taxonomy.rs`
-//! that holds this file's production half free of any decoding call is
-//! unchanged and still green. [`Tokens`] is the one thing a translated
-//! exchange adds to [`Exchange`]: three counts the provider stated, exact
-//! because that response was parsed, and `None` on every relayed exchange.
+//! History: design-decisions.md, "Trims: gateway/ingress.rs", module doc.
 
 use std::io::{BufReader, Read, Write};
 use std::net::{Shutdown, TcpStream};
@@ -650,76 +483,23 @@ pub(super) fn serve(
     forward(head, reader, &mut out, upstream, agent)
 }
 
-/// The three rewrites, and everything that is not one.
+/// The three rewrites, and everything that is not one: the request target is
+/// appended to the base URL for the protocol it belongs to
+/// ([`Upstream::route_for`], [`Route::uri_for`]); `authorization` is
+/// replaced with the provider's own credential
+/// ([`Upstream::authorization`]); `host` is dropped so the outbound layer
+/// derives the upstream's own. Everything else — method, every other
+/// header, every body byte, and the hop-by-hop headers of
+/// [`super::http::HOP_BY_HOP`] — passes through unrewritten.
 ///
-/// Rewritten, and named here so that the list can be counted:
+/// Which protocol is decided **by the request target alone**, chosen before
+/// a byte of the body is read: looking at the body to guess a protocol would
+/// make this module a parser of the payload it exists to be unable to
+/// distinguish from any other bytes. A target belonging to no served
+/// protocol gets a `404` and **nothing is opened upstream** — a deliberate
+/// narrowing measured against real harness traffic (Claude Code, Codex).
 ///
-/// 1. **the request target** is appended to the base URL the provider
-///    declared *for the protocol that target belongs to* —
-///    [`Upstream::route_for`], then [`Route::uri_for`];
-/// 2. **`authorization`** is replaced by the provider's credential, attached
-///    by the gateway — [`Upstream::authorization`];
-/// 3. **`host`** is dropped so that the outbound layer derives the upstream's
-///    own, which is the correction the next hop requires.
-///
-/// Not rewritten: the method, every other header, and every byte of the
-/// body.
-///
-/// Not *forwarded*, which is a different thing from rewritten: the hop-by-hop
-/// headers of [`super::http::HOP_BY_HOP`]. Those describe the connection they
-/// arrived on, and this is a different connection. `content-length` is among
-/// them and is re-stated below from the value the client declared, so the
-/// body is framed outbound exactly as it was framed inbound.
-///
-/// # Which protocol, and how that is decided
-///
-/// **By the request target, and by nothing else.** The gateway may serve
-/// Anthropic Messages, OpenAI Responses and OpenAI Chat at once, each with
-/// the base URL the one configured provider declared for it, and the target
-/// the harness wrote is what says which of them this request is. The
-/// alternative — looking at the body to see which protocol it reads like —
-/// is forbidden here twice over: it would make this module a parser of the
-/// payload it exists to be unable to distinguish from any other bytes, and a
-/// request whose shape was ambiguous would be *guessed* rather than placed.
-///
-/// A target belonging to no served protocol is answered with a `404` and
-/// **nothing is opened upstream**. That is a narrowing of what this gateway
-/// used to do — a single-protocol gateway appended every target to its one
-/// base URL — and it is the point rather than a side effect: with several
-/// base URLs available, "append it to the first one" sends a request
-/// somewhere nobody asked for it to go.
-///
-/// # What the narrowing costs, measured rather than assumed
-///
-/// Real harnesses do send targets outside their own protocol, and both were
-/// observed against a listener that recorded the request line:
-///
-/// - Claude Code 2.1.245 sends `HEAD /api/hello` before its first
-///   `/v1/messages`, and carries on unaffected after a non-2xx answer to it.
-/// - Codex 0.149.1 sends `GET /models?client_version=0.149.1` when it does
-///   not already hold metadata for the configured model. Under this rule
-///   those are refused, and Codex logs
-///   `failed to refresh available models: unexpected status 404 Not
-///   Found: <this refusal's message>` — twice per session, at `ERROR`
-///   level and visible to the user — then completes the session normally.
-///   A full live run through this gateway to OpenRouter returned its
-///   answer with exactly those two refusals recorded.
-///
-/// So the cost is real, it is user-visible, and it is a degradation rather
-/// than a breakage. It is **not** silently accepted, and the reason it is
-/// not simply routed is worth stating: `/models` is a catalogue endpoint
-/// that all three protocols define, and the two spellings a harness may use
-/// need *different* base URLs. Codex asks for `/models`, which only resolves
-/// against a base URL carrying `/v1`; Anthropic Messages is declared at a
-/// root without one, so the same request routed to that protocol would reach
-/// a path the provider answers `404` for anyway. Placing it therefore means
-/// choosing between OpenAI Responses and OpenAI Chat for a request that
-/// names neither — a tie-break invented without a concrete provider pair
-/// requiring it, which is the move the capability map's pass-through lines
-/// forbid.
-///
-/// The change, if a later phase decides the tie-break: add `/models` to
-/// `crate::profile::ingress_targets`' OpenAI Responses entry.
+/// History: design-decisions.md, "Trims: gateway/ingress.rs", fn forward.
 fn forward(
     head: http::RequestHead,
     mut reader: BufReader<TcpStream>,
@@ -1158,37 +938,21 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     difference == 0
 }
 
-/// Why the provider could not be reached, as one of a **fixed vocabulary**.
+/// Why the provider could not be reached, as one of a **fixed vocabulary**
+/// written in this file — never the error's own text. `ureq`'s own string
+/// was tried first and rejected: [`crate::secret::redact`] only removes
+/// credential-shaped runs and makes no promise about the rest, so foreign
+/// text could still leak (`a_recorded_exchange_writes_a_line_with_no_secret_in_it`
+/// caught exactly that). The variant *is* read from the error — so the
+/// answer is a real observation, never a constant — but the phrase it maps
+/// to is always one written here.
 ///
-/// # Not the error's own text, and that is the point
+/// [`TRANSPORT_TIMEOUT_DETAIL`] is named outside this function because
+/// `super::session`'s `failure_class` tells a timeout from every other
+/// transport failure by it; no upstream agent sets a timeout today, so this
+/// arm has no live producer until one is configured.
 ///
-/// The obvious implementation is `crate::secret::redact(&err.to_string())`,
-/// and it was the first one here. It is not enough.
-/// [`crate::secret::redact`] removes things that *look like credentials* —
-/// an `sk-` key, a `Bearer` token — and it makes no claim at all about the
-/// rest of a string. `ureq` wrote that string, `ureq` never had this
-/// project's rules, and a diagnostic that keeps foreign text keeps whatever
-/// the next version of that crate decides to put in it. The test
-/// `a_recorded_exchange_writes_a_line_with_no_secret_in_it` caught exactly
-/// that: the credential was redacted and everything around it went to the
-/// log verbatim.
-///
-/// So nothing foreign is kept. Each variant maps to a phrase written here,
-/// which means a leak is not something to be careful about — it is something
-/// this function has no way to express. The categories are still the ones a
-/// user needs to tell apart: a refused connection, a name that does not
-/// resolve, a TLS failure and a timeout have completely different fixes.
-///
-/// The variant *is* read from the error, so the answer is a real
-/// observation and not a constant.
-///
-/// [`TRANSPORT_TIMEOUT_DETAIL`] is the one phrase named outside this
-/// function, because `super::session`'s `failure_class` tells a timeout from
-/// every other transport failure by it — capability map line 1364's
-/// `timeout`. The upstream agent (`super::upstream::agent`) sets no timeout
-/// today, for the reason its own doc gives, so this arm is a mapping with no
-/// live producer until one is configured; the constant exists so that the
-/// day one is, nothing else has to change.
+/// History: design-decisions.md, "Trims: gateway/ingress.rs", fn transport_detail.
 pub(super) fn transport_detail(err: &ureq::Error) -> &'static str {
     match err {
         ureq::Error::HostNotFound => "the provider's host name did not resolve",

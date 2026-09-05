@@ -5822,3 +5822,491 @@ read from the session to fill any of it in, and an unknown field —
 `failed_attempt` memory through the existing store, with provenance
 naming the assumption (line 1019); the transition's `subject` is the
 memory's id. Without the flag, a refutation writes no memory at all.
+
+## Trims: `database/migrations/v14_on.rs` — history moved out of comments by `GH-TRIM-MIGRATIONS-V14`, 2026-09-05
+
+Rule 3's "move history out, behind a one-line pointer" landed here for the fifteen migration comment blocks that carried more reasoning than a reader changing the code today needs in place. Each subsection is what the in-code comment for that migration now points to.
+
+### migration 14
+
+**The defect this closes, measured.** `CheckpointStore::latest_for` and `::latest` ordered by `created_at DESC, id DESC`. `created_at` is whole seconds and `id` is `lower(hex(randomblob(16)))`, so two checkpoints written inside one second tie on the first key and are separated by a **coin flip on a random identifier**. Measured through the real store over 800 back-to-back pairs, 798 of which shared a second: **414 resolved to the older checkpoint** — 52%, which is what a fair coin looks like.
+
+That is not an internal tidiness problem. `latest` is what `glasshouse checkpoint show`, `glasshouse launch --from-checkpoint latest` and the automatic task-boundary carry-forward resolve through, so a user resuming from *"the latest checkpoint"* got the wrong one about half the time whenever two landed in the same second — and a manual `checkpoint save` beside the task-boundary checkpoint `shell::checkpoint_task_boundaries` takes does exactly that.
+
+**`ALTER TABLE ADD COLUMN`, migration 8's shape.** Migration 7's rule stands: a table is never rebuilt, because rebuilding risks the rows already in it. Nothing here needs one. An added column cannot be `NOT NULL` without a constant default, so it gets `DEFAULT 0` — and 0 is deliberately outside the range the backfill assigns (1..n) and outside the range `CheckpointStore::save` assigns (n+1 upwards), so a row reading 0 is exactly *"written by something that did not go through `save`"* and sorts as the oldest thing in the table rather than silently winning.
+
+**What the backfill can and cannot recover.** Existing rows are ranked by `(created_at ASC, id ASC)`. The between-second order was always recorded and is preserved exactly. The within-second order **was never recorded anywhere**, so it cannot be recovered and is not invented: rows tied on `created_at` keep the order `id ASC` gave them, which is the order the old query already reported for them. A database that migrates therefore answers every old question exactly as it did before, and every new one correctly.
+
+**The indexes.** `checkpoints_by_session` is redefined on `(session_id, seq DESC)` so `latest_for` keeps its seek-and-take-one shape rather than sorting the session's rows; the `(session_id, created_at DESC)` it replaces is indexing a key nothing orders by any more. `checkpoints_by_seq` is new and serves `latest` and `list`, which previously had no index at all. An index holds no data of its own, so dropping one is not the rebuild migration 7 refuses — every row survives untouched, which is what `a_version_thirteen_database_migrates_forward_keeping_the_order_it_could_record` proves.
+
+### migration 15
+
+**What it is for, and the one question it does not answer.** Glasshouse can already answer questions about what it *is* — a memory's status, a session's mechanism — and cannot answer questions about what it *did*. A retrieval happens inside one function call, changes what the user gets, and is gone. Phase 51's verb in 26 of its 37 lines is *"measure how often"*, and nothing can count what was never written down. This table answers *how often*, over a window, split by arm.
+
+It deliberately answers nothing about *how much*: cost, tokens and latency belong to `routing_observations` (migration 11), and a column for any of them here would be a second source of truth for a fact that ledger already models. `routing_seq` is how a row points at the observation that measured a turn instead of copying it.
+
+**A new table, for migration 11's own reasons one level up.** Not a widening of `lifecycle_events`. All eleven values in [`LIFECYCLE_EVENT_KINDS`] are things that happened *to a session's process or its harness*; these are decisions *Glasshouse* made, and `crate::events`'s own module doc keeps that stream narrow on purpose. Widening its `kind` would also be a third rebuild of the one table `memories.source_event_first`/`_last` reference by `seq` — the hazard migration 7 documents and the house rule below refuses. And, decisively: `lifecycle_events` has three triggers that `RAISE(ABORT)` on every `UPDATE` and every `DELETE`, so anything folded into it is permanent by construction, and this table *must* be prunable (see "Retention").
+
+Not a view either: the rows a view would project — *a retrieval happened* — are not stored anywhere. `memory_search_grouped` returns its result and forgets, which is precisely and only what this table adds.
+
+**Why `kind` has no `CHECK`, and why that is not a lapse.** A `CHECK (kind IN (...))` is what `lifecycle_events` has, and it is why map lines 310, 327 and 1316 are refused today: SQLite cannot widen a `CHECK` in place, so an eleventh value cost a full table rebuild and a twelfth is forbidden by the house rule at the top of migration 8. Phase 51 is the phase whose vocabulary is *guaranteed* to grow — every future measurable feature wants a new kind — so putting a SQL vocabulary here would be manufacturing migration 7's problem deliberately, in the one table most certain to need widening.
+
+The house already has the answer twice. [`LIFECYCLE_EVENT_KINDS`] exists because the SQL `CHECK` was not trusted alone — its own doc says the Rust constant plus a pinning test is what actually catches drift — and `response_profile` (migration 8) gets no `CHECK` at all, on the stated ground that pinning its combinations "would be a vocabulary this file has no business holding". This column is `response_profile`'s case: [`EVALUATION_KINDS`] beside an exhaustive `match` at the single writer, pinned by a test that inserts every pair the enum can produce through the real schema. What is given up is that a hand-written `INSERT` at a `sqlite3` prompt can store nonsense; that is true of `response_profile` today and has not hurt. `CHECK (kind <> '')` is kept because an empty kind is not an unrecognised vocabulary, it is a missing one.
+
+`outcome` is the same case for a sharper reason: its vocabulary is *per kind* — `helped`/`stale` for a retrieval, `preferred`/`displaced` for a route — so a single global `CHECK` would be two vocabularies in one column, which is the first objection this migration makes to widening `lifecycle_events` at all.
+
+**`outcome` is the one column that is `NOT NULL DEFAULT 'unknown'`.** Migration 11's argument for `context_state`, verbatim: every other column's NULL means *"not recorded"*, but a row that does not say how it turned out must not be countable as *"turned out badly"*. `DEFAULT 'unknown'` makes that automatic for any future insert path that forgets to think about it, and it is what lets a rate report an honest denominator with an honest unknown bucket instead of a flattering ratio.
+
+**Outcomes learned later are new rows, never an `UPDATE`.** A retrieval is recorded when it happens; whether it helped may only be knowable a turn later. The answer is a second row with the same `memory_id` and a later `observed_at`. This is migration 11's "append-oriented is a property of the code as much as the schema": `crate::evaluation`'s store offers `record` and reads, and no method that edits a recorded observation. A measurement edited in place is a falsified measurement.
+
+So migration 5's three append-only triggers are **deliberately not copied here** — they are exactly what makes `lifecycle_events` unprunable, and repeating them would be repeating a known defect. Migration 11's two project-scope triggers are copied exactly, and they are the only ones. That is the load-bearing difference between the two precedents, and it is why this table is named `evaluation_observations` and not `evaluation_events`: the name should pull a future author toward migration 11's prunable ledger and away from migration 5's permanent stream. The bounds themselves (90 days, 100,000 rows, trimmed oldest-first in the writer's own transaction) live with the writer, in [`crate::evaluation::Retention`].
+
+`AUTOINCREMENT` means a `seq` is never reused after a delete, so pruning can never make one row's identity come to mean another's — which is what makes a prunable ledger safe to point at.
+
+**Two triggers, migration 11's pair, unchanged.** `IS NOT` rather than `<>`, so a missing binding row aborts the write instead of the comparison evaluating to NULL and letting it through. This is the structural half of map line 1856's *"keep evaluation data local and project-scoped"*; the other half — that nothing exports it — is a property of which functions exist in `crate::evaluation`, not of the schema, and is recorded there.
+
+**Bare ids, no `REFERENCES`.** `memory_id` and `routing_seq` are migration 12's rule: a bare nullable reference, no foreign key. A pointed-at row may be pruned or may never have existed, and a read that cannot resolve one must report that rather than lose the observation.
+
+**One index, and the second one is an experiment, not an omission.** `(kind, observed_at)` serves the shape every Phase 51 line reduces to: how many rows of one kind fell in a window. An A/B split adds `feature`/`arm` to the `WHERE`, which this index does not cover — do not add `(feature, arm, kind, observed_at)` on speculation; fill the table to its retention ceiling, read `EXPLAIN QUERY PLAN`, and add it if and only if the plan is a scan and the scan is slow.
+
+### migration 16
+
+**Why this is the only column Phase 30 needed.** The phase asks for eight things about a session's context. Seven of them were already answerable from what this schema holds, and the package that closed the phase says so line by line in `session::store::SessionContext`: the most recent request or turn time is `sessions.last_activity_at`, already stamped by the single `UPDATE` that moves a session's lifecycle; a recent portable checkpoint is `checkpoints.created_at` for the session, which migration 5 recorded and migration 14 ordered; and a task-continuity flag is a count of this session's `turn_ended` rows, which the event log has stored with their `turn_outcome` since migration 5. Adding a column for any of those would be a second source of truth for a fact the schema holds exactly once — migration 15's own objection to copying a token count out of `routing_observations`, one table over.
+
+A compaction is the one that had nowhere to live. `session::lifecycle::precedes_native_compaction` is called on the production hook path and its answer was, until this migration, used to fire a trigger and then discarded — its own doc comment said the fact was "recorded nowhere". So this column is not a convenience: it is the only durable record that the event happened at all.
+
+**Why a counter here and not a twelfth `lifecycle_events` kind.** Migration 7's rule, which migration 15 restates as this file's house rule: `lifecycle_events.kind` carries a `CHECK`, SQLite cannot widen a `CHECK` in place, and an eleventh value already cost a full table rebuild of the one table `memories.source_event_first`/`_last` reference by `seq`. A twelfth is refused outright. `precedes_native_compaction`'s own documentation reached the same conclusion from the other side and declined to invent a `LifecycleEvent` for it.
+
+That refusal blocks an *event row*. It does not block a *column*, and the two are not the same claim: an event says "this happened at this instant, in order, beside every other thing that happened"; a counter says "this has now happened n times". Phase 30's line asks for the number, not the timeline — *"track the number of observed compactions for a session when known"* — so the counter is what the line wants and is also the only one of the two this schema can add.
+
+**`ALTER TABLE ADD COLUMN`, migration 12's shape.** No table is rebuilt, no existing `CHECK` is altered, no existing row is touched, and no index is added: nothing orders or filters by this column, and migration 15's closing note about not adding an index on speculation applies here with more force, because this one is written far more often than it is read.
+
+So this column is nullable and has no default. `SessionStore::create` writes `0` for every session *this* build starts, which is what makes the two states reachable at all, and the increment is `COALESCE(observed_compactions, 0) + 1` so that a row from an older build begins counting at its first observation rather than staying unknowable for ever. What is given up, and it is stated rather than hidden: for such a row the count is a **lower bound**, because compactions before the upgrade were never observed by anything. For a row this build created it is exact.
+
+**The `CHECK`.** Migration 9's shape for a counted quantity (`process_id > 0`): a negative number of compactions is not an unrecognised value, it is an impossible one, and the schema is where that is cheapest to refuse.
+
+### migration 17
+
+**What this is, said before what it is not.** One row per (memory, path) pair, written from `crate::checkpoint::WorkingTreeStatus::changed_files` at the moment extraction ran. That list is what the git index says differs from the working tree right now: no model, no subprocess, no guess.
+
+**It is a correlation with the session, not a reference by the memory.** A session that dirtied twenty files and yielded three memories associates all three with all twenty, and that is not a rounding error in the signal — it *is* the signal. Map line 1139 asks for the files a memory *"explicitly references"*, and on the automatic extraction path the model's input contains no prose at all (`memory::extract::lifecycle`'s own doc comment; `lifecycle_events` has no text column), so a model asked to name files there would be fabricating from an empty input. Map line 1294's rule — a fabricated value does not degrade the policy, it inverts it — is why this table records what was *observed* and says so in a column, rather than claiming what was *referenced*.
+
+**A join table, which this schema has never had, and why not the alternatives.**
+- **Not a column on `memories`.** A delimited or JSON list cannot be indexed for exact enumeration, which reproduces `checkpoints.document`'s defect one table over: you can look a row up, you cannot query the set.
+- **Not a column in `memories_fts`.** FTS5 tokenisation destroys a path at both ends — `src/memory/store.rs` indexes and queries as four unrelated words, so every memory sharing any directory component would match — and migration 6 shows the cost is a full `DROP` / `CREATE` / `'rebuild'` plus three triggers.
+- **Not `evaluation_observations`.** That table is *deliberately prunable* (90 days / 100,000 rows) and its `subject` is documented as free text that is "never a count key on its own". An association that expires after 90 days is not an association: the whole value of a file→memory link is that it outlives the session that made it.
+- **Not `checkpoints.document`.** It already holds real observed paths, but it associates them with a *session* rather than a *memory*, in opaque JSON, reachable only by a full scan.
+
+**No `ALTER`, no rebuild, no existing `CHECK` touched.** Migration 15's shape: `CREATE TABLE` plus one index plus migration 11's two project-scope triggers. `lifecycle_events` is untouched and no new `LIFECYCLE_EVENT_KINDS` value is added, so map lines 310, 327 and 1316 keep the refusal the register gives them, word for word.
+
+The observed producer needs no normalisation *work*: git's index stores every path as UTF-8, repo-relative and `/`-separated on every platform, Windows included, and `checkpoint::git::parse_index` reads it straight with no separator translation. The contract exists for the writers that come after it — a model-emitted or user-typed path is five spellings of one file and must be normalised or refused before it reaches this column.
+
+Repo-relative is also what keeps the `/var` versus `/private/var` class of hazard out of the index key: that ambiguity lives in the *root*, and the root is never stored here. An absolute path would import it directly into the one column this table matches on.
+
+Enforcement is at the writer rather than in a `CHECK` because the schema cannot express it: `CHECK (path NOT LIKE '/%')` would miss `C:\...`, and a `CHECK` forbidding `\` or `:` would reject file names that are legal on Unix. The schema refuses only what is never a path at all — the empty string.
+
+**`seq`, and bare ids.** `AUTOINCREMENT`, migration 11's and 15's shape for an append-oriented row: this table has no `UPDATE` path, and an identifier is never reused even after a future retention policy prunes rows. `memory_id` is a bare id with no `REFERENCES`, migration 12's rule as migration 15 restates it: a pointed-at row may be gone, and a read that cannot resolve one must say so rather than lose the observation.
+
+**Zero rows is one fact here, not two, and that is deliberate.** A join table cannot distinguish *"the tree was clean"* from *"extraction ran before this feature existed"* — both are no rows. A marker column on `memories` would separate them and is exactly the `ALTER` this migration refuses; the distinction is not worth widening the schema's blast radius for while nothing reads it. Stated rather than hidden: for a memory recorded by an older build, the absence of rows means *unknown*, and for one recorded by this build it means the reader found nothing to name.
+
+**One index, and only the one.** `(path)` serves the only access pattern this table exists for: which memories were learned while this file was being worked on. Migration 15's closing note applies unchanged — do not add a second index on speculation.
+
+### migration 18
+
+**`ADD COLUMN`, nullable, no `CHECK`, no index.** Migration 10's shape for `validity_conditions`: an `ALTER TABLE … ADD COLUMN` backfills every existing row with `NULL`, which is the honest reading for a row written before the classification existed — "this build recorded no kind here", never "no failure". No `CHECK`, for `FAILURE_CLASSES`' reason: the vocabulary lives in Rust and is pinned by a test. No index: the reads that want this column (`EvidenceLedger::failure_classes_by_provider`) are a `GROUP BY` over a time window already served by `routing_observations_by_route_time`, and migration 15's closing note applies — measure before indexing.
+
+**What may write it, and from what.** The gateway's connection thread, from the status line, the rate-limit headers it already reads to forward them, the byte count it already keeps to relay the body, and how the stream ended as its framing said. Never from a byte of the body: `crate::gateway::ingress` remains structurally unable to carry one, and the design ruling that framing is not content is in `docs/product/design-decisions.md`.
+
+### migration 19
+
+**What a row is, and what no row is.** `task_assumptions` holds the six fields capability map lines 1014 and 1016 name — claim, current evidence, evidence-source class, uncertainty, affected scope, cheapest verification — and who stated them, for which session, when. **Nothing here was inferred.** Every row was said through `api::protocol::Request::RecordAssumption` or its MCP twin; Glasshouse reads no transcript and no output for one (line 998), and there is no column that could hold reasoning if it did.
+
+`assumption_transitions` is the append-only history. A row naming an `assumption_id` moves it to one of line 1018's six states — or re-states the current one with a response or a note — and **the current state is the latest such row** (`MAX(seq)`), which is why the assumption row itself carries no `state` column: there is exactly one place a state can be, so it can never be two things at once. A row with no `assumption_id` is a session-level event (`kind` is `gate`, `override` or `budget_exceeded`): the fact that a preflight fired and which factor fired it (line 1049), the per-task override a person recorded (line 1008), a budget found exceeded (line 1050). The two table constraints say exactly that: a row is about an assumption or a session, and an assumption row always carries a state.
+
+**No `CHECK` on any vocabulary, for migration 15's reason.** `state`, `kind`, `origin`, `evidence_source`, `uncertainty` and `response` are each a vocabulary that lives in Rust — `crate::guardrails`' enums, one stored spelling per variant, an exhaustive `match` at the single writer — and none of them gets a SQL `CHECK`, because a `CHECK` is what cost `lifecycle_events` a table rebuild for its eleventh value. `CHECK (x <> '')` is kept where a value is required: an empty spelling is a missing one, not a strange one.
+
+**Project scope.** Migration 15's two triggers, copied exactly, on both tables. The database path comes from `Runtime` and nowhere else, and every session-keyed request goes through `SessionApi` before this store is opened, so a foreign session identifier is refused before a row could be written for it.
+
+**Bare ids, no `REFERENCES`.** `assumption_id` and `session_id` are migration 12's rule: a pointed-at row may be trimmed, and a read that cannot resolve one reports that rather than losing the transition.
+
+### migration 20
+
+**`ADD COLUMN`, nullable, no `CHECK`, no index.** Migration 18's shape. Every existing row backfills to `NULL`, which is the honest reading: a session recorded before this column existed was presented somewhere Glasshouse did not write down, which is a different fact from a session recorded now with no pane. No `CHECK` on the shape (`workspace:<n>` / `surface:<n>`): the validation lives in Rust, at the one place the value is handed back to cmux (`integrations::cmux::PaneRef::parse`), so a cmux that changed its reference syntax would be met in one file rather than by a table rebuild. No index: the only reads are a session's own row and a short bounded poll after a pane is opened.
+
+**What may write it, and from what.** `SessionStore::create`, once, from `NewSession::presentation_ref`, which only `main.rs`'s launch path fills — from the reference cmux itself printed (`cmux identify --json`), or from one a caller supplied by hand. Nothing in `session/**` interprets the string; the session abstraction stores and returns it and learns nothing else (line 762).
+
+### migration 21
+
+**`sessions.last_seen_commit`: how a commit is noticed without a Git hook.** Line 1149 wants a memory commit *"after a successful Git commit"*. Glasshouse installs no Git hook and will not: a repository's hooks are the user's, `core.hooksPath` can point anywhere, and a tool that writes into `.git/hooks` to learn something it can read directly has taken over a file it does not own. It does not need one. The harness hook already runs at every `TurnEnded`, and `checkpoint::git::GitPosition` already reads HEAD without spawning `git` — so *"a commit landed"* is the comparison between HEAD now and HEAD the last time this session was looked at, and this column is the second half of that comparison.
+
+Per **session**, not per project: two sessions in one project each have their own idea of what they have seen, and a shared column would let one session's turn silently consume the other's boundary.
+
+**`memories.extraction_trigger`: what made Glasshouse look.** Lines 1147-1151 ask for four ways to start a memory commit and line 1153 asks that the commit be recorded *"with memories produced from a code-change boundary"*. `memories.source_commit` has existed since migration 6 and answers a different question — **where the project stood** when something was learned — and `glasshouse memory extract`, run by hand, fills it from `GitPosition::detect`. So a reader inferring "this came from a code-change boundary" from a commit being present would report every hand-run extraction as one. The trigger is the fact that was missing, and it is a column rather than a derivation.
+
+**Both in one migration.** They are one capability: the trigger vocabulary has a `git_commit` word only because `last_seen_commit` can produce it. Splitting them would create an intermediate schema version in which the word exists and nothing can ever write it.
+
+**`ADD COLUMN`, nullable, no `CHECK`, no index.** Migration 18's shape and its reasons, unchanged. `NULL` backfills every existing row, which is the honest reading for a row written before either fact was observable. No `CHECK` on `extraction_trigger` for `FAILURE_CLASSES`' reason — the vocabulary lives in Rust, on `ExtractionTrigger`, and is pinned there by a test; a `CHECK` would cost a table rebuild per new trigger, and `memories` is the table `memories_fts` shadows and `memory_files` references. No index: nothing queries by trigger, and migration 15's closing note applies.
+
+**What may write them.** `last_seen_commit`: `SessionStore::record_seen_commit`, from the hook path's `TurnEnded` arm, with a full object name `GitPosition::detect` read out of `.git`. `extraction_trigger`: `Extractor::store_one`, from `ExtractionTrigger::as_str`, which is `&'static str` precisely so that no runtime string — a commit hash least of all — can reach this column.
+
+### migration 22
+
+**Why `backend_resource` could not answer this.** `sessions.backend_resource` has held the resolved resource since its own `ADD COLUMN` above, and it stores `crate::profile::BackendResource::slug`, whose whole vocabulary is three coarse words: `native`, `direct-provider:<provider>`, and `glasshouse-gateway`. Phase 56A's unit of capacity is the **entitlement** — two Claude accounts of one vendor, each with its own credential, capacity and reset — and both of those accounts slug to the same `native`. So the one question line 1972 asks of the durable record, *which account served this session*, is the one question `backend_resource` is structurally unable to answer, and no widening of its vocabulary would help: it names a **kind** of resource, and the entitlement is an **instance**.
+
+**What may write it, and from what.** `SessionStore::create`, once, from `NewSession::entitlement`, which only `main.rs`'s launch path fills — from `ResolvedEntitlement::name`, the `[entitlements.<name>]` table key, for the entitlement that path has already resolved and announced (`announce_entitlement`). That is the router's own winner where the router ran (`Routed::chosen`'s `Destination::entitlement`, re-resolved by name), and the one-account lookup where it did not. Nothing else writes the column and nothing derives it: a session whose serving account was never established records `NULL` rather than a guess.
+
+**`ADD COLUMN`, nullable, no `CHECK`, no index.** Migration 20's shape and its stated rationale — validation in Rust, not in SQL — unchanged. `NULL` backfills every existing row, which is the honest reading for a session recorded before Glasshouse could observe which account served it, and it is a **different fact** from any name: `launch_profile`'s `None` draws exactly this distinction and for exactly this reason. No `CHECK`, because the set of valid values is the user's own `[entitlements]` tables — it is not a fixed vocabulary this schema could enumerate, and it changes when a person edits a configuration file rather than when Glasshouse ships. No index: the reads are a session's own row and one bounded pass over a project's sessions for `glasshouse entitlements`, and migration 15's closing note applies.
+
+### migration 23
+
+**Persisted, not recomputed.** `crate::routing::request::RouterAnswer::task_class` derives the class from a `TaskClassification` that lives only for the duration of one routing decision: the classification is not stored anywhere, so a reader looking at yesterday's rows has nothing to derive from. A moving average over task classes is a read of *history*, and history is exactly what is unavailable unless the class is written down at the moment it is known. `main.rs::record_routing_latency` already holds the `RouterAnswer` and already writes the row; this column is the one missing link between them.
+
+**`ADD COLUMN`, nullable, no `CHECK`, no index.** Migration 18's shape and its reasons, unchanged. `NULL` backfills every existing row, which is the honest reading for a row written before the class was recorded — "this build named no class here", never "no class". No `CHECK`, for `FAILURE_CLASSES`' reason: the vocabulary is `crate::routing::request::TaskClass`, five variants pinned in Rust by `every_task_class_the_type_supports_is_one_the_schema_records`, and a `CHECK` would cost a table rebuild the first time a sixth class is added. No index: the one reader (`crate::routing::burn::task_class_request_rates`) is a bounded pass over a window `routing_observations_by_route_time` already serves, and migration 15's closing note applies — measure before indexing.
+
+**What may write it.** `main.rs::record_routing_latency`, from `crate::routing::request::TaskClass::as_str`, which is `&'static str` precisely so no runtime string can reach this column. Nothing parses a relayed response body to fill it: the class comes from Glasshouse's own classification of the *request*, never from anything a provider said.
+
+### migration 24
+
+**Which identity, and which two facts beside it.** `sessions.id` — Glasshouse's own session id — and nothing else. Not the harness's `metadata.user_id`: carrying that would mean the relay reading a body it never reads (`crate::gateway::ingress`'s own `an_exchange_has_nowhere_to_put_a_body`), and it names an account this ledger has no business holding. Not `sessions.native_session_id` either: that column already resolves the harness-side mapping, and the Glasshouse id is the value `evaluation_observations.session_id` already keys by, so every join these columns exist for is on one value with no translation step.
+
+The other two are facts of the *request*, filled at the one seam that holds a decoded one — `crate::gateway::translate::serve` — and they ride here so that line 2039's shadow needs no second migration: `effort_level` is the four-word ladder `crate::gateway::translate::canonical::EffortRequest::level` reduces the harness's thinking request to, and `turn_shape` is *tool-resume* when the last user message's blocks are all tool results and *prompt* otherwise. A relayed exchange, whose body is never read, records `NULL` for both: unread, not absent.
+
+**What may write them.** `crate::gateway::session::SessionRouting::record_routing_observation`, once per exchange the gateway serves, from the id `main.rs`'s two launch doors hand it through `SessionRouting::serve_session` after the session record exists. A gateway nothing has told is a gateway serving no session, and its rows say so with `NULL` rather than an invented id. `main.rs::record_routing_latency`'s own row — written before the record exists — stays `NULL` and says why in its doc comment: it is a row about the routing decision, not about a served exchange.
+
+**`ADD COLUMN`, nullable, no `CHECK`, no `REFERENCES`, no index.** Migration 23's shape and its reasons. `NULL` backfills every existing row, which is the honest reading for a row written before a session could be named — "this build recorded none here", never "none". No `CHECK`: `effort_level` and `turn_shape` are Rust enums pinned by tests exactly as `task_class` is, and `session_id` is an opaque identifier with no enumerable vocabulary at all. No `REFERENCES`: migration 12's rule, and a routing row must outlive the deletion of the session it names, as the evaluation rows already do. No index: the readers are bounded window passes `routing_observations_by_route_time` already serves, and migration 15's closing note applies — measure before indexing.
+
+### migration 25
+
+**Why a column at all, when five timestamps are already here.** Every timestamp on this table is a unix second: `dispatched_at`, `first_byte_at`, `completed_at`, and since migration 11's two late-written columns `first_token_at` and `first_tool_call_at`. At that resolution *time to first byte* and *time to first token* are zero or one on nearly every exchange — honest, and useless for the comparison lines 1347 to 1355 ask for. The producer wall is gone (the translated seam decodes what it needs); what remains is resolution, and resolution is a column decision.
+
+**Offsets, not instants, and their zero is not `dispatched_at`.** A monotonic clock (`std::time::Instant`) is what the gateway can read at millisecond precision; a wall clock is not, and two wall readings subtracted across a clock step produce a negative "duration" that means nothing. So each column is a number of milliseconds since a `std::time::Instant` taken **immediately before the upstream request was sent** — `crate::gateway::ingress::forward` for a relayed exchange, `crate::gateway::translate::serve` for a translated one.
+
+That zero is deliberately *not* `dispatched_at`, whose own comment in `crate::gateway::accept_loop` says it is the instant the connection was handed to `ingress::serve`, not the instant a request left for the provider. The five `*_at` columns stay, are written exactly as before, and remain this row's only absolute timestamps.
+
+Nullable, no index: `NULL` keeps the meaning every other optional column here has — *this producer did not measure* — and backfills every row written before this migration; the readers are the same bounded window passes `routing_observations_by_route_time` already serves.
+
+**What may write them.** `crate::gateway::session::SessionRouting::record_routing_observation`, from the four offsets `crate::gateway::ingress::Exchange` carries. A relayed exchange carries `first_byte_ms` and `completed_ms` and `NULL` for the two token offsets, exactly as it does for `first_token_at` and `first_tool_call_at`. The support-work rows `main.rs::record_extraction_observation` writes keep their seconds: that producer takes no `Instant` of its own, and inventing one from two wall readings is the defect the `CHECK` exists to refuse.
+
+### migration 26
+
+**Migration 7's shape, for migration 7's reason.** SQLite cannot add or drop a `CHECK`, and migration 5's `kind` column is one. Admitting a twelfth value is therefore rename, recreate, copy, drop, then recreate the index and all three triggers — exactly what migration 7 paid to admit the eleventh, and the comment there is the one to read for why the alternative does not exist.
+
+**`path`, and its two `CHECK`s.** Repo-relative, `/`-separated, never absolute — `crate::memory::store::normalize_observed_path`'s contract, applied by the writer, for the reasons migration 17 gives about `memory_files.path`: the schema can refuse an empty string and nothing more, because `CHECK (path NOT LIKE '/%')` would miss `C:\...` and a `CHECK` forbidding `\` or `:` would reject file names that are legal on Unix.
+
+The second `CHECK` is the biconditional the other payload columns do not have and this one can: `file_touched` is the only kind that carries a path, and a path is the only thing that kind carries. So `(kind = 'file_touched') = (path IS NOT NULL)` refuses both a `file_touched` with nothing to point at and a `turn_ended` that somehow acquired a path. `crate::events::log::read_row` would report the first as `MissingValue`; the schema is where it is cheaper to refuse it than to read it back.
+
+**Why an event, and not a table of its own.** `crate::memory::extract::lifecycle::chunk_for_session` already reads a session's events in order, renders each with `describe`, and derives every memory's provenance range from the tail that survived the budget. A second source would need a second ordering and a second range; an event slots into the reader that exists.
+
+This is not the noise `REPORTED_EVENTS` refuses. That list keeps `PostToolUse` out of the *lifecycle state machine*: `file_touched` is appended by the firewall subprocess that already runs on every tool call, `crate::events::LifecycleEvent::implied_state` answers `None` for it, and every `match` on that enum in this crate is exhaustive, so the compiler names each consumer that has to say so.
+
+### migration 27
+
+**One row per (session, path), which is what makes a renew a renew.** The primary key is `(session_id, path)`, so a session claiming a file it already holds can only ever move `renewed_at` and `expires_at` on the row it already has — line 2395's *"renew rather than create a second one"* is the table's shape and not a rule the writer has to remember. `claimed_at` is left alone by a renew, so *"since when"* and *"still wanted as of"* stay two separate facts.
+
+**Project scope — line 2397.** Migration 15's two triggers, copied exactly. The database file is the project, so a claim written in one project is not merely filtered out of another project's reads — there is no query in another project's database that could name it — and a row carrying a foreign `project_id` is refused before it is written.
+
+### migration 28
+
+**Why a table and not a setting.** The field this feeds is the *first* branch `evaluate_reserve_spend` takes, outranking every other signal including the user's own override. A value that is wrong there does not degrade the reserve policy, it inverts it, at the one moment the protection matters. Two shapes were therefore refused: a proxy derived from turn counts or elapsed time (which reports "almost complete" for work that has merely been running a while — exactly the long-running work a protected reserve exists to keep serving), and a configuration value (which is sticky by nature, and a declaration that outlives the task it described re-creates the same inversion by a slower route).
+
+What is left is a **declaration**: somebody says the task is nearly complete, on purpose, about one named session, and the statement expires. That is migration 27's claim, one column narrower.
+
+**One row per session.** The primary key is `session_id` alone, not `(session_id, path)`: progress is a fact about the session's current task, and a session has one. Re-declaring moves `renewed_at` and `expires_at` on the row that exists; `declared_at` is left alone, so *"since when"* survives a renew, exactly as `file_claims.claimed_at` does.
+
+**`session_id` and not a process id, and project scope.** Migration 27's reasoning verbatim: a bare id with no `REFERENCES` because a trimmed sessions row must drop the declaration rather than fail a read, no pid because a recycled pid resolving to a live declaration is precisely the inversion above, and migration 15's two project triggers because a row carrying a foreign `project_id` is refused before it is written.
+
+## Trims: `gateway/ingress.rs` — history moved out of comments by `GH-TRIM-GATEWAY-INGRESS`, 2026-09-05
+
+### module doc
+
+//! One connection, from the harness's request line to the last byte of the
+//! provider's response.
+//!
+//! # The shape of the whole thing
+//!
+//! Read the request head. Check the bearer token against this instance's
+//! own. Append the request target to the provider's base URL, attach the
+//! *provider's* credential in place of whatever the child sent, and forward
+//! every other header and every body byte unchanged. Then write the
+//! provider's status and headers back and move its body across a piece at a
+//! time.
+//!
+//! That is the entire ingress, and its shortness is the design. Three things
+//! are rewritten and named as such in [`forward`]; nothing else is even
+//! looked at. A tool-call payload survives because no code here can tell a
+//! tool-call payload from any other bytes.
+//!
+//! # Line 9: the ingress is not a public API
+//!
+//! "Require every interactive gateway ingress to be consumed through a
+//! compatible installed harness launch profile" is satisfied by the token
+//! rather than by a registry. The token is minted per Glasshouse instance,
+//! held only in memory, and reaches exactly one place: the environment of a
+//! child harness started by [`crate::profile::resolve`] for a
+//! gateway-backed profile. **Possession of it therefore is the proof** that
+//! a request came from such a launch — there is no other way for a process
+//! to have it.
+//!
+//! A second mechanism — a session registry, an allow-list, a handshake —
+//! would add state without adding a fact, because it would have to be keyed
+//! on something the token already establishes.
+//!
+//! # Line 10: what may be recorded, and what may not
+//!
+//! [`Exchange`] is the only thing that reaches `tracing`, and it is
+//! structurally incapable of carrying a body: it holds an outcome, two
+//! statuses, a byte count, two names and one optional clock reading.
+//! Glasshouse's logging is already off unless `GLASSHOUSE_LOG` is set — see
+//! [`crate::logging`] — so "opt-in" is the existing mechanism rather than a
+//! new flag.
+//!
+//! **The packet asked for the provider error's `error.type` and
+//! `error.message` to reach the diagnostic. They deliberately do not.**
+//! Extracting either means parsing the response body, which this module is
+//! forbidden to do and which is a stop condition for the whole slice. The
+//! status is recorded; the body is forwarded to the harness, which is the
+//! thing that actually needed to read it.
+//!
+//! # A second thing may now be recorded: a response *header*, never a body
+//!
+//! Capability map line 1229's gateway half. [`forward`] reads
+//! [`crate::provider::telemetry::RATE_LIMIT_HEADERS`] — the same allowlist
+//! [`crate::provider::discovery`] reads on the catalogue path — off every
+//! response before relaying it, and hands the result to [`serve`]'s caller
+//! alongside [`Exchange`]. This is not [`Exchange`] growing a body-shaped
+//! field: [`RateLimitHeaders`] is structurally the same kind of thing this
+//! module already forwards unread, a handful of integers and the fixed set of
+//! header *names* Glasshouse chose, never a header value stored as text and
+//! never a byte of the response body. See [`mod@crate::provider::telemetry`]
+//! for why a header is not the payload this module exists to be unable to
+//! read, and [`mod@crate::provider::discovery`] for the seam this one
+//! completes — a real inference response is the only kind of request that
+//! has ever been observed to carry a token pool's own headers, and
+//! `discovery` is forbidden from making one.
+//!
+//! # A third thing may now be recorded: when the first response byte arrived
+//!
+//! Capability map line 1331's gateway half. [`forward`] reads the clock the
+//! instant [`Agent::run`] returns with the provider's status and headers —
+//! before a byte of the body is read — and carries that reading on
+//! [`Exchange`] as `first_byte_at`. It is `None` on every path that never
+//! reached a provider at all: refused before a route was chosen, or the
+//! provider could not be reached. Reading the clock here costs nothing this
+//! module was forbidden to pay — a status and a set of headers are already
+//! read to relay them, and the clock is read after they land rather than
+//! after any of the body that follows, so this stays a timing read and never
+//! a parse of what the bytes mean.
+//!
+//! # A fourth thing may now be recorded: how the stream was framed, and how it ended
+//!
+//! Capability map line 1364's `stream abort` and `empty completion`, under
+//! the ruling recorded in `docs/product/design-decisions.md` as *"framing is
+//! not content — the relay may count and timestamp what it never reads"*.
+//! [`forward`] already handles the length the provider declared (it re-states
+//! it on the way out), already counts the bytes it moves (`Outcome::Forwarded`
+//! has carried that count since this module was written), and already learns
+//! from `ureq` whether the provider's stream ended cleanly or failed short —
+//! because a short read is an `io::Error` it has to handle to relay at all.
+//! [`Framing`] carries those three facts, and nothing else: a declared
+//! length, a relayed count, and a [`StreamEnd`]. The observer that counts is
+//! [`Counted`], which sees how many bytes each `read` returned and never the
+//! buffer they landed in. No byte of the body is inspected, decoded, buffered
+//! beyond what forwarding already buffers, or matched against anything — the
+//! boundary that stays is the one this module has always kept, and the
+//! source-scan tests in `tests/gateway_failure_taxonomy.rs` hold it.
+//!
+//! # A fifth thing may now be recorded: the first real token and the first tool call
+//!
+//! Capability map lines 1331 and 1332, under the ruling recorded in
+//! `docs/product/design-decisions.md` as *"first real token and first tool
+//! call on the translated path — the 1331/1332 ruling"*. This module still
+//! decodes nothing: [`super::translate`] already decodes every provider
+//! event into its own canonical form in order to re-encode it for the
+//! harness, and a translated [`Exchange`] carries the instant a qualifying
+//! canonical event passed that seam, exactly as it carries `first_byte_at` —
+//! a clock reading, never a byte of the response. A **relayed** exchange
+//! never enters a codec, so it writes `None` for both, the same restraint
+//! `Tokens` already keeps.
+//!
+//! # A sixth thing may now be recorded: tool rounds and repairs
+//!
+//! Capability map line 1334's last two quantities and line 1350, under the
+//! ruling recorded in `docs/product/design-decisions.md` as *"tool rounds
+//! and repairs on the translated path."* [`super::translate`] already
+//! decodes the request into canonical blocks and the response into
+//! canonical events in order to translate both; `tool_rounds` counts the
+//! response's tool-use block starts and `repairs` counts the request's
+//! `is_error: true` tool-result blocks — two more integers derived from
+//! decoding this module still never does itself. `None` on every relayed
+//! exchange (this module never decodes one) and on a translated exchange
+//! whose request never decoded; `Some(0)` is the seam's own honest reading
+//! of "looked and found none," a different fact from not looking, which is
+//! why it is never conflated with `None` here.
+//!
+//! # A seventh thing may now be recorded: what the provider said it billed
+//!
+//! **The relay rule was narrowed again on 2026-09-03, by the user**
+//! (`docs/product/design-decisions.md`, *Steering decisions of record* §1):
+//! accurate usage and evaluation data is worth more than byte-for-byte
+//! opacity, so the gateway may inspect a **supported** relayed body far
+//! enough to extract structured usage and timing. A relayed exchange now
+//! carries [`Tokens`], `first_token_at` and `first_tool_call_at` — the same
+//! three things a translated one has carried since Phase 56, and no more.
+//!
+//! **This file still decodes nothing.** The reading is [`super::usage`]'s:
+//! a table of JSON key spellings scanned over a sliding window of at most
+//! 512 retained bytes, which is why `gateway/tests.rs`'s
+//! `no_part_of_the_relay_deserializes_anything` covers that file too and
+//! still passes. [`Counted`] hands it a shared borrow of the buffer
+//! [`super::http::pump`] is about to write and returns exactly the `read` it
+//! was given — there is no path here that can forward less, later or
+//! differently because a figure was read out of the bytes on their way past.
+//!
+//! Four rules from the ruling decide what a row says, and each is visible in
+//! [`forward`] rather than promised here:
+//!
+//! - **The format comes from the route's protocol slug**, which
+//!   `route_for` chose from the request target alone. A slug with no entry
+//!   in [`super::usage`]'s table — `gemini-generate-content` today — means
+//!   nothing is looked at at all and the row says unknown.
+//! - **Both counts or neither.** A provider that stated an input figure and
+//!   not an output one leaves both columns `NULL`; there is nothing to put in
+//!   the second that would not be invented.
+//! - **Only a stream that ended where its framing said.** A `Truncated`,
+//!   `Aborted` or `ClientClosed` stream records no usage, however much of it
+//!   arrived first.
+//! - **The two instants are observations, not estimates**, so they survive a
+//!   stream that ended badly: a token that passed the seam passed it — and
+//!   they are recorded only on a `text/event-stream` delivery, because an
+//!   instant inside a document is a reading of the socket rather than of the
+//!   provider. See [`usage::Delivery`].
+//!
+//! # The relay rule, narrowed and not repealed (Phase 56)
+//!
+//! Capability map lines 1948–1950, under the ruling recorded in
+//! `docs/product/design-decisions.md` as *"codecs around one canonical
+//! form; the relay rule narrowed, not repealed"*. A request whose target
+//! belongs to a protocol the provider serves is relayed exactly as above —
+//! [`forward`] is unchanged for it, and it never enters a codec. Only a
+//! target the provider does **not** serve — the branch that used to answer
+//! `404` with nothing opened upstream — is asked a second question, in
+//! [`unrouted`]: does the pair table name a supported pair from the
+//! target's protocol to one this provider serves? If so, the exchange is
+//! [`super::translate`]'s, recorded under the pair's own name; if the pair
+//! is refused, the `404` stays and its body names the pair and the reason;
+//! otherwise the `404` is exactly what it was.
+//!
+//! **This file still decodes nothing.** The decision is made from the
+//! target alone, before a byte of the body is read, and every parse lives
+//! in `translate/` — the source scan in `tests/gateway_failure_taxonomy.rs`
+//! that holds this file's production half free of any decoding call is
+//! unchanged and still green. [`Tokens`] is the one thing a translated
+//! exchange adds to [`Exchange`]: three counts the provider stated, exact
+//! because that response was parsed, and `None` on every relayed exchange.
+
+### `fn forward`
+
+/// The three rewrites, and everything that is not one.
+///
+/// Rewritten, and named here so that the list can be counted:
+///
+/// 1. **the request target** is appended to the base URL the provider
+///    declared *for the protocol that target belongs to* —
+///    [`Upstream::route_for`], then [`Route::uri_for`];
+/// 2. **`authorization`** is replaced by the provider's credential, attached
+///    by the gateway — [`Upstream::authorization`];
+/// 3. **`host`** is dropped so that the outbound layer derives the upstream's
+///    own, which is the correction the next hop requires.
+///
+/// Not rewritten: the method, every other header, and every byte of the
+/// body.
+///
+/// Not *forwarded*, which is a different thing from rewritten: the hop-by-hop
+/// headers of [`super::http::HOP_BY_HOP`]. Those describe the connection they
+/// arrived on, and this is a different connection. `content-length` is among
+/// them and is re-stated below from the value the client declared, so the
+/// body is framed outbound exactly as it was framed inbound.
+///
+/// # Which protocol, and how that is decided
+///
+/// **By the request target, and by nothing else.** The gateway may serve
+/// Anthropic Messages, OpenAI Responses and OpenAI Chat at once, each with
+/// the base URL the one configured provider declared for it, and the target
+/// the harness wrote is what says which of them this request is. The
+/// alternative — looking at the body to see which protocol it reads like —
+/// is forbidden here twice over: it would make this module a parser of the
+/// payload it exists to be unable to distinguish from any other bytes, and a
+/// request whose shape was ambiguous would be *guessed* rather than placed.
+///
+/// A target belonging to no served protocol is answered with a `404` and
+/// **nothing is opened upstream**. That is a narrowing of what this gateway
+/// used to do — a single-protocol gateway appended every target to its one
+/// base URL — and it is the point rather than a side effect: with several
+/// base URLs available, "append it to the first one" sends a request
+/// somewhere nobody asked for it to go.
+///
+/// # What the narrowing costs, measured rather than assumed
+///
+/// Real harnesses do send targets outside their own protocol, and both were
+/// observed against a listener that recorded the request line:
+///
+/// - Claude Code 2.1.245 sends `HEAD /api/hello` before its first
+///   `/v1/messages`, and carries on unaffected after a non-2xx answer to it.
+/// - Codex 0.149.1 sends `GET /models?client_version=0.149.1` when it does
+///   not already hold metadata for the configured model. Under this rule
+///   those are refused, and Codex logs
+///   `failed to refresh available models: unexpected status 404 Not
+///   Found: <this refusal's message>` — twice per session, at `ERROR`
+///   level and visible to the user — then completes the session normally.
+///   A full live run through this gateway to OpenRouter returned its
+///   answer with exactly those two refusals recorded.
+///
+/// So the cost is real, it is user-visible, and it is a degradation rather
+/// than a breakage. It is **not** silently accepted, and the reason it is
+/// not simply routed is worth stating: `/models` is a catalogue endpoint
+/// that all three protocols define, and the two spellings a harness may use
+/// need *different* base URLs. Codex asks for `/models`, which only resolves
+/// against a base URL carrying `/v1`; Anthropic Messages is declared at a
+/// root without one, so the same request routed to that protocol would reach
+/// a path the provider answers `404` for anyway. Placing it therefore means
+/// choosing between OpenAI Responses and OpenAI Chat for a request that
+/// names neither — a tie-break invented without a concrete provider pair
+/// requiring it, which is the move the capability map's pass-through lines
+/// forbid.
+///
+/// The change, if a later phase decides the tie-break: add `/models` to
+/// `crate::profile::ingress_targets`' OpenAI Responses entry.
+
+### `fn transport_detail`
+
+/// Why the provider could not be reached, as one of a **fixed vocabulary**.
+///
+/// # Not the error's own text, and that is the point
+///
+/// The obvious implementation is `crate::secret::redact(&err.to_string())`,
+/// and it was the first one here. It is not enough.
+/// [`crate::secret::redact`] removes things that *look like credentials* —
+/// an `sk-` key, a `Bearer` token — and it makes no claim at all about the
+/// rest of a string. `ureq` wrote that string, `ureq` never had this
+/// project's rules, and a diagnostic that keeps foreign text keeps whatever
+/// the next version of that crate decides to put in it. The test
+/// `a_recorded_exchange_writes_a_line_with_no_secret_in_it` caught exactly
+/// that: the credential was redacted and everything around it went to the
+/// log verbatim.
+///
+/// So nothing foreign is kept. Each variant maps to a phrase written here,
+/// which means a leak is not something to be careful about — it is something
+/// this function has no way to express. The categories are still the ones a
+/// user needs to tell apart: a refused connection, a name that does not
+/// resolve, a TLS failure and a timeout have completely different fixes.
+///
+/// The variant *is* read from the error, so the answer is a real
+/// observation and not a constant.
+///
+/// [`TRANSPORT_TIMEOUT_DETAIL`] is the one phrase named outside this
+/// function, because `super::session`'s `failure_class` tells a timeout from
+/// every other transport failure by it — capability map line 1364's
+/// `timeout`. The upstream agent (`super::upstream::agent`) sets no timeout
+/// today, for the reason its own doc gives, so this arm is a mapping with no
+/// live producer until one is configured; the constant exists so that the
+/// day one is, nothing else has to change.
