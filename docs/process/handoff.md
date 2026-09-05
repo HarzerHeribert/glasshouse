@@ -41,6 +41,13 @@ validated and waiting on the commit. Next action: `.agent-runtime/CONTINUATION.m
 
 Last updated: 2026-09-02, late night (Europe/Berlin)
 
+## Checkpoint — 2026-09-06 (after midnight), wave 138: 1311 / 1398 (93.8%) — the routing-2 trim lands, the pane lane hands to a Fable successor lead, and mutate.sh tells a compile error from a kill
+
+- **State:** `main` at `efb1b55` plus this checkpoint's commit, pushed. Phase 59 is open only on 2053. Live: three trims (`trim-rest-docs-2`, `trim-api-events-harness-config-docs-2`, `trim-commands-docs-3`; Sonnet medium, Green) and the pane lead's successor in `.worktrees/pane-lead` (Fable xhigh), which reviews and integrates three reported sub-worker diffs — the Windows path-normalisation defect first, hard.
+- **Ruled:** the untracked `sites/` (the user's product page, never ours to touch) trips `integrate.sh`'s dirty check; the routing-2 integration ran with `status.showUntrackedFiles=no` for that one call because the worker's files are disjoint from it (`051dffe`). Decision 8 of the guarded-continuations plan: no existing facility reaches a directly-launched pane, so the cancellation token is built in 61E-RUNTIME. `GH-PANE-NOTEBOOK-VIEW` follows `pane-61e-handles`. The plan itself stays HELD for the user's Codex verification.
+- **Trailing sweep:** `525969a` red on the pane windows-latest cell (known; the fix is in the lane) and on `route_health_keeps_line_1765s …` under windows-11-arm msrv — strike 2 this week, one rerun issued; a third strike buys a determinism packet.
+- **Next, by risk:** integrate the three trims in one call when their panes idle (fold each staging file, commit with the files named); the lead's merge-ready commit → `cargo test -p pane` on `main` → push → the pane cell as verdict; then 2053's residue measurement and the tick → Phase 59 complete; then product work and the day's dogfooding session (rule 6).
+
 ## Checkpoint — 2026-09-05 (night), waves 118–137: 1311 / 1398 (93.8%) — pane 61B, 61C and 61D merged, Phase 37 complete, 2054 closed, three 61C ticks taken back off on the lane's own audit, the served-by producers, twenty-nine files trimmed, the first fully green sixteen-cell sweep
 
 Fable 5.1 orchestrators from ~18:00 (`b2416cc7`, then `c07a9ff3` from 20:42). The
