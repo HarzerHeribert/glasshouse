@@ -1531,6 +1531,41 @@ fn a_wildcard_mcp_pattern_is_never_a_silent_grant() {
     assert!(folded.admits_mcp_tool("mcp__git__status"));
 }
 
+/// `path` split into the components [`profile::spelling`] would glob it as:
+/// `\` folded to `/`, a leading `\\?\` verbatim marker dropped when a drive
+/// letter follows it, and that drive letter upper-cased. Mirrors production's
+/// spelling rule for this fixture's own root only — not a general
+/// reimplementation, since the fixture never produces a UNC path and the
+/// production function's `Read`/`Write` distinction plays no part here.
+///
+/// Splitting the resolved root on separators directly used to stand in for
+/// this and kept the verbatim marker as its own component (`"?"`) on
+/// Windows, where `fs::canonicalize` returns `\\?\C:\...` — a component
+/// `Rule::glob()` never emits, because the profile reduces it first.
+fn spelling_components(path: &Path) -> Vec<String> {
+    let folded = path.to_string_lossy().replace('\\', "/");
+    let is_drive_prefixed = |text: &str| {
+        let mut chars = text.chars();
+        matches!((chars.next(), chars.next()), (Some(d), Some(':')) if d.is_ascii_alphabetic())
+    };
+    let text = folded
+        .strip_prefix("//?/")
+        .filter(|rest| is_drive_prefixed(rest))
+        .map(str::to_string)
+        .unwrap_or(folded);
+    let mut parts: Vec<String> = text
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .map(str::to_string)
+        .collect();
+    if let Some(first) = parts.first_mut()
+        && is_drive_prefixed(first)
+    {
+        first[..1].make_ascii_uppercase();
+    }
+    parts
+}
+
 /// The lead's addition, from the appliers package: a platform applier cannot
 /// hold §1.2 for a rule it cannot see.
 ///
@@ -1550,14 +1585,7 @@ fn a_deny_inside_the_root_is_visible_to_a_platform_applier() {
         }}}}"#
     );
     let profile = Profile::compile(&fixture.root, Some(&settings));
-    let root_components: Vec<String> = profile
-        .root()
-        .to_string_lossy()
-        .replace('\\', "/")
-        .split('/')
-        .filter(|part| !part.is_empty())
-        .map(str::to_string)
-        .collect();
+    let root_components: Vec<String> = spelling_components(profile.root());
 
     let deny: Vec<_> = profile
         .rules()
