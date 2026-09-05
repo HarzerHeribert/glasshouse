@@ -796,3 +796,29 @@ pub fn recent_credential_cost(
         account_narrowed,
     }
 }
+
+/// Map line 1158's producer, beside [`recent_credential_spend`]: a session's
+/// estimated context size, read off the **latest** row this session's own
+/// gateway exchanges wrote, never guessed. See `design-decisions.md`,
+/// *"Context size is read off the gateway's own exchange, never guessed"*,
+/// for why this is a reading and not a model, and for the wire rule below:
+/// Anthropic Messages bills `input_tokens` excluding what the cache served,
+/// so the prompt size is their sum; every other known wire's own figure
+/// already includes the cached subset, so it stands alone, and an unknown
+/// wire takes the same conservative floor. `None` — never `Some(0)` — when
+/// this session wrote no row with a known input-token count.
+pub fn estimated_context_tokens(
+    observations: &[RoutingObservation],
+    session_id: &str,
+) -> Option<i64> {
+    let latest = observations
+        .iter()
+        .filter(|row| row.session_id.as_deref() == Some(session_id))
+        .filter(|row| row.input_tokens.is_some())
+        .max_by_key(|row| (row.observed_at_unix, row.seq))?;
+    let input = latest.input_tokens?;
+    Some(match latest.route.as_deref() {
+        Some("anthropic-messages") => input + latest.cached_input_tokens.unwrap_or(0),
+        _ => input,
+    })
+}

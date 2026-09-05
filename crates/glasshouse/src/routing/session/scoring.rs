@@ -1017,6 +1017,47 @@ fn measured_cache_temperature(destination: &Destination) -> Contribution {
     )
 }
 
+/// Map line 1534: what a destination's estimated context size — Line 1158's
+/// reading, attached to [`SessionContextFacts`] — is worth. Bounded and
+/// negative only: size is never a reason to prefer a destination, only a
+/// reason to discount one. See `design-decisions.md`, *"Context size is read
+/// off the gateway's own exchange, never guessed"*, for the bounds.
+///
+/// `observed_compactions` is deliberately not read here — `discovery.rs`'s
+/// `native context` facet already scores it, and this term claims size and
+/// only size (line 1594).
+fn context_quality(destination: &Destination) -> Contribution {
+    const TERM: &str = "context quality";
+    let Some(tokens) = destination.session_context().estimated_context_tokens() else {
+        return Contribution::new(
+            TERM,
+            0.0,
+            "inert: no context-size reading for this session — unknown, not lean",
+        );
+    };
+    if tokens <= CONTEXT_LEAN_TOKENS {
+        return Contribution::new(
+            TERM,
+            0.0,
+            format!(
+                "lean: an estimated {tokens} tokens of context, at or under the \
+                 {CONTEXT_LEAN_TOKENS}-token lean floor"
+            ),
+        );
+    }
+    let fraction =
+        ((tokens - CONTEXT_LEAN_TOKENS) as f64 / CONTEXT_BLOAT_SPAN_TOKENS as f64).clamp(0.0, 1.0);
+    let magnitude = -CONTEXT_QUALITY_MAGNITUDE_CEILING * fraction;
+    Contribution::new(
+        TERM,
+        magnitude,
+        format!(
+            "an estimated {tokens} tokens of context, {:.1}% of the way from lean to bloated",
+            fraction * 100.0
+        ),
+    )
+}
+
 /// Line 1597: what this destination does to provider-side prompt caching.
 ///
 /// Two different questions, and the answer is the *worse* of them:
@@ -1326,6 +1367,10 @@ pub(super) fn score(
     // attached `Destination::route_responsiveness` reading
     // `observed_pairing_reliability` and `tool_round_rate` already read.
     explanation.push(measured_cache_temperature(destination));
+    // Line 1534, right after the term it sits beside in the explanation:
+    // this destination's own estimated context size, from the same
+    // `SessionContextFacts` `native context` (line 1584) reads.
+    explanation.push(context_quality(destination));
     explanation.push(prompt_cache_state(destination, current));
     explanation.push(quota_pressure(destination, weights));
     // Phase 35D, lines 1570–1577: the band the quota reading falls in, and

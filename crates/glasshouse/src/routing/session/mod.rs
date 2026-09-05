@@ -232,6 +232,7 @@ pub struct SessionContextFacts {
     last_task: Option<TaskClassification>,
     touched_files: Option<Vec<String>>,
     task_named_paths: Option<Vec<String>>,
+    estimated_context_tokens: Option<i64>,
 }
 
 impl SessionContextFacts {
@@ -242,6 +243,7 @@ impl SessionContextFacts {
         last_task: None,
         touched_files: None,
         task_named_paths: None,
+        estimated_context_tokens: None,
     };
 
     /// Lines 1584 and 1586: how many compactions a harness has said it was
@@ -275,6 +277,14 @@ impl SessionContextFacts {
         self
     }
 
+    /// Line 1158: [`crate::routing::evidence::estimated_context_tokens`]'s
+    /// reading for this session, or `None` when it never relayed an exchange
+    /// with a known input-token count.
+    pub fn with_estimated_context_tokens(mut self, tokens: Option<i64>) -> Self {
+        self.estimated_context_tokens = tokens;
+        self
+    }
+
     pub fn observed_compactions(&self) -> Option<i64> {
         self.observed_compactions
     }
@@ -289,6 +299,10 @@ impl SessionContextFacts {
 
     pub fn task_named_paths(&self) -> Option<&[String]> {
         self.task_named_paths.as_deref()
+    }
+
+    pub fn estimated_context_tokens(&self) -> Option<i64> {
+        self.estimated_context_tokens
     }
 }
 
@@ -1099,6 +1113,24 @@ const CACHE_LIKELY_LOST: f64 = 0.2;
 ///
 /// [`prompt_cache_state`]: scoring::prompt_cache_state
 const MEASURED_CACHE_TEMPERATURE_MAGNITUDE_CEILING: f64 = 0.1;
+
+/// Map line 1534. Equal to
+/// [`MEASURED_CACHE_TEMPERATURE_MAGNITUDE_CEILING`] and, like it, strictly
+/// below [`CACHE_LIKELY_LOST`] in `scoring.rs` — a size reading never
+/// outweighs a structural fact about the move in front of it. See
+/// `design-decisions.md`, *"Context size is read off the gateway's own
+/// exchange, never guessed"*, for the full reasoning.
+const CONTEXT_QUALITY_MAGNITUDE_CEILING: f64 = 0.1;
+
+/// Map line 1534. The size a working context normally sits at — under this,
+/// [`crate::routing::session::scoring::context_quality`] contributes exactly
+/// `0.0`.
+const CONTEXT_LEAN_TOKENS: i64 = 32_000;
+
+/// Map line 1534. The span, added to [`CONTEXT_LEAN_TOKENS`], at which the
+/// penalty reaches [`CONTEXT_QUALITY_MAGNITUDE_CEILING`] — 160,000 tokens,
+/// where every shipped frontier window has either compacted or is about to.
+const CONTEXT_BLOAT_SPAN_TOKENS: i64 = 128_000;
 
 /// Line 1598. The full weight of a destination's remaining quota, multiplied
 /// by [`RemainingCapacityScore::routing_fraction`] — so a resource at 100%

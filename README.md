@@ -54,12 +54,12 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`█████████████████████████████████████░░░` **1297 closed** · **101 active committed open** (92%)
+`█████████████████████████████████████░░░` **1299 closed** · **99 active committed open** (92%)
 
 Separately tracked, and not release-blocking: **7 deferred gate criteria** (Phase 52, Phase 53) awaiting a decision, and **229 parked experimental lines** under Maybe / Experimental.
 
 <details>
-<summary>Per-phase breakdown (83 of 109 active phases complete)</summary>
+<summary>Per-phase breakdown (85 of 109 active phases complete)</summary>
 
 | Phase | Done |
 |---|---|
@@ -120,7 +120,7 @@ Separately tracked, and not release-blocking: **7 deferred gate criteria** (Phas
 | Phase 27 — Context injection | 11/11 ✅ |
 | Phase 28 — File-aware memory lookup | 5/5 ✅ |
 | Phase 29 — Memory commits | 8/8 ✅ |
-| Phase 30 — Session context metadata | 7/8 |
+| Phase 30 — Session context metadata | 8/8 ✅ |
 | Phase 31 — Compaction-aware behavior | 2/7 |
 | Phase 32 — Resource registry | 12/12 ✅ |
 | Phase 32A — Unified quota and capacity model | 14/21 |
@@ -143,7 +143,7 @@ Separately tracked, and not release-blocking: **7 deferred gate criteria** (Phas
 | Phase 34F — Model capability and tier calibration | 11/11 ✅ |
 | Phase 35 — Lightweight task classification | 14/14 ✅ |
 | Phase 35A — Candidate generation | 11/11 ✅ |
-| Phase 35B — Candidate scoring | 24/25 |
+| Phase 35B — Candidate scoring | 25/25 ✅ |
 | Phase 35C — Capacity-aware tier escalation and downgrade | 9/9 ✅ |
 | Phase 35D — Routing under subscription pressure | 8/8 ✅ |
 | Phase 36 — Session affinity | 8/8 ✅ |

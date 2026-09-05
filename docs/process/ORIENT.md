@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1297 closed · 101 active committed open (93%)** — across 26 phases.
+**1299 closed · 99 active committed open (93%)** — across 24 phases.
 
 Not in the work queue: **7 deferred gate criteria** (Phase 52, Phase 53) awaiting a user decision, and **229 parked experimental lines**. They are visible in the map; they are not release-blocking work.
 
@@ -29,12 +29,10 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 15 | Orchestrator wake-up flow | **1** | 7 | `731` |
 | Phase 21F | Memory retrieval quality | **1** | 10 | `927` |
 | Phase 21K | Assumption-aware implementation guardrails | **1** | 42 | `992` |
-| Phase 30 | Session context metadata | **1** | 7 | `1156` |
 | Phase 32C | Subscription capacity estimation | **1** | 11 | `1242` |
 | Phase 32D | Normalized remaining-capacity score | **1** | 11 | `1257` |
 | Phase 32G | Provider-aware request-cost estimation | **1** | 9 | `1296` |
 | Phase 34C | Automatic routing-model selection | **1** | 12 | `1429` |
-| Phase 35B | Candidate scoring | **1** | 24 | `1523` |
 | Phase 37 | Basic session-aware router | **1** | 10 | `1590` |
 | Phase 38 | Quota-preserving routing | **1** | 6 | `1604` |
 | Phase 9 | Antigravity adapter | **2** | 5 | `330` |
@@ -51,7 +49,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 51 | Evaluation hooks | **15** | 22 | `1818` |
 | Phase 61 | pane: the first-party harness | **29** | 5 | `2419` |
 
-**Fully closed (83):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 7, Phase 8, Phase 9A, Phase 9B, Phase 9C, Phase 9D, Phase 9F, Phase 9G, Phase 9I, Phase 9J, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 16, Phase 17, Phase 18, Phase 19, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 21H, Phase 21I, Phase 21J, Phase 22, Phase 23, Phase 24, Phase 25, Phase 26, Phase 27, Phase 28, Phase 29, Phase 32, Phase 32B, Phase 32E, Phase 32F, Phase 33A, Phase 33C, Phase 34, Phase 34A, Phase 34B, Phase 34D, Phase 34E, Phase 34F, Phase 35, Phase 35A, Phase 35C, Phase 35D, Phase 36, Phase 39, Phase 40, Phase 41, Phase 42, Phase 43, Phase 44, Phase 45, Phase 46, Phase 47, Phase 48, Phase 49, Phase 50, Phase 54, Phase 54A, Phase 55, Phase 56, Phase 56A, Phase 57, Phase 58.
+**Fully closed (85):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 7, Phase 8, Phase 9A, Phase 9B, Phase 9C, Phase 9D, Phase 9F, Phase 9G, Phase 9I, Phase 9J, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 16, Phase 17, Phase 18, Phase 19, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 21H, Phase 21I, Phase 21J, Phase 22, Phase 23, Phase 24, Phase 25, Phase 26, Phase 27, Phase 28, Phase 29, Phase 30, Phase 32, Phase 32B, Phase 32E, Phase 32F, Phase 33A, Phase 33C, Phase 34, Phase 34A, Phase 34B, Phase 34D, Phase 34E, Phase 34F, Phase 35, Phase 35A, Phase 35B, Phase 35C, Phase 35D, Phase 36, Phase 39, Phase 40, Phase 41, Phase 42, Phase 43, Phase 44, Phase 45, Phase 46, Phase 47, Phase 48, Phase 49, Phase 50, Phase 54, Phase 54A, Phase 55, Phase 56, Phase 56A, Phase 57, Phase 58.
 
 ## The nearly-finished phases, in full
 
@@ -86,10 +84,6 @@ these unwrapped.
 
 - **1044** ☐ Preserve user changes and unrelated worker changes when rolling back or isolating an invalidated experiment.
 
-### Phase 30 — Session context metadata  (1 open, 7 closed)
-
-- **1158** ☐ Track an estimated context-size value for a session when the harness exposes enough information.
-
 ### Phase 32C — Subscription capacity estimation  (1 open, 11 closed)
 
 - **1253** ☐ Preserve historical estimation data so the scheduler can improve over repeated usage.
@@ -105,10 +99,6 @@ these unwrapped.
 ### Phase 34C — Automatic routing-model selection  (1 open, 12 closed)
 
 - **1440** ☐ Avoid using a scarce premium subscription session as the classifier when a cheaper adequate routing resource exists.
-
-### Phase 35B — Candidate scoring  (1 open, 24 closed)
-
-- **1534** ☐ Include context quality in candidate scoring.
 
 ### Phase 37 — Basic session-aware router  (1 open, 10 closed)
 

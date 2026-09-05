@@ -261,22 +261,17 @@ impl fmt::Display for TaskContinuity {
 /// What Glasshouse can say about one session's context — Phase 30, read
 /// together so that a caller cannot assemble half of it.
 ///
-/// # Line 1158 is absent from this struct on purpose
+/// # Line 1158 is still absent from this struct, now by a different design
 ///
-/// *"Track an estimated context-size value for a session when the harness
-/// exposes enough information"* — no harness exposes it. The hook path is the
-/// only channel a harness reports through, it carries an event name and
-/// nothing else, and its payload is drained into `io::sink()` unread by
-/// `main`'s own hook handler. The one place in this schema with token counts,
-/// `routing_observations`, has them permanently NULL: its module documentation
-/// states they are "not supplied", because the only producer is the gateway
-/// and the gateway never parses a response body. `HarnessTelemetry`, the
-/// harness-side telemetry seam, carries a plan name and nothing more.
-///
-/// A field here would therefore have to be estimated from something that is
-/// not a context size — message counts, elapsed turns — and a future router
-/// would read it as telemetry. There is no field, and this paragraph is the
-/// record of why.
+/// The refusal this section once recorded ended: `routing_observations` now
+/// carries the gateway's own token counts (migration 24). But a copied token
+/// count would be a second source of truth — the same reason [`SessionContext`]
+/// itself gives migration 15 no field for one — so the estimate is not stored
+/// here either. It is read on demand by
+/// [`crate::routing::evidence::estimated_context_tokens`] over
+/// `routing_observations` and attached to
+/// [`crate::routing::session::SessionContextFacts`]. See `design-decisions.md`,
+/// *"Context size is read off the gateway's own exchange, never guessed"*.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionContext {
     pub session: SessionId,

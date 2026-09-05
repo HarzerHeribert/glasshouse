@@ -1635,6 +1635,6 @@ pub use readers::{
 pub use signals::{
     CorrelationVerdict, CredentialCost, CredentialSpend, CredentialThrottles, RouteCorrelation,
     RouteCorrelations, RouteIdentity, ThrottleScope, ThrottleScopes, classify_throttle_scope,
-    classify_throttle_scopes, correlate_routes, recent_credential_cost, recent_credential_spend,
-    recent_credential_throttles,
+    classify_throttle_scopes, correlate_routes, estimated_context_tokens, recent_credential_cost,
+    recent_credential_spend, recent_credential_throttles,
 };

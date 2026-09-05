@@ -41,7 +41,8 @@ use glasshouse::routing::disposable::{
 use glasshouse::routing::evidence::{CostConfidence, RouteResponsiveness};
 use glasshouse::routing::free::{FreePool, FreePreferences};
 use glasshouse::routing::session::{
-    Destination, EstimatedInputSize, RouterInputs, RoutingMoment, SessionRouter, TaskRequirements,
+    Destination, EstimatedInputSize, RouterInputs, RoutingMoment, SessionContextFacts,
+    SessionRouter, TaskRequirements,
 };
 use glasshouse::routing::{AssignedModel, Backend, Cost, CredentialId, ToolSemantics};
 use glasshouse::secret::SecretRef;
@@ -769,6 +770,141 @@ fn measured_cache_temperature_is_inert_without_a_reading_and_below_the_sample_fl
             .expect("the term is always present, even when inert");
         assert_eq!(contribution.magnitude(), 0.0, "{explanation:?}");
     }
+}
+
+// ---------------------------------------------------------------------------
+// `GH-CONTEXT-SIZE` — map line 1534: `context quality`, a bounded negative
+// contribution over the estimated context size line 1158 attaches.
+// ---------------------------------------------------------------------------
+
+/// Map line 1534: a lean estimate (at or under the 32,000-token floor) and no
+/// estimate at all both score exactly `0.0` — but the first says *lean* and
+/// the second says *unknown*, never the other's word. A mid-range estimate
+/// scores strictly between `0.0` and the ceiling, and any estimate at or past
+/// 160,000 tokens caps at the ceiling and never scores lower.
+#[test]
+fn context_quality_scores_zero_at_the_lean_floor_and_caps_at_the_ceiling() {
+    let overrides = no_pairing_overrides();
+    let health = FreePool::new();
+    let now = Instant::now();
+    let inputs = RouterInputs {
+        overrides: &overrides,
+        health: &health,
+        now,
+        requirements: TaskRequirements::default(),
+    };
+
+    let with_estimate = |id: &'static str, tokens: Option<i64>| {
+        Destination::fresh(
+            id,
+            IntegrationId::ClaudeCode,
+            "default",
+            responsiveness_backend("anthropic", "claude-opus-4", id),
+            None,
+        )
+        .with_session_context(SessionContextFacts::UNREAD.with_estimated_context_tokens(tokens))
+    };
+
+    let unknown = with_estimate("unknown", None);
+    let lean = with_estimate("lean", Some(32_000));
+    let mid = with_estimate("mid", Some(96_000));
+    let bloated = with_estimate("bloated", Some(160_000));
+    let over = with_estimate("over", Some(500_000));
+
+    let routed = SessionRouter::new()
+        .choose(
+            RoutingMoment::SessionStart,
+            None,
+            &[unknown, lean, mid, bloated, over],
+            &inputs,
+        )
+        .expect("destinations were offered");
+
+    for (destination, explanation) in routed.considered() {
+        let contribution = explanation
+            .contributions()
+            .iter()
+            .find(|c| c.name() == "context quality")
+            .expect("the term is always present, even when inert");
+        match destination.id() {
+            "unknown" => {
+                assert_eq!(contribution.magnitude(), 0.0, "{contribution:?}");
+                assert!(
+                    contribution.evidence().contains("unknown"),
+                    "{}",
+                    contribution.evidence()
+                );
+            }
+            "lean" => {
+                assert_eq!(contribution.magnitude(), 0.0, "{contribution:?}");
+                assert!(
+                    contribution.evidence().contains("lean"),
+                    "{}",
+                    contribution.evidence()
+                );
+            }
+            "mid" => assert!(
+                (contribution.magnitude() - (-0.05)).abs() < 1e-9,
+                "96,000 tokens is halfway from lean to bloated: {contribution:?}"
+            ),
+            "bloated" => assert_eq!(
+                contribution.magnitude(),
+                -0.1,
+                "160,000 tokens reaches the ceiling: {contribution:?}"
+            ),
+            "over" => assert_eq!(
+                contribution.magnitude(),
+                -0.1,
+                "past 160,000 tokens must never score lower than the ceiling: {contribution:?}"
+            ),
+            other => panic!("unexpected destination id {other}"),
+        }
+    }
+}
+
+/// Map line 1534: with every other term equal, a lean session outranks an
+/// otherwise identical bloated one.
+///
+/// Mutation target `sign-inverted`: negating `context_quality`'s contribution
+/// must fail this test.
+#[test]
+fn a_lean_session_outranks_an_otherwise_identical_bloated_one() {
+    let overrides = no_pairing_overrides();
+    let health = FreePool::new();
+    let now = Instant::now();
+    let inputs = RouterInputs {
+        overrides: &overrides,
+        health: &health,
+        now,
+        requirements: TaskRequirements::default(),
+    };
+
+    let lean = Destination::fresh(
+        "lean",
+        IntegrationId::ClaudeCode,
+        "default",
+        responsiveness_backend("anthropic", "claude-opus-4", "LEAN_KEY"),
+        None,
+    )
+    .with_session_context(SessionContextFacts::UNREAD.with_estimated_context_tokens(Some(1_000)));
+    let bloated = Destination::fresh(
+        "bloated",
+        IntegrationId::ClaudeCode,
+        "default",
+        responsiveness_backend("anthropic", "claude-opus-4", "BLOATED_KEY"),
+        None,
+    )
+    .with_session_context(SessionContextFacts::UNREAD.with_estimated_context_tokens(Some(200_000)));
+
+    let routed = SessionRouter::new()
+        .choose(RoutingMoment::SessionStart, None, &[lean, bloated], &inputs)
+        .expect("destinations were offered");
+    assert_eq!(
+        routed.chosen().id(),
+        "lean",
+        "with every other term equal, the lean session must win: {:?}",
+        routed.explanation()
+    );
 }
 
 // ---------------------------------------------------------------------------

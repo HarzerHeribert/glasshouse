@@ -399,7 +399,13 @@ pub(crate) fn routing_destinations(
                     .and_then(|sticky| sticky.classification()),
             )
             .with_touched_files(session_touched_files(checkpoints.as_ref(), &record.id))
-            .with_task_named_paths(task_named_paths.clone());
+            .with_task_named_paths(task_named_paths.clone())
+            .with_estimated_context_tokens(
+                glasshouse::routing::evidence::estimated_context_tokens(
+                    consumption.unwrap_or(&[]),
+                    record.id.as_str(),
+                ),
+            );
         // Map line 1299: a cold resume's honest approximation is that
         // session's own latest checkpoint — `warm.state`'s `Resumable` arm
         // only. A `Live` session carries no estimate at all: `WarmSession`

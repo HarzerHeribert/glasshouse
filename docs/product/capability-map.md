@@ -1155,7 +1155,7 @@ Phase 29 — Memory commits
 
 Phase 30 — Session context metadata
 
-☐ Track an estimated context-size value for a session when the harness exposes enough information.
+☑ Track an estimated context-size value for a session when the harness exposes enough information.
 ☑ Track the number of observed compactions for a session when known.
 ☑ Track the most recent request or turn time for a session.
 ☑ Track an estimated prompt-cache state independently from session resumability.
@@ -1531,7 +1531,7 @@ Fixed architectural requirements
 ☑ Include workload-tier fit in candidate scoring.
 ☑ Include hard capability satisfaction as a prerequisite rather than a soft bonus.
 ☑ Include existing session affinity in candidate scoring.
-☐ Include context quality in candidate scoring.
+☑ Include context quality in candidate scoring.
 ☑ Include prompt-cache temperature in candidate scoring.
 ☑ Include normalized remaining capacity in candidate scoring.
 ☑ Include provider health in candidate scoring.

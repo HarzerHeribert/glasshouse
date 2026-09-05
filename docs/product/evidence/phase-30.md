@@ -190,25 +190,22 @@ dismissed later by the same reflex.
 
 ### Track an estimated context-size value for a session when the harness exposes enough information. (line 1158)
 
-Contract: Given a session, when a caller asks for its estimated context size, Glasshouse answers nothing, because no harness adapter and no gateway producer supplies a token count or a context reading at all.
+Contract: Given a session whose latest gateway exchange recorded the provider's own token counts, when the router builds its destination, Glasshouse attaches that exchange's prompt size — by the wire rule: Anthropic Messages sums `input_tokens` and `cache_read_input_tokens`, every other wire takes `input_tokens` alone — while preserving `None`, never `0`, for a session with no such row.
 
-State: NOT STARTED — worker refused the line; see its reason
+State: **COMPLETE** (2026-09-05). The refusal above was correct when written and ended when its wall fell: the 2026-09-03 ruling let `gateway::ingress` record per-exchange tokens with migration 24's `session_id` (the same producer that closed 1535/1545). Design of record: `design-decisions.md`, *Context size is read off the gateway's own exchange, never guessed*. Package `GH-CONTEXT-SIZE` (Sonnet, Amber), report **`.agent-runtime/report-context-size.md`**; integrated with 1534 in wave 120.
 
 Production evidence:
-- `src/session/store.rs` — `SessionContext (the field is deliberately absent; the type doc carries the refusal)`
+- `src/routing/evidence/signals.rs :: estimated_context_tokens` — the latest known-input row for the session by `(observed_at_unix, seq)`, the wire rule keyed on the row's `route` slug.
+- `src/commands/routing_destinations.rs :: routing_destinations` — attaches it to `SessionContextFacts` from the `consumption` rows already in hand; no new ledger open, no column, no migration.
+- `src/session/store/context.rs` — the field stays absent by design (a copied count is a second source of truth); the type doc now points at the producer instead of carrying the refusal.
 
-Regression evidence:
-- `session_context::a_context_size_has_no_producer_in_this_build`
+Regression evidence: `routing::evidence::tests::estimated_context_tokens_tests::{anthropic_messages_sums_input_and_cached_tokens, every_other_wire_takes_input_tokens_alone, the_latest_row_wins_regardless_of_slice_order, no_known_row_reads_none_and_never_zero}`.
 
-| mutation | vocabulary | result | killed by |
+| mutation | change | result | killed by |
 |---|---|---|---|
-| no production behaviour was added for this line, so there is nothing to mutate | `none-applicable` | not run | `` |
+| wire-rule-dropped | the `anthropic-messages` arm returns `input` alone | KILLED | `anthropic_messages_sums_input_and_cached_tokens` — `left: 100, right: 1000` |
 
-Recorded scope limits — stated by the worker, not discovered later:
-- This refuses the line for THIS build. A harness that later reports a token count, or a body-aware gateway layer, would make it packageable.
-- The proof is an absence: the test shows the token columns and the event rows are empty after a full turn plus a compaction. It cannot prove no future producer exists.
-
----
+Limits: proved over hand-built `RoutingObservation` slices, not a live `consumption_in_window` read (that round trip is `recent_credential_spend`'s precedent); the attach line rides an already-tested builder chain and has no `--bin glasshouse` test naming it; cache-*creation* tokens are not recorded, so the estimate is a floor on the turn that writes a cache. `tests/session_context.rs :: a_context_size_has_no_producer_in_this_build` still passes — it asserts the *hook* path writes no token row, which is true — but its name now says more than it checks; renaming it is a one-line trim for a doc package, not owed here.
 
 ### Track the number of observed compactions for a session when known. (line 1159)
 
