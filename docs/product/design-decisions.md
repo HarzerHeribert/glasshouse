@@ -6732,3 +6732,114 @@ with it.
 /// neither of those is yet: wiring a real [`crate::paths::RuntimePaths`] into
 /// [`crate::gateway::start_if_required`]'s two call sites is
 /// `crates/glasshouse/src/main.rs`, which this package may not edit.
+
+## Trims: `gateway/translate/gemini/mod.rs` — history moved out of comments by `GH-TRIM-GATEWAY-GEMINI`, 2026-09-05
+
+### module doc
+
+//! The Google Generative Language codec: `generateContent` and
+//! `streamGenerateContent` requests, responses and stream chunks, into and
+//! out of [`super::canonical`].
+//!
+//! The fourth wire, and the first that differs from the other three in
+//! **shape** rather than only in spelling. Five decisions are worth reading
+//! before the code, because each is a place where a mechanical mapping would
+//! have been wrong.
+//!
+//! # 1. The model is in the path, not in the body
+//!
+//! Anthropic Messages, OpenAI Chat and OpenAI Responses all post to one
+//! fixed path and name the model in the document. Gemini posts to
+//! `…/v1beta/models/<model>:generateContent`, so the request target *is*
+//! part of the translation. [`Gemini::outbound_endpoint`] is where that
+//! happens, and [`Gemini::refuse_unencodable`] refuses a model name that
+//! could not address a path — a name carrying `/`, `?`, `#` or whitespace
+//! would otherwise be smuggled into the request line.
+//!
+//! The outbound path carries **`/v1beta` itself**, and the `gemini`
+//! provider template's base URL is the bare host, for the reason Anthropic
+//! Messages' entry in [`super::outbound_target`] records: a request the
+//! provider serves natively is **relayed byte for byte**, target included,
+//! and a Gemini client's own target already starts `/v1beta`. A base URL
+//! carrying the version and a relayed target carrying it too composes
+//! `…/v1beta/v1beta/models/…`, which the service answers `404` for and
+//! which the harness would report as a model error. One of the two has to
+//! own the segment; the relay cannot, so this does.
+//!
+//! A streamed request goes to `:streamGenerateContent?alt=sse`. Without
+//! `alt=sse` Google answers a streamed **JSON array**, not server-sent
+//! events, and [`super::stream::SseReader`] would see one enormous line.
+//!
+//! # 2. A function call has no id, so a tool result is matched by NAME
+//!
+//! This is the one that decides whether a harness's tooling survives.
+//! Gemini's `functionCall` carries `{name, args}` and no id at all, and its
+//! `functionResponse` carries `{name, response}` — the **name** is the
+//! matching key on this wire, where on the other three the id is.
+//!
+//! So the two directions are not symmetric, and neither of them invents a
+//! mapping table:
+//!
+//! - **Encoding** a canonical request (the direction every supported pair
+//!   uses): a [`Block::ToolResult`]'s `tool_use_id` is resolved to the
+//!   `name` of the [`Block::ToolUse`] carrying that id **in the same
+//!   request**. Every harness this gateway serves resends its whole
+//!   conversation, so the call a result answers is right there. An id with
+//!   no such block is refused by name rather than guessed at — a
+//!   `functionResponse` under the wrong name runs the wrong tool's result
+//!   into the model.
+//! - **Decoding** a Gemini response: the harness needs *some* id to send
+//!   back, and Gemini issued none, so this codec mints
+//!   `gemini-call-<index>-<name>` — unique within one answer, and carrying
+//!   the name it was minted from so a person reading a transcript can see
+//!   what it means. It is never parsed back: the resolution above goes
+//!   through the tool-use block, not through the id's spelling.
+//!
+//! # 3. `STOP` is not `end_turn` when the candidate is a function call
+//!
+//! Gemini reports `finishReason: "STOP"` for an answer that is entirely
+//! function calls. A harness told `end_turn` after a tool call **stops
+//! instead of running the tool**, which is the whole of capability map line
+//! 1950 failing quietly. So the canonical stop reason is derived from the
+//! content as well as the reason: a candidate containing any `functionCall`
+//! part stops with [`StopReason::ToolUse`].
+//!
+//! # 4. The end-user identifier is dropped BY NAME, and it is the only one
+//!
+//! Gemini's request has no field for an end-user identifier. Claude Code
+//! sends `metadata.user_id` on **every** request, so refusing it would
+//! refuse the pair outright rather than refuse a field — and this codec's
+//! whole purpose is a pair that works. It is therefore listed in
+//! [`IGNORED_FIELDS`] and dropped there, exactly as `openai_chat` already
+//! lists `stream_options.include_usage` and `image_url.detail`: named in the
+//! table the `field_rows` view renders, never silent. It is an
+//! abuse-monitoring hint that does not change the answer, which is why it is
+//! the only request field this codec drops.
+//!
+//! # 5. The stream ends without a terminator, so the finish reason is one
+//!
+//! An SSE `streamGenerateContent` has no `data: [DONE]`; the socket simply
+//! closes. A stream that ended early would otherwise be indistinguishable
+//! from one that finished, and the harness would be handed a truncated
+//! message wearing `end_turn` — the trap `openai_chat`'s `[DONE]` rule
+//! exists to close. So this decoder treats **`finishReason` as the
+//! terminator**: a stream that ends without one is refused by name.
+//!
+//! ## Which harness-side events are synthesised, and at which chunk
+//!
+//! Gemini's chunks are whole `GenerateContentResponse` documents, not the
+//! typed start/delta/stop events the canonical vocabulary wants, so every
+//! block boundary here is synthesised. Nothing is held back for it:
+//!
+//! | at | emitted |
+//! |---|---|
+//! | the **first** chunk | [`StreamEvent::MessageStart`] with `responseId` and `modelVersion` as they arrived |
+//! | a chunk carrying a `text` part | [`StreamEvent::BlockStart`] (`Text`) if no text block is open, then a [`StreamEvent::BlockDelta`] with that fragment |
+//! | a chunk carrying a `functionCall` part | a [`StreamEvent::BlockStop`] for whatever was open, then `BlockStart` (`ToolUse`) and one `BlockDelta` carrying the whole `args` — Gemini sends a call's arguments in one piece, so there is nothing to fragment |
+//! | the chunk carrying `finishReason` / `usageMetadata` | nothing yet; both are held for the message's own delta, because a later chunk may still carry parts |
+//! | the end of the stream | `BlockStop` for the open block, then [`StreamEvent::MessageDelta`] with the stop reason and usage, then [`StreamEvent::MessageStop`] |
+//!
+//! The first harness-side event therefore leaves on the first chunk, and a
+//! text fragment leaves on the chunk that carried it. The one thing held is
+//! the message's final delta, which cannot be written before the message
+//! has finished by construction.
