@@ -233,6 +233,7 @@ fn a_project_command_beats_a_same_named_skill() {
     assert_eq!(all.iter().filter(|c| c.name == "reviewer").count(), 1);
 }
 
+#[cfg(unix)]
 #[test]
 fn a_symlink_out_of_the_project_root_is_not_followed() {
     let fixture = Fixture::new("symlink-escape");

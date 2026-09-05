@@ -14,7 +14,6 @@
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -37,7 +36,11 @@ fn unique() -> u64 {
     NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
+/// Unix only: the fakes are shell scripts. The Windows pane cell runs every
+/// other test in this file; a `.cmd` twin is the successor if one is wanted.
+#[cfg(unix)]
 fn write_script(dir: &Path, name: &str, body: &str) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
     let path = dir.join(name);
     fs::write(&path, body).unwrap();
     let mut perms = fs::metadata(&path).unwrap().permissions();
@@ -47,6 +50,7 @@ fn write_script(dir: &Path, name: &str, body: &str) -> PathBuf {
 }
 
 /// A fake `glasshouse` that records its own argv, one line per invocation.
+#[cfg(unix)]
 fn write_argv_recorder(dir: &Path, record: &Path) -> PathBuf {
     let body = format!("#!/bin/sh\necho \"$@\" >> \"{}\"\n", record.display());
     write_script(dir, "fake_glasshouse.sh", &body)
@@ -284,6 +288,7 @@ fn the_binary_loads_the_projects_own_instructions() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn the_binary_emits_session_start_to_the_hook_command() {
     let root = scratch_dir("hook-root");
@@ -418,6 +423,7 @@ fn nothing_the_model_returns_is_executed() {
 ///
 /// This drives the built binary with `/memory` against a fake `glasshouse`
 /// that answers one MCP `tools/call`, and asserts the answer reaches stdout.
+#[cfg(unix)]
 #[test]
 fn the_binary_reads_memory_through_the_mcp_surface() {
     let root = scratch_dir("memory-root");
