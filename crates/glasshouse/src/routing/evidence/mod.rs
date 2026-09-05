@@ -9,158 +9,15 @@
 //! too small to support a routing decision (line 1340), never a wide error
 //! bar around a guess.
 //!
-//! # What a gateway exchange can actually supply, and what it cannot
-//!
-//! [`crate::gateway::session::SessionRouting`] is this ledger's one production
-//! producer this round (see [`EvidenceLedger::record`]'s callers in
-//! `crate::gateway`). It sees far less of a turn than a naive reading of line
-//! 1331 suggests, and the honest limits are load-bearing for which boxes this
-//! package can close:
-//!
-//! - **`provider`, `model`, `harness`, `quota_context`, `route`: available**,
-//!   but only once a launch profile has called
-//!   [`crate::gateway::session::SessionRouting::bind`]. Before that, the
-//!   gateway forwards bytes for a session nothing has claimed yet, and
-//!   recording a provider/model pair for it would be inventing an identity
-//!   the exchange does not have. `route` is the wire protocol slug
-//!   (`crate::gateway::ingress::Exchange::protocol`, private to that module),
-//!   not a full [`crate::harness::pairing::ServingRoute`] — the gateway module may not
-//!   name `crate::harness` at all (see its own header), so a routing
-//!   observation cannot carry more identity than the ingress already exposes.
-//! - **`dispatched_at`: an approximation, not the true instant.** The real
-//!   moment a request left for the provider lives inside
-//!   `crate::gateway::ingress::forward`, which is outside this round's
-//!   partition (`gateway/ingress.rs` is not in this package's `YOURS` list).
-//!   What this producer stamps instead is the instant the accept loop handed
-//!   the connection to `ingress::serve` — earlier than the true dispatch by
-//!   however long it takes to read the request head and stream its body to
-//!   the provider, which is not bounded for a coding session's full context
-//!   window. Recorded as an honest upper-bound proxy, not silently corrected.
-//! - **`completed_at`: accurate.** Stamped the instant `ingress::serve`
-//!   returns, which is genuinely when the exchange finished — every byte of
-//!   the response has been relayed and the connection is closing.
-//! - **`first_byte_at`: accurate, and the one timing column this producer
-//!   added after this module's own header was first written.** Stamped the
-//!   instant `crate::gateway::ingress::forward` sees the provider's status
-//!   and headers arrive — before a byte of the body is read, so this is a
-//!   clock reading rather than a step toward the parse this module is
-//!   forbidden. `None` on every exchange that never reached a provider at
-//!   all, and on the transport-failure case where one was dialled but never
-//!   answered.
-//! - **`first_token_at`, `first_tool_call_at`: supplied by this producer only
-//!   for a *translated* exchange — GH-STREAM-FIRST-EVENTS, closing 1331 and
-//!   1332 for the translated path.** `crate::gateway::translate` already
-//!   decodes every provider event into its own canonical form in order to
-//!   re-encode it for the harness, so the instant a qualifying canonical
-//!   event passes that seam is a clock reading, not a step toward the parse
-//!   this module remains forbidden. Line 1332's exclusions — whitespace
-//!   padding, transport keepalives, reasoning-only deltas — are checked in
-//!   the canonical vocabulary itself (`translate::FirstEvents::note`), not
-//!   per provider, so they cannot drift per codec. A **relayed** exchange
-//!   still leaves both `NULL`: `crate::gateway::ingress::Exchange` (private
-//!   to that module) is still "structurally incapable of carrying a body,"
-//!   and this producer still cannot get the value wrong because it never
-//!   attempts to find one on that path.
-//! - **`tool_rounds`, `repairs`: supplied by this producer only for a
-//!   *translated* exchange — `GH-TOOL-ROUNDS-ON-TRANSLATED`, closing 1334's
-//!   last two quantities and 1350 for the translated path.** `tool_rounds` is
-//!   not a turn spanning several gateway connections — the gateway still has
-//!   no notion of that, and still serves one HTTP request per connection
-//!   (`crate::gateway::ingress::serve`'s own "why one request per
-//!   connection") — it is the number of tool-use blocks *this one exchange's
-//!   response* requested, which `crate::gateway::translate` already counts
-//!   while decoding that response to re-encode it. `repairs` is the number
-//!   of `is_error: true` tool-result blocks *this one exchange's request*
-//!   carried, counted from the same decoded request `turn_shape` already
-//!   walks. Neither is a judgement of success; both are counts of blocks the
-//!   protocol names as such. A **relayed** exchange still leaves both `NULL`
-//!   (this producer never decodes one), and a translated exchange whose
-//!   request decoded but found no error result, or whose response carried no
-//!   tool-use block, writes `0` rather than `NULL` — the seam looked and
-//!   found none, a different fact from not looking.
-//! - **`retries`: `0`, and it is a count, not a default.** The gateway
-//!   forwards each request exactly once — `crate::gateway::ingress::forward`
-//!   calls `Agent::run` once, and `ureq` 3 performs no transparent retry —
-//!   so every gateway row says so. A harness's own retries are separate
-//!   connections and separate rows.
-//! - **`failovers`: supplied.** Whether *this* exchange's outcome moved the
-//!   session to another backend is decided by
-//!   `crate::gateway::session::SessionRouting::observe_exchange` in the same
-//!   connection thread, before the row is written, so the row can carry it:
-//!   `1` for a `ChangeCause::Failover`, else `0`. A credential rotation
-//!   within one provider is deliberately **not** a failover here — Phase 9I
-//!   line 537 keeps the two apart, and so does this column.
-//! - **`failure_class`: supplied, from framing alone.** Capability map line
-//!   1364's nine-way vocabulary, [`FailureClass`], decided by
-//!   `crate::gateway::session`'s `failure_class` from the status, the
-//!   rate-limit headers, the byte count and how the stream ended — never
-//!   from a byte of the body. `None` on a served exchange.
-//! - **`input_tokens`, `output_tokens`, `cached_input_tokens`: supplied by
-//!   this producer only for a *translated* exchange.** `crate::gateway::translate`
-//!   decodes the canonical response anyway, so its `usage` is a sibling of
-//!   something already parsed: `tokens_of` hands it to
-//!   `record_routing_observation`'s `with_tokens`, and
-//!   `tests/gateway_translate_evidence.rs` proves the row carries the
-//!   provider's own three counts. A *relayed* exchange leaves all three
-//!   `NULL`, for the same reason as the timing columns above: reading them
-//!   means parsing a response body this module is forbidden to parse — and
-//!   the same test proves nothing is invented for it. **`cost_micro_usd`:
-//!   not supplied by this producer** (its one producer is line 1307's,
-//!   `main.rs::record_entitlement_fallback`). See also the second producer
-//!   below, which is not a gateway and is not forbidden the body.
-//! - **`outcome`: a coarse proxy, not the user-visible outcome line 1334
-//!   asks for.** This producer only records an observation when an exchange
-//!   actually reached the provider (`Forwarded` or `Unreachable` — the same
-//!   filter `crate::gateway::session::classify` already applies for Phase 9H
-//!   and 9I), and maps a `2xx`/`3xx` forwarded status to
-//!   [`Outcome::Succeeded`] and anything else reaching the provider to
-//!   [`Outcome::Failed`]. That is a transport-level fact, not a statement
-//!   about whether the turn actually helped the user — a `200` whose body
-//!   describes a model error looks identical to this producer, because the
-//!   body is exactly what it cannot read. Recorded because it is a real,
-//!   non-fabricated signal and the schema's own `outcome` vocabulary
-//!   includes it; the gap to a genuine user-visible verdict is named here
-//!   rather than papered over.
-//! - **`context_state`: always `unknown`** from this producer. The gateway
-//!   has no cache-state signal of its own; the schema's `NOT NULL DEFAULT
-//!   'unknown'` is exactly what makes that the honest default rather than a
-//!   guess.
-//!
-//! # The second producer, and why it can read what the gateway cannot
-//!
-//! `crate::memory::extract` supplies the token columns the gateway leaves
-//! `NULL`, and it is allowed to for a reason that does not weaken the rule
-//! above. The gateway **relays** somebody else's request: the response body
-//! is a byte stream `crate::gateway::ingress` is designed never to parse,
-//! and that is unchanged. Memory extraction is the **disposable** path,
-//! where Glasshouse builds the request itself and already deserializes the
-//! whole reply document to find the assistant message in it — so `usage` is
-//! a sibling key of something already parsed, not a new capability to read
-//! payloads.
-//!
-//! What that producer supplies, through
-//! [`crate::memory::extract::ModelCall::observation`]: `provider`, `model`,
-//! `route` (the wire protocol slug, the same spelling the gateway uses), and
-//! `input_tokens`, `output_tokens`, `cached_input_tokens` **when the
-//! provider reported them**. What it leaves `NULL`, deliberately: every
-//! timing column, `outcome`, the four turn counters, `purpose`, and
-//! `cost_micro_usd` — see that type's own documentation for why filling a
-//! column with the nearest available number is worse than leaving it empty.
-//!
-//! # [`crate::config::pairing::ObservationSource`] for `crate::config::pairing`
-//!
-//! [`EvidenceLedger`] implements [`crate::config::pairing::ObservationSource`],
-//! replacing `NoObservations` — design decision 6. One honest gap in that
-//! implementation: [`crate::harness::pairing::EvidenceKey`] is a four-part
-//! identity that includes a launch profile name, and this ledger's schema has
-//! nowhere to put one — the gateway that produces these rows does not see a
-//! launch profile either, only a harness slug and a bound assignment (see
-//! above). `ObservedEvidenceSource::observed` matches on harness, model and
-//! route and **ignores launch profile**, which means observations from two
-//! launch profiles that otherwise share a harness, model and route are
-//! folded together. Recorded rather than hidden: the alternative was
-//! inventing a launch-profile column no producer can fill, which is the same
-//! mistake line 1333 exists to prevent for cost.
+//! Two producers write these rows, each honest about what it can see:
+//! [`crate::gateway::session::SessionRouting`] relays a harness's own request
+//! and so leaves most timing, token and outcome columns `NULL` unless a
+//! translated exchange's own seam already decoded them; `crate::memory::extract`
+//! builds and decodes its own request and so can fill the token columns the
+//! gateway cannot. A column this build cannot honestly read stays `NULL` —
+//! "the build that wrote this row recorded nothing here" — never a guessed or
+//! interpolated value.
+// History: design-decisions.md, "Trims: routing/evidence/mod.rs", module doc.
 
 use std::sync::Mutex;
 
@@ -435,26 +292,16 @@ impl ContextState {
 }
 
 /// The four-word effort ladder a translated exchange's row records —
-/// migration 24's `routing_observations.effort_level`.
-///
-/// # Why this mirrors a type in the gateway instead of borrowing it
-///
-/// The value comes from
-/// [`crate::gateway::translate::canonical::EffortRequest::level`], whose own
-/// `EffortLevel` is the *wire* vocabulary: it exists to be spelled onto
-/// OpenAI's `reasoning_effort` and to be derived from Anthropic's
-/// `budget_tokens`. This one is the *stored* vocabulary, and this module may
-/// not reach into `crate::gateway` — the dependency runs the other way, and
-/// `crate::gateway::session` is what writes these rows. So the four words
-/// are declared here and pinned against the gateway's four, exhaustively and
-/// in lockstep, by `canonical`'s own
-/// `every_wire_effort_level_stores_and_reads_back_as_the_same_word`: a fifth
-/// variant on either side fails to compile there rather than drifting.
+/// migration 24's `routing_observations.effort_level`. The *stored*
+/// vocabulary: this module may not depend on `crate::gateway`, so it is
+/// declared here rather than reusing `crate::gateway::translate::canonical`'s
+/// *wire* `EffortLevel`, and pinned against it exhaustively by that module's
+/// own `every_wire_effort_level_stores_and_reads_back_as_the_same_word` test.
 ///
 /// [`Self::from_stored`] answers [`None`] for a word this build does not
-/// know, and this module's own row reader keeps that as `None` rather than an
-/// error — migration 24's own doc comment has the reason, which is migration
-/// 23's.
+/// know, kept as `None` rather than an error — migration 24's own doc
+/// comment has the reason.
+// History: design-decisions.md, "Trims: routing/evidence/mod.rs", `EffortLevel` doc.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum EffortLevel {
     Minimal,
@@ -573,26 +420,10 @@ pub struct ObservedCost {
 /// this row treats a pre-migration `NULL`; [`FailureClassCounts`] keeps such
 /// rows out of *served* by reading [`Outcome`] beside this.
 ///
-/// # Stored as text with no SQL `CHECK`
-///
-/// The column carries no `CHECK`, for the reason
-/// `crate::database::EVALUATION_KINDS` gives: a vocabulary that will grow must
-/// not cost a table rebuild per value. The vocabulary lives here —
-/// [`FailureClass::ALL`], [`FailureClass::as_str`], `from_stored` — and
-/// `crate::database::FAILURE_CLASSES` is pinned against it by a test.
-///
-/// # What decides each value, and what is never read to decide it
-///
-/// The one place a value is chosen is `crate::gateway::session`'s
-/// `failure_class`, beside `classify`. Every rule there is over a status
-/// code, a rate-limit header the relay already reads in order to forward it,
-/// a byte count the relay already keeps in order to relay the body, or how
-/// the stream ended as its own framing said it would. **No rule reads a byte
-/// of the body**: a `200` whose body describes a model error is [`None`]
-/// here, because the body is exactly what the relay cannot read — the same
-/// caveat [`Outcome`] already carries. The design ruling is recorded in
-/// `docs/product/design-decisions.md` under *"Phase 33: framing is not
-/// content"*.
+/// No rule deciding a value reads a byte of the body — see
+/// `crate::gateway::session`'s `failure_class`, beside `classify`, and
+/// `docs/product/design-decisions.md`'s *"Phase 33: framing is not content"*.
+// History: design-decisions.md, "Trims: routing/evidence/mod.rs", `FailureClass` doc.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum FailureClass {
     /// `429` from a per-window cadence limit: the provider asked for a pause
@@ -719,17 +550,7 @@ impl std::fmt::Display for FailureClass {
 /// exchanges is a true statement about two exchanges, and it is the
 /// denominator printed beside it that keeps a reader from mistaking it for a
 /// rate.
-///
-/// # Which rows count
-///
-/// A row is folded in only when it recorded an [`Outcome`] at all — the
-/// gateway producer always does; `crate::memory::extract`'s rows never do and
-/// are not gateway exchanges, so they are neither served nor failed here. A
-/// row with a class is counted under it. A row with no class and a
-/// [`Outcome::Succeeded`] is *served*. A row with no class and any other
-/// outcome is *unclassified*: written before migration 18, or by a producer
-/// that recorded a verdict without a kind — counted in the denominator so it
-/// is not silently absent, and never mistaken for served.
+// History: design-decisions.md, "Trims: routing/evidence/mod.rs", `FailureClassCounts` doc.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FailureClassCounts {
     served: usize,
