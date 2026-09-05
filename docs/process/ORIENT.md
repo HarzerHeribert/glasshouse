@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1310 closed · 88 active committed open (94%)** — across 21 phases.
+**1311 closed · 87 active committed open (94%)** — across 21 phases.
 
 Not in the work queue: **7 deferred gate criteria** (Phase 52, Phase 53) awaiting a user decision, and **229 parked experimental lines**. They are visible in the map; they are not release-blocking work.
 
@@ -32,10 +32,10 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 32G | Provider-aware request-cost estimation | **1** | 9 | `1296` |
 | Phase 34C | Automatic routing-model selection | **1** | 12 | `1429` |
 | Phase 38 | Quota-preserving routing | **1** | 6 | `1604` |
+| Phase 59 | Decompression: the code's physical shape catches up with its architecture | **1** | 7 | `2043` |
 | Phase 9 | Antigravity adapter | **2** | 5 | `330` |
 | Phase 20 | Minimal durable project memory | **2** | 16 | `805` |
 | Phase 33 | Resource health | **2** | 13 | `1309` |
-| Phase 59 | Decompression: the code's physical shape catches up with its architecture | **2** | 6 | `2043` |
 | Phase 33B | Reliability-adjusted agent performance | **3** | 11 | `1345` |
 | Phase 60 | Parallel-session file coordination | **3** | 13 | `2374` |
 | Phase 21E | Decision ladder and conflict handling | **4** | 8 | `907` |
@@ -93,6 +93,10 @@ these unwrapped.
 
 - **1608** ☐ Prefer cheap resources for simple repository summarization when no valuable warm session already exists.
 
+### Phase 59 — Decompression: the code's physical shape catches up with its architecture  (1 open, 7 closed)
+
+- **2053** ☐ Keep doc comments to the invariant and the reason it holds now, moving the history of how a decision was reached to the design or measurements record behind a one-line pointer.
+
 ### Phase 9 — Antigravity adapter  (2 open, 5 closed)
 
 - **340** ☐ Integrate structured Antigravity lifecycle events where the CLI exposes them.
@@ -112,11 +116,6 @@ these unwrapped.
 
 - **1879** ☐ Do not add a graph database solely to visualize project memory.
 - **1882** ☐ Evaluate whether SQLite relations are insufficient before adopting a dedicated graph database.
-
-### Phase 59 — Decompression: the code's physical shape catches up with its architecture  (2 open, 6 closed)
-
-- **2053** ☐ Keep doc comments to the invariant and the reason it holds now, moving the history of how a decision was reached to the design or measurements record behind a one-line pointer.
-- **2054** ☐ Re-open the refused lines the user named as product-relevant — context quality (1534), cache temperature and affinity (1535, 1545), low-confidence memory (1129), preserving user changes on rollback (1044), and nearly-complete tasks under a reserve or quota threshold (1294, 1610) — and settle each by design and risk rather than by the count of open boxes.
 
 ### Phase 33B — Reliability-adjusted agent performance  (3 open, 11 closed)
 

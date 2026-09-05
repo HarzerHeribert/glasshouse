@@ -114,3 +114,17 @@ State: **PARTIALLY VERIFIED** — trims land file by file; the line closes when 
 
 Limits: `tests/memory_store.rs` reads the file by `include_str!` and skips comment lines, so no test asserts a comment literal; the trim proves nothing about behaviour beyond *unchanged*.
 
+### Re-open the refused lines the user named as product-relevant — context quality (1534), cache temperature and affinity (1535, 1545), low-confidence memory (1129), preserving user changes on rollback (1044), and nearly-complete tasks under a reserve or quota threshold (1294, 1610) — and settle each by design and risk rather than by the count of open boxes. (line 2054)
+
+State: **COMPLETE** (2026-09-05, ticked by the primary once the last of the seven, 1534, closed). Every named line was settled by a design entry first and closed on a producer that exists, never on the count; each is ticked on the map with its own evidence entry, and this line's evidence is the seven of them:
+
+| line | settled by | closed |
+|---|---|---|
+| 1534 context quality | `design-decisions.md`, *Context size is read off the gateway's own exchange, never guessed — designing lines 1158 and 1534* (the size is the latest gateway exchange's prompt size, read not modelled; the term is bounded and negative only); `phase-35b.md` | 2026-09-05, `2a19f29`, with 1158 — and today's 1594 entry (`phase-37.md`) is its first consumer beyond the ranking itself |
+| 1535, 1545 prompt-cache temperature and affinity | `design-decisions.md`'s cache-temperature entry: measured from `cache_read_input_tokens` over the route's own rows, stamped and scored as warm, cold or unknown, never inferred; `phase-35b.md` (24/25) | 2026-09-05, waves 116–117 |
+| 1129 low-confidence memory | the per-door observed false-positive rate, injection withheld below it; `phase-27.md` (Phase 27 complete) | 2026-09-05, waves 116–117 |
+| 1044 preserving user changes on rollback | *1044 names the preserve set, reverts nothing* — the design ruling of 2026-09-05; `phase-21e.md` / `phase-21g.md` as the entry names | 2026-09-05, `d963016` |
+| 1294, 1610 nearly-complete tasks | `phase-38.md`, *Task progress is declared — lines 1294 and 1610 closed together, 2026-09-03*: the producer is a declaration (`glasshouse task-progress`), not an observation, and the refusal's reason was answered rather than sidestepped | 2026-09-03 |
+
+Limits: the line asked for design and risk, not a count — the two lines that took longest (1534, 1294/1610) closed only when a real producer existed, which is the standard `Decompression` set; nothing here retracts an earlier refusal's reasoning. What remains of Phase 59 is 2053, the comment trims, which land file by file.
+
