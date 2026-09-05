@@ -5331,3 +5331,22 @@ Closed these waves: **1295 → 1297** (2438, 2439). Live at the end of wave 119:
 28. **Re-read the register after a producer lands, not after a wave.** 1535/1545 closed on 2026-09-05 because the gateway's per-exchange tokens ended their refusal; 1158's refusal named the *same* wall (*"a response body `gateway::ingress` is forbidden to parse"*) and was re-read as "still true" the same day. The register's own rule — re-read the *reasons* after every wave that adds a column or a row kind — was applied to two of three lines sharing one reason. The fix is mechanical: when a refusal ends, grep the register for the *reason's* wording, not the line number.
 29. **A test that asserts a constant equals a literal pins the declaration, not the output.** (The pane lead, 61A.) 2432's tests pinned `HEADERS` and `JSONL_KEYS` against literals; appending `tokens/turn` to the *rendered* header survived the whole suite. The mutation that asks the real question lives in the renderer, and the killing test reads the emitted bytes. Same shape as §80's four; a fifth way a mutation lies.
 
+
+### Waves 120–123 — 2026-09-05, night: four ticks, one merge, three reds attributed and fixed forward
+
+| package | tier | result |
+|---|---|---|
+| `GH-CONTEXT-SIZE` | Sonnet high, Amber | **1158, 1534 closed; Phase 35B 25/25.** Both mutations KILLED (`wire-rule-dropped`, `sign-inverted`); no packet errors. The old tripwire `a_context_size_has_no_producer_in_this_build` still passes — it asserts the hook path, and its name now overstates it (a trim, not owed). |
+| pane 61A merge | Opus xhigh lead | **2431, 2432 closed; 2430 PARTIALLY VERIFIED by ruling.** Eight mutations by the lead, two survivors that mattered (a single-tier fixture; tests pinning constants rather than rendered bytes). `pane/integration` merged as `aa16f6b`; `-p pane` 31 passed on the merged tree. |
+| `GH-SECRET-SERVICE-CI-FIXTURE` | Sonnet high, Amber | **442 closed; Phase 9E 13/13.** A private bus with an unlocked keyring on both gates; the `busctl list` activation race found under load and fixed; the round trip ran for real twice. Fixed at integration: the `--workspace` count pin 5 → 6. |
+| `GH-ROLLBACK-PRESERVE` | Sonnet high, Amber | **1044 closed; Phase 21K 43/43.** The preserve set on the door's reply; `own-claims-preserved` KILLED; packet error (the reply is built in `api/unix/assumptions.rs`) corrected by the worker. |
+| `GH-SUMMARY-SCROLL` | Sonnet high, Amber | the onboarding red fixed forward: a scroll offset, keys, an overflow indicator; `silent-truncation` KILLED. Hand-rolled wrap because `Paragraph::line_count` is behind an unstable feature. |
+| `GH-BOARD-WATCH-LINUX` (live) | Sonnet medium, Green | the lint red: `test_board_watch.py` races its fixture where forks are fast. |
+| `GH-RESERVE-AVAILABILITY` (live) | Sonnet high, Amber | 1837 as RC-A: the band the router read, recorded for Heavy/Frontier launches, read back as a rate. |
+
+Closed these waves: **1297 → 1303**.
+
+**Findings.**
+
+30. **A ruler that cuts `HEAD^` needs history, and `actions/checkout` gives one commit.** Seven of `ruler_run`'s eleven tests failed on both pane cells with `fatal: invalid reference: <sha>^`; local runs never see it. `fetch-depth: 0` on the pane job only. The general form: a test that reads git history is platform-conditional on the *checkout*, not the OS, and the targeted gate cannot trace that.
+31. **A lint job that fails early hides every later check.** `test_board_watch.py` has been red on the ubuntu runner since board-watch landed this afternoon; three sweeps in a row failed lint *before* reaching it (rustup network, `progress.py`, `progress.py`). Read the failed step's name, not just the job's colour, and when a lint red is fixed expect the next one behind it.
