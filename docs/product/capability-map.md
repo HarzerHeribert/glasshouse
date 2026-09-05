@@ -2479,3 +2479,7 @@ record: the session artifact *The Glasshouse Native Harness*.
 ☐ Give every session an inbox and a `send` that delivers into the recipient's next batch; ride Glasshouse's event bus and direct session messaging when present, a local socket when not.
 ☐ Show inbox depth, batches delivered and live handlers in the telemetry sidebar.
 ☐ Do not deliver an event as its own turn when a batch window is open, and do not make the model poll for a background result.
+
+61E — Code over live objects, amended 2026-09-06 (direct verified completion — the user's decision to implement it directly; `runtime-contract.md` §9)
+
+☐ End a task from within the program: a top-level `return` renders and persists the terminal response and sends no further request, and no execution that threw, was refused, was cancelled or whose guard was unmet becomes one.
