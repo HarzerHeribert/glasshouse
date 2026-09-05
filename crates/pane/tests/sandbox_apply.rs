@@ -33,6 +33,13 @@ const RESOLVED: &str = "/bin/cat";
 /// applier the program name back when `PATH` did not find it.
 const UNRESOLVED: &str = "pane-sandbox-apply-no-such-program";
 
+/// A resolved binary that lies outside every [`LOADER_READ_ROOT`] and outside
+/// any project root — `~/.cargo/bin/cargo` is the real one. A literal string
+/// and no file, because `profile_text` is a pure function of its two
+/// arguments; the executing half of this case is
+/// `a_resolved_binary_outside_the_read_roots_still_starts`.
+const OUTSIDE_READ_ROOTS: &str = "/pane-fixture/elsewhere/cat";
+
 /// The Windows applier's source, for the one invariant that is a property of
 /// the prose rather than of any call: the job object is a lifetime primitive
 /// and its documentation has to say so first, because the map line's phrase
@@ -1418,6 +1425,200 @@ fn a_sibling_binary_in_the_same_directory_cannot_exec_but_the_resolved_one_can()
             }
         }
     }
+}
+
+/// §1.4, and the one shape of it a profile can defeat without ever saying
+/// no: **a confined tool either runs or is refused, and never dies silently.**
+/// `process-exec*` permits the exec; the image still has to be mapped, and a
+/// binary the caller resolved outside the loader's read roots is named by no
+/// read term the profile otherwise emits. A process killed between `exec` and
+/// its first instruction carries no exit code, no stdout and no stderr, so
+/// `ToolResult` reaches the model as an empty result where §1.4 promises a
+/// `PermissionDenied`.
+///
+/// **Not a copy of `/bin/cat`.** macOS refuses to launch an Apple platform
+/// binary from any path but its own — an AMFI launch-constraint violation,
+/// which kills the copy identically whether or not a sandbox is in force and
+/// so cannot demonstrate anything about a profile. This test copies the one
+/// binary every host running this suite is guaranteed to have — itself — into
+/// a directory outside both the read roots and the project, and asks it for
+/// the payload test below by name.
+#[test]
+fn a_resolved_binary_outside_the_read_roots_still_starts() {
+    #[cfg(not(target_os = "macos"))]
+    eprintln!(
+        "skipped: seatbelt is macOS-only; Linux grants the resolved binary its own read \
+         through `access::EXEC` and is covered by \
+         a_landlocked_process_cannot_exec_a_sibling_of_the_resolved_binary_but_can_exec_it"
+    );
+    #[cfg(target_os = "macos")]
+    {
+        use std::process::{Command, Stdio};
+
+        let fixture = Fixture::new("outside-roots");
+        let profile = fixture.profile(Some(&settings_for(&fixture.root)));
+        let root = fixture.resolved(&profile);
+        let inside = fixture.write(&root.join("inside.txt"), "inside-secret\n");
+
+        // Outside every LOADER_READ_ROOT *and* outside the project root, so
+        // no term of the rendered profile reaches it but the exec grant and
+        // the read literal beside it.
+        let outside = std::fs::canonicalize(&fixture.outside).unwrap();
+        assert!(
+            !outside.starts_with(&root),
+            "the binary must sit outside the project: {outside:?}"
+        );
+        let binary = outside.join("resolved");
+        let sibling = outside.join("sibling");
+        std::fs::copy(std::env::current_exe().unwrap(), &binary).unwrap();
+        std::fs::copy(&binary, &sibling).unwrap();
+
+        let run = |program: &Path, confined: bool| {
+            let mut command = Command::new(program);
+            command
+                .arg("--exact")
+                .arg("--nocapture")
+                .arg(PAYLOAD)
+                .env(PAYLOAD_FILE, &inside)
+                .stdin(Stdio::null())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped());
+            if confined {
+                macos::confine(&profile, &binary, &mut command).unwrap();
+            }
+            command.output()
+        };
+
+        // The controls: both copies run unconfined and print the file, so a
+        // failure below is the profile and not a binary that cannot start.
+        for control in [&binary, &sibling] {
+            let free = run(control, false).unwrap();
+            assert!(free.status.success(), "{control:?} does not run: {free:?}");
+            assert!(
+                String::from_utf8_lossy(&free.stdout).contains("inside-secret"),
+                "{control:?} printed nothing: {free:?}"
+            );
+        }
+
+        // The resolved binary starts under the profile rendered for it and
+        // reads the project. `code()` is asserted explicitly and not merely
+        // `success()`: the defect's whole signature is `None` — a child
+        // killed by a signal, which every layer above renders as an empty
+        // result rather than as a refusal.
+        let granted = run(&binary, true).unwrap();
+        assert_eq!(
+            granted.status.code(),
+            Some(0),
+            "the resolved binary did not exit under its own profile — a `None` here is the \
+             silent kill §1.4 forbids: {granted:?}"
+        );
+        assert!(
+            String::from_utf8_lossy(&granted.stdout).contains("inside-secret"),
+            "{granted:?}"
+        );
+
+        // And the grant is still one file: its sibling, in the same
+        // directory, is not executable through this profile.
+        match run(&sibling, true) {
+            Err(error) => assert_eq!(
+                error.kind(),
+                std::io::ErrorKind::PermissionDenied,
+                "the sibling was refused for some reason other than the exec grant: {error:?}"
+            ),
+            Ok(output) => {
+                assert!(!output.status.success(), "the sibling ran: {output:?}");
+                assert!(
+                    !String::from_utf8_lossy(&output.stdout).contains("inside-secret"),
+                    "the sibling ran: {output:?}"
+                );
+            }
+        }
+    }
+}
+
+/// The read grant beside the exec grant is **one file**, and the invariant is
+/// as much about what it is not: a `(subpath …)` on the binary's directory
+/// would grant every neighbour it has — §4.3's `$HOME` rule survives here
+/// only because the term names the binary's own bytes and nothing around
+/// them. Text only, so it holds on every host.
+#[test]
+fn the_read_literal_names_the_binary_and_only_the_binary() {
+    let fixture = Fixture::new("binary-read");
+    let profile = fixture.profile(Some(&settings_for(&fixture.root)));
+    let binary = Path::new(OUTSIDE_READ_ROOTS);
+    let text = macos::profile_text(&profile, binary);
+    let (_, filters) = parse(&text);
+
+    assert_eq!(
+        filters
+            .iter()
+            .filter(|f| f.term == "file-read*"
+                && f.form == "literal"
+                && f.value == OUTSIDE_READ_ROOTS)
+            .count(),
+        1,
+        "the resolved binary must be readable by the process that becomes it, exactly once: \
+         {text}"
+    );
+
+    // No subtree grant reaches it, which is the half that would widen: the
+    // directory, its parent, and every ancestor are absent as `subpath`.
+    for filter in &filters {
+        if filter.form == "subpath" {
+            assert!(
+                !binary.starts_with(&filter.value),
+                "a subtree grant contains the binary and would carry its neighbours: {filter:?}"
+            );
+        }
+    }
+
+    // The fallback arm grants no read: an unresolvable name is not a path,
+    // and the roots it falls back to are read roots already.
+    let fallback = macos::profile_text(&profile, Path::new(UNRESOLVED));
+    assert!(!fallback.contains(UNRESOLVED), "{fallback}");
+    let (_, fallback_filters) = parse(&fallback);
+    let read_literals = |filters: &[Filter]| {
+        sorted(
+            filters
+                .iter()
+                .filter(|f| f.term == "file-read*" && f.form == "literal")
+                .map(|f| f.value.clone())
+                .collect(),
+        )
+    };
+    let mut expected = read_literals(&fallback_filters);
+    expected.push(OUTSIDE_READ_ROOTS.to_string());
+    assert_eq!(
+        read_literals(&filters),
+        sorted(expected),
+        "the resolved arm's read literals are the fallback's plus the binary, and nothing else"
+    );
+}
+
+/// The name of the payload test below, and the variable that arms it.
+///
+/// The name is used only by the macOS test that spawns this binary, and
+/// `warnings = deny` makes an unused constant a build failure elsewhere; the
+/// variable is read by the payload itself and so is compiled everywhere.
+#[cfg(target_os = "macos")]
+const PAYLOAD: &str = "a_payload_that_prints_one_file_when_this_binary_is_the_confined_tool";
+const PAYLOAD_FILE: &str = "PANE_SANDBOX_APPLY_PRINT";
+
+/// Not a property — the **program**
+/// `a_resolved_binary_outside_the_read_roots_still_starts` confines.
+///
+/// That test needs a real binary outside the loader's read roots which prints
+/// a file inside the project, and macOS will not launch a copy of `/bin/cat`
+/// from one. This executable is the only binary every host running this suite
+/// is guaranteed to have, so the test copies it and asks for this test by
+/// name with [`PAYLOAD_FILE`] set. In every ordinary run the variable is
+/// unset and this asserts nothing.
+#[test]
+fn a_payload_that_prints_one_file_when_this_binary_is_the_confined_tool() {
+    let Some(path) = std::env::var_os(PAYLOAD_FILE) else {
+        return;
+    };
+    print!("{}", std::fs::read_to_string(path).unwrap());
 }
 
 #[test]

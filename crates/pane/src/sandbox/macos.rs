@@ -244,8 +244,9 @@ pub fn profile_text(profile: &Profile, binary: &Path) -> String {
     // declared roots when there is no path to name. `(literal …)` is a
     // single file and not a subtree, so a sibling in the same directory is
     // not reachable through this term.
+    let exec = exec_scope(binary);
     out.push_str("(allow process-exec*");
-    match exec_scope(binary) {
+    match exec {
         ExecScope::ResolvedBinary => {
             out.push_str(&format!(" (literal {})", quote(&display(binary))));
         }
@@ -256,6 +257,22 @@ pub fn profile_text(profile: &Profile, binary: &Path) -> String {
         }
     }
     out.push_str(")\n");
+
+    // A process may read the one file it is about to become, and nothing
+    // else gains a byte. `process-exec*` says the exec is permitted; the
+    // image still has to be mapped, and a resolved binary outside
+    // `LOADER_READ_ROOTS` — `~/.cargo/bin/cargo`, a `~/.local/bin/bash` —
+    // is named by no read term this profile otherwise emits. The term is a
+    // `(literal …)` on that one path and must never become a `(subpath …)`
+    // on its directory: §4.3's `$HOME` rule survives only because the
+    // binary's own bytes are granted and its neighbours are not. Emitted in
+    // the resolved arm alone — the fallback's roots are read roots already.
+    if exec == ExecScope::ResolvedBinary {
+        out.push_str(&format!(
+            "(allow file-read* (literal {}))\n",
+            quote(&display(binary))
+        ));
+    }
     out.push_str("(allow process-fork)\n");
     out.push_str("(allow signal (target self))\n");
     out.push_str("(allow sysctl-read)\n");

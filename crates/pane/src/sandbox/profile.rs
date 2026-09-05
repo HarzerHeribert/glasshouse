@@ -602,6 +602,20 @@ impl Profile {
         let resolved = resolve(path, Some(&self.root), self.home.as_deref());
         let shown = shown(&resolved);
         let candidate = spelling(&resolved);
+        // The postcondition this function's own documentation states, held
+        // where it is produced rather than where it is read: a granted path
+        // is the absolute path the decision was made on, so opening it lands
+        // on the file this profile examined. A root that is not absolute is
+        // a literal-strings fixture — a Windows spelling on a Unix host —
+        // and has no absolute form to demand (see `resolve`).
+        let grant = |resolved: PathBuf| -> Result<PathBuf, PermissionDenied> {
+            debug_assert!(
+                resolved.is_absolute() || !self.root.is_absolute(),
+                "`check` granted the non-absolute `{}`; a caller opening it would open a file this profile never examined",
+                resolved.display()
+            );
+            Ok(resolved)
+        };
         let denied = |rule: String| -> Result<PathBuf, PermissionDenied> {
             Err(PermissionDenied {
                 tool: tool.to_string(),
@@ -631,7 +645,7 @@ impl Profile {
             }
         }
         if contains(&self.root_spelling, &candidate) {
-            return Ok(resolved);
+            return grant(resolved);
         }
         let granted = self.allow.iter().any(|rule| {
             let wanted = match access {
@@ -641,7 +655,7 @@ impl Profile {
             wanted && covers(&rule.glob, &candidate, false)
         });
         if granted {
-            return Ok(resolved);
+            return grant(resolved);
         }
         denied(access.only_root_sentence().to_string())
     }
@@ -883,11 +897,21 @@ fn home_dir() -> Option<PathBuf> {
 /// The tail that does not exist yet — a file about to be created, which can
 /// therefore be no symlink — is appended to the resolved prefix, so a write
 /// check decides on the same spelling a later read of that file would.
+///
+/// **[`Profile::check`] never returns a non-absolute path on a host whose
+/// root is absolute**, and the anchoring condition is the whole of why. A
+/// candidate is read in *the root's own spelling family*: a drive-rooted
+/// `C:\x` is already rooted under a `\\?\C:\proj` or `C:/proj` root and
+/// must not acquire the project's prefix a second time, while under
+/// `/Users/…/proj` the same string is one relative filename that happens to
+/// contain backslashes, and leaving it unanchored granted a **relative**
+/// path — the file a caller then opened was not the file the decision was
+/// made on.
 fn resolve(path: &Path, root: Option<&Path>, home: Option<&Path>) -> PathBuf {
     let mut expanded = expand_tilde(path, home);
-    if !expanded.is_absolute()
-        && !windows_rooted(&expanded)
-        && let Some(root) = root
+    if let Some(root) = root
+        && !expanded.is_absolute()
+        && !(windows_rooted(&expanded) && windows_rooted(root))
     {
         expanded = root.join(expanded);
     }
@@ -1044,10 +1068,17 @@ fn spelling(path: &Path) -> Vec<String> {
         .filter(|part| !part.is_empty())
         .map(str::to_string)
         .collect();
+    // The **drive letter**, and not the component it begins. `C:foo` and
+    // `C:FOO` are two files on a case-sensitive filesystem, and folding the
+    // whole component made an `allow` match case-insensitively there —
+    // against `match_segment`'s rule that an `allow` never folds, whose
+    // reason is that folding lets one spelling reach a path its author never
+    // wrote. Only the first character is touched; `is_drive_prefixed`
+    // guarantees it is ASCII, so byte 1 is a character boundary.
     if let Some(first) = parts.first_mut()
         && is_drive_prefixed(first)
     {
-        first.make_ascii_uppercase();
+        first[..1].make_ascii_uppercase();
     }
     parts
 }
@@ -1063,6 +1094,14 @@ fn spelling(path: &Path) -> Vec<String> {
 /// or the `UNC/` marker is what keeps the Windows repair from widening
 /// containment on every other platform — the same test, for the same reason,
 /// as `crates/glasshouse/src/commands/context_firewall.rs`.
+///
+/// **On Unix this reduction is reachable only from a backslash-spelled
+/// candidate.** `Path::components` collapses `//` before [`spelling`] sees
+/// it, so a `/`-spelled `//?/…` argument never carries the prefix this
+/// function tests for by the time it is asked — which means
+/// `a_verbatim_and_a_plain_spelling_of_one_path_decide_identically`
+/// exercises the `\\?\` arm on this host and never the `//?/` one. It is
+/// not cross-platform cover for that arm.
 fn reduced_verbatim(folded: &str) -> Option<String> {
     let rest = folded.strip_prefix("//?/")?;
     if is_drive_prefixed(rest) {

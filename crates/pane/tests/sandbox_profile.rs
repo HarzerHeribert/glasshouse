@@ -1087,6 +1087,128 @@ fn check_returns_the_path_it_decided_on() {
     assert_eq!(created, canonical_root.join("out/new.txt"));
 }
 
+/// The other half of `check`'s postcondition, and the one that was not held:
+/// **a granted path is absolute**. A caller opens the value it is handed, so
+/// a relative one opens a file under whatever directory the process happens
+/// to be standing in — never the file any rule here examined.
+///
+/// The shape that broke it is a backslash-spelled candidate on a Unix root.
+/// There it is one relative *filename* that contains `\`, not a path;
+/// `spelling` folds the separators, the folded form is prefix-equal to the
+/// root, and root containment granted it while the anchoring had been skipped
+/// for looking Windows-rooted. `#[cfg(unix)]` on that half alone, because a
+/// backslash is a filename character only where it is not a separator.
+#[test]
+fn every_granted_path_is_absolute_and_inside_the_root_it_was_decided_in() {
+    let fixture = Fixture::new("absolute-grant");
+    let root = std::fs::canonicalize(&fixture.root).unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/main.rs"), "fn main() {}").unwrap();
+    let profile = Profile::compile(&root, Some(r#"{"permissions":{}}"#));
+
+    // Windows adds nothing below — a backslash is a separator there, not a
+    // filename character — so the binding is only mutated on Unix.
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut candidates: Vec<PathBuf> = vec![
+        root.join("src/main.rs"),
+        root.join("src/./main.rs"),
+        // A file that does not exist yet decides the same way.
+        root.join("out/new.txt"),
+        // Relative, and therefore anchored at the project root.
+        PathBuf::from("src/main.rs"),
+        PathBuf::from("./src/../src/main.rs"),
+        // The root's unresolved spelling, which on macOS is a different
+        // string (`/var/…` against `/private/var/…`).
+        fixture.root.join("src/main.rs"),
+    ];
+    #[cfg(unix)]
+    {
+        // The regression, and it needs its exact shape: `windows_rooted`
+        // recognises a candidate whose folded form begins `//`, so it is the
+        // *UNC-looking* spelling — two leading backslashes — that had its
+        // anchoring skipped and came back relative. One leading backslash
+        // folds to a single `/` and was always anchored, so it is here as
+        // the control that says which half of the pair is the defect.
+        candidates.push(PathBuf::from(format!(
+            "\\{}\\src\\main.rs",
+            root.to_string_lossy().replace('/', "\\")
+        )));
+        candidates.push(PathBuf::from(format!(
+            "{}\\src\\main.rs",
+            root.to_string_lossy().replace('/', "\\")
+        )));
+        candidates.push(PathBuf::from("src\\main.rs"));
+        // The containment argument that makes anchoring safe, and the one
+        // reading of it that could look alarming: `\\etc\shadow` is not
+        // `/etc/shadow` here, it is one filename containing backslashes.
+        // Anchoring puts it inside the project, so the path the grant names
+        // — and the path a caller opening the returned value gets — is
+        // `<root>/\etc\shadow`. Leaving it unanchored refused it by citing a
+        // never-rule about a file the argument never named.
+        candidates.push(PathBuf::from("\\\\etc\\shadow"));
+    }
+
+    for candidate in &candidates {
+        let resolved = profile
+            .check("Read", Access::Read, candidate)
+            .unwrap_or_else(|denied| {
+                panic!("{candidate:?} is inside the project and must be granted: {denied:?}")
+            });
+        assert!(
+            resolved.is_absolute(),
+            "{candidate:?} was granted the non-absolute {resolved:?}; a caller opening that \
+             opens a file this profile never examined"
+        );
+        assert!(
+            resolved.starts_with(&root),
+            "{candidate:?} was granted {resolved:?}, which is not inside the root it was \
+             decided in"
+        );
+    }
+}
+
+/// §2 and `match_segment`'s rule that an `allow` matches **case-sensitively
+/// on every platform**: the drive-letter normalisation stops at the colon.
+/// `C:foo` and `C:FOO` are two files on a case-sensitive filesystem, and
+/// upper-casing the whole first component let one `allow` cover both — which
+/// is the trick that rule exists to refuse. The drive letter itself still
+/// folds, because that is the Windows repair and one drive is one drive.
+///
+/// Under a Windows-spelled root, so it runs on every host: a drive-rooted
+/// candidate is read in its root's own spelling family and is not anchored,
+/// and that is the only shape which reaches the fold at all.
+#[test]
+fn the_drive_letter_fold_stops_at_the_colon() {
+    let profile = Profile::compile(
+        Path::new("C:/pane-fixture/proj"),
+        Some(r#"{"permissions":{"allow":["Read(C:foo/bar)"]}}"#),
+    );
+    assert_eq!(
+        profile.rule_count(),
+        1,
+        "the pattern must register: {:?}",
+        profile.diagnostics()
+    );
+
+    for granted in ["C:foo/bar", "c:foo/bar"] {
+        profile
+            .check("Read", Access::Read, Path::new(granted))
+            .unwrap_or_else(|denied| {
+                panic!("`{granted}` is the drive the pattern names: {denied:?}")
+            });
+    }
+    for other in ["C:FOO/bar", "C:Foo/bar", "C:foo/BAR"] {
+        let denied = refusal(profile.check("Read", Access::Read, Path::new(other)));
+        assert!(
+            denied
+                .rule
+                .contains("the project root is the only readable root"),
+            "`{other}` is a different file and no `allow` names it: {:?}",
+            denied.rule
+        );
+    }
+}
+
 /// Item 2, input a: a project rooted at `$HOME` gets §4's set from an **empty**
 /// `permissions` object, because the rule was dropped whenever its subtree lay
 /// inside the root.
