@@ -25,3 +25,21 @@ ureq = { workspace = true }
 
 [lints]
 workspace = true
+
+# Platform appliers only. macOS needs nothing: `sandbox_init` lives in
+# libSystem, which every Rust binary already links.
+[target.'cfg(target_os = "linux")'.dependencies]
+# Landlock is three syscalls and `prctl`; there is no wrapper crate here on
+# purpose, because the ruleset derivation is a value this crate tests on every
+# host and the twenty lines that install it are reviewable as they stand.
+libc.workspace = true
+
+[target.'cfg(target_os = "windows")'.dependencies]
+# `Win32_Security_Isolation` (the AppContainer) and `Win32_Security_Authorization`
+# (the project directory's ACL) are the two feature sets the workspace pin does
+# not already carry; cargo unions features, so naming them here adds API surface
+# and changes nothing for `glasshouse`.
+windows-sys = { workspace = true, features = [
+    "Win32_Security_Authorization",
+    "Win32_Security_Isolation",
+] }
