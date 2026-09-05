@@ -4300,3 +4300,53 @@ reaches the catalogue (a Phase 32G-shaped producer, if ever), the term becomes a
 fraction of *that* window and the constants go. Recorded here so nobody
 re-derives it into a second scale. Package: `GH-CONTEXT-SIZE` (Sonnet, Amber —
 two decisions, two mutations: the wire rule and the term's sign).
+
+## Rollback preserves what is not yours, and Glasshouse names it rather than doing it — designing line 1044, 2026-09-05
+
+Phase 21K's ruling stands: Glasshouse performs no rollback and no isolation of
+code; it records the agent's choice (1041) as a transition. Line 1044 —
+*preserve user changes and unrelated worker changes when rolling back or
+isolating an invalidated experiment* — was refused on that ground, because the
+preserving is the agent's or version control's act. The user's ruling of
+2026-09-03 asks for a design instead of a refusal, and there is one that keeps
+the standing rule intact: **the reason an agent reverts someone else's work is
+that it cannot tell whose work it is, and that is a fact Glasshouse holds.**
+
+**What Glasshouse knows at the moment of the choice.** Phase 60's
+`file_claims` rows say which repo-relative paths every live session in the
+project has declared it is changing (`SessionStore::active_claims`). The
+working tree says which paths carry uncommitted changes (`git status
+--porcelain`, through `checkpoint/git.rs`'s existing `git_output`, which
+already answers *unknown* for a missing git or a non-repository). The
+transition itself says which session is choosing. From those three, the
+**preserve set** is computable and exact in one half and conservative in the
+other:
+
+- **`claimed_elsewhere`** — paths under an active claim held by a session
+  other than the one transitioning. These are another worker's, by that
+  worker's own declaration. Exact.
+- **`unclaimed_changes`** — paths the working tree reports changed that the
+  transitioning session never claimed. The user's edits are here, and so are
+  an unclaiming worker's; Glasshouse cannot tell those two apart and does not
+  try — both are *not the experiment's*, which is the only distinction the
+  line needs. Conservative: a path the experiment changed without claiming it
+  lands here too, and the agent is told to keep it, which is the safe error.
+
+**The door carries it; the ledger does not.** The preserve set is a reading of
+the tree at the instant of the transition, not a fact about the assumption, so
+it rides the door's transition reply (`api/protocol.rs`, and the MCP tool's
+result) when the transition is the agent's rollback or isolate choice or moves
+the assumption to `refuted` — and is never written to `assumption_transitions`,
+which stays append-only and about the assumption. The guidance page gains line
+1044 beside 1041: *before reverting anything, exclude every path the reply
+lists under preserve — another live session or the user owns it; Glasshouse
+names them and reverts nothing.*
+
+**What this does not claim.** A user edit to a path the experiment also
+claimed is indistinguishable from the experiment's own and is not preserved by
+name — the guidance says so and points the agent at its VCS for that case. No
+path is ever reverted, stashed or restored by Glasshouse. A repository without
+git, or a session outside one, yields an empty `unclaimed_changes` marked
+*unknown*, never an empty list that reads as *nothing to preserve*. Package:
+`GH-ROLLBACK-PRESERVE` (Sonnet, Amber — one decision, the membership of the
+set; one mutation, the other-session filter).
