@@ -2469,3 +2469,13 @@ record: the session artifact *The Glasshouse Native Harness*.
 ☐ Watch a compressed trajectory every N turns with a cheaper model and emit one decision: intervene or not.
 ☐ Catch a planted three-turn loop within two turns without a human.
 ☐ Show every nudge in the trajectory and in the sidebar.
+
+61G — Events in batches, background work, messages
+
+☐ Deliver events — monitors, background jobs, hooks, CI, messages — to the model as one deduplicated batch per turn, coalesced over a bounded window, with the batch itself a handle.
+☐ Let a small class of events, marked interrupt, cut the window short; every other event waits for the next batch.
+☐ Run a shell command or a monitor in the background and return a handle at once; deliver its completion as an event whose result is a handle, never as blocking output.
+☐ Let the model register a standing handler — a program that outlives the turn and acts on future batches — visible in the sidebar and cancellable by slash command.
+☐ Give every session an inbox and a `send` that delivers into the recipient's next batch; ride Glasshouse's event bus and direct session messaging when present, a local socket when not.
+☐ Show inbox depth, batches delivered and live handlers in the telemetry sidebar.
+☐ Do not deliver an event as its own turn when a batch window is open, and do not make the model poll for a background result.

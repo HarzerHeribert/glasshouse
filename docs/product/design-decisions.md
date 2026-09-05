@@ -4220,5 +4220,10 @@ and pays review out of its own context; the primary owns `main`, the records, an
 everything outside `crates/pane/`. Contention lasts exactly one commit — the four
 Glasshouse-side files (workspace manifest, `harness/mod.rs`, `ci-local.sh`, the GitHub
 matrix) all change once, in the kickoff, and never again. Merges are per sub-phase,
-six across the whole build. Tiers: 61A Amber · 61B Green · 61C Amber · **61D Red**
-(Opus plus an independent verifier) · **61E Red** · 61F Amber.
+seven across the whole build. Tiers: 61A Amber · 61B Green · 61C Amber · **61D Red**
+(Opus plus an independent verifier) · **61E Red** · 61F Amber · 61G Amber (the batch
+window and the interrupt class are decisions; the bus already exists). 61G — events
+in batches, background work, messages — was recorded the same evening from the
+ended session `glasshouse-9c`'s hand-off: the mechanism that makes pane usable in
+the orchestrator role the two-modes table already lists, and the cure for the storm
+of one-event-one-turn that the orchestrator running this build pays for today.

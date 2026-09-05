@@ -1,6 +1,6 @@
 # Capability evidence — phase 61
 
-Phase 61 — pane, the first-party harness (map lines 2419–2471), approved by the user on 2026-09-05. Design of record: the session artifact *The Glasshouse Native Harness*, recorded in `design-decisions.md` (*pane, the first-party harness*). Hand-off draft: `.agent-runtime/pane/phase-61-draft.md`.
+Phase 61 — pane, the first-party harness (map lines 2419–2481), approved by the user on 2026-09-05. Design of record: the session artifact *The Glasshouse Native Harness*, recorded in `design-decisions.md` (*pane, the first-party harness*). Hand-off draft: `.agent-runtime/pane/phase-61-draft.md`.
 
 Entries are bounded by the *Decompression* ruling: the contract, the tests by name, the mutation on each decision, the limits, and the worker's report by path.
 
@@ -41,3 +41,10 @@ This is the sub-phase the whole phase exists for, and line 2464 is the one that 
 ## 61F — The supervisor — lines 2469–2471
 
 State: **NOT STARTED**.
+
+## 61G — Events in batches, background work, messages — lines 2475–2481
+
+State: **NOT STARTED**. Amber: the batch window and the interrupt class are decisions; the event bus and direct session messaging (Phases 12, 13) already exist and are what this rides on inside Glasshouse.
+
+Recorded 2026-09-05 (evening) from the ended session `glasshouse-9c`'s hand-off (`.agent-runtime/subpacket-pane-phase-61.md`) on the user's instruction; the sixth spec, `docs/product/pane/events-contract.md`, is what makes these seven lines pass Phase −1 and is dispatched as `GH-PANE-EVENTS`. The reason this sub-phase exists is measured on the orchestrator itself: one Monitor per worker plus three standing watches delivers every event as its own turn, and a harness meant to hold the orchestrator role has to coalesce.
+
