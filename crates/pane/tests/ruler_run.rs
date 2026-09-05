@@ -4,6 +4,14 @@
 //! removes at the end of the process. That is the whole point -- 61D's
 //! sandbox is not built, so nothing model-authored may execute here.
 
+#![cfg(unix)]
+//! **Unix only, at file scope.** Every fake in this file -- the harness, the
+//! test command, the `glasshouse` stand-in -- is a shell script with a mode
+//! bit, so the module does not compile on Windows rather than failing there.
+//! The Windows pane cell added on 2026-09-05 runs the rest of the crate; a
+//! `.cmd` twin for these fakes is the successor if Windows coverage of the
+//! runner is wanted.
+
 use std::collections::HashMap;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;

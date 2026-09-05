@@ -94,6 +94,17 @@ struct PathRule {
 #[derive(Debug, Clone)]
 struct NeverRule {
     prefix: PathBuf,
+    /// `prefix` as a glob — its components followed by `**` — so a rule of
+    /// §4's set reads the same way to [`Profile::rules`] as one the document
+    /// wrote. It renders `starts_with` exactly: `**` matches the empty tail,
+    /// so the subtree's own root is covered.
+    glob: Vec<String>,
+    /// The project root, when this rule's subtree contains it, and nothing
+    /// otherwise. It is the only exemption there is: a project checked out
+    /// under `~/.config` must be able to read itself, and nothing else in
+    /// `~/.config`. Dropping the rule instead handed the whole directory to
+    /// any pattern that named it.
+    except: Option<PathBuf>,
     /// `true` for `.claude/**`, which is never writable but stays readable —
     /// `settings.json` is read before the sandbox is entered (§1.5).
     write_only: bool,
@@ -228,6 +239,70 @@ impl Profile {
     }
 }
 
+/// What a rule does to the paths it matches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Effect {
+    /// From `permissions.allow`.
+    Allow,
+    /// From `permissions.deny`, which beats every `allow` (§1.2).
+    Deny,
+    /// §4's set, which no pattern produced and none can undo.
+    Never,
+}
+
+/// One compiled rule, as an applier may read it.
+///
+/// Every field is private and every accessor borrows, which is what makes
+/// [`Profile::rules`] an enumeration rather than a second way in: there is no
+/// constructor for this type outside the module, so nothing a caller holds
+/// can become a grant.
+#[derive(Debug, Clone, Copy)]
+pub struct Rule<'a> {
+    effect: Effect,
+    written: &'a str,
+    glob: &'a [String],
+    read: bool,
+    write: bool,
+    except: Option<&'a Path>,
+}
+
+impl<'a> Rule<'a> {
+    /// Allow, deny, or never-grantable.
+    pub fn effect(&self) -> Effect {
+        self.effect
+    }
+
+    /// The pattern as the document wrote it, or — for [`Effect::Never`] — the
+    /// sentence a refusal quotes, since no document wrote those.
+    pub fn written(&self) -> &'a str {
+        self.written
+    }
+
+    /// The resolved path components, `*`, `?` and `**` intact. A component is
+    /// matched the way [`Profile::check`] matches it: `*` and `?` do not
+    /// cross a separator, and `**` spans any number of components.
+    pub fn glob(&self) -> &'a [String] {
+        self.glob
+    }
+
+    /// Whether the rule bears on reading, and on writing. Both are what
+    /// [`Profile::check`] does with the rule rather than what its verb said,
+    /// so an applier that renders these is as tight as the profile is.
+    pub fn read(&self) -> bool {
+        self.read
+    }
+
+    pub fn write(&self) -> bool {
+        self.write
+    }
+
+    /// The one subtree this rule does not apply to: the project root, when a
+    /// never-grantable directory contains it. `None` everywhere else.
+    pub fn exempt_subtree(&self) -> Option<&'a Path> {
+        self.except
+    }
+}
+
 /// Maps one written pattern to its kind and records it, per §2's table.
 ///
 /// A free function rather than a method, and deliberately: [`Profile`] has
@@ -248,6 +323,19 @@ fn register(profile: &mut Profile, pattern: &str, denying: bool) {
             if denying {
                 profile.command_deny.push(admitted);
             } else {
+                if profile.command_allow.is_empty() {
+                    // Said once, where a person can read it, rather than
+                    // implied: what admits a command line here is a word scan
+                    // and a segment match, and neither is a shell. A
+                    // diagnostic is the mechanism this module uses everywhere
+                    // else for "I did not act on that", and it is a compile-
+                    // time value because a built profile can be told nothing
+                    // afterwards (§1.1).
+                    profile.diagnostics.push(
+                        "argv admission is a word scan over each part of a command line, not a shell: a line that assembles a name through a variable, a substitution or a script file is admitted here, and the OS layer is what refuses it (sandbox-grants.md §4.6)"
+                            .to_string(),
+                    );
+                }
                 profile.command_allow.push(admitted);
             }
             return;
@@ -286,6 +374,17 @@ fn register(profile: &mut Profile, pattern: &str, denying: bool) {
         ));
         return;
     }
+    // A pattern that names no root is anchored at the project root, and the
+    // anchor is the whole of what "project-relative" means: `Read(../**)`
+    // resolves to the project's parent, which is not a project-relative
+    // grant by any reading. Refused rather than narrowed, and diagnosed, so
+    // it is not a silent one.
+    if !is_rooted(&argument.replace('\\', "/")) && !glob.starts_with(&components(&profile.root)) {
+        profile.diagnostics.push(format!(
+            "`{pattern}` is project-relative and resolves outside the project root; it grants nothing"
+        ));
+        return;
+    }
     let rule = PathRule {
         written: pattern.to_string(),
         glob,
@@ -309,6 +408,56 @@ impl Profile {
         &self.root
     }
 
+    /// Every rule this profile compiled, in the order [`Profile::check`]
+    /// consults them: §4's never-grantable set, then `deny`, then `allow`.
+    ///
+    /// **A platform applier cannot hold §1.2 for a rule it cannot see.** A
+    /// profile that could only be asked about one path at a time left the
+    /// seatbelt profile, the Landlock ruleset and the Windows ACL to be built
+    /// from the project root alone, so an in-root
+    /// `deny: ["Read(<root>/secrets/**)"]` was refused in process and granted
+    /// by the kernel — §1.2 holding in one layer and not in the other, and
+    /// the kernel is the layer that is supposed to be the backstop when the
+    /// in-process check is wrong.
+    ///
+    /// Read-only, and structurally rather than by promise: [`Rule`] borrows
+    /// this profile, has no public field and no constructor outside this
+    /// module, so it can be rendered and there is no expression that turns
+    /// one back into a grant (§1.1).
+    pub fn rules(&self) -> impl Iterator<Item = Rule<'_>> {
+        let never = self.never.iter().map(|rule| Rule {
+            effect: Effect::Never,
+            written: rule.rule.as_str(),
+            glob: rule.glob.as_slice(),
+            // What [`Profile::check`] does with it, not what a verb said: a
+            // never rule refuses both halves unless it is the write-only
+            // `.claude/**`.
+            read: !rule.write_only,
+            write: true,
+            except: rule.except.as_deref(),
+        });
+        let deny = self.deny.iter().map(|rule| Rule {
+            effect: Effect::Deny,
+            written: rule.written.as_str(),
+            glob: rule.glob.as_slice(),
+            // Also what [`Profile::check`] does: a `deny` refuses the paths
+            // it matches whichever verb spelled it, so an applier that
+            // denied only the written half would be looser than the profile.
+            read: true,
+            write: true,
+            except: None,
+        });
+        let allow = self.allow.iter().map(|rule| Rule {
+            effect: Effect::Allow,
+            written: rule.written.as_str(),
+            glob: rule.glob.as_slice(),
+            read: rule.read,
+            write: rule.write,
+            except: None,
+        });
+        never.chain(deny).chain(allow)
+    }
+
     /// What the document said that this profile did not act on. Empty for a
     /// document every entry of which mapped to a rule.
     pub fn diagnostics(&self) -> &[String] {
@@ -327,7 +476,8 @@ impl Profile {
         self.command_allow.len()
     }
 
-    /// How many MCP tools were admitted.
+    /// How many MCP tool patterns were admitted. A pattern may glob, so this
+    /// counts patterns rather than tools.
     pub fn mcp_tool_count(&self) -> usize {
         self.mcp_allow.len()
     }
@@ -340,13 +490,28 @@ impl Profile {
         false
     }
 
-    /// Whether an MCP tool is registered. A tool named in `deny` is not, and
-    /// a network-needing tool never is.
+    /// Whether an MCP tool is registered. A tool matched by `deny` is not,
+    /// and a network-needing tool never is.
+    ///
+    /// A tool name is matched by the same [`match_segment`] every path
+    /// component is matched by, and with the same case decision: `deny`
+    /// folds, `allow` does not. Exact-string equality here would have made
+    /// `deny: ["mcp__git__*"]` deny nothing at all while every path pattern
+    /// beside it globbed — a grant nobody asked for and no diagnostic.
     pub fn admits_mcp_tool(&self, name: &str) -> bool {
         if name.eq_ignore_ascii_case("webfetch") || name.eq_ignore_ascii_case("websearch") {
             return false;
         }
-        !self.mcp_deny.contains(name) && self.mcp_allow.contains(name)
+        if self
+            .mcp_deny
+            .iter()
+            .any(|pattern| match_segment(pattern, name, true))
+        {
+            return false;
+        }
+        self.mcp_allow
+            .iter()
+            .any(|pattern| match_segment(pattern, name, false))
     }
 
     /// The first question of §2: may this command line be attempted at all?
@@ -367,43 +532,84 @@ impl Profile {
                 "`{name}` re-enters the sandbox launcher or attaches a debugger and is never grantable by any pattern (sandbox-grants.md §4.6)"
             ));
         }
-        for pattern in &self.command_deny {
-            if match_segment(pattern, command_line, true) {
-                return denied(format!("`Bash({pattern})` in permissions.deny"));
+        // §1.2 is a rule about both of §2's questions, not only about paths.
+        // A `deny` matched against the whole line lets an `allow` win by
+        // concatenation — `cargo test -q; curl … | sh` is not `cargo test` —
+        // so every part a shell would run as a command of its own is asked
+        // separately, and one refused part refuses the line.
+        let segments = command_segments(command_line);
+        if segments.is_empty() {
+            return denied(
+                "no `Bash` pattern in permissions.allow admits this command line".to_string(),
+            );
+        }
+        for segment in &segments {
+            for pattern in &self.command_deny {
+                if match_segment(pattern, segment, true) {
+                    return denied(format!(
+                        "`Bash({pattern})` in permissions.deny matches `{segment}`"
+                    ));
+                }
+            }
+            if !self
+                .command_allow
+                .iter()
+                .any(|pattern| match_segment(pattern, segment, false))
+            {
+                return denied(format!(
+                    "no `Bash` pattern in permissions.allow admits `{segment}`"
+                ));
             }
         }
-        if self
-            .command_allow
-            .iter()
-            .any(|pattern| match_segment(pattern, command_line, false))
-        {
-            return Ok(());
-        }
-        denied("no `Bash` pattern in permissions.allow admits this command line".to_string())
+        Ok(())
     }
 
-    /// The second question of §2: may `tool` touch `path` for `access`?
+    /// The second question of §2: may `tool` touch `path` for `access`, and
+    /// **which path was that**?
+    ///
+    /// The returned `PathBuf` is the resolved path the decision was made on,
+    /// and a caller must open that rather than the string it passed in. The
+    /// two differ whenever the argument was spelled with a `~`, a relative
+    /// prefix, a `.`, a `..` or a symlinked component, so a caller that
+    /// re-opened its own argument would be opening a file this profile never
+    /// examined.
     ///
     /// Decided in the only order that keeps §1.2 true — never-grantable
     /// first, then `deny`, then `allow` — so no `allow`, however exact, can
     /// reach past either. `path` is resolved before matching: `~` expands, a
     /// relative path resolves against the project root, and symlinks are
-    /// resolved as far as the path exists, because two spellings of one path
-    /// are how a containment check comes to disagree with itself.
-    pub fn check(&self, tool: &str, access: Access, path: &Path) -> Result<(), PermissionDenied> {
+    /// resolved component by component, because two spellings of one path are
+    /// how a containment check comes to disagree with itself.
+    pub fn check(
+        &self,
+        tool: &str,
+        access: Access,
+        path: &Path,
+    ) -> Result<PathBuf, PermissionDenied> {
         let resolved = resolve(path, Some(&self.root), self.home.as_deref());
-        let denied = |rule: String| -> Result<(), PermissionDenied> {
+        let shown = display(&resolved);
+        let denied = |rule: String| -> Result<PathBuf, PermissionDenied> {
             Err(PermissionDenied {
                 tool: tool.to_string(),
-                path: display(&resolved),
+                path: shown.clone(),
                 rule,
             })
         };
         for never in &self.never {
-            if (!never.write_only || access == Access::Write) && resolved.starts_with(&never.prefix)
-            {
-                return denied(never.rule.clone());
+            if never.write_only && access != Access::Write {
+                continue;
             }
+            if !resolved.starts_with(&never.prefix) {
+                continue;
+            }
+            // The project's own subtree, and only it, is exempt — and only
+            // from a rule whose subtree contains the root.
+            if let Some(except) = &never.except
+                && resolved.starts_with(except)
+            {
+                continue;
+            }
+            return denied(never.rule.clone());
         }
         let candidate = components(&resolved);
         for rule in &self.deny {
@@ -412,7 +618,7 @@ impl Profile {
             }
         }
         if resolved.starts_with(&self.root) {
-            return Ok(());
+            return Ok(resolved);
         }
         let granted = self.allow.iter().any(|rule| {
             let wanted = match access {
@@ -422,7 +628,7 @@ impl Profile {
             wanted && covers(&rule.glob, &candidate, false)
         });
         if granted {
-            return Ok(());
+            return Ok(resolved);
         }
         denied(access.only_root_sentence().to_string())
     }
@@ -430,24 +636,35 @@ impl Profile {
 
 /// Builds §4's never-grantable set for one project root.
 ///
-/// An entry whose subtree contains the project root, or lies inside it, is
-/// skipped: a project checked out under one of these directories would
-/// otherwise refuse every path in itself. `.claude/**` inside the root is the
-/// deliberate exception, and it is write-only.
+/// **No entry is ever dropped for where the project root sits.** A rule whose
+/// subtree contains the root keeps the rule and exempts the root's own
+/// subtree, so a project under `~/.config` can use `~/.config/myproj/**` and
+/// still cannot touch `~/.config/gh/**`; a rule inside the root is kept as
+/// written, so a project rooted at `$HOME` does not acquire `~/.ssh` by being
+/// there. Skipping either shape — which is what this did — reached §4.3 and
+/// §4.4 from an empty `permissions` object. `.claude/**` inside the root is
+/// the one deliberate exception, and it is write-only.
+///
+/// Order is the message, not the answer: every rule below refuses, and the
+/// specific entries are pushed before the whole of `$HOME` so a refusal cites
+/// the section a person would look up.
 fn never_rules(root: &Path, home: Option<&Path>) -> Vec<NeverRule> {
+    let dot_claude = root.join(".claude");
     let mut rules = vec![NeverRule {
-        prefix: root.join(".claude"),
+        glob: subtree_glob(&dot_claude),
+        prefix: dot_claude,
+        except: None,
         write_only: true,
         rule: "`.claude/**` is never writable: a program that could edit it could widen the profile it was derived from (sandbox-grants.md §1.5)".to_string(),
     }];
-    let mut push = |prefix: PathBuf, rule: String| {
+    let mut push = |prefix: PathBuf, write_only: bool, rule: String| {
         let prefix = resolve(&prefix, None, None);
-        if root.starts_with(&prefix) || prefix.starts_with(root) {
-            return;
-        }
+        let except = root.starts_with(&prefix).then(|| root.to_path_buf());
         rules.push(NeverRule {
+            glob: subtree_glob(&prefix),
             prefix,
-            write_only: false,
+            except,
+            write_only,
             rule,
         });
     };
@@ -456,6 +673,7 @@ fn never_rules(root: &Path, home: Option<&Path>) -> Vec<NeverRule> {
         for name in NEVER_GRANTABLE_HOME {
             push(
                 home.join(name),
+                false,
                 format!("`~/{name}` is never grantable by any pattern (sandbox-grants.md §4.3)"),
             );
         }
@@ -464,17 +682,79 @@ fn never_rules(root: &Path, home: Option<&Path>) -> Vec<NeverRule> {
             home.join(".local").join("share").join("keyrings"),
             home.join(".gnupg"),
         ] {
-            push(path, keyring.to_string());
+            push(path, false, keyring.to_string());
         }
     }
-    push(PathBuf::from("/Library/Keychains"), keyring.to_string());
+    push(
+        PathBuf::from("/Library/Keychains"),
+        false,
+        keyring.to_string(),
+    );
     for state in glasshouse_state_dirs(home) {
         push(
             state,
+            false,
             "Glasshouse's own state and data directories, and every database in them, are never grantable by any pattern (sandbox-grants.md §4.4)".to_string(),
         );
     }
+    for path in system_credential_paths() {
+        push(path, true, keyring.to_string());
+    }
+    if let Some(home) = home {
+        // §4.3 as it is titled: **`$HOME` outside the project**, whatever
+        // pattern names it. The five names in that sentence are the ones that
+        // matter, not the whole of what it refuses — a sandbox that lets a
+        // tool rewrite `~/.gitconfig` or `~/.zsh_history` is not holding a
+        // boundary. Last, so the named entries above keep their own sections.
+        push(
+            home.to_path_buf(),
+            false,
+            "`$HOME` outside the project is never grantable by any pattern (sandbox-grants.md §4.3)"
+                .to_string(),
+        );
+    }
     rules
+}
+
+/// A resolved subtree as a glob: its components, then `**`.
+fn subtree_glob(prefix: &Path) -> Vec<String> {
+    let mut glob = components(prefix);
+    glob.push("**".to_string());
+    glob
+}
+
+/// The machine's own credential and identity store — §4.2's system half,
+/// which is what stops `Write(/**)` reaching `/etc/sudoers`.
+///
+/// Named files and directories rather than the whole of `/etc`, because
+/// `/etc/hosts` is an ordinary readable file and §3's own seatbelt shape
+/// reads `/etc/passwd`; and write-only at the call site above for the same
+/// reason. Computed without a `#[cfg]`, so a profile compiled on one host
+/// still refuses another host's spelling.
+fn system_credential_paths() -> Vec<PathBuf> {
+    let mut paths: Vec<PathBuf> = [
+        "/etc/sudoers",
+        "/etc/sudoers.d",
+        "/etc/shadow",
+        "/etc/gshadow",
+        "/etc/passwd",
+        "/etc/master.passwd",
+        "/etc/group",
+        "/etc/pam.d",
+        "/etc/ssh",
+        "/etc/security",
+    ]
+    .iter()
+    .map(PathBuf::from)
+    .collect();
+    for key in ["SystemRoot", "windir"] {
+        if let Some(value) = std::env::var_os(key)
+            && !value.is_empty()
+        {
+            paths.push(PathBuf::from(value).join("System32").join("config"));
+        }
+    }
+    paths
 }
 
 /// Every shape Glasshouse's own state and data directories take, on every
@@ -522,12 +802,20 @@ fn glasshouse_state_dirs(home: Option<&Path>) -> Vec<PathBuf> {
     dirs
 }
 
-/// The word of `command_line` naming one of §4.6's escapes, if any.
+/// **This scan cannot catch a name the shell assembles**: `sh -c 'S=sandbox-exec;
+/// $S …'`, a `$(printf …)` that builds one, or a `sh ./run.sh` whose script
+/// the project root makes writable — no word of any of those lines names an
+/// escape, and no word list closes that, because the shell is a general
+/// interpreter. §4.6 is held by the platform appliers (seatbelt's
+/// `(deny process-exec* …)`, Landlock plus `no_new_privs`, the AppContainer);
+/// this function is a cheap early refusal in front of them and nothing more.
 ///
-/// Every word is examined rather than the first, because `sh -c "bwrap …"`
-/// and `sudo lldb` are the spellings a first-word check walks straight past;
-/// a command line that merely mentions one of these names is refused too,
-/// which is the direction a never-grantable set must err in.
+/// What it does catch: the word of `command_line` naming one of §4.6's
+/// escapes, if any. Every word is examined rather than the first, because
+/// `sh -c "bwrap …"` and `sudo lldb` are the spellings a first-word check
+/// walks straight past; a command line that merely mentions one of these
+/// names is refused too, which is the direction a never-grantable set must
+/// err in.
 fn escaping_command(command_line: &str) -> Option<&'static str> {
     command_line.split_whitespace().find_map(|word| {
         let base = word
@@ -556,12 +844,20 @@ fn home_dir() -> Option<PathBuf> {
 }
 
 /// Resolves a candidate path the way every comparison in this module needs
-/// it: `~` expands, a relative path resolves against `root`, `.` and `..` are
-/// removed, and symlinks are resolved for as much of the path as exists.
+/// it: `~` expands, a relative path resolves against `root`, and the
+/// components are resolved **in the order the kernel would follow them**, so
+/// a `..` is applied to the directory a call would be standing in rather than
+/// to the name as written.
 ///
-/// The tail that does not exist yet — a file about to be created — is
-/// appended to the resolved prefix, so a write check decides on the same
-/// spelling a later read of that file would.
+/// That order is the invariant, and it holds because [`canonical_prefix`] is
+/// applied to the accumulator *before* every `ParentDir` pop rather than to
+/// the whole string afterwards. Popping textually first is how
+/// `<root>/link/../.ssh/id_ed25519` came to be `<root>/.ssh/id_ed25519` here
+/// — a path inside the project — while every real call landed in `$HOME`.
+///
+/// The tail that does not exist yet — a file about to be created, which can
+/// therefore be no symlink — is appended to the resolved prefix, so a write
+/// check decides on the same spelling a later read of that file would.
 fn resolve(path: &Path, root: Option<&Path>, home: Option<&Path>) -> PathBuf {
     let mut expanded = expand_tilde(path, home);
     if !expanded.is_absolute()
@@ -569,9 +865,25 @@ fn resolve(path: &Path, root: Option<&Path>, home: Option<&Path>) -> PathBuf {
     {
         expanded = root.join(expanded);
     }
-    let lexical = normalize(&expanded);
+    let mut out = PathBuf::new();
+    for component in expanded.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out = canonical_prefix(&out);
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    canonical_prefix(&out)
+}
+
+/// `path` with the longest prefix of it that exists replaced by its canonical
+/// form, and the components that do not exist appended as written.
+fn canonical_prefix(path: &Path) -> PathBuf {
     let mut tail = Vec::new();
-    let mut prefix = lexical;
+    let mut prefix = path.to_path_buf();
     while !prefix.exists() {
         let Some(name) = prefix.file_name().map(|name| name.to_os_string()) else {
             break;
@@ -607,20 +919,74 @@ fn expand_tilde(path: &Path, home: Option<&Path>) -> PathBuf {
     }
 }
 
-/// Removes `.` and `..` textually. Run before the physical resolution above,
-/// which then re-resolves whatever of the result exists.
-fn normalize(path: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
-    for component in path.components() {
-        match component {
-            std::path::Component::CurDir => {}
-            std::path::Component::ParentDir => {
-                out.pop();
+/// Every part of a command line a shell would run as a command of its own:
+/// the sequence and pipeline operators (`;`, `&&`, `||`, `|`, `&` and a
+/// newline), plus the contents of a command substitution (`$(…)`, backticks),
+/// which is a command line in its own right.
+///
+/// Deliberately not a shell parser: quoting is not tracked, so a literal `;`
+/// inside quotes splits too. That asks about more parts than a shell would
+/// run, which is the refusing direction, and it is why this can be a dozen
+/// lines rather than a grammar.
+fn command_segments(command_line: &str) -> Vec<String> {
+    let chars: Vec<char> = command_line.chars().collect();
+    let mut out = Vec::new();
+    let mut current = String::new();
+    let mut index = 0;
+    while index < chars.len() {
+        match chars[index] {
+            '$' if chars.get(index + 1) == Some(&'(') => {
+                let (inner, next) = balanced(&chars, index + 2, Some('('), ')');
+                out.extend(command_segments(&inner));
+                index = next;
             }
-            other => out.push(other.as_os_str()),
+            '`' => {
+                let (inner, next) = balanced(&chars, index + 1, None, '`');
+                out.extend(command_segments(&inner));
+                index = next;
+            }
+            ';' | '\n' | '&' | '|' => {
+                flush_segment(&mut out, &mut current);
+                index += 1;
+            }
+            other => {
+                current.push(other);
+                index += 1;
+            }
         }
     }
+    flush_segment(&mut out, &mut current);
     out
+}
+
+/// The text up to the `close` that balances the one already consumed, and the
+/// index just past it. `open` is `None` where the delimiter cannot nest.
+fn balanced(chars: &[char], start: usize, open: Option<char>, close: char) -> (String, usize) {
+    let mut depth = 1usize;
+    let mut inner = String::new();
+    let mut index = start;
+    while index < chars.len() {
+        let c = chars[index];
+        if c == close {
+            depth -= 1;
+            if depth == 0 {
+                return (inner, index + 1);
+            }
+        } else if Some(c) == open {
+            depth += 1;
+        }
+        inner.push(c);
+        index += 1;
+    }
+    (inner, index)
+}
+
+fn flush_segment(out: &mut Vec<String>, current: &mut String) {
+    let segment = current.trim().to_string();
+    current.clear();
+    if !segment.is_empty() {
+        out.push(segment);
+    }
 }
 
 fn display(path: &Path) -> String {
@@ -655,7 +1021,9 @@ fn is_rooted(pattern: &str) -> bool {
 /// The prefix is resolved so a pattern and a candidate spelled differently —
 /// `/tmp/…` against `/private/tmp/…` — cannot disagree; the tail is left
 /// alone because a glob names no single path to resolve. A pattern that
-/// names no root is anchored at the project root before either step, so a
+/// names no root is anchored at the project root before either step; a
+/// pattern whose resolved form then leaves the root is refused by
+/// [`register`] rather than compiled, which is what makes it true that a
 /// project-relative glob cannot match its way out of the project.
 fn resolve_pattern(root: &Path, home: Option<&Path>, pattern: &str) -> Vec<String> {
     let normalized = pattern.replace('\\', "/");

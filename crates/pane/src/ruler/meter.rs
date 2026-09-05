@@ -163,8 +163,11 @@ fn unix_secs(t: SystemTime) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Only the two `#[cfg(unix)]` tests below write a fake readout script,
+    // so on Windows this import has no user and `warnings = deny` makes an
+    // unused one a build failure rather than a lint.
+    #[cfg(unix)]
     use std::fs;
-    use std::os::unix::fs::PermissionsExt;
     use std::time::Duration;
 
     fn secs(n: u64) -> SystemTime {
@@ -232,6 +235,9 @@ mod tests {
         assert_eq!(turns, None);
     }
 
+    /// Unix only: the fake readout is a shell script. The Windows pane
+    /// cell runs every other test in this module.
+    #[cfg(unix)]
     #[test]
     fn a_command_that_prints_a_row_in_window_is_summed() {
         let dir =
@@ -243,6 +249,7 @@ mod tests {
             "#!/bin/sh\necho '{\"observed_at\":100,\"input_tokens\":7,\"output_tokens\":3}'\n",
         )
         .unwrap();
+        use std::os::unix::fs::PermissionsExt;
         let mut perms = fs::metadata(&fake_glasshouse).unwrap().permissions();
         perms.set_mode(0o755);
         fs::set_permissions(&fake_glasshouse, perms).unwrap();
@@ -260,6 +267,9 @@ mod tests {
     /// `turns: Some(0)`, never `None` -- `None` means "no meter", and
     /// collapsing the two is the exact defect the module doc comment
     /// describes.
+    /// Unix only: the fake readout is a shell script. The Windows pane
+    /// cell runs every other test in this module.
+    #[cfg(unix)]
     #[test]
     fn an_empty_successful_readout_is_zero_turns_not_absent() {
         let dir =
@@ -267,6 +277,7 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         let fake_glasshouse = dir.join("fake_glasshouse.sh");
         fs::write(&fake_glasshouse, "#!/bin/sh\nexit 0\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
         let mut perms = fs::metadata(&fake_glasshouse).unwrap().permissions();
         perms.set_mode(0o755);
         fs::set_permissions(&fake_glasshouse, perms).unwrap();

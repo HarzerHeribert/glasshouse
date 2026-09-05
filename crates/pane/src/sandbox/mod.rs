@@ -3,6 +3,9 @@
 //!
 //! Composition only. [`profile`] compiles `.claude/settings.json`'s
 //! `permissions` into a profile and answers every pre-call path question;
-//! the platform appliers are its siblings and land with 61D's second package.
+//! the platform appliers are its siblings, one per operating system.
 
+pub mod linux;
+pub mod macos;
 pub mod profile;
+pub mod windows;
