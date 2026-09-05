@@ -1,19 +1,24 @@
 //! `pane ruler run`: parse the command, resolve the task and harness sets,
-//! run every (task, harness, attempt) combination, and write one JSON line
-//! per attempt. The table print (aggregation and per-tier rows) is
-//! `score`/`report`'s job, not this module's -- that wiring lands once those
-//! two placeholders are filled.
+//! run every (task, harness, attempt) combination, print the per-tier table
+//! and write one JSON line per attempt.
+//!
+//! **Both renderings are [`super::report`]'s and neither is spelled here.**
+//! This module briefly carried its own `Serialize` record, which meant the
+//! column set [`super::report::JSONL_KEYS`] pins -- map line 2432's whole
+//! enforcement -- guarded a renderer the command never called, and the two
+//! spellings had already drifted on four keys.
 
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
 use clap::Parser;
-use serde::Serialize;
 
 use super::attempt::{self, RunOpts};
 use super::meter::Meter;
 use super::model::{Attempt, Harness, Task, Tier};
+use super::report;
+use super::score::Score;
 use super::tasks;
 
 /// The whole accepted flag set for `pane ruler run` (map line 2432: there is
@@ -111,6 +116,7 @@ fn run(flags: &[String]) -> Result<(), String> {
         }
     }
 
+    print!("{}", report::render_table(&Score::of(&attempts)));
     write_records(&args.out, &attempts)
 }
 
@@ -163,52 +169,10 @@ fn parse_tier(name: &str) -> Result<Tier, String> {
     }
 }
 
-/// The JSON shape one attempt is written as. Separate from [`Attempt`]
-/// because that type is frozen and carries no `Serialize` impl.
-#[derive(Serialize)]
-struct AttemptRecord<'a> {
-    task: &'a str,
-    tier: &'static str,
-    harness: &'a str,
-    base_commit: &'a str,
-    attempt: u32,
-    outcome: &'static str,
-    input_tokens: Option<u64>,
-    output_tokens: Option<u64>,
-    cached_input_tokens: Option<u64>,
-    wall_clock_ms: u128,
-    turns: Option<u32>,
-    changed_lines: Option<u32>,
-}
-
-impl<'a> From<&'a Attempt> for AttemptRecord<'a> {
-    fn from(a: &'a Attempt) -> Self {
-        AttemptRecord {
-            task: a.task,
-            tier: a.tier.as_str(),
-            harness: a.harness.as_str(),
-            base_commit: &a.base_commit,
-            attempt: a.attempt,
-            outcome: a.outcome.as_str(),
-            input_tokens: a.tokens.input,
-            output_tokens: a.tokens.output,
-            cached_input_tokens: a.tokens.cached_input,
-            wall_clock_ms: a.wall_clock.as_millis(),
-            turns: a.turns,
-            changed_lines: a.changed_lines,
-        }
-    }
-}
-
 fn write_records(out_dir: &Path, attempts: &[Attempt]) -> Result<(), String> {
     fs::create_dir_all(out_dir)
         .map_err(|e| format!("could not create --out {}: {e}", out_dir.display()))?;
     let path = out_dir.join("attempts.jsonl");
-    let mut body = String::new();
-    for attempt in attempts {
-        let record = AttemptRecord::from(attempt);
-        body.push_str(&serde_json::to_string(&record).map_err(|e| e.to_string())?);
-        body.push('\n');
-    }
-    fs::write(&path, body).map_err(|e| format!("could not write {}: {e}", path.display()))
+    fs::write(&path, report::render_jsonl(attempts))
+        .map_err(|e| format!("could not write {}: {e}", path.display()))
 }

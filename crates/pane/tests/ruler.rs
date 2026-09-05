@@ -320,3 +320,93 @@ fn an_errored_attempt_counts_in_neither_token_column() {
     assert_eq!(row.tokens_per_completed, None);
     assert_eq!(row.tokens_failed, None);
 }
+
+/// Map line 2432 is about what a comparison **presents**, so this asserts
+/// the bytes the command actually emits, not the constants it declares.
+///
+/// Its predecessor, `the_table_and_the_jsonl_have_exactly_these_columns`,
+/// compares `HEADERS` and `JSONL_KEYS` against literals -- which pins the
+/// declaration and leaves the renderer free. Measured: appending
+/// `tokens/turn` to `render_table`'s own header line, with both constants
+/// untouched, SURVIVED the whole suite. A per-turn column could therefore
+/// have been presented while every test stayed green, which is the one
+/// outcome 2432 forbids.
+#[test]
+fn the_rendered_table_header_is_exactly_the_declared_columns() {
+    let score = Score::of(&[attempt(
+        "L1",
+        Tier::Leaf,
+        "claude-code",
+        1,
+        Outcome::Pass,
+        Tokens {
+            input: Some(100),
+            output: Some(50),
+            cached_input: None,
+        },
+        10,
+        Some(3),
+    )]);
+
+    let table = report::render_table(&score);
+    let header: Vec<&str> = table
+        .lines()
+        .next()
+        .expect("render_table emits a header line")
+        .split_whitespace()
+        .collect();
+
+    assert_eq!(header, report::HEADERS.to_vec());
+    for line in table.lines() {
+        assert!(
+            !line.contains("tokens/turn") && !line.to_lowercase().contains("per turn"),
+            "a tokens-per-turn column reached the rendered table: {line}"
+        );
+    }
+}
+
+/// The JSONL half of the same question: the keys `render_jsonl` actually
+/// writes, in order, rather than the array it is supposed to write them from.
+#[test]
+fn the_rendered_jsonl_keys_are_exactly_the_declared_keys() {
+    let rendered = report::render_jsonl(&[attempt(
+        "L1",
+        Tier::Leaf,
+        "claude-code",
+        1,
+        Outcome::Pass,
+        Tokens {
+            input: Some(100),
+            output: Some(50),
+            cached_input: None,
+        },
+        10,
+        Some(3),
+    )]);
+
+    let line = rendered.lines().next().expect("one attempt, one line");
+    let parsed: serde_json::Value = serde_json::from_str(line).expect("render_jsonl emits JSON");
+    let object = parsed.as_object().expect("each line is a JSON object");
+
+    // Membership both ways: no declared key missing, and no key emitted that
+    // was never declared -- the second half is what a smuggled per-turn
+    // figure would trip.
+    let emitted: HashSet<&str> = object.keys().map(String::as_str).collect();
+    let declared: HashSet<&str> = report::JSONL_KEYS.iter().copied().collect();
+    assert_eq!(emitted, declared);
+
+    // Order, read off the bytes rather than the parse: `serde_json::Value`
+    // holds a `BTreeMap`, so its iteration order is alphabetical and says
+    // nothing about what `render_jsonl` wrote.
+    let mut previous = 0;
+    for key in report::JSONL_KEYS {
+        let at = line
+            .find(&format!("\"{key}\":"))
+            .unwrap_or_else(|| panic!("{key} is not written as a key: {line}"));
+        assert!(
+            at >= previous,
+            "{key} is emitted out of declared order: {line}"
+        );
+        previous = at;
+    }
+}
