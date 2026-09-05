@@ -178,3 +178,44 @@ fn the_system_prompt_is_recorded_once_not_per_turn() {
 
     assert_eq!(system_lines, 1);
 }
+
+/// Re-opening an existing rollout must not destroy it — the property that
+/// makes resume possible at all, and the one its sibling above cannot see.
+///
+/// `a_turn_is_appended_and_the_file_is_never_rewritten` keeps one `Rollout`
+/// alive across both writes, so it holds even if the file were opened with
+/// `truncate(true)`: the truncation happens once, before the first write.
+/// Measured: replacing `.append(true)` with `.write(true).truncate(true)`
+/// SURVIVED the whole suite. A session re-opened after a restart would then
+/// come back empty, and `resume` would honestly report a conversation that
+/// had been silently deleted.
+#[test]
+fn reopening_a_rollout_appends_to_it_rather_than_truncating_it() {
+    let path = tempdir().join("session.jsonl");
+
+    let mut first = Rollout::create(&path, SessionId::new("s1"), "system prompt").unwrap();
+    first.record_turn(Role::User, "before the restart").unwrap();
+    drop(first);
+
+    let bytes_after_first = std::fs::read(&path).unwrap();
+
+    let mut second = Rollout::create(&path, SessionId::new("s1"), "system prompt").unwrap();
+    second
+        .record_turn(Role::Assistant, "after the restart")
+        .unwrap();
+    drop(second);
+
+    let bytes_after_second = std::fs::read(&path).unwrap();
+    assert!(
+        bytes_after_second.starts_with(&bytes_after_first),
+        "re-opening rewrote the rollout instead of appending to it"
+    );
+
+    let conversation = rollout::resume(&path).unwrap();
+    let texts: Vec<&str> = conversation
+        .messages
+        .iter()
+        .flat_map(|message| message.content.iter().map(|block| block.text()))
+        .collect();
+    assert_eq!(texts, vec!["before the restart", "after the restart"]);
+}

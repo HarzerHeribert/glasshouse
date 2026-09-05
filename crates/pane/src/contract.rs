@@ -159,20 +159,25 @@ impl ServedBy {
 /// The kind of a rollout line.
 ///
 /// **One rollout file per session, one JSON object per line, append-only, and
-/// a `kind` on every line.** 61C writes `Turn` lines; 61E's runtime writes
+/// a `kind` on every line.** 61C writes `System` once and then `Turn` lines; 61E's runtime writes
 /// `Cell` lines against the format `runtime-contract.md` §4 fixes. They share
 /// one file rather than two so that append order *is* the session's order —
 /// two files would need a clock to reconcile, and a resumed session would
 /// depend on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RolloutKind {
+    /// The session's system prompt, written once on the file's first line.
+    System,
     Turn,
     Cell,
 }
 
 impl RolloutKind {
-    pub fn as_str(self) -> &'static str {
+    /// `const` so a module writing one kind can name it in a `const` of its
+    /// own rather than re-spelling the string.
+    pub const fn as_str(self) -> &'static str {
         match self {
+            RolloutKind::System => "system",
             RolloutKind::Turn => "turn",
             RolloutKind::Cell => "cell",
         }

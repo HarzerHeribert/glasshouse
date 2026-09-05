@@ -22,7 +22,10 @@ use crate::contract::{Conversation, Message, Role, RolloutKind, SessionId};
 /// shared file; this kind is 61C's own, chosen and documented here, and a
 /// reader that does not know it skips it exactly like any other unknown
 /// `kind` -- so nothing about the shared format depends on this name.
-pub const SYSTEM_KIND: &str = "system";
+/// The system prompt's line kind, from the frozen vocabulary rather than
+/// spelled here: 61E writes into the same file and both halves must agree on
+/// the string, which a shared enum guarantees and a local constant does not.
+pub const SYSTEM_KIND: &str = RolloutKind::System.as_str();
 
 #[derive(Serialize, Deserialize)]
 struct SystemLine {
