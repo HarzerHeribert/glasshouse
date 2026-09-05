@@ -45,9 +45,63 @@ pub use mcp::serve as serve_mcp;
 mod client;
 
 #[cfg(unix)]
+pub(crate) use client::send_machine_message;
+#[cfg(unix)]
 pub use client::{interrupt, mute, read_output, send_message, unmute};
 #[cfg(unix)]
 pub use unix::serve;
+
+/// Why a machine-originated write through this project's control door did
+/// not reach the session it named — capability map line 2414.
+///
+/// Kept distinct rather than flattened to a sentence immediately: this
+/// packet's one caller, the edit-intent hook's
+/// `notify_orchestrator_of_conflict`, must log a different sentence for
+/// "nothing is listening", "the socket refused the connection" and "the
+/// door does not hold this session live" — and must never guess between
+/// them. [`send_message`], `interrupt`, `mute`, `unmute` and `read_output`
+/// still get one flattened sentence, unchanged: see this type's `From`
+/// impl below.
+///
+/// Defined here rather than inside `client` (which is `#[cfg(unix)]`)
+/// because the non-Unix fallback for [`send_machine_message`] below needs
+/// to name it too.
+pub(crate) enum CallError {
+    /// The socket does not exist, or nothing accepted the connection:
+    /// `glasshouse api serve` is not running for this project.
+    NotListening(String),
+    /// The socket exists but rejected this connection outright — it is
+    /// restricted to the user that started the door.
+    ConnectionRefused(String),
+    /// The door was reached and answered `status: "error"` — in practice,
+    /// for this caller, because it does not hold the named session live
+    /// (never started through it, or reachable only through a pane it
+    /// could not reach).
+    DoorRefused(String),
+    /// Any other transport-level failure: a bad response, a timed-out
+    /// write or read, or a status this Glasshouse does not recognise.
+    Other(anyhow::Error),
+}
+
+impl std::fmt::Display for CallError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CallError::NotListening(msg)
+            | CallError::ConnectionRefused(msg)
+            | CallError::DoorRefused(msg) => f.write_str(msg),
+            CallError::Other(err) => write!(f, "{err}"),
+        }
+    }
+}
+
+impl From<CallError> for anyhow::Error {
+    fn from(err: CallError) -> Self {
+        match err {
+            CallError::Other(err) => err,
+            other => anyhow::anyhow!("{other}"),
+        }
+    }
+}
 
 /// The control API needs a Unix domain socket, and Windows has no drop-in
 /// equivalent (a named pipe is a different API with different authentication
@@ -87,6 +141,18 @@ pub fn send_message(
     _text: &str,
 ) -> anyhow::Result<()> {
     Err(no_unix_socket())
+}
+
+/// See [`no_unix_socket`]. The edit-intent hook's undeliverable branch (see
+/// [`CallError::NotListening`]) is exactly the sentence this platform needs:
+/// there is no door here for the hook to have failed to reach.
+#[cfg(not(unix))]
+pub(crate) fn send_machine_message(
+    _runtime: &glasshouse::Runtime,
+    _session: &str,
+    _text: &str,
+) -> Result<(), CallError> {
+    Err(CallError::NotListening(no_unix_socket().to_string()))
 }
 
 /// See [`no_unix_socket`].

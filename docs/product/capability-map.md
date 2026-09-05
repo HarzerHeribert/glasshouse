@@ -2411,9 +2411,9 @@ Conflict prediction (Maybe C)
 
 Orchestrator handling (Maybe H)
 
-☐ Notify the orchestrator when two workers are likely to touch the same files.
-☐ Allow the orchestrator to serialize only the conflicting portion of otherwise parallel tasks.
-☐ Keep conflict handling transparent so the user can inspect why the orchestrator changed a worker's plan.
+☑ Notify the orchestrator when two workers are likely to touch the same files.
+☑ Allow the orchestrator to serialize only the conflicting portion of otherwise parallel tasks.
+☑ Keep conflict handling transparent so the user can inspect why the orchestrator changed a worker's plan.
 
 
 Phase 61 — pane: the first-party harness

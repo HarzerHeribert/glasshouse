@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1319 closed · 87 active committed open (94%)** — across 20 phases.
+**1322 closed · 84 active committed open (94%)** — across 19 phases.
 
 Not in the work queue: **0 deferred gate criteria** (Phase 52, Phase 53) awaiting a user decision, and **229 parked experimental lines**. They are visible in the map; they are not release-blocking work.
 
@@ -36,7 +36,6 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 20 | Minimal durable project memory | **2** | 16 | `805` |
 | Phase 33 | Resource health | **2** | 13 | `1309` |
 | Phase 33B | Reliability-adjusted agent performance | **3** | 11 | `1345` |
-| Phase 60 | Parallel-session file coordination | **3** | 13 | `2374` |
 | Phase 21E | Decision ladder and conflict handling | **4** | 8 | `907` |
 | Phase 31 | Compaction-aware behavior | **5** | 2 | `1167` |
 | Phase 21G | Memory revalidation | **6** | 3 | `941` |
@@ -45,7 +44,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 51 | Evaluation hooks | **13** | 24 | `1818` |
 | Phase 61 | pane: the first-party harness | **24** | 11 | `2419` |
 
-**Fully closed (91):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 7, Phase 8, Phase 9A, Phase 9B, Phase 9C, Phase 9D, Phase 9E, Phase 9F, Phase 9G, Phase 9I, Phase 9J, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 16, Phase 17, Phase 18, Phase 19, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 21H, Phase 21I, Phase 21J, Phase 21K, Phase 22, Phase 23, Phase 24, Phase 25, Phase 26, Phase 27, Phase 28, Phase 29, Phase 30, Phase 32, Phase 32B, Phase 32E, Phase 32F, Phase 33A, Phase 33C, Phase 34, Phase 34A, Phase 34B, Phase 34D, Phase 34E, Phase 34F, Phase 35, Phase 35A, Phase 35B, Phase 35C, Phase 35D, Phase 36, Phase 37, Phase 39, Phase 40, Phase 41, Phase 42, Phase 43, Phase 44, Phase 45, Phase 46, Phase 47, Phase 48, Phase 49, Phase 50, Phase 52, Phase 53, Phase 54, Phase 54A, Phase 55, Phase 56, Phase 56A, Phase 57, Phase 58, Phase 59.
+**Fully closed (92):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 7, Phase 8, Phase 9A, Phase 9B, Phase 9C, Phase 9D, Phase 9E, Phase 9F, Phase 9G, Phase 9I, Phase 9J, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 16, Phase 17, Phase 18, Phase 19, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 21H, Phase 21I, Phase 21J, Phase 21K, Phase 22, Phase 23, Phase 24, Phase 25, Phase 26, Phase 27, Phase 28, Phase 29, Phase 30, Phase 32, Phase 32B, Phase 32E, Phase 32F, Phase 33A, Phase 33C, Phase 34, Phase 34A, Phase 34B, Phase 34D, Phase 34E, Phase 34F, Phase 35, Phase 35A, Phase 35B, Phase 35C, Phase 35D, Phase 36, Phase 37, Phase 39, Phase 40, Phase 41, Phase 42, Phase 43, Phase 44, Phase 45, Phase 46, Phase 47, Phase 48, Phase 49, Phase 50, Phase 52, Phase 53, Phase 54, Phase 54A, Phase 55, Phase 56, Phase 56A, Phase 57, Phase 58, Phase 59, Phase 60.
 
 ## The nearly-finished phases, in full
 
@@ -112,12 +111,6 @@ these unwrapped.
 - **1354** ☐ Count empty completions, unusable tool calls, stream aborts, and apparently successful but non-actionable turns as distinct unsuccessful outcomes.
 - **1356** ☐ Avoid comparing TTFC across tasks with materially different tool requirements unless the comparison is explicitly normalized or segmented.
 - **1360** ☐ Never infer precise TTFC or token timing from terminal text when the adapter cannot distinguish protocol events reliably.
-
-### Phase 60 — Parallel-session file coordination  (3 open, 13 closed)
-
-- **2414** ☐ Notify the orchestrator when two workers are likely to touch the same files.
-- **2415** ☐ Allow the orchestrator to serialize only the conflicting portion of otherwise parallel tasks.
-- **2416** ☐ Keep conflict handling transparent so the user can inspect why the orchestrator changed a worker's plan.
 
 ## Practice sections, by number
 

@@ -4,10 +4,9 @@ use glasshouse::Runtime;
 use glasshouse::checkpoint::git::GitPosition;
 use glasshouse::checkpoint::{Checkpoint, CheckpointReason, ProjectCheckpoints};
 use glasshouse::config::{self, EffectiveConfig, UserConfig};
-use glasshouse::events::{LifecycleEvent, MessageOrigin, Observation, TurnOutcome};
+use glasshouse::events::{LifecycleEvent, Observation, TurnOutcome};
 use glasshouse::session;
-use glasshouse::session::api::SessionApi;
-use glasshouse::session::{ProjectSessions, SessionId, SessionRuntime};
+use glasshouse::session::{ProjectSessions, SessionId};
 
 /// Record a lifecycle event a harness reported about one of its sessions.
 ///
@@ -719,7 +718,7 @@ fn edit_intent_conflict(
             // editing session about, told to the orchestrator too — one
             // delivery attempt per path, never a batch, so a conflict on
             // this path cannot be conflated with one on another (line 2415).
-            notify_orchestrator_of_conflict(&store, path, &id, &claim.session_id);
+            notify_orchestrator_of_conflict(runtime, &store, path, &id, &claim.session_id);
         }
         // Map line 2402: the intent itself, recorded before the operation
         // runs. Per path rather than per batch, and best effort per path —
@@ -769,6 +768,7 @@ fn edit_intent_conflict(
 ///
 /// History: design-decisions.md, "Trims: commands/hook.rs", notify_orchestrator_of_conflict.
 fn notify_orchestrator_of_conflict(
+    runtime: &Runtime,
     store: &glasshouse::session::SessionStore<'_>,
     path: &str,
     editor: &SessionId,
@@ -818,15 +818,37 @@ fn notify_orchestrator_of_conflict(
         crate::commands::shared::short_id(holder),
     );
 
-    let mut live = SessionRuntime::new();
-    let mut api = SessionApi::new(store, &mut live);
-    match api.send_text(&orchestrator.id, &text, MessageOrigin::Machine) {
+    // The one live orchestrator this hook found is a fact from *this*
+    // process's read of the project database; whether it is actually held
+    // by the `glasshouse api serve` process this call reaches is a
+    // separate question the door itself answers — see [`CallError`].
+    match crate::api::send_machine_message(runtime, orchestrator.id.as_str(), &text) {
         Ok(()) => tracing::info!(
             orchestrator = %orchestrator.id,
             path,
-            "edit intent: delivered a conflict notice to the orchestrator"
+            "edit intent: delivered a conflict notice to the orchestrator through this \
+             project's control API"
         ),
-        Err(err) => tracing::debug!(
+        Err(crate::api::CallError::NotListening(detail)) => tracing::debug!(
+            error = %detail,
+            orchestrator = %orchestrator.id,
+            path,
+            "edit intent: this project's control API is not listening, so the notice could \
+             not be delivered"
+        ),
+        Err(crate::api::CallError::ConnectionRefused(detail)) => tracing::debug!(
+            orchestrator = %orchestrator.id,
+            path,
+            "edit intent: {detail}"
+        ),
+        Err(crate::api::CallError::DoorRefused(detail)) => tracing::debug!(
+            error = %detail,
+            orchestrator = %orchestrator.id,
+            path,
+            "edit intent: the orchestrator session was not started by this project's control \
+             API, so the notice could not be delivered"
+        ),
+        Err(crate::api::CallError::Other(err)) => tracing::debug!(
             error = %format!("{err:#}"),
             orchestrator = %orchestrator.id,
             path,

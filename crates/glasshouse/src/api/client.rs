@@ -80,6 +80,38 @@ pub fn send_message(runtime: &Runtime, session: &str, text: &str) -> anyhow::Res
     Ok(())
 }
 
+/// Send one machine-originated line of text to a live session in this
+/// project, without printing anything to stdout — capability map line 2414.
+///
+/// [`send_message`] cannot be reused as is for this: it always states
+/// `"origin": "user"` (this module's doc comment says why that is not a
+/// parameter) and always prints a confirmation line, and this function's one
+/// caller — the edit-intent hook — has neither fact to state and cannot
+/// afford the print: the hook's stdout is `PreToolUse`'s own response
+/// channel, and a second line on it would corrupt that protocol. Omitting
+/// `origin` here states nothing, which the wire format already treats as
+/// `RequestOrigin::Machine` (`protocol.rs`) — exactly what this caller is.
+///
+/// Returns [`super::CallError`] rather than a rendered sentence: the caller
+/// logs a different sentence for "nothing is listening", "the socket
+/// refused the connection" and "the door does not hold this session live",
+/// and must never guess between them by parsing another function's prose.
+pub(crate) fn send_machine_message(
+    runtime: &Runtime,
+    session: &str,
+    text: &str,
+) -> Result<(), super::CallError> {
+    call_inner(
+        runtime,
+        &serde_json::json!({
+            "op": "send_message",
+            "session": session,
+            "text": text,
+        }),
+    )?;
+    Ok(())
+}
+
 /// Interrupt a live session in this project — map line 747.
 ///
 /// The person's, like [`send_message`]: a `Ctrl-C` somebody asked for is an
@@ -249,65 +281,91 @@ fn socket_path_for(runtime: &Runtime) -> PathBuf {
 /// action they need — start the door — is the same whichever path it would
 /// have bound.
 fn call(runtime: &Runtime, request: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
+    call_inner(runtime, request).map_err(anyhow::Error::from)
+}
+
+/// [`call`]'s body, with the errors it used to build inline kept as
+/// [`super::CallError`] variants instead of being flattened into
+/// `anyhow::Error` immediately — see [`send_machine_message`] for the
+/// caller that needs the distinction and [`call`]'s own doc comment for why
+/// its four existing callers do not need it and see nothing different.
+fn call_inner(
+    runtime: &Runtime,
+    request: &serde_json::Value,
+) -> Result<serde_json::Value, super::CallError> {
     let socket = socket_path_for(runtime);
     let stream = UnixStream::connect(&socket).map_err(|err| match err.kind() {
-        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => anyhow!(
-            "this project's control API is not listening; start it with `glasshouse api serve` \
-             in this project, and note that it can only reach sessions that same door started"
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => {
+            super::CallError::NotListening(
+                "this project's control API is not listening; start it with `glasshouse api \
+                 serve` in this project, and note that it can only reach sessions that same \
+                 door started"
+                    .to_owned(),
+            )
+        }
+        std::io::ErrorKind::PermissionDenied => super::CallError::ConnectionRefused(
+            "this project's control socket refused the connection; it is restricted to the \
+             user that started `glasshouse api serve`"
+                .to_owned(),
         ),
-        std::io::ErrorKind::PermissionDenied => anyhow!(
-            "this project's control socket refused the connection; it is restricted to the user \
-             that started `glasshouse api serve`"
-        ),
-        _ => anyhow!("could not reach this project's control API: {err}"),
+        _ => super::CallError::Other(anyhow!("could not reach this project's control API: {err}")),
     })?;
     // Bounded on both halves. A door that accepted the connection and then
     // stopped reading would otherwise wedge the write, which looks exactly
     // like a wedged read from the outside and is just as unhelpful.
-    stream.set_write_timeout(Some(CALL_TIMEOUT))?;
-    stream.set_read_timeout(Some(CALL_TIMEOUT))?;
+    stream
+        .set_write_timeout(Some(CALL_TIMEOUT))
+        .map_err(|err| super::CallError::Other(err.into()))?;
+    stream
+        .set_read_timeout(Some(CALL_TIMEOUT))
+        .map_err(|err| super::CallError::Other(err.into()))?;
 
-    let mut writer = stream.try_clone()?;
-    let mut payload = serde_json::to_string(request)?;
+    let mut writer = stream
+        .try_clone()
+        .map_err(|err| super::CallError::Other(err.into()))?;
+    let mut payload = serde_json::to_string(request)
+        .map_err(|err| super::CallError::Other(anyhow!("could not encode this request: {err}")))?;
     payload.push('\n');
     writer
         .write_all(payload.as_bytes())
-        .map_err(|err| timed_out(&err, "sending the request"))?;
+        .map_err(|err| super::CallError::Other(timed_out(&err, "sending the request")))?;
     writer
         .flush()
-        .map_err(|err| timed_out(&err, "sending the request"))?;
+        .map_err(|err| super::CallError::Other(timed_out(&err, "sending the request")))?;
 
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
     let read = reader
         .read_line(&mut line)
-        .map_err(|err| timed_out(&err, "waiting for the answer"))?;
+        .map_err(|err| super::CallError::Other(timed_out(&err, "waiting for the answer")))?;
     if read == 0 {
-        return Err(anyhow!(
+        return Err(super::CallError::Other(anyhow!(
             "this project's control API closed the connection without answering; check the \
              `glasshouse api serve` process"
-        ));
+        )));
     }
 
     let response: serde_json::Value = serde_json::from_str(line.trim_end()).map_err(|err| {
-        anyhow!("this project's control API sent an answer this Glasshouse cannot read: {err}")
+        super::CallError::Other(anyhow!(
+            "this project's control API sent an answer this Glasshouse cannot read: {err}"
+        ))
     })?;
     match response.get("status").and_then(serde_json::Value::as_str) {
         Some("ok") => Ok(response
             .get("result")
             .cloned()
             .unwrap_or(serde_json::Value::Null)),
-        // The door's sentence, verbatim. See this function's doc comment.
-        Some("error") => Err(anyhow!(
-            "{}",
+        // The door's sentence, verbatim. See [`call`]'s doc comment.
+        Some("error") => Err(super::CallError::DoorRefused(
             response
                 .get("message")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("this project's control API refused the request and did not say why")
+                .to_owned(),
         )),
-        _ => Err(anyhow!(
+        _ => Err(super::CallError::Other(anyhow!(
             "this project's control API sent an answer with no status this Glasshouse knows"
-        )),
+        ))),
     }
 }
 

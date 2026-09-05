@@ -19966,3 +19966,20 @@ Phases 52 and 53 carried seven criteria for features nobody has proposed — sem
 7. **1882** — before any graph database, SQLite relations are shown insufficient for a real query; `phase-53.md`'s 1882 entry records today's evaluation — one relationship ever needed, built, and serving a real query — so the burden is on the proposal.
 
 **Why:** an open gate for a feature nobody wants counts as work pending and is not; a rule recorded and cited is the same protection at no upkeep. The Cluster Q refusals of 1867–1870, 1879 and 1882 are superseded by this decision.
+
+## Steering decisions of record — the user, 2026-09-06 (after midnight)
+
+Put as yes/no by the orchestrator and answered *"agree with all of the proposed decisions"*; each is a standing decision, not a preference to re-ask:
+
+1. **Pane's first live run** (61E-WIRE, line 2464) may use the user's Anthropic subscription through the Glasshouse gateway.
+2. **If the ruler shows no token win on any workload tier, pane still ships** as the first-party harness and the absence of a win is recorded (2464's *"or record why not"*).
+3. **The `v8` crate** — a large prebuilt binary — is an accepted dependency of pane's runtime.
+4. **Pane's Windows cell may lag** behind macOS and Linux: 61E-WIRE proceeds while the Windows cell is red, provided the red is named and packaged.
+5. **Refused lines whose producer is a vendor's that will never ship, or a concept the design dropped, may be closed as decided-out** with the register's reasoning recorded — listed before any is touched (`GH-REFUSED-LINES-CENSUS`).
+6. **The API-served topology is the intended one** for Phase 60's conflict notice: an orchestrator started by `glasshouse api serve` receives notices; a shell-launched one does not, and that is a stated limit, not a defect (line 2414).
+7. **Dogfooding runs daily without asking**: one real Claude Code session through the shipped binary, a few dollars each.
+8. **A support-work provider may be configured on this machine** from the local key file, a cheap model, so memory extraction runs during dogfooding.
+9. **`sites/` changes handed off by the user's other agents may be committed and pushed** without a fresh approval each time, restricted to `sites/**` and the Pages workflow.
+10. **A tagged pre-release** (a GitHub release with built binaries, no crates.io publish) is cut from `main` once the pane Windows cell is green.
+
+Also asked and answered the same night: the seven Phase 52/53 gates are standing rules (*Seven experiment gates adopted as standing rules*), and direct verified completion is implemented directly with no Codex step (*Direct verified completion — decided directly*). **Next question the user asked for:** which Maybe/Experimental lines are worth pulling into the committed map — to be put as a yes/no list from the census.
