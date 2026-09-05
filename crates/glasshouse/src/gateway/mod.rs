@@ -12,35 +12,7 @@
 //! `crate::harness`, and
 //! `tests::the_gateway_imports_none_of_the_modules_that_would_make_it_a_harness`
 //! scans every one of them to keep it that way.
-//! History: design-decisions.md, "Trims: gateway/mod.rs", module doc.
-//!
-//! The listener binds `127.0.0.1:0`. Loopback is not a default waiting to be
-//! overridden: there is no configuration in this module that could bind
-//! anywhere else, so a gateway that is reachable from the network cannot be
-//! produced by getting a setting wrong.
-//!
-//! `session::store`'s native session identifiers come from SQLite's
-//! `randomblob`, and that is right for an identifier: it needs to be unique.
-//! An authentication token needs to be **unpredictable to an attacker**,
-//! which is a different requirement, so this one comes from the operating
-//! system's cryptographic generator via the `getrandom` crate instead — 32
-//! bytes of it, rendered as hex.
-//!
-//! [`GatewayToken`] is then treated exactly the way
-//! [`crate::secret::Secret`] treats a credential: no `Display`, no `Deref`,
-//! no `AsRef<str>`, no serde, and a manual [`Debug`](std::fmt::Debug) that
-//! prints [`crate::secret::REDACTED`] — the same marker, not a second one
-//! invented here.
-//!
-//! A gateway-backed child harness is given [`GatewayToken`] and **not** the
-//! provider's key. So the value in the child's environment is worthless off
-//! this machine and dies with the instance — which is the whole of "never
-//! expose provider API keys to a child harness when the local gateway can
-//! hold the credential itself".
-//!
-//! Glasshouse has no async runtime and this phase does not add one for a
-//! single-user loopback proxy. One thread accepts; each accepted connection
-//! gets a thread of its own and blocks on it.
+// History: design-decisions.md, "Trims: gateway, profile and provider module docs", gateway/mod.rs module doc.
 
 mod http;
 mod ingress;

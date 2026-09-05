@@ -1,48 +1,7 @@
 //! Phase 32B: the readers that turn something a provider or a harness
 //! actually said into a [`Reading`] on a [`CapacityState`].
 //!
-//! [`mod@crate::provider::quota`] built the model and reads nothing; this
-//! module is the half that reads, and it is deliberately the only place in
-//! the crate that turns an outside string into a capacity number.
-//!
-//! # Two seams, kept apart on purpose — capability map line 1232
-//!
-//! [`RateLimitHeaders`] reads what an **API provider** sends back, and
-//! [`HarnessTelemetry`] reads what a **harness** says about its own
-//! first-party subscription. Line 1232 asks that harness adapters be able to
-//! expose subscription-usage telemetry *independently from* API-provider
-//! telemetry, and independence here is structural rather than promised:
-//! neither type can write into the other's fields, each carries its own
-//! [`ReadingSource`] variant, and [`apply_provider_headers`] and
-//! [`apply_harness_report`] are separate functions that a caller may run in
-//! either order, both, or neither. A harness that reports nothing cannot
-//! blank a provider's headers, and a provider that answers no headers cannot
-//! blank a harness's report — proven by
-//! `tests::the_two_telemetry_seams_do_not_overwrite_each_other`.
-//!
-//! # Nothing here can fail a session — capability map line 1238
-//!
-//! **No function in this module returns a `Result`.** A header that is
-//! missing, malformed, negative, or in a unit nobody recognises produces
-//! [`Capacity::Unmeasured`] — the state that means "the provider publishes
-//! this and nothing has read it", which is exactly true after a failed read.
-//! A caller therefore cannot write an error path that stops a coding session
-//! because a rate-limit header was a word instead of a number, because there
-//! is no error to propagate. Falling back from authoritative telemetry to a
-//! weaker source is [`Capacity::prefer`], which is likewise total.
-//!
 //! # What may become a source description, and what may never
-//!
-//! `design-decisions.md` records, measured against real hosts, that a
-//! provider's error body may quote an **account identifier** (NVIDIA) or a
-//! **masked tail of the submitted credential** (two others), and that such a
-//! body "must be treated as sensitive by default: classified against, and
-//! never copied whole into a log, a diagnostic, a session record, or anything
-//! a user might share."
-//!
-//! A [`ReadingSource`] description is precisely such a diagnostic — it is
-//! printed by `glasshouse resources`. So the rule is enforced here, at the
-//! boundary, and it is narrower than "do not copy the body":
 //!
 //! - a header **name** may be recorded, because Glasshouse chose it from
 //!   [`RATE_LIMIT_HEADERS`] and a name that is not on that list is never seen
@@ -55,8 +14,7 @@
 //! is the standing guard: it feeds header values that are shaped like
 //! credentials and account identifiers through the whole reader and asserts
 //! none of them reaches any rendered string.
-//!
-//! History: design-decisions.md, "Trims: provider/telemetry/mod.rs", module doc.
+// History: design-decisions.md, "Trims: gateway, profile and provider module docs", provider/telemetry/mod.rs module doc.
 
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -356,23 +314,6 @@ impl RateLimitHeaders {
 
     /// Fold what these headers said into `state` — capability map line 1229.
     ///
-    /// # What each header becomes, and what it deliberately does not
-    ///
-    /// - a limit whose window is a minute or shorter becomes
-    ///   [`RateCeilings::requests_per_minute`];
-    /// - a limit over a longer window becomes
-    ///   [`RateCeilings::long_window_requests`], which carries its own
-    ///   `window_seconds`, so a per-hour or per-day pool needs no new variant
-    ///   (capability map line 1216);
-    /// - a limit with **no** stated window becomes neither. `300` with no
-    ///   period is not a rate and filing it as one would be inventing the
-    ///   period;
-    /// - a remaining count becomes the request pool's remaining half, and the
-    ///   limit becomes its limit half — so that [`Pool::normalized`] can
-    ///   produce a percentage only when the provider supplied both, which is
-    ///   the case that lets it be [`crate::provider::quota::Percentage::Exact`];
-    /// - a reset field becomes the rolling window's reset time.
-    ///
     /// Every quantity the headers did not carry is left exactly as it was.
     /// This function never downgrades a pool: a state whose credits were
     /// already measured keeps them, because nothing here writes to credits.
@@ -384,6 +325,7 @@ impl RateLimitHeaders {
     /// arrived. That is [`Capacity::is_readable`]'s contract, which Phase 32A
     /// called its best property, and this is the first reader with the
     /// opportunity to break it.
+    // History: design-decisions.md, "Trims: gateway, profile and provider module docs", provider/telemetry/mod.rs `apply_to` doc.
     pub fn apply_to(&self, state: CapacityState, observed_at_unix: i64) -> CapacityState {
         if self.is_empty() {
             return state;
@@ -672,13 +614,6 @@ impl UsageField {
 
 /// What a provider's own usage endpoint answered — capability map line 1230.
 ///
-/// # Established for exactly one provider, and one route
-///
-/// `crate::provider::usage_endpoint` names which providers this can even be
-/// asked of. Today that is OpenRouter's `GET /api/v1/key` alone — the route
-/// [`crate::provider::discovery::read_response_body`] fetches, behind
-/// `--probe`, never on a path that runs without one.
-///
 /// # What this reader folds into [`CapacityState`], and what it deliberately
 /// does not
 ///
@@ -690,8 +625,7 @@ impl UsageField {
 /// window. A field present and `null` becomes [`Capacity::Inapplicable`] and
 /// a field present and a number becomes [`Capacity::Measured`] — D3's own
 /// rule in code.
-///
-/// History: design-decisions.md, "Trims: provider/telemetry/mod.rs", struct ProviderUsage.
+// History: design-decisions.md, "Trims: gateway, profile and provider module docs", provider/telemetry/mod.rs `ProviderUsage` struct doc.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ProviderUsage {
     limit: UsageField,
@@ -915,27 +849,11 @@ pub fn read_harness_plan(body: &str, observed_at_unix: i64, interface: &str) -> 
 /// for its own reports (`ReportOptions::now_unix`'s own doc: *"this module
 /// has no clock"*).
 ///
-/// [`BudgetPeriod::RollingThirtyDays`] needs no zone at all: it is thirty
-/// days of absolute seconds back from `now_unix`.
-/// [`BudgetPeriod::CalendarMonth`] is the first instant of the *local*
-/// calendar month — what a person means by "this month" — read through the
-/// platform's own `localtime_r` (POSIX) / `localtime_s` (the Windows CRT)
-/// and re-normalised with `mktime`. That is the OS's own notion of the local
-/// zone and its DST rules rather than a hand-rolled one: this crate
-/// deliberately carries no date-library dependency for a single conversion
-/// (see `shell::view::format_unix_utc`'s own comment on the same refusal for
-/// UTC rendering), and the OS is the only source of "local" this binary has.
-/// `tm_isdst` is set to `-1` before the `mktime` call so it is re-derived for
-/// the *target* date rather than carried over from `now_unix`'s own DST
-/// state — the one case that could otherwise put the boundary an hour off,
-/// at a DST transition itself. Fails soft to `now_unix` on any libc error,
-/// which makes a budget period start no earlier than "right now" rather than
-/// panicking a report.
-///
 /// **Recorded limit:** a test can only assert this function's *invariants*
 /// (the result is the first of some month at local midnight, at or before
 /// `now_unix`) rather than a fixed absolute timestamp, because the correct
 /// answer depends on the machine's own configured zone.
+// History: design-decisions.md, "Trims: gateway, profile and provider module docs", provider/telemetry/mod.rs `budget_period_start` doc.
 pub fn budget_period_start(period: BudgetPeriod, now_unix: i64) -> i64 {
     match period {
         BudgetPeriod::RollingThirtyDays => now_unix - 30 * 24 * 60 * 60,
@@ -1597,16 +1515,6 @@ impl GatewayHealthReading {
     /// monotonic clock**, or `None` when there is no cooldown or it has
     /// already elapsed.
     ///
-    /// Capability map line 1599's second hazard, answered in one place.
-    /// [`crate::routing::free::ResourceHealth::cooling_down_until`] is an
-    /// [`Instant`], which has no epoch and cannot be compared across two
-    /// processes; this reading carries the absolute unix second the write
-    /// side converted it to. Going back requires **both clocks read at the
-    /// same moment**, which is why they are two parameters rather than
-    /// something read in here: a caller bridging a whole cache must place
-    /// every reading against one pair, not against a clock that moved
-    /// between them.
-    ///
     /// Three cases and no fourth:
     ///
     /// - **no deadline** — `None`, and the resource is not cooling down;
@@ -1618,14 +1526,7 @@ impl GatewayHealthReading {
     ///   to be representable, and a deadline that has passed is not a
     ///   cooldown to express at all.
     /// - **still in the future** — `now` plus the remaining seconds.
-    ///
-    /// A remaining span too large to place on this clock answers `None`
-    /// rather than saturating. It cannot arise from
-    /// `crate::gateway::session::SessionRouting::health_readings_for`, whose
-    /// deadlines are bounded by `routing::free`'s own `MAX_COOLDOWN`, so the
-    /// only way to reach it is a file that says something this program never
-    /// wrote — and inventing a centuries-long cooldown from one is worse
-    /// than reading no cooldown at all.
+    // History: design-decisions.md, "Trims: gateway, profile and provider module docs", provider/telemetry/mod.rs `cooling_down_until` doc.
     pub fn cooling_down_until(&self, now: Instant, now_unix: i64) -> Option<Instant> {
         let remaining = self.cooling_down_until_unix?.checked_sub(now_unix)?;
         let remaining = u64::try_from(remaining).ok().filter(|left| *left > 0)?;
@@ -1739,17 +1640,6 @@ impl GatewayHealthCache {
     /// written** beside its entries — map line 1854's *stale* half, which
     /// this cache has always held and never handed out.
     ///
-    /// # Why the date is per file and not per reading
-    ///
-    /// [`Self::store`] replaces a provider's whole file in one write, and its
-    /// one production caller builds that vector in one pass
-    /// (`crate::gateway::session::SessionRouting::health_readings_for` maps
-    /// the free pool at a single instant). So every entry in one file was
-    /// observed at the file's own `observed_at_unix`, and a per-entry column
-    /// would be that number copied N times — a second source of truth for a
-    /// fact the file already carries, which is the duplication
-    /// `crate::evaluation`'s own module header refuses one seam over.
-    ///
     /// # A file that cannot be dated is not returned at all
     ///
     /// `observed_at_unix` is a required field of the stored document, so a
@@ -1757,11 +1647,7 @@ impl GatewayHealthCache {
     /// same guard that skips a truncated one — [`Self::load_all`]'s own
     /// fail-soft contract. A caller therefore never sees an undated reading,
     /// and cannot mistake one for a fresh reading.
-    ///
-    /// [`Self::load_all`] is deliberately left as it is rather than widened:
-    /// its two other callers
-    /// (`crate::provider::resources::GatheredTelemetry::gather_gateway_health`
-    /// and the shell's own reader) render health, not its age.
+    // History: design-decisions.md, "Trims: gateway, profile and provider module docs", provider/telemetry/mod.rs `load_all_dated` doc.
     pub fn load_all_dated(&self) -> Vec<(String, i64, Vec<GatewayHealthReading>)> {
         let Ok(entries) = std::fs::read_dir(&self.root) else {
             return Vec::new();
@@ -1863,20 +1749,10 @@ const DISPATCH_RESERVATION_FORMAT_VERSION: u32 = 1;
 /// wall-clock second — never against a process id, which recycles and whose
 /// liveness has no portable answer.
 ///
-/// # Why ten seconds
-///
-/// Twice `main.rs`'s `EXTRACTION_BOUND`, which is the bound on the work a
-/// reservation covers: the extraction thread is abandoned five seconds after
-/// it starts, so no dispatch this record protects can still be spending
-/// after that. Doubling it is the margin for the two things either side of
-/// the call — resolving the credential before it and writing the health back
-/// after — so a live dispatch is never evicted while its request is
-/// genuinely in flight, and a killed one frees the slot within seconds
-/// rather than within a rate-limit window.
-///
 /// `main.rs`'s `the_reservation_lease_outlives_the_extraction_it_covers`
 /// pins the relationship between the two constants so they cannot drift
 /// apart in separate edits.
+// History: design-decisions.md, "Trims: gateway, profile and provider module docs", provider/telemetry/mod.rs `DISPATCH_RESERVATION_LEASE` doc.
 pub const DISPATCH_RESERVATION_LEASE: Duration = Duration::from_secs(10);
 
 /// How many concurrent reservations one credential's pool is tracked at.
@@ -1981,12 +1857,6 @@ impl DispatchReservationLease {
 ///
 /// # Why this one is not read-modify-write
 ///
-/// [`GatewayHealthCache`] has one file per provider, and a writer reads it,
-/// replaces one entry and writes the whole file back. Two writers racing
-/// there lose an entry, which is a recorded limit of that cache and
-/// tolerable because the entry is *history*: the next observation restores
-/// it.
-///
 /// A reservation cannot tolerate it. The lost update **is** the double spend
 /// the line is about — two dispatchers that each read "nothing reserved" and
 /// each write their own row over the other's have exactly reproduced the
@@ -1995,18 +1865,7 @@ impl DispatchReservationLease {
 /// claimed with `create_new`: one `O_EXCL`/`CREATE_NEW` open, atomic on
 /// every platform this ships to, which exactly one of two racing processes
 /// can win.
-///
-/// # The slot's key is the credential, and the row names the model
-///
-/// [`crate::routing::free::Allowance`] is *"what a provider is limiting, for
-/// one credential"* and [`crate::routing::free::FreePool`] holds one
-/// allowance per [`crate::routing::CredentialId`], so what two dispatches
-/// contend for is a credential's pool, not a model's. Two models behind one
-/// key draw down the same requests, and giving each its own slots would let
-/// two dispatches spend one remaining request between them — the same defect
-/// wearing a different key. The model is therefore a *field* of the row
-/// rather than part of its path: it says what the reserved request is for,
-/// so a person can see which model is holding a pool open.
+// History: design-decisions.md, "Trims: gateway, profile and provider module docs", provider/telemetry/mod.rs `DispatchReservationCache` struct doc.
 #[derive(Debug, Clone)]
 pub struct DispatchReservationCache {
     root: PathBuf,
@@ -2103,18 +1962,7 @@ impl DispatchReservationCache {
     /// request was free find out here and exactly one of them is right. A
     /// caller whose claim is refused knows the pool is spoken for **now**,
     /// which is the moment that matters, and goes on to the next candidate.
-    ///
-    /// # An expired slot is taken over, not overwritten
-    ///
-    /// A row past its deadline is removed and the slot is then claimed the
-    /// same exclusive way, so two dispatchers that both notice one dead row
-    /// still produce exactly one holder rather than two that each renamed a
-    /// file over the other's.
-    ///
-    /// Best-effort in the same sense every other writer in this module is:
-    /// an I/O failure answers [`None`], and the caller's own documentation
-    /// says what it does with that — never a failed dispatch over a full
-    /// disk.
+    // History: design-decisions.md, "Trims: gateway, profile and provider module docs", provider/telemetry/mod.rs `claim` doc.
     pub fn claim(
         &self,
         credential_label: &str,

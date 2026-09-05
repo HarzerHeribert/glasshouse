@@ -419,16 +419,7 @@ impl ServedBy {
 /// per turn, never for a cheaper model, and never across a protocol or a
 /// weakening of tool semantics. [`crate::routing::interactive`] owns every
 /// one of those decisions; this type owns only the consequence.
-///
-/// # Why an index and not a lock over the backends
-///
-/// [`Secret`] is deliberately not `Clone` and can be minted only inside
-/// [`mod@crate::secret`], so a design that swapped a whole `Upstream` under a
-/// lock would have to resolve credentials again or move them between threads
-/// under contention. An index behind an [`AtomicUsize`] moves one machine
-/// word; every credential stays exactly where it was resolved, and a
-/// connection thread reads the serving backend once at the top of its
-/// exchange, so a failover between two of its reads is not possible.
+// History: design-decisions.md, "Trims: gateway, profile and provider module docs", gateway/upstream.rs `Upstream` struct doc.
 pub struct Upstream {
     /// The assigned backend first, then failover candidates in the user's own
     /// configuration order. Never empty.
@@ -628,12 +619,11 @@ fn bearer(credential: &Secret) -> String {
 ///   [`AutoHeaderValue::None`] — the harness's own headers are forwarded, and
 ///   a gateway that added its own would be visible to the provider as a
 ///   client the harness is not.
-/// - `allow_non_standard_methods(true)` — the method is forwarded, not
-///   vetted.
 ///
 /// Timeouts are left at `ureq`'s defaults, which are unset. A streaming
 /// response may legitimately go minutes between events, and a receive
 /// timeout here would cut a long generation off mid-stream.
+// History: design-decisions.md, "Trims: gateway, profile and provider module docs", gateway/upstream.rs `agent` doc.
 pub(super) fn agent() -> Agent {
     Agent::new_with_config(
         Agent::config_builder()

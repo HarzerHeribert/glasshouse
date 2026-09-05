@@ -1,15 +1,5 @@
 //! Provider price metadata — capability map lines 1305 and 1306.
 //!
-//! A user corrects a wrong price, or adds a provider this build has never
-//! heard of, by editing a file — never by recompiling Glasshouse.
-//! [`PriceTable::load_from_dir`] reads `pricing.toml` out of a directory
-//! [`crate::paths::RuntimePaths`] already owns (`config_dir`).
-//! There is no compiled default table. An absent file is every user's state
-//! until they write one, and [`PriceTable::empty`] is what [`SessionRouter`]
-//! (`routing::session`) already defaults to.
-//!
-//! [`SessionRouter`]: crate::routing::session::SessionRouter
-//!
 //! [`PriceTable::price_for`] answers `None` for a provider/model pair this
 //! table does not name, and that `None` must reach the routing explanation
 //! as a stated unknown, never as a silent zero.
@@ -19,7 +9,7 @@
 //! [`PriceTable::empty`], routing with every price unknown — logged once via
 //! [`tracing::warn!`] naming the path and the parse error, never the
 //! document's contents.
-// History: design-decisions.md, "Trims: provider module docs", pricing.rs module doc.
+// History: design-decisions.md, "Trims: gateway, profile and provider module docs", pricing.rs module doc.
 
 use std::path::Path;
 

@@ -1,18 +1,6 @@
 //! Phase 32A: one provider-independent model for how much usable capacity a
 //! resource has left — [`CapacityState`].
 //!
-//! A [`CapacityState`] is a derived view over a
-//! [`crate::provider::registry::ResourceKind`]. Moving it to `crate::quota`
-//! later is a rename plus one line in `lib.rs`; nothing here depends on the
-//! path.
-//!
-//! [`CapacityState`] is **not** a percentage. It is a record of several
-//! *independent* pools — tokens, requests, credits, a user's own monetary
-//! ceiling — each of which is separately unknown, separately inapplicable, or
-//! separately measured in **the provider's own units**. A normalized
-//! percentage is something [`CapacityState::normalized`] *derives* on demand
-//! and carries its own raw reading with it; it is never a field.
-//!
 //! "Unknown" does four different jobs:
 //!
 //! - [`Capacity::Inapplicable`] — there is no such pool. A caller that sees
@@ -29,7 +17,7 @@
 //! configuration reader here, and every [`Reading`] this module can build
 //! must be handed its value, its observation time and its source by a
 //! caller.
-// History: design-decisions.md, "Trims: provider module docs", quota/mod.rs module doc.
+// History: design-decisions.md, "Trims: gateway, profile and provider module docs", quota/mod.rs module doc.
 
 use std::collections::BTreeSet;
 
@@ -2051,16 +2039,6 @@ impl CapacityState {
     /// The normalized remaining-capacity score for this resource —
     /// capability map lines 1259 and 1260.
     ///
-    /// [`CapacityState::normalized`] already takes the minimum across
-    /// [`CapacityState::pools`], but rate ceilings are not pools —
-    /// [`RateCeilings::requests_per_minute`] is a single ceiling with no
-    /// paired "remaining" reading of its own, so it cannot see it. This
-    /// widens the candidate set with one synthetic pairing (design decision
-    /// #2): the general request pool's own *remaining* reading against the
-    /// per-minute ceiling, when both are stated in the same unit, keeping
-    /// whichever of the two produces the tighter percentage — otherwise a
-    /// tighter per-minute ceiling stays invisible (line 1261).
-    ///
     /// A resource with [`LimitingUnits::None`] has nothing to normalize:
     /// every pool is [`Capacity::Inapplicable`] by construction. Line 1267
     /// asks that local inference be treated as high-capacity while still
@@ -2069,7 +2047,7 @@ impl CapacityState {
     /// explicit "no evidence" note instead of `None` — this build has no
     /// latency or concurrency reader anywhere, so the honest answer is a
     /// score that says it is not backed by a measurement.
-    // History: design-decisions.md, "Trims: provider module docs", quota/mod.rs `remaining_capacity_score` doc.
+    // History: design-decisions.md, "Trims: gateway, profile and provider module docs", quota/mod.rs `remaining_capacity_score` doc.
     pub fn remaining_capacity_score(&self) -> Option<RemainingCapacityScore> {
         if matches!(self.limits, LimitingUnits::None) {
             return Some(RemainingCapacityScore {
@@ -2184,15 +2162,6 @@ pub struct ReserveDecisionInputs {
     /// complete — capability map line 1294's guard on migration, and line
     /// 1610's on quota-driven migration.
     ///
-    /// The only thing that may set this true is somebody saying so on
-    /// purpose about one named session:
-    /// `crate::session::SessionStore::declare_task_nearly_complete`, read
-    /// back through the scoped types the two routers carry
-    /// ([`crate::routing::disposable::DeclaredTaskProgress`] and
-    /// `crate::routing::session::SessionRouter`'s own declared set). It is a
-    /// `bool` here and a *scope* at the producer, and it expires — see
-    /// [`crate::session::TASK_PROGRESS_EXPIRES_AFTER`].
-    ///
     /// **Nothing in this build may infer it.** No harness this build
     /// integrates reports task progress, and this field is the *first*
     /// branch [`evaluate_reserve_spend`] takes, outranking every other
@@ -2200,7 +2169,7 @@ pub struct ReserveDecisionInputs {
     /// degrade the policy, it inverts it. `tests/subscription_pressure.rs`'s
     /// source scan holds both construction sites to reading the declaration
     /// rather than writing a literal.
-    // History: design-decisions.md, "Trims: provider module docs", quota/mod.rs `ReserveContext::task_nearly_complete` doc.
+    // History: design-decisions.md, "Trims: gateway, profile and provider module docs", quota/mod.rs `ReserveContext::task_nearly_complete` doc.
     pub task_nearly_complete: bool,
 }
 
@@ -2214,22 +2183,7 @@ pub struct ReserveDecisionInputs {
 ///    complete is never moved "solely because a reserve threshold was
 ///    crossed" — scoped and expiring at its producer, so this can only ever
 ///    be true of a session somebody named, recently.
-/// 2. **Line 1290 next.** An explicit user override outranks every
-///    automatic signal below it, but not line 1294's guard. It is scoped at
-///    its producer — see [`crate::routing::disposable::ReserveOverride`].
-/// 3. **The band itself.** Above [`CapacityBand::Reserve`], nothing here is
-///    protected in the first place and every request is allowed.
-/// 4. **Reset proximity** — lines 1291 and 1292. Imminent (within
-///    [`RESET_IMMINENT_SECONDS`]) makes the policy permissive outright;
-///    distant ([`RESET_DISTANT_SECONDS`] or further) makes it strictly
-///    conservative, denying even a task with no cheaper alternative unless
-///    it needs at least the heavy tier
-///    ([`crate::routing::classify::WorkloadTier::Heavy`] or
-///    [`crate::routing::classify::WorkloadTier::Frontier`]).
-/// 5. **Tier and alternatives** — lines 1289 and 1288. A task at the heavy
-///    tier or above justifies spending the reserve; a lighter task may spend
-///    it only when nothing cheaper is adequate.
-// History: design-decisions.md, "Trims: provider module docs", quota/mod.rs `evaluate_reserve_spend` doc.
+// History: design-decisions.md, "Trims: gateway, profile and provider module docs", quota/mod.rs `evaluate_reserve_spend` doc.
 pub fn evaluate_reserve_spend(inputs: ReserveDecisionInputs) -> ReserveDecision {
     use crate::routing::classify::WorkloadTier;
 

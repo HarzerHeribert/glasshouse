@@ -18750,3 +18750,501 @@ package's whole job rather than a constraint on the fixups (the lead's correctio
     //! [`POLICY_CEILING_BYTES`] is the separate bound on the whole rendered
     //! policy — the "do not let this grow into a document" bound, which is the
     //! one line 964 would object to losing.
+
+## Trims: gateway, profile and provider module docs — history moved out of comments by `GH-TRIM-GATEWAY-PROFILE-PROVIDER-DOCS`, 2026-09-06
+
+### `gateway/mod.rs` — module doc
+
+The listener binds `127.0.0.1:0`. Loopback is not a default waiting to be
+overridden: there is no configuration in this module that could bind
+anywhere else, so a gateway that is reachable from the network cannot be
+produced by getting a setting wrong.
+
+`session::store`'s native session identifiers come from SQLite's
+`randomblob`, and that is right for an identifier: it needs to be unique.
+An authentication token needs to be **unpredictable to an attacker**,
+which is a different requirement, so this one comes from the operating
+system's cryptographic generator via the `getrandom` crate instead — 32
+bytes of it, rendered as hex.
+
+[`GatewayToken`] is then treated exactly the way
+[`crate::secret::Secret`] treats a credential: no `Display`, no `Deref`,
+no `AsRef<str>`, no serde, and a manual [`Debug`](std::fmt::Debug) that
+prints [`crate::secret::REDACTED`] — the same marker, not a second one
+invented here.
+
+A gateway-backed child harness is given [`GatewayToken`] and **not** the
+provider's key. So the value in the child's environment is worthless off
+this machine and dies with the instance — which is the whole of "never
+expose provider API keys to a child harness when the local gateway can
+hold the credential itself".
+
+Glasshouse has no async runtime and this phase does not add one for a
+single-user loopback proxy. One thread accepts; each accepted connection
+gets a thread of its own and blocks on it.
+
+### `gateway/session/mod.rs` — `set_pairing_preference`
+
+Kept separate from [`Self::bind`] rather than folded into it: `bind`
+answers only when a backend was actually resolved (its early `return`
+above), while a pairing preference is known whether or not that
+lookup succeeds, and a caller that skipped `bind` for a real reason
+should not lose its pairing configuration as a side effect.
+
+### `gateway/session/mod.rs` — `serve_session`
+
+[`Self::set_pairing_preference`]'s shape, and separate from
+[`Self::bind`] for its reason: `bind` answers only when a backend
+actually resolved, while the session this gateway serves is known
+whether or not that lookup succeeded.
+
+# Told by the launch, not learned from the wire
+
+`main.rs`'s two launch doors call this — `launch_session` after
+`store.create` returns the record and before the harness is spawned,
+and `resolve_resume_overlay` for the record being resumed. A gateway
+is started once per launched session, so there is exactly one answer
+per gateway and nothing here ever changes it from the wire. In
+particular this is **not** derived from a request: the relay reads no
+body by construction (`super::ingress`'s own
+`an_exchange_has_nowhere_to_put_a_body`), and the harness's
+`metadata.user_id` names an account, not a Glasshouse session — see
+`docs/product/design-decisions.md`, *A session identity on the
+routing evidence rows*.
+
+### `gateway/session/mod.rs` — `record_routing_observation`
+
+`assignment` is a snapshot the caller took **at dispatch**, not a
+read of whatever [`Self::bind`] or a failover has since made current.
+A connection thread only reaches this call after the exchange is
+already on the wire, and reading `self.lock().assignment` at that
+point would attribute the exchange to a bind or re-bind that happened
+*during* it rather than the one that actually served it — the
+defect this parameter exists to close. So its absence means "there
+was no assignment when this exchange was served", not "there is
+none now".
+
+`dispatched_at_unix` and `completed_at_unix` come from the accept
+loop, the only place in this partition with a timestamp on both sides
+of `ingress::serve`. `exchange.first_byte_at` comes from inside that
+call instead — `ingress::forward` is the only place that ever sees the
+provider's response arrive — and is `None` on every exchange that
+never reached a provider, exactly like every other honest absence this
+method reads off `exchange` rather than invents.
+
+# What the row's `outcome` means now that a `failure_class` sits beside it
+
+`outcome` still answers *did the turn succeed*, at the transport level
+this producer can see. Before framing was observed, a `2xx` was
+always [`RoutingOutcome::Succeeded`]; a `2xx` whose stream was cut
+short, or whose body was permitted and never came, is now
+[`RoutingOutcome::Failed`] with the class that says why. The
+invariant this keeps is simple and a test holds it: a row carries a
+failure class exactly when its outcome is not a success.
+
+`retries` is written as `0` on every row — a count, not a default:
+`ingress::forward` calls `Agent::run` once and `ureq` performs no
+transparent retry. `tool_rounds` and `repairs` stay `NULL`; see the
+ledger's own header for why nothing at this layer can count them.
+
+### `gateway/session/mod.rs` — `observe_exchange`
+
+`ledger` and `now_unix` feed Phase 9J's native-pairing prior and Phase
+33A's local evidence into the one ranking decision this build makes
+(`InteractiveRouting::on_provider_failure`) — the same
+[`EvidenceLedger`] and completion timestamp
+[`Self::record_routing_observation`] is given, so a failover reads the
+very observations this gateway's own accept loop wrote. `None`
+reproduces this policy's pre-batch-46 behaviour exactly (see
+[`crate::routing::interactive::InteractiveRouting::on_provider_failure`]'s
+own doc): with nothing to weigh, every survivor ties and the first one
+found wins, the same as before this package.
+
+### `gateway/session/mod.rs` — `stated_retry_after`
+
+# Why the whole [`RateLimitHeaders`] does not travel further than this
+
+A `Retry-After` is a duration and nothing else. The rest of that value —
+limits, remaining counts, reset instants, the header names it was read
+from — is capacity telemetry with its own destination
+([`SessionRouting::observe_quota_headers`] and the on-disk quota cache),
+and a scheduling block has no business seeing it. So this is where the
+narrowing happens, once, at the boundary between the two.
+
+### `gateway/session/mod.rs` — `failure_class`
+
+# Every rule, and what it reads
+
+- `401`, `403` → [`FailureClass::CredentialFailure`]; `402` →
+  [`FailureClass::ExhaustedQuota`] — the account cannot pay, the
+  `phase-9h` live finding [`classify`] records above.
+- `429` → [`FailureClass::Throttle`], **unless** the response's own
+  headers say nothing remains (`remaining = 0`) and the window reopens at
+  or beyond [`EXHAUSTED_QUOTA_HORIZON_SECONDS`] from when the response
+  arrived — then [`FailureClass::ExhaustedQuota`]. The reopening instant
+  is the provider's reset field when it sent one, else its
+  `Retry-After`; with neither, or with anything remaining, a `429` is a
+  throttle. Line 1365: cadence throttling stays apart from a spent
+  window, and the distinction is *read*, never guessed.
+- any other `4xx` → [`FailureClass::RequestIncompatibility`]; `5xx` →
+  [`FailureClass::Upstream5xx`].
+- `2xx`/`3xx` are decided by framing alone: a stream that ended short of
+  its declared length or before its terminating chunk →
+  [`FailureClass::StreamAbort`]; a body that was permitted and never
+  came, zero bytes and a clean end → [`FailureClass::EmptyCompletion`];
+  otherwise served, `None`.
+- a transport failure → [`FailureClass::Timeout`] when
+  `ingress::transport_detail` said so, else [`FailureClass::Unknown`]
+  with the detail still on the exchange's own log line.
+
+### `gateway/session/mod.rs` — `gateway_failure`
+
+[`crate::events::GatewayFailure::TimedOut`] and
+[`crate::events::GatewayFailure::Rejected`] are never produced here:
+`ingress::Outcome` has no production path that distinguishes either from
+a plain `Unreachable` today — `Outcome::Unreachable`'s own `detail` is a
+diagnostic phrase for `tracing`, not a second, finer-grained outcome, and
+re-deriving one by matching on that text would be reading `ingress`'s
+output more closely than `ingress`'s own module documentation allows this
+directory to. `ingress.rs` is this package's `FORBIDDEN FILES`.
+
+### `gateway/upstream.rs` — `Upstream` struct doc
+
+# Why an index and not a lock over the backends
+
+[`Secret`] is deliberately not `Clone` and can be minted only inside
+[`mod@crate::secret`], so a design that swapped a whole `Upstream` under a
+lock would have to resolve credentials again or move them between threads
+under contention. An index behind an [`AtomicUsize`] moves one machine
+word; every credential stays exactly where it was resolved, and a
+connection thread reads the serving backend once at the top of its
+exchange, so a failover between two of its reads is not possible.
+
+### `gateway/upstream.rs` — `agent` doc
+
+- `allow_non_standard_methods(true)` — the method is forwarded, not
+  vetted.
+
+### `profile/generated.rs` — module doc
+
+# Why this is its own file
+
+`profile/mod.rs` may not name `std::fs`, `std::env`, or anything that
+opens a file — `harness::resolving_a_launch_profile_touches_no_files`
+enforces it, and the reason is worth restating rather than working
+around: a module that never opens a file cannot modify the user's global
+harness configuration, which is a structural guarantee rather than a
+promise to avoid a list of paths.
+
+Line 362 asks for a generated configuration file, so *something* has to
+write one. Putting it here rather than beside [`crate::profile::resolve`]
+keeps the original guarantee exactly as strong as it was: **resolution
+still opens nothing**, and the single function that does is one screen
+long, takes the paths it is given, and is forbidden the ambient
+environment by its own scan
+(`harness::the_only_writer_in_profile_takes_its_paths_from_its_caller`).
+
+### `profile/response.rs` — module doc
+
+# A response profile is not a [`LaunchProfile`](super::LaunchProfile)
+
+They share a module because a module is where related vocabulary lives, and
+they share nothing else. A [`LaunchProfile`](super::LaunchProfile) says which harness runs,
+against which backend, with which model and which approval mode — it can
+refuse a session, spend a credential, and change what the agent is allowed
+to do. A [`ResponseProfile`] says how the answer should read. It cannot
+refuse anything, it holds no credential, and Phase 10's own architectural
+requirement keeps the two separately represented rather than collapsed into
+one identifier.
+
+The map's first fixed architectural requirement for this phase is the whole
+of it:
+
+> Response profiles govern user-facing communication only and remain
+> independent from reasoning depth, diligence, validation, permissions,
+> safety, and tool use.
+
+So there is deliberately no field here for effort, no field for permission
+mode, and no field for tool access. Those exist elsewhere in Glasshouse —
+[`ApprovalSelection`](super::ApprovalSelection) is the permission one — and
+a response profile that could set them would be the collapse the
+requirement forbids.
+
+Lines 588–592 name verbosity, audience, progress narration, evidence
+presentation and final-answer format, each *independently*. They are five
+fields of five types, and the independence is structural rather than
+promised:
+
+# Concision never reduces diagnostics
+
+The second fixed requirement says a response profile must not *"use
+concision to suppress diagnostics, evidence, or verification"*, and line
+594 spells out what a concise preset still owes: changed files,
+verification, risks and blockers.
+
+That is enforced by making it unable to vary. [`REQUIRED_REPORTS`] is a
+constant, [`ResponseProfile::required_reports`] returns it without reading
+`self`, and [`ResponseProfile::directives`] appends
+[`floor_directive`] to *every* profile it renders,
+whatever the five axes say. There is no combination of the 4 × 3 × 3 × 3 ×
+3 = 324 that can drop it, and
+`every_profile_reports_changed_files_verification_risks_and_blockers`
+enumerates all 324 rather than sampling.
+
+A sentence in a prompt would have been the other way to do this, and it is
+the way the requirement was written to prevent.
+
+# This module imports no configuration and no adapter
+
+The same rule, and the same reason, as [`mod@super`] and
+[`mod@crate::harness::pairing`]: the caller reads configuration, asks the
+adapter, and hands the resolved values in. [`resolve`] is a pure function
+of the layers it is given — no file, no environment, no ambient lookup —
+and `crate::config::response` is the caller that rule assumes.
+
+In particular nothing here knows the word "output style". That vocabulary
+belongs to one harness, it reaches Glasshouse through
+[`crate::harness::response`], and line 603 requires it to stay an adapter
+example rather than becoming a universal Glasshouse concept.
+
+### `provider/pricing.rs` — module doc
+
+A user corrects a wrong price, or adds a provider this build has never
+heard of, by editing a file — never by recompiling Glasshouse.
+[`PriceTable::load_from_dir`] reads `pricing.toml` out of a directory
+[`crate::paths::RuntimePaths`] already owns (`config_dir`).
+There is no compiled default table. An absent file is every user's state
+until they write one, and [`PriceTable::empty`] is what [`SessionRouter`]
+(`routing::session`) already defaults to.
+
+[`SessionRouter`]: crate::routing::session::SessionRouter
+
+### `provider/quota/mod.rs` — module doc
+
+A [`CapacityState`] is a derived view over a
+[`crate::provider::registry::ResourceKind`]. Moving it to `crate::quota`
+later is a rename plus one line in `lib.rs`; nothing here depends on the
+path.
+
+[`CapacityState`] is **not** a percentage. It is a record of several
+*independent* pools — tokens, requests, credits, a user's own monetary
+ceiling — each of which is separately unknown, separately inapplicable, or
+separately measured in **the provider's own units**. A normalized
+percentage is something [`CapacityState::normalized`] *derives* on demand
+and carries its own raw reading with it; it is never a field.
+
+### `provider/quota/mod.rs` — `remaining_capacity_score` doc
+
+[`CapacityState::normalized`] already takes the minimum across
+[`CapacityState::pools`], but rate ceilings are not pools —
+[`RateCeilings::requests_per_minute`] is a single ceiling with no
+paired "remaining" reading of its own, so it cannot see it. This
+widens the candidate set with one synthetic pairing (design decision
+#2): the general request pool's own *remaining* reading against the
+per-minute ceiling, when both are stated in the same unit, keeping
+whichever of the two produces the tighter percentage — otherwise a
+tighter per-minute ceiling stays invisible (line 1261).
+
+### `provider/quota/mod.rs` — `ReserveContext::task_nearly_complete` doc
+
+The only thing that may set this true is somebody saying so on
+purpose about one named session:
+`crate::session::SessionStore::declare_task_nearly_complete`, read
+back through the scoped types the two routers carry
+([`crate::routing::disposable::DeclaredTaskProgress`] and
+`crate::routing::session::SessionRouter`'s own declared set). It is a
+`bool` here and a *scope* at the producer, and it expires — see
+[`crate::session::TASK_PROGRESS_EXPIRES_AFTER`].
+
+### `provider/quota/mod.rs` — `evaluate_reserve_spend` doc
+
+2. **Line 1290 next.** An explicit user override outranks every
+   automatic signal below it, but not line 1294's guard. It is scoped at
+   its producer — see [`crate::routing::disposable::ReserveOverride`].
+3. **The band itself.** Above [`CapacityBand::Reserve`], nothing here is
+   protected in the first place and every request is allowed.
+4. **Reset proximity** — lines 1291 and 1292. Imminent (within
+   [`RESET_IMMINENT_SECONDS`]) makes the policy permissive outright;
+   distant ([`RESET_DISTANT_SECONDS`] or further) makes it strictly
+   conservative, denying even a task with no cheaper alternative unless
+   it needs at least the heavy tier
+   ([`crate::routing::classify::WorkloadTier::Heavy`] or
+   [`crate::routing::classify::WorkloadTier::Frontier`]).
+5. **Tier and alternatives** — lines 1289 and 1288. A task at the heavy
+   tier or above justifies spending the reserve; a lighter task may spend
+   it only when nothing cheaper is adequate.
+
+### `provider/telemetry/mod.rs` — module doc
+
+[`mod@crate::provider::quota`] built the model and reads nothing; this
+module is the half that reads, and it is deliberately the only place in
+the crate that turns an outside string into a capacity number.
+
+# Two seams, kept apart on purpose — capability map line 1232
+
+[`RateLimitHeaders`] reads what an **API provider** sends back, and
+[`HarnessTelemetry`] reads what a **harness** says about its own
+first-party subscription. Line 1232 asks that harness adapters be able to
+expose subscription-usage telemetry *independently from* API-provider
+telemetry, and independence here is structural rather than promised:
+neither type can write into the other's fields, each carries its own
+[`ReadingSource`] variant, and [`apply_provider_headers`] and
+[`apply_harness_report`] are separate functions that a caller may run in
+either order, both, or neither. A harness that reports nothing cannot
+blank a provider's headers, and a provider that answers no headers cannot
+blank a harness's report — proven by
+`tests::the_two_telemetry_seams_do_not_overwrite_each_other`.
+
+# Nothing here can fail a session — capability map line 1238
+
+**No function in this module returns a `Result`.** A header that is
+missing, malformed, negative, or in a unit nobody recognises produces
+[`Capacity::Unmeasured`] — the state that means "the provider publishes
+this and nothing has read it", which is exactly true after a failed read.
+A caller therefore cannot write an error path that stops a coding session
+because a rate-limit header was a word instead of a number, because there
+is no error to propagate. Falling back from authoritative telemetry to a
+weaker source is [`Capacity::prefer`], which is likewise total.
+
+`design-decisions.md` records, measured against real hosts, that a
+provider's error body may quote an **account identifier** (NVIDIA) or a
+**masked tail of the submitted credential** (two others), and that such a
+body "must be treated as sensitive by default: classified against, and
+never copied whole into a log, a diagnostic, a session record, or anything
+a user might share."
+
+A [`ReadingSource`] description is precisely such a diagnostic — it is
+printed by `glasshouse resources`. So the rule is enforced here, at the
+boundary, and it is narrower than "do not copy the body":
+
+### `provider/telemetry/mod.rs` — `apply_to` doc
+
+# What each header becomes, and what it deliberately does not
+
+- a limit whose window is a minute or shorter becomes
+  [`RateCeilings::requests_per_minute`];
+- a limit over a longer window becomes
+  [`RateCeilings::long_window_requests`], which carries its own
+  `window_seconds`, so a per-hour or per-day pool needs no new variant
+  (capability map line 1216);
+- a limit with **no** stated window becomes neither. `300` with no
+  period is not a rate and filing it as one would be inventing the
+  period;
+- a remaining count becomes the request pool's remaining half, and the
+  limit becomes its limit half — so that [`Pool::normalized`] can
+  produce a percentage only when the provider supplied both, which is
+  the case that lets it be [`crate::provider::quota::Percentage::Exact`];
+- a reset field becomes the rolling window's reset time.
+
+### `provider/telemetry/mod.rs` — `ProviderUsage` struct doc
+
+# Established for exactly one provider, and one route
+
+`crate::provider::usage_endpoint` names which providers this can even be
+asked of. Today that is OpenRouter's `GET /api/v1/key` alone — the route
+[`crate::provider::discovery::read_response_body`] fetches, behind
+`--probe`, never on a path that runs without one.
+
+### `provider/telemetry/mod.rs` — `budget_period_start` doc
+
+[`BudgetPeriod::RollingThirtyDays`] needs no zone at all: it is thirty
+days of absolute seconds back from `now_unix`.
+[`BudgetPeriod::CalendarMonth`] is the first instant of the *local*
+calendar month — what a person means by "this month" — read through the
+platform's own `localtime_r` (POSIX) / `localtime_s` (the Windows CRT)
+and re-normalised with `mktime`. That is the OS's own notion of the local
+zone and its DST rules rather than a hand-rolled one: this crate
+deliberately carries no date-library dependency for a single conversion
+(see `shell::view::format_unix_utc`'s own comment on the same refusal for
+UTC rendering), and the OS is the only source of "local" this binary has.
+`tm_isdst` is set to `-1` before the `mktime` call so it is re-derived for
+the *target* date rather than carried over from `now_unix`'s own DST
+state — the one case that could otherwise put the boundary an hour off,
+at a DST transition itself. Fails soft to `now_unix` on any libc error,
+which makes a budget period start no earlier than "right now" rather than
+panicking a report.
+
+### `provider/telemetry/mod.rs` — `cooling_down_until` doc
+
+Capability map line 1599's second hazard, answered in one place.
+[`crate::routing::free::ResourceHealth::cooling_down_until`] is an
+[`Instant`], which has no epoch and cannot be compared across two
+processes; this reading carries the absolute unix second the write
+side converted it to. Going back requires **both clocks read at the
+same moment**, which is why they are two parameters rather than
+something read in here: a caller bridging a whole cache must place
+every reading against one pair, not against a clock that moved
+between them.
+
+A remaining span too large to place on this clock answers `None`
+rather than saturating. It cannot arise from
+`crate::gateway::session::SessionRouting::health_readings_for`, whose
+deadlines are bounded by `routing::free`'s own `MAX_COOLDOWN`, so the
+only way to reach it is a file that says something this program never
+wrote — and inventing a centuries-long cooldown from one is worse
+than reading no cooldown at all.
+
+### `provider/telemetry/mod.rs` — `load_all_dated` doc
+
+# Why the date is per file and not per reading
+
+[`Self::store`] replaces a provider's whole file in one write, and its
+one production caller builds that vector in one pass
+(`crate::gateway::session::SessionRouting::health_readings_for` maps
+the free pool at a single instant). So every entry in one file was
+observed at the file's own `observed_at_unix`, and a per-entry column
+would be that number copied N times — a second source of truth for a
+fact the file already carries, which is the duplication
+`crate::evaluation`'s own module header refuses one seam over.
+
+[`Self::load_all`] is deliberately left as it is rather than widened:
+its two other callers
+(`crate::provider::resources::GatheredTelemetry::gather_gateway_health`
+and the shell's own reader) render health, not its age.
+
+### `provider/telemetry/mod.rs` — `DISPATCH_RESERVATION_LEASE` doc
+
+# Why ten seconds
+
+Twice `main.rs`'s `EXTRACTION_BOUND`, which is the bound on the work a
+reservation covers: the extraction thread is abandoned five seconds after
+it starts, so no dispatch this record protects can still be spending
+after that. Doubling it is the margin for the two things either side of
+the call — resolving the credential before it and writing the health back
+after — so a live dispatch is never evicted while its request is
+genuinely in flight, and a killed one frees the slot within seconds
+rather than within a rate-limit window.
+
+### `provider/telemetry/mod.rs` — `DispatchReservationCache` struct doc
+
+[`GatewayHealthCache`] has one file per provider, and a writer reads it,
+replaces one entry and writes the whole file back. Two writers racing
+there lose an entry, which is a recorded limit of that cache and
+tolerable because the entry is *history*: the next observation restores
+it.
+
+# The slot's key is the credential, and the row names the model
+
+[`crate::routing::free::Allowance`] is *"what a provider is limiting, for
+one credential"* and [`crate::routing::free::FreePool`] holds one
+allowance per [`crate::routing::CredentialId`], so what two dispatches
+contend for is a credential's pool, not a model's. Two models behind one
+key draw down the same requests, and giving each its own slots would let
+two dispatches spend one remaining request between them — the same defect
+wearing a different key. The model is therefore a *field* of the row
+rather than part of its path: it says what the reserved request is for,
+so a person can see which model is holding a pool open.
+
+### `provider/telemetry/mod.rs` — `claim` doc
+
+# An expired slot is taken over, not overwritten
+
+A row past its deadline is removed and the slot is then claimed the
+same exclusive way, so two dispatchers that both notice one dead row
+still produce exactly one holder rather than two that each renamed a
+file over the other's.
+
+Best-effort in the same sense every other writer in this module is:
+an I/O failure answers [`None`], and the caller's own documentation
+says what it does with that — never a failed dispatch over a full
+disk.
