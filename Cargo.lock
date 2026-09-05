@@ -1181,6 +1181,11 @@ dependencies = [
 [[package]]
 name = "pane"
 version = "0.1.0"
+dependencies = [
+ "clap",
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "parking_lot"
