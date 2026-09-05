@@ -4,7 +4,7 @@
 //!
 //! **Nothing model-authored runs here — map line 2457.** Every program these
 //! tests cause to be spawned is one of the platform's own (`cat`, `grep`,
-//! `find`, `sh`) resolved from a name fixed in `registry.rs` at compile time,
+//! `find`, `bash`) resolved from a name fixed in `registry.rs` at compile time,
 //! plus one shell script written by this file to stand in for the
 //! `glasshouse` binary. There is no generated code and no path from any
 //! model output into any of it.
@@ -189,7 +189,7 @@ fn no_registered_tool_needs_the_network() {
 ///
 /// The decisive half is the `bash` tool running `echo $0`: a POSIX shell sets
 /// `$0` to its own `argv[0]`, so the string the child prints *is* the path
-/// pane handed to `execvp`. A bare `sh` would print `sh`.
+/// pane handed to `execvp`. A bare `bash` would print `bash`.
 #[test]
 fn exec_is_granted_on_the_resolved_binary() {
     let grant = invoke::exec_grant(registry::lookup("read").unwrap().executable());
@@ -336,7 +336,7 @@ fn the_same_tool_reads_the_path_unconfined() {
         .arg("-c")
         .arg(format!("cat {}", outside.display()))
         .output()
-        .expect("the resolved `sh` runs");
+        .expect("the resolved `bash` runs");
     assert!(output.status.success(), "{output:?}");
     assert_eq!(String::from_utf8_lossy(&output.stdout), "outside-secret\n");
 }

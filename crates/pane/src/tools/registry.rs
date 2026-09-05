@@ -272,12 +272,17 @@ const GREP: Tool = Tool::declare(
 /// `Profile::admits_command` and by nothing else.
 ///
 /// **Effectful, and it is the reason the declaration is explicit.** Nothing
-/// about `sh -c` says whether the line it runs has an effect; the answer
+/// about `bash -c` says whether the line it runs has an effect; the answer
 /// cannot be inferred from the tool, the argument or the result, so it is
 /// declared once here and a resumed handle is never re-materialised from it.
+///
+/// **`bash`, not `sh`, because the sandbox grants exec on one resolved
+/// binary.** On macOS `/bin/sh` is a shim that re-execs `/bin/bash`, and a
+/// grant on `/bin/sh` alone refuses that second exec (`sandbox_apply.rs`'s
+/// sibling test is the rule working). `/bin/bash` is the binary itself.
 const BASH: Tool = Tool::declare(
     "bash",
-    "sh",
+    "bash",
     &[Arg::required("command", ArgKind::CommandLine)],
     Argv::ShellCommand,
     Purity::Effectful,

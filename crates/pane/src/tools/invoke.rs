@@ -536,7 +536,7 @@ fn spawn_confined(
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
 
-    let confinement = confine(profile, tool.name(), &mut command)?;
+    let confinement = confine(profile, &grant.binary, tool.name(), &mut command)?;
 
     let output = command.output().map_err(|error| ToolError::Spawn {
         tool: tool.name().to_string(),
@@ -564,10 +564,11 @@ fn spawn_confined(
 #[cfg(target_os = "macos")]
 fn confine(
     profile: &Profile,
+    binary: &Path,
     tool: &str,
     command: &mut Command,
 ) -> Result<Confinement, PermissionDenied> {
-    crate::sandbox::macos::confine(profile, command)
+    crate::sandbox::macos::confine(profile, binary, command)
         .map(|()| Confinement::Seatbelt)
         .map_err(|error| PermissionDenied {
             tool: tool.to_string(),
@@ -581,6 +582,7 @@ fn confine(
 #[cfg(target_os = "linux")]
 fn confine(
     profile: &Profile,
+    binary: &Path,
     tool: &str,
     command: &mut Command,
 ) -> Result<Confinement, PermissionDenied> {
@@ -589,7 +591,7 @@ fn confine(
         path: String::new(),
         rule,
     };
-    match crate::sandbox::linux::confine(profile, command) {
+    match crate::sandbox::linux::confine(profile, binary, command) {
         Ok(true) => Ok(Confinement::Landlock),
         // `linux::confine` returns `Ok(false)` below Landlock ABI 3 and
         // installs nothing. That is a refusal here rather than a warning.
@@ -607,10 +609,11 @@ fn confine(
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
 fn confine(
     profile: &Profile,
+    binary: &Path,
     tool: &str,
     command: &mut Command,
 ) -> Result<Confinement, PermissionDenied> {
-    let _ = (profile, command);
+    let _ = (profile, binary, command);
     Err(PermissionDenied {
         tool: tool.to_string(),
         path: String::new(),

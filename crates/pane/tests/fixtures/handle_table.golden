@@ -1,0 +1,39 @@
+arr  Array
+n=5
+  [0] 10
+  [1] 20
+  [2] 30
+  [4] 50
+
+file  File
+"src/lib.rs"   120 B · 10 lines · 2026-09-05T00:00:00Z
+L1   "fn main() {}"
+L2   "// second line"
+
+report  TestReport
+passed=3 failed=1 skipped=0
+  "test_x"
+
+str  string
+len=11
+"hello world"
+
+num  number
+42
+
+flag  boolean
+true
+
+empty  null
+null
+
+missing  undefined
+undefined
+
+obj  Object
+"a": number
+"b": string
+
+err  Error
+TypeError: "bad thing"
+  at "cell 2, line 3"

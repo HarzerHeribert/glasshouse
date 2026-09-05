@@ -4,12 +4,18 @@
 //!
 //! The invariant: **the generated text can only ever be narrower than the
 //! profile it came from.** Every `allow` term here is either fixed platform
-//! machinery (the loader's own paths, the executable roots) or the project
-//! root, and the project-root terms are emitted only when
-//! [`Profile::check`] says the root is reachable — so there is no input, at
-//! render time or at spawn time, that adds a path the profile does not
-//! already permit. The text is a value: [`profile_text`] produces it with no
-//! process anywhere in sight, which is what lets a test assert on it.
+//! machinery (the loader's own paths), the project root, or the one binary
+//! the caller has already resolved and is about to run; the project-root
+//! terms are emitted only when [`Profile::check`] says the root is
+//! reachable — so there is no input, at render time or at spawn time, that
+//! adds a path the profile does not already permit. The text is a value:
+//! [`profile_text`] produces it from a profile and a path with no process
+//! anywhere in sight, which is what lets a test assert on it.
+//!
+//! **`process-exec*` names the binary, not the directories around it** — the
+//! 61D exec-roots ruling. `EXECUTABLE_ROOTS` is what a name that could not
+//! be resolved falls back to, and [`ExecScope`] is how the profile says
+//! which of the two happened rather than leaving a reader to infer it.
 //!
 //! macOS is the one platform whose OS layer can express §2's pattern
 //! language exactly — `(subpath …)` for a directory glob and `(regex …)`
@@ -22,15 +28,21 @@ use super::profile::{Access, Profile};
 use std::fmt;
 use std::path::Path;
 
-/// Where a tool process may be executed from, and read, regardless of what
-/// the settings document says.
+/// The **fallback** exec grant: where a tool may be executed from when pane
+/// could not resolve its name to a path and `execvp` has to search.
 ///
-/// These are not grants over project data and they are not derived from
-/// `permissions`: they are the minimum a process needs to exist at all —
-/// `.claude/settings.json` has no pattern kind that names an interpreter, so
-/// deriving them from it is not possible even in principle. A path here
-/// carries no user content; the never-grantable set of §4 is disjoint from
-/// it, and `(deny default)` refuses everything else.
+/// Not the ordinary case any more. When the caller hands [`profile_text`] a
+/// resolved binary, the profile names that one path and none of these — the
+/// 61D exec-roots ruling, whose argument is that a directory list permits
+/// every binary a package manager ever put there and is a list that is
+/// always wrong. These stay because a name `execvp` still has to find cannot
+/// be written as a `(literal …)` at all, and a profile that named nothing
+/// would refuse the search rather than bound it.
+///
+/// They are not derived from `permissions` and are not derivable from it:
+/// `.claude/settings.json` has no pattern kind that names an interpreter. A
+/// path here carries no user content; §4's never-grantable set is disjoint
+/// from it, and `(deny default)` refuses everything else.
 const EXECUTABLE_ROOTS: [&str; 6] = [
     "/usr/bin",
     "/bin",
@@ -102,6 +114,40 @@ const DEVICE_WRITES: [&str; 5] = [
     "/dev/stderr",
 ];
 
+/// Which paths the profile's `process-exec*` term names.
+///
+/// The two halves of the 61D exec-roots ruling as a value, so a session can
+/// say which one is in force. `Regime` carries it and
+/// [`Regime::describe`] prints it, because the ruling asks for the fallback
+/// to be *visible* and a log line the caller never sees is not that.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecScope {
+    /// One `(literal …)` on the binary the caller resolved. The ordinary
+    /// case, and the narrow one: a sibling in the same directory is not
+    /// executable through this profile.
+    ResolvedBinary,
+    /// The six [`EXECUTABLE_ROOTS`], because the name could not be resolved
+    /// and `execvp` has to search for it. Wider, and reported as such.
+    DeclaredRoots,
+}
+
+/// Which of the two grants `binary` earns.
+///
+/// An absolute path is one pane resolved: `tools::invoke::exec_grant`
+/// produces it with `canonicalize`, which is the only producer of the
+/// resolved case and always yields an absolute path. Anything relative is a
+/// bare name `execvp` still has to find, and there is no `(literal …)` that
+/// names it. A path that is absolute but does not exist gets the literal
+/// too, which is a refusal at exec time rather than a widening — the roots
+/// would not have contained it either.
+pub fn exec_scope(binary: &Path) -> ExecScope {
+    if binary.is_absolute() {
+        ExecScope::ResolvedBinary
+    } else {
+        ExecScope::DeclaredRoots
+    }
+}
+
 /// Which enforcement this applier actually achieved, so a coarser regime is
 /// stated rather than implied (§3's closing sentence, applied to macOS).
 ///
@@ -125,8 +171,9 @@ pub enum Regime {
     /// `(deny default)` with the project root granted and §1.5's `.claude`
     /// write-deny rendered. `path_rules` is how many `Read`/`Write`/`Edit`
     /// rules the profile compiled, every one of which is enforced by
-    /// [`Profile::check`] and none of which reaches the OS layer.
-    ProjectRootOnly { path_rules: usize },
+    /// [`Profile::check`] and none of which reaches the OS layer. `exec` is
+    /// which paths `process-exec*` names.
+    ProjectRootOnly { path_rules: usize, exec: ExecScope },
 }
 
 impl Regime {
@@ -134,10 +181,18 @@ impl Regime {
     /// because §3 requires pane to state it rather than imply exactness.
     pub fn describe(self) -> String {
         match self {
-            Regime::ProjectRootOnly { path_rules } => format!(
+            Regime::ProjectRootOnly { path_rules, exec } => format!(
                 "seatbelt: deny by default, the project root the only readable and writable root, no network, no Mach service. \
                  File metadata stays readable filesystem-wide: existence, size, mode and a symlink's target, never a file's contents. \
-                 The OS layer is directory-granular; {path_rules} path rule(s) from `.claude/settings.json` are enforced by pane's own pre-call check alone."
+                 The OS layer is directory-granular; {path_rules} path rule(s) from `.claude/settings.json` are enforced by pane's own pre-call check alone. \
+                 {}",
+                match exec {
+                    ExecScope::ResolvedBinary =>
+                        "Execution is granted on the one resolved binary and on nothing else, so a sibling in its directory cannot be run.",
+                    ExecScope::DeclaredRoots =>
+                        "The program name could not be resolved to a path, so execution fell back to the declared executable roots \
+                         and is bounded by those directories rather than by one binary.",
+                }
             ),
         }
     }
@@ -149,22 +204,24 @@ impl fmt::Display for Regime {
     }
 }
 
-/// The regime [`profile_text`] achieves for `profile`.
-pub fn regime(profile: &Profile) -> Regime {
+/// The regime [`profile_text`] achieves for `profile` and `binary`.
+pub fn regime(profile: &Profile, binary: &Path) -> Regime {
     Regime::ProjectRootOnly {
         path_rules: profile.rule_count(),
+        exec: exec_scope(binary),
     }
 }
 
-/// Renders the seatbelt profile for `profile`, as text.
+/// Renders the seatbelt profile for `profile`, executing `binary`, as text.
 ///
-/// Deterministic in its single argument: the same profile renders the same
-/// bytes on every call, and nothing in the environment, the argv or the
-/// command line about to be spawned reaches this function. That is
-/// mechanical rather than asserted — there is no other parameter — and it is
-/// how invariant §1.1 survives contact with the process-spawning half of the
-/// sandbox.
-pub fn profile_text(profile: &Profile) -> String {
+/// Deterministic in its two arguments: the same profile and the same binary
+/// render the same bytes on every call, and nothing in the environment or in
+/// the argv about to be spawned reaches this function. `binary` is the one
+/// thing the invocation contributes and it can only ever *narrow* the
+/// result — it replaces six directory grants with one path — which is how
+/// invariant §1.1 survives contact with the process-spawning half of the
+/// sandbox now that a caller hands something in.
+pub fn profile_text(profile: &Profile, binary: &Path) -> String {
     let root = display(profile.root());
     let mut out = String::new();
     out.push_str("(version 1)\n");
@@ -183,9 +240,20 @@ pub fn profile_text(profile: &Profile) -> String {
     // `/` itself is read by the loader on every exec.
     out.push_str("(allow file-read* (literal \"/\"))\n");
 
+    // The 61D exec-roots ruling: the one binary the caller resolved, or the
+    // declared roots when there is no path to name. `(literal …)` is a
+    // single file and not a subtree, so a sibling in the same directory is
+    // not reachable through this term.
     out.push_str("(allow process-exec*");
-    for path in EXECUTABLE_ROOTS {
-        out.push_str(&format!(" (subpath {})", quote(path)));
+    match exec_scope(binary) {
+        ExecScope::ResolvedBinary => {
+            out.push_str(&format!(" (literal {})", quote(&display(binary))));
+        }
+        ExecScope::DeclaredRoots => {
+            for path in EXECUTABLE_ROOTS {
+                out.push_str(&format!(" (subpath {})", quote(path)));
+            }
+        }
     }
     out.push_str(")\n");
     out.push_str("(allow process-fork)\n");
@@ -288,23 +356,27 @@ fn display(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
-/// Applies `profile`'s seatbelt profile to `command`, to take effect in the
-/// child between `fork` and `exec`.
+/// Applies `profile`'s seatbelt profile to `command`, which is about to
+/// exec `binary`, to take effect in the child between `fork` and `exec`.
 ///
-/// The text is rendered here from the profile rather than accepted as an
-/// argument, and that is the whole of requirement 5: a caller holding a
-/// `Profile` cannot hand this function a wider policy than the one the
-/// profile implies, because there is no parameter through which to hand it
-/// anything.
+/// The text is still rendered here rather than accepted as an argument, and
+/// that is requirement 5: the only thing a caller may hand in is the path it
+/// is about to run, and every value of it produces a profile at least as
+/// narrow as the roots-based one. There is no parameter through which a
+/// caller could pass policy.
 ///
 /// The `CString` is built before the fork. Everything the child does after
 /// that is one call into libSystem with a pointer that already exists.
 #[cfg(target_os = "macos")]
-pub fn confine(profile: &Profile, command: &mut std::process::Command) -> std::io::Result<()> {
+pub fn confine(
+    profile: &Profile,
+    binary: &Path,
+    command: &mut std::process::Command,
+) -> std::io::Result<()> {
     use std::ffi::{CString, c_char};
     use std::os::unix::process::CommandExt;
 
-    let text = CString::new(profile_text(profile))
+    let text = CString::new(profile_text(profile, binary))
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
     // SAFETY: `pre_exec` runs in the forked child before `exec`. The only
     // call it makes is `sandbox_init` on a `CString` allocated in the parent,

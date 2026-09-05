@@ -17,6 +17,13 @@
 //! Landlock, the mount view is the whole enforcement. [`Regime`] is how a
 //! session says which of those it is in rather than implying an exactness it
 //! has not got.
+//!
+//! **`EXECUTE` is not part of a directory grant** — the 61D exec-roots
+//! ruling, in Landlock's terms. No system root and not the project carries
+//! it; [`LandlockRules::executable`] is the only place it is handed out, and
+//! it names the one binary the caller resolved. [`LOADER_EXEC_ROOTS`] is the
+//! exception the kernel forces and says why, and [`ExecScope`] is how the
+//! ruleset states which grant it made.
 
 use super::profile::{Access, Profile};
 use std::ffi::{OsStr, OsString};
@@ -25,6 +32,11 @@ use std::path::{Path, PathBuf};
 
 /// The read-only roots a process needs before it can run at all: the loader,
 /// the C library, the interpreter it was spawned as.
+///
+/// **Read and list, and not run.** These carried `EXECUTE` until the 61D
+/// exec-roots ruling, which is what let a confined tool exec every binary
+/// under `/usr/bin`; the grant that replaces it names one path and lives in
+/// [`LandlockRules::executable`].
 ///
 /// Not derived from `permissions`, and not derivable from it — no pattern
 /// kind names an interpreter. None of these carries project or user data,
@@ -55,6 +67,26 @@ const DEVICE_READS: [&str; 5] = [
     "/dev/tty",
 ];
 
+/// The roots that keep `EXECUTE` whatever binary is being confined: the ELF
+/// interpreter's own.
+///
+/// **The kernel forces this and a narrower list cannot start a process.**
+/// `execve` of a dynamically linked binary makes the kernel `open_exec` the
+/// interpreter named in its `PT_INTERP`, and that open carries `FMODE_EXEC`,
+/// which Landlock's file-open hook charges `LANDLOCK_ACCESS_FS_EXECUTE`. A
+/// ruleset granting exec on the tool alone therefore refuses the tool.
+///
+/// Shared libraries are **not** why this list exists and would not need it:
+/// `ld.so` opens them `O_RDONLY` and maps them `PROT_EXEC`, and Landlock
+/// hooks the open rather than the mapping, so `READ_FILE` is all they take.
+///
+/// It is a directory list, which the ruling calls a list that is always
+/// wrong — and it is admissible here for the reason `LOADER_READ_ROOTS` is
+/// admissible on macOS: it is loader machinery, not a place tools live. The
+/// binaries a confined process could reach through it are the interpreters,
+/// and `/usr/bin` is not in it.
+const LOADER_EXEC_ROOTS: [&str; 4] = ["/lib", "/lib64", "/usr/lib", "/usr/lib64"];
+
 /// Landlock's filesystem access bits, ABI 1 through 3. Public so a test on
 /// any host can assert what a read grant and a write grant are made of.
 pub mod access {
@@ -74,9 +106,15 @@ pub mod access {
     pub const REFER: u64 = 1 << 13;
     pub const TRUNCATE: u64 = 1 << 14;
 
-    /// What a read grant is: open, list, and run. Never `WRITE_FILE`, never
-    /// any of the `MAKE_*` bits.
-    pub const READ: u64 = EXECUTE | READ_FILE | READ_DIR;
+    /// What a read grant is: open and list. **Not run** — the 61D
+    /// exec-roots ruling took `EXECUTE` out of every directory grant, and
+    /// [`super::LandlockRules::executable`] is the only thing that hands it
+    /// out. Never `WRITE_FILE`, never any of the `MAKE_*` bits.
+    pub const READ: u64 = READ_FILE | READ_DIR;
+
+    /// What an execute grant is: run, and the read the kernel's `open_exec`
+    /// performs alongside it.
+    pub const EXEC: u64 = EXECUTE | READ_FILE;
 
     /// The bits a rule on a **file** may carry.
     ///
@@ -91,7 +129,10 @@ pub mod access {
     /// directory.
     pub const FILE: u64 = EXECUTE | READ_FILE | WRITE_FILE | TRUNCATE;
 
-    /// What a write grant is: everything ABI 3 knows how to hand out.
+    /// What a write grant is: everything ABI 3 knows how to hand out that a
+    /// directory may have. `EXECUTE` is not in it, by way of [`READ`]: the
+    /// project root is where model-authored files live and map line 2457
+    /// says none of them runs.
     pub const READ_WRITE: u64 = READ
         | WRITE_FILE
         | REMOVE_DIR
@@ -105,6 +146,44 @@ pub mod access {
         | MAKE_SYM
         | REFER
         | TRUNCATE;
+
+    /// Every right the ruleset takes responsibility for.
+    ///
+    /// `EXECUTE` is in here **even though no directory grant carries it any
+    /// more**, and that is the trap this constant exists to name: an access
+    /// absent from `handled_access_fs` is one the ruleset does not restrict
+    /// at all, so dropping it from here would not narrow exec — it would
+    /// make exec unrestricted everywhere, silently, while every rule below
+    /// still looked correct.
+    pub const HANDLED: u64 = READ_WRITE | EXECUTE;
+}
+
+/// Which paths the ruleset's `EXECUTE` rules name.
+///
+/// The two halves of the 61D exec-roots ruling as a value, so what the
+/// applier reports says which one happened instead of leaving it to be
+/// inferred from a path list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExecScope {
+    /// The one binary the caller resolved, as a rule on that file. A sibling
+    /// in the same directory is not executable through this ruleset.
+    ResolvedBinary,
+    /// [`SYSTEM_READ_ROOTS`], because the name could not be resolved and
+    /// `execvp` has to search for it. Wider, and reported as such.
+    DeclaredRoots,
+}
+
+/// Which of the two grants `binary` earns.
+///
+/// An absolute path is one pane resolved — `tools::invoke::exec_grant`
+/// produces it with `canonicalize`, the only producer of the resolved case.
+/// Anything relative is a bare name no `PATH_BENEATH` rule can name.
+pub fn exec_scope(binary: &Path) -> ExecScope {
+    if binary.is_absolute() {
+        ExecScope::ResolvedBinary
+    } else {
+        ExecScope::DeclaredRoots
+    }
 }
 
 /// Which enforcement this applier achieved on this host.
@@ -187,22 +266,32 @@ impl fmt::Display for Regime {
 /// the twenty lines of `unsafe` that install it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LandlockRules {
-    /// Directories a process may read, list and execute from, and the
-    /// character devices of [`DEVICE_READS`], which are files and are
-    /// granted as themselves.
+    /// Directories a process may read and list, and the character devices of
+    /// [`DEVICE_READS`], which are files and are granted as themselves.
+    /// **Not executable**: see [`access::READ`].
     pub read_only: Vec<PathBuf>,
     /// Directories a process may additionally write, create in and remove
     /// from. Empty when the profile grants no write to the project root.
+    /// Not executable either.
     pub read_write: Vec<PathBuf>,
+    /// Everything carrying `LANDLOCK_ACCESS_FS_EXECUTE`: the resolved binary
+    /// — or [`SYSTEM_READ_ROOTS`] when there was no path to name — followed
+    /// by [`LOADER_EXEC_ROOTS`], which the kernel requires whichever of the
+    /// two it is.
+    pub executable: Vec<PathBuf>,
+    /// Which of those two [`executable`](Self::executable) is.
+    pub exec: ExecScope,
 }
 
-/// Derives the Landlock ruleset `profile` implies.
+/// Derives the Landlock ruleset `profile` implies for a child about to exec
+/// `binary`.
 ///
-/// Every entry is either a fixed system root or the project root, and the
-/// project root appears only where [`Profile::check`] agrees it is
-/// reachable — so a settings document that denies the root produces a
-/// ruleset with no write grant in it, and no argument to this function
-/// exists through which a caller could put one back.
+/// Every entry is a fixed system root, the project root, or the binary the
+/// caller resolved, and the project root appears only where
+/// [`Profile::check`] agrees it is reachable — so a settings document that
+/// denies the root produces a ruleset with no write grant in it. `binary`
+/// can only narrow: the widest thing it produces is the root list that used
+/// to be unconditional.
 ///
 /// **§1.5's `.claude` write-deny is not in here, because Landlock cannot
 /// express it.** A ruleset's rules are additive: an access beneath a granted
@@ -216,7 +305,7 @@ pub struct LandlockRules {
 /// write whatever the kernel would have allowed. [`Regime::LandlockOnly`]
 /// says so in as many words rather than leaving a reader to assume the
 /// ruleset covers it.
-pub fn landlock_rules(profile: &Profile) -> LandlockRules {
+pub fn landlock_rules(profile: &Profile, binary: &Path) -> LandlockRules {
     let root = profile.root().to_path_buf();
     let mut read_only: Vec<PathBuf> = SYSTEM_READ_ROOTS
         .iter()
@@ -229,9 +318,17 @@ pub fn landlock_rules(profile: &Profile) -> LandlockRules {
     } else if grants(profile, Access::Read, &root) {
         read_only.push(root);
     }
+    let exec = exec_scope(binary);
+    let mut executable: Vec<PathBuf> = match exec {
+        ExecScope::ResolvedBinary => vec![binary.to_path_buf()],
+        ExecScope::DeclaredRoots => SYSTEM_READ_ROOTS.iter().map(PathBuf::from).collect(),
+    };
+    executable.extend(LOADER_EXEC_ROOTS.iter().map(PathBuf::from));
     LandlockRules {
         read_only,
         read_write,
+        executable,
+        exec,
     }
 }
 
@@ -388,10 +485,10 @@ pub fn available_regime() -> Regime {
 /// Installs `profile`'s Landlock ruleset on `command`, to take effect in the
 /// child between `fork` and `exec`.
 ///
-/// The ruleset is derived here from the profile rather than accepted as an
-/// argument, which is requirement 5 made structural: there is no parameter
-/// through which a caller could hand this function a wider ruleset than the
-/// profile implies.
+/// The ruleset is still derived here rather than accepted as an argument,
+/// which is requirement 5 made structural: the only thing a caller may hand
+/// in is the path it is about to run, and every value of it produces a
+/// ruleset at least as narrow as the roots-based one.
 ///
 /// Every path handle is opened in the parent. The child does three syscalls
 /// and closes a descriptor; it allocates nothing.
@@ -401,7 +498,11 @@ pub fn available_regime() -> Regime {
 /// hole in it and pretending otherwise is exactly what [`Regime`] exists to
 /// stop.
 #[cfg(target_os = "linux")]
-pub fn confine(profile: &Profile, command: &mut std::process::Command) -> std::io::Result<bool> {
+pub fn confine(
+    profile: &Profile,
+    binary: &Path,
+    command: &mut std::process::Command,
+) -> std::io::Result<bool> {
     use std::os::fd::{AsRawFd, OwnedFd};
     use std::os::unix::fs::OpenOptionsExt;
     use std::os::unix::process::CommandExt;
@@ -410,11 +511,15 @@ pub fn confine(profile: &Profile, command: &mut std::process::Command) -> std::i
     if abi < 3 {
         return Ok(false);
     }
-    let rules = landlock_rules(profile);
+    let rules = landlock_rules(profile, binary);
     let mut handles: Vec<(OwnedFd, u64)> = Vec::new();
     for (paths, rights) in [
         (&rules.read_only, access::READ),
         (&rules.read_write, access::READ_WRITE),
+        // Landlock's rules union along a path's ancestors, so this adds
+        // `EXECUTE` to a binary the roots above already made readable
+        // without adding it to that binary's siblings.
+        (&rules.executable, access::EXEC),
     ] {
         for path in paths {
             // A system root a given distribution does not have is not an
@@ -439,7 +544,7 @@ pub fn confine(profile: &Profile, command: &mut std::process::Command) -> std::i
             handles.push((OwnedFd::from(file), rights));
         }
     }
-    let handled = access::READ_WRITE;
+    let handled = access::HANDLED;
     // SAFETY: `pre_exec` runs in the forked child before `exec`. It performs
     // syscalls on descriptors opened in the parent and allocates nothing.
     unsafe {

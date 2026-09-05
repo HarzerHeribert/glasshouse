@@ -23,6 +23,19 @@
 //! [`Profile::check`] alone. Case-insensitivity is the platform's, and
 //! `Profile`'s matcher already makes the same decision on every host rather
 //! than three different ones.
+//!
+//! **And the 61D exec-roots ruling is not expressible here either, which is
+//! stated rather than worked around.** macOS names the resolved binary in a
+//! `(literal …)` and Linux gives it a Landlock rule; the AppContainer model
+//! has no equivalent, because a system binary is executable by
+//! `ALL APPLICATION PACKAGES` through an ACE on the *binary*, and narrowing
+//! that would mean rewriting the ACLs of files pane does not own. It does
+//! not. What this module can do, and does, is refuse execution inside the
+//! project: [`READ_RIGHTS`] and [`READ_WRITE_RIGHTS`] no longer carry
+//! `FILE_EXECUTE`, so nothing model-authored runs (map line 2457).
+//! [`AclGrants::executable`] records which binary the grants were derived
+//! for so the report is not silent about a narrowing that did not happen.
+//! Like everything else here it has never run.
 
 use super::profile::{Access, Profile};
 use std::fmt;
@@ -81,31 +94,69 @@ impl fmt::Display for Regime {
     }
 }
 
+/// `FILE_EXECUTE`.
+///
+/// Stripped from both grants below and named here so a test on any host can
+/// say which bit it is. The project tree is where model-authored files live
+/// and map line 2457 says none of them executes; a `FILE_GENERIC_EXECUTE`
+/// ACE on the project root grants exactly that.
+pub const FILE_EXECUTE: u32 = 0x0000_0020;
+
+/// `FILE_GENERIC_READ | FILE_GENERIC_EXECUTE`, less [`FILE_EXECUTE`].
+///
+/// The rest of `FILE_GENERIC_EXECUTE` stays: `SYNCHRONIZE`,
+/// `READ_CONTROL` and `FILE_READ_ATTRIBUTES` are what an ordinary open
+/// needs, and dropping the whole mask would refuse reads as well.
+pub const READ_RIGHTS: u32 = 0x0012_00A9 & !FILE_EXECUTE;
+
+/// The above plus `FILE_GENERIC_WRITE` and `DELETE`, less [`FILE_EXECUTE`].
+pub const READ_WRITE_RIGHTS: u32 = 0x001F_01FF & !FILE_EXECUTE;
+
+/// Everything a write grant carries that a read grant does not — the bits
+/// §1.5's `.claude` carve-out has to deny, now that the DACL is merged
+/// rather than protected.
+pub const WRITE_ONLY_RIGHTS: u32 = READ_WRITE_RIGHTS & !READ_RIGHTS;
+
 /// Which access the AppContainer's capability SID is granted, and where.
 ///
 /// A value, so the derivation is assertable on a host that cannot run a
 /// single Win32 call — which is every host this package was written on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AclGrants {
-    /// Directories whose ACL admits the capability SID for read and execute.
+    /// Directories whose ACL admits the capability SID for read. **Not for
+    /// execute** — see [`READ_RIGHTS`].
     pub read_only: Vec<PathBuf>,
-    /// Directories whose ACL admits it for read, write and delete.
+    /// Directories whose ACL admits it for read, write and delete. Not for
+    /// execute either.
     pub read_write: Vec<PathBuf>,
+    /// The binary these grants were derived for, recorded and not acted on.
+    ///
+    /// The 61D exec-roots ruling asks the OS to grant execution on this path
+    /// and on nothing else. Windows cannot: system binaries are executable
+    /// through an ACE on themselves for `ALL APPLICATION PACKAGES`, and
+    /// pane does not rewrite the ACLs of files it does not own. So this is
+    /// the one platform where the narrow grant is *not* enforced, and the
+    /// field exists so that is visible in what the applier reports rather
+    /// than absent from it.
+    pub executable: PathBuf,
     /// Whether the AppContainer declares `internetClient`. Always `false`:
     /// no `permissions` pattern names a host, a port or a protocol, so a
     /// network capability would have to be invented (§4.1).
     pub internet_client: bool,
 }
 
-/// Derives the ACL grants `profile` implies.
+/// Derives the ACL grants `profile` implies for a child about to exec
+/// `binary`.
 ///
-/// The project root, and nothing else. Every system directory an
+/// The project root, and nothing else. `binary` adds no ACE — see
+/// [`AclGrants::executable`] for why this platform cannot honour the narrow
+/// exec grant — so it can widen nothing here even in principle. Every system directory an
 /// AppContainer needs is already readable by `ALL APPLICATION PACKAGES`, so
 /// there is nothing to add for them and nothing here that could be widened
 /// into them. `.claude/` is carved back to read-only inside a writable root
 /// (§1.5), and both decisions are [`Profile::check`]'s rather than this
 /// function's.
-pub fn acl_grants(profile: &Profile) -> AclGrants {
+pub fn acl_grants(profile: &Profile, binary: &Path) -> AclGrants {
     let root = profile.root().to_path_buf();
     let mut read_only = Vec::new();
     let mut read_write = Vec::new();
@@ -121,6 +172,7 @@ pub fn acl_grants(profile: &Profile) -> AclGrants {
     AclGrants {
         read_only,
         read_write,
+        executable: binary.to_path_buf(),
         internet_client: profile.grants_network(),
     }
 }
@@ -157,7 +209,10 @@ pub use platform::{AppContainer, RestrictedToken, grant_project_acl, regime};
 
 #[cfg(target_os = "windows")]
 mod platform {
-    use super::{AclGrants, Regime, acl_grants, container_name};
+    use super::{
+        AclGrants, READ_RIGHTS, READ_WRITE_RIGHTS, Regime, WRITE_ONLY_RIGHTS, acl_grants,
+        container_name,
+    };
     use crate::sandbox::profile::Profile;
     use std::io;
     use std::os::windows::ffi::OsStrExt;
@@ -335,8 +390,12 @@ mod platform {
     /// `SetEntriesInAclW`'s documented placement of supplied entries ahead of
     /// merged ones; like everything else here it is read from a contract and
     /// not from a run.
-    pub fn grant_project_acl(profile: &Profile, container: &AppContainer) -> io::Result<()> {
-        let grants: AclGrants = acl_grants(profile);
+    pub fn grant_project_acl(
+        profile: &Profile,
+        binary: &std::path::Path,
+        container: &AppContainer,
+    ) -> io::Result<()> {
+        let grants: AclGrants = acl_grants(profile, binary);
         for (paths, rights, deny_write) in [
             (&grants.read_only, READ_RIGHTS, true),
             (&grants.read_write, READ_WRITE_RIGHTS, false),
@@ -432,15 +491,6 @@ mod platform {
             },
         }
     }
-
-    /// `FILE_GENERIC_READ | FILE_GENERIC_EXECUTE`.
-    const READ_RIGHTS: u32 = 0x0012_00A9;
-    /// The above plus `FILE_GENERIC_WRITE` and `DELETE`.
-    const READ_WRITE_RIGHTS: u32 = 0x001F_01FF;
-    /// Everything a write grant carries that a read grant does not — the
-    /// bits §1.5's `.claude` carve-out has to deny, now that the DACL is
-    /// merged rather than protected.
-    const WRITE_ONLY_RIGHTS: u32 = READ_WRITE_RIGHTS & !READ_RIGHTS;
 
     /// What this host can enforce for `profile`, **creating nothing**.
     ///
