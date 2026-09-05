@@ -13,6 +13,9 @@
 #   PROMPT_WATCH_SELF=workspace:N skip that pane (the default watches every pane,
 #                                 the orchestrator's included -- it prompts too)
 #   PROMPT_WATCH_INTERVAL=20      seconds between sweeps
+#   PROMPT_WATCH_ONCE=1           run a single sweep and exit (board-watch.sh
+#                                 composes this for a one-shot prompt check;
+#                                 no other caller needs it)
 # Report-only mode names each prompt once (the orchestrator answers it by hand,
 # and a screen keeps showing the prompt for a sweep after Enter).
 declare -A seen
@@ -36,5 +39,6 @@ while true; do
       fi
     fi
   done
+  [ "${PROMPT_WATCH_ONCE:-0}" = "1" ] && exit 0
   sleep "${PROMPT_WATCH_INTERVAL:-20}"
 done

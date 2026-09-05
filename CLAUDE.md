@@ -245,6 +245,22 @@ absorbed. The ceiling is still §74's — past three concurrent editing workers 
 a team lead, because review is what catches a mutation killed by the wrong
 assertion, and review is yours.
 
+**Or arm one Monitor for the whole board instead of the per-worker and standing
+watches above** (`GH-BOARD-WATCH`, 2026-09-05; measured: one event, one turn,
+roughly a third of an orchestrator's turns spent on notices needing no act).
+`scripts/board-watch.sh` composes the same detection — worker panes, prompts,
+pipeline dryness, stale panes, CI runs — into one digest line per window plus
+an immediate line for exactly five things: a report landing, a stuck prompt, a
+worker gone quiet with no signal, a CI run concluding failure, the board going
+dry. Everything else waits for the digest.
+
+    Monitor(command: "scripts/board-watch.sh --window 120 \
+      --worker <name>:<surface-ref>:<report-path> [--worker ...] \
+      --ci <run-id> [--ci ...] --self <your-workspace-ref>", persistent: true)
+
+The per-worker `worker-watch.sh` and the three standing watches stay valid and
+may be armed instead — supervising exactly one worker is the case for them.
+
 **Before choosing what to dispatch, run `scripts/cluster-b.py` and then read
 `docs/process/refusal-register.md` — in that order, and read the register
 before you commit to anything.** The script finds the shape that closed four of
