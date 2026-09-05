@@ -302,7 +302,9 @@ targets plus the worker's quoted tests, re-run on the merged tree
 (`blast-radius.sh --targeted` once GH-GATE-ECONOMICS lands; until then, run
 the equivalent target list by hand). Commit and push on targeted green. The
 FULL two-lane sweep runs in the background per WAVE — once per two-to-four
-integrations, not once each — and a trailing red spawns a fix-forward worker
+integrations, not once each — **and since 2026-09-05 the push itself starts
+the twelve-cell GitHub sweep, so the local wave sweep is `--macos` and the
+platform legs come from GitHub for free** — and a trailing red spawns a fix-forward worker
 (§84) while the line keeps moving; 2026-09-01's own history is the model: a
 missed regression shipped, the next tree's sweep caught it, the fix landed
 two commits later with zero damage. What does NOT weaken: per-box targeted
@@ -563,23 +565,57 @@ an index already loaded. The fix is a list, not more prose.
 batch 51's eight closures) · `pipeline.sh` (nags when the board runs dry) ·
 `map-index.py` · `progress.py`
 
-**Verification:** `ci-local.sh` (`--macos --linux --windows-vm`; **any flag
-suppresses the macOS+Linux default**) · `blast-radius.sh` · `mutate.sh` ·
-`msrv-check.sh` · `check-doc-boundary.sh` · `check-evidence-coverage.py`
+**Verification:** `ci-local.sh` (`--scoped` for the fast tier; `--macos
+--linux --windows-vm` for legs; **any flag suppresses the macOS+Linux
+default**) · `blast-radius.sh` · `mutate.sh` · `msrv-check.sh` ·
+`check-doc-boundary.sh` · `check-evidence-coverage.py` · `lib/accel.sh`
+(sourced by both gates: sccache when installed, silent when not)
 
-**GitHub CI is manual-only — the LOCAL gate is the gate.** User instruction of
-record, 2026-08-31/09-01: *"this projects CI is way too demanding to be ran on
-github fully … only run in the github CI in the future when absolutely
-necessary"*, then *"if ci is good on this machine then just skip it on github."*
-`.github/workflows/ci.yml` therefore triggers on **`workflow_dispatch` only** —
-a push fires **nothing** and costs nothing, on any branch. The jobs are intact
-for the rare cross-platform contract that genuinely cannot be settled locally:
-run them from the Actions tab, and say in the triggering commit why the run was
-needed. The cost that motivated this stands if anyone re-adds a push trigger:
-seven jobs (`test`+`msrv` × 3 OS, plus `lint`), macOS billed **10×**, a fresh
-monthly allowance gone in about ten pushes. `ci-local.sh` covers macOS and
-Linux and drives a real **Windows VM**, and this machine *is* the macOS
-coverage. Pushing to main is now cost-free and needs no CI justification.
+**The LOCAL gate is the BLOCKING gate; GitHub is the trailing sweep — since
+2026-09-05, when the repository went public (user instruction).**
+`.github/workflows/ci-extended.yml` runs on every push: twelve cells — five
+OS/arch targets × the declared compiler and the MSRV, plus beta and nightly —
+with the real harnesses installed via npm so every adapter's `Declared` fact is
+re-verified against a live binary, `--no-fail-fast`, and a RustSec audit. It is
+free on a public repository, so a push needs no justification, and a red there
+gets a fix-forward worker (§84) exactly as a trailing local sweep would. The
+old seven-job `ci.yml` stays `workflow_dispatch` and can be deleted.
+`ci-local.sh` remains what a worker runs before reporting — faster than any
+hosted runner — and `--windows-vm` remains the only Windows-ARM64 run besides
+the `windows-11-arm` cell.
+
+**Five build rules. Each is a defect measured on 2026-09-05 (`efdf3ea`; the
+numbers and the findings are in `docs/process/handoff.md`, that date):**
+
+1. **Never set `RUSTFLAGS`.** Warnings are denied by `[workspace.lints.rust]`,
+   identically for every invocation. `RUSTFLAGS` is part of cargo's
+   fingerprint; three values across gate steps and interactive builds left one
+   `target/` holding 1203 fingerprint variants of `glasshouse` and 98.7 GiB.
+2. **One compiler.** `[workspace.metadata.ci] toolchain` and
+   `rust-toolchain.toml` name the same version — bump both in one commit.
+   `ci-local.sh` uses it on every leg and warns by name when it is not
+   installed; until this rule the macOS leg had never built with it. On the
+   development machine Homebrew `rust` is unlinked and `rustup` owns `cargo`.
+3. **An inherited `ANTHROPIC_BASE_URL` is warned about, never scrubbed.**
+   Claude Code exports it into every child, and `tests/pty_smoke.rs:3526`
+   correctly refuses to certify overlay hygiene under it — so from any Claude
+   Code pane, workers included, that one test is red for a reason that is not
+   the tree. Confirm with `env -u ANTHROPIC_BASE_URL` on the target, say so in
+   the report, and do not "fix" the test.
+4. **macOS `cargo test` is fail-fast.** One red target hides every later one;
+   the Codex catalogue drift sat behind `pty_smoke` for a whole run. Before
+   attributing a red, enumerate with `--no-fail-fast` or read the GitHub sweep,
+   which already runs that way.
+5. **`--scoped` is a tier, not the gate.** Lints plus `blast-radius.sh`,
+   macOS-only, refuses platform legs, and prints a NOTE that it is not a CI
+   prediction. Run it in the loop; run the full gate before any push claim.
+
+Measured, so nobody re-measures: cold, three platforms, from a wiped tree,
+**2371s**; warm macOS **≈300s**, of which ≈175s is 136 test binaries run one
+at a time (median 0.51s — process startup, not test work). That is the next
+lever and it is a nextest-with-a-**generated**-serial-list package, not a
+cache: an attempt with a hand-written serial lane matched 7 targets where
+`blast-radius.sh`'s classification matches 112, and was backed out for it.
 
 **Sharing a contended file — read §77 before queueing on `main.rs`:**
 `coedit.sh claim|peers|diff|done|status|ready|list|release`. Contention on

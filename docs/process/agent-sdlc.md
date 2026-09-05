@@ -159,17 +159,16 @@ handoff, and create one accurate coherent commit. The Opus orchestrator is the
 only role that integrates, commits, or changes project-status records. Leave
 main clean at coherent boundaries.
 
-**GitHub CI is manual-only; the local gate is the gate.** By user instruction
-(2026-08-31, then "just skip it on github" on 2026-09-01),
-`.github/workflows/ci.yml` triggers on **`workflow_dispatch` only** — a push
-fires nothing and costs nothing, on any branch. Cross-platform claims are
-settled by `scripts/ci-local.sh`, which covers macOS and Linux and drives a
-real **Windows VM** (`--windows-vm`); this machine *is* the macOS coverage.
-The GitHub jobs are kept intact for the rare contract that genuinely cannot be
-settled locally or on the VM: trigger them by hand from the Actions tab, and
-say in the triggering commit why the run was needed — the cost that motivated
-the change (seven jobs, macOS billed 10×, an allowance gone in ~10 runs)
-returns in full for every manual dispatch. Pushing at all remains the
+**The local gate is the blocking gate; GitHub is the trailing sweep.** Since
+2026-09-05 the repository is public (user instruction) and
+`.github/workflows/ci-extended.yml` runs on every push — twelve OS/arch ×
+compiler cells with the real harnesses installed, `--no-fail-fast`, a RustSec
+audit — for free. Cross-platform claims are settled there and by
+`scripts/ci-local.sh --windows-vm` on the ARM64 VM; `ci-local.sh` remains what
+a worker runs before reporting. The five build rules that came out of
+measuring the gate that day — no `RUSTFLAGS`, one declared compiler, the
+inherited `ANTHROPIC_BASE_URL` warning, fail-fast, `--scoped` as a tier — are
+in `CLAUDE.md` under *Verification* and are not repeated here. Pushing at all remains the
 orchestrator's job and nobody else's.
 
 **Bounded records (user ruling 2026-09-03, *Decompression*).** An evidence entry

@@ -102,7 +102,14 @@ esac
 PACKET="$(cd "$(dirname "$PACKET")" && pwd)/$(basename "$PACKET")"
 
 ARM="FIRST, before reading anything: arm your continuity watch, or you will run out of context mid-package with nothing to show for it. Run Monitor(command: \"${REPO}/scripts/continuity-watch.sh --role worker\", persistent: true). It finds your session itself; if it prints CONTINUITY NOT ARMED, pass --session with the last path component of your scratchpad directory and run it again. Never \`cd\` inside a shell command: use absolute paths and \`git -C\`. A \`cd\` followed by a read makes the permission classifier stop and ask, and nobody is watching your pane to answer (2026-09-03: three workers sat on that prompt for half an hour). THEN:"
-PROMPT="${ARM} Read ${PACKET} now and follow it exactly. Read ONLY the files its 'READ ONLY THIS' section names - reading more is the documented way workers waste context. Do not commit. Write your report to the path the packet's REPORT TO section gives."
+# Two build facts every worker hits and none can discover cheaply: this pane
+# inherits ANTHROPIC_BASE_URL from Claude Code, which fails exactly one
+# pty_smoke assertion for a reason that is not the tree; and RUSTFLAGS is
+# never set in this workspace (CLAUDE.md, *Verification*, rules 1 and 3).
+# Said here, once, because a worker that meets the red first and the rule
+# never will "fix" the test or re-add the flag.
+BUILD_NOTE="Two build facts: (1) if pty_smoke fails on 'overlay's own environment variable leaked', that is ANTHROPIC_BASE_URL inherited from this Claude Code pane, not your change - confirm once with 'env -u ANTHROPIC_BASE_URL cargo test --test pty_smoke', say so in the report, do not alter the test. (2) Never set RUSTFLAGS; warnings come from [workspace.lints.rust]. Use 'scripts/ci-local.sh --scoped' for the fast tier and 'scripts/blast-radius.sh' before reporting."
+PROMPT="${ARM} Read ${PACKET} now and follow it exactly. Read ONLY the files its 'READ ONLY THIS' section names - reading more is the documented way workers waste context. Do not commit. Write your report to the path the packet's REPORT TO section gives. ${BUILD_NOTE}"
 
 # Built here, before the --print-prompt short-circuit, so that path can also
 # expose the launch command a worker actually receives -- not just the prompt
