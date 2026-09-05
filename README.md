@@ -54,12 +54,12 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`█████████████████████████████████████░░░` **1302 closed** · **96 active committed open** (93%)
+`█████████████████████████████████████░░░` **1303 closed** · **95 active committed open** (93%)
 
 Separately tracked, and not release-blocking: **7 deferred gate criteria** (Phase 52, Phase 53) awaiting a decision, and **229 parked experimental lines** under Maybe / Experimental.
 
 <details>
-<summary>Per-phase breakdown (86 of 109 active phases complete)</summary>
+<summary>Per-phase breakdown (87 of 109 active phases complete)</summary>
 
 | Phase | Done |
 |---|---|
@@ -111,7 +111,7 @@ Separately tracked, and not release-blocking: **7 deferred gate criteria** (Phas
 | Phase 21H — Simplicity-first implementation policy | 10/10 ✅ |
 | Phase 21I — Production-aware implementation checks | 11/11 ✅ |
 | Phase 21J — Implementation review checklist | 9/9 ✅ |
-| Phase 21K — Assumption-aware implementation guardrails | 42/43 |
+| Phase 21K — Assumption-aware implementation guardrails | 43/43 ✅ |
 | Phase 22 — Memory lifecycle and supersession | 9/9 ✅ |
 | Phase 23 — Memory full-text search | 7/7 ✅ |
 | Phase 24 — Memory reranking | 6/6 ✅ |

@@ -809,6 +809,7 @@ fn dispatch(
             origin,
         } => update_assumption(
             runtime,
+            &store,
             &assumption,
             NewTransition {
                 state,

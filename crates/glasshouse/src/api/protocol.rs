@@ -613,6 +613,15 @@ pub enum Request {
     /// `failed_attempt` memory through the existing store, with provenance
     /// naming the assumption (line 1019); the transition's `subject` is the
     /// memory's id. Without the flag, a refutation writes no memory at all.
+    ///
+    /// A transition to `refuted`, or whose `response` is `re-plan` or
+    /// `handoff` — the rollback and isolate choices line 1041 offers — gets
+    /// one more field in the reply: `preserve`, a
+    /// `guardrails::PreserveSet` naming every path another live session
+    /// claims and every changed path this session never claimed. Glasshouse
+    /// reverts nothing itself; the reply only names what an agent about to
+    /// roll back or isolate must not touch (line 1044). Every other
+    /// transition's reply omits the field, byte-identical to before.
     UpdateAssumption {
         /// An assumption identifier, or an unambiguous leading part of one.
         assumption: String,

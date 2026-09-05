@@ -806,7 +806,11 @@ const TOOLS: &[Tool] = &[
                       `state: refuted` and `record_failed_approach: true`, one failed-attempt \
                       memory is written with provenance naming the assumption, so the approach \
                       is not repeated. Transitions only ever append; nothing is edited. Writes to \
-                      the ledger (and, when asked, one memory) only.",
+                      the ledger (and, when asked, one memory) only. A transition to `refuted`, \
+                      or with response `re-plan` or `handoff`, gets one more reply field: \
+                      `preserve`, naming the paths another live session claims and the paths \
+                      changed in the working tree that were never claimed here — before \
+                      reverting anything, exclude those. Glasshouse reverts nothing itself.",
         annotations: Annotations {
             read_only: false,
             destructive: false,

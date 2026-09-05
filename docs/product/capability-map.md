@@ -1041,7 +1041,7 @@ Bounded implementation and correction
 ☑ When a critical premise is refuted, stop compounding the implementation and explicitly choose rollback, repair, re-plan, preserve as an experiment, or ask the user.
 ☑ Preserve useful evidence and a concise failed-approach record even when the implementation itself is discarded.
 ☑ Never silently rewrite the task history to make a failed premise appear as though it had always been understood correctly.
-☐ Preserve user changes and unrelated worker changes when rolling back or isolating an invalidated experiment.
+☑ Preserve user changes and unrelated worker changes when rolling back or isolating an invalidated experiment.
 
 User and orchestrator visibility
 
