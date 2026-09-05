@@ -238,6 +238,13 @@ pub(crate) fn record_file_touches(
 /// function the other writer of this column uses and the only definition of
 /// the spelling.
 ///
+/// Both sides are reduced to one spelling before any prefix test, and the
+/// separator fold is only half of that: on Windows the root is
+/// `fs::canonicalize`'s output and therefore **verbatim** (`\\?\C:\proj`),
+/// while a tool input or a shell argument is not, so the two would fail to
+/// match for the same reason `\` and `/` did. See
+/// [`folded_ordinary_spelling`].
+///
 /// `None` for a path outside the root, and that is the isolation invariant:
 /// nothing outside the project is stored, not even to be filtered out later.
 /// A relative path is accepted as already being relative to the root, which
@@ -248,8 +255,8 @@ pub(crate) fn record_file_touches(
 /// hold the same spelling, and a second implementation of "inside this
 /// project, spelled this way" is how the two would come to disagree.
 pub(crate) fn project_relative_path(root: &std::path::Path, raw: &str) -> Option<String> {
-    let folded = raw.replace('\\', "/");
-    let root_folded = root.display().to_string().replace('\\', "/");
+    let folded = folded_ordinary_spelling(raw);
+    let root_folded = folded_ordinary_spelling(&root.display().to_string());
     let root_folded = root_folded.trim_end_matches('/');
 
     let relative = if let Some(rest) = folded.strip_prefix(root_folded) {
@@ -272,6 +279,55 @@ pub(crate) fn project_relative_path(root: &std::path::Path, raw: &str) -> Option
     };
 
     glasshouse::memory::normalize_observed_path(relative)
+}
+
+/// `path` with `\` folded to `/` and any Windows verbatim prefix reduced to
+/// the ordinary spelling of the same file.
+///
+/// `\\?\C:\proj` and `C:\proj` name one directory, and `\\?\UNC\srv\share` and
+/// `\\srv\share` name one share; only the reduced spelling of each can be
+/// compared with the other. Both spellings genuinely arrive at
+/// [`project_relative_path`] — the project root is `fs::canonicalize`'s
+/// output, which on Windows is always verbatim, while a hook's tool input or
+/// a shell argument almost never is, and a caller that has canonicalized for
+/// itself hands over the first form on both sides.
+fn folded_ordinary_spelling(path: &str) -> String {
+    let folded = path.replace('\\', "/");
+    reduced_verbatim_prefix(&folded).unwrap_or(folded)
+}
+
+/// `folded` without its Windows verbatim prefix, or `None` when it carries
+/// none — where "carries one" means `//?/` followed by something only
+/// Windows produces.
+///
+/// That condition is the isolation half of the reduction, not a tidiness
+/// check. `//?/` is an unusual but perfectly legal absolute path on Unix, so
+/// an unconditional strip would reduce `//?/proj/a.rs` to the *relative*
+/// `proj/a.rs`, which [`project_relative_path`] accepts as being inside
+/// `/proj`. Requiring a drive letter or the `UNC/` marker is what keeps the
+/// Windows repair from widening containment on every other platform.
+fn reduced_verbatim_prefix(folded: &str) -> Option<String> {
+    let rest = folded.strip_prefix("//?/")?;
+    if is_drive_rooted(rest) {
+        return Some(rest.to_owned());
+    }
+    // `\\?\UNC\srv\share` is the verbatim way of writing `\\srv\share`: the
+    // marker stands in for the second leading separator.
+    let marker = rest.get(..4)?;
+    marker
+        .eq_ignore_ascii_case("unc/")
+        .then(|| format!("//{}", &rest[4..]))
+}
+
+/// `rest` begins with a drive letter and a colon — the same two-character
+/// test [`glasshouse::memory::normalize_observed_path`] uses to recognise a
+/// Windows-absolute path, applied here to what follows a verbatim prefix.
+fn is_drive_rooted(rest: &str) -> bool {
+    let mut chars = rest.chars();
+    matches!(
+        (chars.next(), chars.next()),
+        (Some(drive), Some(':')) if drive.is_ascii_alphabetic()
+    )
 }
 
 /// Write the `PostToolUse` hook response JSON to stdout — the protocol
@@ -843,4 +899,150 @@ fn context_firewall_reducer_model(
         ),
         other => format!("the context-firewall reducer cannot be used: {other}"),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::project_relative_path;
+    use std::path::Path;
+
+    /// A Windows project root is `fs::canonicalize`'s output and therefore
+    /// verbatim; the paths that arrive to be tested against it are not. Every
+    /// case here is lexical — the function takes a `&Path` and a `&str` and
+    /// touches no filesystem — so a literal verbatim root proves the Windows
+    /// behaviour on whichever platform the gate happens to run on, which is
+    /// the point: gated behind `cfg(windows)` the regression would be
+    /// invisible where it is actually caught.
+    #[test]
+    fn a_verbatim_root_accepts_every_ordinary_spelling_of_a_file_inside_it() {
+        let root = Path::new(r"\\?\C:\proj");
+        for raw in [
+            r"C:\proj\src\a.rs",
+            "C:/proj/src/a.rs",
+            r"\\?\C:\proj\src\a.rs",
+            "src/a.rs",
+        ] {
+            assert_eq!(
+                project_relative_path(root, raw).as_deref(),
+                Some("src/a.rs"),
+                "`{raw}` names a file inside the project and must resolve repo-relative"
+            );
+        }
+    }
+
+    /// The refusal adjacent to every acceptance above. Reducing both sides to
+    /// one spelling must not cost the rule that the prefix ends at a
+    /// separator, or `C:\proj-other` passes as a file inside `C:\proj`.
+    #[test]
+    fn a_verbatim_root_still_refuses_what_is_outside_it() {
+        let root = Path::new(r"\\?\C:\proj");
+        for raw in [
+            r"C:\proj-other\a.rs",
+            "C:/proj-other/a.rs",
+            r"\\?\C:\proj-other\a.rs",
+            r"C:\elsewhere\a.rs",
+            r"D:\proj\a.rs",
+            // Inside by spelling, outside by meaning: `normalize_observed_path`
+            // refuses the `..` rather than resolving it.
+            r"C:\proj\..\other\a.rs",
+        ] {
+            assert_eq!(
+                project_relative_path(root, raw),
+                None,
+                "`{raw}` is outside the project and nothing outside it may be stored"
+            );
+        }
+    }
+
+    /// `\\?\UNC\srv\share` is the verbatim spelling of `\\srv\share`, so a
+    /// project on a share has the same two-spellings problem a drive does.
+    #[test]
+    fn a_verbatim_unc_root_accepts_the_ordinary_unc_spelling_and_refuses_another_share() {
+        let root = Path::new(r"\\?\UNC\srv\share\proj");
+        for raw in [
+            r"\\srv\share\proj\src\a.rs",
+            r"\\?\UNC\srv\share\proj\src\a.rs",
+            "src/a.rs",
+        ] {
+            assert_eq!(
+                project_relative_path(root, raw).as_deref(),
+                Some("src/a.rs"),
+                "`{raw}` names a file inside the share's project"
+            );
+        }
+        for raw in [
+            r"\\srv\other\proj\src\a.rs",
+            r"\\srv\share\proj-other\src\a.rs",
+            r"C:\proj\src\a.rs",
+        ] {
+            assert_eq!(
+                project_relative_path(root, raw),
+                None,
+                "`{raw}` is not inside the share's project"
+            );
+        }
+    }
+
+    /// **The isolation case, and the whole reason the reduction is guarded.**
+    ///
+    /// `//?/` is an unusual but perfectly legal absolute path on Unix. An
+    /// unconditional strip would reduce `//?/proj/a.rs` to the *relative*
+    /// `proj/a.rs`, and a relative path is accepted as already root-relative
+    /// — so a file outside the project would be stored as though it were
+    /// inside it, on every non-Windows platform, for the sake of a Windows
+    /// repair. Nothing after `//?/` here is drive- or UNC-shaped, so nothing
+    /// is stripped and each path is refused as the absolute stranger it is.
+    #[test]
+    fn the_verbatim_reduction_never_fires_on_a_unix_shaped_path() {
+        let root = Path::new("/proj");
+        for raw in [
+            "//?/proj/a.rs",
+            "//?/proj/src/a.rs",
+            "//?/UNC/proj/a.rs",
+            "//?/a.rs",
+        ] {
+            assert_eq!(
+                project_relative_path(root, raw),
+                None,
+                "`{raw}` is not inside /proj, and stripping `//?/` from it would say it was"
+            );
+        }
+    }
+
+    /// Every answer the function gave before the reduction, unchanged: an
+    /// ordinary root, an ordinary path, and the three refusals.
+    #[test]
+    fn an_ordinary_root_answers_exactly_as_it_did() {
+        let root = Path::new("/proj");
+        for (raw, expected) in [
+            ("/proj/src/a.rs", Some("src/a.rs")),
+            ("src/a.rs", Some("src/a.rs")),
+            ("./src/a.rs", Some("src/a.rs")),
+            // The path *is* the root: a directory, not a file anything edited.
+            ("/proj", None),
+            ("/proj/", None),
+            ("/proj-other/a.rs", None),
+            ("/etc/passwd", None),
+            ("../outside/a.rs", None),
+        ] {
+            assert_eq!(
+                project_relative_path(root, raw).as_deref(),
+                expected,
+                "`{raw}` under /proj"
+            );
+        }
+    }
+
+    /// A verbatim root compared against itself is still the root, not a file.
+    #[test]
+    fn a_path_equal_to_the_verbatim_root_is_still_not_a_file() {
+        let root = Path::new(r"\\?\C:\proj");
+        for raw in [r"\\?\C:\proj", r"C:\proj", r"C:\proj\", "C:/proj"] {
+            assert_eq!(
+                project_relative_path(root, raw),
+                None,
+                "`{raw}` is the project root itself"
+            );
+        }
+    }
 }
