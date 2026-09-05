@@ -122,39 +122,18 @@ pub(crate) fn context_firewall_hook(
 
 /// Map line 1139's producer: one `file_touched` lifecycle event per distinct
 /// path a **writing** tool named, for the Glasshouse session this hook was
-/// registered for.
+/// registered for. Returns `()` and never surfaces an error to the caller —
+/// every failure path ends in a `tracing::warn!` and a `return`, proved by
+/// `the_hook_response_is_identical_whether_or_not_recording_works` — because
+/// a bookkeeping write must never be able to fail a user's `Edit`.
 ///
-/// # Why the hook's response can never depend on this
+/// Records a path only when a session is present, the tool is a writing tool
+/// (`firewall::eligibility::is_writing_tool`), the path is under the project
+/// root (made relative to it; outside it, dropped and never stored — the
+/// isolation invariant), and it normalizes the same way `memory_files.path`
+/// does. Once per distinct path even under `MultiEdit`.
 ///
-/// It returns `()`. There is no error for the caller to see, no value for it
-/// to branch on, and every failure below ends in a `tracing::warn!` and a
-/// `return`. That is not caution about a rare case — the whole tool call is
-/// downstream of this function, and a bookkeeping write that could fail a
-/// user's `Edit` would be a far worse defect than never learning which file
-/// it touched. `the_hook_response_is_identical_whether_or_not_recording_works`
-/// is the proof rather than this paragraph.
-///
-/// # The four gates a path passes, in order
-///
-/// 1. **A session**, or nothing is recorded. See
-///    `cli::ContextFirewallCommand::Hook`'s `--session` for why absent is a
-///    supported state and why the payload's own `session_id` is not a
-///    substitute.
-/// 2. **A writing tool** — `firewall::eligibility::is_writing_tool`, which is
-///    the block list read the other way round. `Read`, `Grep` and `Glob`
-///    carry paths and are deliberately not recorded: *touched* means the
-///    session changed the file.
-/// 3. **Under the project root.** An absolute path inside the root is made
-///    relative to it; a path outside it is **dropped and never stored**, which
-///    is the isolation invariant rather than a tidiness rule — a memory must
-///    not be able to name a file in another project, or in the user's home.
-/// 4. **Normalisable**, through the one function `memory_files.path` already
-///    goes through, so the two producers spell a path identically or the
-///    association never matches.
-///
-/// Distinct paths only: `MultiEdit` names the same file once per edit, and
-/// sixty rows saying one file was edited is sixty times the storage for the
-/// same fact.
+/// History: design-decisions.md, "Trims: commands module docs", record_file_touches.
 pub(crate) fn record_file_touches(
     runtime: &Runtime,
     session: Option<&str>,
@@ -227,33 +206,22 @@ pub(crate) fn record_file_touches(
 }
 
 /// `raw` as a path under `root`, in `memory_files.path`'s spelling, or
-/// `None`.
+/// `None` when `raw` falls outside `root` — the isolation invariant:
+/// nothing outside the project is stored, not even to be filtered out
+/// later. A relative path is accepted as already relative to the root.
 ///
-/// Claude Code hands the hook an **absolute** path, and on Windows it hands
-/// one with `\` separators. So: fold the separators first — before any
-/// prefix test, because `C:\proj\src\a.rs` does not start with
-/// `C:/proj/src` until it has been folded — then strip the root, then put
-/// what is left through
-/// [`glasshouse::memory::store::normalize_observed_path`], which is the
-/// function the other writer of this column uses and the only definition of
-/// the spelling.
+/// Both sides are folded to one spelling before any prefix test
+/// (`folded_ordinary_spelling`), because Windows separators and
+/// `fs::canonicalize`'s verbatim root (`\\?\C:\proj`) would otherwise fail
+/// to match a tool input or shell argument that is neither, then run
+/// through [`glasshouse::memory::store::normalize_observed_path`], the only
+/// definition of the spelling.
 ///
-/// Both sides are reduced to one spelling before any prefix test, and the
-/// separator fold is only half of that: on Windows the root is
-/// `fs::canonicalize`'s output and therefore **verbatim** (`\\?\C:\proj`),
-/// while a tool input or a shell argument is not, so the two would fail to
-/// match for the same reason `\` and `/` did. See
-/// [`folded_ordinary_spelling`].
-///
-/// `None` for a path outside the root, and that is the isolation invariant:
-/// nothing outside the project is stored, not even to be filtered out later.
-/// A relative path is accepted as already being relative to the root, which
-/// is what a relative path in a tool input means.
-///
-/// `pub(crate)` for `commands::sessions::claimed_path`, which needs the same
+/// `pub(crate)` because `commands::sessions::claimed_path` needs the same
 /// answer for the same reason: `file_claims.path` and `memory_files.path`
-/// hold the same spelling, and a second implementation of "inside this
-/// project, spelled this way" is how the two would come to disagree.
+/// must hold the same spelling.
+///
+/// History: design-decisions.md, "Trims: commands module docs", project_relative_path.
 pub(crate) fn project_relative_path(root: &std::path::Path, raw: &str) -> Option<String> {
     let folded = folded_ordinary_spelling(raw);
     let root_folded = folded_ordinary_spelling(&root.display().to_string());

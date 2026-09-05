@@ -48,57 +48,26 @@ impl glasshouse::memory::ExtractionModel for NoExtractionModel {
 pub(crate) const EXTRACTION_BOUND: std::time::Duration = std::time::Duration::from_secs(5);
 
 /// Run memory extraction over what this session has done — Phase 29's
-/// **memory commit**, whatever started it.
+/// **memory commit**, whatever started it. One operation for map line
+/// 1147's four triggers (lines 1148-1151): `Manual`, `TaskCompleted`,
+/// `GitCommit`, `BeforeCompaction` — never a second pipeline, credential
+/// screen, or duplicate check.
 ///
-/// # One operation, four triggers, and no second pipeline
+/// Returns `Option<ExtractionOutcome>`, not `()` or a `Result`: `None` means
+/// preparation failed or the bound expired (both logged here), and every
+/// failure of the extraction itself is a field on the outcome. The hook
+/// path discards it either way — Phase 21's *"keep memory-extraction
+/// failure non-fatal to the coding session"* — so a db/log open failure, a
+/// model that is unavailable, refuses, answers rubbish, panics, or hangs
+/// (bounded by [`EXTRACTION_BOUND`], then left running on its own thread as
+/// the process exits) never reaches [`report_hook`].
 ///
-/// Map line 1147 asks for *"a lightweight memory commit operation that
-/// extracts durable project knowledge from recently completed work"* and
-/// lines 1148-1151 ask for four ways to start one. This function is that
-/// operation, and `trigger` is the whole of the difference between them:
-/// `Manual` from `glasshouse memory commit`, `TaskCompleted` and `GitCommit`
-/// from the `TurnEnded` arm of [`report_hook_with`], `BeforeCompaction` from
-/// its `PreCompact` arm. A second extraction path for any of them would be a
-/// second answer to what is worth remembering, a second credential screen and
-/// a second duplicate check.
+/// A thread, not a plain call, because the bound is the whole point: this
+/// codebase has no async runtime and `ExtractionModel` is deliberately
+/// synchronous. Everything cheap runs before the thread starts, so only the
+/// model call and the insert sit past the timeout.
 ///
-/// # The outcome is returned, and the hook path still ignores it
-///
-/// `Option<ExtractionOutcome>` rather than `()` so `glasshouse memory commit`
-/// can print what its run actually did. It is not an error channel and does
-/// not become one: `None` means the *preparation* failed or the bound expired
-/// — both already logged here — and every failure of the extraction itself is
-/// a field on the outcome, never a `Result`. The hook path discards it, which
-/// is why nothing about its posture changes.
-///
-/// # Nothing here can hurt the session, and that is the design
-///
-/// Phase 21: *"keep memory-extraction failure non-fatal to the coding
-/// session."* Four different failures are absorbed here and none of them
-/// reaches [`report_hook`]:
-///
-/// - the project database will not open, or the event log will not read —
-///   logged, and the function returns;
-/// - the model is unavailable, refuses, or answers rubbish —
-///   [`glasshouse::memory::Extractor::run`] has no error channel at all and
-///   describes it on the outcome;
-/// - the model **panics** — caught inside `run`, reported as an outcome;
-/// - the model **hangs** — the work is on its own thread and this waits
-///   [`EXTRACTION_BOUND`], then leaves it behind. The thread dies when the
-///   process exits moments later, having written nothing: the store is only
-///   touched after the model answers.
-///
-/// # Why a thread and not just a call
-///
-/// The only thing that buys is the bound, and the bound is the whole point.
-/// This codebase has no async runtime and [`glasshouse::memory::ExtractionModel`]
-/// is deliberately synchronous, so a thread is the mechanism; `ExtractionModel`
-/// is `Send + Sync` for precisely this reason.
-///
-/// Everything cheap happens before the thread starts — opening the database,
-/// reading a bounded window of the log, scrubbing and bounding the chunk — so
-/// what is on the far side of the bound is the model call and the insert, and
-/// a timeout means the model, not Glasshouse.
+/// History: design-decisions.md, "Trims: commands module docs", run_extraction.
 pub(crate) fn run_extraction(
     runtime: &Runtime,
     id: &SessionId,
@@ -232,44 +201,25 @@ pub(crate) fn run_extraction(
 }
 
 /// [`run_extraction`] on a hook's path, where a lost memory has to be said
-/// out loud.
+/// out loud, because nothing reads the log there:
+/// `logging::LogConfig::resolve` answers `Disabled` unless `GLASSHOUSE_LOG`
+/// or a `--log-*` flag is given, and a harness spawning `glasshouse hook`
+/// gives neither — measured 2026-08-31, a failed `PreCompact` model call
+/// exited **0** with empty stderr, recording nothing, which is exactly the
+/// silent-failure map line 1174 warns against.
 ///
-/// # Why this exists at all, when `run_extraction` already logs every failure
+/// So this writes one line to stderr on any failure, never stdout and
+/// never a non-zero exit — the same distinction `main.rs`'s `run` draws for
+/// the overridden safety refusal — and Phase 21's *"keep memory-extraction
+/// failure non-fatal to the coding session"* stays true: the hook still
+/// exits zero whatever extraction did.
 ///
-/// Because on this path nothing reads the log. `logging::LogConfig::resolve`
-/// answers [`glasshouse::logging::LogSink::Disabled`] unless `GLASSHOUSE_LOG`
-/// is set or a `--log-*` flag is given, and a harness spawning
-/// `glasshouse hook` gives neither — so `run_extraction`'s
-/// `"memory extraction produced nothing"` and its bound-expiry `warn!` are
-/// both written to a subscriber that was never installed. Measured
-/// 2026-08-31: a `PreCompact` hook whose model call failed exited **0**, with
-/// **empty stderr**, having recorded nothing.
+/// Not used by `glasshouse memory commit` (`ExtractionTrigger::Manual` runs
+/// in front of a watching person and prints its own report); this is the
+/// wrapper for triggers that run inside somebody's session with nobody
+/// watching.
 ///
-/// That is the precise thing capability map line 1174 is about. *"Record
-/// enough pre-compaction durable memory that important project decisions do
-/// not depend solely on a lossy native compact summary"* is not satisfied by
-/// a trigger that fires, fails, and says nothing: the person then believes
-/// their decisions were captured and goes on to compact, which is worse than
-/// knowing they were not.
-///
-/// # Why stderr, and why one line
-///
-/// `main.rs`'s own [`run`] already draws this distinction for the overridden
-/// safety refusal, three lines into the program and for exactly this reason:
-/// *"logging is off by default, so a `tracing::warn!` there can go completely
-/// unseen … it always gets a line on stderr, log or no log."* A memory the
-/// compaction trigger was supposed to record and did not is user-facing in
-/// the same sense.
-///
-/// Stderr and not stdout, and never a non-zero exit: Claude Code reads a
-/// hook's exit code as a gate on the turn, and Phase 21's *"keep
-/// memory-extraction failure non-fatal to the coding session"* is unchanged
-/// by this. The hook still exits zero whatever extraction did.
-///
-/// Not used by `glasshouse memory commit`: that trigger is
-/// [`glasshouse::memory::ExtractionTrigger::Manual`], it runs in front of a
-/// person who is watching, and it prints its own report. This is the wrapper
-/// for the triggers that run inside somebody's session with nobody watching.
+/// History: design-decisions.md, "Trims: commands module docs", hook_extraction.
 pub(crate) fn hook_extraction(
     runtime: &Runtime,
     id: &SessionId,
@@ -289,34 +239,21 @@ pub(crate) fn hook_extraction(
 }
 
 /// What to tell the person about an extraction that recorded nothing, or
-/// [`None`] when nothing was lost.
+/// [`None`] when nothing was lost. Separated from [`hook_extraction`] so the
+/// decision can be tested without a process.
 ///
-/// Separated from [`hook_extraction`] so the decision can be tested without a
-/// process: what this returns is the whole of the difference between a silent
-/// loss and an observable one.
+/// Four cases, two silent: **no outcome at all** ([`run_extraction`]'s two
+/// preparation failures and [`EXTRACTION_BOUND`] expiring) and **a
+/// failure** (unavailable, refused, timed out, panicked, unreadable answer,
+/// or the store unreadable for duplicate detection) are both said out
+/// loud — `ExtractionFailure`'s `Display` is a fixed phrase, no provider
+/// body reaches this line. **`NothingToExtract` stays silent**: there was
+/// no activity to extract from, so a warning would fire on every empty
+/// compaction and teach people to ignore it. **Rejections without a
+/// failure** are silent unless *nothing* survived: dropping a duplicate or
+/// a speculative memory is the mechanism working, not failing.
 ///
-/// # The four cases, and why two of them are silent
-///
-/// - **no outcome at all.** [`run_extraction`] answers `None` for its two
-///   preparation failures and for [`EXTRACTION_BOUND`] expiring. All three
-///   are losses — a boundary went by and nothing was written — and the reason
-///   is in a log that, on this path, does not exist.
-/// - **a failure.** The model was unavailable, refused, timed out, panicked,
-///   answered something the contract could not read, or the store could not
-///   be read for duplicate detection. Each is a memory that should exist and
-///   does not, and [`glasshouse::memory::extract::ExtractionFailure`]'s `Display` is a
-///   fixed phrase by construction — no provider body reaches this line.
-/// - **[`glasshouse::memory::extract::ExtractionFailure::NothingToExtract`] is
-///   deliberately silent.** There was no session activity to extract from, so
-///   there is no memory to have lost. A warning here would fire on every
-///   compaction of a session that had not done anything yet, and a warning
-///   that cries wolf is how the real one gets ignored.
-/// - **rejections without a failure.** The model answered and some of what it
-///   proposed did not survive the contract. Said out loud when *nothing*
-///   survived, and silent when something did: a run that stored two memories
-///   and rejected a third lost nothing a person needs to act on, and
-///   duplicates and speculative drops are the mechanism working rather than
-///   failing.
+/// History: design-decisions.md, "Trims: commands module docs", lost_extraction_notice.
 pub(crate) fn lost_extraction_notice(
     trigger: &str,
     outcome: Option<&glasshouse::memory::ExtractionOutcome>,
@@ -353,39 +290,25 @@ pub(crate) fn lost_extraction_notice(
 }
 
 /// What the extraction model reported the call cost, into this project's
-/// routing evidence ledger.
+/// routing evidence ledger — the first thing in this build that counts
+/// tokens, because the gateway path never writes them
+/// (`crate::gateway::ingress` relays a body it is designed never to parse)
+/// while extraction already deserializes the whole reply. See
+/// [`glasshouse::memory::extract::ModelCall::observation`] for what one row
+/// carries and leaves empty.
 ///
-/// # This is the first thing in this build that counts tokens
+/// Opened here, not beside the event log, for the reason [`evidence_ledger`]
+/// carries too: an open `Mutex<Connection>` for the ledger's whole lifetime
+/// blocks a later writer under Windows even when there is nothing to write.
+/// So nothing opens until `observation()` has already said there is a row —
+/// [`None`] under the default configuration, where extraction reaches no
+/// provider.
 ///
-/// `routing_observations` has carried `input_tokens`, `output_tokens` and
-/// `cached_input_tokens` since migration 11 and nothing has ever written
-/// one: `crate::gateway::ingress` relays a response body it is designed
-/// never to parse, so the gateway producer leaves all three `NULL` and says
-/// so in its own module header. Memory extraction is the other path —
-/// Glasshouse builds the request itself and already deserializes the whole
-/// reply — so the counts come from a document that was parsed anyway. See
-/// [`glasshouse::memory::extract::ModelCall::observation`] for exactly what
-/// one row carries and what it deliberately leaves empty.
+/// A failure here is one log line, [`run_extraction`]'s own posture: no
+/// caller of a hook process inside somebody's session should have an error
+/// channel out of it.
 ///
-/// # Why the ledger is opened here and not beside the event log
-///
-/// The same finding [`evidence_ledger`] carries, one path over.
-/// [`glasshouse::routing::evidence::EvidenceLedger`] holds `Mutex<Connection>`
-/// — an open SQLite handle for its whole lifetime — and a handle opened on a
-/// path that turns out to have nothing to write blocks a later writer under
-/// Windows' mandatory `LockFileEx` while being invisible under POSIX advisory
-/// locks. So nothing is opened until `observation()` has already said there
-/// is a row: that is [`None`] for every run that reached no provider, which
-/// is every run under the default configuration, where extraction chooses a
-/// resource and calls nothing at all.
-///
-/// # A failure here is one log line
-///
-/// [`run_extraction`]'s own posture, for its own reason: this is a hook
-/// process running inside somebody's coding session, and Glasshouse's
-/// bookkeeping is never more important than the session it keeps books
-/// about. There is no error channel out of this function because no caller
-/// should have one.
+/// History: design-decisions.md, "Trims: commands module docs", record_extraction_observation.
 fn record_extraction_observation(
     runtime: &Runtime,
     outcome: &glasshouse::memory::ExtractionOutcome,
@@ -427,41 +350,24 @@ fn record_extraction_observation(
 }
 
 /// Which files were being worked on when these memories were learned, into
-/// this project's `memory_files` — migration 17.
-///
-/// # This records an observation and not a reference, deliberately
-///
-/// `paths` is what the git index said differed from the working tree when
-/// extraction began. It says *"this was learned while that file was being
-/// worked on"*, which is a fact about the **session**: three memories out of a
-/// session that dirtied twenty files get all sixty pairs, and each pair is
-/// true. It is emphatically not capability-map line 1139's *"the files a
-/// memory explicitly references"* — on this path the model's input carries no
-/// prose at all, so a model asked to name files here would be fabricating from
-/// an empty input, and line 1294's rule is that a fabricated value inverts the
-/// policy rather than degrading it. Every row therefore carries
+/// this project's `memory_files` — migration 17. `paths` is what the git
+/// index said differed from the working tree when extraction began: an
+/// observation about the **session**, not capability-map line 1139's *"the
+/// files a memory explicitly references"* (this path's model input carries
+/// no prose to reference from), so every row carries
 /// [`glasshouse::memory::FileAssociation::Observed`].
 ///
-/// # Why the store is opened here and not beside the event log
+/// Opened here, not beside the event log, for
+/// [`record_extraction_observation`]'s reason: an open handle on a path
+/// with nothing to write blocks a later writer under Windows, so the guard
+/// comes first. Runs on the calling thread, not the extraction thread,
+/// which outlives its bound and would otherwise open a second writable
+/// handle at an unpredictable moment.
 ///
-/// [`record_extraction_observation`]'s finding, one function over, for the
-/// same reason: an open SQLite handle on a path that turns out to have
-/// nothing to write blocks a later writer under Windows' mandatory
-/// `LockFileEx` while being invisible under POSIX advisory locks (practice
-/// §65). So the guard comes first and nothing is opened at all when there is
-/// no row — which is every extraction that stored nothing, and every one run
-/// against a clean tree.
+/// A failure here is one log line that counts lost associations and never
+/// names the files: a file path is the user's own data.
 ///
-/// This deliberately runs on the calling thread rather than inside the
-/// extraction thread: the thread outlives its bound, and a write started
-/// there after the process has already decided to move on would be a second
-/// writable handle appearing at an unpredictable moment.
-///
-/// # A failure here is one log line
-///
-/// [`run_extraction`]'s posture, and the path is not named in it: a file path
-/// is the user's own data, so the log says how many associations were lost
-/// and never which files they were about.
+/// History: design-decisions.md, "Trims: commands module docs", record_observed_files.
 fn record_observed_files(
     runtime: &Runtime,
     recorded: &[glasshouse::memory::MemoryId],

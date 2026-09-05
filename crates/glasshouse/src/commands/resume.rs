@@ -17,50 +17,28 @@ use glasshouse::session::{
 };
 use glasshouse::{Runtime, shutdown};
 
-/// Run a harness session that never takes this terminal — Phase 4's headless
-/// presentation mode.
+/// Run a harness session that never takes this terminal — Phase 4's
+/// headless presentation mode, the mirror image of [`session::attach`]. The
+/// harness gets a real pseudo-terminal exactly as always, but this
+/// process's own terminal is never claimed: no raw mode, no alternate
+/// screen, output relayed only into the session's own bounded scrollback.
+/// Glasshouse stays in the foreground for the session's whole life —
+/// returning early would drop the [`SessionRuntime`] and its
+/// pseudo-terminal — and terminal queries (`ESC[6n`, ConPTY's startup
+/// handshake) must be answered from here, since a headless session has no
+/// emulator on the other end and [`SessionRuntime`] cannot answer from its
+/// reader thread.
 ///
-/// The mirror image of [`session::attach`]. The harness gets a real
-/// pseudo-terminal in the project root exactly as it always does, but this
-/// process's own terminal is never claimed: no raw mode, no alternate screen,
-/// no output relayed to standard output. What the harness prints goes into
-/// the session's own bounded scrollback, which is where an embedded session's
-/// output goes too. That is the whole of "a PTY continues running without
-/// occupying the visible session viewport" from the launch side; the shell
-/// side is `shell::run`, which never makes a headless session the viewport's.
+/// `shutdown::install_signal_handler` normally ends the process immediately
+/// on the premise that nothing needs restoring — broken here, because this
+/// path owns a child that stops receiving a hangup the moment Glasshouse
+/// dies via [`std::process::exit`], which runs no destructor. So this
+/// registers its own cleanup rather than claiming the terminal is engaged
+/// (which would make `restore_terminal` write escape sequences to a
+/// terminal Glasshouse never touched). Found by sending a real `SIGINT` to
+/// a real headless launch and finding the child still running afterwards.
 ///
-/// Glasshouse stays in the foreground for the session's whole life on
-/// purpose. Returning early would drop the [`SessionRuntime`], and with it
-/// the pseudo-terminal the harness is writing to — a detached session needs a
-/// supervisor process, which is a different capability from this one.
-///
-/// **The terminal queries have to be answered here.** A headless session has
-/// no emulator on the other end: on Windows nothing gets past ConPTY's
-/// startup handshake without a reply, and on any platform a harness asking
-/// `ESC[6n` waits forever for one. [`SessionRuntime`] knows how to answer but
-/// cannot do it from its reader thread, so whoever owns the runtime must — in
-/// the shell that is the tick, and here it is this loop.
-///
-/// # A signal here is a forced exit, and that is why the cleanup exists
-///
-/// [`shutdown::install_signal_handler`] ends the process immediately when the
-/// terminal is not engaged, on the reasonable premise that a Glasshouse with
-/// nothing to restore has nothing to wind down. **This path breaks that
-/// premise**: it engages no terminal — that is what makes it headless — and
-/// it owns a child process that stops receiving a hangup the moment Glasshouse
-/// dies. Forced exit calls [`std::process::exit`], which runs no destructor,
-/// so without the registration below a Ctrl-C would leave the harness running
-/// with nothing left able to reach it.
-///
-/// Found by sending a real `SIGINT` to a real headless launch and looking for
-/// the child afterwards; it was still there. `shutdown`'s own documentation
-/// had already named this as the thing a second caller would have to get
-/// right, which is exactly what this is.
-///
-/// Deliberately **not** solved by claiming the terminal is engaged. That flag
-/// means "raw mode and the alternate screen are on", and `restore_terminal`
-/// acts on it — setting it here would write escape sequences to a terminal
-/// Glasshouse never touched.
+/// History: design-decisions.md, "Trims: commands module docs", run_headless.
 pub(crate) fn run_headless(
     runtime: &Runtime,
     store: &glasshouse::session::SessionStore<'_>,
@@ -163,28 +141,22 @@ fn lock(live: &Mutex<SessionRuntime>) -> std::sync::MutexGuard<'_, SessionRuntim
 const FORCED_EXIT_BOUND: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// Close `id` on the way out of a forced exit, retrying briefly rather than
-/// once.
+/// once: [`glasshouse::shutdown`]'s rule that a forced-exit callback must
+/// never wait indefinitely is honoured by a single `try_lock`, but the
+/// headless poll loop takes this same lock every `POLL`, so one attempt is
+/// a coin flip that orphans a real harness permanently with no second
+/// chance above this. Measured at 1 orphan in 100 runs under 3x CPU load,
+/// first seen as an intermittent red `test (macos-latest)` that passed on
+/// rerun against the identical commit.
 ///
-/// [`glasshouse::shutdown`]'s rule is that a forced-exit callback must never
-/// wait indefinitely: failing to clean up is survivable, failing to exit is
-/// not. A **single** `try_lock` honours the letter of that rule and still
-/// gets the wrong answer. The headless poll loop takes this same lock every
-/// `POLL`, so one attempt is a coin flip, and losing it orphans a real
-/// harness permanently with no second chance — there is no retry anywhere
-/// above this.
-///
-/// That is not theoretical. It was **measured at 1 orphan in 100 runs under
-/// 3x CPU load**, and it turned up first as an intermittent red
-/// `test (macos-latest)` that passed on rerun against the identical commit.
-///
-/// A bound keeps the guarantee that actually matters — this returns, always,
-/// and quickly — while removing the coin flip. Poisoning is treated as
-/// ownership rather than as a reason to give up, for the same reason
-/// [`lock`] does: a panicked thread must not strand a live child, and a
-/// poisoned mutex would otherwise make `try_lock` fail for as long as we were
-/// willing to retry.
+/// A bound keeps the guarantee that matters — this returns, always, and
+/// quickly — while removing the coin flip. Poisoning is treated as
+/// ownership, not a reason to give up, for the same reason [`lock`] does: a
+/// panicked thread must not strand a live child.
 ///
 /// Returns whether the runtime was reached.
+///
+/// History: design-decisions.md, "Trims: commands module docs", close_before_forced_exit.
 pub(crate) fn close_before_forced_exit(
     live: &Mutex<SessionRuntime>,
     id: &SessionId,
@@ -248,57 +220,24 @@ pub(crate) fn gateway_upstream(
     )?)
 }
 
-/// Re-resolve `profile_name`'s overlay for a resumed session — Phase 9A line
-/// 368's resume half, production caller of `resume_session`.
+/// The routing evidence ledger for this project — only when a gateway will
+/// actually be started ([`glasshouse::gateway::gateway_is_required`]) — or
+/// `None` with a warning. Opening [`crate::routing::evidence::EvidenceLedger`]
+/// holds `Mutex<Connection>` for its whole lifetime, and SQLite's mandatory
+/// `LockFileEx` on Windows (advisory and invisible on Unix) means an unused
+/// handle blocks a later writer there for free — measured as a 37-minute,
+/// six-test hang on Windows before this gate existed, on a tree whose local
+/// gate was 13/13 green.
 ///
-/// Exactly [`launch_session`]'s own resolution: the same lookup, the same
-/// secret store, the same gateway start. A resumed session's overlay is not a
-/// smaller thing than a fresh one's, so there is no separate, weaker path
-/// here for it to take.
+/// Runs on every launch and every resume, before
+/// `start_if_required_with_telemetry` decides whether a gateway is needed
+/// at all, so it must never fail the caller: refusing a session because a
+/// telemetry table could not be opened would trade the user's whole session
+/// for a row nobody is waiting on. The warning is `tracing::warn!`, same as
+/// `set_lifecycle`'s — it belongs in the log, not on the terminal the
+/// harness is about to take over.
 ///
-/// # Errors here are never fatal to the resume
-///
-/// The caller treats any `Err` as "resume without the overlay, and say why" —
-/// never as a reason to refuse the resume outright. `open_for_resume` has
-/// already proven this session is safe to continue; a bypass acknowledgement
-/// withdrawn since the original launch, or a provider since removed from
-/// configuration, is a reason to fall back to a plain native resume, not a
-/// reason to make an otherwise-healthy session unresumable.
-/// The routing evidence ledger for this project — **only when a gateway will
-/// actually be started** — or `None` with a warning.
-///
-/// # Why the gate, and what it cost to learn
-///
-/// The first version opened the ledger unconditionally, before
-/// `start_if_required_with_telemetry` decided whether a gateway was needed at
-/// all. On macOS and Linux that was merely wasted work. On Windows it **hung
-/// six memory-extraction tests indefinitely** — a 37-minute stall with no
-/// output, on a tree whose local gate was 13/13 green.
-///
-/// [`crate::routing::evidence::EvidenceLedger`] holds `Mutex<Connection>`: an
-/// open SQLite handle for its whole lifetime. SQLite locks with advisory
-/// POSIX locks on Unix and with mandatory `LockFileEx` on Windows, so a handle
-/// this function opened on a launch that never needed it blocks a later writer
-/// on Windows and is invisible on Unix. **Opening a database you may not use is
-/// not free, and the platform that charges for it is not the one this project
-/// develops on.**
-///
-/// Gating on [`glasshouse::gateway::gateway_is_required`] makes the open happen
-/// exactly when the gateway that consumes it is started, which is also what
-/// `start_if_required_with_telemetry` would have decided a moment later.
-///
-/// Phase 33A records an observation per forwarded gateway exchange. Opening
-/// its store touches the project database, and both callers evaluate this
-/// **before** `start_if_required_with_telemetry` decides whether a gateway is
-/// needed at all — so this runs on every launch and every resume.
-///
-/// It therefore must not fail the caller. A launch that refused to start
-/// because a telemetry table could not be opened would trade the user's whole
-/// session for a row nobody is waiting on, and this project's own product
-/// invariant is that Glasshouse orchestrates real harnesses rather than
-/// standing between the user and one. The warning is `tracing::warn!` for the
-/// same reason `set_lifecycle`'s is: it belongs in the log, not on the
-/// terminal the harness is about to take over.
+/// History: design-decisions.md, "Trims: commands module docs", evidence_ledger.
 pub(crate) fn evidence_ledger(
     runtime: &glasshouse::Runtime,
     profiles: &[glasshouse::profile::LaunchProfile],
@@ -462,28 +401,24 @@ pub(crate) fn install_session_document(
 
 /// Map lines 1991-1996: register the context firewall's `PostToolUse` hook
 /// for a Claude Code session, when the effective configuration enables it.
-///
-/// **Never a second `--settings` flag.** Claude Code 2.1.247 silently
-/// discards every `--settings` but the last (verified in
-/// `session::HarnessSelection::install_session_document`'s own doc), so the
-/// only safe way to add a hook is to merge it into the SAME document
-/// [`install_session_document`] already wrote — this function reads that
-/// file back, adds one `PostToolUse` key, and writes it in place. `args`
-/// itself is never touched, which is what makes `mode = "off"` byte-identical
-/// to a session built before this phase existed: this function returns
-/// before touching anything when the harness is not Claude Code or the
-/// effective mode is `off`.
+/// Never a second `--settings` flag: Claude Code silently discards every
+/// one but the last, so this reads the document
+/// [`install_session_document`] already wrote, adds one `PostToolUse` key,
+/// and writes it back in place; `args` is never touched, which makes
+/// `mode = "off"` byte-identical to a session built before this phase
+/// existed. Returns before touching anything when the harness is not
+/// Claude Code or the effective mode is `off`.
 ///
 /// Best effort, matching [`install_session_document`]'s own policy: any
-/// failure here is a session that starts without the firewall bridge rather
-/// than one that fails to start, and is logged rather than propagated.
+/// failure here is a session that starts without the firewall bridge
+/// rather than one that fails to start, logged rather than propagated.
 ///
 /// Map lines 2023/2024: `entitlement` and `backend` are read only to
-/// *classify* the reduction policy (subscription, metered or local) and to
-/// resolve its thresholds through `effective`'s new accessors — never baked
-/// into the registered command line themselves. The firewall core and the
-/// hook subprocess this command line invokes stay entitlement-blind, exactly
-/// as before this package: only numbers and a mode word ever reach them.
+/// *classify* the reduction policy and resolve its thresholds — never
+/// baked into the registered command line, so the firewall core and hook
+/// subprocess stay entitlement-blind, exactly as before this package.
+///
+/// History: design-decisions.md, "Trims: commands module docs", install_context_firewall_hook.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn install_context_firewall_hook(
     runtime: &Runtime,
@@ -700,42 +635,26 @@ fn record_context_firewall_registration_fallback(runtime: &Runtime, reason: &str
 }
 
 /// Records lifecycle events durably from a command that is about to exit.
+/// Writes synchronously rather than through [`glasshouse::events::EventLogSink`]'s
+/// writer-thread queue: a `glasshouse hook` process lives a few milliseconds
+/// and exits, and queueing behind a thread it is about to drop would lose
+/// the event it ran to record.
 ///
-/// # Why this is not the sink the shell uses
+/// Uses [`EventBus::publish`] as the minting authority for
+/// [`glasshouse::events::RecordedEvent`] (which needs a session id and
+/// timestamp it cannot supply itself), with no sink attached so nothing is
+/// written twice. Every failure is swallowed into the log: this runs inside
+/// the user's own session and on the launch path, where a bookkeeping
+/// failure must not look like a harness failure — a project whose database
+/// cannot be opened loses event history and keeps its session.
 ///
-/// [`glasshouse::events::EventLogSink`] queues behind a writer thread,
-/// because the shell publishes from a thread that is sometimes draining a
-/// pseudo-terminal and must never wait. None of that applies here: a
-/// `glasshouse hook` process lives for a few milliseconds and then exits, and
-/// queueing behind a thread it is about to drop would lose the event it was
-/// run to record. So this writes synchronously.
+/// The log sits behind a `Mutex` because [`EventLog`]'s `rusqlite::Connection`
+/// is `Send` but not `Sync`, and since [`DegradeRelay`] a recorder is
+/// touched from more than the thread that built it (the gateway's own
+/// connection thread reports a failed upstream through it) — uncontended in
+/// practice, since the two writers rarely speak at once.
 ///
-/// # Why there is a bus at all
-///
-/// [`glasshouse::events::RecordedEvent`] cannot be built without a session
-/// identifier and a timestamp — that is a property of the type rather than a
-/// habit of its callers, and [`EventBus::publish`] is what stamps both. Using
-/// it as the minting authority is what keeps "record every translated
-/// lifecycle event with session ID and timestamp" true on this path as well
-/// as in the interactive one. No sink is attached to it, so nothing is
-/// written twice.
-///
-/// # Every failure is swallowed into the log, deliberately
-///
-/// This runs inside the user's own session — see [`report_hook`], which may
-/// never fail — and it is also on the launch path, where a bookkeeping
-/// failure must not turn into what looks like a harness failure. A project
-/// whose database cannot be opened loses event history and keeps its session.
-/// # Why the log is behind a `Mutex`
-///
-/// [`EventLog`] owns a `rusqlite::Connection`, which is `Send` and **not**
-/// `Sync`. Since [`DegradeRelay`], a recorder is no longer touched only by
-/// the thread that built it: the gateway's own connection thread reports a
-/// failed upstream through it, so `&EventRecorder` crosses a thread boundary
-/// and the type has to be `Sync` to be shared at all. The lock is what makes
-/// it so, and it is uncontended in practice — the two writers are a launch
-/// path making one bookkeeping call at a time and a gateway thread that only
-/// speaks when its upstream has just failed.
+/// History: design-decisions.md, "Trims: commands module docs", EventRecorder.
 pub(crate) struct EventRecorder {
     bus: EventBus,
     log: Option<Mutex<EventLog>>,
@@ -757,27 +676,20 @@ impl EventRecorder {
     }
 
     /// Record that one backend resource stopped serving — map line 1735's
-    /// durable half, on the path the shipped binary actually takes.
+    /// durable half, on the path the shipped binary actually takes. Calls
+    /// [`glasshouse::events::degrade_resource`] rather than reimplementing
+    /// its selection rule (*a session is affected iff its own record
+    /// resolved to this backend resource*), so that rule stays the one copy
+    /// and keeps its production caller.
     ///
-    /// # Why `degrade_resource` is called rather than reimplemented
+    /// Publishes on `EventBus::with_history(0)`, not `self.bus`: the durable
+    /// write is [`Self::append`], which already publishes on this
+    /// recorder's own bus to mint the record, so handing `degrade_resource`
+    /// that bus too would mint every event twice. A history of zero makes
+    /// it purely the question-asking apparatus, and its
+    /// [`glasshouse::events::Degradation`] answer is what this method acts on.
     ///
-    /// Which sessions a failing resource affects is one rule, and it lives in
-    /// [`glasshouse::events::degrade_resource`]: *a session is affected if,
-    /// and only if, its own record says it resolved to this backend
-    /// resource.* Selecting the sessions here instead would be a second copy
-    /// of that rule, and it would leave `degrade_resource` with no production
-    /// caller again — the exact state the evidence ledger refused this line
-    /// in.
-    ///
-    /// # Why it publishes on a bus that keeps nothing
-    ///
-    /// `degrade_resource` publishes each `GatewayUnhealthy` on the bus it is
-    /// given, and the durable write on this path is [`Self::append`], which
-    /// publishes on *this* recorder's bus to mint the record. Handing it
-    /// `self.bus` would mint every event twice. A history of zero makes the
-    /// bus purely the question-asking apparatus: nothing is kept, nothing is
-    /// dropped, and the returned [`glasshouse::events::Degradation`] is the
-    /// answer this method acts on.
+    /// History: design-decisions.md, "Trims: commands module docs", EventRecorder::degrade.
     fn degrade(
         &self,
         records: &[SessionRecord],
@@ -837,43 +749,25 @@ impl EventRecorder {
 const EARLY_GATEWAY_FAILURES: usize = 32;
 
 /// Where a gateway failure is recorded, given that the recorder does not
-/// exist yet when the gateway starts.
-///
-/// # The ownership problem, stated exactly
-///
-/// [`glasshouse::gateway::DegradeSink`] has to be handed to the gateway at
-/// `start_if_required_with_degrade_sink`, and **both** of this binary's
-/// gateway starts happen before anything the sink needs exists:
-/// `launch_session` starts the gateway 184 lines before it opens its
-/// [`EventRecorder`], and it has no `SessionRecord` at all until the store
-/// has created one. So the sink cannot close over a bus and a session list;
-/// there is nothing to close over. This is the handle it closes over
-/// instead, created before the gateway and filled by [`Self::install`] once
+/// exist yet when the gateway starts. [`glasshouse::gateway::DegradeSink`]
+/// must be handed to the gateway before either of this binary's two gateway
+/// starts has an [`EventRecorder`] or even a `SessionRecord` to close over,
+/// so this is the handle created first and filled by [`Self::install`] once
 /// both halves exist.
 ///
-/// # Why the session records are a snapshot, and whose sessions they are
+/// Holds a snapshot of the sessions this process itself owns — one, on
+/// either path — never a fresh read of the project's whole session table:
+/// a fresh read would need a second open connection on the gateway's
+/// thread held for the session's whole life (§65's Windows hang was
+/// exactly that shape), and a gateway is per instance anyway, so degrading
+/// another process's session from here would report a failure this
+/// process never observed.
 ///
-/// [`glasshouse::events::degrade_resource`] takes the records it should
-/// consider. This relay is given **the sessions this process owns** — one, on
-/// either path — and not a fresh read of the project's whole session table.
-/// Two reasons, and the second is the load-bearing one:
+/// The sink holds an `Arc<DegradeRelay>` and the relay an
+/// `Arc<EventRecorder>`, with no cycle back; no thread is started or kept
+/// alive here, and the gateway's own guard stops the threads that call it.
 ///
-/// - reading fresh would mean a `SessionStore` on the gateway's thread, which
-///   means a second open connection held for the life of the session for a
-///   read that fires only when an upstream has failed. §65's Windows hang was
-///   exactly that shape;
-/// - and a gateway is **per instance**. Another Glasshouse process's session
-///   is served by *its* gateway, which does its own detecting. Degrading it
-///   from here would report a failure this process never observed on that
-///   session's behalf. The narrower snapshot is the honest claim.
-///
-/// # Lifetime
-///
-/// The sink holds an `Arc<DegradeRelay>` and the relay holds an
-/// `Arc<EventRecorder>`; neither points back, so there is no cycle to leak.
-/// No thread is started here and none is kept alive: the relay is inert
-/// between calls, and the gateway's own guard is what stops the threads that
-/// call it.
+/// History: design-decisions.md, "Trims: commands module docs", DegradeRelay.
 pub(crate) struct DegradeRelay {
     state: Mutex<RelayState>,
 }
@@ -1055,35 +949,27 @@ pub(crate) fn active_session(
 }
 
 /// Check point the session this work is leaving, before it moves —
-/// capability map line 1716.
+/// capability map line 1716. `moving_to` is where the work is going: a
+/// session identifier when continuing one, `None` when starting fresh. The
+/// session being **left** is whichever this project was most recently
+/// active in, the same `active_session` rule `glasshouse checkpoint save`
+/// and `Request::TakeCheckpoint` use.
 ///
-/// `moving_to` is where the work is going: a session identifier when this
-/// launch or resume is continuing one, and `None` when it is starting a new
-/// session. The session being **left** is whichever this project was most
-/// recently active in, which is the same `active_session` rule
-/// `glasshouse checkpoint save` and `Request::TakeCheckpoint` use for "the
-/// current session".
+/// Three of four cases are a no-op — no recorded session, a fresh launch,
+/// or the destination already in hand — and the flag says so instead of
+/// passing silently, so a person who asked for a checkpoint can tell a
+/// no-op from one taken (practice §68's shape).
 ///
-/// # Three of the four cases are a no-op, and each says which
+/// The handoff records only what Glasshouse knows — session left, where
+/// the work went, Git position, this project's binding memories, through
+/// the same [`Checkpoint::capture`] both existing checkpoint paths use —
+/// never a read of the session's terminal for an objective, which
+/// `checkpoint_command`'s own doc says would be a confident fiction.
 ///
-/// Nothing is being left when this project has no recorded session, when the
-/// launch is starting a fresh one, or when the destination *is* the session
-/// already in hand. Writing a checkpoint for any of those would produce a
-/// handoff describing a migration that did not happen. The flag says so
-/// instead of passing silently: a person who asked for a checkpoint and did
-/// not get one needs to know which of the two occurred, and a silent no-op is
-/// indistinguishable from a checkpoint that was taken (practice §68's shape).
+/// A failure here stops the launch: moving anyway would lose exactly what
+/// the person asked to keep.
 ///
-/// # It invents nothing, and it fails loudly
-///
-/// The handoff records only what Glasshouse knows: which session was left,
-/// where the work went, the Git position and this project's binding memories,
-/// all through the same [`Checkpoint::capture`] the two existing checkpoint
-/// paths use. It does not read the session's terminal for an objective —
-/// `checkpoint_command`'s own doc says why that would be a confident fiction.
-///
-/// A failure here **stops the launch**. The person asked for a checkpoint
-/// before the move; moving anyway would lose exactly what they asked to keep.
+/// History: design-decisions.md, "Trims: commands module docs", checkpoint_before_moving.
 pub(crate) fn checkpoint_before_moving(
     runtime: &Runtime,
     moving_to: Option<&str>,
@@ -1210,33 +1096,21 @@ pub(crate) fn resolve_bootstrap_prompt(
     )))
 }
 
-/// Reopen a recorded session in its own harness.
-///
-/// The order here is the safety property. The store decides whether this
-/// session may be resumed *at all* — it belongs to this project, it is not
-/// still running, and it has a native identifier to resume to — before any
-/// harness is selected and long before any process exists. A refusal costs
-/// nothing; a session opened against the wrong project would be a breach of
-/// the isolation the whole product rests on.
-///
-/// The harness is then whichever one the record names, not whichever one is
-/// configured now: resuming a Codex conversation in Claude Code would be
-/// nonsense, so a record's own harness is what gets selected.
 /// Line 1592's task-boundary caller, and line 1601's explanation on it.
-///
 /// Prints where the router would have sent this work and what the named
-/// session displaced. Never changes the destination — see `RouteOnResume`.
-/// Everything it needs can fail (the session store, a deleted profile, a quota
-/// cache that will not open), and none of those may cost a person their
-/// resume, so the whole thing is best effort and silent when it has nothing to
-/// say.
-/// **It explains; it does not move the work.** The session was named on the
-/// command line, and a router that answered "somewhere else" would overrule
-/// the most explicit statement a person can make — so the named session goes
-/// in as `RoutingOverride::to`, which is what line 1602 calls a user override,
-/// and the ranking it displaced is printed beside it. Stated as a limit rather
-/// than left to be discovered: **line 1593 is earned on the launch path**,
-/// where the choice is genuinely open, and not here.
+/// session displaced — never changes the destination (see `RouteOnResume`)
+/// — and is best effort and silent on nothing to say, since everything it
+/// reads can fail (the session store, a deleted profile, a quota cache that
+/// will not open) without costing a person their resume.
+///
+/// It explains; it does not move the work. The session was named on the
+/// command line, so the named session goes in as `RoutingOverride::to`
+/// (line 1602's user override) rather than letting the router answer
+/// "somewhere else", with the ranking it displaced printed beside it.
+/// Line 1593 is earned on the launch path, where the choice is genuinely
+/// open, and not here.
+///
+/// History: design-decisions.md, "Trims: commands module docs", report_task_boundary_routing.
 fn report_task_boundary_routing(runtime: &Runtime, session: &str) {
     use glasshouse::routing::session::{
         RouterInputs, RoutingMoment, RoutingOverride, TaskRequirements,
