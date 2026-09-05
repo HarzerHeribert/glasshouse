@@ -225,6 +225,13 @@ const NATIVE_FAMILIES: &[&str] = &["gpt-5"];
 /// family it ships as its default line.
 const SUPPORTED_MODELS: &[&str] = &["o3"];
 
+// Non-interactive mode is `codex exec [PROMPT]` — verified 2026-09-05 against
+// codex-cli 0.153.3 (`codex exec --help`: "Run Codex non-interactively").
+// Nothing in this crate invokes it, and `HarnessDescription` has no slot for
+// it: `crates/pane`'s ruler carries the same argv in its own harness table and
+// names this file as the authority — a stated duplication kept under rule 8
+// (`.agent-runtime/pane/ask-primary-2451-and-codex.md`, option 2) instead of a
+// readout command built for one reader. Change the argv here and there together.
 impl HarnessAdapter for Codex {
     fn id(&self) -> IntegrationId {
         IntegrationId::Codex
