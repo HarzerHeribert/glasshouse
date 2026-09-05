@@ -5350,3 +5350,19 @@ Closed these waves: **1297 → 1303**.
 
 30. **A ruler that cuts `HEAD^` needs history, and `actions/checkout` gives one commit.** Seven of `ruler_run`'s eleven tests failed on both pane cells with `fatal: invalid reference: <sha>^`; local runs never see it. `fetch-depth: 0` on the pane job only. The general form: a test that reads git history is platform-conditional on the *checkout*, not the OS, and the targeted gate cannot trace that.
 31. **A lint job that fails early hides every later check.** `test_board_watch.py` has been red on the ubuntu runner since board-watch landed this afternoon; three sweeps in a row failed lint *before* reaching it (rustup network, `progress.py`, `progress.py`). Read the failed step's name, not just the job's colour, and when a lint red is fixed expect the next one behind it.
+
+### Waves 124–129 — 2026-09-05, night: the lint red fixed, 1837 closed, the explicit route rating landed, and three Phase 59 trims
+
+| package | tier | result |
+|---|---|---|
+| `GH-BOARD-WATCH-LINUX` | Sonnet medium, Green | the lint red: the two racing tests give their worker a busy screen; 5/5 on macOS and in a Linux container, three runs each; `board-watch.sh` byte-identical. The first sweep with lint, audit and both pane cells green followed. |
+| `GH-RESERVE-AVAILABILITY` | Sonnet high, Amber | **1837 closed** as RC-A: the router's own band recorded for Heavy/Frontier launches, read back as a rate; `tier-filter-dropped` KILLED after the worker discarded a false KILLED from a compile error (§80 case 4). `EVALUATION_KINDS` is an explicit `[&str; N]` — a second edit the compiler catches. |
+| `GH-ROUTING-RATING` | Sonnet high, Amber | the explicit half of RC-B's routing side: `RoutingRated`, `rate-route`, the rated/proxy split printed apart; `rated-counted-twice` KILLED. Closes no line; 1846's producer. `route` is a flat command, so the door is top-level, not a subcommand. |
+| `GH-TRIM-MEMORY-SEARCH` · `GH-TRIM-TUI-EVENT` · `GH-TRIM-MEMORY-INJECT` | Sonnet medium, Green | 2053 PARTIALLY VERIFIED: 749→465, 728→491, 620→432 comment lines; every longest block now 20; ten, nine and seven items moved verbatim to the design record behind pointers; each filtered diff empty, each test count unchanged. Reviewed by reading two kept blocks each. |
+
+Closed these waves: **1303 → 1304**; three files trimmed.
+
+**Findings.**
+
+32. **Two trims live at once collide on the design record.** Both append a `## Trims:` section to `design-decisions.md`, and `integrate.sh` would refuse the second. The rule that worked: the second and later trims write `docs/product/trims-<file>.md`, and the orchestrator folds the section in at integration and deletes the staging file (`132978b`, `d91cd7a`). A trim packet derived by substitution must replace the staging name too — one derivation failed its own guard on `trims-memory-inject.md` and dispatched a worktree with no packet until fixed.
+33. **A push cancels the running sweep, and eight pushes in an hour meant no sweep finished its twelve test cells until the last.** Lint, audit and the pane cells came back green each time, so the fixes were confirmed, but the platform legs on any one commit were never read to the end. Batch pushes per wave, and when a sweep is past half, hold the next push until it concludes.
