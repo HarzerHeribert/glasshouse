@@ -5462,3 +5462,24 @@ Closed these waves: **1304 → 1305**.
 | three trims dispatched | Sonnet medium, Green | `trim-rest-docs-2` (24 files, 48 blocks), `trim-api-events-harness-config-docs-2` (23 files, 48 blocks), `trim-commands-docs-3` (4 files, 20 blocks); rule 5 in each packet amended to the generator's finding-48 sentence before dispatch; worktrees fast-forwarded to `525969a`. Board: four live, one lead. |
 
 **Findings.** None new — 47 and 48 were applied rather than repeated: the integration's exit line was read before the worktree removal, and the amended rule 5 went into every packet before dispatch.
+
+### Wave 139 — 2026-09-06, 00:40–01:30: Phase 59 completes — nine multi-file trims land in eight integrations, the route_health flake is fixed at its third strike, and the product site goes live on the user's instruction
+
+| package | tier | result |
+|---|---|---|
+| `GH-TRIM-COMMANDS-DOCS-3` · `GH-TRIM-SESSION-DOCS-2` | Sonnet medium, Green | `2d35bd0`, one integrate call: 34 blocks; `--bin glasshouse` 91 (the packet named `--lib commands`, which is no target — `commands/` is the binary's; the worker reported the packet error and ran the right one) and `--lib session` 315 / `--lib harness` 220 before and after |
+| `GH-TRIM-MEMORY-EXTRACT-DOCS` | Sonnet medium, Green | `e11ce62`: 17 blocks; `--lib memory` 155; `disposable_interface` 7, `tracked_knowledge` 5 |
+| `GH-TRIM-API-EVENTS-HARNESS-CONFIG-DOCS-2` | Sonnet medium, Green | `149dc3e`: 50 blocks in 23 files (two the packet's list missed, found by the worker's re-scan); five `--lib` targets before and after |
+| `GH-TRIM-REST-DOCS-2` | Sonnet medium, Green | `2d3dde5`: 59 blocks in 24 files (eight found by re-scan); the kept text is a condensation — `pty/mod.rs` read by the orchestrator; 52 pointers are doc-comment lines and render in rustdoc (debt, no successor) |
+| `GH-TRIM-GATEWAY-PROFILE-PROVIDER-DOCS` | Sonnet medium, Green | `03ec924`: 26 blocks; six carried a pointer from an earlier single-file trim that had never cut the block (finding 50) |
+| `GH-TRIM-CONFIG-CHECKPOINT-EVALUATION-CODEX-DOCS` · `GH-TRIM-MIGRATIONS-SECRET-DOCS` | Sonnet medium, Green | `5600485`, `44e4831`: 15 + 15 blocks; `secret/native.rs`'s module doc keeps every security statement, read at the fold |
+| line 2053 → **Phase 59 complete** | orchestrator | `3f138ee`: eight blocks over 20 content lines remain, every one under the invariant exception, ruled by reading and listed by file in `phase-59.md`; 34 runs over 20 raw lines comply by the budget rule. **1312 / 1398.** |
+| `shell::view::tests::route_health_keeps_line_1765s …` | orchestrator, tests only | `8cfc252`: strike 3 (ubuntu nightly on `9c7a96a`) → fixed — the fixture's deadline moves from 300 s to 330 s because `describe_deadline` floors to whole minutes against its own clock read |
+| product site | user instruction | `c038163`: `sites/` + `.github/workflows/pages.yml`, authored in the user's Codex session, committed by pathspec on the user's own words; Pages run 33997706879 green. The auto-mode classifier refused `git add sites …` twice before those words arrived |
+| sweeps | orchestrator | `33995052810`, `33995530968`, `33996669314`, `33996779961`, `33997304633` — each cancelled by the following push (finding 49); **`33997706886` on `c038163` concluded: all sixteen glasshouse cells green, red only on the pane windows-latest cell (the lane's known defect).** Single-cell reds seen before cancellation: `gateway_failure_taxonomy::each_failure_class_is_recorded_from_status_headers_and_framing_alone` on windows-latest declared — the row held the next case's class (rows zipped with cases by `seq`; a stream-abort row can land after the following exchange's) — strike 1; two pane tests on ubuntu-latest (`ruler::meter … zero_turns_not_absent`, `seams::a_tool_result_goes_to_the_context_firewall …`), strike 1 each, green on the rerun |
+
+**Findings.**
+
+49. **Rapid pushes cancel their own trailing sweeps.** `ci-extended.yml` runs one sweep per ref with `cancel-in-progress`, so eight integrations pushed one at a time produced five cancelled sweeps and one conclusion in fifty minutes. The rule already says once per two-to-four integrations; under an event-driven board the way to obey it is **hold the push until the running sweep concludes or two-to-four integrations have accumulated, whichever comes first** — the held commits cost nothing, and the sweep that finally ran covered them all.
+
+50. **A pointer without a cut is a false negative for every measurement that keys on the pointer.** Six gateway/provider blocks carried a `// History:` line from an earlier trim that never shortened them and were still over 20 lines; the tree-wide scan counts lines, not pointers, and caught them. `.agent-runtime/gen-trim-packet.py` now slices the production part at `#[cfg(test)]\nmod tests` (the first-marker slice missed twenty blocks in routing), and a packet's LIBS must name `--bin glasshouse` for `commands/`.

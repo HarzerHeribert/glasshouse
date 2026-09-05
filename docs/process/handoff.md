@@ -41,6 +41,12 @@ validated and waiting on the commit. Next action: `.agent-runtime/CONTINUATION.m
 
 Last updated: 2026-09-02, late night (Europe/Berlin)
 
+## Checkpoint — 2026-09-06 (01:30), wave 139: 1312 / 1398 (93.8%) — Phase 59 complete, the product site live, the trailing sweep green on all sixteen glasshouse cells
+
+- **State:** `main` at `3f138ee` plus this checkpoint, pushed. **Phase 59 is complete**: line 2053 closed on the corrected measurement (production part to `#[cfg(test)]` + `mod tests`; content lines ≤ 20), eight invariant-exception blocks listed in `phase-59.md`. Nine multi-file trims landed tonight in eight integrations. The product site (`c038163`) is deployed by its own Pages workflow. Live: the pane lead (Fable xhigh) with its subs — the Windows path-normalisation review first, then `GH-PANE-NOTEBOOK-VIEW`, 61E-RUNTIME with the cancellation token.
+- **Sweep:** `33997706886` on `c038163` concluded green on all sixteen glasshouse cells; the pane windows-latest cell stays red until the lead's merge. Five earlier sweeps were cancelled by the next push each — hold pushes until a sweep concludes (finding 49).
+- **Next, by risk:** the lead's merge-ready commit → `cargo test -p pane` → push → the pane cell; `GH-PANE-2456-CONTAMINATION` (Red, the primary's) after it; product work from the map — Phase 60's approved slice (2414–2416) and Phase 38's 1608 are the open lines not in the refusal register; the day's dogfooding session (rule 6).
+
 ## Checkpoint — 2026-09-06 (after midnight), wave 138: 1311 / 1398 (93.8%) — the routing-2 trim lands, the pane lane hands to a Fable successor lead, and mutate.sh tells a compile error from a kill
 
 - **State:** `main` at `efb1b55` plus this checkpoint's commit, pushed. Phase 59 is open only on 2053. Live: three trims (`trim-rest-docs-2`, `trim-api-events-harness-config-docs-2`, `trim-commands-docs-3`; Sonnet medium, Green) and the pane lead's successor in `.worktrees/pane-lead` (Fable xhigh), which reviews and integrates three reported sub-worker diffs — the Windows path-normalisation defect first, hard.
