@@ -52,6 +52,45 @@ impl Drop for Fixture {
     }
 }
 
+/// A path outside the project **and** outside `$HOME`, on every host.
+///
+/// `std::env::temp_dir()` is not that, and five tests here used it as
+/// "somewhere else in the filesystem". On Windows `%TEMP%` is
+/// `%USERPROFILE%\AppData\Local\Temp` — *inside* `$HOME`, which §4.3 makes
+/// never grantable by any pattern. So a grant a macOS run observed there
+/// could not happen, and a refusal it attributed to "the only writable root"
+/// was §4.3's. The root of the filesystem the project sits on is outside both
+/// on all three platforms: `/` on macOS and Linux, `C:\` on Windows.
+///
+/// Nothing is created. `Profile::check` decides on a path that does not exist
+/// — that is the same decision it makes for a file about to be written — so a
+/// test about where a path *is* need not put a file there.
+struct Elsewhere {
+    root: PathBuf,
+}
+
+impl Elsewhere {
+    fn new(label: &str) -> Self {
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let anchor = std::env::temp_dir()
+            .ancestors()
+            .last()
+            .expect("every path has a root")
+            .to_path_buf();
+        Self {
+            root: anchor.join(format!(
+                "pane-sandbox-elsewhere-{}-{label}-{n}",
+                std::process::id()
+            )),
+        }
+    }
+
+    /// The root as a pattern writes it, exactly as [`Fixture::pattern_root`].
+    fn pattern_root(&self) -> String {
+        self.root.to_string_lossy().replace('\\', "/")
+    }
+}
+
 fn home() -> PathBuf {
     for key in ["HOME", "USERPROFILE"] {
         if let Some(value) = std::env::var_os(key)
@@ -124,7 +163,7 @@ fn a_deny_beats_a_more_specific_allow() {
     // covers its subtree, on both sides. Neither half was exercised by any
     // test in this file -- every other pattern here ends in `**` or names an
     // exact file.
-    let elsewhere = Fixture::new("deny-beats-allow-elsewhere");
+    let elsewhere = Elsewhere::new("deny-beats-allow");
     let outside = elsewhere.pattern_root();
     let subtree = Profile::compile(
         &fixture.root,
@@ -165,9 +204,13 @@ fn nothing_outside_the_project_root_is_writable_by_default() {
         .check("Write", Access::Write, &fixture.root.join("build/out.txt"))
         .expect("the project root is writable");
 
+    // Outside the project **and** outside `$HOME`, so the rule that applies
+    // is the default one and not §4.3 — see [`Elsewhere`], which is what the
+    // project's own parent directory could not be relied on to be.
+    let elsewhere = Elsewhere::new("writable-root");
     let outside = [
-        fixture.root.parent().unwrap().join("escaped.txt"),
-        std::env::temp_dir().join("pane-sandbox-elsewhere.txt"),
+        elsewhere.root.join("escaped.txt"),
+        elsewhere.root.join("nested/deeper/escaped.txt"),
         PathBuf::from("/etc/hosts"),
     ];
     for path in outside {
@@ -180,6 +223,24 @@ fn nothing_outside_the_project_root_is_writable_by_default() {
             denied.rule
         );
     }
+
+    // §1.3 names the project's parent, and it is refused too. Which sentence
+    // decides it depends on where the host puts its temp directory, and both
+    // are correct: on Windows the parent is inside `%USERPROFILE%` and §4.3 —
+    // which no document can undo — answers before the default does.
+    let parent = refusal(profile.check(
+        "Write",
+        Access::Write,
+        &fixture.root.parent().unwrap().join("escaped.txt"),
+    ));
+    assert!(
+        parent
+            .rule
+            .contains("the project root is the only writable root")
+            || parent.rule.contains("never grantable by any pattern"),
+        "the project's parent must not be writable: {:?}",
+        parent.rule
+    );
 
     // A path in `$HOME` is refused too, and by the stronger rule: §4.3 makes
     // `$HOME` outside the project never grantable, so it never reaches the
@@ -365,10 +426,7 @@ fn the_profile_cannot_be_widened_after_it_is_built() {
     }
 
     let fixture = Fixture::new("no-widening");
-    let elsewhere = std::env::temp_dir().join(format!(
-        "pane-sandbox-elsewhere-{}/secret.txt",
-        std::process::id()
-    ));
+    let elsewhere = Elsewhere::new("no-widening").root.join("secret.txt");
     std::fs::create_dir_all(fixture.root.join(".claude")).unwrap();
     std::fs::write(
         fixture.root.join(".claude/settings.json"),
@@ -462,10 +520,8 @@ fn a_bash_pattern_grants_no_file_access() {
     refusal(profile.admits_command("cargo build"));
 
     // Admitting the command line grants no path outside the project root.
-    for path in [
-        std::env::temp_dir().join("pane-bash-elsewhere.txt"),
-        PathBuf::from("/etc/hosts"),
-    ] {
+    let elsewhere = Elsewhere::new("bash-argv");
+    for path in [elsewhere.root.join("x.txt"), PathBuf::from("/etc/hosts")] {
         let denied = refusal(profile.check("Read", Access::Read, &path));
         assert!(denied.rule.contains("no grant covers this path"));
     }
@@ -787,7 +843,7 @@ fn the_repositorys_own_settings_document_compiles_to_its_written_grants() {
 #[test]
 fn an_allow_outside_the_root_honours_its_verb_and_its_case() {
     let fixture = Fixture::new("allow-verb-and-case");
-    let elsewhere = Fixture::new("allow-verb-and-case-target");
+    let elsewhere = Elsewhere::new("allow-verb-and-case-target");
     let outside = elsewhere.pattern_root();
     let settings = format!(
         r#"{{"permissions":{{
@@ -1031,6 +1087,128 @@ fn check_returns_the_path_it_decided_on() {
     assert_eq!(created, canonical_root.join("out/new.txt"));
 }
 
+/// The other half of `check`'s postcondition, and the one that was not held:
+/// **a granted path is absolute**. A caller opens the value it is handed, so
+/// a relative one opens a file under whatever directory the process happens
+/// to be standing in — never the file any rule here examined.
+///
+/// The shape that broke it is a backslash-spelled candidate on a Unix root.
+/// There it is one relative *filename* that contains `\`, not a path;
+/// `spelling` folds the separators, the folded form is prefix-equal to the
+/// root, and root containment granted it while the anchoring had been skipped
+/// for looking Windows-rooted. `#[cfg(unix)]` on that half alone, because a
+/// backslash is a filename character only where it is not a separator.
+#[test]
+fn every_granted_path_is_absolute_and_inside_the_root_it_was_decided_in() {
+    let fixture = Fixture::new("absolute-grant");
+    let root = std::fs::canonicalize(&fixture.root).unwrap();
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/main.rs"), "fn main() {}").unwrap();
+    let profile = Profile::compile(&root, Some(r#"{"permissions":{}}"#));
+
+    // Windows adds nothing below — a backslash is a separator there, not a
+    // filename character — so the binding is only mutated on Unix.
+    #[cfg_attr(not(unix), allow(unused_mut))]
+    let mut candidates: Vec<PathBuf> = vec![
+        root.join("src/main.rs"),
+        root.join("src/./main.rs"),
+        // A file that does not exist yet decides the same way.
+        root.join("out/new.txt"),
+        // Relative, and therefore anchored at the project root.
+        PathBuf::from("src/main.rs"),
+        PathBuf::from("./src/../src/main.rs"),
+        // The root's unresolved spelling, which on macOS is a different
+        // string (`/var/…` against `/private/var/…`).
+        fixture.root.join("src/main.rs"),
+    ];
+    #[cfg(unix)]
+    {
+        // The regression, and it needs its exact shape: `windows_rooted`
+        // recognises a candidate whose folded form begins `//`, so it is the
+        // *UNC-looking* spelling — two leading backslashes — that had its
+        // anchoring skipped and came back relative. One leading backslash
+        // folds to a single `/` and was always anchored, so it is here as
+        // the control that says which half of the pair is the defect.
+        candidates.push(PathBuf::from(format!(
+            "\\{}\\src\\main.rs",
+            root.to_string_lossy().replace('/', "\\")
+        )));
+        candidates.push(PathBuf::from(format!(
+            "{}\\src\\main.rs",
+            root.to_string_lossy().replace('/', "\\")
+        )));
+        candidates.push(PathBuf::from("src\\main.rs"));
+        // The containment argument that makes anchoring safe, and the one
+        // reading of it that could look alarming: `\\etc\shadow` is not
+        // `/etc/shadow` here, it is one filename containing backslashes.
+        // Anchoring puts it inside the project, so the path the grant names
+        // — and the path a caller opening the returned value gets — is
+        // `<root>/\etc\shadow`. Leaving it unanchored refused it by citing a
+        // never-rule about a file the argument never named.
+        candidates.push(PathBuf::from("\\\\etc\\shadow"));
+    }
+
+    for candidate in &candidates {
+        let resolved = profile
+            .check("Read", Access::Read, candidate)
+            .unwrap_or_else(|denied| {
+                panic!("{candidate:?} is inside the project and must be granted: {denied:?}")
+            });
+        assert!(
+            resolved.is_absolute(),
+            "{candidate:?} was granted the non-absolute {resolved:?}; a caller opening that \
+             opens a file this profile never examined"
+        );
+        assert!(
+            resolved.starts_with(&root),
+            "{candidate:?} was granted {resolved:?}, which is not inside the root it was \
+             decided in"
+        );
+    }
+}
+
+/// §2 and `match_segment`'s rule that an `allow` matches **case-sensitively
+/// on every platform**: the drive-letter normalisation stops at the colon.
+/// `C:foo` and `C:FOO` are two files on a case-sensitive filesystem, and
+/// upper-casing the whole first component let one `allow` cover both — which
+/// is the trick that rule exists to refuse. The drive letter itself still
+/// folds, because that is the Windows repair and one drive is one drive.
+///
+/// Under a Windows-spelled root, so it runs on every host: a drive-rooted
+/// candidate is read in its root's own spelling family and is not anchored,
+/// and that is the only shape which reaches the fold at all.
+#[test]
+fn the_drive_letter_fold_stops_at_the_colon() {
+    let profile = Profile::compile(
+        Path::new("C:/pane-fixture/proj"),
+        Some(r#"{"permissions":{"allow":["Read(C:foo/bar)"]}}"#),
+    );
+    assert_eq!(
+        profile.rule_count(),
+        1,
+        "the pattern must register: {:?}",
+        profile.diagnostics()
+    );
+
+    for granted in ["C:foo/bar", "c:foo/bar"] {
+        profile
+            .check("Read", Access::Read, Path::new(granted))
+            .unwrap_or_else(|denied| {
+                panic!("`{granted}` is the drive the pattern names: {denied:?}")
+            });
+    }
+    for other in ["C:FOO/bar", "C:Foo/bar", "C:foo/BAR"] {
+        let denied = refusal(profile.check("Read", Access::Read, Path::new(other)));
+        assert!(
+            denied
+                .rule
+                .contains("the project root is the only readable root"),
+            "`{other}` is a different file and no `allow` names it: {:?}",
+            denied.rule
+        );
+    }
+}
+
 /// Item 2, input a: a project rooted at `$HOME` gets §4's set from an **empty**
 /// `permissions` object, because the rule was dropped whenever its subtree lay
 /// inside the root.
@@ -1225,6 +1403,97 @@ fn a_chained_command_line_is_admitted_only_if_every_segment_is() {
     }
 }
 
+/// A redirect operand — `>&2`, `2>&1`, `<&0`, `&>file` — is part of the
+/// command's own segment, not a separator that starts a new one, and not a
+/// nonsense segment (`1`, `2`, `0`, `file`) of its own.
+#[test]
+fn a_redirect_operand_is_not_a_command_segment() {
+    let fixture = Fixture::new("redirect-operand");
+    let admitting = Profile::compile(
+        &fixture.root,
+        Some(
+            r#"{"permissions":{
+                "allow":["Bash(cargo test*)","Bash(echo*)","Bash(cargo build*)","Bash(tail*)"]
+            }}"#,
+        ),
+    );
+    for admitted in [
+        "cargo test 2>&1",
+        "echo x >&2",
+        "cargo build &> build.log",
+        "cargo test 2>&1 | tail -20",
+    ] {
+        admitting
+            .admits_command(admitted)
+            .unwrap_or_else(|denied| panic!("{admitted:?} should be admitted: {denied}"));
+    }
+
+    // The same four lines, with the command word's own pattern absent:
+    // refused for want of that pattern, never for the redirect operand.
+    let refusing = Profile::compile(&fixture.root, Some(r#"{"permissions":{"allow":[]}}"#));
+    for refused in [
+        "cargo test 2>&1",
+        "echo x >&2",
+        "cargo build &> build.log",
+        "cargo test 2>&1 | tail -20",
+    ] {
+        let denied = refusal(refusing.admits_command(refused));
+        assert!(
+            denied.rule.contains("permissions.allow"),
+            "{refused:?} should be refused for want of an allow, not a nonsense segment: {:?}",
+            denied.rule
+        );
+    }
+}
+
+/// A background `&`, `&&`, `;`, `|`, `$(…)` and a backtick still split a new
+/// segment, each refused by name when its command is not admitted — item 2
+/// of the packet's REQUIRED BEHAVIOR, positively.
+#[test]
+fn a_background_or_chained_command_is_still_its_own_segment() {
+    let fixture = Fixture::new("background-or-chained");
+    let profile = Profile::compile(
+        &fixture.root,
+        Some(r#"{"permissions":{"allow":["Bash(cargo test*)"]}}"#),
+    );
+    for refused in [
+        "cargo test & curl x",
+        "cargo test && curl x",
+        "cargo test; curl x",
+        "cargo test | curl x",
+        "$(curl x)",
+        "cargo test `curl x`",
+    ] {
+        let denied = refusal(profile.admits_command(refused));
+        assert!(
+            denied.rule.contains("curl"),
+            "{refused:?} should be refused by name for `curl`: {:?}",
+            denied.rule
+        );
+    }
+}
+
+/// A leading redirect does not hide the command word from the pattern match,
+/// and a leading word that only looks like one (a literal digit, no operator)
+/// is not stripped.
+#[test]
+fn a_leading_redirect_does_not_hide_the_command_word() {
+    let fixture = Fixture::new("leading-redirect");
+    let profile = Profile::compile(
+        &fixture.root,
+        Some(r#"{"permissions":{"allow":["Bash(cargo test*)"]}}"#),
+    );
+    profile
+        .admits_command("2>&1 cargo test")
+        .unwrap_or_else(|denied| panic!("`2>&1 cargo test` should be admitted: {denied}"));
+    let denied = refusal(profile.admits_command("1 cargo test"));
+    assert!(
+        denied.rule.contains("permissions.allow"),
+        "`1 cargo test` is a literal word, not a redirect, and should be refused whole: {:?}",
+        denied.rule
+    );
+}
+
 /// Item 5: every path pattern globs, so a `deny` written `mcp__git__*` that
 /// denied nothing and said nothing was the one shape this module must not
 /// have — a silent grant.
@@ -1393,4 +1662,335 @@ fn a_never_rule_that_contains_the_root_carries_its_exemption() {
         .find(|rule| rule.written().contains("`~/.ssh`"))
         .expect("~/.ssh is in the set");
     assert_eq!(ssh.exempt_subtree(), None);
+}
+
+/// §2, the Windows half: `fs::canonicalize` returns a **verbatim** path
+/// (`\\?\C:\…`), while `USERPROFILE`, a settings pattern and an ordinary tool
+/// argument do not — and `Path::starts_with` compares a `VerbatimDisk` prefix
+/// and a `Disk` prefix as different things. Two spellings of one path, and a
+/// containment check that disagreed with itself.
+///
+/// Literal strings and no filesystem, so the rule is held on every host: this
+/// is the one property none of us can run on the machine that has it.
+#[test]
+fn a_verbatim_and_a_plain_spelling_of_one_path_decide_identically() {
+    let root = Path::new("C:/pane-fixture/proj");
+    let profile = Profile::compile(
+        root,
+        Some(r#"{"permissions":{"deny":["Read(C:/pane-fixture/proj/secrets/**)"]}}"#),
+    );
+
+    // Three paths that must decide three *different* ways, so an agreement
+    // between spellings cannot be an agreement on one uniform answer.
+    let cases = [
+        (
+            r"\\?\C:\pane-fixture\proj\notes\one.md",
+            r"C:\pane-fixture\proj\notes\one.md",
+            None,
+        ),
+        (
+            r"\\?\C:\pane-fixture\proj\secrets\token.txt",
+            r"C:\pane-fixture\proj\secrets\token.txt",
+            Some("permissions.deny"),
+        ),
+        (
+            r"\\?\C:\pane-fixture\elsewhere\x.md",
+            r"C:\pane-fixture\elsewhere\x.md",
+            Some("the project root is the only readable root"),
+        ),
+    ];
+    for (verbatim, plain, expected) in cases {
+        let from_verbatim = profile.check("Read", Access::Read, Path::new(verbatim));
+        let from_plain = profile.check("Read", Access::Read, Path::new(plain));
+        match expected {
+            None => {
+                from_verbatim
+                    .as_ref()
+                    .unwrap_or_else(|d| panic!("{verbatim} must be granted: {d:?}"));
+                from_plain
+                    .as_ref()
+                    .unwrap_or_else(|d| panic!("{plain} must be granted: {d:?}"));
+            }
+            Some(rule) => {
+                let a = refusal(from_verbatim).rule;
+                let b = refusal(from_plain).rule;
+                assert_eq!(a, b, "{verbatim} decided differently from {plain}");
+                assert!(a.contains(rule), "{verbatim} cited {a:?}, wanted {rule:?}");
+            }
+        }
+    }
+
+    // The drive letter's case is not a third spelling either.
+    let lower = refusal(profile.check(
+        "Read",
+        Access::Read,
+        Path::new(r"c:\pane-fixture\proj\secrets\token.txt"),
+    ));
+    assert!(
+        lower.rule.contains("permissions.deny"),
+        "a lower-case drive letter walked past the deny: {:?}",
+        lower.rule
+    );
+    // And granted inside the root, not merely refused by a deny that folds
+    // case anyway: root containment compares the spelling exactly, so this
+    // is the assertion that actually watches the upper-casing.
+    profile
+        .check(
+            "Read",
+            Access::Read,
+            Path::new(r"c:\pane-fixture\proj\notes\one.md"),
+        )
+        .unwrap_or_else(|d| panic!("a lower-case drive letter fell outside its own root: {d:?}"));
+
+    // The same reduction on the *pattern* side, which is where a verbatim
+    // spelling did its real damage. `?` is a glob metacharacter here, so a
+    // `//?/C:/…` root spliced into a project-relative pattern anchored it
+    // under a component that matches a single character — and `Read(**)`,
+    // the broadest pattern a document can write for its own project,
+    // registered nothing at all on Windows for that reason.
+    let verbatim_root = Profile::compile(
+        Path::new(r"\\?\C:\pane-fixture\proj"),
+        Some(r#"{"permissions":{"allow":["Read(**)"]}}"#),
+    );
+    assert_eq!(
+        verbatim_root.rule_count(),
+        1,
+        "a project-relative pattern under a verbatim root must register: {:?}",
+        verbatim_root.diagnostics()
+    );
+    let globs: Vec<Vec<String>> = verbatim_root
+        .rules()
+        .filter(|rule| rule.effect() == Effect::Allow)
+        .map(|rule| rule.glob().to_vec())
+        .collect();
+    assert_eq!(
+        globs,
+        vec![vec![
+            "C:".to_string(),
+            "pane-fixture".to_string(),
+            "proj".to_string(),
+            "**".to_string()
+        ]],
+        "a verbatim root put a `?` component into the pattern's glob"
+    );
+
+    // And the reduction is conditional, which is the half that keeps it from
+    // widening anything on Unix: `//?/proj` is a legal absolute path there and
+    // is not a verbatim prefix, so it stays outside this project rather than
+    // becoming the relative `proj`.
+    let unix_shaped = refusal(profile.check(
+        "Read",
+        Access::Read,
+        Path::new("//?/pane-fixture/proj/notes/one.md"),
+    ));
+    assert!(
+        unix_shaped
+            .rule
+            .contains("the project root is the only readable root"),
+        "`//?/…` is not a verbatim prefix and must not reach inside the root: {:?}",
+        unix_shaped.rule
+    );
+}
+
+/// §2 again, the spelling only the filesystem can reconcile: Windows hands out
+/// 8.3 short names (`RUNNER~1` for `runneradmin`), and no amount of text
+/// rewriting turns one into the other. `canonical_prefix` is what decides this
+/// one — every candidate and every pattern prefix is canonicalized before it
+/// is compared — so the test asks the filesystem for both spellings of one
+/// file and requires one answer.
+///
+/// Real on every host: macOS gives `/var` and `/private/var` for the same
+/// directory, Windows gives the short name and the long one, and on a host
+/// where the two spellings coincide the test degenerates to an equality and
+/// proves nothing there. It is the Windows leg that is the point.
+#[test]
+fn a_short_name_and_its_long_form_decide_identically() {
+    let fixture = Fixture::new("short-name");
+    std::fs::create_dir_all(fixture.root.join("notes/chapter")).unwrap();
+    std::fs::write(fixture.root.join("notes/chapter/one.md"), "x").unwrap();
+    std::fs::create_dir_all(fixture.root.join("secrets")).unwrap();
+    std::fs::write(fixture.root.join("secrets/token.txt"), "t").unwrap();
+
+    let pattern = fixture.pattern_root();
+    let profile = Profile::compile(
+        &fixture.root,
+        Some(&format!(
+            r#"{{"permissions":{{"deny":["Read({pattern}/secrets/**)"]}}}}"#
+        )),
+    );
+
+    // As `std::env::temp_dir()` spelled it -- the short name on Windows --
+    // against what the filesystem says it is.
+    let granted = fixture.root.join("notes/chapter/one.md");
+    assert_eq!(
+        profile
+            .check("Read", Access::Read, &granted)
+            .expect("the project's own subtree is readable"),
+        profile
+            .check(
+                "Read",
+                Access::Read,
+                &std::fs::canonicalize(&granted).unwrap()
+            )
+            .expect("and so is the same file under the name the filesystem gives it"),
+        "the two spellings decided on different paths"
+    );
+
+    let denied = fixture.root.join("secrets/token.txt");
+    let long = std::fs::canonicalize(&denied).unwrap();
+    assert_eq!(
+        refusal(profile.check("Read", Access::Read, &denied)).rule,
+        refusal(profile.check("Read", Access::Read, &long)).rule,
+        "{denied:?} and {long:?} are one file and decided differently"
+    );
+}
+
+/// The case a Windows checkout is: `C:\Users\<name>\source\<project>` is
+/// inside `%USERPROFILE%`, which §4.3 makes never grantable — and §4.3's one
+/// exemption, the project's own subtree, is what must still hold there.
+///
+/// Nothing is created: `$HOME` is the developer's own directory and this test
+/// only compiles paths against it.
+#[test]
+fn a_project_root_inside_home_grants_its_own_subtree() {
+    let home = home();
+    let root = home.join(format!(
+        "pane-sandbox-project-inside-home-{}-not-created",
+        std::process::id()
+    ));
+    let profile = Profile::compile(&root, Some(r#"{"permissions":{}}"#));
+
+    for relative in [
+        "notes/chapter/one.md",
+        "src/main.rs",
+        ".gitignore",
+        "out.txt",
+    ] {
+        for access in [Access::Read, Access::Write] {
+            profile
+                .check("Read", access, &root.join(relative))
+                .unwrap_or_else(|denied| {
+                    panic!("a project inside $HOME must grant {relative}: {denied:?}")
+                });
+        }
+    }
+
+    // And nothing else in `$HOME`: the rule is narrowed to the project's own
+    // subtree, never dropped.
+    for path in [
+        home.join(".ssh/id_ed25519"),
+        home.join("another-project/src/main.rs"),
+        home.join("taxes-2025.pdf"),
+    ] {
+        let denied = refusal(profile.check("Read", Access::Read, &path));
+        assert!(
+            denied.rule.contains("never grantable by any pattern"),
+            "{path:?} was granted because the project sits inside $HOME: {:?}",
+            denied.rule
+        );
+    }
+}
+
+/// §5: the `rule` names the *deciding* rule, so a person can fix the settings
+/// file without re-deriving the profile. Which means a path outside the
+/// project must be refused by the rule that applies **where it actually is**,
+/// and never by §4.3 reached through a spelling that did not compare.
+#[test]
+fn a_path_outside_the_project_is_refused_by_the_rule_that_applies() {
+    let fixture = Fixture::new("rule-that-applies");
+    let elsewhere = Elsewhere::new("rule-that-applies");
+    let profile = Profile::compile(&fixture.root, Some(r#"{"permissions":{}}"#));
+
+    // Outside the project and outside `$HOME`: the default, which a document
+    // could widen.
+    let plain = refusal(profile.check("Write", Access::Write, &elsewhere.root.join("out.txt")));
+    assert!(
+        plain
+            .rule
+            .contains("the project root is the only writable root"),
+        "a path outside both must cite the default: {:?}",
+        plain.rule
+    );
+
+    // Inside `$HOME` and outside the project: §4.3, which no document can.
+    let in_home = refusal(profile.check(
+        "Write",
+        Access::Write,
+        &home().join("scratch-that-is-not-the-project.txt"),
+    ));
+    assert!(
+        in_home.rule.contains("sandbox-grants.md §4.3"),
+        "a $HOME path must cite §4.3: {:?}",
+        in_home.rule
+    );
+
+    // The machine's own credential store: §4.2, and cited even against the
+    // broadest allow a document can spell -- which is what a driveless
+    // `/etc/sudoers` prefix could not do on Windows, where a candidate spelled
+    // that way acquires the project's drive and the never-rule did not.
+    let maximal = Profile::compile(
+        &fixture.root,
+        Some(r#"{"permissions":{"allow":["Read(/**)","Write(/**)","Edit(/**)"]}}"#),
+    );
+    for path in ["/etc/sudoers", "/etc/pam.d/sudo", "/etc/master.passwd"] {
+        let denied = refusal(maximal.check("Write", Access::Write, Path::new(path)));
+        assert!(
+            denied.rule.contains("sandbox-grants.md §4.2"),
+            "{path} must cite §4.2: {:?}",
+            denied.rule
+        );
+    }
+
+    // `.claude/**` inside the project: §1.5, and readable all the same.
+    let dot_claude = refusal(maximal.check(
+        "Write",
+        Access::Write,
+        &fixture.root.join(".claude/settings.json"),
+    ));
+    assert!(
+        dot_claude.rule.contains("sandbox-grants.md §1.5"),
+        "`.claude/**` must cite §1.5: {:?}",
+        dot_claude.rule
+    );
+}
+
+/// The isolation half of the verbatim reduction: `//?/` is a legal absolute
+/// path on Unix and is *not* a verbatim prefix unless a drive letter or the
+/// `UNC/` marker follows it. An unconditional strip would turn the written
+/// pattern `Read(//?/elsewhere/**)` into the project-relative `elsewhere/**`
+/// and anchor it inside the root, and the directory it named would lose its
+/// grant. The pattern side is where the conditional is observable: on the
+/// candidate side `canonical_prefix` rebuilds the path from `/` and collapses
+/// the doubled slash before `spelling` ever sees it. Unix only, because on
+/// Windows `//?/x` and `/?/x` genuinely are two different paths.
+#[cfg(unix)]
+#[test]
+fn a_unix_path_under_a_double_slash_question_mark_is_not_a_verbatim_prefix() {
+    let profile = Profile::compile(
+        Path::new("/pane-fixture-not-created/proj"),
+        Some(r#"{"permissions":{"allow":["Read(//?/pane-elsewhere-not-created/**)"]}}"#),
+    );
+    assert_eq!(profile.rule_count(), 1, "{:?}", profile.diagnostics());
+    let globs: Vec<Vec<String>> = profile
+        .rules()
+        .filter(|rule| rule.effect() == Effect::Allow)
+        .map(|rule| rule.glob().to_vec())
+        .collect();
+    assert_eq!(
+        globs,
+        vec![vec![
+            "?".to_string(),
+            "pane-elsewhere-not-created".to_string(),
+            "**".to_string()
+        ]],
+        "the `//?/` pattern was anchored somewhere other than the directory it named"
+    );
+    for spelled in [
+        "/?/pane-elsewhere-not-created/a.md",
+        "//?/pane-elsewhere-not-created/a.md",
+    ] {
+        profile
+            .check("Read", Access::Read, Path::new(spelled))
+            .unwrap_or_else(|d| panic!("{spelled} is the directory the pattern named: {d:?}"));
+    }
 }

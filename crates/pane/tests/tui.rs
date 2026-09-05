@@ -4,6 +4,8 @@
 //! a terminal.
 
 use pane::contract::{Conversation, Message, Role, ServedBy};
+use pane::runtime::handles::{HandleTable, render_table};
+use pane::runtime::preview::{FileValue, PREVIEW_TOKEN_CAP, TABLE_TOKEN_CAP, Value};
 use pane::tui::render;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -28,12 +30,22 @@ fn known_served_by() -> ServedBy {
     }
 }
 
-/// Renders `conversation` and `served_by` into an 80x20 buffer.
+/// Renders `conversation` and `served_by` into an 80x20 buffer, with no live
+/// handles -- the shape every pre-notebook test still exercises.
 fn rendered(conversation: &Conversation, served_by: &ServedBy) -> Buffer {
+    rendered_with_handles(conversation, served_by, &HandleTable::new())
+}
+
+/// Renders `conversation`, `served_by` and `handles` into an 80x20 buffer.
+fn rendered_with_handles(
+    conversation: &Conversation,
+    served_by: &ServedBy,
+    handles: &HandleTable,
+) -> Buffer {
     let backend = TestBackend::new(80, 20);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal
-        .draw(|frame| render(frame, conversation, served_by))
+        .draw(|frame| render(frame, conversation, served_by, handles))
         .unwrap();
     terminal.backend().buffer().clone()
 }
@@ -65,6 +77,36 @@ fn row_symbols(buffer: &Buffer, y: u16) -> Vec<String> {
                 .unwrap_or_default()
         })
         .collect()
+}
+
+/// The `count` rows immediately beneath the row containing `marker`, each
+/// trimmed of its bordering `│` and padding -- so a cell's output region can
+/// be compared against plain text without caring where the border fell.
+fn rows_after(buffer: &Buffer, marker: &str, count: usize) -> Vec<String> {
+    let text = buffer_text(buffer);
+    let lines: Vec<&str> = text.lines().collect();
+    let marker_row = lines
+        .iter()
+        .position(|line| line.contains(marker))
+        .unwrap_or_else(|| panic!("{marker:?} not found in buffer:\n{text}"));
+    (1..=count)
+        .map(|offset| {
+            lines
+                .get(marker_row + offset)
+                .map(|line| {
+                    line.trim_start_matches('│')
+                        .trim_end_matches(['│', ' '])
+                        .to_string()
+                })
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+/// The single row beneath the row containing `marker`, trimmed the same way
+/// as [`rows_after`] -- for an output region that is exactly one line.
+fn line_after(buffer: &Buffer, marker: &str) -> String {
+    rows_after(buffer, marker, 1).remove(0)
 }
 
 /// The x of the sidebar's left border on the top row: the second box-drawing
@@ -203,5 +245,159 @@ fn a_metered_request_with_no_provider_name_is_still_known() {
     assert!(
         text.contains("123") && text.contains("456"),
         "the tokens that were counted are missing:\n{text}"
+    );
+}
+
+/// A two-cell task, reused by every test below: a header and two numbered
+/// cells, `[1]` and `[2]`.
+fn two_cell_task() -> Conversation {
+    conversation(vec![
+        Message::text(Role::User, "the task"),
+        Message::text(Role::Assistant, "first turn"),
+        Message::text(Role::Assistant, "second turn"),
+    ])
+}
+
+#[test]
+fn a_turn_renders_as_a_cell_with_an_input_and_an_output_region() {
+    let text = buffer_text(&rendered(&two_cell_task(), &known_served_by()));
+
+    let in1 = text.find("[1] in").expect("cell 1's input header renders");
+    let text1 = text.find("first turn").expect("cell 1's text renders");
+    let out1 = text
+        .find("[1] out")
+        .expect("cell 1's output header renders");
+    let in2 = text.find("[2] in").expect("cell 2's input header renders");
+    let text2 = text.find("second turn").expect("cell 2's text renders");
+    let out2 = text
+        .find("[2] out")
+        .expect("cell 2's output header renders");
+
+    assert!(
+        in1 < text1 && text1 < out1 && out1 < in2 && in2 < text2 && text2 < out2,
+        "cells must render as [1] in, its text, [1] out, [2] in, its text, \
+         [2] out, in that order:\n{text}"
+    );
+}
+
+#[test]
+fn the_latest_cell_shows_the_live_handle_table_through_the_one_renderer() {
+    let mut handles = HandleTable::new();
+    handles.declare(
+        "f",
+        Value::File(FileValue {
+            path: "a.rs".to_string(),
+            byte_len: 10,
+            line_count: 1,
+            mtime: "t".to_string(),
+            lines: vec!["x".to_string()],
+        }),
+        1,
+    );
+    handles.declare(
+        "arr",
+        Value::Array(vec![Value::Number(1.0), Value::Number(2.0)]),
+        1,
+    );
+
+    let expected = render_table(&handles, PREVIEW_TOKEN_CAP, TABLE_TOKEN_CAP);
+    assert!(!expected.is_empty(), "the fixture table must not be empty");
+    let expected_lines: Vec<String> = expected.lines().map(str::to_string).collect();
+
+    let buffer = rendered_with_handles(&two_cell_task(), &known_served_by(), &handles);
+
+    let actual = rows_after(&buffer, "[2] out", expected_lines.len());
+    assert_eq!(
+        actual, expected_lines,
+        "every line of render_table's output must appear beneath [2] out, in order"
+    );
+
+    let text = buffer_text(&buffer);
+    let out1 = text
+        .find("[1] out")
+        .expect("cell 1's output header renders");
+    let out2 = text
+        .find("[2] out")
+        .expect("cell 2's output header renders");
+    let earlier_region = &text[out1..out2];
+    for line in expected_lines.iter().filter(|line| !line.is_empty()) {
+        assert!(
+            !earlier_region.contains(line.as_str()),
+            "no handle content may appear under an earlier cell's output region:\n{earlier_region}"
+        );
+    }
+}
+
+#[test]
+fn an_output_region_with_nothing_to_show_says_so_rather_than_collapsing() {
+    let buffer = rendered(&two_cell_task(), &known_served_by());
+
+    assert_eq!(
+        line_after(&buffer, "[1] out"),
+        "(no outputs)",
+        "an earlier cell's output region must say so plainly, not collapse"
+    );
+    assert_eq!(
+        line_after(&buffer, "[2] out"),
+        "(no outputs)",
+        "the latest cell's output region must say so when its table is empty"
+    );
+}
+
+/// A source scan, not a behavioral test: `tui.rs` may call `render_table`
+/// and name the two token caps, and nothing else that would let it turn a
+/// handle into text on its own.
+#[test]
+fn the_tui_renders_no_handle_itself() {
+    let source = include_str!("../src/tui.rs");
+
+    assert!(
+        source.contains("render_table"),
+        "tui.rs must draw a handle only through the one renderer, render_table:\n{source}"
+    );
+
+    let cleaned = source
+        .replace("crate::runtime::preview::PREVIEW_TOKEN_CAP", "")
+        .replace("crate::runtime::preview::TABLE_TOKEN_CAP", "");
+    assert!(
+        !cleaned.contains("runtime::preview::"),
+        "tui.rs must not reach into runtime::preview beyond the two token caps:\n{source}"
+    );
+    assert!(
+        !source.contains("render_preview"),
+        "tui.rs must not call render_preview itself -- render_table is the one renderer"
+    );
+    assert!(
+        !source.contains("Value::"),
+        "tui.rs must not match on a handle's Value itself"
+    );
+}
+
+#[test]
+fn the_sidebar_is_unchanged_by_the_notebook() {
+    let baseline = rendered(
+        &conversation(vec![Message::text(Role::User, "hi")]),
+        &known_served_by(),
+    );
+    let notebook = rendered(&two_cell_task(), &known_served_by());
+
+    assert_eq!(
+        sidebar_left_edge(&notebook),
+        sidebar_left_edge(&baseline),
+        "the notebook's cells must not change the sidebar's width"
+    );
+
+    let text = buffer_text(&notebook);
+    assert!(
+        text.contains("pro-plan"),
+        "the sidebar must still show the entitlement:\n{text}"
+    );
+    assert!(
+        text.contains("anthropic") && text.contains("claude-sonnet-5"),
+        "the sidebar must still show the provider and model:\n{text}"
+    );
+    assert!(
+        text.contains("123") && text.contains("456"),
+        "the sidebar must still show the tokens:\n{text}"
     );
 }

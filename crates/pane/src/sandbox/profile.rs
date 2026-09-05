@@ -93,18 +93,26 @@ struct PathRule {
 /// One entry of §4's never-grantable set, expressed as a resolved subtree.
 #[derive(Debug, Clone)]
 struct NeverRule {
-    prefix: PathBuf,
-    /// `prefix` as a glob — its components followed by `**` — so a rule of
-    /// §4's set reads the same way to [`Profile::rules`] as one the document
-    /// wrote. It renders `starts_with` exactly: `**` matches the empty tail,
-    /// so the subtree's own root is covered.
+    /// The subtree this rule refuses, in [`spelling`] — the one form every
+    /// comparison in this module is made in, never a `Path`, because
+    /// `Path::starts_with` compares a `\\?\C:` prefix and a `C:` prefix as
+    /// different things while they name one directory.
+    prefix: Vec<String>,
+    /// `prefix` followed by `**`, so a rule of §4's set reads the same way to
+    /// [`Profile::rules`] as one the document wrote. It renders the prefix
+    /// test exactly: `**` matches the empty tail, so the subtree's own root
+    /// is covered.
     glob: Vec<String>,
     /// The project root, when this rule's subtree contains it, and nothing
     /// otherwise. It is the only exemption there is: a project checked out
     /// under `~/.config` must be able to read itself, and nothing else in
     /// `~/.config`. Dropping the rule instead handed the whole directory to
     /// any pattern that named it.
+    ///
+    /// Kept as a path because [`Rule::exempt_subtree`] hands it to a platform
+    /// applier; `except_spelling` is the same subtree in the comparison form.
     except: Option<PathBuf>,
+    except_spelling: Option<Vec<String>>,
     /// `true` for `.claude/**`, which is never writable but stays readable —
     /// `settings.json` is read before the sandbox is entered (§1.5).
     write_only: bool,
@@ -119,6 +127,10 @@ struct NeverRule {
 #[derive(Debug, Clone)]
 pub struct Profile {
     root: PathBuf,
+    /// `root` in [`spelling`], compiled once. Every containment question this
+    /// module asks about the project root is asked against this and never
+    /// against `root` itself, for the reason [`NeverRule::prefix`] gives.
+    root_spelling: Vec<String>,
     home: Option<PathBuf>,
     allow: Vec<PathRule>,
     deny: Vec<PathRule>,
@@ -173,6 +185,7 @@ impl Profile {
         let home = home_dir().map(|home| resolve(&home, None, None));
         let mut profile = Self {
             never: never_rules(&root, home.as_deref()),
+            root_spelling: spelling(&root),
             root,
             home,
             allow: Vec::new(),
@@ -379,7 +392,7 @@ fn register(profile: &mut Profile, pattern: &str, denying: bool) {
     // resolves to the project's parent, which is not a project-relative
     // grant by any reading. Refused rather than narrowed, and diagnosed, so
     // it is not a silent one.
-    if !is_rooted(&argument.replace('\\', "/")) && !glob.starts_with(&components(&profile.root)) {
+    if !is_rooted(&argument.replace('\\', "/")) && !glob.starts_with(&profile.root_spelling[..]) {
         profile.diagnostics.push(format!(
             "`{pattern}` is project-relative and resolves outside the project root; it grants nothing"
         ));
@@ -544,8 +557,12 @@ impl Profile {
             );
         }
         for segment in &segments {
+            // A leading redirect is not the command: `2>&1 cargo test` is
+            // matched on `cargo test`, never on the operand that happens to
+            // come first. `segment` itself is still what a refusal quotes.
+            let command_word = skip_leading_redirects(segment);
             for pattern in &self.command_deny {
-                if match_segment(pattern, segment, true) {
+                if match_segment(pattern, command_word, true) {
                     return denied(format!(
                         "`Bash({pattern})` in permissions.deny matches `{segment}`"
                     ));
@@ -554,7 +571,7 @@ impl Profile {
             if !self
                 .command_allow
                 .iter()
-                .any(|pattern| match_segment(pattern, segment, false))
+                .any(|pattern| match_segment(pattern, command_word, false))
             {
                 return denied(format!(
                     "no `Bash` pattern in permissions.allow admits `{segment}`"
@@ -587,7 +604,22 @@ impl Profile {
         path: &Path,
     ) -> Result<PathBuf, PermissionDenied> {
         let resolved = resolve(path, Some(&self.root), self.home.as_deref());
-        let shown = display(&resolved);
+        let shown = shown(&resolved);
+        let candidate = spelling(&resolved);
+        // The postcondition this function's own documentation states, held
+        // where it is produced rather than where it is read: a granted path
+        // is the absolute path the decision was made on, so opening it lands
+        // on the file this profile examined. A root that is not absolute is
+        // a literal-strings fixture — a Windows spelling on a Unix host —
+        // and has no absolute form to demand (see `resolve`).
+        let grant = |resolved: PathBuf| -> Result<PathBuf, PermissionDenied> {
+            debug_assert!(
+                resolved.is_absolute() || !self.root.is_absolute(),
+                "`check` granted the non-absolute `{}`; a caller opening it would open a file this profile never examined",
+                resolved.display()
+            );
+            Ok(resolved)
+        };
         let denied = |rule: String| -> Result<PathBuf, PermissionDenied> {
             Err(PermissionDenied {
                 tool: tool.to_string(),
@@ -599,26 +631,25 @@ impl Profile {
             if never.write_only && access != Access::Write {
                 continue;
             }
-            if !resolved.starts_with(&never.prefix) {
+            if !contains(&never.prefix, &candidate) {
                 continue;
             }
             // The project's own subtree, and only it, is exempt — and only
             // from a rule whose subtree contains the root.
-            if let Some(except) = &never.except
-                && resolved.starts_with(except)
+            if let Some(except) = &never.except_spelling
+                && contains(except, &candidate)
             {
                 continue;
             }
             return denied(never.rule.clone());
         }
-        let candidate = components(&resolved);
         for rule in &self.deny {
             if covers(&rule.glob, &candidate, true) {
                 return denied(format!("`{}` in permissions.deny", rule.written));
             }
         }
-        if resolved.starts_with(&self.root) {
-            return Ok(resolved);
+        if contains(&self.root_spelling, &candidate) {
+            return grant(resolved);
         }
         let granted = self.allow.iter().any(|rule| {
             let wanted = match access {
@@ -628,7 +659,7 @@ impl Profile {
             wanted && covers(&rule.glob, &candidate, false)
         });
         if granted {
-            return Ok(resolved);
+            return grant(resolved);
         }
         denied(access.only_root_sentence().to_string())
     }
@@ -649,20 +680,32 @@ impl Profile {
 /// specific entries are pushed before the whole of `$HOME` so a refusal cites
 /// the section a person would look up.
 fn never_rules(root: &Path, home: Option<&Path>) -> Vec<NeverRule> {
-    let dot_claude = root.join(".claude");
+    let root_spelling = spelling(root);
+    let dot_claude = spelling(&root.join(".claude"));
     let mut rules = vec![NeverRule {
         glob: subtree_glob(&dot_claude),
         prefix: dot_claude,
         except: None,
+        except_spelling: None,
         write_only: true,
         rule: "`.claude/**` is never writable: a program that could edit it could widen the profile it was derived from (sandbox-grants.md §1.5)".to_string(),
     }];
+    // `Some(root)`, and it is what makes §4.2 hold on Windows: `/etc/sudoers`
+    // has a root and no drive there, so a candidate spelled that way acquires
+    // the project's drive from `Path::join` and becomes `C:/etc/sudoers`. A
+    // prefix resolved without the same root stayed `/etc/sudoers`, matched no
+    // candidate at all, and `Write(/**)` reached the file. On macOS and Linux
+    // every prefix here is already absolute, so the argument is never used.
     let mut push = |prefix: PathBuf, write_only: bool, rule: String| {
-        let prefix = resolve(&prefix, None, None);
-        let except = root.starts_with(&prefix).then(|| root.to_path_buf());
+        let prefix = resolve(&prefix, Some(root), None);
+        let prefix = spelling(&prefix);
+        let except = contains(&prefix, &root_spelling).then(|| root.to_path_buf());
+        let mut glob = prefix.clone();
+        glob.push("**".to_string());
         rules.push(NeverRule {
-            glob: subtree_glob(&prefix),
+            except_spelling: except.as_ref().map(|_| root_spelling.clone()),
             prefix,
+            glob,
             except,
             write_only,
             rule,
@@ -716,9 +759,9 @@ fn never_rules(root: &Path, home: Option<&Path>) -> Vec<NeverRule> {
     rules
 }
 
-/// A resolved subtree as a glob: its components, then `**`.
-fn subtree_glob(prefix: &Path) -> Vec<String> {
-    let mut glob = components(prefix);
+/// A resolved subtree as a glob: its spelling, then `**`.
+fn subtree_glob(prefix: &[String]) -> Vec<String> {
+    let mut glob = prefix.to_vec();
     glob.push("**".to_string());
     glob
 }
@@ -858,10 +901,21 @@ fn home_dir() -> Option<PathBuf> {
 /// The tail that does not exist yet — a file about to be created, which can
 /// therefore be no symlink — is appended to the resolved prefix, so a write
 /// check decides on the same spelling a later read of that file would.
+///
+/// **[`Profile::check`] never returns a non-absolute path on a host whose
+/// root is absolute**, and the anchoring condition is the whole of why. A
+/// candidate is read in *the root's own spelling family*: a drive-rooted
+/// `C:\x` is already rooted under a `\\?\C:\proj` or `C:/proj` root and
+/// must not acquire the project's prefix a second time, while under
+/// `/Users/…/proj` the same string is one relative filename that happens to
+/// contain backslashes, and leaving it unanchored granted a **relative**
+/// path — the file a caller then opened was not the file the decision was
+/// made on.
 fn resolve(path: &Path, root: Option<&Path>, home: Option<&Path>) -> PathBuf {
     let mut expanded = expand_tilde(path, home);
-    if !expanded.is_absolute()
-        && let Some(root) = root
+    if let Some(root) = root
+        && !expanded.is_absolute()
+        && !(windows_rooted(&expanded) && windows_rooted(root))
     {
         expanded = root.join(expanded);
     }
@@ -920,9 +974,11 @@ fn expand_tilde(path: &Path, home: Option<&Path>) -> PathBuf {
 }
 
 /// Every part of a command line a shell would run as a command of its own:
-/// the sequence and pipeline operators (`;`, `&&`, `||`, `|`, `&` and a
-/// newline), plus the contents of a command substitution (`$(…)`, backticks),
-/// which is a command line in its own right.
+/// the sequence and pipeline operators (`;`, `&&`, `||`, `|`, a background
+/// `&` and a newline), plus the contents of a command substitution (`$(…)`,
+/// backticks), which is a command line in its own right — but **not** a `&`
+/// that is part of a redirect operator (`2>&1`, `>&2`, `<&0`, `&>file`,
+/// `&>>file`), because that `&` never starts a new command.
 ///
 /// Deliberately not a shell parser: quoting is not tracked, so a literal `;`
 /// inside quotes splits too. That asks about more parts than a shell would
@@ -945,6 +1001,10 @@ fn command_segments(command_line: &str) -> Vec<String> {
                 out.extend(command_segments(&inner));
                 index = next;
             }
+            '&' if is_redirect_ampersand(&chars, index) => {
+                current.push('&');
+                index += 1;
+            }
             ';' | '\n' | '&' | '|' => {
                 flush_segment(&mut out, &mut current);
                 index += 1;
@@ -957,6 +1017,51 @@ fn command_segments(command_line: &str) -> Vec<String> {
     }
     flush_segment(&mut out, &mut current);
     out
+}
+
+/// Whether the `&` at `index` is part of a redirect operator rather than a
+/// background or `&&` operator: immediately after a `>` or `<` (`2>&1`,
+/// `<&0`), or immediately before a `>` (`&>file`, `&>>file`). A leading
+/// file-descriptor digit needs no separate check here — it was already an
+/// ordinary character pushed onto the current segment before this `&` was
+/// reached.
+fn is_redirect_ampersand(chars: &[char], index: usize) -> bool {
+    let prev = index.checked_sub(1).and_then(|i| chars.get(i));
+    let next = chars.get(index + 1);
+    matches!(prev, Some('>') | Some('<')) || matches!(next, Some('>'))
+}
+
+/// Whether `word` is entirely one redirect operator with its operand
+/// attached — `N>file`, `N>&M`, `<file`, `>file`, `>>file`, `&>file`,
+/// `&>>file` — the same forms [`command_segments`] no longer splits on.
+fn is_redirect_word(word: &str) -> bool {
+    if let Some(rest) = word.strip_prefix("&>>").or_else(|| word.strip_prefix("&>")) {
+        return !rest.is_empty();
+    }
+    let digits_end = word
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(word.len());
+    let rest = &word[digits_end..];
+    let operand = rest
+        .strip_prefix(">>")
+        .or_else(|| rest.strip_prefix('>'))
+        .or_else(|| rest.strip_prefix('<'));
+    matches!(operand, Some(operand) if !operand.is_empty())
+}
+
+/// `segment` with every leading redirect word removed, so matching begins at
+/// the command: `2>&1 cargo test` becomes `cargo test`, while `1 cargo test`
+/// — a literal word, not an operator — is returned unchanged.
+fn skip_leading_redirects(segment: &str) -> &str {
+    let mut rest = segment.trim_start();
+    loop {
+        let word_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let word = &rest[..word_end];
+        if word.is_empty() || !is_redirect_word(word) {
+            return rest;
+        }
+        rest = rest[word_end..].trim_start();
+    }
 }
 
 /// The text up to the `close` that balances the one already consumed, and the
@@ -993,15 +1098,118 @@ fn display(path: &Path) -> String {
     path.to_string_lossy().into_owned()
 }
 
-/// Splits a path into `/`-separated components, with `\` treated as a
-/// separator too so one matcher serves every host.
-fn components(path: &Path) -> Vec<String> {
-    display(path)
-        .replace('\\', "/")
+/// One spelling of one path, and the only form this module ever compares two
+/// paths in.
+///
+/// **Two spellings of one path are how a containment check comes to disagree
+/// with itself** (§2), and on Windows one file has three: `fs::canonicalize`
+/// returns the *verbatim* `\\?\C:\…`, an environment variable or a settings
+/// pattern returns the ordinary `C:\…`, and either may carry an 8.3 short
+/// name such as `RUNNER~1`. This function decides the first two — `\` folded
+/// to `/`, a verbatim prefix reduced to the ordinary spelling it stands for,
+/// the drive letter upper-cased — and [`canonical_prefix`] decides the third,
+/// because only the filesystem that issued a short name can say what it is
+/// short for.
+///
+/// The fold is unconditional and always was: `\` is a separator here on every
+/// host, which is what lets one matcher serve all three. The *reduction* is
+/// not, and that condition is a containment rule rather than tidiness — see
+/// [`reduced_verbatim`].
+fn spelling(path: &Path) -> Vec<String> {
+    let folded = display(path).replace('\\', "/");
+    let text = reduced_verbatim(&folded).unwrap_or(folded);
+    let mut parts: Vec<String> = text
         .split('/')
         .filter(|part| !part.is_empty())
         .map(str::to_string)
-        .collect()
+        .collect();
+    // The **drive letter**, and not the component it begins. `C:foo` and
+    // `C:FOO` are two files on a case-sensitive filesystem, and folding the
+    // whole component made an `allow` match case-insensitively there —
+    // against `match_segment`'s rule that an `allow` never folds, whose
+    // reason is that folding lets one spelling reach a path its author never
+    // wrote. Only the first character is touched; `is_drive_prefixed`
+    // guarantees it is ASCII, so byte 1 is a character boundary.
+    if let Some(first) = parts.first_mut()
+        && is_drive_prefixed(first)
+    {
+        first[..1].make_ascii_uppercase();
+    }
+    parts
+}
+
+/// `folded` without its Windows verbatim prefix, or `None` when it carries
+/// none — where "carries one" means `//?/` followed by something only Windows
+/// produces.
+///
+/// That condition is the isolation half of the reduction. `//?/` is an
+/// unusual but perfectly legal absolute path on Unix, so an unconditional
+/// strip would reduce `//?/proj/a.rs` to the *relative* `proj/a.rs`, which
+/// [`resolve`] then anchors inside the project root. Requiring a drive letter
+/// or the `UNC/` marker is what keeps the Windows repair from widening
+/// containment on every other platform — the same test, for the same reason,
+/// as `crates/glasshouse/src/commands/context_firewall.rs`.
+///
+/// **On Unix this reduction is reachable only from a backslash-spelled
+/// candidate.** `Path::components` collapses `//` before [`spelling`] sees
+/// it, so a `/`-spelled `//?/…` argument never carries the prefix this
+/// function tests for by the time it is asked — which means
+/// `a_verbatim_and_a_plain_spelling_of_one_path_decide_identically`
+/// exercises the `\\?\` arm on this host and never the `//?/` one. It is
+/// not cross-platform cover for that arm.
+fn reduced_verbatim(folded: &str) -> Option<String> {
+    let rest = folded.strip_prefix("//?/")?;
+    if is_drive_prefixed(rest) {
+        return Some(rest.to_string());
+    }
+    // `\\?\UNC\srv\share` is the verbatim way of writing `\\srv\share`: the
+    // marker stands in for the second leading separator.
+    let marker = rest.get(..4)?;
+    marker
+        .eq_ignore_ascii_case("unc/")
+        .then(|| format!("//{}", &rest[4..]))
+}
+
+/// Whether `text` begins with a drive letter and a colon.
+fn is_drive_prefixed(text: &str) -> bool {
+    let mut chars = text.chars();
+    matches!(
+        (chars.next(), chars.next()),
+        (Some(drive), Some(':')) if drive.is_ascii_alphabetic()
+    )
+}
+
+/// Whether `path` is already rooted in a spelling only Windows produces: a
+/// drive letter, a verbatim prefix, or a UNC share.
+///
+/// Asked on every host, and deliberately. [`is_rooted`] already asks exactly
+/// this of a written *pattern* without a `#[cfg]`, and a candidate path that
+/// got a different answer is the disagreement this module exists to prevent —
+/// a never-rule computed for a Windows spelling could never meet a candidate
+/// that had been anchored inside the project instead. On macOS and Linux the
+/// question is only ever put to a path that is not already absolute, so
+/// nothing beginning `/` reaches it and the only spelling that can match is a
+/// literal drive letter, which no path in a Unix project is.
+fn windows_rooted(path: &Path) -> bool {
+    let text = display(path).replace('\\', "/");
+    text.starts_with("//") || is_drive_prefixed(&text)
+}
+
+/// `path` as one string, for the sentence a person reads.
+///
+/// The verbatim prefix is reduced here too, so a refusal quotes the spelling
+/// the settings file would use rather than the one the kernel handed back.
+/// Nothing else is touched: a path carrying no verbatim prefix — which is
+/// every path on macOS and Linux — is returned exactly as it was, separators
+/// included.
+fn shown(path: &Path) -> String {
+    let text = display(path);
+    reduced_verbatim(&text.replace('\\', "/")).unwrap_or(text)
+}
+
+/// Whether `candidate` is `prefix` or lies beneath it, in [`spelling`].
+fn contains(prefix: &[String], candidate: &[String]) -> bool {
+    prefix.len() <= candidate.len() && prefix.iter().zip(candidate).all(|(a, b)| a == b)
 }
 
 /// Whether a written pattern names an absolute path, a `~`-rooted one, or a
@@ -1026,11 +1234,20 @@ fn is_rooted(pattern: &str) -> bool {
 /// [`register`] rather than compiled, which is what makes it true that a
 /// project-relative glob cannot match its way out of the project.
 fn resolve_pattern(root: &Path, home: Option<&Path>, pattern: &str) -> Vec<String> {
-    let normalized = pattern.replace('\\', "/");
+    // Both halves are reduced before they are spliced, and the pattern's own
+    // half matters as much as the root's: `?` is a glob metacharacter here, so
+    // a verbatim `//?/C:/…` left in either one splits at the `?` and anchors
+    // the pattern under a doubled drive prefix that matches no path at all.
+    // That is what made every project-relative pattern — `Read(**)`,
+    // `Read(src/**)` — register nothing on Windows.
+    let normalized = ordinary(&pattern.replace('\\', "/"));
     let anchored = if is_rooted(&normalized) {
         normalized
     } else {
-        format!("{}/{normalized}", display(root).replace('\\', "/"))
+        format!(
+            "{}/{normalized}",
+            ordinary(&display(root).replace('\\', "/"))
+        )
     };
     let mut literal = Vec::new();
     let mut rest = Vec::new();
@@ -1045,10 +1262,15 @@ fn resolve_pattern(root: &Path, home: Option<&Path>, pattern: &str) -> Vec<Strin
     let mut out = if literal_path.is_empty() {
         Vec::new()
     } else {
-        components(&resolve(Path::new(&literal_path), Some(root), home))
+        spelling(&resolve(Path::new(&literal_path), Some(root), home))
     };
     out.extend(rest.into_iter().filter(|part| !part.is_empty()));
     out
+}
+
+/// `folded` with a Windows verbatim prefix reduced, and unchanged otherwise.
+fn ordinary(folded: &str) -> String {
+    reduced_verbatim(folded).unwrap_or_else(|| folded.to_string())
 }
 
 /// Splits `Name(argument)` into its parts; a bare `Name` has no argument.

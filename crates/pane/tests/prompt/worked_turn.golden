@@ -1,0 +1,22 @@
+Every file that names `IntegrationId` — how many are tests, and which
+production files would a new variant force me to touch?
+===MSG===
+```pane
+const hits = await grep({ pattern: "IntegrationId", glob: "crates/glasshouse/**/*.rs" });
+const adapter = await read({ path: "crates/glasshouse/src/harness/mod.rs" });
+```
+===MSG===
+[cell 1 yielded in 412 ms]
+
+## Handles
+{{HANDLES}}
+
+## Budget
+turn cap 8,000 · task 3,412/400,000 · cells 1/40
+===MSG===
+```pane
+const isTest = (m) => m.path.startsWith("crates/glasshouse/tests/");
+const inTests = hits.filter(isTest);
+const prodFiles = new Set(hits.filter(m => !isTest(m)).map(m => m.path));
+return { total: hits.length, in_tests: inTests.length, prod_files: prodFiles.size };
+```
