@@ -3,7 +3,9 @@
 
 use pane::prompt::{self, Budget, CellResult, ErrorSection, Extracted};
 use pane::runtime::handles::{HandleTable, render_table};
-use pane::runtime::preview::{FileValue, PREVIEW_TOKEN_CAP, TABLE_TOKEN_CAP, Value};
+use pane::runtime::preview::{
+    ArrayValue, FileValue, PREVIEW_TOKEN_CAP, StringValue, TABLE_TOKEN_CAP, Value,
+};
 use pane::tools::registry::{self, Tool};
 
 /// §7's four messages, as a golden file. The `{{HANDLES}}` marker stands in
@@ -55,13 +57,27 @@ fn the_worked_turn_renders_byte_for_byte() {
     let mut fixture = HandleTable::new();
     fixture.declare(
         "hits",
-        Value::Array(vec![
-            Value::String("crates/glasshouse/tests/gateway_translate_effort.rs:29".into()),
-            Value::String("crates/glasshouse/tests/gateway_translate_effort.rs:512".into()),
-            Value::String("crates/glasshouse/tests/gateway_translate_responses.rs:35".into()),
-            Value::String("crates/glasshouse/src/session/store/record.rs:425".into()),
-            Value::String("crates/pane/src/tools/registry.rs:12".into()),
-        ]),
+        Value::Array(ArrayValue::sampled(
+            5,
+            vec![
+                Value::String(StringValue::sampled(
+                    54,
+                    "crates/glasshouse/tests/gateway_translate_effort.rs:29".to_string(),
+                )),
+                Value::String(StringValue::sampled(
+                    55,
+                    "crates/glasshouse/tests/gateway_translate_effort.rs:512".to_string(),
+                )),
+                Value::String(StringValue::sampled(
+                    57,
+                    "crates/glasshouse/tests/gateway_translate_responses.rs:35".to_string(),
+                )),
+            ],
+            Some(Value::String(StringValue::sampled(
+                36,
+                "crates/pane/src/tools/registry.rs:12".to_string(),
+            ))),
+        )),
         1,
     );
     fixture.declare(

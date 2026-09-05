@@ -5,7 +5,7 @@
 
 use pane::contract::{Conversation, Message, Role, ServedBy};
 use pane::runtime::handles::{HandleTable, render_table};
-use pane::runtime::preview::{FileValue, PREVIEW_TOKEN_CAP, TABLE_TOKEN_CAP, Value};
+use pane::runtime::preview::{ArrayValue, FileValue, PREVIEW_TOKEN_CAP, TABLE_TOKEN_CAP, Value};
 use pane::tui::render;
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
@@ -296,7 +296,11 @@ fn the_latest_cell_shows_the_live_handle_table_through_the_one_renderer() {
     );
     handles.declare(
         "arr",
-        Value::Array(vec![Value::Number(1.0), Value::Number(2.0)]),
+        Value::Array(ArrayValue::sampled(
+            2,
+            vec![Value::Number(1.0), Value::Number(2.0)],
+            None,
+        )),
         1,
     );
 
