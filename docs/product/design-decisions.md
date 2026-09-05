@@ -12997,3 +12997,27 @@ describe `report_task_boundary_routing`.
     //! Nothing from a session's output or a memory's body is ever written to
     //! stderr or to a log line by this module; those travel only inside a tool
     //! result.
+
+## pane's screen as a notebook — the user's idea, 2026-09-05 23:20
+
+**The idea, in the user's words:** *since code snippets and objects are its distinctive feature, it
+could be looking like a Jupyter notebook — blocks, each turn.* Recorded as a design direction for the
+61C/61E screen, not yet a package.
+
+**Why it fits without a new concept.** `runtime-contract.md` §1 already names a turn's program a
+**cell**; §3 gives every result a type-directed, size-capped preview and §2 a handle the model named;
+§4 records programs and previews in the rollout and never objects. A notebook view renders exactly
+those four things in the order they already exist: the cell's program as the input block, its
+previews and handles as the outputs beneath it, a thrown result (§5) as the error output of that
+cell, and a terminal `return` (the direct-verified-completion delta, `phase-61.md` §61E) as the last
+cell's rendered value. The conversation column of line 2449 becomes a column of cells; the telemetry
+sidebar is unchanged.
+
+**What it decides and what it does not.** It decides the *shape* of the conversation column — a
+sequence of input/output blocks keyed by cell, scrollable, with a cell's outputs collapsible to the
+preview line. It does not decide execution (a notebook re-runs cells; pane never re-runs a turn, §5),
+does not add a second serialization of any result (2465 — the outputs are the previews the model
+already saw), and does not put the model's own text anywhere but the cell that produced it.
+**Successor:** `GH-PANE-NOTEBOOK-VIEW` (Amber, pane-lead's lane), after `GH-PANE-61C-FIXUPS` lands the
+real `CrosstermBackend` renderer — the fixups worker should shape that renderer as a column of cells
+from the start rather than a chat transcript to be re-laid later.
