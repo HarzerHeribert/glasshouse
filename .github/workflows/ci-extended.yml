@@ -29,13 +29,6 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
-  # Compile cache backed by the Actions cache service. Swatinem/rust-cache
-  # keeps a whole target/ and this workspace's 160 test binaries blow through
-  # the 10 GB per-repository cap in one run; sccache stores per-crate outputs
-  # and survives that.
-  SCCACHE_GHA_ENABLED: "true"
-  RUSTC_WRAPPER: sccache
-  CARGO_INCREMENTAL: "0"
 
 jobs:
   # Everything a runner can answer about the tree: every OS and architecture
@@ -46,6 +39,18 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 90
     continue-on-error: ${{ matrix.toolchain == 'beta' || matrix.toolchain == 'nightly' }}
+    # Compile cache backed by the Actions cache service. Swatinem/rust-cache
+    # keeps a whole target/ and this workspace's 160 test binaries blow through
+    # the 10 GB per-repository cap in one run; sccache stores per-crate outputs
+    # and survives that. Scoped to THIS job: the first run of this workflow set
+    # RUSTC_WRAPPER at workflow level and the audit job, which never installs
+    # sccache, failed on `could not execute process sccache` before doing
+    # anything -- the same absence-is-not-an-error rule scripts/lib/accel.sh
+    # follows locally, learned again here.
+    env:
+      SCCACHE_GHA_ENABLED: "true"
+      RUSTC_WRAPPER: sccache
+      CARGO_INCREMENTAL: "0"
     strategy:
       fail-fast: false
       matrix:
@@ -173,8 +178,15 @@ jobs:
         run: scripts/check-doc-boundary.sh
       - name: Evidence coverage
         run: python3 scripts/check-evidence-coverage.py --strict --strict-consistency
+      # The orchestration scripts' tests write fixtures under .agent-runtime/,
+      # which is gitignored and exists only in a developer's main checkout --
+      # a runner has no such directory and the tests fail on the first write.
+      # Giving the runner the same shape is the honest fix; teaching every test
+      # to create it is a change to code this workflow should not be making.
       - name: Script tests
-        run: for t in scripts/tests/test_*.py; do python3 "$t" || exit 1; done
+        run: |
+          mkdir -p .agent-runtime
+          for t in scripts/tests/test_*.py; do python3 "$t" || exit 1; done
 
   # Known-vulnerable dependencies, from the RustSec advisory database. Free
   # to run, and the only check in this file that can go red with no change
