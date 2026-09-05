@@ -6843,3 +6843,145 @@ with it.
 //! text fragment leaves on the chunk that carried it. The one thing held is
 //! the message's final delta, which cannot be written before the message
 //! has finished by construction.
+
+## Trims: `api/client.rs` — history moved out of comments by `GH-TRIM-API-CLIENT`, 2026-09-05
+
+### module doc
+
+//! The half of the control door that knocks — capability map lines 745, 746
+//! and 747.
+//!
+//! `api serve` answers `send_message` and `interrupt` against a
+//! `SessionRuntime` it owns, and has done since Phase 42. Nothing in this
+//! repository ever *called* it: `UnixStream::connect` appeared nowhere in
+//! `crates/glasshouse/src`, and `cli::ApiCommand` had exactly one variant,
+//! `Serve`. Glasshouse could answer this door and could not knock on it, so
+//! the transport that carries a person's keystrokes into a running worker
+//! existed with no person on either end of it. This module is the missing
+//! end.
+//!
+//! # Why this closes 746 rather than merely relaying
+//!
+//! *"Allow direct user input to an orchestrated worker without requiring the
+//! orchestrator as an intermediary."* An orchestrated worker's pseudo-terminal
+//! is private to the process that spawned it — `super`'s own doc comment
+//! explains why nothing else can reach one — so `api serve` is unavoidably
+//! the process that performs the write. What line 746 forbids is not *a*
+//! process in the middle; it is **the orchestrator** in the middle. Those are
+//! different things and the difference is observable:
+//!
+//! - `glasshouse api send` is a process a person starts from their own
+//!   terminal. No agent is asked, no agent's turn is consumed, and no agent
+//!   need even be running — the door serves a project, not a conversation.
+//! - The door does not decide anything about the text. It is
+//!   `unix::dispatch`'s two shortest arms: resolve the session,
+//!   write the bytes, answer. There is no model, no prompt, and no policy on
+//!   this path.
+//!
+//! An orchestrator relaying the same words would have to be running, would
+//! spend a turn, and could reword them. None of those is true here.
+//!
+//! # The third verb, and why it completes line 745
+//!
+//! *"Allow the user to enter any orchestrated worker while it is running."*
+//! Send and interrupt could put a person's words and a person's `Ctrl-C`
+//! into a worker and could not show them a single character of what came
+//! back, so this module shipped with the honest note that a user could type
+//! into a worker blind. `glasshouse api read` is the half that was missing:
+//!
+//!     glasshouse api read --session <ID> [--max-bytes N]
+//!
+//! It is answered by `Request::RecentOutput`, which is
+//! `session::api::SessionApi::recent_output` — a read of a live session's
+//! scrollback tail, inside the process that owns the pty, project-scoped
+//! through the same seam send and interrupt resolve through. That function
+//! existed for this module's whole life with **no production caller at
+//! all**; the note this section replaces is what recorded it, and this is
+//! the caller.
+//!
+//! **What this is not.** A transparent full-terminal attach — a person's own
+//! terminal handed to the worker's, keystroke for keystroke — is a different
+//! thing again, and `session::attach`'s own doc comment explains why it is a
+//! larger decision than a verb. What these three commands are is a person in
+//! a running worker without an agent between them: words in, an interrupt,
+//! and the terminal read back.
+//!
+//! # It says who it is, and that is the point
+//!
+//! Every write this module makes carries `"origin": "user"`, because a
+//! process a person started from their own terminal is the one caller on this
+//! door that knows a person is behind it. Until it did, the event log could
+//! not tell a person's intervention from an orchestrator's message: both went
+//! through `session::api::SessionApi`, which hard-wired
+//! `events::MessageOrigin::Machine`, and produced rows equal field for field.
+//! That was harmless while nothing human reached the door and stopped being
+//! harmless the moment these three commands shipped.
+//!
+//! **It is attribution, not authentication.** A different program could
+//! connect to the same socket and claim to be a person; nothing here or on
+//! the far side tries to stop it, and nothing should be built that does. The
+//! socket is already restricted to this user, so a caller that lied would be
+//! lying to that user about that user — and the honest callers, which are the
+//! ones that exist, stop being indistinguishable. See
+//! `protocol::RequestOrigin`.
+//!
+//! **It never retries.** One connect, one line written, one line read. A send
+//! refused by the terminal's canonical line limit
+//! (`session::RuntimeError::LineTooLong`) is a refusal that *prevented* a
+//! wedge; a client that retried it would be attempting to cause the wedge the
+//! refusal exists to avoid.
+//!
+//! **It has no `--socket`.** `api serve` takes one because a server may be
+//! told where to bind; a client that took one could be aimed at *another
+//! project's* door, and every project-scope check on the far side is a check
+//! about the session named in the request, not about which door received it.
+//! Aiming is the whole attack, so the aim is not a parameter: this resolves
+//! the socket from the same already-resolved [`Runtime`] every other
+//! subcommand resolves, and the only way to address a different project is
+//! `--scope`, which changes which project you are rather than letting one
+//! project reach into another.
+//!
+//! # The duplicated socket path, and why it is not left to drift
+//!
+//! [`socket_path_for`] is a copy of `unix::socket_path_for`, which is private
+//! to its own module and was not made visible here because the server is not
+//! this half's to change. The copy is proven
+//! against the original the only way that is worth anything —
+//! `tests/worker_access.rs::the_client_finds_the_door_the_server_actually_bound`
+//! starts the real `glasshouse api serve`, reads the path it announces, and
+//! drives a real send through this client against both branches of the
+//! computation. If the two ever disagree, every client test in that file
+//! fails to connect.
+
+### `fn read_output`
+
+/// Show the recent terminal output of a live session in this project — map
+/// line 745.
+///
+/// # Four answers, kept apart
+///
+/// The door distinguishes four things about a read, and a client that
+/// flattened any two of them would hand the user a fact that is not true:
+///
+/// - **A live session with output** — written to standard output, verbatim
+///   and with nothing added, and nothing else is written there. What a
+///   worker's terminal holds is what a pipe receives.
+/// - **A live session that has printed nothing yet** — `ok` with an empty
+///   `output`. Said on standard error, because it is Glasshouse talking
+///   rather than the worker, and it succeeds: a worker that has said nothing
+///   is not a failure to read it.
+/// - **A session no process is running** — the door's `not live` refusal,
+///   which fails. This is the distinction the whole verb turns on:
+///   `SessionApi::recent_output` refuses rather than answering `""` because
+///   *"returning an empty string would be a lie the caller has no way to
+///   detect"*, and a client that printed nothing for both would have told
+///   that lie on the door's behalf.
+/// - **No such session in this project** — the door's scoped sentence,
+///   which fails. Passed through unchanged, as every error on this path is;
+///   see [`call`].
+///
+/// `max_bytes` is optional rather than defaulted here on purpose. The door
+/// owns both the default and the ceiling, so a client carrying its own copy
+/// of either could drift from the door it is talking to — and the ceiling in
+/// particular is not a client's to state, because a client cannot enforce
+/// it.
