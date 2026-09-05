@@ -101,15 +101,27 @@ esac
 # the path inside the prompt that was unusable. Resolve it here, once.
 PACKET="$(cd "$(dirname "$PACKET")" && pwd)/$(basename "$PACKET")"
 
-ARM="FIRST, before reading anything: arm your continuity watch, or you will run out of context mid-package with nothing to show for it. Run Monitor(command: \"${REPO}/scripts/continuity-watch.sh --role worker\", persistent: true). It finds your session itself; if it prints CONTINUITY NOT ARMED, pass --session with the last path component of your scratchpad directory and run it again. Never \`cd\` inside a shell command: use absolute paths and \`git -C\`. A \`cd\` followed by a read makes the permission classifier stop and ask, and nobody is watching your pane to answer (2026-09-03: three workers sat on that prompt for half an hour). THEN:"
-# Two build facts every worker hits and none can discover cheaply: this pane
-# inherits ANTHROPIC_BASE_URL from Claude Code, which fails exactly one
-# pty_smoke assertion for a reason that is not the tree; and RUSTFLAGS is
-# never set in this workspace (CLAUDE.md, *Verification*, rules 1 and 3).
-# Said here, once, because a worker that meets the red first and the rule
-# never will "fix" the test or re-add the flag.
-BUILD_NOTE="Two build facts: (1) if pty_smoke fails on 'overlay's own environment variable leaked', that is ANTHROPIC_BASE_URL inherited from this Claude Code pane, not your change - confirm once with 'env -u ANTHROPIC_BASE_URL cargo test --test pty_smoke', say so in the report, do not alter the test. (2) Never set RUSTFLAGS; warnings come from [workspace.lints.rust]. Use 'scripts/ci-local.sh --scoped' for the fast tier and 'scripts/blast-radius.sh' before reporting."
-PROMPT="${ARM} Read ${PACKET} now and follow it exactly. Read ONLY the files its 'READ ONLY THIS' section names - reading more is the documented way workers waste context. Do not commit. Write your report to the path the packet's REPORT TO section gives. ${BUILD_NOTE}"
+# MEASURED ROOT CAUSE (2026-09-05): a single long `cmux send` payload can
+# lose an INTERIOR chunk, not just get truncated from one end. The failing
+# 1489-byte prompt was missing bytes 262-1285 -- a 1023-byte hole, one ~1KB
+# chunk dropped from a single send call -- with the packet path (at offset
+# 782) inside the missing span. The earlier fix here only DETECTED that after
+# the fact (grep the screen for $PACKET, retry once). The actual fix is to
+# stop handing `cmux send` a payload long enough to trigger the hole: the
+# typed prompt is kept under 700 bytes (everything else moves to
+# $LAUNCH_NOTES, read from disk instead of typed), and what IS typed is sent
+# in <=400-byte chunks with a pause between them rather than one long call.
+FIRST_SENTENCE="FIRST, before reading anything: arm your continuity watch, or you will run out of context mid-package with nothing to show for it."
+LAUNCH_NOTES="${REPO}/.agent-runtime/launch-notes.md"
+mkdir -p "$(dirname "$LAUNCH_NOTES")"
+cat > "$LAUNCH_NOTES" <<NOTES
+Run Monitor(command: "${REPO}/scripts/continuity-watch.sh --role worker", persistent: true). It finds your session itself; if it prints CONTINUITY NOT ARMED, pass --session with the last path component of your scratchpad directory and run it again. Never \`cd\` inside a shell command: use absolute paths and \`git -C\`. A \`cd\` followed by a read makes the permission classifier stop and ask, and nobody is watching your pane to answer (2026-09-03: three workers sat on that prompt for half an hour).
+
+Read ONLY the files the packet's 'READ ONLY THIS' section names -- reading more is the documented way workers waste context. Do not commit. Write your report to the path the packet's REPORT TO section gives.
+
+Two build facts: (1) if pty_smoke fails on 'overlay's own environment variable leaked', that is ANTHROPIC_BASE_URL inherited from this Claude Code pane, not your change - confirm once with 'env -u ANTHROPIC_BASE_URL cargo test --test pty_smoke', say so in the report, do not alter the test. (2) Never set RUSTFLAGS; warnings come from [workspace.lints.rust]. Use 'scripts/ci-local.sh --scoped' for the fast tier and 'scripts/blast-radius.sh' before reporting.
+NOTES
+PROMPT="${FIRST_SENTENCE} Read ${LAUNCH_NOTES} now for the rest of the arming instructions and build notes, then read ${PACKET} and follow it exactly."
 
 # Built here, before the --print-prompt short-circuit, so that path can also
 # expose the launch command a worker actually receives -- not just the prompt
@@ -268,8 +280,60 @@ done
 #
 # `scripts/tests/test_launch_prompts.py` fails the gate if this line loses the
 # instruction again.
-cmux send --surface "$surface" "$PROMPT" >/dev/null
-sleep 1
+#
+# PROVE THE PACKET PATH LANDED BEFORE PRESSING ENTER.
+# -----------------------------------------------------
+# Ten launches on 2026-09-05; three delivered only the TAIL of this prompt —
+# the pane showed it starting mid-word, the worker had nothing to do, and step
+# 4 below still reported ACCEPTED because the token counter moved for a
+# truncated prompt too (the worker's own reply cost tokens). One of those
+# three lost its MIDDLE, not its head or tail: `Monitor(command: "` and the
+# text that should immediately follow it were on screen with a gap between
+# them and the rest of the line resuming later intact — so a long `cmux send`
+# can drop an interior chunk of the payload, not only truncate from one end.
+# That is why this checks for $PACKET specifically (an absolute path that
+# appears exactly once and never wraps mid-token in practice) rather than for
+# a contiguous prefix or suffix of $PROMPT: a middle-drop can leave both ends
+# of the text intact while removing the one part this check must catch, and
+# $PACKET sits far enough into the prompt that a head-only check would miss a
+# tail-drop and a tail-only check would miss this head-and-middle-intact case.
+#
+# SEND IN SMALL CHUNKS, NOT ONE CALL. The root cause above is a single long
+# `cmux send` payload dropping an interior chunk; keeping $PROMPT under 700
+# bytes shrinks the risk but the fix that actually addresses the mechanism is
+# to never hand `cmux send` more than a few hundred bytes at once. Each chunk
+# is typed as its own call with a short pause after it, so the pane
+# accumulates the full prompt across several small, individually-reliable
+# sends instead of one large one.
+send_prompt_chunks() {
+  local text="$1" surface="$2" len off chunk
+  len=${#text}
+  off=0
+  while [ "$off" -lt "$len" ]; do
+    chunk="${text:$off:400}"
+    cmux send --surface "$surface" "$chunk" >/dev/null
+    sleep 0.2
+    off=$((off + 400))
+  done
+}
+
+prompt_landed=0
+for attempt in 1 2; do
+  send_prompt_chunks "$PROMPT" "$surface"
+  sleep 1
+  if cmux read-screen --surface "$surface" 2>/dev/null | grep -qF -- "$PACKET"; then
+    prompt_landed=1; break
+  fi
+  echo "new-worker: packet path missing from pane after send attempt $attempt (prompt truncated in transit); clearing and retrying"
+  cmux send-key --surface "$surface" C-u >/dev/null 2>&1
+  sleep 2
+done
+if [ "$prompt_landed" -ne 1 ]; then
+  echo "new-worker: could not get the packet path onto $surface after 2 attempts (prompt truncated in transit)." >&2
+  echo "  The pane holds a partial prompt; nothing was submitted. Send it by hand:" >&2
+  printf '  cmux send --surface %s "<prompt>" && cmux send-key --surface %s Enter\n' "$surface" "$surface" >&2
+  exit 1
+fi
 cmux send-key --surface "$surface" Enter >/dev/null
 
 # 4. PROVE it landed: the token counter must move off zero.
