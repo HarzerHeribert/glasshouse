@@ -54,7 +54,7 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`████████████████████████████████████░░░░` **1291 closed** · **107 active committed open** (92%)
+`█████████████████████████████████████░░░` **1295 closed** · **103 active committed open** (92%)
 
 Separately tracked, and not release-blocking: **7 deferred gate criteria** (Phase 52, Phase 53) awaiting a decision, and **229 parked experimental lines** under Maybe / Experimental.
 
@@ -129,7 +129,7 @@ Separately tracked, and not release-blocking: **7 deferred gate criteria** (Phas
 | Phase 32D — Normalized remaining-capacity score | 11/12 |
 | Phase 32E — Burn rate and exhaustion forecasting | 10/10 ✅ |
 | Phase 32F — Protected quota reserve | 8/8 ✅ |
-| Phase 32G — Provider-aware request-cost estimation | 8/10 |
+| Phase 32G — Provider-aware request-cost estimation | 9/10 |
 | Phase 33 — Resource health | 13/15 |
 | Phase 33A — Routing evidence ledger | 15/15 ✅ |
 | Phase 33B — Reliability-adjusted agent performance | 11/14 |
@@ -173,7 +173,7 @@ Separately tracked, and not release-blocking: **7 deferred gate criteria** (Phas
 | Phase 58 — Context economy: cache-stable translation, entitlement-aware reduction, and a measured token budget | 15/15 ✅ |
 | Phase 59 — Decompression: the code's physical shape catches up with its architecture | 6/8 |
 | Phase 60 — Parallel-session file coordination | 13/16 |
-| Phase 61 — pane: the first-party harness | 0/34 |
+| Phase 61 — pane: the first-party harness | 3/34 |
 | Phase 52 — Criteria before adding semantic/vector retrieval (deferred experiment gate) | 1/6 — deferred gate |
 | Phase 53 — Criteria before adding graph storage (deferred experiment gate) | 3/5 — deferred gate |
 

@@ -113,7 +113,15 @@ jobs:
         continue-on-error: true
         shell: bash
         run: |
-          npm install -g @anthropic-ai/claude-code @openai/codex opencode-ai
+          # Codex is pinned to the version `harness::codex::CATALOGUE_OBSERVED_VERSION`
+          # records -- read from source so the two cannot drift. The provenance
+          # test compares the installed version against that constant; unpinned,
+          # every `declared` cell went red the hour OpenAI published 0.153.4
+          # (2026-09-05, runs 33971282609..33973391507). Build rule 2, applied to
+          # a harness: one declared version, actually used.
+          codex_ver="$(grep -oE 'CATALOGUE_OBSERVED_VERSION: &str = "[^"]+"' crates/glasshouse/src/harness/codex.rs | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')"
+          test -n "$codex_ver"
+          npm install -g @anthropic-ai/claude-code "@openai/codex@$codex_ver" opencode-ai
           if [ "$RUNNER_OS" != "Windows" ]; then
             curl -fsS https://cursor.com/install | bash || true
             echo "$HOME/.local/bin" >> "$GITHUB_PATH"
@@ -122,32 +130,68 @@ jobs:
             printf '%-14s ' "$h"; command -v "$h" >/dev/null 2>&1 && "$h" --version 2>/dev/null | head -1 || echo "(absent -- its tests will skip)"
           done
 
+      # The Linux Secret Service backend (Phase 9E line 442) links libdbus
+      # through `libdbus-sys`, whose build script needs the dev headers and
+      # pkg-config on the build host -- accepted by the user on 2026-09-05.
+      - name: Linux build-host packages (libdbus for the Secret Service backend)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q libdbus-1-dev pkg-config
+
       - name: Build
-        run: cargo build --locked --workspace --all-targets
+        run: cargo build --locked --workspace --exclude pane --all-targets
 
       # --no-fail-fast: this is the sweep, not the gate. The gate stops at the
       # first red so a developer gets an answer fast; the sweep runs everything
       # so one red cannot hide the others -- which is exactly how a Codex
       # catalogue drift sat behind a pty_smoke failure on 2026-09-05.
       - name: Test
-        run: cargo test --locked --workspace --no-fail-fast -- --nocapture
+        run: cargo test --locked --workspace --exclude pane --no-fail-fast -- --nocapture
 
       - name: Doctests
-        run: cargo test --locked --workspace --doc
+        run: cargo test --locked --workspace --exclude pane --doc
 
       - name: Clippy
         if: matrix.toolchain == 'declared'
-        run: cargo clippy --locked --workspace --all-targets -- -D warnings
+        run: cargo clippy --locked --workspace --exclude pane --all-targets -- -D warnings
 
       - name: Rustdoc
         if: matrix.toolchain == 'declared'
-        run: cargo doc --workspace --no-deps
+        run: cargo doc --workspace --exclude pane --no-deps
         env:
           RUSTDOCFLAGS: -D warnings
 
       - name: Cache statistics
         if: always()
         run: sccache --show-stats
+
+  # `crates/pane` is excluded from `test` above so its own future dependencies
+  # (an embedded V8, a tokio stack) never leak into `glasshouse`'s build; it
+  # gets a job of its own instead. Ubuntu and macOS only -- Windows arrives
+  # with 61D's sandbox, and a Windows cell before there is anything
+  # platform-specific to test would buy nothing and cost a cell on every push.
+  pane:
+    name: pane (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve the declared toolchain
+        id: tc
+        shell: bash
+        run: |
+          v="$(grep -m1 '^toolchain' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"; test -n "$v"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.tc.outputs.version }}
+      - name: Build
+        run: cargo build --locked -p pane --all-targets
+      - name: Test
+        run: cargo test --locked -p pane --no-fail-fast -- --nocapture
 
   # The checks that never cost a compiler: formatting, the README progress
   # block, the file-size ratchet, the doc boundary, evidence coverage, and the

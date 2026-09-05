@@ -204,8 +204,8 @@ step() {           # step <label> <command...>
 # --- native macOS jobs -------------------------------------------------------
 if [ "$DO_MAC" -eq 1 ]; then
   step "lint / fmt" cargo fmt --all -- --check
-  step "lint / clippy" cargo clippy --locked --workspace --all-targets -- -D warnings
-  step "lint / rustdoc" env RUSTDOCFLAGS='-D warnings' cargo doc --workspace --no-deps
+  step "lint / clippy" cargo clippy --locked --workspace --exclude pane --all-targets -- -D warnings
+  step "lint / rustdoc" env RUSTDOCFLAGS='-D warnings' cargo doc --workspace --exclude pane --no-deps
   step "lint / README progress" python3 scripts/progress.py --check
   step "lint / file sizes"      python3 scripts/check-file-sizes.py
   # Free-because-local checks. These never ran on GitHub Actions; they exist
@@ -232,9 +232,13 @@ if [ "$DO_MAC" -eq 1 ]; then
   if [ "$SCOPED" -eq 1 ]; then
     step "test (macos) / blast radius" scripts/blast-radius.sh
   else
-    step "test (macos) / build" cargo build --locked --workspace --all-targets
-    step "test (macos) / test"  sh -c 'cargo test --locked --workspace -- --nocapture < /dev/null'
+    step "test (macos) / build" cargo build --locked --workspace --exclude pane --all-targets
+    step "test (macos) / test"  sh -c 'cargo test --locked --workspace --exclude pane -- --nocapture < /dev/null'
   fi
+  # `pane` is excluded from the workspace runs above and given its own step
+  # here, unconditionally: it is a standalone process gated separately from
+  # `glasshouse`, and it is cheap enough today that --scoped need not skip it.
+  step "test (macos) / pane build+test" sh -c 'cargo build --locked -p pane --all-targets && cargo test --locked -p pane -- --nocapture < /dev/null'
   # Call the project's own script rather than `cargo +$MSRV`: its header
   # documents three traps, and `cargo +<v>` needs the rustup shim, which is
   # exactly how the first version of this file got a false red.
@@ -285,6 +289,11 @@ if [ "$DO_LINUX" -eq 1 ]; then
         -e STEP="$1" \
         "rust:$TOOLCHAIN" bash -c '
           set -e
+          # The Linux Secret Service backend (Phase 9E line 442) links libdbus
+          # through libdbus-sys, whose build script needs the dev headers and
+          # pkg-config on the build host -- accepted by the user 2026-09-05.
+          # Root here, before the ci user exists; the image ships neither.
+          apt-get update -q >/dev/null && apt-get install -y -q libdbus-1-dev pkg-config >/dev/null
           id -u ci >/dev/null 2>&1 || useradd -m -u 1000 ci
           # Wipe before extracting. `tar -x` writes over a tree, it never
           # removes what is no longer in the source — so a file deleted (or
@@ -310,11 +319,11 @@ if [ "$DO_LINUX" -eq 1 ]; then
     }
     step "test (ubuntu) / build+test" run_linux \
       'set -e; rustup component add clippy rustfmt >/dev/null 2>&1 || true;
-       cargo build --locked --workspace --all-targets;
-       cargo test --locked --workspace -- --nocapture < /dev/null'
+       cargo build --locked --workspace --exclude pane --all-targets;
+       cargo test --locked --workspace --exclude pane -- --nocapture < /dev/null'
     step "lint (ubuntu) / clippy" run_linux \
       'set -e; rustup component add clippy >/dev/null 2>&1 || true;
-       cargo clippy --locked --workspace --all-targets -- -D warnings'
+       cargo clippy --locked --workspace --exclude pane --all-targets -- -D warnings'
     step "msrv (ubuntu) $MSRV" run_linux \
       "rustup toolchain install $MSRV --profile minimal && scripts/msrv-check.sh"
   fi
@@ -440,7 +449,7 @@ if [ "$DO_WIN" -eq 1 ]; then
     # RUSTC beside cargo is what makes the target's std visible.
     WIN_TC="$(rustup run stable rustc --print sysroot)/bin"
     step "windows CROSS-CHECK (compiles only, proves nothing about behaviour)" \
-      env RUSTC="$WIN_TC/rustc" "$WIN_TC/cargo" check --locked --workspace --target "$TARGET"
+      env RUSTC="$WIN_TC/rustc" "$WIN_TC/cargo" check --locked --workspace --exclude pane --target "$TARGET"
     # The earlier note, kept for the history it records: bare `cargo` is
     # Homebrew's, and E0463 reads like a broken dependency (GH-WINDOWS-TEST-BUILD,
     # 2026-09-02).

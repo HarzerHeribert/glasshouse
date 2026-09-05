@@ -1297,7 +1297,7 @@ Phase 32G — Provider-aware request-cost estimation
 
 ☑ Estimate the marginal input cost of starting a new session on a metered provider.
 ☑ Estimate the marginal input cost of resuming a cold existing session when context size is known or approximated.
-☐ Estimate cached-input cost separately from uncached-input cost when provider pricing supports caching.
+☑ Estimate cached-input cost separately from uncached-input cost when provider pricing supports caching.
 ☑ Estimate expected output cost from task tier and recent comparable tasks when useful.
 ☑ Estimate request-pool cost for free providers whose scarce unit is requests rather than tokens.
 ☐ Estimate local compute cost qualitatively through latency and occupancy instead of pretending local tokens are financially free of all cost.
@@ -2433,11 +2433,11 @@ record: the session artifact *The Glasshouse Native Harness*.
 
 61B — The crate and the adapter
 
-☐ Add `crates/pane` as a workspace member with its own binary and library; the default member set stays `glasshouse` alone so a bare `cargo build` at the root is unchanged.
-☐ Exclude `pane` from every `--workspace` invocation in `ci-local.sh` and the GitHub matrix, and give it its own job.
+☑ Add `crates/pane` as a workspace member with its own binary and library; the default member set stays `glasshouse` alone so a bare `cargo build` at the root is unchanged.
+☑ Exclude `pane` from every `--workspace` invocation in `ci-local.sh` and the GitHub matrix, and give it its own job.
 ☐ Add `Vendor::Glasshouse` and a `pane` adapter whose every declaration is `Verified` against the built binary.
 ☐ Launch `pane` from Glasshouse as a session over a PTY, visible in the session list and typeable into.
-☐ Keep `pane` free of any compile-time dependency on the `glasshouse` crate; integration is by protocol only.
+☑ Keep `pane` free of any compile-time dependency on the `glasshouse` crate; integration is by protocol only.
 
 61C — The loop and the three seams
 

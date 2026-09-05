@@ -1,6 +1,12 @@
 [workspace]
 resolver = "3"
-members = ["crates/glasshouse"]
+members = ["crates/glasshouse", "crates/pane"]
+# `pane` is a workspace member so its own gate job can build and test it, but
+# it must never ride along on a bare `cargo build`/`test`/`run` at the root --
+# it will carry an embedded V8 and a tokio stack, and `glasshouse` deliberately
+# has no async runtime. `default-members` keeps the root commands scoped to
+# `glasshouse` alone regardless of what else joins `members`.
+default-members = ["crates/glasshouse"]
 
 [workspace.package]
 version = "0.1.0"

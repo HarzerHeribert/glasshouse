@@ -1,0 +1,19 @@
+[package]
+name = "pane"
+description = "The Glasshouse native harness -- a standalone process, integrated by protocol only."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "pane"
+path = "src/main.rs"
+
+[lib]
+name = "pane"
+path = "src/lib.rs"
+
+[lints]
+workspace = true

@@ -18,7 +18,13 @@ State: **NOT STARTED**.
 
 ## 61B — The crate and the adapter — lines 2436–2440
 
-State: **NOT STARTED**.
+State: **PARTIALLY VERIFIED** — 2436, 2437 and 2440 **COMPLETE** (2026-09-05); 2438 (the adapter) and 2439 (launch over a PTY) are `GH-PANE-ADAPTER`'s.
+
+`GH-PANE-KICKOFF` (Sonnet, Amber), report **`.agent-runtime/report-pane-kickoff.md`**. `crates/pane` is a member with a library (`echo_line`, two tests) and a binary that reads a line, echoes it and exits 0; `default-members = ["crates/glasshouse"]` keeps a bare `cargo build` unchanged; `cargo tree -p pane` names no dependency at all (2440). All thirteen `--workspace` invocations — eight in `ci-local.sh`, five in `ci-extended.yml` — carry `--exclude pane`, `ci-local.sh`'s macOS lane gains a pane step, and the GitHub matrix gains a two-OS `pane` job (2437). **The mutation is the interesting part:** removing one `--exclude pane` **SURVIVED** — nothing in the repository could observe it — so the worker added `scripts/tests/test_pane_workspace_exclusion.py`, which asserts every `--workspace` in both gate files carries the exclusion, and the identical mutation then **KILLED**. A rule nothing enforces is a comment; now it is enforced.
+
+**One finding outside the packet, with a named successor.** `scripts/blast-radius.sh`'s `run_target()` hardcodes `cargo test -p glasshouse`, so the bare sweep's classified `--bin pane` runs against the wrong package and fails — the workspace had exactly one package for the script's whole life. `--targeted`, the worker's gate, does not hit it. Successor: `GH-BLAST-RADIUS-PACKAGE` (Green) — the classifier and `run_target()` learn which package each target belongs to. Until it lands, the local full sweep is red on that one target and nothing else.
+
+Recorded in the same commit by the orchestrator, in the two CI files this packet held: the Codex npm install pinned to `CATALOGUE_OBSERVED_VERSION` read from source (`.agent-runtime/finding-codex-pin-ci.md`), and `libdbus-1-dev` + `pkg-config` on the Linux cells and in the local Linux container, which `GH-SECRET-SERVICE-BACKEND` needs to build.
 
 Kickoff note: the four Glasshouse-side files this sub-phase touches — the workspace manifest, `harness/mod.rs`, `scripts/ci-local.sh` and `.github/workflows/ci-extended.yml` — change exactly once, in the primary's kickoff commit, and never again. `integrate.sh` refuses any file two trees both touched, and after the kickoff there is no such file.
 
