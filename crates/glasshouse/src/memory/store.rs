@@ -1,36 +1,21 @@
 //! The `memories` table, and the only way to read or write it.
 //!
-//! # Project isolation
+//! Project isolation is enforced in three independent places: **at the
+//! file**, because [`ProjectMemory::open`] goes through `database::open`,
+//! which refuses a database bound to another project outright; **at the
+//! row**, by the two SQLite triggers migration 4 creates, which hold
+//! against any writer even one that forgets to filter by `project_id`; and
+//! **at the read boundary**, by [`MemoryStore::get`], which compares the
+//! stored identifier against the active project before handing a record
+//! back — covering a row that predates a guard or arrived through a
+//! restored backup.
 //!
-//! Enforced in three independent places, for the reason each is different:
+//! There is no column here for a token, a key, or a provider secret. The
+//! operating system's secret storage ([`crate::secret`]) is where a
+//! credential lives; `body` is free text an extractor produced, which is
+//! exactly why nothing may *route* a credential into it.
 //!
-//! - **At the file**, because [`ProjectMemory::open`] goes through
-//!   `database::open`, which derives the path from the runtime and
-//!   refuses a database bound to another project outright.
-//! - **At the row**, by the two SQLite triggers migration 4 creates. A query
-//!   can forget to filter by `project_id`; a `BEFORE INSERT` / `BEFORE UPDATE`
-//!   guard cannot be forgotten, and it holds against any writer, including one
-//!   written later by someone who never read this module.
-//! - **At the read boundary**, by [`MemoryStore::get`], which compares the
-//!   stored identifier against the active project before handing a record
-//!   back.
-//!
-//! The third is not redundant with the second, for the reason
-//! [`crate::session::store`] gives about resume: the trigger governs what this
-//! database will *accept* from now on, while the boundary check governs what
-//! Glasshouse will *act on* — including a row that predates a guard, arrived
-//! through a restored backup, or was written by a build whose triggers
-//! differed. Retrieval is the operation that turns a stored row into something
-//! an agent will treat as true, so it verifies rather than assumes.
-//!
-//! # No credentials
-//!
-//! There is no column here for a token, a key, or a provider secret, and there
-//! is no field for one either. The project database is checked into nothing
-//! and backed up casually; the operating system's secret storage
-//! ([`crate::secret`]) is where a credential lives. `body` is free text an
-//! extractor produced, which is exactly why nothing may *route* a credential
-//! into it.
+//! History: design-decisions.md, "Trims: memory and session module docs", memory/store.rs module doc.
 
 use std::fmt;
 use std::sync::Arc;
@@ -436,35 +421,20 @@ impl fmt::Display for FileAssociation {
 
 /// The one spelling `memory_files.path` accepts, or `None`.
 ///
-/// **Migration 17's column contract, enforced where it can be enforced.** The
-/// column is repo-relative, `/`-separated, UTF-8 and never absolute; the
-/// schema can only refuse the empty string, because `CHECK (path NOT LIKE
-/// '/%')` would miss `C:\...` and a `CHECK` forbidding `\` or `:` would
-/// reject file names that are legal on Unix. So the contract is a function,
-/// and every writer goes through it.
+/// The column is repo-relative, `/`-separated, UTF-8 and never absolute.
+/// Anything this cannot bring to the canonical spelling with certainty is
+/// dropped rather than guessed at, because two spellings of one file
+/// becoming two rows makes a missed association invisible:
 ///
-/// # Why refusing beats normalising here
-///
-/// Two spellings of one file become two rows, and the exact-match index then
-/// silently misses one of them — a missed association is invisible, where a
-/// wrong one is at least wrong out loud. So anything this cannot bring to the
-/// canonical spelling with certainty is dropped rather than guessed at:
-///
-/// - `\` becomes `/`, because git's own index never writes `\` and a
-///   Windows-shaped path reaching here means some other producer wrote it;
+/// - `\` becomes `/`;
 /// - a leading `./` is stripped, and repeated or trailing separators are
-///   collapsed, because they name the same file;
-/// - an **absolute** path is refused — it is not repo-relative, and the
-///   project root is exactly where the `/var` versus `/private/var` class of
-///   ambiguity lives, which is the reason this column stores no root at all;
+///   collapsed;
+/// - an **absolute** path is refused;
 /// - a `..` component is refused, because it can leave the repository and no
 ///   normalisation here can tell whether it did;
 /// - an empty result is refused, which is what `.` and `./` collapse to.
 ///
-/// The observed producer never exercises any of this: git's index is already
-/// UTF-8, repo-relative and `/`-separated on every platform, Windows
-/// included, and `checkpoint::git::parse_index` reads it with no separator
-/// translation. This exists for the producers that come after it.
+/// History: design-decisions.md, "Trims: memory and session module docs", memory/store.rs normalize_observed_path.
 pub fn normalize_observed_path(path: &str) -> Option<String> {
     let path = path.trim();
     if path.is_empty() {
@@ -549,35 +519,22 @@ impl fmt::Display for SourceEvents {
 
 /// Why a durable decision was made, and what it assumed — Phase 21B.
 ///
-/// # Why these are fields and not one blob of prose
+/// Each assumption is its own field, not one blob of prose, because
+/// Phase 21C rechecks a decision by checking its assumptions against the
+/// project as it is now, one at a time — a scale assumption against a
+/// benchmark, a security assumption against a new requirement.
 ///
-/// The memory-validity principle is that *"an old decision is not still
-/// correct merely because it was remembered"*. Deciding whether a decision
-/// still holds means checking its assumptions against the project as it is
-/// now, and that is only mechanisable if the assumptions are separable: a
-/// scale assumption is rechecked against a benchmark, a security assumption
-/// against a new requirement, a compatibility assumption against a platform
-/// bump. Phase 21C is the phase that does the rechecking; this is the shape
-/// it needs to find.
+/// Every field is optional and `None` means "not known", never "none": a
+/// decision that recorded *"none: this path handles no user data"* has
+/// answered the question, and collapsing the two would make
+/// [`DecisionProvenance::is_thin`] meaningless.
 ///
-/// # `None` means "not known", never "none"
+/// Every field here is free text, the same statement `subject` and `body`
+/// carry, so `super::extract::schema::judge` screens each emitted element
+/// **whole** before reading any field — a field added to this struct is
+/// covered automatically.
 ///
-/// Every field is optional and absent is never the same as empty. A decision
-/// that recorded no security assumption is a decision nobody asked that
-/// question about; a decision that recorded *"none: this path handles no
-/// user data"* has answered it. Collapsing the two would make Phase 21B's
-/// *"when they influenced the decision"* unrepresentable, and would make
-/// [`DecisionProvenance::is_thin`] — which drives Phase 21B's
-/// lower-confidence rule — meaningless.
-///
-/// # Every field here is free text, and free text can hold a credential
-///
-/// The same statement `subject` and `body` carry, recorded in migration 6
-/// rather than left to be inferred. The control is on the producer side:
-/// `super::extract::schema::judge` screens each emitted element **whole**,
-/// before reading any field, so a field added to this struct is covered
-/// automatically. [`DecisionProvenance::source_excerpt`] is the sharpest of
-/// them because it is verbatim session text.
+/// History: design-decisions.md, "Trims: memory and session module docs", memory/store.rs DecisionProvenance.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct DecisionProvenance {
     /// Why the decision was made, in a sentence — Phase 21B's first line,
@@ -1411,28 +1368,21 @@ impl<'a> MemoryStore<'a> {
 
     /// [`MemoryStore::supersede`], recording **why** — map line 925.
     ///
-    /// # Why the reason is a separate door rather than a changed signature
+    /// A separate door rather than a changed signature: superseding without
+    /// a reason stays legal and stores `NULL`, so callers that have nothing
+    /// to say keep calling [`MemoryStore::supersede`] unchanged.
     ///
-    /// Superseding without a reason stays legal and stores `NULL`: the map
-    /// asks that the reason be *recordable*, not that every supersession have
-    /// one, and Phase 22's `superseded_by` is already allowed to be absent for
-    /// the same kind of reason. Callers that have nothing to say keep calling
-    /// [`MemoryStore::supersede`] unchanged.
+    /// `Some("")` and `Some("   ")` are recorded as `None` here rather than
+    /// at the caller: a reason that is only whitespace is not a reason, and
+    /// migration 13's `CHECK` refuses `''` outright, so this is the trim
+    /// that keeps a blank `--reason` from being an error the user cannot
+    /// act on.
     ///
-    /// # What happens to blank text, and why here rather than at the caller
+    /// The reason is operator text and never reaches SQL as text: it is
+    /// bound as parameter `?4`, never formatted into the statement, and the
+    /// `UPDATE` keeps its `project_id` predicate.
     ///
-    /// `Some("")` and `Some("   ")` are recorded as `None`. A reason that is
-    /// only whitespace is not a reason, and if it were stored the row would
-    /// read back as *"a reason was recorded"* to every consumer. Migration
-    /// 13's `CHECK` refuses `''` outright, so this is the trim that keeps a
-    /// blank `--reason` from being an error the user cannot act on.
-    ///
-    /// # The reason is operator text and never reaches SQL as text
-    ///
-    /// It is bound as parameter `?4` — never formatted into the statement —
-    /// and it is not logged. The `UPDATE` also keeps its `project_id`
-    /// predicate, so this cannot write across the project boundary even if a
-    /// caller somehow held a foreign identifier.
+    /// History: design-decisions.md, "Trims: memory and session module docs", memory/store.rs supersede_with_reason.
     pub fn supersede_with_reason(
         &self,
         old: &MemoryId,
@@ -1990,38 +1940,21 @@ impl<'a> MemoryStore<'a> {
     /// migration 17's `memory_files`, and the only writer of it.
     ///
     /// `paths` is
-    /// [`crate::checkpoint::WorkingTreeStatus::changed_files`]: what the git
-    /// index said differed from the working tree at the moment extraction
-    /// ran. Every row this writes carries
-    /// [`FileAssociation::Observed`] and **never anything stronger** — see
-    /// that variant, and migration 17's own text, for why *observed-dirty* is
-    /// not *explicitly referenced* and why writing the stronger word here
-    /// would invert map line 1294's rule rather than bend it.
+    /// [`crate::checkpoint::WorkingTreeStatus::changed_files`]. Every row
+    /// this writes carries [`FileAssociation::Observed`] and **never
+    /// anything stronger** — writing a stronger word here would invert map
+    /// line 1294's rule rather than bend it.
     ///
-    /// # An empty answer is an absence, never a row
-    ///
-    /// A clean tree writes nothing: no memory, no path, no empty-string path
-    /// standing in for "there were none". Neither does a path this build
-    /// cannot bring to the column's canonical spelling — see
-    /// [`normalize_observed_path`], which drops rather than guesses. The
-    /// count returned is rows written, so a caller that wants to know whether
-    /// anything was recorded can ask without querying the table back.
-    ///
-    /// # It is the cross product, and that is the signal rather than a defect
-    ///
-    /// Every memory here was extracted from one session, and the dirty set is
-    /// a property of that session and not of any one memory. Three memories
-    /// and twenty paths are sixty rows, each of them true: *"this was learned
-    /// while that file was being worked on."* A producer that could say more
-    /// than that does not exist in this build.
-    ///
-    /// # Failure is never the caller's problem
-    ///
-    /// Returns [`MemoryStoreError::Sql`] the way every other writer here
-    /// does, so a caller may log it — but a caller on the extraction path
-    /// should log and continue: the memories are already stored, and losing
-    /// their file association is strictly better than losing the session's
-    /// turn to a bookkeeping error.
+    /// An empty answer is an absence, never a row: a clean tree writes
+    /// nothing, and neither does a path this build cannot bring to the
+    /// column's canonical spelling (see [`normalize_observed_path`]).
+    /// It is the cross product, and that is the signal rather than a
+    /// defect: every memory here was extracted from one session, and the
+    /// dirty set is a property of that session, not of any one memory.
+    /// Failure is never the caller's problem: a caller on the extraction
+    /// path should log [`MemoryStoreError::Sql`] and continue rather than
+    /// lose the session's turn to a bookkeeping error.
+    /// History: design-decisions.md, "Trims: memory and session module docs", memory/store.rs record_observed_files.
     pub fn record_observed_files(
         &self,
         memories: &[MemoryId],

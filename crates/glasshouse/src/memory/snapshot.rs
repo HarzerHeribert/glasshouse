@@ -1,29 +1,22 @@
 //! The concise current-project snapshot agents ask for (Phase 26).
 //!
-//! Declared ahead of its implementation so that the module owning it never has
-//! to edit `memory/mod.rs`, which another worker holds.
-//!
-//! # What "current" means here
-//!
-//! Only [`MemoryStatus::Active`] memories are current. A todo whose status is
-//! [`MemoryStatus::NeedsReview`] or [`MemoryStatus::Conflicted`] is still open
-//! work by [`MemoryStatus::is_open_work`], but this snapshot is stricter: it
-//! is what an agent treats as settled project knowledge, and a memory under
-//! review or in conflict with another is exactly the opposite of settled. So
-//! every section here holds `Active` memories and nothing else — the resolved,
-//! superseded, rejected, invalidated, needs-review and conflicted rows stay in
-//! the database, queryable by id or by [`super::MemoryStore::with_status`],
-//! and simply do not appear.
-//!
-//! # Budget, by construction
+//! Only [`MemoryStatus::Active`] memories are current: a todo whose status
+//! is [`MemoryStatus::NeedsReview`] or [`MemoryStatus::Conflicted`] is still
+//! open work by [`MemoryStatus::is_open_work`], but this snapshot is what an
+//! agent treats as settled project knowledge, so every section here holds
+//! `Active` memories and nothing else — every other status stays in the
+//! database, queryable by id or by [`super::MemoryStore::with_status`], and
+//! simply does not appear.
 //!
 //! [`snapshot`] takes a [`SnapshotBudget`] and honours it on every section
-//! independently: a per-section entry cap, and a per-entry body length. A
+//! independently — a per-section entry cap and a per-entry body length, so a
 //! project with five thousand memories and one with fifty produce
-//! same-sized output. Nothing is silently dropped — a section that hit its
-//! cap reports how many entries it left out ([`SnapshotSection::omitted`]),
-//! and an entry whose body was cut records that it was
+//! same-sized output — and nothing is silently dropped: a section that hit
+//! its cap reports how many entries it left out
+//! ([`SnapshotSection::omitted`]), and a cut body records that it was
 //! ([`SnapshotEntry::body_truncated`]).
+//!
+//! History: design-decisions.md, "Trims: memory and session module docs", memory/snapshot.rs module doc.
 
 use rusqlite::OptionalExtension;
 

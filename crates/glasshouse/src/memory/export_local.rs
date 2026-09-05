@@ -2,41 +2,22 @@
 //! opt-in export of remembered constraints and failed approaches into a
 //! marker-delimited block of the harness's native local instruction file,
 //! gitignored by default, replacing only its own block on re-export."*
-//!
-//! # A sibling verb, not `export`
-//!
-//! [`super::export::TrackedKnowledge`] (`glasshouse memory export --tracked`)
-//! is Phase 50's projection of decisions and constraints into
-//! `.glasshouse/knowledge/`, a **tracked** directory reviewed through an
-//! ordinary Git workflow. This module writes a different file, for a
-//! different reader, under a different verb: `CLAUDE.local.md` is the
-//! harness's own **local**, conventionally untracked instruction file, read
-//! at launch rather than reviewed in a diff. The two share no flag and no
-//! destination — the orchestrator's ruling on the worker's blocked report of
-//! 2026-09-02, after the CLI's `Export` name turned out to already be Phase
-//! 50's. Never merge them.
-//!
-//! # Why this reuses `inject`'s renderer rather than a copy
-//!
-//! `super::inject::render_entry` is already the format a session reads at
-//! launch: the bracketed head (`[position/total standing kind=... authority=...
-//! id=...]`) plus the quoted subject and body. Calling the same function here
-//! means an exported entry and an injected one are, byte for byte, the same
-//! shape — a reader who has seen one recognizes the other. `render_entry`,
-//! `standing` and `quote` were private to `inject.rs`; this package's only
-//! change to that file is widening the three to `pub(crate)`, a visibility
-//! change and nothing else.
-//!
-//! # What never happens here
-//!
+//! A sibling verb, not `export`: [`super::export::TrackedKnowledge`] is
+//! Phase 50's projection into `.glasshouse/knowledge/`, a **tracked**
+//! directory reviewed through an ordinary Git workflow, while this module
+//! writes `CLAUDE.local.md`, the harness's own **local**, conventionally
+//! untracked instruction file read at launch. The two share no flag and no
+//! destination. Never merge them.
+//! Reuses `super::inject::render_entry` rather than a copy, so an exported
+//! entry and an injected one are the same shape byte for byte; `render_entry`,
+//! `standing` and `quote` were widened from private to `pub(crate)` for it.
 //! Nothing in this module runs unless `glasshouse memory export-local` is
 //! typed: no hook, no launch-time call, no timer. It reads
 //! [`super::MemoryStore::binding`] and [`super::MemoryStore::current_of_kind`],
-//! both of which already scope to the active project and to
-//! [`super::MemoryStatus::Active`] — the same read boundary every other
-//! memory command goes through. Every byte outside the marker block is
-//! copied forward unchanged, and the user's own `.gitignore` is never opened
-//! for writing, only read.
+//! both already scoped to the active project. Every byte outside the marker
+//! block is copied forward unchanged, and the user's own `.gitignore` is
+//! never opened for writing, only read.
+//! History: design-decisions.md, "Trims: memory and session module docs", memory/export_local.rs module doc.
 
 use std::path::{Path, PathBuf};
 

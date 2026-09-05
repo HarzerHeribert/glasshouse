@@ -6,23 +6,15 @@
 //! Modeled on [`crate::memory::rerank::append_diagnostics`]'s own shape —
 //! one `create(true).append(true)` open and one `write_all`, fail-soft, a
 //! path under `runtime.state_dir()` and therefore project-scoped — and on
-//! that module's own `serde`-encoded record: this module, unlike
-//! `crate::evaluation`, carries no pin against a general-purpose
-//! serializer (verified: `memory::extract::schema` and
-//! `memory::extract::model` already depend on `serde`/`serde_json` for the
-//! extraction contract itself), so the line is encoded the same way
-//! `rerank`'s is rather than hand-assembled.
-//!
-//! # What never reaches this file
+//! that module's own `serde`-encoded record.
 //!
 //! The prompt, a memory's body or subject, and a rejection's own free text
-//! (a model's malformed reply, an unknown field value, a store's rendered
-//! error) never appear here — only ids, the closed vocabulary words this
-//! module maps each reason to, and counts. [`ExtractionOutcome`] itself
-//! carries the prompt nowhere ([`super::Prompt`] has no accessor that would
-//! let it), so the guarantee this module adds is narrower: every *reason*
-//! recorded here is a fixed word or a schema field name, never a value
-//! copied from the model's reply.
+//! never appear here — only ids, the closed vocabulary words this module
+//! maps each reason to, and counts: every *reason* recorded here is a
+//! fixed word or a schema field name, never a value copied from the
+//! model's reply.
+//!
+//! History: design-decisions.md, "Trims: memory and session module docs", memory/extract/diagnostics.rs module doc.
 
 use std::io::Write as _;
 

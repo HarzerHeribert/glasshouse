@@ -3,28 +3,21 @@
 //! A harness reports what happened in its own vocabulary, and Glasshouse
 //! records one of a handful of states that mean something to a session
 //! overview. Claude Code and Codex happen to spell every shared event
-//! identically — both say `UserPromptSubmit`, not `user_prompt_submit`. An
-//! earlier revision of this module claimed Codex used snake_case, citing the
-//! wrong artifact: Codex's `config.toml` records hook *trust* under
-//! snake_case keys, but the `hooks.json` document it actually reads is
-//! PascalCase, per its own hook review screen. That agreement is why most of
-//! this translation works untouched for either harness — but it is a fact
-//! about the two installed binaries, not a guarantee, so this module is
-//! deliberately the only place that knows either vocabulary at all.
+//! identically, but that is a fact about the two installed binaries, not a
+//! guarantee, so this module is deliberately the only place that knows
+//! either vocabulary at all.
 //!
-//! # Why an unknown event changes nothing
+//! An event this build has never heard of must leave the session exactly as
+//! it was, because guessing a state from an unfamiliar name would show the
+//! user a session that is idle when it is working, or working when it is
+//! waiting for them.
 //!
-//! Harnesses gain events between releases. An event this build has never
-//! heard of must leave the session exactly as it was, because the alternative
-//! — guessing a state from an unfamiliar name — would show the user a session
-//! that is idle when it is working, or working when it is waiting for them.
+//! A slow hook process can deliver its event after the harness it belongs
+//! to has exited; applying it would resurrect a stopped session in the
+//! records, which is worse than losing a note about a session that has
+//! already ended.
 //!
-//! # Why a finished session cannot be revived
-//!
-//! Hook processes are separate processes, and a slow one can deliver its event
-//! after the harness it belongs to has exited. Applying it would resurrect a
-//! stopped session in the records, which is worse than losing a note about a
-//! session that has already ended.
+//! History: design-decisions.md, "Trims: memory and session module docs", session/lifecycle.rs module doc.
 
 use crate::events::{LifecycleEvent, RawObservation, TurnOutcome};
 use crate::session::SessionLifecycle;
@@ -121,53 +114,22 @@ pub fn lifecycle_for(event: &str) -> Option<SessionLifecycle> {
 /// context — Phase 21's *"allow memory extraction to run before or around
 /// native prompt compaction."*
 ///
-/// # Why this is a separate question from [`event_for`]
-///
 /// A compaction is **not a `SessionLifecycle` state**: a session that
 /// compacts was running before and is running after, and there is no
-/// `LifecycleEvent` for it. Answering it through [`event_for`] would mean
-/// inventing one, which would mean a new `database::LIFECYCLE_EVENT_KINDS`
-/// value and a migration to widen a `CHECK`, which SQLite cannot do in place
-/// and which `database`'s own house rule refuses. So this is a predicate a
-/// *trigger* can ask, and the event log stays exactly as narrow as it was.
+/// `LifecycleEvent` for it, so this is a predicate a *trigger* can ask
+/// rather than a new `event_for` variant.
 ///
-/// # What is recorded, since map line 1159
+/// What is recorded, since map line 1159, is a **count** on the session
+/// row — migration 16's `sessions.observed_compactions`, written by
+/// [`crate::session::SessionStore::record_observed_compaction`] — not an
+/// event beside everything else that happened.
 ///
-/// A **count**, on the session row: migration 16's
-/// `sessions.observed_compactions`, written by
-/// [`crate::session::SessionStore::record_observed_compaction`] at this
-/// predicate's one production call site. That is a different claim from an
-/// event — it says the compaction has now happened *n* times, not that it
-/// happened at an instant beside everything else that happened — and it is
-/// the one line 1159 asks for. The raw observation is still preserved by
-/// [`observe`]'s own [`crate::events::RawObservation`] line, and no
-/// `lifecycle_events` row is written for it.
-///
-/// # Why `PostCompact` is not here
-///
-/// `PostCompact` is a real Codex event and Glasshouse asks for it (see
-/// `harness::codex`'s `REPORTED_EVENTS`), but extraction reads **this
-/// project's event log**, which a harness compacting its own context does not
-/// change. Running on both would be two extractions over identical material,
-/// inside the user's session, per compaction. `PreCompact` is the "before"
-/// the line names and the one that arrives while the harness still has what
-/// it is about to lose. Named explicitly, rather than left to the wildcard,
-/// so the omission reads as a decision.
-///
-/// # Claude Code, corrected 2026-09-01
-///
-/// This predicate matches on the event string alone, so it was never the
-/// reason Claude Code's compactions went uncounted — a stale version of this
-/// comment used to say otherwise, from a 2.1.245 reading that found no
-/// compaction hook at all. Claude Code 2.1.257 has one: run and observed
-/// (`harness::claude_code`'s `REPORTED_EVENTS` doc), a manual `/compact`
-/// against a real installation fired a `PreCompact` hook whose payload named
-/// this exact string. The gap was one link earlier — `harness::claude_code`'s
-/// `REPORTED_EVENTS` never asked Claude Code to report it, so no hook was
-/// ever installed and this predicate never saw the event. That is now fixed;
-/// this function itself did not need to change.
-///
+/// `PostCompact` is a real Codex event Glasshouse asks for, but extraction
+/// reads **this project's event log**, which a harness compacting its own
+/// context does not change; `PreCompact` is the "before" the line names,
+/// named explicitly so the omission reads as a decision.
 /// Event names are the harness's own, exactly as its adapter declares them.
+/// History: design-decisions.md, "Trims: memory and session module docs", session/lifecycle.rs precedes_native_compaction.
 pub fn precedes_native_compaction(event: &str) -> bool {
     matches!(event, "PreCompact")
 }
@@ -178,27 +140,15 @@ pub fn precedes_native_compaction(event: &str) -> bool {
 /// failed, or been closed is finished, and a hook arriving afterwards — from a
 /// process that outlived its harness — must not bring it back.
 ///
-/// # Why a genuine resume needs nothing here
-///
-/// A resumed session was, for a while, refused by this rule: its record still
-/// read `stopped`, so every hook the reopened harness sent was discarded. The
-/// cause was not this predicate. `main.rs::resume_session` already wrote
-/// *"running"* the moment it reopened the session, and
-/// [`crate::session::SessionStore`]'s own copy of this rule — the one inside
-/// its write transaction, where two processes cannot step over it — declined
-/// that write for exactly the reason above. The record never left `stopped`,
-/// and this function was then asked the wrong question about a state that
-/// should not have been current.
-///
-/// The fix belongs where the acts differ: `SessionStore::begin_resume` is
+/// A genuine resume needs nothing here: `SessionStore::begin_resume` is
 /// something Glasshouse *does*, at a boundary it opened, and a hook is an
-/// event that merely *arrives*. Widening this predicate instead would have
-/// meant a hook arguing for its own authority, which is the one thing the
-/// rule exists to refuse — and it would not have helped, because the record
-/// would still have been `stopped` when it was asked.
+/// event that merely *arrives*. Widening this predicate to let a resumed
+/// session's stale hooks through would mean a hook arguing for its own
+/// authority, which is the one thing the rule exists to refuse. Once a
+/// resume has been recorded the session is live, and a live session follows
+/// its harness.
 ///
-/// So this stays as it is. Once a resume has been recorded the session is
-/// live, and a live session follows its harness.
+/// History: design-decisions.md, "Trims: memory and session module docs", session/lifecycle.rs may_apply.
 pub fn may_apply(current: SessionLifecycle, next: SessionLifecycle) -> bool {
     current.is_live() && current != next
 }

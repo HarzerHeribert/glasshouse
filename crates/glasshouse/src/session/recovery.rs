@@ -7,19 +7,16 @@
 //! decision point; it is pure, so a caller supplies everything it needs and
 //! reads back exactly one of three outcomes.
 //!
-//! # What counts as "enough task-state information"
+//! "Enough task-state information" is narrowly a [`CheckpointRef`] and
+//! nothing else: a [`TaskState`]'s `event_history` records what happened to
+//! the *session*, never what the *task* had already done to the world,
+//! which is the only question a destructive retry needs answered. Phase 19,
+//! which produces checkpoints, is not implemented yet, so the answer is
+//! effectively always "no" for a destructive or unknown-kind cross-harness
+//! retry — the correct outcome, since the capability map's line asks
+//! Glasshouse to *avoid* the retry, and refusing does exactly that.
 //!
-//! Narrowly: a [`CheckpointRef`] and nothing else. A [`TaskState`] may also
-//! carry an `event_history` — what the harness reported doing, turn by turn —
-//! but [`plan`] never reads it when deciding whether a cross-harness retry is
-//! safe. An event history records what happened to the *session*: turns
-//! starting and ending, text arriving. It does not record what the *task* had
-//! already done to the world, which is the only question a destructive retry
-//! needs answered. Only a portable checkpoint answers it, and Phase 19 — which
-//! produces checkpoints — is not implemented yet, so in this build the answer
-//! is effectively always "no" for a destructive or unknown-kind cross-harness
-//! retry. That is the correct outcome, not a gap: the capability map's line
-//! asks Glasshouse to *avoid* the retry, and refusing does exactly that.
+//! History: design-decisions.md, "Trims: memory and session module docs", session/recovery.rs module doc.
 
 use crate::session::store::{SessionDisposition, SessionId, SessionLifecycle, SessionRecord};
 

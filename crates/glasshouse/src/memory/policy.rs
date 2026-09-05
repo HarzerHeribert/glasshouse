@@ -5,27 +5,18 @@
 //! became an accepted constraint or decision, no obvious source-code facts,
 //! and a preference for information whose rediscovery would be expensive.
 //!
-//! # Only two of the four are enforced here, deliberately
-//!
 //! The first two are *mechanically decidable* from the text itself, so they
 //! are enforced at the one place every memory must pass through:
 //! [`crate::memory::MemoryStore::record`] refuses them, and the refusal is a
 //! typed error rather than a silent drop.
-//!
-//! The other two are not decidable here and are not faked. Whether a statement
-//! is an "obvious source-code fact", or whether rediscovering it "would
-//! require significant exploration", is a judgment about the project that only
-//! the producer of the memory can make — Phase 21's extractor, or a person. A
-//! keyword heuristic pretending to make that call would refuse real memories
-//! and admit fake ones, and would produce a test that passed for the wrong
-//! reason. This module's job is to be a floor that cannot be argued with, not
-//! a classifier.
 //!
 //! So [`MemoryRefusal`] is a **closed, conservative** guard. It refuses text
 //! that is *nothing but* an acknowledgement, and text that is *unambiguously*
 //! an ordered plan. Anything it is unsure about, it admits — the cost of a
 //! wrongly-admitted memory is one bad search result, and the cost of a wrongly
 //! refused one is knowledge that is gone.
+//!
+//! History: design-decisions.md, "Trims: memory and session module docs", memory/policy.rs module doc.
 
 use super::store::{MemoryAuthority, MemoryKind, NewMemory, ProjectPhase};
 
@@ -240,13 +231,7 @@ const EXPLORATORY_UNVALIDATED_PENALTY: f64 = 0.5;
 const EARLY_PHASE_UNVALIDATED_PENALTY: f64 = 0.75;
 
 /// How many days it takes a memory of this authority to decay halfway from
-/// full weight to [`RETRIEVAL_WEIGHT_FLOOR`] — Phase 21D line 898's *"age
-/// never overrides authority"*, made into policy instead of a magic number
-/// inside the ranker.
-///
-/// A full `match` on every class, never a lookup table with a default: a
-/// class added to [`MemoryAuthority`] must be given an explicit rate here
-/// rather than silently inheriting one meant for something else.
+/// full weight to [`RETRIEVAL_WEIGHT_FLOOR`].
 ///
 /// - [`MemoryAuthority::Invariant`] has no half-life at all — see
 ///   [`retrieval_weight`], which returns full weight for it before this is
@@ -261,9 +246,10 @@ const EARLY_PHASE_UNVALIDATED_PENALTY: f64 = 0.75;
 ///   [`MemoryAuthority::Idea`] decay fastest (line 900) — they were never
 ///   binding, so staleness costs nothing to make visible quickly.
 /// - [`MemoryAuthority::Historical`] decays at the ordinary rate: it already
-///   explains rather than directs, so there is no faster-decaying class
-///   below it that the map names, and treating it as ordinary is the
+///   explains rather than directs, and treating it as ordinary is the
 ///   conservative middle rather than an invented rule.
+///
+/// History: design-decisions.md, "Trims: memory and session module docs", memory/policy.rs half_life_days.
 fn half_life_days(authority: Option<MemoryAuthority>) -> f64 {
     match authority {
         Some(MemoryAuthority::Invariant) => f64::INFINITY,
@@ -278,25 +264,19 @@ fn half_life_days(authority: Option<MemoryAuthority>) -> f64 {
 /// Phase 21F lines 931 and 933's project-phase signal, folded into decay as
 /// an extra multiplier rather than a second independent check.
 ///
-/// This module does not read the project's *current* phase or architecture
-/// — that is line 932, and map lines 828/829/862 already settled that a
-/// storage-layer heuristic for "does this still match the repository"
-/// refuses real memories and admits fake ones. What it can honestly do with
-/// what a memory itself recorded is this: a decision made in an earlier,
-/// more provisional phase and never rechecked since is preferred less than
-/// one that has been checked at all, whatever phase that check happened
-/// in — which is why reaffirming ([`super::store::MemoryStore::reaffirm`])
-/// clears the penalty entirely rather than scaling it down. [`ProjectPhase`]
-/// is a fixed, ordered vocabulary (Phase 21B), not a live reading of the
-/// repository, so ranking by it is ranking by what was stored, not by an
-/// invented judgement about where the project is now.
+/// A decision made in an earlier, more provisional phase and never
+/// rechecked is preferred less than one that has been checked at all —
+/// reaffirming ([`super::store::MemoryStore::reaffirm`]) clears the penalty
+/// entirely rather than scaling it down. [`ProjectPhase`] is a fixed,
+/// ordered vocabulary (Phase 21B) recorded on the memory, not a live
+/// reading of the repository.
 ///
-/// [`ProjectPhase::Prototype`] is line 933's "exploratory session," by that
-/// variant's own doc comment. [`ProjectPhase::Alpha`] gets the milder
-/// version line 931 also asks for. [`ProjectPhase::Beta`],
-/// [`ProjectPhase::Production`], [`ProjectPhase::Migration`] and unrecorded
-/// phase are not judged at all — a decision with no evidence it was made
-/// early is not assumed to be provisional.
+/// [`ProjectPhase::Prototype`] is line 933's "exploratory session."
+/// [`ProjectPhase::Alpha`] gets the milder version line 931 also asks for.
+/// [`ProjectPhase::Beta`], [`ProjectPhase::Production`],
+/// [`ProjectPhase::Migration`] and unrecorded phase are not judged at all.
+///
+/// History: design-decisions.md, "Trims: memory and session module docs", memory/policy.rs phase_penalty.
 fn phase_penalty(project_phase: Option<ProjectPhase>, last_validated_at: Option<i64>) -> f64 {
     if last_validated_at.is_some() {
         return 1.0;
@@ -318,38 +298,19 @@ fn phase_penalty(project_phase: Option<ProjectPhase>, last_validated_at: Option<
 /// `1.0` means no decay at all. Applied by [`super::store::MemoryStore::search`]
 /// to the raw BM25 score of every current result, so an old, low-authority
 /// memory that matches the query text well still ranks below a fresh,
-/// high-authority memory that matches it poorly — see that method's own
-/// documentation for why the multiplier is applied there and not baked into
-/// the SQL.
-///
-/// # Why the reference point is `last_validated_at.unwrap_or(created_at)`
-///
-/// Line 901: *"allow recently reaffirmed memories to regain retrieval weight
-/// without changing their original creation timestamp."* Reaffirming
-/// ([`super::store::MemoryStore::reaffirm`]) writes only
-/// [`super::store::MemoryRecord::last_validated_at`], so decay has to measure
-/// age from whichever of the two is more recent information about when this
-/// memory was last known to be true — and a memory that has never been
-/// reaffirmed has no more recent information than its creation. This is also
-/// line 899's *"when they have not been reaffirmed"*: a memory that has been
-/// keeps its full weight for a fresh interval measured from the reaffirming,
-/// not from when it was first written down. Line 931 rides the same
-/// mechanism: a validated memory always has a reference point at least as
-/// recent as an otherwise-identical unvalidated one, so it can never rank
-/// below it at equal relevance and authority.
-///
-/// # Why age never invalidates an invariant
-///
-/// Line 898. Checked before anything else, and unconditionally: no age, no
+/// high-authority memory that matches it poorly.
+/// Age is measured from `last_validated_at.unwrap_or(created_at)`, so a
+/// reaffirmed memory ([`super::store::MemoryStore::reaffirm`]) regains
+/// retrieval weight without its original creation timestamp changing.
+/// Checked before anything else, and unconditionally: no age, no
 /// validation history, no project phase, and no half-life computation can
 /// move an invariant's weight away from `1.0`.
-///
-/// # Why the phase penalty multiplies the decay term, not the final weight
 ///
 /// [`phase_penalty`] is folded in *before* [`RETRIEVAL_WEIGHT_FLOOR`] is
 /// applied, so the floor's own guarantee — decay demotes, it never makes a
 /// memory unfindable — still holds for a memory the phase penalty also
 /// applies to.
+/// History: design-decisions.md, "Trims: memory and session module docs", memory/policy.rs retrieval_weight.
 pub fn retrieval_weight(
     authority: Option<MemoryAuthority>,
     now: i64,
