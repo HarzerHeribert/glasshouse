@@ -14,7 +14,13 @@ Entries are bounded by the *Decompression* ruling: the contract, the tests by na
 
 ## 61A — The ruler — lines 2430–2432
 
-State: **NOT STARTED**.
+State: **NOT STARTED** on the pane side (the lead's sub-workers hold 2430–2432). **The Glasshouse-side producer 2430's meter needs landed 2026-09-05**: `GH-ROUTING-COST-JSON` (Sonnet, Amber), report `.agent-runtime/report-routing-cost-json.md`, answering the lead's ask `.agent-runtime/pane/ask-primary-exchange-readout.md` (its refusal of the SQLite shortcut is on the record there). `glasshouse routing-cost --json [--since <UNIX>] [--session <ID>]` prints JSON Lines — one object per observation from `consumption_in_window`, twenty-two fixed keys in a fixed order (`ObservationJson`, a `Serialize` view struct in `commands/routing_cost.rs` so the order is structural), every absent column `null`, ordered by `observed_at`; `--since` conflicts with `--hours`, both filters require `--json`, so the prose path is untouched. Tests (nine, all driving the shipped binary): `routing_cost::a_row_with_no_tokens_prints_null_never_zero_in_json`, `json_lines_are_ordered_by_observed_at_ascending`, `json_empty_window_prints_nothing_and_exits_zero`, `json_session_filters_to_that_sessions_rows_only`, `json_since_bounds_the_window`, `session_flag_without_json_is_a_clap_usage_error`, `since_flag_without_json_is_a_clap_usage_error`, `since_and_hours_together_is_a_clap_usage_error`, `a_row_planted_under_another_projects_id_never_appears_in_json`.
+
+| mutation | change | result | killed by |
+|---|---|---|---|
+| absent-as-zero | `input_tokens: observation.input_tokens` → `Some(observation.input_tokens.unwrap_or(0))` | KILLED | `routing_cost::a_row_with_no_tokens_prints_null_never_zero_in_json` — `"input_tokens":0` printed where the build prints `null` |
+
+Limits: closes no line itself; whether the meter parses the shape is 2430's own test on the pane side. The stale "the relay never parses a reply body" sentences in `cli.rs`, `commands/routing_cost.rs` and `tests/routing_cost.rs` were rewritten to the true invariant in the same package.
 
 ## 61B — The crate and the adapter — lines 2436–2440
 

@@ -79,7 +79,9 @@ pub(crate) fn routing_cost_report(runtime: &Runtime, hours: u32) -> anyhow::Resu
 /// own *not recorded* — never `0ms` — for exactly that case. Unlike the token
 /// columns above, the coding-agent group is the one group this build **can**
 /// honestly time, because a first-byte instant is a clock reading rather than
-/// a read of the response body the relay never parses.
+/// a read of the response body: a relayed exchange whose reply the gateway
+/// could not read leaves the token columns `NULL`, and a `NULL` column
+/// prints as *not counted*, never `0`.
 ///
 /// `GH-STREAM-FIRST-EVENTS` (lines 1331/1332) adds two more such pairs beside
 /// it, `first-token`/`TTFT` and `first-tool-call`/`TTFC` — but only a
@@ -220,10 +222,10 @@ fn render_routing_cost(
         }
     }
     out.push_str(
-        "\ncoding-agent consumption relayed through the gateway is never counted in this \
-         build (the relay never parses a reply body), so the coding-agent group above always \
-         has its tokens print as \"not counted\" even though its request count is real; \
-         \"not counted\" always means nobody read a count, never that nothing was spent.\n",
+        "\na relayed exchange whose reply the gateway could not read leaves its token columns \
+         NULL, so the coding-agent group above prints its tokens as \"not counted\" whenever \
+         none of its rows carried one, even though its request count is real; \"not counted\" \
+         always means nobody read a count, never that nothing was spent.\n",
     );
     out.push_str(&render_savings_section(
         firewall_savings,
@@ -576,3 +578,120 @@ fn render_responsiveness_separation(
 /// verbatim, the same floor [`SeparationMeasure::separation`] itself gates
 /// on.
 const MIN_SAMPLE_SEPARATION: usize = glasshouse::routing::evidence::MIN_SAMPLE_FOR_SUMMARY;
+
+/// `glasshouse routing-cost --json` — capability map line 2430's producer:
+/// one `serde_json` object per observation `consumption_in_window` returns
+/// over the window `--hours` or `--since` defines, one per line (JSON
+/// Lines), ordered by `observed_at` ascending, no wrapper array and no
+/// trailing summary. An empty window returns the empty string, which prints
+/// nothing and exits `0`, exactly like the prose path's own empty-ledger
+/// case.
+///
+/// `consumption_in_window`, never `observations_in_window`: this reads how
+/// much was consumed, not how exchanges went, and a row with no recorded
+/// outcome still consumed a request — the same reasoning
+/// [`routing_cost_report`]'s own callee documents for the prose path.
+///
+/// `session_id` is filtered here, after the read, rather than by widening
+/// the reader: `--session` is this command's own concern, and
+/// `routing/evidence` gains no query it did not already need for anything
+/// else (CLAUDE.md rule 8).
+pub(crate) fn routing_cost_json_report(
+    runtime: &Runtime,
+    hours: u32,
+    since_unix: Option<i64>,
+    session_id: Option<&str>,
+) -> anyhow::Result<String> {
+    let ledger = glasshouse::routing::evidence::EvidenceLedger::open(runtime)?;
+    let now_unix = glasshouse::provider::cache::now_unix_seconds();
+    let window_seconds = match since_unix {
+        Some(since) => now_unix.saturating_sub(since).max(0),
+        None => i64::from(hours) * 3600,
+    };
+    let observations = ledger.consumption_in_window(now_unix, window_seconds)?;
+    let mut out = String::new();
+    for observation in &observations {
+        if let Some(session_id) = session_id
+            && observation.session_id.as_deref() != Some(session_id)
+        {
+            continue;
+        }
+        out.push_str(&serde_json::to_string(&observation_json(observation))?);
+        out.push('\n');
+    }
+    Ok(out)
+}
+
+/// One `--json` line's exact shape — a view type owned here rather than a
+/// `Serialize` impl on [`glasshouse::routing::evidence::RoutingObservation`]
+/// itself: the readout owns its own wire shape, and the ledger gains no new
+/// dependents for one reader (CLAUDE.md rule 8).
+///
+/// A struct rather than a hand-built [`serde_json::Value`]: struct-field
+/// serialization emits keys in declaration order regardless of feature
+/// flags, which is what fixes the key order the packet pins — a
+/// `serde_json::Value::Object` built through the `json!` macro would instead
+/// sort them alphabetically, because this workspace does not enable
+/// `serde_json`'s `preserve_order` feature.
+#[derive(serde::Serialize)]
+struct ObservationJson<'a> {
+    seq: i64,
+    observed_at: i64,
+    session_id: Option<&'a str>,
+    harness: Option<&'a str>,
+    provider: &'a str,
+    model: &'a str,
+    route: Option<&'a str>,
+    purpose: Option<&'a str>,
+    quota_context: Option<&'a str>,
+    dispatched_at: Option<i64>,
+    completed_at: Option<i64>,
+    first_byte_ms: Option<i64>,
+    completed_ms: Option<i64>,
+    input_tokens: Option<i64>,
+    output_tokens: Option<i64>,
+    cached_input_tokens: Option<i64>,
+    outcome: Option<&'static str>,
+    failure_class: Option<&'static str>,
+    tool_rounds: Option<i64>,
+    retries: Option<i64>,
+    repairs: Option<i64>,
+    failovers: Option<i64>,
+}
+
+/// [`ObservationJson`]'s only constructor — every `None` stays `None`
+/// through to serialization, where `serde_json` renders it `null`: the same
+/// rule [`render_routing_cost`]'s own doc comment states for the prose path,
+/// applied to the wire shape instead of a rendered word.
+fn observation_json(
+    observation: &glasshouse::routing::evidence::RoutingObservation,
+) -> ObservationJson<'_> {
+    ObservationJson {
+        seq: observation.seq,
+        observed_at: observation.observed_at_unix,
+        session_id: observation.session_id.as_deref(),
+        harness: observation.harness.as_deref(),
+        provider: &observation.provider,
+        model: &observation.model,
+        route: observation.route.as_deref(),
+        purpose: observation.purpose.as_deref(),
+        quota_context: observation.quota_context.as_deref(),
+        dispatched_at: observation.dispatched_at_unix,
+        completed_at: observation.completed_at_unix,
+        first_byte_ms: observation.first_byte_ms,
+        completed_ms: observation.completed_ms,
+        input_tokens: observation.input_tokens,
+        output_tokens: observation.output_tokens,
+        cached_input_tokens: observation.cached_input_tokens,
+        outcome: observation
+            .outcome
+            .map(glasshouse::routing::evidence::Outcome::as_str),
+        failure_class: observation
+            .failure_class
+            .map(glasshouse::routing::evidence::FailureClass::as_str),
+        tool_rounds: observation.tool_rounds,
+        retries: observation.retries,
+        repairs: observation.repairs,
+        failovers: observation.failovers,
+    }
+}

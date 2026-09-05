@@ -248,8 +248,23 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
                 return Ok(ExitCode::FAILURE);
             }
         },
-        Some(Command::RoutingCost { hours }) => {
-            match crate::commands::routing_cost::routing_cost_report(&runtime, *hours) {
+        Some(Command::RoutingCost {
+            hours,
+            json,
+            since,
+            session,
+        }) => {
+            let result = if *json {
+                crate::commands::routing_cost::routing_cost_json_report(
+                    &runtime,
+                    *hours,
+                    *since,
+                    session.as_deref(),
+                )
+            } else {
+                crate::commands::routing_cost::routing_cost_report(&runtime, *hours)
+            };
+            match result {
                 Ok(report) => print!("{report}"),
                 Err(err) => {
                     eprintln!("glasshouse: {err:#}");
