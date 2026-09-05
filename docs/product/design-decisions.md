@@ -4227,3 +4227,7 @@ in batches, background work, messages — was recorded the same evening from the
 ended session `glasshouse-9c`'s hand-off: the mechanism that makes pane usable in
 the orchestrator role the two-modes table already lists, and the cure for the storm
 of one-event-one-turn that the orchestrator running this build pays for today.
+
+## Line 442's crate, ruled 2026-09-05: the one that can refuse a prompt before raising it
+
+The 2026-09-03 answer named *the secret-service/zbus route*; the backend that landed uses `dbus-secret-service` 4.1.0 directly, and the ruling is that the measured property decides, not the name. The hazard this line was refused over for a month is a locked collection hanging a launch — `keyring` 3.6.3 leaves the prompt timeout unset and the calling thread waits up to a year. `dbus-secret-service` exposes `connect_with_max_prompt_timeout(_, 0)`, under which a prompt is refused before it is raised, and reads a collection's `Locked` without unlocking it; the pure-Rust `secret-service` crate, by the worker's reading of its source, has no timeout anywhere and unlocks unconditionally inside `delete` — an unbounded wait, worse than the year. The cost is `libdbus-sys` and therefore `libdbus-1-dev` + `pkg-config` on every Linux build host, which the user accepted the same day, and no executor enters the crate. The box ticks when a CI fixture proves the round trip against a live Secret Service; until then 442 is LOCALLY VERIFIED in `phase-9e.md`.

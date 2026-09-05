@@ -45,25 +45,58 @@
 //!    `tests/secret_native.rs` fails if the manifest ever declares `keyring`
 //!    without a backend feature or outside a per-target section.
 //!
-//! # Which platforms, and why not the third
+//! # Which platforms, and how the third one refuses
 //!
-//! macOS and Windows are here. **The Secret Service is deliberately not**,
-//! and the reason is no longer only that a headless runner cannot prove it.
-//! keyring 3.6.3's Secret Service backend reaches the bus through
-//! `SecretService::connect`, leaving `dbus-secret-service`'s prompt timeout
-//! unset; that crate then defaults an unanswered unlock prompt to
-//! `ONE_YEAR_SECONDS` and blocks the calling thread for it. A locked
+//! All three are here now, and the third one arrived by fixing the reason it
+//! was refused rather than by accepting it.
+//!
+//! The refusal was this: keyring 3.6.3's Secret Service backend reaches the
+//! bus through `SecretService::connect`, leaving `dbus-secret-service`'s
+//! prompt timeout unset; that crate then defaults an unanswered unlock prompt
+//! to `ONE_YEAR_SECONDS` and blocks the calling thread for it. A locked
 //! collection is not an error there — `keyring`'s `map_matching_items`
 //! unlocks locked items before reading them, and `get_collection` unlocks a
 //! locked collection before writing — so a Linux desktop with a locked
-//! keyring would **hang a launch**, which is the same defect
-//! `silence_authorization_dialogs` exists to prevent on macOS with no
-//! equivalent available. Worse, a probe cannot see it coming: probing an
-//! account that was never written matches no item, so it returns before
-//! anything needs unlocking and reports the store as healthy. Until a
-//! backend can refuse a prompt rather than wait for one, "prefer a Secret
-//! Service-compatible keyring **when available**" cannot be honoured, and
-//! saying so is the honest answer.
+//! keyring would **hang a launch**. Worse, a probe could not see it coming:
+//! probing an account that was never written matches no item, so it returns
+//! before anything needs unlocking and reports the store as healthy.
+//!
+//! **`dbus-secret-service` itself can refuse; `keyring` just never asks it
+//! to.** `connect_with_max_prompt_timeout(_, 0)` is documented as *"prevent
+//! the prompt from appearing at all: the operation will immediately be
+//! canceled"*, and `Collection::is_locked` reads the `Locked` property
+//! without touching an item. `keyring` calls neither and exposes no way for a
+//! caller to, so the Linux arm depends on `dbus-secret-service` directly.
+//! Zero is the Linux `SecKeychainSetUserInteractionAllowed(0)`, and the
+//! backend probes a *collection* rather than an item because a collection is
+//! the thing that can be locked.
+//!
+//! # The crate, and the four properties it was chosen on
+//!
+//! Against `secret-service` 5.2.0, the pure-Rust zbus client, which was the
+//! obvious alternative and is not what this uses:
+//!
+//! 1. **Can it refuse?** `dbus-secret-service` can, above. `secret-service`
+//!    reads `Locked` too, but `blocking::Item::delete` calls
+//!    `ensure_unlocked()` unconditionally, and its `exec_prompt_blocking` is
+//!    `receive_completed_iter.next()` — an **unbounded** wait on a signal,
+//!    with no timeout anywhere in the crate. Deleting a credential from a
+//!    collection that locked since the last check would hang with no ceiling
+//!    at all, which is worse than the year this arm was refused over.
+//! 2. **What does it drag in?** `dbus-secret-service` brings `libdbus-sys`,
+//!    so `libdbus-1-dev` and `pkg-config` are needed on every Linux build
+//!    host — a real cost, accepted by the user on 2026-09-05 — and **no
+//!    executor**. `secret-service` brings zbus and an async runtime.
+//! 3. **Is the blocking API real?** `dbus-secret-service` is synchronous to
+//!    the bottom: libdbus is a blocking C API. `secret-service::blocking` is
+//!    a shim over `zbus::blocking`, whose own documentation warns it stalls
+//!    if a runtime is already running. This crate owns no runtime by design
+//!    (see `design-decisions.md` on `ureq`), and now still owns none.
+//! 4. **Maintained?** Both. `dbus-secret-service` 4.1.0 is by `keyring`'s own
+//!    maintainer and exists to be `keyring`'s Secret Service transport.
+//!
+//! Property 1 decided it: this whole arm exists to refuse rather than wait,
+//! and only one of the two can.
 //!
 //! # A reference names a credential; the store decides where it lives
 //!
@@ -100,6 +133,14 @@
 //! `tests::a_store_error_never_carries_anything_the_store_returned` and
 //! `tests::a_store_refusals_status_comes_from_no_variant_that_carries_store_data`
 //! are what fail if either drifts.
+//!
+//! The Secret Service arm obeys the same rule against a different error type:
+//! the only thing carried out of a `dbus_secret_service::Error` is the D-Bus
+//! error **name** — a fixed `org.freedesktop.*` identifier — and never the
+//! message beside it, which is free text the provider composes and the one
+//! field that could echo something it read.
+//! `tests::a_secret_service_refusals_status_comes_from_no_variant_that_carries_a_payload`
+//! is what fails if that drifts.
 
 use super::{EnvironmentSecretStore, Secret, SecretRef, SecretStore};
 
@@ -127,6 +168,12 @@ pub const SERVICE: &str = "glasshouse";
 /// platform-gated backend uses needs the same gate as that backend** — which
 /// is why this gate has to be widened in lockstep with the backend's own,
 /// and not one line later.
+///
+/// The Secret Service arm is the deliberate exception: it probes a
+/// *collection* for its `Locked` property rather than an item, because
+/// searching for an account nothing ever wrote is exactly the probe that
+/// cannot see a locked keyring coming. So this gate stayed at two platforms
+/// while the backend went to three.
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 const PROBE_ACCOUNT: &str = "glasshouse-availability-probe";
 
@@ -152,7 +199,7 @@ pub fn os_credential_for_variable(var: &str) -> SecretRef {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Unavailable {
     /// No backend is compiled for this target — see "Which platforms, and
-    /// why not the third".
+    /// how the third one refuses".
     UnsupportedPlatform,
     /// A backend exists and refused a probe: a locked or missing keychain,
     /// or a session with no access to one — with the store's own account of
@@ -287,9 +334,13 @@ impl NativeSecretStore {
     /// Probe the platform's store, and hand back a handle only if it
     /// answered.
     ///
-    /// The probe reads an account that is never written, so the answer is
-    /// "the store is reachable" and nothing else: no credential is read, and
-    /// `keyring::Error::NoEntry` — the expected outcome — counts as success.
+    /// No credential is read either way, but *what* is asked differs by
+    /// platform and has to: macOS and Windows read an account that is never
+    /// written, so `keyring::Error::NoEntry` — the expected outcome — counts
+    /// as success. The Secret Service arm reads the default collection's
+    /// `Locked` property instead, because a locked keyring is the state an
+    /// item probe cannot see and the state that would otherwise freeze a
+    /// launch.
     ///
     /// That name is deliberately not a link. `keyring` is a macOS-only
     /// dependency (see `crates/glasshouse/Cargo.toml`), so an intra-doc link
@@ -746,11 +797,301 @@ mod backend {
     }
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(target_os = "linux")]
+mod backend {
+    //! A Secret Service keyring, through `dbus-secret-service`, and **refusing
+    //! rather than waiting**.
+    //!
+    //! # The invariant
+    //!
+    //! No call this module makes can wait for a user. The connection is opened
+    //! with `connect_with_max_prompt_timeout(_, 0)`, which
+    //! `dbus-secret-service` documents as *"prevent the prompt from appearing
+    //! at all: the operation will immediately be canceled"*
+    //! (`src/prompt.rs:42-45` returns `Error::Prompt` before the prompt is even
+    //! raised when the timeout is zero). Every D-Bus call it makes carries a
+    //! 2-second reply timeout (`src/proxy/mod.rs:17`). Nothing here names
+    //! `unlock`, `ensure_unlocked` or `create_collection`, so there is no path
+    //! that would need a prompt in the first place: a locked collection is
+    //! **read** through its `Locked` property and refused.
+    //!
+    //! That is the Linux equivalent of macOS's
+    //! `SecKeychainSetUserInteractionAllowed(0)`, and having one is the whole
+    //! reason this arm is written against `dbus-secret-service` directly rather
+    //! than through `keyring` — see the module documentation's "Which
+    //! platforms, and how the third one refuses".
+    //!
+    //! # Why the probe is a collection and not an item
+    //!
+    //! macOS and Windows probe by reading an account that is never written,
+    //! because their stores have no state to ask about beyond "does the store
+    //! answer". The Secret Service does: a collection is locked or it is not,
+    //! and probing an item cannot see it. Searching for an account nothing ever
+    //! wrote matches no item and returns before anything needs unlocking, which
+    //! is exactly how a probe reports a store healthy and then freezes on the
+    //! first real read. So this probe reads `Locked` on the default collection,
+    //! and `PROBE_ACCOUNT` is deliberately **not** gated in for this target.
+
+    use std::collections::HashMap;
+
+    use dbus_secret_service::{Collection, EncryptionType, Error, SecretService};
+
+    use super::{Deletion, Unavailable};
+
+    /// [`super::SecretStore::describe`] for the native store alone.
+    pub const LABEL: &str = "a Secret Service keyring";
+    /// [`super::PreferNativeSecretStore`]'s whole arrangement, native first.
+    pub const NATIVE_FIRST_LABEL: &str = "a Secret Service keyring, then the process environment";
+
+    /// Zero, and it is load-bearing: with a zero timeout `dbus-secret-service`
+    /// cancels a prompt instead of raising one, so no call from here can wait
+    /// for a user who is not there.
+    const PROMPT_TIMEOUT_SECONDS: u64 = 0;
+
+    /// **The compile-time half of the "never in the clear" guard.**
+    /// `EncryptionType::Dh` is declared `#[cfg(any(feature = "crypto-rust",
+    /// feature = "crypto-openssl"))]` inside `dbus-secret-service`, so naming
+    /// it here stops compiling if the manifest ever drops the crypto feature —
+    /// rather than silently leaving `EncryptionType::Plain`, which would send
+    /// a provider credential over the session bus unencrypted. Same shape as
+    /// the macOS arm's `keyring::macos::default_credential_builder` import.
+    const ENCRYPTION: EncryptionType = EncryptionType::Dh;
+
+    /// The Secret Service's own attribute names for a service/account pair —
+    /// the ones `libsecret`, `secret-tool` and `keyring` all use — so a user
+    /// can find a Glasshouse credential with
+    /// `secret-tool lookup service glasshouse username <VARIABLE>` exactly as
+    /// they can with `security find-generic-password` on macOS.
+    const ATTRIBUTE_SERVICE: &str = "service";
+    const ATTRIBUTE_ACCOUNT: &str = "username";
+
+    /// What the Secret Service is told a credential's bytes are. `text/plain`
+    /// is what every other Secret Service client writes, and what makes a
+    /// Glasshouse item readable by one.
+    const CONTENT_TYPE: &str = "text/plain";
+
+    /// Every classification this backend can give, and each is
+    /// **diagnosis, semicolon, instruction** — the user's decision of
+    /// 2026-09-03 asks for actionable installation or configuration
+    /// instructions, and this is where the first sentence of those lives.
+    /// Fixed text chosen by the error's variant alone, exactly as `classify`
+    /// is on the other two platforms.
+    const NO_SESSION_BUS: &str = "no D-Bus session bus is reachable, so no keyring can be; \
+         start Glasshouse from a desktop session, or run it under `dbus-run-session`";
+    const NO_PROVIDER: &str = "nothing owns `org.freedesktop.secrets` on the session bus; \
+         install gnome-keyring, KWallet or KeePassXC and enable its Secret Service integration";
+    pub(super) const COLLECTION_LOCKED: &str = "the keyring's default collection is locked, and \
+         Glasshouse will not wait for an unlock prompt; unlock the keyring in your desktop \
+         session and start Glasshouse again";
+    const NO_DEFAULT_COLLECTION: &str = "the keyring has no default collection; create one in \
+         your keyring application, or run `secret-tool store --label=glasshouse service \
+         glasshouse username SOME_VARIABLE` once";
+    const PROMPT_REFUSED: &str = "the keyring wanted an unlock prompt, which Glasshouse \
+         refuses on the launch path; unlock the keyring in your desktop session and start \
+         Glasshouse again";
+    const BAD_ENCODING: &str = "the stored credential is not text; re-store it through \
+         Glasshouse, or remove the item with `secret-tool clear`";
+    const REFUSED: &str = "the Secret Service keyring reported an error; check your keyring \
+         application's own log for what it refused";
+
+    /// The one place a connection is opened, and the only constructor this
+    /// module names.
+    ///
+    /// `SecretService::connect` — the constructor that leaves the prompt
+    /// timeout unset, and the one `keyring` uses — is deliberately never named
+    /// here; `tests::the_secret_service_backend_can_never_wait_for_an_unlock_prompt`
+    /// is what fails if it ever is.
+    fn open_service() -> Result<SecretService, Error> {
+        SecretService::connect_with_max_prompt_timeout(ENCRYPTION, PROMPT_TIMEOUT_SECONDS)
+    }
+
+    /// Which of the two "there is nothing to talk to" states this is, read
+    /// from the D-Bus error's **name** — a well-known `org.freedesktop.*`
+    /// identifier — and never from its message.
+    ///
+    /// Only a bus that answered can produce `ServiceUnknown`, `NameHasNoOwner`
+    /// or a `Spawn` failure: those mean the session bus is there and no
+    /// provider is. Anything else at connect time means there is no bus.
+    fn classify_dbus(name: Option<&str>) -> &'static str {
+        match name {
+            Some(
+                "org.freedesktop.DBus.Error.ServiceUnknown"
+                | "org.freedesktop.DBus.Error.NameHasNoOwner",
+            ) => NO_PROVIDER,
+            Some(name) if name.starts_with("org.freedesktop.DBus.Error.Spawn.") => NO_PROVIDER,
+            _ => NO_SESSION_BUS,
+        }
+    }
+
+    /// Every `dbus_secret_service::Error` reduced to fixed text chosen by
+    /// **variant alone**, the same choke point `classify` is on the other two
+    /// platforms: no payload and no `Display` of the crate's own error reaches
+    /// a Glasshouse message.
+    fn classify(err: &Error) -> &'static str {
+        match err {
+            Error::Locked => COLLECTION_LOCKED,
+            Error::NoResult => NO_DEFAULT_COLLECTION,
+            Error::Prompt => PROMPT_REFUSED,
+            Error::Unavailable => NO_PROVIDER,
+            Error::UnsupportedSecretFormat => BAD_ENCODING,
+            Error::Dbus(err) => classify_dbus(err.name()),
+            _ => REFUSED,
+        }
+    }
+
+    /// The provider's own status, and **only** the D-Bus error *name*.
+    ///
+    /// A name is an interface identifier from the `org.freedesktop.*`
+    /// namespace — `ServiceUnknown`, `AccessDenied` — fixed by the protocol
+    /// and composed by nobody. The *message* beside it is free text a provider
+    /// writes, which is the one field on this error that could echo something
+    /// it read, so `message()` is never called here. `Crypto`, `Path` and
+    /// `Parse` carry payloads that are not statuses at all and are excluded by
+    /// the match rather than by inspecting them. See [`super::StoreRefusal`].
+    fn platform_status(err: &Error) -> Option<String> {
+        match err {
+            Error::Dbus(err) => err.name().map(str::to_owned),
+            _ => None,
+        }
+    }
+
+    /// The one place a `dbus_secret_service::Error` becomes an [`Unavailable`].
+    fn refusal(err: &Error) -> Unavailable {
+        Unavailable::StoreUnreachable(super::StoreRefusal {
+            classification: classify(err),
+            status: platform_status(err),
+        })
+    }
+
+    /// **The locked-collection guard, and the reason this backend exists.**
+    /// A locked collection is refused; it is never unlocked.
+    ///
+    /// `proceed` is what the caller would do next with a collection it
+    /// believes is open — and every one of those operations, on a locked
+    /// collection, is answered by the Secret Service with an unlock prompt.
+    /// Taking it as a parameter is what lets
+    /// `tests::a_locked_collection_is_refused_before_anything_can_prompt`
+    /// supply a `proceed` standing in for a prompt nobody answers and prove
+    /// this function never reaches it. The test cannot *actually* block: a
+    /// test that reproduced the hang would be the defect this packet exists
+    /// to prevent, so it panics instead and fails at once.
+    pub(super) fn refuse_if_locked<T>(
+        locked: Result<bool, Error>,
+        proceed: impl FnOnce() -> Result<T, &'static str>,
+    ) -> Result<T, &'static str> {
+        match locked {
+            Ok(false) => proceed(),
+            Ok(true) => Err(COLLECTION_LOCKED),
+            Err(err) => Err(classify(&err)),
+        }
+    }
+
+    /// The default collection, or the fixed text saying why not.
+    ///
+    /// The **only** producer of a [`Collection`] in this module, so every
+    /// search, read, write and delete below is downstream of the locked check
+    /// by construction rather than by each of them remembering.
+    fn unlocked_default_collection(
+        connection: &SecretService,
+    ) -> Result<Collection<'_>, &'static str> {
+        let collection = connection
+            .get_default_collection()
+            .map_err(|err| classify(&err))?;
+        refuse_if_locked(collection.is_locked(), || Ok(collection))
+    }
+
+    /// The attributes a credential is filed under, and the only two.
+    fn attributes<'a>(service: &'a str, account: &'a str) -> HashMap<&'a str, &'a str> {
+        HashMap::from([(ATTRIBUTE_SERVICE, service), (ATTRIBUTE_ACCOUNT, account)])
+    }
+
+    /// What a user sees in Seahorse or KWalletManager. Two names, never a
+    /// value — the same thing [`super::SecretRef`] is safe to print for.
+    fn label(service: &str, account: &str) -> String {
+        format!("{service}: {account}")
+    }
+
+    pub fn probe() -> Result<(), Unavailable> {
+        let connection = open_service().map_err(|err| refusal(&err))?;
+        unlocked_default_collection(&connection)
+            .map(|_| ())
+            .map_err(|classification| {
+                Unavailable::StoreUnreachable(super::StoreRefusal {
+                    classification,
+                    status: None,
+                })
+            })
+    }
+
+    pub fn get(service: &str, account: &str) -> Option<String> {
+        let connection = open_service().ok()?;
+        let collection = unlocked_default_collection(&connection).ok()?;
+        let items = collection.search_items(attributes(service, account)).ok()?;
+        let secret = items.first()?.get_secret().ok()?;
+        String::from_utf8(secret).ok()
+    }
+
+    /// Answered without the value ever entering this process, and here that is
+    /// literal rather than a near miss: `SearchItems` returns object paths and
+    /// no secret at all, so unlike the macOS and Windows arms — which have to
+    /// read the item for its attributes — nothing is decrypted to answer this.
+    pub fn exists(service: &str, account: &str) -> bool {
+        let Ok(connection) = open_service() else {
+            return false;
+        };
+        let Ok(collection) = unlocked_default_collection(&connection) else {
+            return false;
+        };
+        collection
+            .search_items(attributes(service, account))
+            .is_ok_and(|items| !items.is_empty())
+    }
+
+    pub fn set(service: &str, account: &str, value: &str) -> Result<(), &'static str> {
+        let connection = open_service().map_err(|err| classify(&err))?;
+        let collection = unlocked_default_collection(&connection)?;
+        collection
+            .create_item(
+                &label(service, account),
+                attributes(service, account),
+                value.as_bytes(),
+                true,
+                CONTENT_TYPE,
+            )
+            .map(|_| ())
+            .map_err(|err| classify(&err))
+    }
+
+    /// The one operation here the Secret Service can answer with a prompt,
+    /// and the reason the prompt timeout is not merely belt-and-braces.
+    ///
+    /// An item in an unlocked collection can still be individually locked on
+    /// some providers, and `Item::Delete` then returns a prompt path.
+    /// `dbus-secret-service` refuses it at once rather than raising it,
+    /// because the timeout is zero, and this reports `PROMPT_REFUSED` — which
+    /// tells the user to unlock the keyring. Reading is not exposed to this:
+    /// `get_secret` is a plain method call that fails on a locked item rather
+    /// than unlocking it.
+    pub fn delete(service: &str, account: &str) -> Result<Deletion, &'static str> {
+        let connection = open_service().map_err(|err| classify(&err))?;
+        let collection = unlocked_default_collection(&connection)?;
+        let items = collection
+            .search_items(attributes(service, account))
+            .map_err(|err| classify(&err))?;
+        let Some(item) = items.first() else {
+            return Ok(Deletion::AlreadyAbsent);
+        };
+        item.delete().map_err(|err| classify(&err))?;
+        Ok(Deletion::Removed)
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 mod backend {
     //! No store this project can prove. Nothing here pretends otherwise, and
-    //! `keyring` is not even a dependency on these targets — see the module
-    //! documentation's "Which platforms, and why not the third".
+    //! neither `keyring` nor `dbus-secret-service` is a dependency on these
+    //! targets — see the module documentation's "Which platforms, and how the
+    //! third one refuses".
 
     use super::{Deletion, Unavailable};
 
@@ -1159,6 +1500,243 @@ mod tests {
         assert!(rendered.contains(VAR), "the NAME must survive: {rendered}");
     }
 
+    // --- the Secret Service arm can never wait for a user -----------------
+
+    /// This module's Linux backend with its `//` comments stripped — the
+    /// slice the two scans below are about, taken between its own `mod`
+    /// header and the no-backend arm that follows it.
+    ///
+    /// A source scan rather than a run-time one because the property is
+    /// *"no code path here can raise a prompt"*, and a test can only ever
+    /// exercise the paths it thought of. Both scans therefore run on every
+    /// platform, including the ones with no Linux compiler in sight.
+    fn secret_service_backend() -> String {
+        let code = production_code(include_str!("native.rs"));
+        let after = code
+            .split("#[cfg(target_os = \"linux\")]")
+            .nth(1)
+            .expect("the Linux backend module")
+            .to_owned();
+        let scanned = after
+            .split("#[cfg(not(any(")
+            .next()
+            .expect("the no-backend arm follows it")
+            .to_owned();
+        // Assert what was scanned, rather than trusting a slice: an empty or
+        // truncated slice would make every assertion below pass for nothing.
+        for landmark in [
+            "fn open_service",
+            "fn refuse_if_locked",
+            "fn unlocked_default_collection",
+            "pub fn probe",
+            "pub fn delete",
+        ] {
+            assert!(
+                scanned.contains(landmark),
+                "the Linux backend slice is truncated: it does not reach `{landmark}`"
+            );
+        }
+        scanned
+    }
+
+    /// **The invariant this whole arm exists for.** Nothing in the Secret
+    /// Service backend may name an operation that can raise an unlock
+    /// prompt, and the connection may only be opened by the constructor that
+    /// bounds one.
+    ///
+    /// `SecretService::connect` is the constructor `keyring` uses and the
+    /// reason line 442 was refused: it leaves the prompt timeout unset, and
+    /// `dbus-secret-service` then waits a year. `unlock`, `ensure_unlocked`
+    /// and `create_collection` are the three call shapes that reach a prompt
+    /// even with a bounded timeout — bounded is still a wait, and this sits
+    /// on the launch path.
+    #[test]
+    fn the_secret_service_backend_can_never_wait_for_an_unlock_prompt() {
+        let code = secret_service_backend();
+
+        assert!(
+            code.contains("connect_with_max_prompt_timeout(ENCRYPTION, PROMPT_TIMEOUT_SECONDS)"),
+            "the Linux backend must open its connection with the constructor that bounds a \
+             prompt"
+        );
+        assert!(
+            code.contains("const PROMPT_TIMEOUT_SECONDS: u64 = 0;"),
+            "the prompt timeout must be zero: `dbus-secret-service` treats zero as `do not \
+             raise the prompt at all`, and any other value is a wait on the launch path"
+        );
+        assert!(
+            !code.contains("SecretService::connect("),
+            "`SecretService::connect` leaves the prompt timeout unset, which is the exact \
+             defect that kept the Secret Service out of this file"
+        );
+        for forbidden in [
+            ".unlock(",
+            ".ensure_unlocked(",
+            ".unlock_all(",
+            ".create_collection(",
+        ] {
+            assert!(
+                !code.contains(forbidden),
+                "the Linux backend names `{forbidden}`, which asks the Secret Service to \
+                 unlock something and therefore to prompt: a locked collection is refused \
+                 here, never opened"
+            );
+        }
+        assert!(
+            !code.contains(".message()"),
+            "a D-Bus error's message is free text the provider composes; only its `name()`, \
+             a fixed `org.freedesktop.*` identifier, may be carried out of here"
+        );
+        assert!(
+            code.contains("EncryptionType::Dh") && !code.contains("EncryptionType::Plain"),
+            "the session must be the encrypted one: `Plain` sends a provider credential over \
+             the session bus in the clear"
+        );
+    }
+
+    /// The probe reads `Locked` **before** anything touches an item, and it
+    /// is structurally impossible for a later call to skip it.
+    ///
+    /// `unlocked_default_collection` is the only producer of a collection in
+    /// the backend, so every search, read, write and delete is downstream of
+    /// the guard by construction. That is asserted here rather than left to
+    /// each caller remembering, because "remembering" is what a probe that
+    /// searched for a never-written account was doing when it reported a
+    /// locked keyring healthy.
+    #[test]
+    fn the_secret_service_probe_reads_locked_before_it_reads_an_item() {
+        let code = secret_service_backend();
+
+        assert_eq!(
+            code.matches("get_default_collection(").count(),
+            1,
+            "`unlocked_default_collection` must be the only place a collection is obtained, \
+             or a caller can reach an item without the locked check"
+        );
+
+        let guard = code
+            .split("fn unlocked_default_collection")
+            .nth(1)
+            .expect("the one producer of a collection")
+            .split("\n    }")
+            .next()
+            .expect("its body ends at this module's first dedented brace");
+        assert!(
+            guard.contains("is_locked()") && guard.contains("refuse_if_locked"),
+            "the collection's `Locked` property must be read and refused on, before the \
+             collection is handed to anything: {guard}"
+        );
+    }
+
+    /// **Requirement 2, against a `proceed` that stands in for a prompt
+    /// nobody answers.** A locked collection is refused, and the refusal
+    /// names the locked state.
+    ///
+    /// The fake panics rather than blocking on purpose. A test that really
+    /// waited would reproduce the hang this arm exists to prevent and would
+    /// take the suite with it; panicking fails inside the bound and says
+    /// exactly what went wrong.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_locked_collection_is_refused_before_anything_can_prompt() {
+        // The ceiling the backend promises on the launch path: the bus
+        // connect plus a handful of `dbus-secret-service`'s 2-second D-Bus
+        // replies, with a prompt contributing nothing because one is never
+        // raised. Declared here rather than beside the backend, where only a
+        // test would read it and `-D dead-code` would refuse it.
+        const PROBE_BOUND: std::time::Duration = std::time::Duration::from_secs(30);
+
+        let started = std::time::Instant::now();
+        let refused = backend::refuse_if_locked::<()>(Ok(true), || {
+            panic!(
+                "the probe went on from a locked collection to an operation the Secret \
+                 Service answers with an unlock prompt: where nobody answers it, that call \
+                 does not return"
+            )
+        });
+        let elapsed = started.elapsed();
+
+        assert_eq!(refused, Err(backend::COLLECTION_LOCKED));
+        assert!(
+            backend::COLLECTION_LOCKED.contains("locked"),
+            "the refusal must name the locked state: {}",
+            backend::COLLECTION_LOCKED
+        );
+        assert!(
+            elapsed < PROBE_BOUND,
+            "refusing a locked collection must be immediate, not bounded-but-slow: {elapsed:?}"
+        );
+
+        // ... and an unlocked collection is handed straight through, or the
+        // guard would refuse every Linux desktop rather than only locked ones.
+        assert_eq!(backend::refuse_if_locked(Ok(false), || Ok(7)), Ok(7));
+    }
+
+    /// The Linux arm's status is the D-Bus error **name** and comes from no
+    /// variant that carries a payload of its own — the same rule the macOS
+    /// and Windows arm's `platform_status` obeys, asserted the same way, on
+    /// the match rather than on today's values.
+    #[test]
+    fn a_secret_service_refusals_status_comes_from_no_variant_that_carries_a_payload() {
+        let status = secret_service_backend();
+        let status = status
+            .split("fn platform_status")
+            .nth(1)
+            .expect("the Linux backend builds a status too")
+            .split("\n    }")
+            .next()
+            .expect("its body ends at this module's first dedented brace");
+
+        for carries_its_own in ["Crypto", "Path(", "Parse", "message"] {
+            assert!(
+                !status.contains(carries_its_own),
+                "`platform_status` names `{carries_its_own}`, which is a payload of the \
+                 crate's own rather than a status the provider named: {status}"
+            );
+        }
+        assert!(
+            status.contains("Error::Dbus") && status.contains("name()"),
+            "the status must still be taken from the D-Bus error's name, or the widened \
+             reason says nothing on Linux: {status}"
+        );
+    }
+
+    /// Every Secret Service refusal is **diagnosis, semicolon, instruction**.
+    ///
+    /// The user's decision of 2026-09-03 asks for actionable installation or
+    /// configuration instructions where no keyring is available. This is what
+    /// makes them actually be there, rather than seven sentences describing a
+    /// problem to somebody who wanted to fix it — and it reads the source
+    /// rather than the values so it holds on macOS and Windows too, where the
+    /// Linux constants do not exist to be read.
+    #[test]
+    fn every_secret_service_refusal_carries_an_instruction() {
+        let code = secret_service_backend();
+
+        for name in [
+            "NO_SESSION_BUS",
+            "NO_PROVIDER",
+            "COLLECTION_LOCKED",
+            "NO_DEFAULT_COLLECTION",
+            "PROMPT_REFUSED",
+            "BAD_ENCODING",
+            "REFUSED",
+        ] {
+            let literal = code
+                .split(&format!("{name}: &str = "))
+                .nth(1)
+                .unwrap_or_else(|| panic!("`{name}` is not a classification in this backend"))
+                .split("\";")
+                .next()
+                .expect("a string literal ends at its closing quote");
+            assert!(
+                literal.contains("; "),
+                "`{name}` tells the user what happened and not what to do about it; every \
+                 classification here is a diagnosis, a semicolon, and an instruction: {literal}"
+            );
+        }
+    }
+
     // --- the backend that is linked is the platform's own ----------------
 
     /// **The mock guard, at run time.** `keyring` 3.x resolves
@@ -1243,14 +1821,14 @@ mod tests {
     fn detect_offers_a_native_store_on_exactly_the_platforms_with_a_backend() {
         let detected = NativeSecretStore::detect();
 
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        #[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
         assert!(
             !matches!(detected, Err(Unavailable::UnsupportedPlatform)),
             "this platform has a backend, so the only honest refusal is \
              `StoreUnreachable`"
         );
 
-        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
         assert_eq!(
             detected,
             Err(Unavailable::UnsupportedPlatform),

@@ -15,11 +15,13 @@
 //!    [`the_manifest_never_declares_keyring_without_a_real_backend`] reads
 //!    `crates/glasshouse/Cargo.toml` and fails on any `keyring` line that is
 //!    not paired with its own platform's backend feature.
-//! 2. **A platform with no backend hands back no store at all.** On Linux
-//!    that assertion is the whole of this file's value: a `detect` that
-//!    succeeded there would mean something got linked that this project has
-//!    not proven, which is exactly how the mock would first appear at run
-//!    time.
+//! 2. **A platform with no backend hands back no store at all**, and a
+//!    platform with one never claims the reverse. Linux gained a backend on
+//!    2026-09-05, so its assertion moved rather than went away: a headless
+//!    cell — which every Linux CI cell is — must refuse with
+//!    `StoreUnreachable` and an instruction, never with
+//!    `UnsupportedPlatform`, and it must do it inside a bound, because this
+//!    call is on the launch path.
 //!
 //! # Why the round-trip tests are gated rather than universal
 //!
@@ -40,9 +42,9 @@ use glasshouse::secret::{SecretRef, SecretStore};
 // warnings` makes dead imports a hard error. Practice §18's rule — anything
 // used only by a platform-gated item needs the same gate — reaches import
 // lists too, and this file went red on the flipped build until it did.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use glasshouse::secret::EnvironmentSecretStore;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 use glasshouse::secret::native::Deletion;
 
 // --- the manifest may never link the mock --------------------------------
@@ -162,6 +164,113 @@ fn the_manifest_scan_would_catch_a_violation() {
     );
 }
 
+// --- the Linux dependency may never reach another target -----------------
+
+/// Every complaint the two manifests have about the Secret Service
+/// dependency, or an empty list.
+///
+/// A sibling of [`manifest_complaints`] and not an extension of it, because
+/// the hazard is a different one. `keyring` can silently become a mock;
+/// `dbus-secret-service` has no mock mode at all — the string `mock` does not
+/// occur in its source. What it *can* do is send a provider credential over
+/// the session bus in the clear, if the crypto feature that makes
+/// `EncryptionType::Dh` exist is ever dropped, and reach a platform whose
+/// Secret Service nobody proved.
+///
+/// The feature lives in the workspace manifest and the target section lives
+/// in the crate manifest, so this reads both: a check of either alone would
+/// pass while the other was wrong.
+fn secret_service_complaints(crate_manifest: &str, workspace_manifest: &str) -> Vec<String> {
+    let mut complaints = Vec::new();
+    let mut section = "";
+    let mut declared = false;
+
+    for line in crate_manifest.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') {
+            section = trimmed;
+            continue;
+        }
+        if trimmed.starts_with('#') || !trimmed.starts_with("dbus-secret-service") {
+            continue;
+        }
+        declared = true;
+        if section != "[target.'cfg(target_os = \"linux\")'.dependencies]" {
+            complaints.push(format!(
+                "`dbus-secret-service` is declared under `{section}`: it links `libdbus-sys`, \
+                 whose build script needs `libdbus-1-dev` on the build host, so it may reach \
+                 no target but Linux"
+            ));
+        }
+    }
+    if !declared {
+        complaints.push(
+            "no `dbus-secret-service` dependency is declared, but this project claims a \
+             Secret Service keyring on Linux"
+                .to_owned(),
+        );
+    }
+
+    for line in workspace_manifest.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with('#') || !trimmed.starts_with("dbus-secret-service") {
+            continue;
+        }
+        if !trimmed.contains("\"crypto-rust\"") && !trimmed.contains("\"crypto-openssl\"") {
+            complaints.push(
+                "the `dbus-secret-service` dependency enables no crypto feature: without one \
+                 `EncryptionType::Dh` does not exist and the only session left is `Plain`, \
+                 which carries a provider credential over the session bus unencrypted"
+                    .to_owned(),
+            );
+        }
+    }
+    complaints
+}
+
+/// The Linux dependency, checked against the manifests that decide it.
+#[test]
+fn the_manifests_confine_the_secret_service_dependency_to_linux_and_keep_it_encrypted() {
+    let complaints = secret_service_complaints(
+        include_str!("../Cargo.toml"),
+        include_str!("../../../Cargo.toml"),
+    );
+    assert!(
+        complaints.is_empty(),
+        "the Secret Service dependency is declared in a way this project cannot stand \
+         behind:\n- {}",
+        complaints.join("\n- ")
+    );
+}
+
+/// The scan above is worth having only if it can fail, and these are the two
+/// ways this project could actually get there.
+#[test]
+fn the_secret_service_manifest_scan_would_catch_a_violation() {
+    let correct_crate = "[target.'cfg(target_os = \"linux\")'.dependencies]\n\
+                         dbus-secret-service.workspace = true\n";
+    let correct_workspace =
+        "dbus-secret-service = { version = \"4.1\", features = [\"crypto-rust\"] }\n";
+
+    // Shared `[dependencies]`: every build host now needs `libdbus-1-dev`.
+    let shared = "[dependencies]\ndbus-secret-service.workspace = true\n";
+    assert!(!secret_service_complaints(shared, correct_workspace).is_empty());
+
+    // The crypto feature dropped, which leaves `EncryptionType::Plain`.
+    let plain = "dbus-secret-service = { version = \"4.1\", default-features = false }\n";
+    assert!(!secret_service_complaints(correct_crate, plain).is_empty());
+
+    // Not declared at all, on a project that claims the Linux store.
+    assert!(!secret_service_complaints("[dependencies]\n", correct_workspace).is_empty());
+
+    // ... and it stays quiet on the shape that is correct.
+    assert!(
+        secret_service_complaints(correct_crate, correct_workspace).is_empty(),
+        "{:?}",
+        secret_service_complaints(correct_crate, correct_workspace)
+    );
+}
+
 // --- the fallback is labelled on every platform ---------------------------
 
 /// Whichever arrangement is in force, a caller can read which one it is.
@@ -203,7 +312,7 @@ fn the_store_says_which_of_its_sources_is_in_force() {
 /// false, and a user told it would be told to stop looking for a fix that
 /// exists. The only honest refusal here is that the store would not open,
 /// which unlocking a keychain or logging in properly might change.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 #[test]
 fn on_a_platform_with_a_backend_the_only_honest_refusal_is_that_it_would_not_open() {
     assert_ne!(
@@ -217,7 +326,7 @@ fn on_a_platform_with_a_backend_the_only_honest_refusal_is_that_it_would_not_ope
 /// **This is the Linux gate's real assertion**, and it is what a linked mock
 /// would break: the mock's probe succeeds, so `detect` would return `Ok` and
 /// `describe` would claim a secure store that persists nothing.
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 #[test]
 fn on_a_platform_with_no_backend_no_native_store_can_be_built() {
     assert_eq!(
@@ -236,18 +345,75 @@ fn on_a_platform_with_no_backend_no_native_store_can_be_built() {
     assert_eq!(store.source_of(&reference), None);
 }
 
+/// **Requirement 1, and every Linux CI cell exercises it for free.** A
+/// headless container has no session bus at all, so this is the honest
+/// refusal on the platform that just gained a backend — and it must arrive
+/// inside a bound, because `detect` sits on the launch path.
+///
+/// Written to pass on a Linux *desktop* too, where the store answers: the
+/// claim is not "Linux has no keyring", it is "whichever of the two states
+/// this host is in, Glasshouse says so quickly and truthfully". The refusal
+/// this arm exists to prevent — a wait — would fail this test by timing out
+/// the whole target rather than by an assertion, which is why the elapsed
+/// time is asserted rather than assumed.
+#[cfg(target_os = "linux")]
+#[test]
+fn on_linux_a_keyring_that_cannot_be_reached_refuses_quickly_and_says_what_to_do() {
+    let started = std::time::Instant::now();
+    let detected = NativeSecretStore::detect();
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < std::time::Duration::from_secs(30),
+        "`detect` is on the launch path and took {elapsed:?}: a Secret Service backend that \
+         waits for an unlock prompt is the defect this arm exists to prevent"
+    );
+    assert_ne!(
+        detected,
+        Err(Unavailable::UnsupportedPlatform),
+        "Linux has a backend now, so `UnsupportedPlatform` would tell a user to stop looking \
+         for a fix that exists"
+    );
+
+    let store = PreferNativeSecretStore::detect();
+    match detected {
+        Ok(native) => {
+            assert!(
+                store.describe().starts_with(native.describe()),
+                "the arrangement must name the store that answered first: `{}` / `{}`",
+                store.describe(),
+                native.describe()
+            );
+        }
+        Err(refusal) => {
+            assert_eq!(
+                store.describe(),
+                STORE_UNREACHABLE_LABEL,
+                "with no keyring reachable the environment is the source in force, and the \
+                 label is where a user reads that"
+            );
+            let reason = refusal.reason();
+            assert!(
+                reason.contains("; "),
+                "a refusal must carry an instruction after the diagnosis, or a user is told \
+                 what happened and not what to do: {reason}"
+            );
+        }
+    }
+}
+
 // --- the store itself, where there is one ---------------------------------
 
 /// Removes its stored item when it goes out of scope, however the test
 /// leaves — a passing assertion, a failing one, or a panic. A test that
 /// deletes on its last line deletes nothing when an assertion above that
 /// line fires, and what it leaves behind is in a real user's real store.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 struct StoredItem {
     reference: SecretRef,
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 impl Drop for StoredItem {
     fn drop(&mut self) {
         // Best effort by construction: this may run while a panic is
@@ -261,7 +427,7 @@ impl Drop for StoredItem {
 
 /// A name no other process in this test run uses, so a leftover item from an
 /// earlier run can never be read by a later one.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 fn test_account(suffix: &str) -> String {
     format!(
         "GLASSHOUSE_SECRET_NATIVE_TEST_ONLY_{suffix}_{}",
@@ -279,7 +445,7 @@ fn test_account(suffix: &str) -> String {
 /// readable from the environment, the OS store would be a place to *copy*
 /// secrets to rather than a place to keep them, and every process the user
 /// launches would inherit one.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 #[test]
 fn a_credential_in_the_native_store_is_readable_there_and_invisible_to_the_environment() {
     const VALUE: &str = "sk-native-only-0123456789abcdefghijklmn";
@@ -338,7 +504,7 @@ fn a_credential_in_the_native_store_is_readable_there_and_invisible_to_the_envir
 /// Deleting a credential that is not there is the desired state, reported
 /// rather than raised — and it stays that way after a real deletion, which
 /// is the case a "delete then delete again" bug would break.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
+#[cfg(any(target_os = "macos", target_os = "windows", target_os = "linux"))]
 #[test]
 fn deleting_a_credential_that_is_not_there_is_success() {
     const VALUE: &str = "sk-delete-twice-abcdefghijklmnop01234567";

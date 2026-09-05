@@ -73,6 +73,22 @@ hex = "0.4"
 # forbids, so the backend feature is enabled per target instead — see
 # `crates/glasshouse/Cargo.toml`, where only macOS turns on `apple-native`.
 keyring = { version = "3.6", default-features = false }
+# The Linux half of the same boundary, and a **different crate on purpose**.
+# `keyring` 3.6's Secret Service backend reaches the bus through
+# `SecretService::connect`, which leaves `dbus-secret-service`'s prompt timeout
+# unset and blocks the calling thread for a year on an unanswered unlock
+# prompt; it also unlocks a locked collection on the way to reading it. Talking
+# to `dbus-secret-service` directly is what makes
+# `connect_with_max_prompt_timeout(_, 0)` reachable, and that is the Linux
+# equivalent of `SecKeychainSetUserInteractionAllowed(0)` — see
+# `crates/glasshouse/src/secret/native.rs`.
+#
+# `default-features = false` with `crypto-rust`: the crypto feature is what
+# makes `EncryptionType::Dh` exist at all, so a session that would send a
+# credential over the bus in the clear does not compile. `crypto-rust` rather
+# than `crypto-openssl` because it is pure Rust and adds no second C library
+# to a build that already needs `libdbus-1-dev`.
+dbus-secret-service = { version = "4.1", default-features = false, features = ["crypto-rust"] }
 ratatui = "0.30"
 rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
