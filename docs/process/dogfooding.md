@@ -100,3 +100,67 @@ exist, so cmux typed the literal string `--text …` into the shell. The
 recovery is the one `scripts/dev/new-worker.sh` already implements: wait for a
 prompt, send, read the line back and confirm it is intact, `C-u` and retry if
 not, and only then press Enter.
+
+### 2026-09-05 — `149240c`, claude-code 2.1.261 (Fable 5.1), a real task with edits, a search and a test run
+
+Scratch project: `.worktrees/dogfood-20260905`, a detached worktree of this
+repository. The binary built from `main` at `149240c`, launched as
+`glasshouse launch claude-code --response-role interactive` into its own cmux
+pane; three tasks, fifteen minutes of harness time, 149k tokens, about $4.
+Driven from the orchestrator's pane over `cmux send`, exactly like a worker.
+
+**What was done.** Task 1: fix the `999` false positive in
+`tests/routing_cost.rs`'s cross-project isolation test (the nightly red of run
+33985317460) — done correctly in 2m42s, with the header line stripped and its
+shape asserted. Task 2: the JSON sibling the session found on its own, plus a
+survey of every negative-substring assertion under `tests/` (189 sites; only the
+two `routing_cost.rs` ones exposed, the rest safe by needle shape, limits of the
+regex stated). Task 3: the memory, sessions and routing-cost readouts from inside
+the session. Both fixes landed on `main` as `ad05372`.
+
+**Glasshouse tracked it end to end:** `sessions` showed it `active` then
+`resumable`; `sessions show` carried the native session id, `3 tasks completed`,
+`prompt cache hot (estimated)`, `compactions 0`; `lifecycle_events` recorded
+`session_started`, three `turn_started`/`turn_ended completed` pairs from the
+`UserPromptSubmit`/`Stop` hooks, and `process_exited 0`; `route` preferred the
+warm session at +2.097 over a fresh start at −1.100 with every inert term named.
+The hooks reach the harness on its argv (`--settings` with `hook --event
+UserPromptSubmit|PermissionRequest|Stop|StopFailure|PreCompact` and `edit-intent
+hook`), merged with cmux's own hooks, both active.
+
+**Surprises, each with the exact reading:**
+
+- **Memory extraction ran after every turn and produced nothing, and said why.**
+  `evaluation_observations` holds three `disposable_route_decided` rows, each
+  reading *"none configured (Phase 39 supplies the provider): no provider is
+  configured for Glasshouse's own support work — no model was called"*; this
+  machine's `config.toml` has an empty `[providers]` table (fifteen keys live in
+  `provider-keys.env`, none configured for support work). `memory search --path
+  crates/glasshouse/tests/routing_cost.rs` therefore answered *"No current
+  memories"* after a session that edited that file and found something worth
+  remembering. Honest, and a **precondition for the next session**: configure
+  one support-work provider (Ollama is enabled as an integration) before
+  launching, or extraction cannot be watched at all. Not a package.
+- **The context firewall cannot be watched from a launched session until
+  `[context_firewall] mode` is set:** the default is `off`, which by design
+  registers no `PostToolUse` hook (`config/firewall.rs`), so no reduction and no
+  `file_touched` row can appear. Same precondition class as above: set `shadow`
+  or `safe` in the scratch project's config next time. Not a package.
+- **`entitlements` on a project with no pool prints *"Also served, by entries no
+  longer configured: `claude-code`"*** — for a session that had been running for
+  a minute under the harness's own sign-in, "no longer configured" is a label
+  that did not help. **Curiosity.**
+- **`routing-cost --json` printed nothing, exit 0** — correct: a native session
+  never crosses the gateway, so it writes no `routing_observations` row. The
+  prose readout says as much; the JSON's silence is the documented empty-window
+  shape. Not a surprise once read, recorded so nobody re-derives it.
+- **On exit, Claude Code still warns** *"Permission allow rule
+  (.claude/settings.json): `Write(…/report-*.md)` is not matched by file
+  permission checks"* — the 2026-09-03 finding is unchanged; the repo's two
+  worker-report allow rules have never applied, and workers write reports under
+  auto mode's classifier instead. Recorded once already; still open, still ours.
+- **`/exit` typed into the input needs Enter twice** (the slash-command popup
+  takes the first) — a driver's note, not Glasshouse's.
+
+**No defect found in the product path exercised.** The two test defects the
+session fixed were the sweep's, found by CI and closed here in one session.
