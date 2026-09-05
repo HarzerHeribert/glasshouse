@@ -195,7 +195,14 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     steps:
+      # The ruler cuts a worktree at a task's PARENT commit (crates/pane/src/ruler/
+      # attempt.rs), and its tests do the same at HEAD^; a depth-1 checkout has
+      # no parent, and seven of ruler_run's eleven tests failed on both pane cells
+      # with "fatal: invalid reference: <sha>^" (run 33978067733). Full history,
+      # for this job only.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Resolve the declared toolchain
         id: tc
         shell: bash
