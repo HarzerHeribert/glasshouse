@@ -1353,6 +1353,8 @@ name = "pane"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "crossterm",
+ "ratatui",
  "serde",
  "serde_json",
  "ureq",
