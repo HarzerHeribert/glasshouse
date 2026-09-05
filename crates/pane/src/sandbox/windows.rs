@@ -163,15 +163,16 @@ mod platform {
     use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, HANDLE, LocalFree};
     use windows_sys::Win32::Security::Authorization::{
-        EXPLICIT_ACCESS_W, GRANT_ACCESS, NO_MULTIPLE_TRUSTEE, SE_FILE_OBJECT, SetEntriesInAclW,
-        SetNamedSecurityInfoW, TRUSTEE_IS_SID, TRUSTEE_IS_WELL_KNOWN_GROUP, TRUSTEE_W,
+        DENY_ACCESS, EXPLICIT_ACCESS_W, GRANT_ACCESS, GetNamedSecurityInfoW, NO_MULTIPLE_TRUSTEE,
+        SE_FILE_OBJECT, SetEntriesInAclW, SetNamedSecurityInfoW, TRUSTEE_IS_SID,
+        TRUSTEE_IS_WELL_KNOWN_GROUP, TRUSTEE_W,
     };
     use windows_sys::Win32::Security::Isolation::{
         CreateAppContainerProfile, DeriveAppContainerSidFromAppContainerName,
     };
     use windows_sys::Win32::Security::{
-        ACL, CreateRestrictedToken, DACL_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
-        PSID, SUB_CONTAINERS_AND_OBJECTS_INHERIT, TOKEN_ALL_ACCESS, WRITE_RESTRICTED,
+        ACL, CreateRestrictedToken, DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID,
+        SUB_CONTAINERS_AND_OBJECTS_INHERIT, TOKEN_ALL_ACCESS, WRITE_RESTRICTED,
     };
     use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -298,54 +299,115 @@ mod platform {
         }
     }
 
-    /// Extends the project directory's ACL to admit `container`'s SID, and
-    /// admits nothing else.
+    /// **Unverified, unwired, and not to be called until a Windows cell runs
+    /// it.** Nothing in this crate calls it, no host in this project executes
+    /// a Win32 call, and not one line below has ever run anywhere: what
+    /// follows is reviewed reasoning against the documented contracts of
+    /// three functions, and the only honest status for it is untested. It is
+    /// the one function here that modifies a user's filesystem, so wiring it
+    /// from a spawn path before a Windows cell has watched it is the specific
+    /// mistake this sentence exists to prevent.
     ///
-    /// The grants come from [`acl_grants`], so the profile decides which
-    /// directories appear and whether the writable one is writable. A
-    /// protected DACL is set so an inherited ACE from a parent directory
-    /// cannot put back what this removes.
+    /// Extends the project directory's ACL to admit `container`'s SID, and
+    /// admits nothing else. The grants come from [`acl_grants`], so the
+    /// profile decides which directories appear and whether the writable one
+    /// is writable.
+    ///
+    /// **Extends, now, rather than replaces.** A previous revision passed a
+    /// null `OldAcl` to `SetEntriesInAclW`, which does not merge — it builds
+    /// an ACL from the supplied entries alone — and wrote the result with
+    /// `PROTECTED_DACL_SECURITY_INFORMATION`, which discards the inherited
+    /// ACEs as well. On a real checkout that leaves a DACL granting the
+    /// container SID and nobody else: not the developer, not `SYSTEM`, not
+    /// `Administrators`, inheritably down the whole tree. The repair is the
+    /// existing DACL read with [`GetNamedSecurityInfoW`] and handed back as
+    /// `OldAcl`, and the protection flag dropped — its stated purpose was to
+    /// stop an inherited ACE putting back what this removes, and after the
+    /// repair this function removes nothing. It only ever adds.
+    ///
+    /// **What the dropped flag costs, stated rather than left implicit.**
+    /// §1.5's `.claude` carve-out worked only because protection stripped the
+    /// inherited read-write ACE the project root grants. Without protection
+    /// that ACE reaches `.claude` again, so the carve-out is written here as
+    /// an explicit DENY ACE for the write-only rights, for the container SID
+    /// alone — it constrains no other trustee, and a DENY placed ahead of the
+    /// grants is what an access check evaluates first. That ordering is
+    /// `SetEntriesInAclW`'s documented placement of supplied entries ahead of
+    /// merged ones; like everything else here it is read from a contract and
+    /// not from a run.
     pub fn grant_project_acl(profile: &Profile, container: &AppContainer) -> io::Result<()> {
         let grants: AclGrants = acl_grants(profile);
-        for (paths, rights) in [
-            (&grants.read_only, READ_RIGHTS),
-            (&grants.read_write, READ_WRITE_RIGHTS),
+        for (paths, rights, deny_write) in [
+            (&grants.read_only, READ_RIGHTS, true),
+            (&grants.read_write, READ_WRITE_RIGHTS, false),
         ] {
             for path in paths {
-                let entry = EXPLICIT_ACCESS_W {
-                    grfAccessPermissions: rights,
-                    grfAccessMode: GRANT_ACCESS,
-                    grfInheritance: SUB_CONTAINERS_AND_OBJECTS_INHERIT,
-                    Trustee: TRUSTEE_W {
-                        pMultipleTrustee: std::ptr::null_mut(),
-                        MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
-                        TrusteeForm: TRUSTEE_IS_SID,
-                        TrusteeType: TRUSTEE_IS_WELL_KNOWN_GROUP,
-                        ptstrName: container.sid().cast(),
-                    },
+                let mut entries: Vec<EXPLICIT_ACCESS_W> = Vec::with_capacity(2);
+                // The refusal first: an access check reads the ACL in order
+                // and a DENY it reaches before the GRANT is what keeps a
+                // read-only path read-only — `.claude` inside a writable
+                // project, or the whole root when the document grants read
+                // and not write.
+                if deny_write {
+                    entries.push(entry(container, WRITE_ONLY_RIGHTS, DENY_ACCESS));
+                }
+                entries.push(entry(container, rights, GRANT_ACCESS));
+
+                let mut wide_path = wide(&path.to_string_lossy());
+                let mut old_dacl: *mut ACL = std::ptr::null_mut();
+                let mut descriptor: PSECURITY_DESCRIPTOR = std::ptr::null_mut();
+                // SAFETY: `wide_path` outlives the call; the two out-pointers
+                // are live, and the descriptor owns the ACL it hands back.
+                let read = unsafe {
+                    GetNamedSecurityInfoW(
+                        wide_path.as_ptr(),
+                        SE_FILE_OBJECT,
+                        DACL_SECURITY_INFORMATION,
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        &mut old_dacl,
+                        std::ptr::null_mut(),
+                        &mut descriptor,
+                    )
                 };
+                if read != 0 {
+                    return Err(io::Error::from_raw_os_error(read as i32));
+                }
+
                 let mut acl: *mut ACL = std::ptr::null_mut();
-                // SAFETY: one entry, whose address and count agree; a null
-                // existing-ACL pointer builds a fresh ACL from that entry.
-                let built = unsafe { SetEntriesInAclW(1, &entry, std::ptr::null_mut(), &mut acl) };
+                // SAFETY: the entry array's address and count agree, and
+                // `old_dacl` is the DACL just read — passing it is what makes
+                // this a merge instead of a replacement.
+                let built = unsafe {
+                    SetEntriesInAclW(entries.len() as u32, entries.as_ptr(), old_dacl, &mut acl)
+                };
                 if built != 0 {
+                    // SAFETY: `descriptor` was allocated by the read above.
+                    unsafe { LocalFree(descriptor) };
                     return Err(io::Error::from_raw_os_error(built as i32));
                 }
-                let mut wide_path = wide(&path.to_string_lossy());
-                // SAFETY: `wide_path` and `acl` outlive the call.
+
+                // SAFETY: `wide_path` and `acl` outlive the call. The
+                // security information is `DACL` alone: unprotected, so the
+                // inherited ACEs that give the developer their own project
+                // stay exactly where they were.
                 let applied = unsafe {
                     SetNamedSecurityInfoW(
                         wide_path.as_mut_ptr(),
                         SE_FILE_OBJECT,
-                        DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                        DACL_SECURITY_INFORMATION,
                         std::ptr::null_mut(),
                         std::ptr::null_mut(),
                         acl,
                         std::ptr::null_mut(),
                     )
                 };
-                // SAFETY: `acl` was allocated by `SetEntriesInAclW`.
-                unsafe { LocalFree(acl.cast()) };
+                // SAFETY: `acl` was allocated by `SetEntriesInAclW` and
+                // `descriptor` by `GetNamedSecurityInfoW`.
+                unsafe {
+                    LocalFree(acl.cast());
+                    LocalFree(descriptor);
+                }
                 if applied != 0 {
                     return Err(io::Error::from_raw_os_error(applied as i32));
                 }
@@ -354,23 +416,66 @@ mod platform {
         Ok(())
     }
 
+    /// One `EXPLICIT_ACCESS_W` for `container`'s SID, inheritable down the
+    /// tree.
+    fn entry(container: &AppContainer, rights: u32, mode: i32) -> EXPLICIT_ACCESS_W {
+        EXPLICIT_ACCESS_W {
+            grfAccessPermissions: rights,
+            grfAccessMode: mode,
+            grfInheritance: SUB_CONTAINERS_AND_OBJECTS_INHERIT,
+            Trustee: TRUSTEE_W {
+                pMultipleTrustee: std::ptr::null_mut(),
+                MultipleTrusteeOperation: NO_MULTIPLE_TRUSTEE,
+                TrusteeForm: TRUSTEE_IS_SID,
+                TrusteeType: TRUSTEE_IS_WELL_KNOWN_GROUP,
+                ptstrName: container.sid().cast(),
+            },
+        }
+    }
+
     /// `FILE_GENERIC_READ | FILE_GENERIC_EXECUTE`.
     const READ_RIGHTS: u32 = 0x0012_00A9;
     /// The above plus `FILE_GENERIC_WRITE` and `DELETE`.
     const READ_WRITE_RIGHTS: u32 = 0x001F_01FF;
+    /// Everything a write grant carries that a read grant does not — the
+    /// bits §1.5's `.claude` carve-out has to deny, now that the DACL is
+    /// merged rather than protected.
+    const WRITE_ONLY_RIGHTS: u32 = READ_WRITE_RIGHTS & !READ_RIGHTS;
 
-    /// What this host can actually enforce for `profile`.
+    /// What this host can enforce for `profile`, **creating nothing**.
     ///
-    /// Both primitives are attempted and dropped again: the answer is what
-    /// the operating system permitted just now, not what the code intends.
+    /// A previous revision answered by calling [`AppContainer::create`],
+    /// which registers a *persistent* profile — a registry entry and a
+    /// directory under `%LOCALAPPDATA%\Packages` that outlives the session,
+    /// and `DeleteAppContainerProfile` is called nowhere in this crate. So
+    /// asking what the host could enforce wrote to the developer's machine
+    /// and left the result behind. `DeriveAppContainerSidFromAppContainerName`
+    /// computes the SID for a name and creates no profile, which answers the
+    /// availability question without the side effect: a function whose name
+    /// promises a reading must not perform a write.
+    ///
+    /// It is the weaker probe, and that is stated rather than glossed: it
+    /// establishes that this host has the AppContainer API and that the name
+    /// derives, not that a profile can be created. Creation belongs to the
+    /// spawn path that needs the container. Unverified, like everything in
+    /// this module.
     pub fn regime(profile: &Profile) -> Regime {
         if RestrictedToken::derive().is_err() {
             return Regime::Unconfined;
         }
-        match AppContainer::create(profile) {
-            Ok(_) => Regime::RestrictedTokenAndAppContainer,
-            Err(_) => Regime::RestrictedTokenOnly,
+        let name = wide(&container_name(profile));
+        let mut sid: PSID = std::ptr::null_mut();
+        // SAFETY: `name` outlives the call and `sid` is a live
+        // out-parameter; the call allocates a SID and nothing else.
+        let derived = unsafe { DeriveAppContainerSidFromAppContainerName(name.as_ptr(), &mut sid) };
+        if derived < 0 {
+            return Regime::RestrictedTokenOnly;
         }
+        // SAFETY: the SID was allocated by the container API, whose
+        // documented release is `FreeSid` — `LocalFree` in practice, and the
+        // same call this module's `Drop` already makes.
+        unsafe { LocalFree(sid) };
+        Regime::RestrictedTokenAndAppContainer
     }
 
     fn wide(text: &str) -> Vec<u16> {

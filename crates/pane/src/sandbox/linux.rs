@@ -29,8 +29,30 @@ use std::path::{Path, PathBuf};
 /// Not derived from `permissions`, and not derivable from it — no pattern
 /// kind names an interpreter. None of these carries project or user data,
 /// and §4's never-grantable set is disjoint from every one of them.
-const SYSTEM_READ_ROOTS: [&str; 10] = [
-    "/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/opt", "/proc", "/dev", "/sys",
+///
+/// **`/proc`, `/sys` and `/dev` were here and are not any more.** A rule
+/// beneath `/proc` grants `READ_FILE` on `/proc/<pid>/environ` for every
+/// process of the same user, which is the whole environment of the harness
+/// that spawned the tool — §4.2's credentials by another route, reachable by
+/// no `permissions` pattern and narrowable by no `deny` entry. That is
+/// harmless under a bubblewrap mount view, which unshares the PID namespace
+/// and mounts a fresh `/proc`; it is not harmless in the regime this package
+/// can actually apply, which is Landlock alone in the host's own PID
+/// namespace (see [`regime`]). `/sys` goes for the same reason and `/dev` is
+/// replaced by [`DEVICE_READS`], which names the devices instead of the tree
+/// that contains the block devices too.
+const SYSTEM_READ_ROOTS: [&str; 7] = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/etc", "/opt"];
+
+/// Character devices a process may read, named one by one rather than as
+/// `/dev`. Each is a device, not a file, and none carries project or user
+/// data; a Landlock rule on a path that is not a directory covers that path
+/// alone, so this is a grant on five files and not on the tree.
+const DEVICE_READS: [&str; 5] = [
+    "/dev/null",
+    "/dev/zero",
+    "/dev/random",
+    "/dev/urandom",
+    "/dev/tty",
 ];
 
 /// Landlock's filesystem access bits, ABI 1 through 3. Public so a test on
@@ -56,6 +78,19 @@ pub mod access {
     /// any of the `MAKE_*` bits.
     pub const READ: u64 = EXECUTE | READ_FILE | READ_DIR;
 
+    /// The bits a rule on a **file** may carry.
+    ///
+    /// Landlock refuses a `PATH_BENEATH` rule with `EINVAL` when the
+    /// descriptor is not a directory and `allowed_access` carries a
+    /// directory-only right, and the refusal takes the whole ruleset with
+    /// it — every confined spawn then fails to start. Measured: adding
+    /// `/dev/null` to the read grants with [`READ`], which carries
+    /// `READ_DIR`, turned both Linux execution tests into
+    /// `Os { code: 22, kind: InvalidInput }` on a Landlock ABI 6 kernel.
+    /// [`super::confine`] masks with this for any path that is not a
+    /// directory.
+    pub const FILE: u64 = EXECUTE | READ_FILE | WRITE_FILE | TRUNCATE;
+
     /// What a write grant is: everything ABI 3 knows how to hand out.
     pub const READ_WRITE: u64 = READ
         | WRITE_FILE
@@ -76,7 +111,17 @@ pub mod access {
 ///
 /// The three regimes are genuinely different products, not degrees of the
 /// same one, and §3 requires pane to name which is in force at session
-/// start. `abi` is the Landlock ABI the running kernel reports; the
+/// start.
+///
+/// **Two of the four are not reachable from [`regime`] in this package.**
+/// Nothing here spawns `bwrap` — [`bwrap_argv`] builds an argv and the spawn
+/// path that would run it is not this package's — so the mount view is never
+/// installed, and a `regime()` that named it would report an enforcement
+/// nobody applied. The two bubblewrap variants therefore describe what
+/// [`available_regime`] found the host capable of, and become applicable
+/// only when a caller executes that argv.
+///
+/// `abi` is the Landlock ABI the running kernel reports; the
 /// specification asks for 3 or better, because `LANDLOCK_ACCESS_FS_TRUNCATE`
 /// arrived there and a write grant without it is a write grant with a hole
 /// in it.
@@ -109,7 +154,9 @@ impl Regime {
             Regime::LandlockOnly { abi } => format!(
                 "Landlock ABI {abi} ruleset and no bubblewrap: per-path rights apply, but this process keeps the host's mount view and its network namespace, \
                  and `.claude/` is not write-protected by the OS layer — Landlock's rules are additive and cannot carve a subdirectory out of a writable project, \
-                 so pane's own pre-call check is the only thing refusing that write."
+                 so pane's own pre-call check is the only thing refusing that write. \
+                 `/proc` and `/sys` are not granted at all, because this process shares the host's PID namespace and a read of `/proc` there is a read of every \
+                 same-user process's environment; a tool that needs either is refused rather than handed them."
             ),
             Regime::Unconfined => "no OS-level confinement: neither bubblewrap nor Landlock is available on this host, \
                  so pane's own pre-call check is the only thing between a tool and the filesystem."
@@ -140,7 +187,9 @@ impl fmt::Display for Regime {
 /// the twenty lines of `unsafe` that install it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LandlockRules {
-    /// Directories a process may read, list and execute from.
+    /// Directories a process may read, list and execute from, and the
+    /// character devices of [`DEVICE_READS`], which are files and are
+    /// granted as themselves.
     pub read_only: Vec<PathBuf>,
     /// Directories a process may additionally write, create in and remove
     /// from. Empty when the profile grants no write to the project root.
@@ -169,7 +218,11 @@ pub struct LandlockRules {
 /// ruleset covers it.
 pub fn landlock_rules(profile: &Profile) -> LandlockRules {
     let root = profile.root().to_path_buf();
-    let mut read_only: Vec<PathBuf> = SYSTEM_READ_ROOTS.iter().map(PathBuf::from).collect();
+    let mut read_only: Vec<PathBuf> = SYSTEM_READ_ROOTS
+        .iter()
+        .chain(DEVICE_READS.iter())
+        .map(PathBuf::from)
+        .collect();
     let mut read_write = Vec::new();
     if grants(profile, Access::Write, &root) {
         read_write.push(root.clone());
@@ -294,9 +347,35 @@ pub fn landlock_abi() -> i32 {
     if abi < 0 { -1 } else { abi as i32 }
 }
 
-/// What this host can actually enforce.
+/// What [`confine`] actually applies on this host.
+///
+/// Landlock, or nothing. Bubblewrap is deliberately absent from the answer
+/// even where `bwrap` is installed: this package never spawns it, so a
+/// regime naming the mount view would claim an enforcement that was not
+/// installed — and [`Regime::removes_network`] would answer `true` for a
+/// network nothing removed, which is §4.1 reported as enforced when it is
+/// not. [`available_regime`] answers the other question, under a name that
+/// says which one it is.
 #[cfg(target_os = "linux")]
 pub fn regime() -> Regime {
+    let abi = landlock_abi();
+    if abi >= 3 {
+        Regime::LandlockOnly { abi }
+    } else {
+        Regime::Unconfined
+    }
+}
+
+/// What this host *could* enforce if a caller composed both primitives —
+/// the mount view from [`bwrap_argv`] around the ruleset [`confine`]
+/// installs.
+///
+/// A capability report, not a claim about any process: nothing here has been
+/// applied, and a session that prints this must say so. It exists so the
+/// spawn path that will run the argv can ask the question, and so the answer
+/// stops being confused with [`regime`]'s.
+#[cfg(target_os = "linux")]
+pub fn available_regime() -> Regime {
     let abi = landlock_abi();
     match (bubblewrap_available(), abi >= 3) {
         (true, true) => Regime::BubblewrapAndLandlock { abi },
@@ -346,6 +425,16 @@ pub fn confine(profile: &Profile, command: &mut std::process::Command) -> std::i
                 .open(path)
             else {
                 continue;
+            };
+            // A rule on a file may not carry a directory-only right, and
+            // the kernel refuses the whole ruleset rather than that one
+            // rule if it does — see [`access::FILE`]. `DEVICE_READS` are
+            // files.
+            let directory = file.metadata().map(|meta| meta.is_dir()).unwrap_or(true);
+            let rights = if directory {
+                rights
+            } else {
+                rights & access::FILE
             };
             handles.push((OwnedFd::from(file), rights));
         }

@@ -69,6 +69,28 @@ const DEVICE_READS: [&str; 8] = [
     "/dev/stderr",
 ];
 
+/// The Mach services a confined tool may look up, by `global-name`.
+///
+/// **Empty, and that is the measured base set.** A previous revision emitted
+/// a blanket `(allow mach-lookup)`, which reaches every Mach service on the
+/// machine including `securityd` — the Keychain, which §4.2 says is never
+/// grantable on any platform. A file-only sandbox does not satisfy that
+/// clause, because securityd does the keychain read on the caller's behalf
+/// and the file rules never see it.
+///
+/// Nothing in scope needed it: with no `mach-lookup` term emitted at all,
+/// `cat`, `grep`, `ls`, `sed`, `wc`, `cp`, `head`, `awk`, `find`, `sh`,
+/// `env`, `xxd`, `diff` and `tar` each ran under this profile and read the
+/// project. The one measured degradation is name resolution — `id` prints
+/// `uid=501` where it would otherwise print `uid=501(eneas)`, because
+/// `getpwuid` reaches opendirectoryd over Mach — and no tool failed for it.
+///
+/// A name is added here only where a tool in scope is *shown* to need it,
+/// bisected the way the file roots were, with the demonstration recorded in
+/// the package that adds it. `securityd`, `com.apple.SecurityServer` and
+/// every other keychain endpoint are excluded by §4.2 whatever a tool wants.
+const MACH_SERVICES: [&str; 0] = [];
+
 /// Character devices a process may write. `/dev/dtracehelper` is opened for
 /// write by the loader itself on every exec; refusing it costs a denial
 /// record on every spawn and buys nothing.
@@ -83,18 +105,21 @@ const DEVICE_WRITES: [&str; 5] = [
 /// Which enforcement this applier actually achieved, so a coarser regime is
 /// stated rather than implied (§3's closing sentence, applied to macOS).
 ///
-/// Seatbelt can express every pattern in §2's table. **This applier cannot
-/// reach that**, and the reason is one missing capability on the merged
-/// producer rather than anything about the operating system: [`Profile`]
-/// keeps its compiled rules private and publishes no way to enumerate them,
-/// so a rule naming a path outside the project root — §3's own
-/// `(literal "/etc/passwd")` — cannot be rendered, and neither can a `deny`
-/// rule naming a path inside it. The first case makes the OS layer *narrower*
-/// than the profile, which is safe and merely inconvenient; the second makes
-/// it *wider*, and the in-process [`Profile::check`] is what holds the line
-/// there. [`Regime::path_rules`] carries the count so a session can say how
-/// many rules went unrendered instead of claiming an exactness it has not
-/// got.
+/// Seatbelt can express every pattern in §2's table. **This applier does not
+/// reach that**, and the gap is what it renders rather than anything about
+/// the operating system: only the project root reaches the profile text, so
+/// a rule naming a path outside it — §3's own `(literal "/etc/passwd")` —
+/// is not rendered, and neither is a `deny` rule naming a path inside it.
+/// The first case makes the OS layer *narrower* than the profile, which is
+/// safe and merely inconvenient; the second makes it *wider*, and the
+/// in-process [`Profile::check`] is what holds the line there.
+/// [`Regime::path_rules`] carries the count so a session can say how many
+/// rules went unrendered instead of claiming an exactness it has not got.
+///
+/// `Profile::rules` now enumerates them, so rendering the rest is possible
+/// and is a package of its own: each rendered rule changes what a confined
+/// process may touch, in both directions, and that is a decision with its
+/// own acceptance rather than a comment repair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Regime {
     /// `(deny default)` with the project root granted and §1.5's `.claude`
@@ -110,7 +135,8 @@ impl Regime {
     pub fn describe(self) -> String {
         match self {
             Regime::ProjectRootOnly { path_rules } => format!(
-                "seatbelt: deny by default, the project root the only readable and writable root, no network. \
+                "seatbelt: deny by default, the project root the only readable and writable root, no network, no Mach service. \
+                 File metadata stays readable filesystem-wide: existence, size, mode and a symlink's target, never a file's contents. \
                  The OS layer is directory-granular; {path_rules} path rule(s) from `.claude/settings.json` are enforced by pane's own pre-call check alone."
             ),
         }
@@ -144,9 +170,15 @@ pub fn profile_text(profile: &Profile) -> String {
     out.push_str("(version 1)\n");
     out.push_str("(deny default)\n");
 
-    // Metadata, and only metadata. Resolving any path at all requires
-    // stat-ing its parents, so a deny-default profile that withholds this
-    // cannot exec. It discloses existence and size, never content.
+    // Metadata, and only metadata, filesystem-wide. Resolving any path at
+    // all requires stat-ing its parents, so a deny-default profile that
+    // withholds this cannot exec. It discloses existence, size and mode —
+    // and the *target* of a symlink, because `readlink(2)` is a metadata
+    // operation to seatbelt and its result is the link's own contents. It
+    // discloses no file's data: reading `~/.ssh` is refused, and reading a
+    // symlink that points into it returns the path and not the key.
+    // `Regime::describe` says so, because §3 requires a coarseness to be
+    // stated rather than left for a reader to discover.
     out.push_str("(allow file-read-metadata)\n");
     // `/` itself is read by the loader on every exec.
     out.push_str("(allow file-read* (literal \"/\"))\n");
@@ -159,7 +191,18 @@ pub fn profile_text(profile: &Profile) -> String {
     out.push_str("(allow process-fork)\n");
     out.push_str("(allow signal (target self))\n");
     out.push_str("(allow sysctl-read)\n");
-    out.push_str("(allow mach-lookup)\n");
+
+    // §4.2. Enumerated, never blanket: an unfiltered `mach-lookup` reaches
+    // securityd and answers keychain queries authoritatively. The term is
+    // omitted entirely while `MACH_SERVICES` is empty, so the profile has no
+    // `mach-lookup` line for a reader to mistake for a narrow one.
+    let mut services = String::new();
+    for name in MACH_SERVICES {
+        services.push_str(&format!(" (global-name {})", quote(name)));
+    }
+    if !services.is_empty() {
+        out.push_str(&format!("(allow mach-lookup{services})\n"));
+    }
 
     out.push_str("(allow file-read*");
     for path in LOADER_READ_ROOTS {
