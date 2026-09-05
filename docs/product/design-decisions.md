@@ -4231,3 +4231,72 @@ of one-event-one-turn that the orchestrator running this build pays for today.
 ## Line 442's crate, ruled 2026-09-05: the one that can refuse a prompt before raising it
 
 The 2026-09-03 answer named *the secret-service/zbus route*; the backend that landed uses `dbus-secret-service` 4.1.0 directly, and the ruling is that the measured property decides, not the name. The hazard this line was refused over for a month is a locked collection hanging a launch — `keyring` 3.6.3 leaves the prompt timeout unset and the calling thread waits up to a year. `dbus-secret-service` exposes `connect_with_max_prompt_timeout(_, 0)`, under which a prompt is refused before it is raised, and reads a collection's `Locked` without unlocking it; the pure-Rust `secret-service` crate, by the worker's reading of its source, has no timeout anywhere and unlocks unconditionally inside `delete` — an unbounded wait, worse than the year. The cost is `libdbus-sys` and therefore `libdbus-1-dev` + `pkg-config` on every Linux build host, which the user accepted the same day, and no executor enters the crate. The box ticks when a CI fixture proves the round trip against a live Secret Service; until then 442 is LOCALLY VERIFIED in `phase-9e.md`.
+
+## Context size is read off the gateway's own exchange, never guessed — designing lines 1158 and 1534, 2026-09-05
+
+Both lines were refused for one reason, stated in `phase-30.md` and repeated in
+`phase-35b.md`: the only token counts in the schema are the gateway's, and the
+gateway was forbidden to parse a response body, so no context size could be
+known and a fabricated one *"would have been read as telemetry by every future
+router"*. That reason ended on 2026-09-03 (`gateway/ingress.rs`, *a seventh
+thing may now be recorded*): every relayed exchange now writes the provider's
+own `input_tokens` and `cache_read_input_tokens` into `routing_observations`
+with migration 24's `session_id`. 1535 and 1545 closed on that producer on
+2026-09-05; 1158 and 1534 close on it here. **A refusal ends when its producer
+lands; nothing in the earlier reasoning is retracted.**
+
+**The estimate (1158).** A session's estimated context size is the prompt size
+of its **latest** gateway exchange — the row with the greatest `observed_at`
+(then `seq`) whose `session_id` is the session's and whose `input_tokens` is
+known. The prompt the provider billed *is* the context the harness sent, so
+this is a reading, not a model. It lives nowhere as a column: `SessionContext`
+already records that copying a token count out of `routing_observations` is a
+second source of truth (migration 15), so the value is computed from the rows
+the destination builder already holds (`commands/routing_destinations.rs`
+reads `consumption_in_window` for the burn readers) and attached to
+`SessionContextFacts`, the same carrier as compactions. A session with no such
+row — never relayed, or idle for longer than the window — reads `None`, and
+`None` is the honest floor, never `0`.
+
+**The wire rule, which is the decision 1158 makes.** The two counts do not
+mean the same thing on every wire. Anthropic Messages bills `input_tokens`
+*excluding* the tokens served from cache (`cache_read_input_tokens` is a
+separate figure), so the prompt size is their **sum**. OpenAI's
+`prompt_tokens` / `input_tokens` *include* `cached_tokens` (a subset detail),
+so the prompt size is `input_tokens` **alone** and adding the cached figure
+would double-count it. The row's `route` column carries the wire slug the
+gateway chose from the request target (`with_route(exchange.protocol)`), so
+the rule keys on it: `"anthropic-messages"` sums, every other known slug takes
+`input_tokens` as is. Cache-*creation* tokens are not recorded and are not
+estimated — the estimate is a floor on the turn that writes a cache, and the
+doc says so.
+
+**The term (1534).** `context quality` is a bounded negative contribution in
+the session router's explanation, beside `measured cache temperature`:
+`−CONTEXT_QUALITY_MAGNITUDE_CEILING × clamp((tokens − CONTEXT_LEAN_TOKENS) /
+CONTEXT_BLOAT_SPAN_TOKENS, 0, 1)`. A lean session — under 32,000 tokens, the
+size a working context normally sits at — contributes exactly `0.0` and says
+*lean*; the penalty grows linearly and reaches the ceiling at 160,000 tokens,
+where every shipped frontier window has either compacted or is about to. The
+ceiling is **0.1**: equal to the measured cache temperature's and, like it,
+strictly below `CACHE_LIKELY_LOST` (0.2), so a size reading never outweighs a
+structural fact about the move in front of it, and it cannot outrank the
+affinity facets that reward the same session for being *about* the task. A
+destination with no estimate contributes `0.0` and says *unknown* — a ranking
+on a build with no relayed exchanges is byte-for-byte what it was. Compactions
+are **not** folded in: `discovery.rs`'s native-context facet already scores
+them, and the same signal twice under a new name is the trap `phase-35b.md`
+named when it kept 1534 open.
+
+**Why "quality" is size and only size.** Line 1594 names the three ways a
+session's context can be poor — *cold, bloated, or semantically poor*. Cold is
+1535/1545's term; semantically poor is Phase 36's task-match and touched-files
+facets; bloated was the one nobody could measure. Now it is the one this term
+measures, and it claims nothing else.
+
+**Limits and the successor.** The two constants stand in for a fact this build
+does not hold — the destination model's context window. When a per-model window
+reaches the catalogue (a Phase 32G-shaped producer, if ever), the term becomes a
+fraction of *that* window and the constants go. Recorded here so nobody
+re-derives it into a second scale. Package: `GH-CONTEXT-SIZE` (Sonnet, Amber —
+two decisions, two mutations: the wire rule and the term's sign).
