@@ -5368,3 +5368,19 @@ Closed these waves: **1303 → 1304**; three files trimmed.
 33. **A push cancels the running sweep, and eight pushes in an hour meant no sweep finished its twelve test cells until the last.** Lint, audit and the pane cells came back green each time, so the fixes were confirmed, but the platform legs on any one commit were never read to the end. Batch pushes per wave, and when a sweep is past half, hold the next push until it concludes.
 34. **§85 again, with a price: eight `while true` load generators from `GH-DEGRADE-BARRIER`'s experiment ran for 2 h 56 min at 91–95 % CPU each, parented to PID 1.** The worker's `kill $(jobs -p)` was the no-op §85 describes, its pane was closed, and nothing on the board watches the host's own load. The user noticed from the Activity Monitor before any mechanism did. Rule: a packet that starts load generators names the kill in its own STOP CONDITIONS as `kill <pids>` from the echoed list, never `jobs -p`, and the orchestrator runs `ps -eo pid,pcpu,etime,command -r | head` once per wave — one line, no script.
 35. **The Windows CI VM was pinned at 100 % for three days by one `sshd` connection child** (PID 4420, started 2026-09-02, 129,965 CPU-seconds), with no cargo, rustc or test binary left inside. The memory that a killed `--windows-vm` run orphans the *job* on the VM was half the story: the ssh session that carried it spins after the client dies. `taskkill /PID <child>` inside the guest freed it; the listener (booted with the VM) is untouched. Check the VM's `sshd` children after any interrupted run.
+
+### Waves 130–131 — 2026-09-05, night: the first full-sweep read, its four reds attributed inside twenty minutes, 1846 closed
+
+| package | tier | result |
+|---|---|---|
+| `GH-TRIM-COMMANDS-HOOK` · `GH-TRIM-ROUTING-BURN` | Sonnet medium, Green | 517 → 369 and 355 → 292 comment lines; longest blocks 51 → 20 and 65 → 19; nine and three items moved verbatim behind pointers; filtered diffs empty; test counts unchanged. Five files trimmed so far under 2053. |
+| clippy fix, `pty/process.rs` | orchestrator, Green | `collapsible_if` under `#[cfg(windows)]`, flagged by clippy 1.98 on both Windows `declared` cells the first time they reached their clippy step (the codex pin unblocked them today). A let-chain; behaviour unchanged. |
+| `GH-PAIRING-CROSSOVER` | Sonnet high, Amber | **1846 closed.** Prior vs local evidence per k-bucket against the rated-or-proxy outcome; k = 0 scored wrong for local evidence so a uniform history cannot cross over in the first bucket; `prior-inverted` KILLED by every test in the file. |
+| `GH-TERMINAL-LOSS-DETERMINISM-2` (live) | Sonnet high, Amber | rule 4's packet after the resize test's third strike on GitHub's slowest cells: slop-gated tolerances that print the slop, the reverted rounding line still failing. |
+| `GH-TRIM-GATEWAY-MOD` (live) | Sonnet medium, Green | the sixth trim; `gateway/ingress.rs` deliberately excluded (rulings cited by wording). |
+
+Closed these waves: **1304 → 1305**.
+
+**Findings.**
+
+36. **The first sweep to finish all sixteen cells since 15:46 was `d91cd7a` at 19:40, and it read: 12 green — every msrv cell, lint, audit, both pane cells — and four `declared` reds, each attributed from one grep per cell within twenty minutes.** Two were the load-sensitive `terminal_loss` family (macOS resize 2/8 at 4 ms; Ubuntu hangup 1/15) on `declared` runners while the same tests passed on the sibling msrv cells of the same run — the shape §91 describes, and the third strike that buys a determinism packet. One was a Windows-only clippy lint that no local clippy can see and that `--target x86_64-pc-windows-msvc` cannot check here because `ring`'s C build wants Windows headers; the Windows cells are that check. Read the failed *step*, not the cell colour: two of the four reds were not tests.
