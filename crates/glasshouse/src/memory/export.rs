@@ -1,45 +1,21 @@
 //! Phase 50: tracked project knowledge — an explicit, opt-in projection of
 //! durable memory into human-readable files a Git workflow can review.
 //!
-//! # Why this exists at all
+//! This is the only door that copies memory into the project tree, and it
+//! reads exactly the active project's [`super::MemoryStore`] — no session
+//! history, event log or checkpoint, and no credential or provider metadata
+//! (`tests/tracked_knowledge.rs` scans this file's own source for the module
+//! paths it must never name). Every free-text field is redacted a second
+//! time on the way out, independent of whatever the extractor already
+//! screened, because this is the boundary where text leaves Glasshouse's
+//! database and becomes a file any tool that reads the repository can open.
 //!
-//! Runtime memory lives under [`crate::Runtime::state_dir`], which is always
-//! outside the project's own repository (map line 1810) — nothing here
-//! changes that. This module is the *only* door that copies any of it back
-//! into the tree, and it never opens on its own: [`TrackedKnowledge::write`]
-//! has exactly one production caller, `glasshouse memory export --tracked`,
-//! and nothing else in this build reaches it. There is no hook, no
-//! background trigger, and no path from a session's own activity to this
-//! module — see the module-level test in `tests/tracked_knowledge.rs` that
-//! scans this file's own source for the module paths it must never name.
-//!
-//! # What is never in scope
-//!
-//! - **No session history.** This module never reads the session store, the
-//!   project event log, or a checkpoint. It reads exactly one thing: the
-//!   active project's [`super::MemoryStore`], the same door `memory search`
-//!   and `memory snapshot` already use.
-//! - **No credential or provider metadata.** The `memories` table has no
-//!   column for one (see `super::store`'s module documentation), but a
-//!   memory's `body` and `subject` are free text an extractor produced, and
-//!   free text can hold anything typed into it. This module's own redaction
-//!   screens every free-text field it writes, independently of whatever the
-//!   extractor already screened on the way in — a second control on the way
-//!   out, because this is the boundary where the text leaves Glasshouse's own
-//!   database and becomes a file a person's editor, a Git diff, and every
-//!   tool that reads a repository can open.
-//!
-//! # Why the projection is deterministic
-//!
-//! Map line 1816 asks that a team review tracked decisions through an
-//! ordinary Git workflow, and an ordinary Git workflow is only useful if a
-//! diff means something: re-running the export with nothing changed must
-//! produce no diff, and changing one memory must produce a diff in exactly
-//! one file. So every file name is derived from the memory's own identifier
-//! (stable for the memory's lifetime — nothing here ever renames a kind), and
-//! every timestamp printed comes from the memory's own `updated_at`, never
-//! from the wall clock at the moment the export command happened to run.
-//! Running the export twice in a row, an hour apart, changes nothing.
+//! The projection is deterministic: every file name derives from the
+//! memory's own stable identifier and every timestamp comes from the
+//! memory's `updated_at`, never the wall clock — so re-running the export
+//! with nothing changed produces no diff, and changing one memory changes
+//! exactly one file.
+// History: design-decisions.md, "Trims: memory export and extraction module docs", memory/export.rs module doc.
 
 use std::path::{Path, PathBuf};
 

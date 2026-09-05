@@ -14363,3 +14363,698 @@ package's whole job rather than a constraint on the fixups (the lead's correctio
     //! its death ends the session. Those are the processes the 2026-08-26 incident
     //! was about. See `docs/product/evidence/phase-10a.md` for what is not yet
     //! recorded and why.
+
+## Trims: memory export and extraction module docs — history moved out of comments by `GH-TRIM-MEMORY-EXTRACT-DOCS`, 2026-09-06
+
+### `memory/export.rs` — module doc
+
+    //! Phase 50: tracked project knowledge — an explicit, opt-in projection of
+    //! durable memory into human-readable files a Git workflow can review.
+    //!
+    //! # Why this exists at all
+    //!
+    //! Runtime memory lives under [`crate::Runtime::state_dir`], which is always
+    //! outside the project's own repository (map line 1810) — nothing here
+    //! changes that. This module is the *only* door that copies any of it back
+    //! into the tree, and it never opens on its own: [`TrackedKnowledge::write`]
+    //! has exactly one production caller, `glasshouse memory export --tracked`,
+    //! and nothing else in this build reaches it. There is no hook, no
+    //! background trigger, and no path from a session's own activity to this
+    //! module — see the module-level test in `tests/tracked_knowledge.rs` that
+    //! scans this file's own source for the module paths it must never name.
+    //!
+    //! # What is never in scope
+    //!
+    //! - **No session history.** This module never reads the session store, the
+    //!   project event log, or a checkpoint. It reads exactly one thing: the
+    //!   active project's [`super::MemoryStore`], the same door `memory search`
+    //!   and `memory snapshot` already use.
+    //! - **No credential or provider metadata.** The `memories` table has no
+    //!   column for one (see `super::store`'s module documentation), but a
+    //!   memory's `body` and `subject` are free text an extractor produced, and
+    //!   free text can hold anything typed into it. This module's own redaction
+    //!   screens every free-text field it writes, independently of whatever the
+    //!   extractor already screened on the way in — a second control on the way
+    //!   out, because this is the boundary where the text leaves Glasshouse's own
+    //!   database and becomes a file a person's editor, a Git diff, and every
+    //!   tool that reads a repository can open.
+    //!
+    //! # Why the projection is deterministic
+    //!
+    //! Map line 1816 asks that a team review tracked decisions through an
+    //! ordinary Git workflow, and an ordinary Git workflow is only useful if a
+    //! diff means something: re-running the export with nothing changed must
+    //! produce no diff, and changing one memory must produce a diff in exactly
+    //! one file. So every file name is derived from the memory's own identifier
+    //! (stable for the memory's lifetime — nothing here ever renames a kind), and
+    //! every timestamp printed comes from the memory's own `updated_at`, never
+    //! from the wall clock at the moment the export command happened to run.
+    //! Running the export twice in a row, an hour apart, changes nothing.
+
+### `memory/extract/authority.rs` — module doc
+
+    //! How binding an extracted memory is allowed to become.
+    //!
+    //! Phase 21A's twelve lines are one policy with three parts, and this module
+    //! is the second and third:
+    //!
+    //! - the **seven classes** exist in the store already
+    //!   ([`MemoryAuthority`]), and the schema requires the model to pick one;
+    //! - **classification is conservative and only ever lowers** —
+    //!   [`conservative`];
+    //! - **an invariant is a human act** — [`super::super::store::Classifier`]
+    //!   and `MemoryStore::set_authority`.
+    //!
+    //! # An extractor may not mint an invariant. At all.
+    //!
+    //! The map's line is *"treat uncertain authority classification
+    //! conservatively and avoid promoting uncertain memories to invariants
+    //! automatically"*, which reads as though a *certain* memory could be
+    //! promoted automatically. It cannot be, and the map answers this itself
+    //! twenty lines further on: Phase 21K requires that model *"confidence,
+    //! repetition, eloquence, and reasoning length"* be treated as
+    //! **"presentation characteristics rather than evidence"**.
+    //!
+    //! The only certainty an extractor has access to is the model's own report
+    //! of it. So there is no input to this function that could justify an
+    //! invariant, and [`EXTRACTOR_CEILING`] is `Constraint`: still binding,
+    //! still surfaced as a rule, but a class Phase 22's conflict machinery is
+    //! willing to have reviewed. Reaching `Invariant` takes
+    //! [`super::super::store::Classifier::Reviewed`] — a person, or an agent the
+    //! user put in a review role. That is Phase 21A's last line
+    //! (*"allow users or trusted review agents to promote or demote memory
+    //! authority explicitly"*) doing the work its neighbour needs.
+    //!
+    //! # Lowering only, and why that direction is not arbitrary
+    //!
+    //! [`conservative`] can move a memory towards `historical` and never towards
+    //! `invariant`. The asymmetry matters because the two errors are not
+    //! symmetric: a memory stored weaker than it deserves is retrieved as
+    //! context when it should have been a rule, and a person notices when the
+    //! rule is broken. A memory stored stronger than it deserves *directs work*
+    //! — it is the "idea discussed once, injected as a binding instruction"
+    //! failure Phase 21A exists to prevent, and nobody notices, because the
+    //! implementation that obeyed it looks deliberate.
+    //!
+    //! # Three ceilings, and the weakest one wins
+    //!
+    //! | rule | ceiling | why |
+    //! |---|---|---|
+    //! | any automatic extraction | `constraint` | model confidence is not evidence |
+    //! | `confidence: probable` | `decision` | revisitable, not a current limit |
+    //! | `confidence: unsure` | `hypothesis` | says out loud that it needs validating |
+    //! | `disposition: proposed` | `idea` | enthusiasm is not acceptance |
+    //! | `disposition: abandoned` | `historical` | a dead end explains, it does not direct |
+    //!
+    //! `disposition: proposed` capped at `idea` is the direct mechanism for
+    //! *"distinguish an accepted decision from an idea that was merely discussed
+    //! enthusiastically"*. Nothing about how warmly a proposal was received can
+    //! move it: acceptance is a separate field, and only acceptance lifts the
+    //! ceiling.
+
+### `memory/extract/credentials.rs` — module doc
+
+    //! The one control that stops a secret reaching a model or a memory row.
+    //!
+    //! # Why this module exists at all, and why here
+    //!
+    //! `the_project_database_schema_has_nowhere_to_put_a_credential` pins every
+    //! column of the project database and proves no column's *purpose* is a
+    //! credential. Its own doc comment then says what it cannot prove:
+    //! `memories.subject` and `memories.body` are free text, and free text holds
+    //! anything. The worker that added migration 4 declined to certify otherwise
+    //! and was right to. **The control therefore belongs to the producer, and
+    //! this module is it.**
+    //!
+    //! # Two directions, deliberately asymmetric
+    //!
+    //! **Into the model, text is scrubbed.** A session that happened to print a
+    //! key still contains everything else the project learned that hour, and
+    //! throwing the hour away to punish one line would lose far more than it
+    //! protects. [`scrub`] removes the credential and keeps the session.
+    //!
+    //! **Out of the model, a memory is refused whole.** [`screen`] is
+    //! fail-closed: a memory whose text trips the recognizer is not stored at
+    //! all, not stored redacted. The asymmetry is the point. A redacted secret
+    //! sitting in a durable row still carries everything around it — which host,
+    //! which account, which variable, which project — and
+    //! [`crate::secret::redact`]'s own documentation records the failure this
+    //! project already had: it "removes credential-shaped runs and says nothing
+    //! about the text around them", and a captured line once had its credential
+    //! redacted and a planted prompt body verbatim. One lost memory costs one
+    //! memory. A durable row that names a live credential's neighbourhood costs
+    //! something else.
+    //!
+    //! # What is recognized, stated as a closed list
+    //!
+    //! Nothing here is a general secret detector, and pretending otherwise would
+    //! be worse than the honest list:
+    //!
+    //! 1. Everything [`crate::secret::redact`] recognizes — `sk-`, `ghp_`,
+    //!    `github_pat_` tokens and `Bearer` tokens. That function is already
+    //!    tested in its own module, and reusing it means the two recognizers
+    //!    cannot drift apart.
+    //! 2. A **secret assignment**: one of [`ASSIGNMENT_KEYWORDS`] followed by
+    //!    `=` or `:` and a value that is credential-shaped —
+    //!    [`MIN_ASSIGNED_VALUE`] characters or more, no whitespace, and carrying
+    //!    both a letter and a digit.
+    //!
+    //! # Why there is no entropy rule
+    //!
+    //! The obvious next step — refuse any long high-entropy run — refuses
+    //! `source_commit`. A Git SHA is forty characters of hex, and storing it is
+    //! a Phase 20 requirement. An entropy rule that admitted SHAs would admit
+    //! most keys too, so the rule would be decoration. The letter-and-digit
+    //! requirement on an *assigned* value does the same work without the
+    //! collateral damage, because a SHA does not follow the word `password`.
+    //!
+    //! # Why the error carries no text
+    //!
+    //! [`CredentialFound`] names the shape and nothing else. An error that
+    //! quoted the offending line would move the credential from the row into the
+    //! log, which is the same leak wearing a different hat —
+    //! `crate::gateway`'s eight fixed phrases exist for exactly this reason.
+    //! `a_credential_refusal_never_repeats_the_credential` holds it to that.
+
+### `memory/extract/disposable.rs` — module doc
+
+    //! The one production caller of [`crate::routing::disposable::DisposableRouting`]
+    //! (Phase 9I lines 530, 531, 532, 540), and — since GH-ROUTED-EXTRACTION-CLIENT
+    //! — the thing that then **calls the resource it chose**.
+    //!
+    //! # What this is
+    //!
+    //! [`RoutedModel`] is an [`ExtractionModel`] that asks the disposable routing
+    //! policy which resource should perform this bounded support job —
+    //! preferring a free one (line 530), letting an explicitly configured free
+    //! model such as a Nemotron variant participate by name (line 531), and
+    //! reporting why the resource it landed on is the one in use (line 540) —
+    //! and then builds nothing itself and sends nothing itself. Its caller hands
+    //! it a [`ConfiguredModel`] for the chosen resource, and it makes the call
+    //! through that.
+    //!
+    //! # Why the client arrives from outside
+    //!
+    //! Turning a [`DisposableChoice`] into a client needs the provider table,
+    //! the layering rule that resolves a provider's configuration, and a
+    //! [`crate::secret::SecretStore`]. All three live in `main.rs`, which is the
+    //! only place in this build that reads a user's configuration, and none of
+    //! them may live here: `crate::routing` is pure by rule and this module is
+    //! the seam directly above it. So [`RoutedModel::with_client`] takes a
+    //! client the caller resolved for the choice this type already made, the
+    //! same shape `main.rs::context_firewall_reducer_model` and
+    //! `main.rs::classification_model` already use one layer over.
+    //!
+    //! # The consent boundary is the caller's, and it did not move
+    //!
+    //! A [`RoutedModel`] with **no** client behaves exactly as this type did
+    //! before it could call anything: it chooses, it says what it chose, and
+    //! [`ExtractionModel::complete`] fails with [`ModelError::Unavailable`]. That
+    //! is not a leftover — it is the state every user who has not configured
+    //! `[memory] extraction_model` is still in, and `main.rs`'s own
+    //! `configured_extraction_model` documents why: *a free-model list is a
+    //! statement about cost; it is not a request that a hook running inside a
+    //! coding session start making outbound requests.*
+    //!
+    //! What changed is what happens **after** that consent. The configured
+    //! extraction model used to bypass the router entirely, so the policy chose
+    //! only when nothing would be called and the model that was called had never
+    //! been routed. Now the configured model is one candidate among the user's
+    //! own free ones and `DisposableRouting::choose` ranks them all, which is
+    //! what makes line 530's *prefer free models when quality is sufficient*
+    //! true on the path that actually spends something.
+    //!
+    //! # What the call teaches, and where it goes
+    //!
+    //! [`WorkloadOutcome`] is [`crate::routing::free::FreePool`]'s only teacher
+    //! (line 534), and until this batch nothing on this path produced one. The
+    //! translation from one finished exchange to one outcome happens **here**,
+    //! once, exactly as [`WorkloadOutcome`]'s own documentation requires — and
+    //! the result goes to the observer the caller supplied, which is what makes
+    //! it durable for the next short-lived process that dispatches an extraction.
+
+### `memory/extract/disposable.rs` — `new_for_request`
+
+    /// Same as [`Self::new`], but with GH-CLASSIFY-CALLER's fifth link: a
+    /// real [`crate::routing::classify::TaskClassification`] of
+    /// `request_text` reaches the metered-fallback path's `tier` input (map
+    /// line 1550) instead of the fixed
+    /// [`crate::routing::classify::WorkloadTier::Leaf`] [`Self::new`] still
+    /// passes.
+    ///
+    /// `classify_heuristically`, not [`crate::routing::classify::classify`]:
+    /// this caller has no model answer to prefer, the same "no cheap model is
+    /// available" case Phase 35's own production caller (`glasshouse
+    /// classify`) is already built for.
+    ///
+    /// **Not called by `main.rs`, and `JobKind::MemoryExtraction` must not
+    /// call it.** Two things block it, and only the first is about ordering.
+    ///
+    /// *Ordering:* `disposable_extraction_model` builds and calls its model
+    /// closure before `run_extraction_after_turn` reads this session's events
+    /// or builds its chunk, so no text exists at the point the routing
+    /// decision is made. That part is fixable by reordering `main.rs`.
+    ///
+    /// *Semantics — the blocking one:* reordering would hand this constructor
+    /// the **chunk**, which is a transcript of a finished turn, not a request.
+    /// [`crate::routing::classify::classify_heuristically`] is documented as
+    /// classifying *a request*, and the tier it yields feeds
+    /// `evaluate_reserve_spend`, whose distant-reset branch spends protected
+    /// premium reserve only at `WorkloadTier::Heavy` (tier 3) or above. A transcript of hard
+    /// debugging work is full of the keywords that produce `Heavy` — so
+    /// wiring the chunk here would let a *cheap* extraction job spend the
+    /// reserve because the conversation it is summarising happened to be
+    /// demanding. The tier would vary with conversation topic rather than
+    /// with this job's own demand, which is the opposite of what the gate is
+    /// protecting.
+    ///
+    /// This constructor is therefore correct and ready for a `JobKind` that
+    /// carries a real user request — `Classification`, `Reranking`,
+    /// `Evaluation` — none of which has a production caller today.
+    /// `MemoryExtraction`, the only one that does, is disposable by design and
+    /// keeps [`Self::new`]'s fixed `WorkloadTier::Leaf`.
+    ///
+    /// It keeps [`FreePool::new`] for the same reason it keeps the fixed
+    /// tier: it has no caller, so there is no process whose persisted health
+    /// this could honestly be reading.
+
+### `memory/extract/disposable.rs` — release doc (`Self::release`/drop)
+
+    /// How the request this dispatch reserved is given back — capability
+    /// map line 1367's release half, and the mirror of [`Self::observing`].
+    ///
+    /// Called once, from whichever comes first: the end of
+    /// [`ExtractionModel::complete_observed`], where the exchange has
+    /// finished and the pool is genuinely free again — success or failure
+    /// alike, because a call that failed spent the request just the same —
+    /// or this type's drop, which covers a model that was built and never
+    /// asked anything.
+    ///
+    /// # Both, and neither is the belt to the other's braces
+    ///
+    /// Releasing at the end of the call is what makes the pool usable again
+    /// *while this process is still finishing*, which is the whole point of
+    /// a reservation being narrower than a process. Releasing on drop is
+    /// what covers the run that never called: `main.rs` builds the model
+    /// before it knows whether there is anything to extract, and a chunk
+    /// with nothing in it must not hold a request until the deadline.
+    ///
+    /// Neither covers a process killed mid-call, and neither is meant to:
+    /// that is what the record's own expiry is for.
+
+### `memory/extract/mod.rs` — module doc
+
+    //! Turning session activity into durable project memory (Phase 21).
+    //!
+    //! # What exists here and what deliberately does not
+    //!
+    //! This is the **producer** for the store Phases 20, 22 and 23 built. It
+    //! bounds and scrubs session activity, asks a model for structured memories,
+    //! validates what comes back against a contract it cannot argue with, and
+    //! records what survives.
+    //!
+    //! It does **not** call a provider. Phase 21 says *"allow a configurable
+    //! cheap or local model to perform memory extraction"*, and the mechanism
+    //! that would provide one — Phase 39's disposable-job interface — does not
+    //! exist yet. So [`ExtractionModel`] is the seam, tested against fakes, and
+    //! this batch's report states exactly what Phase 39 must supply. Building
+    //! half a provider call path here would be a second answer to a question
+    //! another phase owns.
+    //!
+    //! Four things **trigger** extraction, and Phase 29 is the name for what
+    //! they start: a *memory commit*. `main.rs`'s hook path runs one after a
+    //! completed turn, after a commit lands, and before a harness compacts its
+    //! own context; `glasshouse memory commit` runs one a person asked for. All
+    //! four go through [`Extractor::run`] with a different
+    //! [`ExtractionTrigger`], which is recorded both on the
+    //! [`ExtractionOutcome`] and on every memory the run stored — a second
+    //! extraction path for any of them would be a second answer to what is worth
+    //! remembering.
+    //!
+    //! (This paragraph used to say nothing triggered extraction at all. Batch 51
+    //! wired the first two and Phase 29 wired the rest; it is kept in the past
+    //! tense here because the module's structure — a trigger the caller passes
+    //! in, rather than a trigger this module decides — is still the reason
+    //! `ExtractionTrigger` exists.)
+    //!
+    //! # The acceptance condition, and where it lives
+    //!
+    //! **The extractor must never be fed, and must never emit, credential
+    //! material.** `memories.body` is free text and the schema cannot stop a
+    //! secret being put in it — the pinned-schema test
+    //! `the_project_database_schema_has_nowhere_to_put_a_credential` says so in
+    //! its own doc comment and hands the control to this module.
+    //!
+    //! It is enforced at exactly three places, each with its own regression test
+    //! and its own mutation:
+    //!
+    //! 1. [`chunk::SessionChunk::build`] scrubs every entry, so no chunk in the
+    //!    program holds un-scrubbed activity;
+    //! 2. [`Prompt::build`] scrubs the block of already-stored memories it
+    //!    quotes back, because a memory recorded before this module existed was
+    //!    never screened;
+    //! 3. [`schema::judge`] screens each emitted element **before reading any of
+    //!    its fields** and refuses it whole rather than redacting it.
+    //!
+    //! The first two are why nothing reaches a model. The third is why nothing
+    //! reaches a row. See [`credentials`] for why the two directions are
+    //! deliberately asymmetric — scrubbed in, refused out.
+    //!
+    //! # Failure is not the session's problem
+    //!
+    //! [`Extractor::run`] returns [`ExtractionOutcome`] and **no `Result`**.
+    //! There is no error channel for a caller to propagate, which is the
+    //! structural form of Phase 21's *"keep memory-extraction failure non-fatal
+    //! to the coding session"*: an unavailable model, an unparseable reply, a
+    //! store that refuses a row, and a model implementation that panics all
+    //! produce an outcome describing what happened.
+
+### `memory/extract/mod.rs` — `ExtractionTrigger` enum doc
+
+    /// Why extraction ran — Phase 29's *memory commit*, in the only form it has.
+    ///
+    /// # A memory commit is this pipeline with a trigger, not a second pipeline
+    ///
+    /// Phase 29 line 1147 asks for *"a lightweight memory commit operation that
+    /// extracts durable project knowledge from recently completed work"*, and
+    /// lines 1148–1151 ask for four ways to start one. That is exactly this
+    /// module with four constructors of this type: a second extractor would be a
+    /// second answer to *what is worth remembering*, a second credential screen,
+    /// and a second duplicate check — three places for the same question to be
+    /// answered differently.
+    ///
+    /// So the variants below are the whole of the difference between a memory
+    /// commit a person asked for and one a harness event started, and every one
+    /// of them is recorded on the memories the run produced
+    /// (`memories.extraction_trigger`, written by [`Extractor::run`]) as
+    /// well as on its [`ExtractionOutcome`].
+    ///
+    /// # Not `Copy`, because one variant carries a commit
+    ///
+    /// [`Self::GitCommit`] names the object that made the boundary a boundary,
+    /// which is a `String`. Carrying it here rather than passing it beside the
+    /// trigger is what makes *"the commit is the reason this ran"* unrepresentable
+    /// as anything else: there is no way to construct this variant without one,
+    /// and no way for another trigger to acquire one.
+
+### `memory/extract/mod.rs` — `Prompt::for_request`
+
+    /// Assemble a **request** prompt: a contract this repository wrote,
+    /// followed by one request a person actually typed.
+    ///
+    /// # Why this exists beside [`Prompt::build`] rather than replacing it
+    ///
+    /// [`Prompt::build`] assembles a session transcript, which is the one
+    /// thing a classification job must never send: a routing decision is
+    /// about a single request, and quoting the conversation at a cheap model
+    /// would put a whole session's activity through a resource chosen for
+    /// being disposable. The two constructors therefore differ in what they
+    /// assemble and agree on the only thing this newtype exists to guarantee
+    /// — that every byte reaching a model went through
+    /// [`credentials::scrub`] or was written in this repository's source.
+    ///
+    /// # The `&'static str` is the guarantee, not a convenience
+    ///
+    /// `contract` and `schema` are unscrubbed, so they must be text that
+    /// cannot have come from a person, a file or a database. `&'static str`
+    /// is the type that says so: a runtime-assembled `String` cannot be
+    /// passed here, so the only unscrubbed half of the result is a literal
+    /// compiled into the binary. They are two arguments rather than one for
+    /// the same reason [`Prompt::build`] pushes `PROMPT_CONTRACT` and then
+    /// `RESPONSE_SCHEMA` — what a job is for and what its reply must look
+    /// like are separately documented and separately revised.
+    /// `request_text` is the half that *did* come from a person, and
+    /// it is scrubbed — a request that pasted a key in gets the key removed
+    /// before anything leaves the process, which is the same direction
+    /// [`Prompt::build`] scrubs its `existing` memories for.
+    ///
+    /// The caller keeps the original text for its own report; only what
+    /// reaches the model is altered.
+
+### `memory/extract/mod.rs` — cost-in-tokens doc
+
+    /// What one provider said a call cost, in tokens.
+    ///
+    /// # Every field is optional, and an absence is never a zero
+    ///
+    /// `usage` is optional in the protocols this seam is asked over, and
+    /// providers disagree about which of its fields they populate. So each count
+    /// here is [`None`] when the provider did not report it — a distinct fact
+    /// from a reported zero, and the reason
+    /// `crate::routing::evidence::NewObservation`'s own token fields are
+    /// `Option<i64>` and its columns nullable. Collapsing the two would make
+    /// "this build recorded nothing here" indistinguishable from "this call used
+    /// no input tokens" at every consumer downstream, which is the shape of
+    /// fabrication the capability map refuses by name: *a fabricated value here
+    /// does not degrade the policy, it inverts it.*
+    ///
+    /// Deliberately not here: a **cost**. A monetary figure needs per-model
+    /// pricing this build does not have, and `routing_observations` pairs
+    /// `cost_micro_usd` with a `cost_confidence` by `CHECK` for exactly that
+    /// reason — a stored number must carry a stated confidence, and there is
+    /// none to state. Tokens are what a provider actually reports; a price is
+    /// what somebody would have to invent.
+
+### `memory/extract/mod.rs` — `Extractor::run`
+
+    /// Extract from one bounded chunk.
+    ///
+    /// # There is no error channel, and that is the design
+    ///
+    /// Phase 21 requires extraction failure to be *"non-fatal to the coding
+    /// session"*. A `Result` here would put the decision in every caller's
+    /// hands, and one caller using `?` on a lifecycle-event path would make
+    /// a failed extraction end a session. So this returns an outcome, always,
+    /// and every failure is a field on it.
+    ///
+    /// A model implementation that **panics** is caught rather than allowed
+    /// to unwind into the caller, because a disposable support job taking a
+    /// coding session down is the same defect wearing a worse hat.
+    /// `AssertUnwindSafe` is sound here for a specific reason: nothing has
+    /// been written to the store when the model is called, so a panic
+    /// unwinding out of it cannot leave a partially-recorded extraction
+    /// behind — the outcome is discarded whole and reported as
+    /// [`ExtractionFailure::ModelPanicked`]. Note the caveat: the default
+    /// panic hook still prints to stderr, so a Glasshouse that runs
+    /// extraction while a TUI owns the terminal must install a hook of its
+    /// own.
+
+### `memory/extract/mod.rs` — file-touched reliability guard
+
+    /// Map line 1139's reliability guard, and the writer behind it.
+    ///
+    /// **The check is byte-equality against the chunk's own `file_touched`
+    /// set, and nothing else.** Not a prefix match, not a normalised
+    /// comparison, not a "does this look like a path" test — the model was
+    /// shown `edited <path>` for each of those paths verbatim
+    /// (`lifecycle::describe`), so a returned path either is one of them or
+    /// is something the model produced rather than copied. Anything softer
+    /// would let a plausible near-miss earn
+    /// [`crate::memory::FileAssociation::Referenced`], which is precisely the
+    /// fabricated producer the refusal register refused for this line.
+    ///
+    /// Normalisation happens **after** the check, inside
+    /// [`crate::memory::MemoryStore::record_referenced_files`], for the same
+    /// reason: normalising first would make two spellings of one file compare
+    /// equal and quietly widen what counts as copied.
+    ///
+    /// A store failure is a `tracing::warn!` and nothing more. The memory is
+    /// already recorded, and losing its file association is strictly better
+    /// than losing it — the posture `main.rs::record_observed_files`
+    /// documents for the other writer.
+
+### `memory/extract/model.rs` — module doc
+
+    //! An [`ExtractionModel`] that actually calls one — Phase 21's *"allow a
+    //! configurable cheap or local model to perform memory extraction"*.
+    //!
+    //! # Why this exists here rather than behind Phase 39
+    //!
+    //! [`mod@super`] was written against a seam and said, in its own module
+    //! header, that nothing in this codebase could call a model. That was true
+    //! when it was written and is no longer: `ureq` arrived with the gateway, and
+    //! `crate::provider::discovery` has been making real authenticated requests
+    //! to configured providers since. So the missing half of line 834 was never
+    //! an architecture, only a transport — and this is that transport, kept
+    //! deliberately small.
+    //!
+    //! # OpenAI chat completions, and nothing else
+    //!
+    //! [`WireProtocol::OpenAiChat`] is the only protocol here, and that is a
+    //! reading of the line rather than a shortfall against it. *Cheap or local*
+    //! is what the map asks for, and every local runner (Ollama, LM Studio,
+    //! llama.cpp, vLLM) and every cheap hosted router speaks OpenAI chat
+    //! completions. [`WireProtocol::AnthropicMessages`] would need this module to
+    //! **originate** an `anthropic-version` header, which nothing in this
+    //! codebase has ever done — the gateway only ever forwards a client's own —
+    //! and inventing a protocol version is the same class of guess
+    //! `crate::provider` refuses when it declines to invent a base URL.
+    //! [`WireProtocol::OpenAiResponses`] is a different request shape again.
+    //! Both are refused **by name at construction**, so an unusable choice is one
+    //! logged sentence at the wiring rather than a failure on every turn.
+    //!
+    //! # What may never leave this module
+    //!
+    //! A provider's error body can echo the request, and the request is a prompt
+    //! built from the user's own session. So no response body, and no `ureq`
+    //! error's own words, ever reaches a [`ModelError`]: every failure here is
+    //! one of a fixed set of phrases chosen in this file. That is the same rule
+    //! [`ModelError::Failed`] was given a `&'static str` to enforce, applied at
+    //! the first place that could have broken it.
+    //!
+    //! The credential is read in exactly one place — the header
+    //! [`ConfiguredModel::complete`] builds — and [`ConfiguredModel`]'s
+    //! [`Debug`](std::fmt::Debug) prints [`REDACTED`] in its place. The base URL
+    //! is **not** in [`ExtractionModel::describe`]'s answer, because a base URL
+    //! can have a credential embedded in it and that string is stored on every
+    //! outcome and printed in every log line.
+
+### `memory/extract/model.rs` — `parse_reply`
+
+    /// The assistant message and the token counts out of an OpenAI
+    /// chat-completions reply.
+    ///
+    /// Separate from [`ConfiguredModel::call`] so the shapes a real endpoint
+    /// produces can be tested without one. Every error below is produced in the
+    /// same order and with the same phrase it was before this function read a
+    /// second key: a reply that was not an answer stays not an answer, whatever
+    /// `usage` it carried, and `tests::content_of` is the wrapper that keeps
+    /// asserting exactly that.
+    ///
+    /// # Why the counts are read here and not somewhere with a socket
+    ///
+    /// This function already deserializes the whole chat-completions document to
+    /// find one key in it. `usage` is a sibling of `choices` in that same
+    /// value — already parsed, already in memory. Reading it needs no streaming
+    /// observer, no second request and no new dependency, which is what
+    /// separates this path from the relay in `crate::gateway::ingress`: there,
+    /// the body is a byte stream the proxy is designed never to parse, and that
+    /// remains true and untouched. Here, Glasshouse made the request itself and
+    /// has the document in its hand.
+    ///
+    /// The same rule as [`content_of`] applies to everything it returns: no part
+    /// of `text` reaches an error or a log. Token counts are integers and carry
+    /// none of the provider's words.
+
+### `memory/extract/model.rs` — `usage_of`
+
+    /// What the reply says the call cost, and nothing it does not say.
+    ///
+    /// # A missing count is `None`, never a zero
+    ///
+    /// `usage` is optional in this protocol and providers disagree about which
+    /// of its fields they fill in. A reply with no `usage` at all, a `usage`
+    /// missing one of these fields, or a field that is not a non-negative
+    /// integer all produce [`None`] for that count — *the provider did not
+    /// say* — because that is a different fact from a reported zero and
+    /// [`TokenUsage`] exists to keep them apart all the way to the nullable
+    /// column that stores them.
+    ///
+    /// **Negative is refused rather than passed on.** `routing_observations`
+    /// `CHECK`s every one of these columns `>= 0`, so a negative would turn a
+    /// telemetry write into a failed one; and a provider reporting a negative
+    /// token count has not told us anything we can record.
+    ///
+    /// # Only the spellings this protocol actually defines
+    ///
+    /// `prompt_tokens`, `completion_tokens` and
+    /// `prompt_tokens_details.cached_tokens` are OpenAI chat completions' own
+    /// names for these, and OpenAI chat completions is the only protocol this
+    /// module speaks — see the module header for why it refuses to approximate
+    /// the ones it does not. A provider with a private spelling for a
+    /// cached-prompt count is read as having reported none, which is the same
+    /// refusal to guess [`ConfiguredModel::new`] applies to a base URL it was
+    /// not given. Adding a spelling is a change with a provider behind it, not
+    /// a default.
+
+### `memory/extract/schema.rs` — module doc
+
+    //! The extraction contract: what a model is asked for, and what is accepted
+    //! back.
+    //!
+    //! # The response is untrusted input
+    //!
+    //! A model's reply is text from outside the program. It is parsed like any
+    //! other untrusted document: per element, so one bad memory costs one memory
+    //! rather than the whole extraction, and **screened for credential material
+    //! before any field of it is read**.
+    //!
+    //! That ordering is deliberate and is the reason [`judge`] does the screen
+    //! first. Once an element has passed, every field in it is known to be
+    //! credential-free, so a later error may safely name the value it rejected.
+    //! Screening field by field would leave the fields nobody reads unscreened,
+    //! and an error raised before the screen could echo a credential into a log.
+    //!
+    //! # Required fields, and why five of them are enums
+    //!
+    //! `kind` is Phase 21's *"classify every emitted memory into one supported
+    //! memory kind"*. The other three enums each exist to make a distinction the
+    //! map asks for **representable, and therefore checkable**:
+    //!
+    //! | field | the line it serves |
+    //! |---|---|
+    //! | `support` | *omit speculative claims that were not established* |
+    //! | `disposition` | *distinguish failed approaches from accepted decisions* |
+    //! | `confidence` | *treat uncertain authority classification conservatively* |
+    //!
+    //! A prompt that merely *asks* a model to distinguish two things produces no
+    //! evidence that it did. A schema that makes the distinction a required
+    //! field, and a validator that refuses a response contradicting itself,
+    //! produces a test. Which half is enforced and which half is only asked for
+    //! is stated per rule below, because the difference is the whole value.
+    //!
+    //! # What is asked for and cannot be enforced here
+    //!
+    //! Whether a statement is *true*, whether it is an obvious source-code fact,
+    //! and whether rediscovering it would be expensive are judgments about the
+    //! project that only the producer can make — the same three
+    //! `memory::policy` declined to fake at the storage layer, for the
+    //! same reason. They are stated in [`PROMPT_CONTRACT`] and evaluated
+    //! nowhere. Saying so is more useful than a keyword heuristic that would
+    //! refuse real memories and admit fake ones.
+
+### `memory/mod.rs` — module doc
+
+    //! Durable, project-scoped memory.
+    //!
+    //! > **Memory belongs to the project, not to the model.**
+    //!
+    //! Everything here lives in the one SQLite database bound to the active
+    //! project (see `crate::database`). There is no cross-project query, no
+    //! second store, and no path a caller can supply: a [`ProjectMemory`] is
+    //! opened from a [`crate::Runtime`], which resolves exactly one project.
+    //!
+    //! # What this module is, and is not
+    //!
+    //! `store`, [`search`] and [`snapshot`] are the storage and retrieval half
+    //! of Phases 20, 22, 23 and 26 — a table, its lifecycle, its full-text index,
+    //! and the operations an agent asks it questions through. None of them decides
+    //! that a conversation contained a durable fact; the admission guard
+    //! ([`admit`]) is deliberately narrow — see [`MemoryRefusal`] — rather than a
+    //! stand-in for that judgment.
+    //!
+    //! [`inject`] is Phase 27's consumer of that half: the step that chooses
+    //! which of those memories reach a session Glasshouse is routing a task to,
+    //! and labels them so an agent can never mistake a remembered sentence for
+    //! something the user just said. It decides nothing about relevance either —
+    //! it reuses [`search`]'s ranking rather than ranking again.
+    //!
+    //! [`extract`] is the other half, and Phase 21 is where the judgment lives: it
+    //! bounds and scrubs session activity, asks a model for structured memories,
+    //! and validates the reply against a contract. **It is also where the
+    //! credential control lives.** `subject` and `body` are free text and no
+    //! schema can stop a secret being put in one, so the producer is the only
+    //! place the guarantee can be made — see [`extract::credentials`] and the
+    //! doc comment on
+    //! `crate::session::store::tests::the_project_database_schema_has_nowhere_to_put_a_credential`,
+    //! which hands the control here by name.
+    //!
+    //! # The two enum axes, and why they are two
+    //!
+    //! [`MemoryKind`] is *what sort of thing was remembered*. [`MemoryAuthority`]
+    //! is *how binding it is*. They overlap in spelling and not in meaning: a
+    //! [`MemoryKind::Finding`] can be an [`MemoryAuthority::Invariant`], and a
+    //! [`MemoryKind::Decision`] can have decayed to [`MemoryAuthority::Historical`].
+    //! [`MemoryStatus`] is a third, independent axis: where the memory sits in its
+    //! lifecycle. Migration 4's comment records why none of the three may be
+    //! folded into another.

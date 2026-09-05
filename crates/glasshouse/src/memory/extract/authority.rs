@@ -1,61 +1,23 @@
 //! How binding an extracted memory is allowed to become.
 //!
-//! Phase 21A's twelve lines are one policy with three parts, and this module
-//! is the second and third:
+//! Phase 21A's policy has three parts: the seven classes already exist in
+//! the store ([`MemoryAuthority`]); classification only ever lowers
+//! ([`conservative`]); and minting an invariant is a human act
+//! ([`super::super::store::Classifier`] and `MemoryStore::set_authority`).
 //!
-//! - the **seven classes** exist in the store already
-//!   ([`MemoryAuthority`]), and the schema requires the model to pick one;
-//! - **classification is conservative and only ever lowers** —
-//!   [`conservative`];
-//! - **an invariant is a human act** — [`super::super::store::Classifier`]
-//!   and `MemoryStore::set_authority`.
+//! An extractor may never mint an invariant, even from a certain report: the
+//! only certainty it has access to is the model's own claim of it, and Phase
+//! 21K treats confidence, repetition and eloquence as "presentation
+//! characteristics rather than evidence." So [`EXTRACTOR_CEILING`] is
+//! `Constraint` — still binding, but a class Phase 22's conflict machinery
+//! may review. Reaching `Invariant` takes
+//! [`super::super::store::Classifier::Reviewed`].
 //!
-//! # An extractor may not mint an invariant. At all.
-//!
-//! The map's line is *"treat uncertain authority classification
-//! conservatively and avoid promoting uncertain memories to invariants
-//! automatically"*, which reads as though a *certain* memory could be
-//! promoted automatically. It cannot be, and the map answers this itself
-//! twenty lines further on: Phase 21K requires that model *"confidence,
-//! repetition, eloquence, and reasoning length"* be treated as
-//! **"presentation characteristics rather than evidence"**.
-//!
-//! The only certainty an extractor has access to is the model's own report
-//! of it. So there is no input to this function that could justify an
-//! invariant, and [`EXTRACTOR_CEILING`] is `Constraint`: still binding,
-//! still surfaced as a rule, but a class Phase 22's conflict machinery is
-//! willing to have reviewed. Reaching `Invariant` takes
-//! [`super::super::store::Classifier::Reviewed`] — a person, or an agent the
-//! user put in a review role. That is Phase 21A's last line
-//! (*"allow users or trusted review agents to promote or demote memory
-//! authority explicitly"*) doing the work its neighbour needs.
-//!
-//! # Lowering only, and why that direction is not arbitrary
-//!
-//! [`conservative`] can move a memory towards `historical` and never towards
-//! `invariant`. The asymmetry matters because the two errors are not
-//! symmetric: a memory stored weaker than it deserves is retrieved as
-//! context when it should have been a rule, and a person notices when the
-//! rule is broken. A memory stored stronger than it deserves *directs work*
-//! — it is the "idea discussed once, injected as a binding instruction"
-//! failure Phase 21A exists to prevent, and nobody notices, because the
-//! implementation that obeyed it looks deliberate.
-//!
-//! # Three ceilings, and the weakest one wins
-//!
-//! | rule | ceiling | why |
-//! |---|---|---|
-//! | any automatic extraction | `constraint` | model confidence is not evidence |
-//! | `confidence: probable` | `decision` | revisitable, not a current limit |
-//! | `confidence: unsure` | `hypothesis` | says out loud that it needs validating |
-//! | `disposition: proposed` | `idea` | enthusiasm is not acceptance |
-//! | `disposition: abandoned` | `historical` | a dead end explains, it does not direct |
-//!
-//! `disposition: proposed` capped at `idea` is the direct mechanism for
-//! *"distinguish an accepted decision from an idea that was merely discussed
-//! enthusiastically"*. Nothing about how warmly a proposal was received can
-//! move it: acceptance is a separate field, and only acceptance lifts the
-//! ceiling.
+//! [`conservative`] moves a memory toward `historical`, never toward
+//! `invariant`: a memory stored weaker than it deserves is merely
+//! under-surfaced context, but one stored stronger than it deserves directs
+//! work unasked, and nobody notices because it looks deliberate.
+// History: design-decisions.md, "Trims: memory export and extraction module docs", memory/extract/authority.rs module doc.
 
 use super::super::store::MemoryAuthority;
 use super::schema::{Confidence, Disposition};

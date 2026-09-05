@@ -1,64 +1,22 @@
 //! The one control that stops a secret reaching a model or a memory row.
 //!
-//! # Why this module exists at all, and why here
+//! `memories.subject` and `memories.body` are free text no schema keeps a
+//! credential out of, so this module is the control.
 //!
-//! `the_project_database_schema_has_nowhere_to_put_a_credential` pins every
-//! column of the project database and proves no column's *purpose* is a
-//! credential. Its own doc comment then says what it cannot prove:
-//! `memories.subject` and `memories.body` are free text, and free text holds
-//! anything. The worker that added migration 4 declined to certify otherwise
-//! and was right to. **The control therefore belongs to the producer, and
-//! this module is it.**
+//! Deliberately asymmetric: **into the model, text is scrubbed** — [`scrub`]
+//! removes the credential and keeps the rest of the session. **Out of the
+//! model, a memory is refused whole** — [`screen`] is fail-closed, never
+//! stored redacted, because a redacted secret still carries its
+//! neighbourhood (host, account, variable, project).
 //!
-//! # Two directions, deliberately asymmetric
+//! Recognized, as a closed list: everything [`crate::secret::redact`]
+//! recognizes, plus a **secret assignment** — one of
+//! [`ASSIGNMENT_KEYWORDS`] followed by `=`/`:` and a value
+//! [`MIN_ASSIGNED_VALUE`] characters or more with no whitespace and both a
+//! letter and a digit; no entropy rule, since that would also flag
+//! `source_commit` (a required 40-hex Git SHA).
 //!
-//! **Into the model, text is scrubbed.** A session that happened to print a
-//! key still contains everything else the project learned that hour, and
-//! throwing the hour away to punish one line would lose far more than it
-//! protects. [`scrub`] removes the credential and keeps the session.
-//!
-//! **Out of the model, a memory is refused whole.** [`screen`] is
-//! fail-closed: a memory whose text trips the recognizer is not stored at
-//! all, not stored redacted. The asymmetry is the point. A redacted secret
-//! sitting in a durable row still carries everything around it — which host,
-//! which account, which variable, which project — and
-//! [`crate::secret::redact`]'s own documentation records the failure this
-//! project already had: it "removes credential-shaped runs and says nothing
-//! about the text around them", and a captured line once had its credential
-//! redacted and a planted prompt body verbatim. One lost memory costs one
-//! memory. A durable row that names a live credential's neighbourhood costs
-//! something else.
-//!
-//! # What is recognized, stated as a closed list
-//!
-//! Nothing here is a general secret detector, and pretending otherwise would
-//! be worse than the honest list:
-//!
-//! 1. Everything [`crate::secret::redact`] recognizes — `sk-`, `ghp_`,
-//!    `github_pat_` tokens and `Bearer` tokens. That function is already
-//!    tested in its own module, and reusing it means the two recognizers
-//!    cannot drift apart.
-//! 2. A **secret assignment**: one of [`ASSIGNMENT_KEYWORDS`] followed by
-//!    `=` or `:` and a value that is credential-shaped —
-//!    [`MIN_ASSIGNED_VALUE`] characters or more, no whitespace, and carrying
-//!    both a letter and a digit.
-//!
-//! # Why there is no entropy rule
-//!
-//! The obvious next step — refuse any long high-entropy run — refuses
-//! `source_commit`. A Git SHA is forty characters of hex, and storing it is
-//! a Phase 20 requirement. An entropy rule that admitted SHAs would admit
-//! most keys too, so the rule would be decoration. The letter-and-digit
-//! requirement on an *assigned* value does the same work without the
-//! collateral damage, because a SHA does not follow the word `password`.
-//!
-//! # Why the error carries no text
-//!
-//! [`CredentialFound`] names the shape and nothing else. An error that
-//! quoted the offending line would move the credential from the row into the
-//! log, which is the same leak wearing a different hat —
-//! `crate::gateway`'s eight fixed phrases exist for exactly this reason.
-//! `a_credential_refusal_never_repeats_the_credential` holds it to that.
+//! [`CredentialFound`] names the shape and never quotes the text.
 
 use std::fmt;
 
