@@ -10,62 +10,9 @@
 //! Unix socket door answers with. That is the design ruling recorded in
 //! `docs/product/design-decisions.md` under *"Phase 43: the MCP surface is a
 //! transport over the existing API door"*, and it is what this module
-//! inherits rather than re-implements:
-//!
-//! - **Project scope** (capability map line 1702). The server binds to the
-//!   [`Runtime`] it was started in and offers no tool argument that names a
-//!   project, a path, a database, or a socket. A session identifier from
-//!   another project's database is refused by `SessionApi::resolve`, exactly
-//!   as it is refused on the socket, because the request reaches that seam
-//!   through the same `dispatch`. This file opens no store of its own —
-//!   `tests/mcp_project_scope.rs` greps it to make sure that stays true.
-//! - **Dangerous operations are explicit** (line 1703). Spawning a session,
-//!   sending it a message, and interrupting it are three separately named
-//!   tools whose descriptions say what they do to a process, never one
-//!   `glasshouse_control` with an `action` field. A harness's own permission
-//!   controls can therefore allow the five read-only tools and ask about the
-//!   three that are not; the MCP tool annotations (`readOnlyHint` and its
-//!   siblings) say the same thing in the form a harness reads mechanically.
-//! - **The caller is a program.** Every message and interrupt this door
-//!   delivers is recorded with `MessageOrigin::Machine`, and no tool accepts
-//!   an `origin` argument that could say otherwise: the field exists on the
-//!   wire for `glasshouse api send`, which knows a person ran it, and an MCP
-//!   client is never that.
-//!
-//! # Hand-rolled on `serde_json`, deliberately
-//!
-//! The handshake and the two tool methods are a few hundred lines; a
-//! dependency that pulled an async runtime into a binary that has none is
-//! the thing this project has refused every time. What is implemented is the
-//! 2025-06-18 revision's stdio transport: newline-delimited frames, no
-//! embedded newlines, protocol on stdout and nothing else on it, diagnostics
-//! on stderr. JSON-RPC batches — removed in that revision — are refused as
-//! an invalid request rather than half-supported. Where the specification
-//! leaves a choice, the conservative reading is taken and stated at the site.
-//!
-//! # What happens when the client goes away
-//!
-//! EOF on stdin ends the read loop and the server returns cleanly. Nothing
-//! here interrupts, stops, closes, or marks the sessions it spawned on the
-//! way out: Glasshouse orchestrates real harnesses, and a client
-//! disconnecting is not an instruction to reap the workers it started — an
-//! orchestrator that wants a worker stopped calls `glasshouse_interrupt_session`
-//! while it is still connected.
-//!
-//! That is a statement about what this module does, not a promise about
-//! what the harness experiences, and the two differ. The sessions' pseudo-
-//! terminals are held by this process, so when it exits the kernel closes
-//! them and each harness receives `SIGHUP` on its controlling terminal.
-//! Measured on macOS with a shell harness: one that handles the hangup kept
-//! running, reparented to init, and saw EOF on its stdin; one that had only
-//! just been spawned died before it ran a line. A harness that takes the
-//! default action on `SIGHUP` — most do — ends with the server. This is the
-//! same fate a `glasshouse api serve` that is killed hands its sessions, and
-//! nothing here can promise more than "not killed by Glasshouse".
-//!
-//! Nothing from a session's output or a memory's body is ever written to
-//! stderr or to a log line by this module; those travel only inside a tool
-//! result.
+//! inherits rather than re-implements.
+//
+// History: design-decisions.md, "Trims: api, events, harness and config module docs", api/mcp.rs module doc.
 
 use std::io::{BufRead, BufWriter, Write};
 
@@ -806,7 +753,11 @@ const TOOLS: &[Tool] = &[
                       `state: refuted` and `record_failed_approach: true`, one failed-attempt \
                       memory is written with provenance naming the assumption, so the approach \
                       is not repeated. Transitions only ever append; nothing is edited. Writes to \
-                      the ledger (and, when asked, one memory) only.",
+                      the ledger (and, when asked, one memory) only. A transition to `refuted`, \
+                      or with response `re-plan` or `handoff`, gets one more reply field: \
+                      `preserve`, naming the paths another live session claims and the paths \
+                      changed in the working tree that were never claimed here — before \
+                      reverting anything, exclude those. Glasshouse reverts nothing itself.",
         annotations: Annotations {
             read_only: false,
             destructive: false,

@@ -1,23 +1,6 @@
 //! Writing, and unwriting, the generated configuration documents a launch
 //! overlay carries.
 //!
-//! # Why this is its own file
-//!
-//! `profile/mod.rs` may not name `std::fs`, `std::env`, or anything that
-//! opens a file — `harness::resolving_a_launch_profile_touches_no_files`
-//! enforces it, and the reason is worth restating rather than working
-//! around: a module that never opens a file cannot modify the user's global
-//! harness configuration, which is a structural guarantee rather than a
-//! promise to avoid a list of paths.
-//!
-//! Line 362 asks for a generated configuration file, so *something* has to
-//! write one. Putting it here rather than beside [`crate::profile::resolve`]
-//! keeps the original guarantee exactly as strong as it was: **resolution
-//! still opens nothing**, and the single function that does is one screen
-//! long, takes the paths it is given, and is forbidden the ambient
-//! environment by its own scan
-//! (`harness::the_only_writer_in_profile_takes_its_paths_from_its_caller`).
-//!
 //! # What is guaranteed here, and what is guaranteed elsewhere
 //!
 //! Here: a document is written owner-only, and removed again when the
@@ -28,6 +11,7 @@
 //! [`crate::profile::PendingConfig`]s whose paths came from
 //! [`crate::harness::GeneratedConfigSite::file`], which is the only thing
 //! allowed to decide where a generated document may live.
+// History: design-decisions.md, "Trims: gateway, profile and provider module docs", profile/generated.rs module doc.
 
 use std::path::{Path, PathBuf};
 

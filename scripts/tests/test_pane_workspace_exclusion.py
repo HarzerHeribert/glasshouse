@@ -43,7 +43,7 @@ def test_every_ci_local_workspace_invocation_excludes_pane():
 
 
 def test_ci_extended_has_workspace_invocations_to_check():
-    assert len(_workspace_invocation_lines(CI_EXTENDED)) == 5
+    assert len(_workspace_invocation_lines(CI_EXTENDED)) == 6
 
 
 def test_every_ci_extended_workspace_invocation_excludes_pane():

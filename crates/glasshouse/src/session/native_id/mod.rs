@@ -1,46 +1,23 @@
 //! Discovering a harness's own identifier for a session Glasshouse started.
 //!
-//! Glasshouse cannot tell every harness what its session's identifier should
-//! be — see [`crate::harness::HarnessAdapter::assign_session_id`]'s doc
-//! comment. A harness that names its own sessions instead writes some kind of
-//! session record to its own state, and [`discover`] is how Glasshouse finds
-//! the one that belongs to a session it just ran, without reading anything
-//! beyond that record's own header.
+//! Glasshouse cannot tell every harness what its session's identifier
+//! should be. A harness that names its own sessions instead writes some
+//! kind of record to its own state, and [`discover`] finds the one that
+//! belongs to a session Glasshouse just ran, reading only that record's
+//! header — never more, and refusing rather than guessing when more than
+//! one candidate survives its filter (cwd, a time window, "interactive"):
+//! guessing would let `glasshouse resume` reopen a stranger's conversation.
 //!
-//! # Why this refuses rather than guesses
+//! [`NativeSessionSource`] is an enum because not every harness keeps one
+//! record per session — Antigravity keeps one shared index whose records
+//! are the user's own conversation databases — and [`discover`] dispatches
+//! on it so the shared-index arm can never reach the private directory walk.
 //!
-//! A harness's session store holds records for things Glasshouse never
-//! started: subagent threads, sessions from another client (a desktop app,
-//! another terminal), sessions in another project. [`discover`] is
-//! deliberately narrow — cwd, a time window, and the harness's own notion of
-//! "interactive" — and deliberately refuses when more than one record
-//! survives that filter. Guessing here would let `glasshouse resume` reopen a
-//! stranger's conversation, which is a worse outcome than recording nothing
-//! at all.
-//!
-//! # Two shapes, and why the difference is in the type
-//!
-//! Not every harness keeps one record per session. Antigravity keeps every
-//! project's last conversation identifier in a single shared index, and its
-//! records are SQLite databases holding the user's private conversations.
-//! [`NativeSessionSource`] is therefore an enum, and [`discover`] dispatches
-//! on it: the shared-index arm opens exactly one named file and never calls
-//! the private directory walk, so it cannot reach a conversation database — a
-//! property of the code path rather than of a rule someone has to remember.
-//!
-//! [`capture`] is the production entry point: it resolves where a harness
-//! keeps its session identity, calls [`discover`], and records what it finds.
-//! Both session producers (`main.rs: launch_session` and `shell::run`) call
-//! it exactly once, when a session ends — and call [`snapshot`] once when a
-//! session starts, because a harness that keeps its identifiers in one shared
-//! index gives Glasshouse no per-entry timestamp to bound a candidate with,
-//! and the only bound left is having read the entry both before and after.
-//!
-//! This module knows no harness: [`crate::harness::NativeSessionRecord`],
-//! [`crate::harness::NativeSessionKind`] and [`NativeSessionSource`] — the
-//! vocabulary a [`HarnessAdapter`] speaks to describe what it found — live in
-//! `harness/mod.rs` beside the rest of that vocabulary, and this module only
-//! ever consumes them through the adapter trait.
+//! [`capture`] is the production entry point, called once when a session
+//! ends; [`snapshot`] is called once when it starts, since a shared-index
+//! harness gives no per-entry timestamp to bound a candidate by other than
+//! having read the entry both before and after.
+// History: design-decisions.md, "Trims: session module docs, second packet", session/native_id/mod.rs module doc.
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -73,32 +50,19 @@ pub enum Discovered {
 const MAX_HEADER_BYTES: u64 = 1024 * 1024;
 
 /// Find `adapter`'s own identifier for the session Glasshouse ran in
-/// `project_root` between `started_at` and `ended_at`.
+/// `project_root` between `started_at` and `ended_at`. `source_path` is the
+/// already-resolved records directory or index file; `before` is what
+/// [`snapshot`] read at session start (unused for the record-per-session
+/// shape). Reads no environment and no global state.
 ///
-/// `source_path` is the already-resolved place this adapter's
-/// [`NativeSessionSource`] points at — a records directory for
-/// [`NativeSessionSource::RecordPerSession`], one index *file* for
-/// [`NativeSessionSource::SharedIndex`] — and `before` is what that index
-/// held for this project when the session started (see [`snapshot`]; empty,
-/// and unused, for the record-per-session shape).
-///
-/// Reads no environment and no global state, so it is exercised entirely
-/// through fixture files in this module's tests.
-///
-/// # The two shapes
-///
-/// Which shape a harness declares decides what is opened, and the difference
-/// is a security property rather than a performance one:
-///
-/// - [`NativeSessionSource::RecordPerSession`] walks the directory and opens
-///   every file surviving the name filter, reading **only** the first line:
-///   everything after it is the user's own conversation, and this module has
-///   no business reading any of it.
-/// - [`NativeSessionSource::SharedIndex`] opens **exactly one file**, the
-///   index named in the declaration. It never calls the directory walk, so it
-///   cannot list or open a session record — which matters because
-///   Antigravity's records are SQLite databases holding the user's private
-///   conversations.
+/// Which shape a harness declares decides what is opened, and it is a
+/// security property, not a performance one:
+/// [`NativeSessionSource::RecordPerSession`] reads **only the first line**
+/// of each matching file — the rest is the user's own conversation.
+/// [`NativeSessionSource::SharedIndex`] opens **exactly one named file** and
+/// never calls the directory walk, so it can never reach a conversation
+/// database.
+// History: design-decisions.md, "Trims: session module docs, second packet", session/native_id/mod.rs `discover`.
 pub fn discover(
     adapter: &dyn HarnessAdapter,
     source_path: &Path,
@@ -239,36 +203,22 @@ pub fn snapshot(harness: &str, project_root: &Path) -> IndexSnapshot {
 /// The shared-index shape: read **one** named file and ask the adapter what
 /// it says about this project.
 ///
-/// # The identity guard
-///
 /// Recording the wrong identifier here means `glasshouse resume` reopening a
-/// stranger's conversation, and Antigravity's resume does not fail closed —
-/// an unknown identifier starts a *fresh* conversation and exits 0 — so a
-/// mistake is silent. The record-per-session shape bounds a candidate by the
-/// start time the record states about itself. An index entry states nothing
-/// about when it was written, so two rules stand in for that bound, and both
-/// are required:
+/// stranger's conversation, and Antigravity's resume fails open (a mistake
+/// is silent), so two rules stand in for the record-per-session shape's own
+/// start-time bound, and both are required:
 ///
-/// 1. **The index file's own mtime falls inside the session's window.** The
-///    same prefilter [`discover_record_per_session`] applies to a rollout,
-///    applied to the index instead.
-/// 2. **This project's entry changed during the session.** Read once at
-///    session start ([`snapshot`]) and again here; record only if the second
-///    read is `Some` and differs from the first.
+/// 1. The index file's own mtime falls inside the session's window.
+/// 2. This project's entry actually changed during the session — read once
+///    at session start ([`snapshot`]) and again here, since the index's own
+///    mtime alone can be refreshed by another project's session in the same
+///    window.
 ///
-/// Rule 1 alone is not enough, and the hole is worth stating: the index's
-/// mtime moves when *any* project's entry changes, so somebody else's session
-/// in another project during our window refreshes it and could make a stale
-/// entry for *our* project look fresh. Rule 2 closes that, because a stale
-/// entry is by definition unchanged.
-///
-/// Rule 2's one false negative is acceptable, and points the safe way:
-/// resuming the *same* conversation leaves the entry unchanged, so nothing
-/// new is recorded — but Glasshouse only ever resumes an identifier it
-/// already holds, so the record already has it.
-///
-/// Nothing here logs the index's contents. A conversation UUID is the user's
-/// own data.
+/// Rule 2's one false negative is safe: resuming the *same* conversation
+/// leaves the entry unchanged, but Glasshouse already holds that identifier.
+/// Nothing here logs the index's contents — a conversation UUID is the
+/// user's own data.
+// History: design-decisions.md, "Trims: session module docs, second packet", session/native_id/mod.rs `discover_shared_index`.
 fn discover_shared_index(
     adapter: &dyn HarnessAdapter,
     index_path: &Path,

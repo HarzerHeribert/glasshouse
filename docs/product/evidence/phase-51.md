@@ -711,3 +711,48 @@ State: **COMPLETE** for 1836, 1855 (token half) and 1854 (sparse and stale). Pha
 Gates and limits: the `phase-33b.md` entry for this package. Scope overflow: `tests/routing_economics.rs` (two `PurposeConsumption` fields), `tests/routing_outcome.rs` (the pairing block's text changed by the caveat's removal).
 
 State: **COMPLETE** for 1845 and 1850. Phase 51 stands at 22 of 37.
+
+## 1837 — CLOSED 2026-09-05 (`GH-RESERVE-AVAILABILITY`, Amber, Sonnet high): protected quota's availability, recorded when a high-tier task is routed
+
+**Why now, and why it was never RC-B.** The register filed 1837 under *no outcome is ever learned* because its verb is *measure … when needed*. Read again after the 2026-09-03 answer, the line needs no outcome: whether protected quota remained available for a high-tier task is decided when the task is routed, from two facts the router already held and nobody wrote together — the task's tier (`routed_tier`, the same value `RoutingTierObserved` records) and the chosen destination's capacity band (`Destination::capacity_facts().band`, computed under the resource's own reserve thresholds). RC-A's shape. Design of record: `design-decisions.md`, *Protected quota's availability is recorded when a high-tier task is routed*.
+
+### Measure how often protected quota remains available for high-tier tasks when needed. (line 1837)
+
+Contract: Given a launch classified above the routine tier, when the router picks a destination, Glasshouse records the destination's capacity band as that task's protected-quota reading and `glasshouse route` reports how often such tasks found quota available — while preserving that a routine-tier launch writes no row, a destination with no reading records `unknown` rather than a band, and the ledger schema is unchanged.
+
+Production: `evaluation/writer.rs :: record_reserve_availability` (writes only for `WorkloadTier::Heavy` or `Frontier`; subject the band in `CapacityBand`'s spelling or `unknown`; detail the tier word; the handle opened and dropped there), called at both routed exits of `commands/launch.rs` beside `record_routed_session`; `EvaluationKind::ReserveAvailabilityObserved` (`kinds.rs`, plus the `EVALUATION_KINDS` pin — no migration); `commands/route.rs :: route_outcomes_section` prints *protected quota for high-tier tasks (1837): available N · at reserve R · exhausted E · unknown U of K high-tier launches*, or *not enough high-tier launches* below `MIN_SAMPLE_FOR_SUMMARY`, counted by `counts_by_subject`.
+
+Regression (all through the shipped binary): `routing_outcome::a_heavy_tier_launch_records_reserve_availability_as_unknown_with_no_reading`, `routing_outcome::a_standard_or_unclassified_launch_writes_no_reserve_availability_row`, `routing_outcome::route_outcomes_section_prints_the_protected_quota_line`.
+
+| mutation | change | result | killed by |
+|---|---|---|---|
+| tier-filter-dropped | `record_reserve_availability` writes for every tier | KILLED | `routing_outcome::a_standard_or_unclassified_launch_writes_no_reserve_availability_row` (routing_outcome.rs:579) — a first attempt whose replacement left a variable unused failed to compile and read as KILLED; the worker discarded it and re-ran (§80 case 4) |
+
+Packet error (the orchestrator's): the inverse of `as_str` is `from_stored`, not `from_str`; `EVALUATION_KINDS` carries an explicit `[&str; N]` length that moved 15 → 16. Scope overflow, accepted: `evaluation/tests.rs`'s kind-count pin. Limits: the fixture drives a destination with **no** capacity reading (`unknown`) — a real band word on the row is proven by the writer's unit path, not by a launch against a metered destination; `available` sums every band above `Reserve` by definition, not by observation.
+
+State: **COMPLETE** for 1837. Phase 51 stands at 23 of 37.
+
+## The explicit half of RC-B's routing side landed 2026-09-05 (`GH-ROUTING-RATING`, Amber, Sonnet high) — no line ticked, 1846's producer
+
+Report **`.agent-runtime/report-routing-rating.md`**. Design of record: `design-decisions.md`, *The routing half of RC-B: an explicit route rating when given, the turn-outcome proxy otherwise*. `EvaluationKind::RoutingRated` (subject the routed destination, outcome `useful`/`not-useful` — the memory rating's own two words, on purpose — `session_id` required, the note in `detail`); `glasshouse rate-route <session> useful|not-useful [--note]`, a top-level command modelled on `memory rate`, refusing a session with no routing row (*cannot rate a route that was never taken*); `route_outcomes_by` and `route_outcomes_by_pairing_class` count a rated session by its latest rating instead of its proxy and carry `rated_useful`/`rated_not_useful` apart from the proxy figures — printed as ` · rated N useful / M not-useful` only when non-zero, so a window with no ratings renders byte-identical. Tests (`tests/route_rating.rs`, seven, through the shipped binary): the door writes and prints its row, refuses an unrouted session, the latest rating wins, the proxy count drops by one when a session is rated, the readout stays byte-identical without ratings. Mutation `rated-counted-twice` (the proxy exclusion dropped) KILLED by `route_rating::a_rated_session_is_counted_by_its_rating_and_the_proxy_count_drops_by_one`. Scope overflow, accepted: the kind-count pin in `evaluation/tests.rs`, and `read_harness_outcome_row`'s struct literal gaining the two zero fields (that reader, line 1951's, has no rating split by design). No migration; `EVALUATION_KINDS` is 17.
+
+## 1846 — CLOSED 2026-09-05 (`GH-PAIRING-CROSSOVER`, Amber, Sonnet high): the same-vendor prior measured against local evidence, bucket by bucket
+
+Design of record: `design-decisions.md`, *The routing half of RC-B*, last paragraph. The outcome used is the explicit rating when one exists and the turn-outcome proxy otherwise — the user's 2026-09-03 answer applied as the ground truth for *predictive*.
+
+### Measure how quickly local pairing evidence becomes more predictive than the initial same-vendor prior. (line 1846)
+
+Contract: Given routed sessions with an outcome and the pairing class each launch recorded, when `glasshouse route` prints its outcomes section, Glasshouse reports per bucket of a pairing class's prior evidence count (`0–4`, `5–9`, `10–19`, `20+`) how often the same-vendor prior's prediction and the local success rate's prediction each matched the outcome, and names the first bucket at or above `MIN_SAMPLE_FOR_SUMMARY` where local evidence is at least as predictive — while preserving that the prior is never re-tuned, that a bucket under the floor says *not yet*, and that no schema changes.
+
+Production: `evaluation/readers.rs :: pairing_prior_crossover` (`CrossoverBucket`, `PairingCrossover`; k is a session's own pairing class's earlier outcome-bearing sessions, ordered by routing time and tie-broken by session id; k = 0 is scored wrong for local evidence unconditionally — the rule that keeps a uniform history from crossing over in the first bucket); `commands/route.rs :: render_pairing_prior_crossover`, beside the 1837 line. `PairingClass::VendorNative` is read; nothing in `routing/**` changes.
+
+Regression (through the shipped binary, rows seeded through the public writers): `pairing_crossover::vendor_native_always_succeeds_prior_right_everywhere_local_catches_up_at_5_9`, `pairing_crossover::vendor_native_always_fails_prior_wrong_everywhere_crossover_is_first_bucket_at_the_floor`, `pairing_crossover::a_rated_session_overrides_its_completed_proxy`, and the under-the-floor *not yet* test.
+
+| mutation | change | result | killed by |
+|---|---|---|---|
+| prior-inverted | the vendor-native prior predicts failure | KILLED | every test in `pairing_crossover.rs` — bucket `0–4`'s `prior right 5/5` became `prior right 0/5` |
+
+Limits (the worker's): says nothing about `PAIRING_PRIOR`'s magnitude, only how often its prediction and the local rate's match outcomes; a session with mixed completed/failed turns and no rating is scored by simple majority, and no fixture produces one.
+
+State: **COMPLETE** for 1846. Phase 51 stands at 24 of 37.
+

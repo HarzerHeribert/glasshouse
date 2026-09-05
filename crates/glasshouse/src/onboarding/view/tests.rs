@@ -765,12 +765,12 @@ fn advance_to_routing(state: WizardState) -> WizardState {
 /// gateway note off the bottom, and nothing said so, because a wrapped
 /// paragraph simply stops drawing.
 ///
-/// The screen has **no rows to spare** in this state. If you add a line to
-/// `render_summary` and this test fails, that is the screen telling you it
-/// is full — give it real scrolling rather than deleting an assertion
-/// here.
-#[test]
-fn every_summary_section_survives_the_worst_case_at_80x24() {
+/// The screen has **no rows to spare** in this state: it is the ruling
+/// GH-SUMMARY-SCROLL implements. Nothing may be silently cut any more —
+/// the last body row must say how much is still below, `End` must bring
+/// the rest onto the screen, and the union of what both screens show must
+/// still be everything.
+fn worst_case_summary_state() -> WizardState {
     let long = "/private/var/folders/gc/y14vjq1j3wq6_gj1zt10t7j40000gn/T/agent-shims/\
                 DC30465E-5CC0-4172-A1E8-F17DB285B969";
     let detected: Vec<IntegrationDetection> = IntegrationId::ALL
@@ -811,21 +811,52 @@ fn every_summary_section_survives_the_worst_case_at_80x24() {
         crossterm::event::KeyModifiers::NONE,
     ));
     assert_eq!(state.step(), Step::Summary);
+    state
+}
 
-    let lines = rendered_lines(&state, 80, 24);
-    let text = lines.join("\n");
+#[test]
+fn every_summary_section_survives_the_worst_case_at_80x24() {
+    let mut state = worst_case_summary_state();
 
-    // Every integration is exactly one row, so ten of them cost ten rows
-    // however long the machine's paths happen to be.
+    let top = rendered_lines(&state, 80, 24);
+    let top_text = top.join("\n");
+
+    // Every integration is exactly one row, so eleven of them cost eleven
+    // rows however long the machine's paths happen to be.
     for &id in IntegrationId::ALL {
         let name = id.display_name();
         assert_eq!(
-            lines.iter().filter(|line| line.contains(name)).count(),
+            top.iter().filter(|line| line.contains(name)).count(),
             1,
-            "{name} must occupy exactly one Summary row at 80 columns, got:\n{text}"
+            "{name} must occupy exactly one Summary row at 80 columns, got:\n{top_text}"
         );
     }
 
+    // The last body row (index 22: title at 0, footer at 23) announces
+    // that more follows rather than silently dropping it.
+    let last_body_row = &top[22];
+    assert!(
+        last_body_row.contains('\u{2193}') && last_body_row.contains("more row"),
+        "the last body row must announce the rows below, got:\n{last_body_row:?}"
+    );
+
+    state.handle_key(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::End,
+        crossterm::event::KeyModifiers::NONE,
+    ));
+    let bottom = rendered_lines(&state, 80, 24);
+    let bottom_text = bottom.join("\n");
+
+    // The first body row (index 1: title is index 0) now announces what
+    // scrolled off above, and the routing lines and gateway note the top
+    // screen could not fit are on screen.
+    let first_body_row = &bottom[1];
+    assert!(
+        first_body_row.contains('\u{2191}') && first_body_row.contains("above"),
+        "the first body row must announce the rows above once scrolled, got:\n{first_body_row:?}"
+    );
+
+    let union = format!("{top_text}\n{bottom_text}");
     for required in [
         "Routing model:",
         "gpt-5.6-luna",
@@ -835,8 +866,41 @@ fn every_summary_section_survives_the_worst_case_at_80x24() {
         "openrouter",
     ] {
         assert!(
-            text.contains(required),
-            "the Summary dropped {required:?} at 80x24 — the screen is full:\n{text}"
+            union.contains(required),
+            "the Summary dropped {required:?} across both scroll positions:\n{union}"
         );
     }
+}
+
+/// A Summary that fits gets no scrolling machinery at all: same rendering
+/// as before this packet, and the scroll keys are no-ops.
+#[test]
+fn a_fitting_summary_has_no_indicator_and_ignores_scroll_keys() {
+    let mut state = advance_to_routing(sample_state());
+    state.handle_key(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Tab,
+        crossterm::event::KeyModifiers::NONE,
+    ));
+    assert_eq!(state.step(), Step::Summary);
+
+    let before = rendered_lines(&state, 80, 40);
+    assert!(
+        !before
+            .iter()
+            .any(|line| line.contains('\u{2193}') || line.contains('\u{2191}')),
+        "a fitting Summary must carry no scroll indicator, got:\n{}",
+        before.join("\n")
+    );
+    let footer = &before[39];
+    assert_eq!(footer.trim_end(), "Enter / Tab finish   Esc cancel");
+
+    state.handle_key(crossterm::event::KeyEvent::new(
+        crossterm::event::KeyCode::Down,
+        crossterm::event::KeyModifiers::NONE,
+    ));
+    let after = rendered_lines(&state, 80, 40);
+    assert_eq!(
+        before, after,
+        "Down on a fitting Summary must render nothing differently"
+    );
 }

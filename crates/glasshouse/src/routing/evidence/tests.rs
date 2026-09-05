@@ -2304,6 +2304,147 @@ mod credential_spend_tests {
     }
 }
 
+/// Map line 1158's producer — [`estimated_context_tokens`].
+#[cfg(test)]
+mod estimated_context_tokens_tests {
+    use super::*;
+
+    fn row(
+        session_id: Option<&str>,
+        observed_at_unix: i64,
+        seq: i64,
+        route: Option<&str>,
+        tokens: Option<(i64, i64)>,
+    ) -> RoutingObservation {
+        RoutingObservation {
+            seq,
+            project_id: "project".to_owned(),
+            observed_at_unix,
+            provider: "alpha".to_owned(),
+            model: "m".to_owned(),
+            route: route.map(str::to_owned),
+            quota_context: None,
+            harness: Some("claude-code".to_owned()),
+            purpose: None,
+            dispatched_at_unix: Some(observed_at_unix - 1),
+            first_byte_at_unix: None,
+            first_token_at_unix: None,
+            first_tool_call_at_unix: None,
+            completed_at_unix: Some(observed_at_unix),
+            first_byte_ms: None,
+            first_token_ms: None,
+            first_tool_call_ms: None,
+            completed_ms: None,
+            input_tokens: tokens.map(|(input, _)| input),
+            output_tokens: None,
+            cached_input_tokens: tokens.map(|(_, cached)| cached),
+            cost: None,
+            tool_rounds: None,
+            retries: None,
+            repairs: None,
+            failovers: None,
+            outcome: Some(Outcome::Succeeded),
+            failure_class: None,
+            task_class: None,
+            session_id: session_id.map(str::to_owned),
+            effort_level: None,
+            turn_shape: None,
+            context_state: ContextState::Unknown,
+        }
+    }
+
+    /// The wire rule Line 1158 makes: Anthropic Messages bills `input_tokens`
+    /// excluding the tokens the cache served, so the prompt size is their
+    /// sum.
+    ///
+    /// Mutation target `wire-rule-dropped`: dropping the cached sum on the
+    /// `anthropic-messages` arm must fail this test.
+    #[test]
+    fn anthropic_messages_sums_input_and_cached_tokens() {
+        let rows = vec![row(
+            Some("s1"),
+            1_000,
+            0,
+            Some("anthropic-messages"),
+            Some((100, 900)),
+        )];
+        assert_eq!(estimated_context_tokens(&rows, "s1"), Some(1_000));
+    }
+
+    /// Every other wire's own figure already includes the cached subset, so
+    /// it stands alone — and an unknown wire takes the same conservative
+    /// floor.
+    #[test]
+    fn every_other_wire_takes_input_tokens_alone() {
+        let rows = vec![row(
+            Some("s1"),
+            1_000,
+            0,
+            Some("openai-chat"),
+            Some((100, 900)),
+        )];
+        assert_eq!(estimated_context_tokens(&rows, "s1"), Some(100));
+
+        let rows = vec![row(Some("s1"), 1_000, 0, None, Some((50, 900)))];
+        assert_eq!(estimated_context_tokens(&rows, "s1"), Some(50));
+    }
+
+    /// The **latest** row by `(observed_at_unix, seq)` decides, regardless of
+    /// slice order — an earlier row, even a larger one, does not win.
+    #[test]
+    fn the_latest_row_wins_regardless_of_slice_order() {
+        let rows = vec![
+            row(
+                Some("s1"),
+                2_000,
+                0,
+                Some("anthropic-messages"),
+                Some((500, 0)),
+            ),
+            row(
+                Some("s1"),
+                1_000,
+                5,
+                Some("anthropic-messages"),
+                Some((900, 0)),
+            ),
+            row(
+                Some("s1"),
+                2_000,
+                1,
+                Some("anthropic-messages"),
+                Some((10, 0)),
+            ),
+        ];
+        assert_eq!(
+            estimated_context_tokens(&rows, "s1"),
+            Some(10),
+            "the row at (2_000, 1) is later than both (2_000, 0) and (1_000, 5)"
+        );
+    }
+
+    /// A session with no row at all, or none whose `input_tokens` is known,
+    /// reads `None` — never `Some(0)` for "nobody counted".
+    #[test]
+    fn no_known_row_reads_none_and_never_zero() {
+        let rows: Vec<RoutingObservation> = vec![];
+        assert_eq!(estimated_context_tokens(&rows, "s1"), None);
+
+        let rows = vec![row(Some("s1"), 1_000, 0, Some("anthropic-messages"), None)];
+        assert_eq!(estimated_context_tokens(&rows, "s1"), None);
+
+        // A row for a different session does not leak into this one's reading.
+        let rows = vec![row(
+            Some("other"),
+            1_000,
+            0,
+            Some("anthropic-messages"),
+            Some((100, 0)),
+        )];
+        assert_eq!(estimated_context_tokens(&rows, "s1"), None);
+    }
+}
+
 /// Map line 1519's spend reader — [`recent_credential_cost`].
 #[cfg(test)]
 mod credential_cost_tests {

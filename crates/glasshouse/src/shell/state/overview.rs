@@ -550,66 +550,26 @@ impl ShellState {
     }
 }
 
-/// `Ctrl-]` — the one chord that returns to control mode from session mode.
+/// `Ctrl-]` — the one chord that returns to control mode from session mode
+/// (what `telnet` has used for decades; no ordinary key produces it). It
+/// has more than one spelling, and all of them must be accepted. The
+/// chord is really the byte `0x1D`, and Crossterm's Unix parser decodes the
+/// control range `0x1C..=0x1F` arithmetically, so a real terminal's `Ctrl-]`
+/// arrives as `Ctrl` + `'5'`, never as `Ctrl` + `']'` — matching too
+/// narrowly traps the user in session mode with no way back, and only a
+/// real pseudo-terminal caught it (twice, once per platform), since a
+/// synthetic `KeyEvent` is not what any terminal sends.
 ///
-/// See the design note for why this chord: it is what `telnet` has used for
-/// decades, no ordinary key produces it, and it is exactly one chord rather
-/// than a prefix that would double the latency of escaping a runaway session.
-///
-/// **It has more than one spelling, and all of them must be accepted.** The
-/// chord is really the byte `0x1D` (ASCII group separator), and Crossterm's
-/// Unix parser decodes the control range `0x1C..=0x1F` arithmetically, as
-/// `Char((c - 0x1C + b'4'))` — so a real terminal's `Ctrl-]` arrives as
-/// `Ctrl` + `'5'`, never as `Ctrl` + `']'`.
-///
-/// Matching too narrowly is not a cosmetic bug: it leaves the user in session
-/// mode with no way back, which is precisely the failure the single-chord
-/// escape exists to prevent. It survived unit testing because a synthetic
-/// `KeyEvent::new(KeyCode::Char(']'), CONTROL)` is not what any terminal
-/// sends; only driving the real binary through a real pseudo-terminal caught
-/// it — twice, once per platform.
-///
-/// # Windows delivers a character chosen by the keyboard layout
-///
-/// The `']'` spelling was written for Windows, where Crossterm reads console
-/// records rather than a byte stream. That is right only by accident of
-/// whoever wrote it having a US keyboard. Measured on the ARM64 CI machine,
-/// whose input locale is `0x04070409` — US English on a **German** physical
-/// layout — the byte `0x1D` arrives from ConPTY as this console record:
-///
-/// ```text
-/// vk=0xBB (VK_OEM_PLUS)  scan=0x1B  uChar=0x001D  ctrl=LEFT_CTRL_PRESSED
-/// ```
-///
-/// `uChar` is the right answer and Crossterm throws it away: its Windows
-/// parser treats any `uChar` in `0x00..=0x1f` as "some chord produced a
-/// control code, ask the layout which character that key really types" and
-/// calls `ToUnicodeEx` on the *virtual key*. Scan code `0x1B` is the physical
-/// key right of `P`; a US layout types `']'` there and a German one types
-/// `'+'`. So Glasshouse is handed `Ctrl` + `'+'` on this machine and
-/// `Ctrl` + `']'` on the machine the original spelling came from, for the
-/// same keypress.
-///
-/// **No fixed set of characters can be correct**, because the set is the set
-/// of layouts. So on Windows the test is the modifier and the *shape* of the
-/// character rather than its identity: any non-alphanumeric character with
-/// Control. Its failure mode is a spurious escape — a user typing some other
-/// `Ctrl`+punctuation chord lands back in control mode — which is the
-/// direction to fail in, because the other direction traps them with no way
-/// out. Nothing is lost by it either: [`encode`] has never translated
-/// `Ctrl`+punctuation to a control byte, so those chords reached the harness
-/// as bare punctuation, which is not what the user pressed.
-///
-/// **`AltGr` is excluded, and that is measured too.** Windows reports `AltGr`
-/// as `CONTROL | ALT`, so on a layout where `']'` itself needs `AltGr` — as
-/// it does on the German one — typing a literal `']'` arrived as
-/// `Ctrl` + `Alt` + `']'` and matched the old rule. Typing a bracket into a
-/// harness would have thrown the user out of the session. The real chord
-/// never carries `ALT`: the record above has `LEFT_CTRL_PRESSED` alone.
-///
-/// The durable fix is upstream of here, in whatever reads the console
-/// records: `uChar` already carries `0x1D` exactly. See the report for the
-/// shape that would take.
+/// On Windows, Crossterm asks the keyboard layout which character a
+/// control code's virtual key really types, so the same physical keypress
+/// decodes differently per layout even though the raw `uChar` already
+/// carries `0x1D` exactly (Crossterm discards it). No fixed character set
+/// can be correct across layouts, so on Windows the test is the modifier
+/// and the *shape* — any non-alphanumeric character with Control, excluding
+/// `AltGr` (`CONTROL | ALT`, never carried by the real chord) — with a
+/// spurious escape as the acceptable failure direction. History:
+/// design-decisions.md, "Trims: the remaining module docs, second packet",
+/// `is_session_escape`.
 pub(super) fn is_session_escape(key: &KeyEvent) -> bool {
     if !key.modifiers.contains(KeyModifiers::CONTROL) {
         return false;

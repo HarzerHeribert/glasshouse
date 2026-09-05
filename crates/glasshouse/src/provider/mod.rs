@@ -12,124 +12,7 @@
 //! nothing established, and that `None` is a hard answer, never an
 //! invitation to check a neighbouring protocol instead.
 //!
-//! # Declarations are evidence, not recollection
-//!
-//! Every capability a [`ProtocolSupport`] or [`Provider`] states beyond its
-//! protocol and base URL is a [`crate::harness::Declared`] value, for exactly
-//! the reason [`mod@crate::harness`] uses it: "nobody checked" and "verified
-//! absent" are different claims, and a router deciding what a provider can be
-//! trusted to do needs to be able to tell them apart.
-//!
-//! # What was actually established, on 2026-08-25
-//!
-//! Every built-in template in [`templates`] was read from a real installation
-//! or the service's own endpoint list on 2026-08-25, exactly once, the same
-//! way an adapter in [`mod@crate::harness`] is read from an installed binary.
-//! Only OpenRouter's and LiteLLM's model-list endpoints (both a documented,
-//! public `GET /models`) were established well enough to declare `Verified`;
-//! every other capability nothing was actually established for is
-//! `Unverified` — never filled in from what a service probably supports.
-//!
-//! Two sources were added on the same date, alongside the two above:
-//!
-//! - **NVIDIA.** `docs.api.nvidia.com/nim/reference/llm-apis` gives base
-//!   `https://integrate.api.nvidia.com` with `POST /v1/chat/completions`, and
-//!   NVIDIA's own `build.nvidia.com` model pages use
-//!   `base_url = "https://integrate.api.nvidia.com/v1"`. No Responses
-//!   endpoint was established, so [`templates`]' `nvidia` entry declares
-//!   `openai-chat` only — which is also why it cannot back Codex, whose
-//!   `wire_api` dropped `"chat"` in 0.149.1.
-//! - **LiteLLM.** Its quick-start and `proxy/user_keys` documentation pages
-//!   both use exactly `http://0.0.0.0:4000` as the client `base_url` — kept
-//!   verbatim rather than "fixed" to `localhost`. Its proxy documentation
-//!   also lists `GET /models - available models on server`, which is the
-//!   second `Verified` model-list endpoint above.
-//! - **OpenRouter serves Anthropic Messages too**, established two
-//!   independent ways: an unauthenticated `POST
-//!   https://openrouter.ai/api/v1/messages` answers `401`, while `POST
-//!   https://openrouter.ai/api/v1/nonexistent-endpoint` under the same prefix
-//!   answers `404` — the working control case that turns "the endpoint
-//!   exists and wants a credential" into a finding rather than a guess. And
-//!   the user's own working launcher (`~/projects/openrouter-clis/bin/claude-or`)
-//!   drives real Claude Code against exactly `https://openrouter.ai/api`,
-//!   its own comment explaining why: it strips `/v1` from the OpenAI base
-//!   URL because Claude Code appends `/v1/messages` itself.
-//!
-//! # What the model-list probes established, on 2026-08-26
-//!
-//! Every template here shipped with `model_list_endpoint: Unverified` except
-//! OpenRouter's and LiteLLM's, both of which cited a documentation page
-//! rather than a response. Six live `GET <base>/models` requests were then
-//! made against the exact base URLs these templates declare, unauthenticated,
-//! and read for their entry counts:
-//!
-//! | provider | base URL | HTTP | entries |
-//! |---|---|---|---|
-//! | openrouter | `https://openrouter.ai/api/v1` | 200 | 417 |
-//! | unorouter | `https://api.unorouter.com/v1` | 200 | 374 |
-//! | anyrouter | `https://anyrouter.dev/api/v1` | 200 | 102 |
-//! | kilo | `https://kilo.ai/api/openrouter` | 200 | 367 |
-//! | nous | `https://inference-api.nousresearch.com/v1` | 200 | 372 |
-//! | zai | `https://api.z.ai/api/paas/v4` | 401 | — |
-//!
-//! The five that answered `200` are the entries whose `model_list_endpoint`
-//! is now `Verified`. **The promotion goes no further than that.** A
-//! `GET /models` that answers `200` establishes that a model list is served
-//! at that URL and nothing whatever about streaming, tool calls or reasoning,
-//! so every one of those stays `Unverified` — the same discipline the
-//! OpenRouter Responses entry below already documents for its own probe.
-//!
-//! Two of those counts are worth reading as snapshots rather than facts about
-//! the service. UnoRouter answered `374` at 09:00 on 2026-08-26 and `369` an
-//! hour later, re-probed independently. A catalogue that moves within the
-//! hour is why every citation here names a date and why nothing downstream
-//! may treat a count as stable.
-//!
-//! # z.ai stays `Unverified`, and the reason is the control
-//!
-//! **A `401` from z.ai establishes nothing about `/models`,** and the batch
-//! that first promoted it said so itself without knowing: its stated control
-//! was that "a host that served nothing there would have answered `404`".
-//! That is exactly the right test, and it was cited from the OpenRouter
-//! Responses probe rather than run against this host. Run against this host,
-//! on 2026-08-26, it fails:
-//!
-//! - `/api/paas/v4/models` → `401`
-//! - `/api/paas/v4/definitely-not-real-xyz` → `401`
-//! - `/api/paas/v4/nonsense/deep/path` → `401`
-//! - `/api/paas/v9/models`, a version prefix that does not exist → **`200`**,
-//!   carrying the same authentication error in its body
-//!
-//! The service refuses every path under that prefix identically and will not
-//! say whether a route exists until a credential is presented, so the `401`
-//! discriminates nothing. `https://api.z.ai/totally/bogus` does answer `404`,
-//! which is what made the original reasoning look sound — the `404` behaviour
-//! is real, it simply lives outside the API prefix where the probe cannot use
-//! it.
-//!
-//! The base URL is unchanged and still `unverified_support`; only the claim
-//! that a model list is served at `<base>/models` is withdrawn. Establishing
-//! it needs one authenticated request with the user's own key, which is a
-//! free-models-only condition away and belongs to whoever spends it.
-//!
-//! **The transferable rule, which is this project's own and was applied to
-//! the wrong subject here: a control has to be run against the host it is
-//! being used to justify.** A control borrowed from another service is a
-//! statement about that service.
-//!
-//! # Kilo and Nous have endpoints now
-//!
-//! Both were deliberately absent from [`templates`] until 2026-08-26 because
-//! the user held a credential for each and no endpoint had been read for
-//! either. The probes above are those endpoints, so both are templates now.
-//!
-//! **Kilo moved, and the template declares the new host.**
-//! `https://kilocode.ai/api/openrouter/models` answers `308` with
-//! `Location: https://kilo.ai/api/openrouter/models`. A template on the old
-//! host would work only for a client that follows redirects, and
-//! [`mod@crate::provider::discovery`] deliberately follows none — a redirect
-//! means deciding whether to re-attach a credential to a host named at
-//! runtime, which is not a decision to make silently.
+//! History: design-decisions.md, "Trims: provider/mod.rs", module doc.
 
 pub mod cache;
 pub mod discovery;
@@ -381,21 +264,13 @@ pub fn templates() -> Vec<Provider> {
                 // protocol nothing can be configured for — and Codex 0.149.1
                 // speaks Responses and nothing else.
                 //
-                // Established by empty-body `POST`s against the live service
-                // on 2026-08-26, with a control: `/v1/responses`,
-                // `/v1/chat/completions` and `/v1/messages` each answered
-                // `400` (the route exists, the body was rejected) while
-                // `/v1/definitely-not-a-real-endpoint` answered `404`.
-                // Without that control a `400` would prove nothing. The
-                // `/v1` is on the base URL because an OpenAI-shaped client
-                // appends `/responses` itself — Codex 0.149.1 pointed at a
-                // path-less base URL was observed sending exactly
-                // `POST /responses`.
-                //
                 // Still `unverified_support`: the probe established that the
                 // route exists, and nothing about streaming, tool calls or
                 // reasoning, so those stay Unverified rather than being
                 // upgraded by association.
+                //
+                // History: design-decisions.md, "Trims: provider/mod.rs",
+                // openrouter Responses entry.
                 unverified_support(
                     WireProtocol::OpenAiResponses,
                     "https://openrouter.ai/api/v1",
@@ -609,13 +484,6 @@ pub fn templates() -> Vec<Provider> {
         },
         // Google AI Studio, the service `x-goog-api-key` authenticates.
         //
-        // Base URL and credential delivery read off Google's published
-        // Generative Language API reference: `POST
-        // https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent`
-        // with the key in an `x-goog-api-key` header (the `?key=` query form
-        // is documented too and deliberately not used — a credential in a
-        // URL lands in every proxy log between here and Google).
-        //
         // The base URL is the **bare host**, with no version segment, for
         // the same reason OpenRouter's Anthropic Messages entry above is the
         // root: a Gemini client's own request target already begins
@@ -625,12 +493,8 @@ pub fn templates() -> Vec<Provider> {
         // Gemini codec therefore states `/v1beta` itself on a translated
         // request.
         //
-        // `GEMINI_API_KEY` is the variable Google's own SDK samples and the
-        // Gemini CLI both read. `model_list_endpoint` and `usage_telemetry`
-        // stay `Unverified`: no request has been made against this host from
-        // this project — the `generateContent` route is documented, not
-        // probed, and nothing here upgrades a document into a measurement.
-        // `USAGE_ENDPOINTS` therefore gains no row.
+        // History: design-decisions.md, "Trims: provider/mod.rs",
+        // gemini entry.
         unverified_provider(
             "gemini",
             WireProtocol::GeminiGenerateContent,

@@ -1454,3 +1454,90 @@ fn tabbing_through_every_optional_step_produces_a_valid_configuration() {
         crate::config::RoutingModelResolution::Heuristics(_)
     ));
 }
+
+// --- GH-SUMMARY-SCROLL, the Summary's own scroll offset ------------
+
+/// The Summary key vocabulary: Up/Down/j/k move by one, PageUp/PageDown by
+/// ten (clamped at zero — the view clamps the top end, since only it knows
+/// the terminal's height), Home/End jump to the extremes, and none of it
+/// changes what Enter/Tab/Esc already do.
+#[test]
+fn summary_scroll_keys_move_the_offset_and_clamp_at_zero() {
+    let mut state = drive_to_routing(&all_harnesses_detected());
+    state.handle_key(key(KeyCode::Tab)); // Routing (Do later) -> Summary
+    assert_eq!(state.step(), Step::Summary);
+    assert_eq!(state.summary_scroll(), 0);
+
+    assert_eq!(state.handle_key(key(KeyCode::Down)), Action::Redraw);
+    assert_eq!(state.summary_scroll(), 1);
+    assert_eq!(state.handle_key(key(KeyCode::Char('j'))), Action::Redraw);
+    assert_eq!(state.summary_scroll(), 2);
+    assert_eq!(state.handle_key(key(KeyCode::Up)), Action::Redraw);
+    assert_eq!(state.summary_scroll(), 1);
+    assert_eq!(state.handle_key(key(KeyCode::Char('k'))), Action::Redraw);
+    assert_eq!(state.summary_scroll(), 0);
+
+    // Up/k must not go below zero.
+    assert_eq!(state.handle_key(key(KeyCode::Up)), Action::Redraw);
+    assert_eq!(state.summary_scroll(), 0);
+
+    assert_eq!(state.handle_key(key(KeyCode::PageDown)), Action::Redraw);
+    assert_eq!(state.summary_scroll(), 10);
+    assert_eq!(state.handle_key(key(KeyCode::PageUp)), Action::Redraw);
+    assert_eq!(state.summary_scroll(), 0);
+    // PageUp must not go below zero either.
+    assert_eq!(state.handle_key(key(KeyCode::PageUp)), Action::Redraw);
+    assert_eq!(state.summary_scroll(), 0);
+
+    assert_eq!(state.handle_key(key(KeyCode::End)), Action::Redraw);
+    assert_eq!(
+        state.summary_scroll(),
+        u16::MAX,
+        "the state clamps to u16::MAX; the view clamps to the real maximum"
+    );
+    assert_eq!(state.handle_key(key(KeyCode::Home)), Action::Redraw);
+    assert_eq!(state.summary_scroll(), 0);
+
+    // Every other key is still what it always was on this step.
+    assert_eq!(state.handle_key(key(KeyCode::Char('x'))), Action::None);
+}
+
+/// `Enter` and `Tab` finish the wizard from any scroll offset -- scrolling
+/// is purely a view concern and must never gate the step's own exit.
+#[test]
+fn enter_finishes_the_wizard_from_a_non_zero_summary_scroll_offset() {
+    let mut state = drive_to_routing(&all_harnesses_detected());
+    state.handle_key(key(KeyCode::Tab)); // -> Summary
+    state.handle_key(key(KeyCode::Down));
+    state.handle_key(key(KeyCode::Down));
+    assert_eq!(state.summary_scroll(), 2);
+
+    assert_eq!(state.handle_key(key(KeyCode::Enter)), Action::Finish);
+}
+
+/// Entering the Summary step always starts at the top, regardless of
+/// which of the three routing choices got there -- each is its own
+/// assignment site for `Step::Summary` and each resets the offset.
+#[test]
+fn entering_summary_starts_at_the_top() {
+    for setup in [
+        |state: &mut WizardState| {
+            // Default highlight is "Do later" (bottom of three); go up
+            // twice to reach "Automatic".
+            state.handle_key(key(KeyCode::Up));
+            state.handle_key(key(KeyCode::Up));
+            state.handle_key(key(KeyCode::Enter)); // Automatic
+        },
+        |state: &mut WizardState| {
+            state.handle_key(key(KeyCode::Enter)); // Do later, already highlighted
+        },
+        |state: &mut WizardState| {
+            state.handle_key(key(KeyCode::Tab)); // tabbed straight past
+        },
+    ] {
+        let mut state = drive_to_routing(&all_harnesses_detected());
+        setup(&mut state);
+        assert_eq!(state.step(), Step::Summary);
+        assert_eq!(state.summary_scroll(), 0);
+    }
+}

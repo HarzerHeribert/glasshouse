@@ -1,6 +1,7 @@
 use std::sync::Mutex;
 
 use glasshouse::Runtime;
+use glasshouse::checkpoint::git::changed_paths;
 use glasshouse::config::{self, EffectiveConfig, UserConfig};
 use glasshouse::guardrails::{
     self, AppliedOverride, AssumptionStore, AssumptionView, ChangeFactors, GuardrailError,
@@ -279,8 +280,16 @@ pub(super) fn record_assumption(
 /// only ever written for a `refuted` state, so a refused waiver can leave
 /// nothing behind. A copy of that check at this door survived its own
 /// mutation, which is how it was found to be dead.
+///
+/// Line 1044: when the appended transition is a move to `refuted` or the
+/// rollback/isolate response (`guardrails::transition_wants_preserve`), the
+/// reply gains `preserve` — read from the session store the caller already
+/// holds (`store.active_claims()`) and the working tree
+/// (`checkpoint::git::changed_paths`), never a second store opened here.
+/// Every other transition's reply is unchanged.
 pub(super) fn update_assumption(
     runtime: &Runtime,
+    store: &SessionStore<'_>,
     assumption: &str,
     mut transition: NewTransition,
     record_failed_approach: bool,
@@ -346,12 +355,35 @@ pub(super) fn update_assumption(
         Ok(written) => written,
         Err(err) => return Response::err(err.to_string()),
     };
+
+    let preserve = if guardrails::transition_wants_preserve(written.state, written.response) {
+        let claims = match store.active_claims() {
+            Ok(claims) => claims,
+            Err(err) => return Response::err(err.to_string()),
+        };
+        let changed = changed_paths(runtime.project().root());
+        let session = SessionId::new(written.session_id.clone().unwrap_or_default());
+        Some(guardrails::preserve_set(
+            &claims,
+            changed.as_deref(),
+            &session,
+        ))
+    } else {
+        None
+    };
+
     match ledger.get(&id) {
-        Ok(Some(view)) => Response::ok(serde_json::json!({
-            "assumption": assumption_json(&view),
-            "transition": transition_json(&written),
-            "memory": memory_id,
-        })),
+        Ok(Some(view)) => {
+            let mut result = serde_json::json!({
+                "assumption": assumption_json(&view),
+                "transition": transition_json(&written),
+                "memory": memory_id,
+            });
+            if let Some(preserve) = preserve {
+                result["preserve"] = serde_json::json!(preserve);
+            }
+            Response::ok(result)
+        }
         Ok(None) => Response::err(format!("assumption {id} vanished while being updated")),
         Err(err) => Response::err(err.to_string()),
     }

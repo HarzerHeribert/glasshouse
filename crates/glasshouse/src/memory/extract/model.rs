@@ -1,46 +1,24 @@
 //! An [`ExtractionModel`] that actually calls one — Phase 21's *"allow a
 //! configurable cheap or local model to perform memory extraction"*.
 //!
-//! # Why this exists here rather than behind Phase 39
-//!
-//! [`mod@super`] was written against a seam and said, in its own module
-//! header, that nothing in this codebase could call a model. That was true
-//! when it was written and is no longer: `ureq` arrived with the gateway, and
-//! `crate::provider::discovery` has been making real authenticated requests
-//! to configured providers since. So the missing half of line 834 was never
-//! an architecture, only a transport — and this is that transport, kept
-//! deliberately small.
-//!
-//! # OpenAI chat completions, and nothing else
-//!
-//! [`WireProtocol::OpenAiChat`] is the only protocol here, and that is a
-//! reading of the line rather than a shortfall against it. *Cheap or local*
-//! is what the map asks for, and every local runner (Ollama, LM Studio,
-//! llama.cpp, vLLM) and every cheap hosted router speaks OpenAI chat
-//! completions. [`WireProtocol::AnthropicMessages`] would need this module to
+//! [`WireProtocol::OpenAiChat`] is the only protocol here: every local
+//! runner (Ollama, LM Studio, llama.cpp, vLLM) and every cheap hosted router
+//! speaks it. [`WireProtocol::AnthropicMessages`] would need this module to
 //! **originate** an `anthropic-version` header, which nothing in this
-//! codebase has ever done — the gateway only ever forwards a client's own —
-//! and inventing a protocol version is the same class of guess
-//! `crate::provider` refuses when it declines to invent a base URL.
-//! [`WireProtocol::OpenAiResponses`] is a different request shape again.
-//! Both are refused **by name at construction**, so an unusable choice is one
-//! logged sentence at the wiring rather than a failure on every turn.
+//! codebase has ever done, and [`WireProtocol::OpenAiResponses`] is a
+//! different request shape; both are refused **by name at construction**.
 //!
-//! # What may never leave this module
-//!
-//! A provider's error body can echo the request, and the request is a prompt
-//! built from the user's own session. So no response body, and no `ureq`
-//! error's own words, ever reaches a [`ModelError`]: every failure here is
-//! one of a fixed set of phrases chosen in this file. That is the same rule
-//! [`ModelError::Failed`] was given a `&'static str` to enforce, applied at
-//! the first place that could have broken it.
+//! No response body, and no `ureq` error's own words, ever reaches a
+//! [`ModelError`], since a provider's error body can echo the request (a
+//! prompt built from the user's own session): every failure here is one of
+//! a fixed set of phrases, enforced by [`ModelError::Failed`]'s `&'static str`.
 //!
 //! The credential is read in exactly one place — the header
 //! [`ConfiguredModel::complete`] builds — and [`ConfiguredModel`]'s
 //! [`Debug`](std::fmt::Debug) prints [`REDACTED`] in its place. The base URL
-//! is **not** in [`ExtractionModel::describe`]'s answer, because a base URL
-//! can have a credential embedded in it and that string is stored on every
-//! outcome and printed in every log line.
+//! is **not** in [`ExtractionModel::describe`]'s answer, because it can have
+//! a credential embedded in it and that string is printed in every log line.
+// History: design-decisions.md, "Trims: memory export and extraction module docs", memory/extract/model.rs module doc.
 
 use std::fmt;
 use std::time::Duration;
@@ -430,26 +408,15 @@ fn has_userinfo(url: &str) -> bool {
 /// chat-completions reply.
 ///
 /// Separate from [`ConfiguredModel::call`] so the shapes a real endpoint
-/// produces can be tested without one. Every error below is produced in the
-/// same order and with the same phrase it was before this function read a
-/// second key: a reply that was not an answer stays not an answer, whatever
-/// `usage` it carried, and `tests::content_of` is the wrapper that keeps
-/// asserting exactly that.
+/// produces can be tested without one. `usage` is a sibling of `choices` in
+/// the same already-parsed document, so reading it here needs no streaming
+/// observer, no second request and no new dependency — unlike the relay in
+/// `crate::gateway::ingress`, which is designed never to parse its body.
 ///
-/// # Why the counts are read here and not somewhere with a socket
-///
-/// This function already deserializes the whole chat-completions document to
-/// find one key in it. `usage` is a sibling of `choices` in that same
-/// value — already parsed, already in memory. Reading it needs no streaming
-/// observer, no second request and no new dependency, which is what
-/// separates this path from the relay in `crate::gateway::ingress`: there,
-/// the body is a byte stream the proxy is designed never to parse, and that
-/// remains true and untouched. Here, Glasshouse made the request itself and
-/// has the document in its hand.
-///
-/// The same rule as [`content_of`] applies to everything it returns: no part
-/// of `text` reaches an error or a log. Token counts are integers and carry
+/// The same rule as [`content_of`] applies to everything returned: no part
+/// of `text` reaches an error or a log; token counts are integers and carry
 /// none of the provider's words.
+// History: design-decisions.md, "Trims: memory export and extraction module docs", memory/extract/model.rs `parse_reply`.
 fn parse_reply(text: &str) -> Result<(String, TokenUsage), ModelError> {
     let document: serde_json::Value =
         serde_json::from_str(text).map_err(|_| ModelError::Failed {
@@ -474,32 +441,20 @@ fn parse_reply(text: &str) -> Result<(String, TokenUsage), ModelError> {
 
 /// What the reply says the call cost, and nothing it does not say.
 ///
-/// # A missing count is `None`, never a zero
+/// A missing count is [`None`], never a zero: `usage` is optional in this
+/// protocol and providers disagree about which fields they fill in, so a
+/// reply missing `usage` or a field, or one that is not a non-negative
+/// integer, produces `None` for that count — a fact [`TokenUsage`] keeps
+/// distinct from a reported zero all the way to the nullable column.
+/// Negative is refused rather than passed on, since `routing_observations`
+/// `CHECK`s these columns `>= 0`.
 ///
-/// `usage` is optional in this protocol and providers disagree about which
-/// of its fields they fill in. A reply with no `usage` at all, a `usage`
-/// missing one of these fields, or a field that is not a non-negative
-/// integer all produce [`None`] for that count — *the provider did not
-/// say* — because that is a different fact from a reported zero and
-/// [`TokenUsage`] exists to keep them apart all the way to the nullable
-/// column that stores them.
-///
-/// **Negative is refused rather than passed on.** `routing_observations`
-/// `CHECK`s every one of these columns `>= 0`, so a negative would turn a
-/// telemetry write into a failed one; and a provider reporting a negative
-/// token count has not told us anything we can record.
-///
-/// # Only the spellings this protocol actually defines
-///
-/// `prompt_tokens`, `completion_tokens` and
-/// `prompt_tokens_details.cached_tokens` are OpenAI chat completions' own
-/// names for these, and OpenAI chat completions is the only protocol this
-/// module speaks — see the module header for why it refuses to approximate
-/// the ones it does not. A provider with a private spelling for a
-/// cached-prompt count is read as having reported none, which is the same
-/// refusal to guess [`ConfiguredModel::new`] applies to a base URL it was
-/// not given. Adding a spelling is a change with a provider behind it, not
-/// a default.
+/// Only `prompt_tokens`, `completion_tokens` and
+/// `prompt_tokens_details.cached_tokens` — OpenAI chat completions' own
+/// names — are read; a provider with a private spelling is read as having
+/// reported none, the same refusal to guess [`ConfiguredModel::new`]
+/// applies to a base URL it was not given.
+// History: design-decisions.md, "Trims: memory export and extraction module docs", memory/extract/model.rs `usage_of`.
 fn usage_of(document: &serde_json::Value) -> TokenUsage {
     let Some(usage) = document.get("usage") else {
         return TokenUsage::UNREPORTED;

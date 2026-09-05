@@ -465,75 +465,24 @@ impl<'de> Deserialize<'de> for ConfiguredHeadroomBand {
 }
 /// One configured entitlement — a specific subscription or API-credit
 /// account, the unit of capacity — as stored in an `[entitlements.<name>]`
-/// table. Map lines 1946, 1947, 1962 and 1963.
+/// table. Map lines 1946, 1947, 1962 and 1963. Backed by exactly one of
+/// `native_harness` (the harness's own sign-in, no `credential` of its own)
+/// or `provider` (the account behind a configured provider); naming both is
+/// refused ([`EntitlementLookupError::TwoBackings`]), naming neither makes a
+/// pool member ([`EffectiveConfig::entitlement_resources`]) no launch
+/// profile charges yet.
 ///
-/// The entitlement's *name* is its key in [`EntitlementTable`], as a
-/// provider's is in [`ProviderTable`]. What it is (`kind`), who bills it
-/// (`vendor`), what backs it (`native_harness` **or** `provider`, never
-/// both), its own authentication (`credential` — a **reference**, never a
-/// value), and six rule lists in three allow/deny pairs.
+/// Sits in a stack of five separately replaceable layers — harness, protocol
+/// adapter, authentication (`credential`), this entry, and inference model —
+/// owning only authentication and itself, so replacing any other layer
+/// leaves this entitlement's capacity where it was: the entitlement, not the
+/// vendor or harness, is the unit of capacity.
 ///
-/// # The five layers, and which field is which (map line 1964)
+/// Rules resolve through [`crate::routing::EntitlementRules`] and nowhere
+/// else — deny wins over allow, and `deny_unknown_fields` keeps an
+/// unrecognised rule from being silently read as "no rule".
 ///
-/// An entitlement sits in a stack of five separately replaceable layers,
-/// and this entry deliberately owns only its own two:
-///
-/// 1. **harness** — [`IntegrationId`], chosen per launch profile
-///    ([`crate::profile::LaunchProfile::harness`]); an entitlement's rules
-///    may refuse one, but the choice is the user's.
-/// 2. **protocol adapter** — [`crate::harness::WireProtocol`], declared by
-///    the provider template a backing names, never by this entry.
-/// 3. **authentication** — the `credential` reference on this entry: which
-///    key or token proves the account. Two entries of one vendor differ
-///    here and nowhere else, and that is enough to make them two accounts.
-/// 4. **entitlement** — this entry itself: the named account whose capacity
-///    is spent.
-/// 5. **inference model** — [`crate::profile::LaunchProfile::model`], again
-///    per profile.
-///
-/// Replacing any one layer leaves the other four standing: the same
-/// entitlement can serve two harnesses, the same harness can run under two
-/// entitlements, the same entitlement can serve two models, and one vendor
-/// and protocol can stand behind two credentials — which is what makes the
-/// entitlement, not the vendor or the harness, the unit of capacity.
-///
-/// # Backing
-///
-/// `native_harness = "claude-code"` says *this entry is Claude Code's own
-/// sign-in* — the resource `crate::provider::registry::ResourceKind::
-/// NativeSubscription` describes — and replaces the default entry
-/// [`EffectiveConfig::entitlements`] would otherwise supply for that
-/// harness. Such an entry carries **no `credential` of its own**
-/// ([`EntitlementLookupError::NativeSignInWithOwnCredential`]): the harness
-/// authenticates itself, and what the registry's `NativeSubscription` names
-/// is exactly *one shape of an entitlement, not the shape*. `provider =
-/// "<name>"` says *this entry is the account behind that configured
-/// provider*, which is how an API key becomes an entitlement with rules.
-/// Naming both is refused when resolved
-/// ([`EntitlementLookupError::TwoBackings`]). Naming neither is allowed: an
-/// account with its own `credential` and no backing is a pool member —
-/// listed by [`EffectiveConfig::entitlement_resources`], carrying its own
-/// capacity and reset slots — that no launch profile charges yet; the 56A
-/// broker packages are what will place work on it.
-///
-/// # Rules
-///
-/// Resolved by [`crate::routing::EntitlementRules`] and nowhere else: deny
-/// wins over allow, an empty allow-list admits everything not denied. The
-/// spellings are the routing types' own — [`IntegrationId::slug`],
-/// [`crate::routing::classify::WorkloadTier::as_str`],
-/// [`crate::routing::disposable::JobKind::as_str`] — through the three
-/// `Configured*` newtypes above, so an unknown spelling is refused by the
-/// loader rather than read as "no rule".
-///
-/// `deny_unknown_fields` is load-bearing for the same reason those newtypes
-/// are, one level up: the fields are plural, `deny_harness` for
-/// `deny_harnesses` is the natural typo, and a rule that silently does not
-/// exist is not a cosmetic default — an empty deny-list *admits*. The
-/// forward-compatibility story `ConfigError::UnsupportedVersion` tells is
-/// about `version`, and it already refuses to *write* a file it does not
-/// understand; refusing to read a rule it does not understand is the same
-/// fail-closed choice applied to the one table that grants capacity.
+/// History: design-decisions.md, "Trims: config, checkpoint, evaluation and codex module docs", entitlement.rs module doc `EntitlementConfig`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct EntitlementConfig {
@@ -1067,29 +1016,20 @@ impl ResolvedEntitlement {
 
     /// Map line 1965's producer — populate the four telemetry facets from
     /// what `telemetry` actually holds, each reading carrying its scope.
-    ///
-    /// - **Capacity and reset**, for a remote-provider backing: the
-    ///   gateway-captured per-provider reading
-    ///   ([`crate::provider::telemetry::GatewayQuotaCache`]) folded into the
-    ///   provider's own capacity shape. The cache is keyed by provider and
-    ///   the gateway's write is settled, so the reading cannot be narrowed
-    ///   to one credential: it is [`TelemetryScope::ProviderWide`], shared
-    ///   verbatim by every entitlement of that provider. A local-inference
-    ///   provider is skipped outright — a local server has no account
-    ///   allowance, and the capacity model's local-inference estimate is not
-    ///   a reading about *this account*.
-    /// - **Recent throttling**: the ledger rows' informative throttles for
-    ///   the provider, narrowed to this account's own
-    ///   ([`crate::routing::evidence::recent_credential_throttles`]) when
-    ///   every throttle row names its account, provider-wide otherwise.
-    /// - **Models**: the provider's own declared catalogue
-    ///   ([`crate::provider::cache::ModelCache`]), when one was ever
-    ///   fetched; a native sign-in is [`EntitlementModels::HarnessDecided`]
-    ///   — the harness picks, and Glasshouse does not know the plan's
-    ///   models, so no list is ever invented for one.
+    /// Capacity and reset are [`TelemetryScope::ProviderWide`] for a
+    /// remote-provider backing (the gateway's cache is keyed by provider, so
+    /// a reading cannot be narrowed to one credential) and skipped outright
+    /// for local inference, which has no account allowance to read.
+    /// Throttling narrows to this account when every ledger row names one,
+    /// provider-wide otherwise. Models come from the provider's own declared
+    /// catalogue, except a native sign-in is
+    /// [`EntitlementModels::HarnessDecided`] — Glasshouse does not know the
+    /// plan's models, so none are invented.
     ///
     /// Every facet a source cannot answer stays `None` — unknown, never
     /// full, never empty, never zero-observed.
+    ///
+    /// History: design-decisions.md, "Trims: config, checkpoint, evaluation and codex module docs", entitlement.rs `with_telemetry`.
     pub fn with_telemetry(mut self, telemetry: &EntitlementTelemetry<'_>) -> Self {
         match self.backing.clone() {
             EntitlementBacking::Provider(provider) => {

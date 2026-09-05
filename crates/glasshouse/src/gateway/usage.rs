@@ -11,65 +11,7 @@
 //! a constraint this module has to meet rather than advice, and each one is
 //! answered by a property of the code below:
 //!
-//! - **The forwarded bytes are preserved.** This module is handed a shared
-//!   slice of a buffer `http::pump` has already read and is about to write. It
-//!   takes `&[u8]`, returns no bytes, and cannot shorten, reorder or reframe
-//!   what its caller then writes — `Extractor::feed` has no way to say
-//!   "forward less".
-//! - **Bounded, incremental, never the whole response.** [`Extractor`] holds
-//!   one window: whatever chunk it was just handed, plus at most [`CARRY`]
-//!   bytes retained from the previous one so a figure split across a read
-//!   boundary is still read. The retained part is 512 bytes; the window's
-//!   whole capacity is that plus one `pump` chunk. No accumulation, and no
-//!   growth with response length.
-//! - **Usage fields and protocol markers only.** [`Format`] is a table of
-//!   literal JSON key spellings. The scan matches those keys and reads the
-//!   integer after them; it never walks the response as a document, never
-//!   turns a byte into text, and never records anything but four integers and
-//!   two booleans.
-//! - **Nothing is persisted.** The window is overwritten as it slides and
-//!   dropped with the stream. What leaves this module is
-//!   [`Extractor::usage`]'s three counts and [`Seen`]'s two flags, which is
-//!   all `Exchange` has anywhere to put.
-//! - **An instant is observed or it is absent.** [`Delivery`] records the two
-//!   markers only on a streamed response, because a document's internal
-//!   boundaries are not observable as instants and deriving one from
-//!   `first_byte_at` would be the estimate the ruling forbids.
-//! - **Unsupported is unknown, never estimated.** [`format_for`] answers
-//!   `None` for a protocol that is not in the table — `gemini-generate-content`
-//!   today — and [`Extractor::usage`] answers `None` unless the provider
-//!   stated *both* an input and an output figure. No arithmetic anywhere in
-//!   this file derives a count from anything but digits the provider wrote.
-//!
-//! # Why a key scan rather than a parser
-//!
-//! Two reasons, and the second is the load-bearing one.
-//!
-//! A parser needs a document, and a document is the thing the ruling forbids
-//! buffering. A scan over a sliding window is the shape "bounded streaming or
-//! incremental parsing" actually permits, and it is why
-//! `gateway/tests.rs`'s `no_part_of_the_relay_deserializes_anything` still
-//! covers this file unchanged: the relay gained a reader of two dozen key
-//! spellings, not a deserializer.
-//!
-//! And a bare `"` cannot occur inside a JSON string — it would be `\"` there.
-//! So a needle that *starts* with a quote, like `"input_tokens":`, can only
-//! ever match a real object key, never text a model generated that happens to
-//! spell one. That is what makes a scan safe here rather than merely cheap,
-//! and it is why every needle in [`Format`] begins with a quote.
-//!
-//! # The one place this looks at a value rather than a key
-//!
-//! `first_token_at` means *the first real generated token*, and capability map
-//! line 1332 excludes whitespace padding from it — `translate`'s own
-//! `FirstEvents::note` refuses a text delta whose text is all whitespace. To
-//! answer the same question the same way, [`text_at`] reads forward from a
-//! text field's opening quote until it finds either a non-whitespace byte or
-//! the end of the string. It yields one boolean, *is there a real character
-//! here*; the bytes it walked are not retained, counted, classified further or
-//! passed on. That is the whole of what this module reads that is not a key,
-//! and it is stated here rather than buried because it is the one line of the
-//! ruling that needed a judgement.
+//! History: design-decisions.md, "Trims: gateway module docs", usage.rs module doc.
 
 /// How many bytes of one chunk are kept for the next.
 ///

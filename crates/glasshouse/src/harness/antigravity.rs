@@ -1,61 +1,23 @@
 //! Antigravity.
 //!
-//! Read from Antigravity CLI 1.1.20 as installed on the development machine on
-//! 2026-08-25 — `agy --help` and the package that installed it.
-//!
-//! # The name
-//!
-//! Until this install existed, Glasshouse searched `PATH` for `antigravity`
-//! and would never have found a real one: the published package ships a
-//! binary called `antigravity` but puts it on `PATH` as **`agy`**. Both names
-//! are searched now, `agy` first, because that is what an install actually
-//! produces. This is the whole argument for deriving adapter declarations
-//! from real binaries rather than from plausible-sounding recollection — the
-//! previous single-name guess was carefully reasoned and simply wrong.
-//!
-//! # The state root
-//!
+//! Both `agy` and `antigravity` are searched on `PATH`, `agy` first: the
+//! published package ships a binary named `antigravity` but installs it on
+//! `PATH` as `agy`.
 //! Conversations live under `~/.gemini/antigravity-cli/`, not
-//! `~/.gemini/antigravity/`. An earlier revision of this file, and the
-//! evidence ledger it was read from, named the latter — that directory
-//! belongs to the *desktop app*, its `conversations/` is permanently empty,
-//! and nothing had ever been run against it to say otherwise. The CLI's own
-//! root, confirmed against a signed-in install on 2026-08-25, is
-//! `antigravity-cli`. This is the fourth declaration in this project derived
-//! from an artifact that did not serve the purpose it was cited for.
-//!
-//! Inside that root, `cache/last_conversations.json` maps each project's
-//! absolute path to the conversation UUID Antigravity last opened there —
-//! see [`Antigravity::read_last_conversation`].
-//!
-//! # Why this harness declares a different *shape* of source
-//!
-//! An earlier revision of this file left
-//! [`super::HarnessAdapter::session_id_source`] undeclared, and was right to:
-//! the only shape it could describe at the time was "a directory of session
-//! records, each self-describing in its own first line", which
-//! `session::native_id::discover` walks and **opens**. Antigravity's records
-//! are `conversations/<uuid>.db` — SQLite databases holding the user's
-//! private conversations — so declaring that shape here would have sent
-//! discovery to open every one of them on the box the moment a session
-//! ended. A worker asked to do exactly that refused and cited the code.
-//!
-//! [`super::NativeSessionSource`] is now an enum over the two shapes, so this
-//! adapter declares the one it actually has:
-//! [`super::NativeSessionSource::SharedIndex`], which names one file and
-//! carries no notion of a record directory at all. Discovery reads that one
-//! file and hands its text to [`super::HarnessAdapter::read_index_entry`];
-//! the conversation databases are unreachable from that code path rather than
-//! merely forbidden to it.
-//!
-//! Note the absent `home_env`. Codex honours `CODEX_HOME`, so Glasshouse
-//! follows the harness wherever the user has moved it. Antigravity CLI 1.1.20
-//! honours no such variable — its binary was searched on 2026-08-26 for
-//! `GEMINI_DIR`, `GEMINI_HOME`, `ANTIGRAVITY_HOME`, `AGY_HOME`, `XDG_*` and
-//! every `*_HOME`/`*_DIR` symbol it contains, and none of them relocates
-//! `~/.gemini/antigravity-cli`. Declaring a plausible-sounding one would be
-//! the same mistake this module already records twice: an invented name that
-//! compiles and is simply not what the binary does.
+//! `~/.gemini/antigravity/` (the latter belongs to the desktop app, whose
+//! `conversations/` is permanently empty). Inside the CLI's root,
+//! `cache/last_conversations.json` maps each project's absolute path to the
+//! conversation UUID last opened there — see
+//! [`Antigravity::read_last_conversation`].
+//! [`super::HarnessAdapter::session_id_source`] declares
+//! [`super::NativeSessionSource::SharedIndex`], not a record directory:
+//! Antigravity's records are `conversations/<uuid>.db`, SQLite databases
+//! holding private conversations, so discovery reads only the one shared
+//! index file via [`super::HarnessAdapter::read_index_entry`] — the
+//! conversation databases are unreachable from that code path.
+//! No `home_env`: Antigravity CLI honours no environment variable that
+//! relocates `~/.gemini/antigravity-cli`.
+// History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/harness/antigravity.rs module doc.
 
 use std::path::Path;
 

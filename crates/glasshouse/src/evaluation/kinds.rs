@@ -76,22 +76,18 @@ pub enum EvaluationKind {
     /// adds); `detail` is the chosen destination's id; `session_id` is the
     /// session, which is what makes an outcome attachable to it later.
     ///
-    /// **This is the link row, and it is a third row rather than a rewrite of
-    /// the two above.** [`crate::evaluation::record_routing_decision`] runs before a fresh
-    /// launch has minted a session id, and its `session_id` is absent on
-    /// purpose. Moving that call later — the other way to link a decision to
-    /// a session — would change what lines 1829 and 1830 count: a launch that
-    /// is refused while resolving its profile reaches the router and never
-    /// reaches a session record, and those two lines are about the decision,
-    /// not about what became of it. So the decision keeps its own moment and
-    /// this row records the session it turned into.
+    /// A third row rather than a rewrite of the two above:
+    /// [`crate::evaluation::record_routing_decision`] runs before a fresh
+    /// launch has minted a session id, so its `session_id` is absent on
+    /// purpose, and the decision keeps its own moment while this row records
+    /// the session it turned into.
     ///
-    /// **`unknown` is a real answer, not a gap.** A destination on a
-    /// harness's own sign-in has no configured provider and no marked model,
-    /// and Glasshouse does not know what that costs at the margin; saying so
-    /// is the [`crate::routing::Cost`] doc's own fail-closed stance carried
-    /// into a count, and a reader that folded it into `metered` would report
-    /// a number nobody measured.
+    /// `unknown` is a real answer, not a gap: a destination on a harness's
+    /// own sign-in has no configured provider and no marked model, and a
+    /// reader that folded that into `metered` would report a number nobody
+    /// measured.
+    ///
+    /// History: design-decisions.md, "Trims: config, checkpoint, evaluation and codex module docs", kinds.rs `EvaluationKind::RoutingCostClassObserved`.
     RoutingCostClassObserved,
     /// How much observed evidence the router actually held about the
     /// destination it chose, at the moment it chose it — map line 1854's
@@ -129,20 +125,15 @@ pub enum EvaluationKind {
     /// used is not the tier the classifier stated, plus `unclassified`);
     /// `detail` is the tier the classifier itself stated, absent for a
     /// launch that stated no task; `session_id` is the session the launch
-    /// produced, which is what lets [`Self::RoutingOutcomeObserved`] be
-    /// counted against it.
+    /// produced.
     ///
-    /// **A launch with no `--task` records `unclassified`, never nothing.**
-    /// The alternative — writing no row — would make *"this project never
-    /// states its tasks"* indistinguishable from *"this project never
-    /// launches"*, which is [`Self::RoutingOverrideDecided`]'s own argument
-    /// one line over. The bucket is its own; it is never folded into a tier.
+    /// A launch with no `--task` records `unclassified`, never nothing —
+    /// the bucket is its own and is never folded into a tier. The tier and
+    /// the escalation are one bucket rather than two columns, because line
+    /// 1834 asks about the pair: does a tier predict a successful turn
+    /// **without** escalation?
     ///
-    /// **The tier and the escalation are one bucket rather than two
-    /// columns**, because line 1834's question is about the pair: *does a
-    /// tier predict a successful turn **without** escalation?* A reader
-    /// grouping on `subject` alone therefore already has the comparison,
-    /// with no second key and no join.
+    /// History: design-decisions.md, "Trims: config, checkpoint, evaluation and codex module docs", kinds.rs `EvaluationKind::RoutingTierObserved`.
     RoutingTierObserved,
     /// Whether the failure-domain term changed which candidate a gateway
     /// failover chose — **map line 1851**. `subject` is
@@ -167,24 +158,20 @@ pub enum EvaluationKind {
     /// A person's or an agent's own verdict on a memory Glasshouse retrieved
     /// — `glasshouse memory rate <memory-id> <verdict>` — map lines 1821,
     /// 1823, 1824, 1825, 1831 and **939**'s explicit half. `subject` carries
-    /// the [`RetrievalScope`] word of the retrieval this rating judges (see
-    /// [`crate::evaluation::record_memory_rating`]'s own doc comment), or is absent when the
-    /// memory was never retrieved; `outcome` carries the verdict word itself
-    /// ([`EvaluationOutcome`]'s eight non-[`EvaluationOutcome::Unknown`]
-    /// values), `memory_id` is the rated memory, `session_id` is the
-    /// session the rating is about when one was given, and `detail` is the
-    /// operator's own note, never parsed.
+    /// the [`RetrievalScope`] word of the retrieval this rating judges, or is
+    /// absent when the memory was never retrieved; `outcome` carries the
+    /// verdict word itself ([`EvaluationOutcome`]'s eight
+    /// non-[`EvaluationOutcome::Unknown`] values), `memory_id` is the rated
+    /// memory, `session_id` is the session the rating is about when one was
+    /// given, and `detail` is the operator's own note, never parsed.
     ///
-    /// Design decision, "Phase 51, the memory half of RC-B: an explicit
-    /// rating when given, a labelled proxy otherwise — user ruling
-    /// 2026-09-02": *"Both: explicit rating when given, the labelled proxy
-    /// otherwise."* This is the explicit half; every reader here labels the
-    /// other half `proxy` and never folds the two together.
+    /// This is the explicit half of "explicit rating when given, a labelled
+    /// proxy otherwise" (design decision, Phase 51 / RC-B, user ruling
+    /// 2026-09-02). A rating is a new row, never an edit — it judges a
+    /// [`Self::MemoryRetrieved`] row without touching it, the same
+    /// append-only shape every kind in this ledger keeps.
     ///
-    /// **A rating is a new row, never an edit.** It judges a
-    /// [`Self::MemoryRetrieved`] row (or, for 1823/1824/1825, a memory that
-    /// was never retrieved in this exact window at all) without touching it
-    /// — the same append-only shape every kind in this ledger keeps.
+    /// History: design-decisions.md, "Trims: config, checkpoint, evaluation and codex module docs", kinds.rs `EvaluationKind::MemoryRated`.
     MemoryRated,
     /// `glasshouse memory revalidate <id> <outcome>` happened — map line
     /// 1824's own denominator. `subject` is the outcome word verbatim
@@ -204,27 +191,21 @@ pub enum EvaluationKind {
     /// production column ever meant "a revalidation happened" until this one.
     MemoryRevalidated,
     /// The harness's own verdict on one turn of **any** session that runs
-    /// the hook — map lines 1821 and 1831's proxy denominator, and the row
-    /// [`Self::RoutingOutcomeObserved`] cannot be for this purpose, because
-    /// that row refuses to write for a session with no routed destination.
-    /// `subject` is `"completed"` or `"failed"`, spelled exactly as
-    /// [`Self::RoutingOutcomeObserved`]'s own vocabulary — the same
-    /// [`crate::events::TurnOutcome`], not a second word for the same fact.
+    /// the hook — map lines 1821 and 1831's proxy denominator; not
+    /// [`Self::RoutingOutcomeObserved`], which refuses to write for a
+    /// session with no routed destination. `subject` is `"completed"` or
+    /// `"failed"`, spelled exactly as [`Self::RoutingOutcomeObserved`]'s own
+    /// vocabulary — the same [`crate::events::TurnOutcome`].
     ///
-    /// Design ruling, refusal register *"Phase 51's memory proxy — 1821 and
-    /// 1831"*: option (b), because `api::unix::spawn_session` makes no
-    /// routing decision, and writing a routed row for it would fabricate
-    /// one. This row makes no claim about a route at all — it is the
-    /// harness's verdict on the session's turn, full stop.
+    /// Written for every session that reaches the hook's `TurnEnded` arm,
+    /// routed or not: a door-spawned session that was never routed gets
+    /// this row and never a `RoutingOutcomeObserved` one; a CLI-launched
+    /// session gets both. The memory-quality readers (1821, 1831) join a
+    /// session-attributed retrieval to this row rather than to the routing
+    /// row, because the proxy's definition is about the *session's* turn,
+    /// not the *route's*.
     ///
-    /// **Written for every session that reaches the hook's `TurnEnded` arm,
-    /// routed or not.** `main.rs`'s hook handler records this row and then
-    /// [`Self::RoutingOutcomeObserved`] as before — a door-spawned session
-    /// that was never routed gets this row and never a
-    /// `RoutingOutcomeObserved` one; a CLI-launched session gets both. The
-    /// memory-quality readers (1821, 1831) join a session-attributed
-    /// retrieval to this row rather than to the routing row, because the
-    /// proxy's definition is about the *session's* turn, not the *route's*.
+    /// History: design-decisions.md, "Trims: config, checkpoint, evaluation and codex module docs", kinds.rs `EvaluationKind::TurnOutcomeObserved`.
     TurnOutcomeObserved,
     /// Why a launch's session-boundary routing chose the destination it did
     /// — map lines 1757 and 1766, design decision *"The session router's
@@ -257,6 +238,44 @@ pub enum EvaluationKind {
     /// rather than a fabricated zero; see
     /// [`crate::evaluation::record_routing_consumption_estimate`]'s own doc comment.
     RoutingConsumptionEstimated,
+    /// Whether protected quota remained available for a task the reserve
+    /// exists to protect — map line 1837, design decision *"Protected
+    /// quota's availability is recorded when a high-tier task is routed, and
+    /// read back as a rate"* (2026-09-05). Decided at the moment a launch is
+    /// routed, from two facts the router already holds: the task's workload
+    /// tier ([`RoutingTier`], the same value [`Self::RoutingTierObserved`]
+    /// records) and the chosen destination's capacity band
+    /// (`Destination::capacity_facts().band()`).
+    ///
+    /// **Written only when the tier is `Heavy` or `Frontier`** — the tiers
+    /// the reserve exists to protect; a `Standard`, `Leaf`, `Deterministic`
+    /// or unclassified launch writes nothing, because *needed* is the line's
+    /// own word. `subject` is the band the router read, in
+    /// [`crate::provider::quota::CapacityBand`]'s own spelling, or
+    /// `"unknown"` when the destination carried no reading; `detail` is the
+    /// tier word; `session_id` is the launched session's.
+    ReserveAvailabilityObserved,
+    /// An operator's or agent's own verdict on a session's route —
+    /// `glasshouse rate-route <session-id> useful|not-useful` — the explicit
+    /// half of map line 1846's own design note, *"The routing half of RC-B:
+    /// an explicit route rating when given, the turn-outcome proxy
+    /// otherwise"* (2026-09-05). `subject` is the destination id the session
+    /// was routed to (the same word [`Self::RoutingCostClassObserved`]'s
+    /// `detail` carries); `outcome` is [`EvaluationOutcome::Useful`] or
+    /// [`EvaluationOutcome::NotUseful`] only — [`ROUTE_RATING_VERDICTS`]'
+    /// closed two-word vocabulary, reusing [`EvaluationKind::MemoryRated`]'s
+    /// own words rather than inventing a second scale for the same question;
+    /// `session_id` is required — a route rating is about a session's route,
+    /// never a memory; `detail` is the operator's own note, never parsed.
+    ///
+    /// **A rating is a new row, never an edit** — the same append-only shape
+    /// [`Self::MemoryRated`] keeps, and never a rewrite of
+    /// [`Self::RoutingOutcomeObserved`]. **Replaces the proxy, never sums
+    /// with it**: every reader that counts a session's route as a success or
+    /// a failure from [`Self::RoutingOutcomeObserved`] substitutes this row's
+    /// verdict for that session instead, and prints the two counts apart. A
+    /// session with two ratings takes the latest.
+    RoutingRated,
 }
 
 /// The `subject` this ledger writes for a destination whose cost class no
@@ -476,6 +495,8 @@ impl EvaluationKind {
             Self::TurnOutcomeObserved => "turn_outcome_observed",
             Self::SessionRouteDecided => "session_route_decided",
             Self::RoutingConsumptionEstimated => "routing_consumption_estimated",
+            Self::ReserveAvailabilityObserved => "reserve_availability_observed",
+            Self::RoutingRated => "routing_rated",
         }
     }
 
@@ -502,6 +523,8 @@ impl EvaluationKind {
             "turn_outcome_observed" => Some(Self::TurnOutcomeObserved),
             "session_route_decided" => Some(Self::SessionRouteDecided),
             "routing_consumption_estimated" => Some(Self::RoutingConsumptionEstimated),
+            "reserve_availability_observed" => Some(Self::ReserveAvailabilityObserved),
+            "routing_rated" => Some(Self::RoutingRated),
             _ => None,
         }
     }
@@ -587,6 +610,14 @@ pub const MEMORY_RATING_VERDICTS: [EvaluationOutcome; 8] = [
     EvaluationOutcome::ChallengeJustified,
     EvaluationOutcome::ChallengeUnjustified,
 ];
+
+/// [`EvaluationKind::RoutingRated`]'s own closed vocabulary — two of
+/// [`MEMORY_RATING_VERDICTS`]' eight words, reused rather than a second
+/// scale for the same question (design decision, *"The routing half of
+/// RC-B"*, 2026-09-05). `glasshouse rate-route`'s CLI parser refuses every
+/// other word, including the six memory-only verdicts, by name.
+pub const ROUTE_RATING_VERDICTS: [EvaluationOutcome; 2] =
+    [EvaluationOutcome::Useful, EvaluationOutcome::NotUseful];
 
 /// The `subject` vocabulary for [`EvaluationKind::MemoryRetrieved`] and
 /// [`EvaluationKind::MemoryRetrievalMiss`]: which of the questions the search

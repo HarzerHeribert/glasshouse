@@ -1,48 +1,22 @@
 //! Attaching the user's real terminal to a harness session.
 //!
-//! This is Glasshouse's first production consumer of
+//! Glasshouse's first production consumer of
 //! [`crate::launch::HarnessLaunch`]: a direct-attach session that hands the
-//! terminal to a real native harness and gets out of the way. It is
-//! deliberately a *transparent bridge*, not a renderer — bytes from the
-//! harness go straight to the terminal and bytes from the terminal go
-//! straight to the harness — which is what "Glasshouse orchestrates agents
-//! without hiding them" means at this layer.
+//! terminal to a real native harness and gets out of the way. It is a
+//! *transparent bridge*, not a renderer — bytes pass straight through in
+//! both directions, and nothing here may answer a query from the pty (such
+//! as ConPTY's cursor-position probe) itself: that is the user's terminal
+//! emulator's job, and a second answer would reach the harness as spurious
+//! input. [`attach`] therefore refuses to run without a terminal at both
+//! ends.
 //!
-//! # Why there is no terminal emulation here
-//!
-//! The pty module's documentation records that ConPTY opens every Windows
-//! session by asking "where is the cursor?" (`ESC[6n`) and blocks until
-//! something answers, and that answering it needs a component that
-//! understands terminal control sequences. A direct attach already has one:
-//! the user's own terminal emulator. The query travels out of the pty, into
-//! this process's standard output, and to the real terminal, which replies on
-//! standard input exactly as it would for any other program — and that reply
-//! is forwarded straight back into the pty. Nothing here parses it, and
-//! nothing here may answer it *for* the terminal: two replies to one query
-//! would be delivered to the harness as spurious input.
-//!
-//! This is why [`attach`] insists on a terminal at both ends rather than
-//! treating that as a nicety. Attached to a pipe there would be no emulator
-//! to answer, and a Windows session would hang before its first byte with
-//! nothing in the output to explain why.
-//!
-//! # Lifetime of the pumps
-//!
-//! Two threads move bytes. The output pump ends by itself when the pty
-//! closes. The input pump cannot: a thread blocked in a read on standard
-//! input is not cancellable, and there is no portable way to interrupt one
-//! without stealing the keystroke that unblocks it. It is therefore left
-//! running and the process exits out from under it, which is sound only
-//! because `attach` owns the terminal for the whole life of the process.
-//! Nothing here is reusable from inside a longer-lived interface; the
-//! session runtime that multiplexes several harnesses needs a different
-//! input path, not this one.
-//!
-//! Because it cannot be ended, the input pump must not *own* anything whose
-//! destructor matters. It holds a [`std::sync::Weak`] reference to the process
-//! for exactly that reason — see `spawn_input_pump`, whose own comment records
-//! the consequence of the alternative. (Not a link: that function is private,
-//! and this module doc is public.)
+//! Two threads move bytes. The output pump ends when the pty closes. The
+//! input pump cannot be cancelled — a blocked read on standard input has no
+//! portable interrupt — so it is left running when the process exits, which
+//! is sound only because `attach` owns the terminal for the process's whole
+//! life. It must not own anything whose destructor matters; see
+//! `spawn_input_pump`.
+// History: design-decisions.md, "Trims: session module docs, second packet", session/attach.rs module doc.
 
 use std::io::{IsTerminal, Read, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -248,33 +222,16 @@ fn pump_output(mut output: PtyOutput, drained: &AtomicBool) {
 /// Start the thread that forwards the terminal's input to the harness,
 /// **without giving it ownership of the process**.
 ///
-/// # Why a `Weak` and not an `Arc`
+/// Holds a [`std::sync::Weak`], never an `Arc`: this thread cannot be
+/// cancelled (module doc), so an `Arc` clone would never let the strong
+/// count reach zero, and `PtyProcess::drop` — the only thing that kills and
+/// reaps the harness on an unhappy path — would never run. A `Weak` costs
+/// one upgrade per keystroke and makes the guarantee structural: the pump
+/// *cannot* keep the harness alive, whatever `attach` later adds.
 ///
-/// The input pump cannot be cancelled (module doc), so whatever it holds it
-/// holds until the process exits. With an `Arc` clone the strong count never
-/// reaches zero, so `PtyProcess::drop` — the only thing that kills and reaps
-/// the harness on an unhappy path — never runs, and every early return in
-/// [`attach`] leaves a live harness behind: a session leader of its own
-/// (portable-pty's `pre_exec` calls `setsid`) with nothing left in this
-/// process able to reach it, which is the shape of the 2026-08-26 incident
-/// `crate::session::supervision` records. `supervise`'s `try_wait` surfaces a
-/// raw `waitpid` failure, so that return is reachable by ordinary means.
-///
-/// Two other fixes were considered and are worse. **Killing explicitly before
-/// each early return** is what the runtime's duplicate-session guard was
-/// criticised for being: correct today and remembered rather than structural,
-/// so the next `?` added to `attach` brings the leak back with nothing to
-/// catch it. **Making the pump cancellable** means interrupting a blocking
-/// read on the terminal, which has no portable answer and whose plausible
-/// answers — a poll loop, a non-blocking fd — cost keystroke latency on the
-/// one path whose whole job is to be transparent. A `Weak` costs one upgrade
-/// per keystroke and moves the guarantee into the type: the pump *cannot*
-/// keep the harness alive, whatever anyone later adds to `attach`.
-///
-/// `input` is the terminal's standard input in production and a parameter
-/// only so a test can hold this pump open without one; `stdin_hung_up` below
-/// still asks about this process's real standard input, which is what
-/// production passes here.
+/// `input` is the terminal's real standard input in production and a
+/// parameter only so a test can hold this pump open without one.
+// History: design-decisions.md, "Trims: session module docs, second packet", session/attach.rs `spawn_input_pump`.
 fn spawn_input_pump(
     process: &Arc<Mutex<PtyProcess>>,
     input: impl Read + Send + 'static,
@@ -287,53 +244,20 @@ fn spawn_input_pump(
     Ok(())
 }
 
-/// Forward this process's standard input to the harness, byte for byte.
+/// Forward this process's standard input to the harness, byte for byte, with
+/// no interpretation: everything the harness's own interface depends on
+/// (arrow keys, bracketed paste, Ctrl-C's `0x03`, a cursor-position reply) is
+/// carried by exactly these bytes.
 ///
-/// Raw and untranslated on purpose. Everything the harness's own interface
-/// depends on — escape sequences for arrow keys, bracketed paste, the `0x03`
-/// that Ctrl-C becomes in raw mode, and the terminal's reply to a cursor
-/// position query — is carried by exactly these bytes, and any interpretation
-/// here would break one of them.
-///
-/// # Why a lost terminal ends the session rather than just this thread
-///
-/// This thread cannot be cancelled — see the module doc — so when its read
-/// ends there is no second chance to notice why. Ending quietly, as this used
-/// to, left the reason unrecorded anywhere `supervise` could see it.
-///
-/// # This is belt-and-suspenders, not the only thing standing between a lost
-/// # terminal and a leaked session
-///
-/// `supervise` (below) already reacts to `crate::shutdown::shutdown_requested`
-/// every [`POLL_INTERVAL`], and the terminal hanging up delivers `SIGHUP` to
-/// this process's foreground process group — which [`crate::shutdown`]'s
-/// `ctrlc` handler (installed with the `termination` feature) already turns
-/// into exactly that flag. Measured directly: with this arm reverted to a
-/// bare `break`, closing the terminal on an attached session still sets
-/// `shutdown_requested` and still ends the session, on the signal path alone.
-/// So unlike [`crate::tui::event::wait_for_terminal`] — whose loop can go a
-/// full tick without ever returning to its own `shutdown_requested` check,
-/// which is what let the field incident spin for nineteen hours — `supervise`
-/// was never capable of missing a flag that was already set.
-///
-/// What this arm adds is a second, independent way to *set* that flag: one
-/// that does not depend on a signal reaching this process at all, only on the
-/// read this thread is already blocked in returning. If the signal path ever
-/// stops applying — a container or job-control setup that does not deliver
-/// `SIGHUP` the way a real terminal emulator does, a future change to the
-/// `ctrlc` wiring — this is what still notices. A zero-byte read here is not
-/// treated as self-explanatory, for the same reason `wait_for_terminal` does
-/// not trust a bare readable poll: it is [`std::io::Read::read`] returning
-/// `Ok(0)` on `stdin`, and `attach` requires stdin to be a terminal and puts
-/// it in raw mode before this thread starts, so no keystroke can produce it —
-/// Ctrl-D's canonical-mode EOF behaviour does not apply in raw mode, it
-/// arrives as a literal `0x04` byte instead. The one way a blocking read on a
-/// live raw terminal returns `Ok(0)` is the far end closing. Still,
-/// `stdin_hung_up` confirms it with the same `POLLHUP` check
-/// `wait_for_terminal` uses, rather than trusting that inference alone, so a
-/// stray `Err` unrelated to a hangup — which this arm also catches — cannot
-/// trigger a shutdown it does not warrant. A wrong shutdown here is worse
-/// than a missed one.
+/// This thread cannot be cancelled (module doc), so when its read ends there
+/// is no second chance to notice why: a lost terminal must call
+/// `crate::shutdown::request_shutdown` here, not just fall silent. This is
+/// belt-and-suspenders, not the only path — `supervise` already reacts to
+/// `shutdown_requested` on the signal path (`SIGHUP`) — but it is what still
+/// notices if that path ever stops applying. `stdin_hung_up` confirms an
+/// actual hangup (via `POLLHUP`) before requesting shutdown, so a stray
+/// `Err` unrelated to one cannot trigger a shutdown it does not warrant.
+// History: design-decisions.md, "Trims: session module docs, second packet", session/attach.rs `pump_input`.
 fn pump_input(mut input: impl Read, process: &Weak<Mutex<PtyProcess>>) {
     let mut buffer = [0u8; 4096];
     loop {

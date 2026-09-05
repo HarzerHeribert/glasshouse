@@ -4,32 +4,20 @@
 //! inspects a session by identifier — the seam an orchestrator, the MCP
 //! surface, or anything else internal to Glasshouse goes through instead of
 //! reaching into [`super::store::SessionStore`] and [`super::runtime::SessionRuntime`]
-//! directly. Two things make that worth a seam of its own:
-//!
-//! - **Project scope is checked once, here, for every entry point.** Every
-//!   method resolves the identifier through the store first and compares its
-//!   `project_id` against the active project before doing anything else —
-//!   including before asking whether the session is even live. A foreign
-//!   session that also happens to be stopped is still refused as foreign,
-//!   never as merely not running, because "you asked about someone else's
-//!   session" is the true answer and the only one worth giving.
-//! - **Who sent a message is recorded, never inferred.** Every write goes
-//!   through [`super::runtime::SessionRuntime::send_text_from`] and
-//!   [`super::runtime::SessionRuntime::interrupt_from`] with an origin its
-//!   **caller** supplies, not the plain `send_text` / `interrupt` that assume
-//!   a person's keyboard. The distinction is recorded in Glasshouse's own
-//!   event log, not inferred later from context that will not exist by then.
-//!
-//!   This seam used to hard-wire [`crate::events::MessageOrigin::Machine`],
-//!   on the reasoning that everything reaching it was Glasshouse or an
-//!   orchestrator. That stopped being true when `glasshouse api send` and
-//!   `glasshouse api interrupt` shipped: a person's keystrokes now arrive
-//!   here, over the control door, and hard-wiring made their intervention
-//!   equal field for field to an orchestrator's own message. A seam that
-//!   *decides* the origin can only be right while it has one kind of caller,
-//!   so this one asks instead. Callers that are Glasshouse still pass
-//!   `Machine` and are unchanged; the control door passes what its request
-//!   said, defaulting to `Machine` when it said nothing.
+//! directly.
+//! Project scope is checked once, here, for every entry point: every method
+//! resolves the identifier through the store first and compares its
+//! `project_id` against the active project before doing anything else — a
+//! foreign session that also happens to be stopped is still refused as
+//! foreign, never as merely not running.
+//! Who sent a message is recorded, never inferred: every write goes through
+//! [`super::runtime::SessionRuntime::send_text_from`] and
+//! [`super::runtime::SessionRuntime::interrupt_from`] with an origin its
+//! **caller** supplies, not the plain `send_text` / `interrupt` that assume
+//! a person's keyboard — Glasshouse callers still pass `Machine`, and the
+//! control door passes what its request said, defaulting to `Machine` when
+//! it said nothing.
+//! History: design-decisions.md, "Trims: memory and session module docs", session/api/mod.rs module doc.
 
 use crate::events::MessageOrigin;
 
@@ -127,40 +115,24 @@ impl<'a> SessionApi<'a> {
     }
 
     /// Send a line of text to a live session, on behalf of `origin`.
-    ///
     /// A carriage return is appended, the same way `shell::send_session_text`
     /// sends a line typed at the shell's own prompt: this call delivers one
-    /// line, not raw bytes, and `\r` is what a session's terminal expects to
-    /// see for the harness's line editor to submit it.
-    ///
+    /// line, not raw bytes.
     /// `origin` is the caller's to state and this method's to record — see
     /// the module doc comment for why it is no longer decided here. Pass
-    /// [`MessageOrigin::Machine`] for anything Glasshouse itself originates,
-    /// which is what every caller inside this process does; only the control
-    /// door has a caller it did not write, and only that door can know
-    /// whether a person is on the other end of it.
-    ///
-    /// # A person at this session's keyboard outranks a machine — line 1719
-    ///
-    /// Machine text is **refused** with
-    /// [`ApiError::UserHasTheKeyboard`] while a person has put something into
-    /// this same session within
-    /// [`crate::session::runtime::USER_INPUT_PRECEDENCE`]. Refused rather than queued,
-    /// which is this seam's existing rule and not a new one:
-    /// `super::runtime::SessionRuntime::deliver` already refuses a
-    /// concurrent delivery instead of queuing it, because *"queuing would
-    /// deliver it eventually, out of the order its sender believed"* — and a
-    /// message held for ten seconds and then typed into whatever the person
-    /// is now doing is that failure with a delay in front of it. A refusal a
-    /// caller can read is the answer it can act on.
-    ///
-    /// The rule is taken **here**, at the one seam every machine sender in
-    /// this process passes through — the control door's `send_message`, the
-    /// task a spawn delivers, an injected memory briefing, and a worker
-    /// completion pumped into an orchestrator — rather than at any one of
-    /// them, so there is no machine write path that quietly is not subject to
-    /// it. It is deliberately **not** applied to
-    /// [`SessionApi::interrupt`]: see that method.
+    /// [`MessageOrigin::Machine`] for anything Glasshouse itself originates;
+    /// only the control door has a caller it did not write.
+    /// A person at this session's keyboard outranks a machine (line 1719):
+    /// machine text is **refused** with [`ApiError::UserHasTheKeyboard`]
+    /// while a person has put something into this same session within
+    /// [`crate::session::runtime::USER_INPUT_PRECEDENCE`] — refused rather
+    /// than queued, the same rule `super::runtime::SessionRuntime::deliver`
+    /// already applies to a concurrent delivery.
+    /// Taken **here**, at the one seam every machine sender in this process
+    /// passes through, so there is no machine write path quietly exempt from
+    /// it. Deliberately **not** applied to [`SessionApi::interrupt`]: see
+    /// that method.
+    /// History: design-decisions.md, "Trims: memory and session module docs", session/api/mod.rs send_text.
     pub fn send_text(
         &mut self,
         id: &SessionId,
@@ -187,25 +159,20 @@ impl<'a> SessionApi<'a> {
     /// now, or `None` if it would be delivered — capability map line 1719.
     ///
     /// [`SessionApi::send_text`] takes this decision itself, so no caller has
-    /// to ask, and it is **private on purpose**.
+    /// to ask, and it is **private on purpose**: it was briefly public so the
+    /// control door could refuse a machine message before opening this
+    /// project's memory store for a briefing it was about to throw away, but
+    /// with a copy of the check in front of this seam, a mutation of the
+    /// check *inside* `send_text` left the entire suite green — a rule with
+    /// two enforcement points is a rule with one that nobody watches.
     ///
-    /// It was briefly public, so the control door could refuse a machine
-    /// message before opening this project's memory store for a briefing it
-    /// was about to throw away. That saved one SQLite open and cost the whole
-    /// rule: with a copy of the check in front of this seam, mutating the
-    /// check *inside* [`SessionApi::send_text`] away left the entire suite
-    /// green, because nothing ever reached the seam to be refused by it. A
-    /// rule with two enforcement points is a rule with one that nobody
-    /// watches.
+    /// So there is one enforcement point and this is its only caller; the
+    /// wasted memory open on a refused message is paid only on the path
+    /// where a person is already using the session. It reads state and
+    /// changes none, and resolves through the same project-scope check
+    /// every other method starts with.
     ///
-    /// So there is one enforcement point, this is its only caller, and a
-    /// caller that wants to know without sending has to ask by sending. The
-    /// wasted memory open on a refused message is the price, and it is paid
-    /// only on the path where a person is already using the session.
-    ///
-    /// It reads state and changes none, and it resolves through the same
-    /// project-scope check every other method starts with, so a foreign
-    /// session is refused as foreign here too rather than answered.
+    /// History: design-decisions.md, "Trims: memory and session module docs", session/api/mod.rs machine_delivery_refusal.
     fn machine_delivery_refusal(&self, id: &SessionId) -> Option<ApiError> {
         if let Err(err) = self.resolve(id) {
             return Some(err);

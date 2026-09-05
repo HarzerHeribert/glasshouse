@@ -1,43 +1,20 @@
 //! Running a real native harness as a Glasshouse session.
 //!
 //! A session is a real installed harness in a real pseudo-terminal, started
-//! inside the active project root and never anywhere else. Opening one has
-//! two halves, and this module holds both:
+//! inside the active project root and never anywhere else. [`fn@select`]
+//! decides which harness and executable; [`fn@attach`] hands it the
+//! terminal. Both go through [`crate::launch::HarnessLaunch`], the only
+//! sanctioned way to start a harness. [`store`] is Glasshouse's own durable
+//! record of this project's sessions, independent of any harness's own
+//! files. [`native_id`] finds a self-naming harness's own session identifier
+//! after the session ends.
 //!
-//! - [`fn@select`] decides *which* harness and *which* executable, refusing
-//!   ambiguity rather than guessing;
-//! - [`fn@attach`] hands the terminal to it and stays out of the way.
-//!
-//! [`store`] holds the third: Glasshouse's own durable record of the sessions
-//! in this project, kept independently of whatever session files the harness
-//! writes for itself.
-//!
-//! Selecting and attaching both go through [`crate::launch::HarnessLaunch`],
-//! the only sanctioned way to start a harness: it derives the child's working
-//! directory from the active project and offers no way to override it.
-//!
-//! [`native_id`] is a fourth, smaller piece: for a harness that names its own
-//! sessions rather than accepting one Glasshouse assigns, it finds that
-//! identifier after the session ends and records it in [`store`].
-//!
-//! Three more pieces sit on top of those, and all three speak
-//! [`crate::events`] rather than any harness's vocabulary:
-//!
-//! - [`lifecycle`] is the crate's **only** translator from a harness's own
-//!   event names into Glasshouse's;
-//! - [`api`] is the internal surface for driving and inspecting a live
-//!   session — send, interrupt, query, list, read recent output — and the
-//!   place a machine-originated message is distinguished from a keystroke;
-//! - [`recovery`] decides what may happen to a task whose session died, and
-//!   refuses rather than guesses when it cannot tell.
-//!
-//! [`supervision`] is the fourth, and it is about a different question from
-//! all of them: not what a session *is* or what it *said*, but whether the
-//! process it was started in is still there. It discovers what this project
-//! recorded, verifies each process against the identity recorded for it,
-//! adopts what it can verify, quarantines what is alive and unaccounted for,
-//! and refuses to start a second session beside either. It never ends
-//! anything.
+//! [`lifecycle`], [`api`] and [`recovery`] sit on top and speak only
+//! [`crate::events`], never a harness's own vocabulary. [`supervision`] is
+//! the odd one out: not what a session *is* or *said*, but whether its
+//! process is still there — it adopts what it can verify, quarantines what
+//! it cannot, and never ends anything.
+// History: design-decisions.md, "Trims: session module docs, second packet", session/mod.rs module doc.
 
 pub mod api;
 pub mod attach;
@@ -164,28 +141,19 @@ pub fn session_response_mechanism(mechanism: &AppliedMechanism) -> ResponseMecha
     }
 }
 
-/// Whether `harness` may own a Glasshouse session — line 646.
+/// Whether `harness` may own a Glasshouse session — line 646: every
+/// interactive session must be owned by a real harness.
 ///
-/// # What is being refused, and what cannot even be spelled
+/// A provider (`openai`, `anthropic`) or the Glasshouse gateway is not an
+/// integration at all and fails as unknown. `cmux` (a multiplexer), `ollama`
+/// and `llama.cpp` (local inference) are known integrations but not
+/// harnesses, and fail as such — the three [`crate::harness::adapter_for`]
+/// answers `None` for.
 ///
-/// The map's requirement is that *every interactive Glasshouse session is
-/// owned by a real harness*, and line 646 names the failure: a direct API
-/// provider or a gateway represented as an interactive session in its own
-/// right. A provider (`openai`, `anthropic`) and the Glasshouse gateway are
-/// not integrations at all, so neither has a name this check could accept —
-/// they fail as unknown. What *is* spellable and still wrong is one of the
-/// integrations Glasshouse knows that is not a harness: `cmux` multiplexes
-/// terminals, `ollama` and `llama.cpp` serve models. There is no session to
-/// start in any of the three — they are exactly the three
-/// [`crate::harness::adapter_for`] answers `None` for — so there is no
-/// session record for one either.
-///
-/// # Not a `CHECK` in the schema
-///
-/// The list of harnesses lives in `crate::integrations` and grows. A copy of
-/// it in a migration would need a migration every time a harness is added,
-/// and would be a second place for it to be wrong. Migration 2 made the same
-/// call for the `harness` column and gave the same reason.
+/// Not a schema `CHECK`: the harness list lives in `crate::integrations` and
+/// grows, and a copy in a migration would need one every time it does —
+/// migration 2 made the same call for the `harness` column.
+// History: design-decisions.md, "Trims: session module docs, second packet", session/mod.rs `owning_harness`.
 pub fn owning_harness(harness: &str) -> Result<(), SessionStoreError> {
     let known = IntegrationId::ALL
         .iter()

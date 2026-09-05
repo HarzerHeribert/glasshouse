@@ -2,30 +2,20 @@
 //! and what `glasshouse pairing` prints.
 //!
 //! [`mod@crate::harness::pairing`] is a pure domain model that imports no
-//! configuration — the same rule, and the same reason, as
-//! [`mod@crate::profile`]. This module is the caller that rule assumes: it
-//! reads the layered configuration, resolves providers and launch profiles
-//! into [`crate::harness::pairing::PairingQuery`] values, asks
-//! [`crate::harness::pairing::classify`], and renders the answers.
+//! configuration, like [`mod@crate::profile`]; this module is the caller
+//! that rule assumes: it reads layered configuration, resolves providers
+//! and launch profiles into [`crate::harness::pairing::PairingQuery`]
+//! values, asks [`crate::harness::pairing::classify`], and renders answers.
 //!
-//! # Why the report lives here and not in `main.rs`
+//! [`report`] lives here, not in `main.rs`, so `main.rs`'s `pairing` arm and
+//! `tests/pairing.rs` call the same one line — a caller only the binary can
+//! reach is a caller no test enters through.
 //!
-//! Because a caller only the binary can reach is a caller no test enters
-//! through, and a capability proven by tests that all set the world up
-//! themselves is proven against a build whose production path could be
-//! deleted. [`report`] is what `main.rs`'s `pairing` arm calls, in one line,
-//! and it is what `tests/pairing.rs` calls too — so a mutation to the
-//! resolution below is a mutation to the path the shipped binary runs.
-//!
-//! # What a correction may and may not do
-//!
-//! A correction sets *metadata*: who developed a model, what family it
-//! belongs to, what a harness vendor officially supports, and what a person
-//! has actually observed about a model's behaviour. It cannot set the pairing
-//! **class** directly. The class is always derived, so that "why does this
-//! say vendor-native" always has an answer made of things somebody declared —
-//! which is the whole point of a taxonomy whose top rung is a claim about a
-//! first-party relationship.
+//! A correction sets *metadata* — developer, family, vendor support,
+//! observed behaviour — never the pairing **class** directly: the class is
+//! always derived, so "why does this say vendor-native" always has an
+//! answer made of things somebody declared.
+// History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/config/pairing.rs module doc.
 
 use std::collections::BTreeMap;
 
@@ -476,25 +466,22 @@ impl ContinuitySource for NoWarmSessions {
 /// How long after its last activity a warm session is worth exactly nothing.
 ///
 /// One working day, decayed linearly to **exactly** zero rather than to a
-/// floor — the same shape, and the same reason, as
-/// [`FULL_DECAY_OBSERVATIONS`]: a test can assert `0.0` instead of "smaller
-/// than before".
+/// floor — the same shape as [`FULL_DECAY_OBSERVATIONS`]: a test can assert
+/// `0.0` instead of "smaller than before".
 ///
-/// **Provisional, and the reasoning rather than a measurement.** What is
-/// being valued is the *conversation* a person could pick back up, not a
-/// provider-side prompt cache (those expire in minutes, and Glasshouse
-/// observes neither their presence nor their TTL). A thread abandoned before
-/// lunch is plausibly resumed after it; one abandoned last Tuesday is a new
-/// task wearing an old session's name. Deliberately **much shorter** than
+/// Provisional, reasoning rather than measurement: what is valued is the
+/// *conversation* a person could pick back up, not a provider-side prompt
+/// cache. Deliberately much shorter than
 /// `crate::routing::interactive::FAILOVER_EVIDENCE_WINDOW_SECONDS` (7 days),
-/// because that window asks "has this backend behaved well lately", which
-/// stays true across days, and this one asks "is this thread still live in
-/// someone's head", which does not.
+/// because that window asks "has this backend behaved well lately" (stays
+/// true across days) and this one asks "is this thread still live in
+/// someone's head" (does not).
 ///
 /// The measurement that would change it: the distribution of
-/// `last_activity_at`-to-resume gaps in the session store. If half of real
+/// `last_activity_at`-to-resume gaps in the session store — if half of real
 /// resumes happen after this window, it is too short.
-const WARM_SESSION_RELEVANCE_WINDOW_SECONDS: i64 = 8 * 60 * 60;
+// History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/config/pairing.rs `WARM_SESSION_RELEVANCE_WINDOW_SECONDS`.
+pub(crate) const WARM_SESSION_RELEVANCE_WINDOW_SECONDS: i64 = 8 * 60 * 60;
 
 /// What a *live* warm session contributes at zero idle time.
 ///
@@ -693,32 +680,22 @@ fn describe_observed(observed: &ObservedEvidence) -> String {
 /// the local evidence for `key` contribute to routing `candidate`.
 ///
 /// `candidate` must already have survived every hard protocol, tool,
-/// capability, privacy and user constraint — [`crate::routing::EligibleCandidate`]
-/// is what makes that structural (design decision 2) rather than a comment
-/// asking a future caller to remember the order.
+/// capability, privacy and user constraint —
+/// [`crate::routing::EligibleCandidate`] makes that structural (design
+/// decision 2).
+/// The explanation always carries the pairing class and evidence count
+/// (line 575's first two terms, informational), then either a `pinned`
+/// line (a pin is a hard rule, not scored), or a `native-pairing prior`
+/// (zero unless vendor-native, decayed toward zero as observations
+/// accumulate) plus `local observed evidence` (present only with at least
+/// one reliable observation, unbounded — so a strong observation can
+/// always outrank the prior, design decision 1, and enough bad ones can
+/// make a vendor-native total lower than a neutral candidate's, line 574).
 ///
-/// The explanation always carries the pairing class and the evidence count
-/// (line 575's first two terms, magnitude `0.0`, informational), then either:
-/// - a `pinned` line, when `preference` is [`PairingPreference::Pin`] — the
-///   prior is not scored at all, because a pin is a hard rule; or
-/// - a `native-pairing prior` contribution (line 575's third term), zero
-///   unless the pairing is vendor-native, decayed toward zero as reliable
-///   observations accumulate; plus
-/// - a `local observed evidence` contribution, present only when at least one
-///   reliable observation exists, and unbounded — so a strong enough
-///   observation can always outrank the prior (design decision 1), and enough
-///   bad observations against a vendor-native pairing can make its total
-///   lower than a neutral candidate's (line 574).
-///
-/// **The production caller is `InteractiveRouting::on_provider_failure`**,
-/// by way of its own `score_candidate` helper, reached from
-/// `crate::gateway::session::SessionRouting::observe_exchange`. `preference`
-/// and `evidence` both come from that caller now — see
-/// `SessionRouting::set_pairing_preference`, called beside `Self::bind` by
-/// `crate::profile`'s gateway path, for where `preference` is actually
-/// resolved from configuration. `DisposableRouting` still does not rank
-/// candidates at all (Phase 9J line 566 needs a different caller for that,
-/// per this package's report).
+/// The production caller is `InteractiveRouting::on_provider_failure`, by
+/// way of `score_candidate`, reached from
+/// `crate::gateway::session::SessionRouting::observe_exchange`.
+// History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/config/pairing.rs `native_pairing_prior_contribution`.
 pub fn native_pairing_prior_contribution(
     candidate: &crate::routing::EligibleCandidate<pairing::Pairing>,
     key: &pairing::EvidenceKey,

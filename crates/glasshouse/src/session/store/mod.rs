@@ -1,35 +1,20 @@
 //! Glasshouse's own record of the sessions in one project.
 //!
-//! This is deliberately *not* a view over a harness's session files. Claude
-//! Code, Codex, and the rest each keep their own history in their own format
-//! in their own directory, and Glasshouse neither parses nor owns those files.
-//! What it keeps here is the metadata it needs to list, resume, and reason
-//! about sessions: which harness, when it started, when it was last active,
-//! what role it plays, where it is presented, and what state it is in. The
-//! harness's own identifier is recorded when it is known, as a nullable
-//! reference — so a session survives in this table whether or not the harness
-//! kept anything, and clearing a harness's history never silently deletes
-//! Glasshouse's record of what happened.
+//! Deliberately *not* a view over a harness's session files: Claude Code,
+//! Codex, and the rest each keep their own history in their own format, and
+//! Glasshouse neither parses nor owns those files. The harness's own
+//! identifier is recorded when known, as a nullable reference, so clearing
+//! a harness's history never silently deletes Glasshouse's record.
 //!
-//! # Project isolation
+//! Every row carries the project identifier, enforced **structurally**, by
+//! SQLite triggers created in migration 2, which abort any insert or
+//! update whose `project_id` is not the identifier bound in
+//! `project_metadata`; and **at the resume boundary**, by
+//! [`SessionStore::open_for_resume`], which compares the stored identifier
+//! against the active project before handing back anything a caller could
+//! act on.
 //!
-//! Every row carries the project identifier, and it is enforced in two places
-//! on purpose:
-//!
-//! - **Structurally**, by SQLite triggers created in migration 2, which abort
-//!   any insert or update whose `project_id` is not the identifier bound in
-//!   `project_metadata`. No query in this module — or any future one — has to
-//!   remember to filter, because a foreign row cannot be written at all.
-//! - **At the resume boundary**, by [`SessionStore::open_for_resume`], which
-//!   compares the stored identifier against the active project before handing
-//!   back anything a caller could act on.
-//!
-//! The second check is not redundant with the first. The trigger governs what
-//! this database will accept from now on; the resume check governs what
-//! Glasshouse will *act on*, including rows that predate a guard, arrived
-//! through a restored backup, or were written by a build whose triggers
-//! differed. A resume is the one operation that takes a stored identity and
-//! turns it back into a running process, so it verifies rather than assumes.
+//! History: design-decisions.md, "Trims: memory and session module docs", session/store/mod.rs module doc.
 
 use std::fmt;
 use std::path::PathBuf;
@@ -106,28 +91,19 @@ enum Activity {
 /// Whether this write is Glasshouse resuming a session, and may therefore
 /// move a finished record back to a live state.
 ///
-/// # The asymmetry this type exists to express
+/// *"A finished session stays finished"* was written for one hazard: hook
+/// processes are separate processes, and a slow one can deliver its event
+/// after the harness it belongs to has exited, which would resurrect a
+/// stopped session in the records. A genuine resume is not that case, so
+/// the authority is a value only the resume boundary can supply, rather
+/// than a property of the event or a loosening of
+/// [`SessionLifecycle::is_live`] — which is unchanged, and which other
+/// callers depend on. [`SessionStore::begin_resume`] is the only
+/// constructor of [`Revival::Authorized`] in the crate, and it is
+/// unreachable from the hook path: `glasshouse hook` never opens a resume
+/// boundary.
 ///
-/// *"A finished session stays finished"* was written for one hazard, and it is
-/// a real one: hook processes are separate processes, and a slow one can
-/// deliver its event after the harness it belongs to has exited. Applying it
-/// would resurrect a stopped session in the records.
-///
-/// A genuine resume is not that case, and until this marker existed the two
-/// were indistinguishable — with the consequence that
-/// `main.rs::resume_session`'s own *"this session is running again"* write was
-/// silently declined along with the zombies, leaving a demonstrably live
-/// session reading `stopped` and every hook it went on to send discarded. That
-/// was observed against a live Codex, with the resume twenty-nine seconds
-/// after the process exit that preceded it.
-///
-/// **A resume is an act Glasshouse performs; a late hook is an event that
-/// merely arrives.** So the authority is a value only the resume boundary can
-/// supply, rather than a property of the event or a loosening of
-/// [`SessionLifecycle::is_live`] — which is unchanged, and which other callers
-/// depend on. [`SessionStore::begin_resume`] is the only constructor of
-/// [`Revival::Authorized`] in the crate, and it is unreachable from the hook
-/// path: `glasshouse hook` never opens a resume boundary.
+/// History: design-decisions.md, "Trims: memory and session module docs", session/store/mod.rs Revival.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Revival {
     /// The default, and what every other caller passes: a finished session
@@ -760,39 +736,22 @@ impl<'a> SessionStore<'a> {
 
     /// Move a session to a new lifecycle state, which also counts as activity.
     ///
-    /// # This is the single ordered path — Phase 10A's twelfth line
+    /// The single ordered path — Phase 10A's twelfth line: every lifecycle
+    /// change in the shipped binary arrives here, from **separate
+    /// operating-system processes** (the launch path, the shell's exit
+    /// handling, `glasshouse hook`), and until this method took a
+    /// transaction they raced in the classic read-check-write shape,
+    /// producing a live state (`idle`) for a session whose process was
+    /// already gone. `BEGIN IMMEDIATE` takes SQLite's write lock **before**
+    /// the read, so the read and the write are one indivisible step and the
+    /// losing writer sees the winner's state and declines.
     ///
-    /// Every lifecycle change in the shipped binary arrives here: the launch
-    /// path's `note_lifecycle`, the shell's exit handling and its failed-start
-    /// handling, and `glasshouse hook` when a harness reports something. They
-    /// are **separate operating-system processes**, so nothing in Rust's type
-    /// system orders them, and until this method took a transaction they raced
-    /// in the classic read-check-write shape:
+    /// What it declines is one rule, [`super::lifecycle::may_apply`]'s: **a
+    /// session that has finished may not be moved back to a live state.** A
+    /// declined change returns the record as it stands rather than an
+    /// error: the caller asked for something that is no longer true.
     ///
-    /// 1. a hook process reads `running` and decides `idle`;
-    /// 2. the launch process observes the harness exit and writes `stopped`;
-    /// 3. the hook process writes `idle`.
-    ///
-    /// The result is `idle` — a live state for a session whose process is
-    /// gone. Neither writer asked for that, which is exactly the interleaving
-    /// the line forbids.
-    ///
-    /// `BEGIN IMMEDIATE` takes SQLite's write lock **before** the read, so the
-    /// read and the write are one indivisible step and the second writer's
-    /// check runs against what the first writer actually left. The order is
-    /// then decided by the lock rather than by which process happened to read
-    /// first, and the losing writer sees the winner's state and declines.
-    ///
-    /// # What it declines
-    ///
-    /// One rule, and it is [`super::lifecycle::may_apply`]'s: **a session that
-    /// has finished may not be moved back to a live state.** It refuses
-    /// nothing the shipped binary legitimately does — every real transition is
-    /// from a live state — so this is not a new policy, it is the existing
-    /// policy moved to where two processes cannot step over it. A declined
-    /// change returns the record as it stands rather than an error: the caller
-    /// asked for something that is no longer true, which is not its fault and
-    /// not a failure.
+    /// History: design-decisions.md, "Trims: memory and session module docs", session/store/mod.rs set_lifecycle.
     pub fn set_lifecycle(
         &self,
         id: &SessionId,
@@ -806,27 +765,20 @@ impl<'a> SessionStore<'a> {
             .ok_or(SessionStoreError::NotFound { id: id.clone() })
     }
 
-    /// **The only statement in this crate that moves a session's lifecycle.**
-    ///
-    /// That is what "a single ordered path" means at the level a reader can
-    /// check: not that one function is polite about it, but that there is one
-    /// `UPDATE` and everything else has to come through it.
-    /// `one_statement_moves_a_sessions_lifecycle` fails if a second appears,
-    /// because a second writer is a second order and two orders are no order.
+    /// **The only statement in this crate that moves a session's lifecycle**:
+    /// one `UPDATE`, and everything else has to come through it —
+    /// `one_statement_moves_a_sessions_lifecycle` fails if a second appears.
     ///
     /// Callers must already hold a write transaction — see
     /// [`SessionStore::in_a_write_transaction`], which is what makes the read
     /// below and the write after it one indivisible step.
     ///
-    /// # What it declines
+    /// What it declines is one rule, [`super::lifecycle::may_apply`]'s: **a
+    /// session that has finished may not be moved back to a live state.** A
+    /// declined change leaves the record as it stands rather than
+    /// erroring.
     ///
-    /// One rule, and it is [`super::lifecycle::may_apply`]'s: **a session that
-    /// has finished may not be moved back to a live state.** It refuses
-    /// nothing the shipped binary legitimately does — every real transition is
-    /// from a live state — so this is not a new policy, it is the existing
-    /// policy moved to where two processes cannot step over it. A declined
-    /// change leaves the record as it stands rather than erroring: the caller
-    /// asked for something that is no longer true, which is not its fault.
+    /// History: design-decisions.md, "Trims: memory and session module docs", session/store/mod.rs write_lifecycle_locked.
     fn write_lifecycle_locked(
         &self,
         id: &SessionId,
@@ -1120,31 +1072,22 @@ impl<'a> SessionStore<'a> {
     /// Count one compaction a harness said it was about to perform — map
     /// line 1159.
     ///
-    /// # Why this is a column and not an event
+    /// A column, not an event: a compaction cannot join
+    /// `LIFECYCLE_EVENT_KINDS` because that vocabulary is a SQL `CHECK` that
+    /// SQLite cannot widen in place, so the count lives on the session row
+    /// instead and the event log is left exactly as narrow as it was.
     ///
-    /// `super::lifecycle::precedes_native_compaction` is the observation, and
-    /// its own documentation explains why a compaction cannot join
-    /// `LIFECYCLE_EVENT_KINDS`: that vocabulary is a SQL `CHECK`, SQLite
-    /// cannot widen one in place, and the eleventh value already cost a full
-    /// rebuild of the table `memories` references by `seq`. Migration 16 says
-    /// the same thing from the schema's side. So the count lives on the
-    /// session row, and the event log is left exactly as narrow as it was.
+    /// `COALESCE`: a row recorded before migration 16 reads `NULL`, meaning
+    /// *"nobody was counting"*, and its first observed compaction moves it
+    /// to `1` rather than leaving it unknowable forever — from then on the
+    /// number is a **lower bound**, since compactions before the upgrade
+    /// cannot be recovered. For a session this build created the count is
+    /// exact, because `create` starts it at a measured `0`.
     ///
-    /// # `COALESCE`, and what it costs
+    /// `last_activity_at` is untouched: a compaction is the harness
+    /// reorganising what it holds, not the session doing work.
     ///
-    /// A row recorded before migration 16 reads `NULL`, meaning *"nobody was
-    /// counting"*. Its first observed compaction moves it to `1` rather than
-    /// leaving it unknowable for ever, so from then on the number is a
-    /// **lower bound** — compactions before the upgrade were observed by
-    /// nothing and cannot be recovered. For a session this build created the
-    /// count is exact, because `create` starts it at a measured `0`.
-    ///
-    /// # It is not activity
-    ///
-    /// `last_activity_at` is untouched, for `rename`'s reason turned around:
-    /// a compaction is the harness reorganising what it holds, not the
-    /// session doing work, and stamping it would move a session up a list
-    /// ordered by when it last ran on the strength of housekeeping.
+    /// History: design-decisions.md, "Trims: memory and session module docs", session/store/mod.rs record_observed_compaction.
     pub fn record_observed_compaction(
         &self,
         id: &SessionId,
@@ -1197,36 +1140,19 @@ impl<'a> SessionStore<'a> {
     /// `Ok(None)` for a session this project does not have, exactly as
     /// [`SessionStore::get`] answers.
     ///
-    /// # Why one function and not five
-    ///
-    /// Four of Phase 30's lines are answered by facts that already existed —
-    /// the session's own activity stamp, its checkpoints, and its turn
-    /// events — and were unreadable together. A caller assembling them itself
-    /// would have to know that "recent checkpoint" is a comparison against
-    /// `last_activity_at` and that a cache state must never be derived from
-    /// resumability; those are the rulings this phase is made of, and they
-    /// belong in one place rather than in each caller. See
+    /// One function and not several: four of Phase 30's lines are answered
+    /// by facts that already existed and were unreadable together — a
+    /// caller assembling them itself would have to know that "recent
+    /// checkpoint" is a comparison against `last_activity_at`. See
     /// [`SessionContext`], including its paragraph on the line that is
     /// **not** here.
     ///
-    /// # It reads two sibling tables, and never writes them
-    ///
-    /// `checkpoints` and `lifecycle_events` are read by `project_id` and
-    /// `session_id` together, so the project boundary
-    /// [`SessionRecord::project_id`] draws is honoured by the query and not
-    /// merely by the caller. Nothing here inserts, updates or deletes, and in
-    /// `lifecycle_events`' case nothing could: migration 5's triggers
-    /// `RAISE(ABORT)` on every write but an insert.
-    ///
-    /// # Nothing here is stored
-    ///
-    /// The cache estimate and the checkpoint verdict are computed at the
-    /// moment they are asked for, on purpose. A stored `hot` is wrong the
-    /// minute after it is written, and a stored copy of
-    /// `checkpoints.created_at` would be a second source of truth for a
-    /// column one table over — migration 15's objection to copying a token
-    /// count, applied to this phase. Only [`SessionRecord::observed_compactions`]
-    /// is durable, because a compaction leaves no trace anywhere else.
+    /// Reads two sibling tables and never writes them, so the project
+    /// boundary is honoured by the query. Nothing here is stored: a stored
+    /// `hot` is wrong the minute after it is written. Only
+    /// [`SessionRecord::observed_compactions`] is durable, because a
+    /// compaction leaves no trace anywhere else.
+    /// History: design-decisions.md, "Trims: memory and session module docs", session/store/mod.rs context.
     pub fn context(&self, id: &SessionId) -> Result<Option<SessionContext>, SessionStoreError> {
         let Some(record) = self.get(id)? else {
             return Ok(None);
@@ -1382,29 +1308,21 @@ impl<'a> SessionStore<'a> {
 
     /// Retire Glasshouse's record of a session — line 654.
     ///
-    /// # What this deliberately does not do
-    ///
     /// It writes one column. `native_session_id` is untouched, and so is
-    /// every harness file on disk: this module has never parsed or owned
-    /// those, and closing a Glasshouse record is not an occasion to start.
-    /// Line 654 says the record may be closed *"without deleting the native
-    /// provider history unless explicitly requested"*, and nothing here is a
-    /// request. `closing_a_session_keeps_the_harnesss_own_history` proves the
-    /// history is still there afterwards rather than proving no error came
-    /// back.
+    /// every harness file on disk, per line 654's *"without deleting the
+    /// native provider history unless explicitly requested"* — nothing here
+    /// is a request.
     ///
-    /// # A live session is refused
+    /// A live session is refused: closing is filing a record away, and a
+    /// record whose process is still running is not finished being
+    /// written. Refusing names the state so the user knows to stop the
+    /// session first.
     ///
-    /// Closing is filing a record away, and a record whose process is still
-    /// running is not finished being written. Refusing names the state so the
-    /// user knows to stop the session first, rather than leaving a `closed`
-    /// row that a running harness keeps updating.
+    /// `last_activity_at` stays put: when the session last did something is
+    /// a fact about the session, and when somebody filed it away is a
+    /// different fact.
     ///
-    /// # `last_activity_at` stays put, for [`SessionStore::rename`]'s reason
-    ///
-    /// When the session last did something is a fact about the session. When
-    /// somebody filed it away is a different fact, and this column is not the
-    /// place for it.
+    /// History: design-decisions.md, "Trims: memory and session module docs", session/store/mod.rs close.
     pub fn close(&self, id: &SessionId) -> Result<SessionRecord, SessionStoreError> {
         // Through the same ordered path as every other lifecycle change —
         // Phase 10A's twelfth line. The liveness check and the write used to
@@ -1521,82 +1439,21 @@ impl<'a> SessionStore<'a> {
     /// Record that Glasshouse is resuming this session, moving it back to
     /// `Running`.
     ///
-    /// # Why this is not `set_lifecycle`
+    /// Not `set_lifecycle`, which declines to move a finished record back to
+    /// a live state and must keep declining: the two cases are told apart
+    /// by **who is acting**. A resume is something Glasshouse does, at a
+    /// boundary it opened deliberately; a late hook merely arrives. So this
+    /// carries `Revival::Authorized` as a separate operation, rather than
+    /// widening [`SessionLifecycle::is_live`] or `lifecycle::may_apply`.
     ///
-    /// [`SessionStore::set_lifecycle`] declines to move a finished record back
-    /// to a live state, and must keep declining: a hook process outliving its
-    /// harness is exactly what that rule is for. But the resume path's own
-    /// *"this session is running again"* write went through the same door and
-    /// was refused by the same rule, so a session Glasshouse itself had just
-    /// reopened kept reading `stopped` — and every hook the resumed harness
-    /// then sent was discarded for arriving at a finished session.
-    ///
-    /// Observed against a live Codex over five compaction trials, with the
-    /// resume recorded twenty-nine seconds after the process exit before it,
-    /// so nothing about it was a race.
-    ///
-    /// The two cases are told apart by **who is acting**. A resume is
-    /// something Glasshouse does, at a boundary it opened deliberately; a late
-    /// hook is an event that merely arrives. So this is a separate operation
-    /// carrying `Revival::Authorized`, rather than a widening of
-    /// [`SessionLifecycle::is_live`] or of `lifecycle::may_apply` — and once
-    /// this has run, a resumed session is live, so `may_apply` believes its
-    /// harness again without knowing anything about resumes at all.
-    ///
-    /// # The disposition is checked again, under the write lock
-    ///
-    /// Not defence in depth for its own sake. [`SessionStore::open_for_resume`]
-    /// reads outside a transaction, so between its answer and this write
-    /// another process can close the record, quarantine it, or start it — the
-    /// classic read-check-write window this module's
-    /// `in_a_write_transaction` exists to shut. Re-asking
-    /// [`SessionRecord::disposition`] with the write lock already held makes
-    /// the check and the write one indivisible step, which is Phase 10A's
-    /// requirement for every lifecycle change and is what makes this one safe
-    /// to authorise at all.
-    ///
-    /// # `Stopped`, `Failed` and `Closed` are three different answers
-    ///
-    /// Only a **stopped** record with a native identifier is
-    /// [`SessionDisposition::Resumable`], and only that one is revived here.
-    /// A **failed** session ended badly and reports
-    /// [`SessionDisposition::Failed`]; a **closed** one was retired by the
-    /// user, and a stopped one with nothing to resume *to* is
-    /// [`SessionDisposition::Closed`]. All three are refused, by the same
-    /// classification `open_for_resume` refuses them by — one rule read twice
-    /// rather than a second rule that could drift from the first.
-    ///
-    /// # The process identity is re-recorded here, and that is not a detail
-    ///
-    /// A resume happens in a **new operating-system process**. Making the
-    /// record live again while it still named the `glasshouse` that created
-    /// the session left every later invocation verifying a process id that
-    /// had exited — so `supervision::reconcile` reached [`Verdict::Gone`],
-    /// correctly, and wrote `stopped` back over the resume on the very next
-    /// command. Observed twice out of two trials against a live Codex, where
-    /// the command that undid the resume was the resumed session's own first
-    /// hook.
-    ///
-    /// The two writes are one transaction on purpose. A resumed record is
-    /// discoverable by supervision the instant its lifecycle goes live
-    /// ([`supervision::discover`] filters on exactly that), so a live
-    /// lifecycle and a stale identity must never both be readable, not even
-    /// between two statements. Afterwards a resumed row is the same shape a
-    /// created one is — live, with the identity of the Glasshouse responsible
-    /// for it — and supervision reaches the same conclusions about it for the
-    /// same reasons, which is the whole of the repair.
-    ///
-    /// Nothing about supervision is weakened. A resumed session whose process
-    /// is genuinely gone is still found and still recorded `lost`; that is
-    /// `a_resumed_session_whose_process_is_gone_is_still_lost` in
-    /// `tests/session_supervision.rs`, reached against the identity this
-    /// function wrote.
-    ///
-    /// `None` — a platform that will not name its processes — clears the
-    /// columns rather than leaving the old values behind, for
-    /// [`SessionStore::create`]'s reason: an unverifiable session is a real
-    /// answer that supervision refuses to conclude anything from, and a stale
-    /// identity is a wrong one it concludes a great deal from.
+    /// The disposition is checked again under the write lock, since
+    /// [`SessionStore::open_for_resume`] reads outside a transaction: only a
+    /// **stopped** record with a native identifier is resumable.
+    /// The process identity is re-recorded here in one transaction with the
+    /// lifecycle write: leaving the record naming the old process would
+    /// make `supervision::reconcile` reach [`Verdict::Gone`] and undo the
+    /// resume. `None` clears the columns rather than leaving old values.
+    /// History: design-decisions.md, "Trims: memory and session module docs", session/store/mod.rs begin_resume.
     ///
     /// [`Verdict::Gone`]: super::supervision::Verdict::Gone
     pub fn begin_resume(
@@ -1665,18 +1522,17 @@ impl<'a> SessionStore<'a> {
     /// lifecycle it belongs to are one change, and a reader that could see
     /// half of it is the defect this exists to close.
     ///
-    /// `supervision` is set to [`Supervision::Owned`] beside the identity, and
-    /// the reason cleared, for the reason `create` gives: this Glasshouse is
-    /// responsible for this process, and it is the only conclusion a writer
-    /// that is not [`super::supervision::reconcile`] may reach. Leaving the
-    /// previous conclusion would leave a sentence like *"its process (65061)
-    /// is no longer running"* printed beside a session that is running, about
-    /// a process the row no longer names.
+    /// `supervision` is set to [`Supervision::Owned`] beside the identity,
+    /// and the reason cleared: this Glasshouse is responsible for this
+    /// process, and it is the only conclusion a writer that is not
+    /// [`super::supervision::reconcile`] may reach.
     ///
     /// A `None` identity clears all four columns rather than half of them —
     /// [`SessionStore::supervision_of`] reads the three identity columns
     /// together or not at all, and a partially cleared row would be read as an
     /// identity built from whichever parts survived.
+    ///
+    /// History: design-decisions.md, "Trims: memory and session module docs", session/store/mod.rs write_identity_locked.
     fn write_identity_locked(
         &self,
         id: &SessionId,
@@ -1879,25 +1735,18 @@ fn optional<T>(
 
 /// Refuse a session whose owner is not a real harness — line 646.
 ///
-/// # The catalogue is asked, not held
+/// The catalogue is asked, not held: the question is answered by
+/// [`super::owning_harness`], one module up, because Phase 6 line 294 keeps
+/// adapter knowledge out of the session store, and
+/// `harness::tests::the_session_model_depends_on_no_adapter` enforces it by
+/// scanning this file.
 ///
-/// The map's first fixed architectural requirement for this phase is that
-/// *every interactive Glasshouse session is owned by a real harness*, and
-/// line 646 names the failure it guards: a direct API provider or a gateway
-/// appearing in this table as though it were one.
+/// Enforced **here** rather than at the caller because this is the only
+/// door: a guard in `main.rs` would be a guard `shell::start_session` does
+/// not have, and one any future caller could forget; a refusal in `create`
+/// is one no caller can bypass.
 ///
-/// The question is answered by [`super::owning_harness`], one module up,
-/// because Phase 6 line 294 keeps adapter knowledge out of the session store
-/// and `harness::tests::the_session_model_depends_on_no_adapter` enforces it
-/// by scanning this file. That separation is right on its own terms: this
-/// module owns *what is recorded about a session* and has no business
-/// holding a list of harnesses, which grows.
-///
-/// It is enforced **here** rather than at the caller because this is the only
-/// door. A guard in `main.rs` would be a guard `shell::start_session` does
-/// not have, and one any future caller could forget; a refusal in `create` is
-/// one no caller can bypass — the §35 shape, applied before the fact instead
-/// of after it.
+/// History: design-decisions.md, "Trims: memory and session module docs", session/store/mod.rs require_owning_harness.
 fn require_owning_harness(harness: &str) -> Result<(), SessionStoreError> {
     super::owning_harness(harness)
 }

@@ -247,31 +247,20 @@ pub fn switching_and_bootstrap_cost(
 }
 
 // ---------------------------------------------------------------------------
-// Phase 56A step 3, lines 1953 and 1966–1969 — the entitlement pool's own
-// terms: the pool enters the candidate set (main.rs widens it, one candidate
-// per entitlement allowed to serve the harness), and the score chooses.
+// Phase 56A step 3, lines 1953 and 1966-1969 — the entitlement pool's own
+// terms: the pool enters the candidate set, and the score chooses among map
+// line 1966's five factors (capacity band, time to reset, recent throttling,
+// session affinity, model availability). Affinity is deliberately not a new
+// term — it **is** [`session_affinity`], since a second number for the same
+// warmth fact would be the double-count this module refuses everywhere;
+// stickiness (line 1968) is that term's weight, not a second mechanism.
 //
-// Five factors, map line 1966's own list: available capacity (band), time
-// until reset, recent throttling, session affinity, and model availability.
-// The affinity factor is deliberately NOT a new term — it **is**
-// [`session_affinity`], because the entitlement holding a warm session's
-// context scores exactly what that session's warmth already says, and a
-// second number for the same fact would be the double-count this module
-// refuses everywhere. Stickiness (line 1968) is therefore the affinity
-// term's weight, not a second mechanism, and
-// [`entitlement_stickiness_note`] says so in the explanation.
-//
-// Two rules every term below obeys:
-//
-// - **an unknown facet contributes NOTHING and says so** — never a guessed
-//   number, the same stance `quota_pressure` takes for an unread quota;
-// - **the terms are live only when the candidate set actually offers a
-//   choice of configured entitlements** ([`EntitlementPoolView`], two or
-//   more distinct configured names). A user with zero or one configured
-//   entitlement has no pool for a score to choose across, and their ranking
-//   must stay byte-for-byte what it was — the packet's own preservation
-//   clause, enforced structurally rather than hoped for.
+// An unknown facet contributes nothing and says so, and the terms are live
+// only when the candidate set offers a choice of configured entitlements
+// ([`EntitlementPoolView`], two or more) — a user with zero or one keeps a
+// ranking byte-for-byte identical to today's, enforced structurally.
 // ---------------------------------------------------------------------------
+// History: design-decisions.md, "Trims: routing module docs", routing/session/reserve.rs entitlement-pool terms block.
 
 /// Line 1966's capacity factor, by band. Plenty earns the most, and the
 /// magnitudes are graded so that one band's step (0.15) is a *slight* lead —
@@ -1559,24 +1548,17 @@ fn fallback_trigger(entitlement: &crate::routing::Entitlement) -> Option<Fallbac
 /// on, the index the work should move to instead and the record of why.
 ///
 /// `ranked` is the already-ranked, already-gated list `Routed` keeps as
-/// [`Routed::considered`], best first — so every candidate this function can
-/// reach has passed every hard constraint, **map line 1971's rules
-/// included**. That is the whole of
-/// how *"an exhausted pool does not license exceeding a rule"* is enforced:
-/// there is no path from here to a candidate the gate removed, because the
-/// gate ran first and this function never sees its rejections.
+/// [`Routed::considered`], best first, so every candidate here has passed
+/// every hard constraint, **map line 1971's rules included** — there is no
+/// path to a candidate the gate removed, since the gate ran first.
 ///
-/// `None` — no fallback — whenever any of these holds, and each is a
-/// deliberate narrowing rather than an omission:
-///
-/// - the candidate set carries fewer than two configured entitlements, so
-///   there is no pool to fall back across (the gate every pool term checks);
-/// - the chosen candidate carries no entitlement, or its entitlement is
-///   neither exhausted nor throttled — the untriggered case, which must stay
-///   byte-identical to today's decision;
-/// - no step of [`FallbackStep::ORDER`] matched a **healthy** candidate on a
-///   **different** account. A sibling in the same state is not a refuge, and
-///   a second candidate on the *same* account is the same account.
+/// `None` — no fallback — whenever: the candidate set carries fewer than
+/// two configured entitlements (no pool to fall back across); the chosen
+/// candidate carries no entitlement or one neither exhausted nor throttled
+/// (the untriggered case, byte-identical to today's decision); or no step
+/// of [`FallbackStep::ORDER`] matched a **healthy** candidate on a
+/// **different** account — a sibling in the same state is not a refuge.
+// History: design-decisions.md, "Trims: routing module docs", routing/session/reserve.rs `fn entitlement_fallback`.
 pub fn entitlement_fallback(
     ranked: &[&Destination],
     chosen_index: usize,

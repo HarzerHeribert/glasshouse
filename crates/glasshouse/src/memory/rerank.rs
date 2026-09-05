@@ -1,41 +1,23 @@
 //! Reranking the top lexical memory candidates by a cheap language model —
 //! capability map lines 1089-1092 and 1094.
-//!
-//! # What this module refuses to be
-//!
-//! [`super::inject`]'s ladder — invariants and constraints first, then
-//! failed attempts, then everything else — is settled and stays settled.
 //! [`rerank`] never sees an invariant or a constraint: it is handed only
 //! [`super::search::RetrievalResult::other`], the bucket [`super::inject`]
 //! already treats as ordinary matches, and it reorders *within* that bucket
-//! and nothing above it. Nothing here can promote a candidate past a rung
-//! its own authority did not earn, for the same reason [`super::inject`]'s
-//! own module doc gives: the ladder is a stable partition, and this is one
-//! more pass over one partition of it.
-//!
-//! # Every failure is a bypass, never an error the session sees
-//!
+//! and nothing above it — [`super::inject`]'s ladder is a stable partition,
+//! and this is one more pass over one partition of it.
 //! No `[memory] rerank_model` configured, fewer than two candidates, a model
 //! that times out, refuses, or answers something this module cannot trust —
 //! every one of these is [`RerankOutcome`] carrying a reason, and every one
-//! of them leaves `candidates` in the lexical order they arrived in. A
-//! reranker that could turn "the model was unreachable" into "no memory is
-//! injected" would make Glasshouse's own memory less available exactly when
-//! the network is least available — the shape `GH-LOCAL-REDUCER`'s own
-//! posture (`docs/product/evidence/phase-58.md`) already refuses.
+//! of them leaves `candidates` in the lexical order they arrived in, so a
+//! reranker that cannot be reached never makes memory less available.
 //!
-//! # The reply is a JSON array of ids, and it is strictly parsed
-//!
-//! The model is not asked to write a memory —
-//! [`super::extract::schema::PROMPT_CONTRACT`] is a different contract for a
-//! different job — it is asked to return the ids it was given, reordered. So
-//! the whole reply is one array of strings, and this module's own reply
-//! parsing is stricter than [`super::extract::schema::parse`] in the one way
-//! that matters here: an id the reply names that was never sent is not a memory
-//! this module can classify as low-confidence and keep half of, the way a
-//! malformed extraction field can — it is evidence the reply is not
+//! The whole reply is one JSON array of the ids it was given, reordered —
+//! this module's own reply parsing is stricter than
+//! [`super::extract::schema::parse`] in the one way that matters here: an id
+//! the reply names that was never sent is evidence the reply is not
 //! answering about the candidates it was actually given, and the whole
 //! reply is a bypass.
+//! History: design-decisions.md, "Trims: memory and session module docs", memory/rerank.rs module doc.
 
 use std::collections::HashSet;
 use std::io::Write as _;
@@ -412,45 +394,24 @@ impl ExtractionModel for BudgetExhaustedModel {
 // ---------------------------------------------------------------------------
 
 /// Resolve `[memory] rerank_model` into a callable model, or say `None`.
-///
 /// The extraction seat's four steps (`docs/product/evidence/phase-9i.md`'s
 /// `GH-ROUTED-EXTRACTION-CLIENT`) — consent, the local bypass, the choice,
 /// the client — for `JobKind::Reranking`. Lives here, in the library, rather
-/// than beside `main.rs::disposable_extraction_model`: [`super::inject::briefing`]
-/// is reached from **two** doors, `main.rs::brief_launch_session` and
-/// `crate::api::unix::select_memory`, and only the library crate is common
-/// to both — `main.rs` is a separate binary target that cannot be called
-/// from `crate::api`. `main.rs::disposable_rerank_model` is this function by
-/// another name, kept there only as the thin call `brief_launch_session`
-/// makes.
-///
-/// # `None`, never a model whose calls would all fail
-///
-/// Unlike [`super::extract::disposable::RoutedModel`]'s own "route, explain,
-/// record, call nothing" posture for memory extraction's unconsented case
-/// (Phase 9I line 534: durable evidence of what *would* have been chosen),
-/// reranking has no such evidence requirement for a knob nobody set — see
-/// map line 1090. So this returns `None` immediately when unconsented,
-/// before any candidate, health read, or routing decision is built, rather
-/// than returning a model that would only fail when called. `None` is also
-/// the answer when a candidate could not be built, the router found none,
-/// or the resolved client could not be built — every one of these is
-/// `RerankOutcome::Bypassed` at [`rerank`]'s own call site, with the reason
-/// [`super::extract::ModelError::Unavailable`] gives.
-///
-/// # What this deliberately does not carry, unlike extraction's own seat
-///
-/// No persisted cross-process health ([`crate::routing::free::FreePool::new`]
-/// is the honest argument for a caller with no history — that type's own
-/// doc comment), and no paced-request reservation claim. At most one
-/// rerank call happens per briefing, so the pacing that protects a shared
-/// free allowance under memory extraction's own dispatch volume is not
-/// reused here; a Green follow-up if reranking's own volume ever earns it.
-///
-/// No `session` parameter, unlike `main.rs::disposable_extraction_model`:
-/// this function records nothing (see above), so it has nothing to key a
-/// record by. `main.rs::disposable_rerank_model` keeps `session` in its own
-/// signature, matching its sibling's shape, and does not pass it here.
+/// than beside `main.rs::disposable_extraction_model`, because
+/// [`super::inject::briefing`] is reached from **two** doors and only the
+/// library crate is common to both.
+/// Returns `None` immediately when unconsented, before any candidate,
+/// health read, or routing decision is built — unlike
+/// [`super::extract::disposable::RoutedModel`]'s "route, explain, record,
+/// call nothing" posture, reranking has no evidence requirement for a knob
+/// nobody set (map line 1090). `None` is also the answer when a candidate
+/// could not be built, the router found none, or the resolved client could
+/// not be built — every one of these is `RerankOutcome::Bypassed` at
+/// [`rerank`]'s own call site.
+/// No persisted cross-process health, no paced-request reservation claim,
+/// and no `session` parameter: at most one rerank call happens per
+/// briefing and this function records nothing, so it needs neither.
+/// History: design-decisions.md, "Trims: memory and session module docs", memory/rerank.rs resolve_rerank_model.
 pub fn resolve_rerank_model(runtime: &crate::Runtime) -> Option<Box<dyn ExtractionModel>> {
     use super::ConfiguredModel;
     use crate::config::{EffectiveConfig, UserConfig, load_project_config};

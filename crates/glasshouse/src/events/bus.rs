@@ -1,38 +1,23 @@
 //! Getting a lifecycle event to everyone who needs it, without ever making
 //! the harness wait.
 //!
-//! # The property this file exists for
+//! Publishing is bounded work with no waiting on a consumer: if the thread
+//! draining a harness's terminal ever waited on a Glasshouse consumer, the
+//! terminal's buffer would fill and the harness itself would block on
+//! `write`. Each subscriber owns a fixed-size queue; when it is full the
+//! **oldest** event goes and a counter records that it did — recent events
+//! are the useful ones, and a consumer that stopped consuming has stopped
+//! mattering. Proved by `a_subscriber_that_never_drains_cannot_stall_the_publisher`
+//! and, against a real child process, `tests/events_bus.rs`.
+//! The bus also keeps its own bounded history, separate from any
+//! subscriber's queue, because Phase 45 requires a crashed worker's event
+//! history to survive the crash — a crash report and
+//! [`crate::events::task_outcome`] read it.
 //!
-//! A harness writes into a pseudo-terminal. If the thread draining that
-//! terminal ever waits on a Glasshouse consumer, the terminal's buffer fills
-//! and the harness itself blocks on `write` — Glasshouse would have stopped
-//! the product it exists to host, and it would look like the harness hanging.
-//!
-//! So publishing is bounded work with no waiting on a consumer at all. Each
-//! subscriber owns a fixed-size queue; when it is full the **oldest** event
-//! goes and a counter records that it did. A TUI that stops draining loses
-//! history and can never apply backpressure. That is the right trade in both
-//! directions: recent events are the useful ones, and a consumer that has
-//! stopped consuming has stopped mattering.
-//!
-//! `a_subscriber_that_never_drains_cannot_stall_the_publisher` is the proof,
-//! and `a_stalled_subscriber_does_not_stall_a_live_harness` in
-//! `tests/events_bus.rs` is the same property against a real child process.
-//!
-//! # Why the bus keeps its own history as well
-//!
-//! Phase 45 requires a crashed worker's event history to survive the crash.
-//! A subscriber's queue cannot serve that — it is drained, bounded to
-//! whatever a viewport needs, and belongs to whoever subscribed. The bus
-//! therefore holds its own bounded history, which is what a crash report and
-//! [`crate::events::task_outcome`] read.
-//!
-//! # Poisoning is ownership, not a reason to give up
-//!
-//! Every lock here is taken through `own`, a private helper. A thread that panicked while
-//! holding one leaves the data intact and the lock poisoned; refusing to
-//! publish from then on would turn one panic into a permanently deaf event
-//! stream. The data is taken and used.
+//! Every lock here is taken through `own`, a private helper, so a thread
+//! that panics holding one leaves the data intact and the lock poisoned
+//! rather than making the stream permanently deaf.
+// History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/events/bus.rs module doc.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex, MutexGuard, Weak};

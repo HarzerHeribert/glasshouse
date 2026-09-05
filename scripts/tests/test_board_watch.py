@@ -217,6 +217,26 @@ QUIET_SCREEN = (
     "  ░░░░░░░░░░░░░░░░░░░░░░░░╎░░░ 0% · 0/1M            ~$0.00"
 )
 
+# A pane `is_busy_screen` accepts, so the worker-quiet debounce in
+# board-watch.sh (two consecutive quiet ticks -> a `! QUIET` interrupt) never
+# fires against it. test_report_interrupts_same_tick and
+# test_heartbeat_and_silence need a worker screen that produces NO interrupt
+# of its own so the only `!`/`BOARD` lines they see are the ones the test is
+# actually asserting about -- QUIET_SCREEN classifies as quiet, and on a host
+# where ticks are fast (fewer than ~100ms of process-spawn cost each, e.g. a
+# Linux CI runner) two quiet ticks land inside the test's own wait window and
+# race the assertion. Driving state by fake-`sleep`-counted ticks rather than
+# by screen content doesn't remove the race for these two tests specifically,
+# because both tests wait on real wall-clock time (a report file appearing,
+# or the heartbeat window), not on a tick count they control.
+BUSY_SCREEN = (
+    "Tip: Use /help for more information\n"
+    "❯ \n"
+    "  ✻ Flowing… (12s)\n"
+    "  Sonnet 5 · high  · worker            5h 21% 3h01m\n"
+    "  ░░░░░░░░░░░░░░░░░░░░░░░░╎░░░ 0% · 0/1M            ~$0.00"
+)
+
 PROMPT_SCREEN = (
     "  │ Bash: grep -r foo .                                              │\n"
     "  │                                                                   │\n"
@@ -257,7 +277,7 @@ def test_once_flag(failures):
 def test_report_interrupts_same_tick(failures):
     fixtures = Fixtures()
     try:
-        fixtures.set_screen("surface:0", QUIET_SCREEN)
+        fixtures.set_screen("surface:0", BUSY_SCREEN)
         fixtures.set_workspace_list([])
         report = Path(tempfile.gettempdir()) / f"bw-report-{os.getpid()}.md"
         report.unlink(missing_ok=True)
@@ -355,7 +375,7 @@ def test_heartbeat_and_silence(failures):
     """
     fixtures = Fixtures()
     try:
-        fixtures.set_screen("surface:0", QUIET_SCREEN)
+        fixtures.set_screen("surface:0", BUSY_SCREEN)
         fixtures.set_workspace_list([])
         proc = start(fixtures, [
             "--tick", "1", "--window", "1", "--heartbeat", "10",

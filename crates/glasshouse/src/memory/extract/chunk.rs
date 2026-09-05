@@ -1,40 +1,23 @@
 //! What the extractor is allowed to be shown: a bounded, scrubbed chunk.
 //!
-//! # One constructor, two guarantees
-//!
-//! [`SessionChunk::build`] is the only way to make one, and it does two
-//! things no caller can skip:
-//!
-//! 1. **It bounds.** Phase 21 requires bounded session/event chunks "rather
-//!    than entire unbounded session histories". A limit a caller passes is a
-//!    limit a caller forgets, so the bound is applied here, three ways at
-//!    once — a cap on entries, a cap on each entry, and a cap on the whole —
-//!    and the third is the one that matters: without it, a thousand entries
-//!    just under the per-entry cap is an unbounded chunk assembled out of
-//!    bounded parts.
-//!
-//! 2. **It scrubs.** Every entry goes through
-//!    [`super::credentials::scrub`] on the way in, so there is no
-//!    `SessionChunk` anywhere in the program holding un-scrubbed text. That
-//!    is what makes "the extractor is never fed credential material" a
-//!    property of the type rather than a rule someone has to remember at
-//!    every call site — and the prompt can only be built from this type.
-//!
-//! # Newest first, and why the tail is what survives
+//! [`SessionChunk::build`] is the only way to make one. It bounds three
+//! ways at once — a cap on entries, a cap on each entry, and a cap on the
+//! whole, because without the third a thousand entries just under the
+//! per-entry cap is an unbounded chunk assembled out of bounded parts. And
+//! it scrubs: every entry goes through [`super::credentials::scrub`] on the
+//! way in, so there is no `SessionChunk` anywhere holding un-scrubbed text,
+//! and the prompt can only be built from this type.
 //!
 //! When there is more activity than the budget allows, the **most recent**
-//! entries are kept. A task's conclusion is at its end: what was decided,
-//! what failed, what was agreed. The beginning is where the exploring
-//! happened, and Phase 21A specifically does not want an idea discussed
-//! early to arrive with the authority of a decision made late.
-//!
-//! # Nothing is dropped silently
+//! entries are kept — a task's conclusion is at its end, and Phase 21A
+//! specifically does not want an idea discussed early to arrive with the
+//! authority of a decision made late.
 //!
 //! [`SessionChunk::dropped`], [`SessionChunk::truncated`] and
 //! [`SessionChunk::redactions`] report exactly what the budget and the
-//! scrubber removed. A chunk that lost half a session and says so is
-//! evidence; one that lost half a session quietly is a bug that looks like a
-//! result.
+//! scrubber removed, so a chunk that lost half a session says so.
+//!
+//! History: design-decisions.md, "Trims: memory and session module docs", memory/extract/chunk.rs module doc.
 
 use super::credentials;
 use crate::memory::SourceEvents;

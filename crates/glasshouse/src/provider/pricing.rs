@@ -1,49 +1,15 @@
 //! Provider price metadata — capability map lines 1305 and 1306.
 //!
-//! # Data, not code (line 1306)
-//!
-//! *"Allow provider price metadata to be updated independently from the
-//! router implementation."* A user corrects a wrong price, or adds a
-//! provider this build has never heard of, by editing a file — never by
-//! recompiling Glasshouse. [`PriceTable::load_from_dir`] reads
-//! `pricing.toml` out of a directory [`crate::paths::RuntimePaths`] already
-//! owns (`config_dir`, the same directory `user_config_file` lives in — this
-//! is configuration a person wrote, not a machine-cached catalogue like
-//! `provider_cache_dir`).
-//!
-//! There is no compiled default table. Every other `Unverified`/`Verified`
-//! entry in [`mod@crate::provider`] exists because this project refuses to
-//! guess a capability nobody established, and a shipped price nobody priced
-//! against a real invoice would be exactly that guess — worse, because a
-//! silently-wrong shipped price is harder to notice than an absent one. An
-//! absent file is therefore not a degraded state; it is every user's state
-//! until they write one, and [`PriceTable::empty`] is what [`SessionRouter`]
-//! (`routing::session`) already defaults to.
-//!
-//! [`SessionRouter`]: crate::routing::session::SessionRouter
-//!
-//! # Unknown is unknown, and it is not zero (line 1305)
-//!
-//! This module only builds the table; the honesty rule it exists to serve is
-//! enforced at the consumer,
-//! `routing::session::expected_marginal_cost`. [`PriceTable::price_for`]
-//! answers `None` for a provider/model pair this table does not name, and
-//! that `None` must reach the routing explanation as a stated unknown, never
-//! as a silent zero — the same `known`/`unknown` idiom
-//! `routing::session::AffinityFacet` already applies to every other scored
-//! signal that may or may not have arrived.
-//!
-//! # Fail-soft on every input
-//!
+//! [`PriceTable::price_for`] answers `None` for a provider/model pair this
+//! table does not name, and that `None` must reach the routing explanation
+//! as a stated unknown, never as a silent zero.
 //! The file is untrusted user input. [`PriceTable::load_from_dir`] never
 //! panics and never refuses to route: a missing file, an unreadable one, a
 //! malformed document, or a single invalid entry all degrade to
 //! [`PriceTable::empty`], routing with every price unknown — logged once via
 //! [`tracing::warn!`] naming the path and the parse error, never the
-//! document's contents. Parsing additionally bounds the document size and
-//! range-checks every number before it is admitted, so a `1e308` or a
-//! negative entry cannot reach a score as anything but a parse failure for
-//! that document.
+//! document's contents.
+// History: design-decisions.md, "Trims: gateway, profile and provider module docs", pricing.rs module doc.
 
 use std::path::Path;
 

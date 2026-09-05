@@ -688,6 +688,7 @@ fn stream_events_refuses_a_delta_that_would_misfile_under_another_calls_id() {
     let (mut server, _) = listener.accept().expect("loopback accepts");
 
     let finish: Finish<'_> = &test_finish;
+    let served_by = ServedBy::for_test("test-provider", "test-provider/TEST_API_KEY");
     stream_events(
         &mut server,
         &mut events,
@@ -696,6 +697,7 @@ fn stream_events_refuses_a_delta_that_would_misfile_under_another_calls_id() {
         finish,
         200,
         Instant::now(),
+        &served_by,
     );
     drop(server);
 

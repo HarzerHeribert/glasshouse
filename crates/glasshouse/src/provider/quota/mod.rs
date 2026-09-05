@@ -1,63 +1,23 @@
 //! Phase 32A: one provider-independent model for how much usable capacity a
 //! resource has left — [`CapacityState`].
 //!
-//! # Where this lives, and why it is not `crate::quota`
+//! "Unknown" does four different jobs:
 //!
-//! A [`CapacityState`] is a derived view over a
-//! [`crate::provider::registry::ResourceKind`], the same way
-//! [`mod@crate::provider::registry`] is a derived view over
-//! [`crate::provider::templates`]. Putting it beside the type it describes
-//! keeps the whole quota story in one module tree and needs no new
-//! top-level module registration. Moving it to `crate::quota` later is a
-//! rename plus one line in `lib.rs`; nothing here depends on the path.
-//!
-//! # The hard constraint this type exists to honour
-//!
-//! Phase 32 established that the four quota *shapes* are not the same shape:
-//! a subscription has a rolling window, a metered key has a balance, a free
-//! pool has a request count, and local inference has neither. A model that
-//! flattened them into one "percent remaining" number would satisfy the word
-//! "unified" and break the requirement in the same motion.
-//!
-//! So [`CapacityState`] is **not** a percentage. It is a record of several
-//! *independent* pools — tokens, requests, credits, a user's own monetary
-//! ceiling — each of which is separately unknown, separately inapplicable, or
-//! separately measured in **the provider's own units**. A normalized
-//! percentage is something [`CapacityState::normalized`] *derives* on demand
-//! and carries its own raw reading with it; it is never a field, so it can
-//! never be what is left after the raw reading was thrown away.
-//!
-//! # Why "unknown" has four different answers
-//!
-//! The map's own rule is that Glasshouse must never invent exact token
-//! balances for opaque subscriptions, and a model that reports a number it
-//! cannot know is worse than one that says `unknown`. But "unknown" is doing
-//! four different jobs, and collapsing them is how a later phase talks itself
-//! into filling one in:
-//!
-//! - [`Capacity::Inapplicable`] — there is no such pool. A local inference
-//!   server has no credit balance; asking is a category error, and a caller
-//!   that sees this must not go looking for the number elsewhere.
+//! - [`Capacity::Inapplicable`] — there is no such pool. A caller that sees
+//!   this must not go looking for the number elsewhere.
 //! - [`Capacity::ProviderOpaque`] — there is such a pool and the provider
-//!   publishes no number for it. A first-party subscription's remaining
-//!   tokens. **This one can never become a measurement**, and that is the
-//!   map's rule expressed as a state rather than as a comment.
+//!   publishes no number for it. **This one can never become a measurement.**
 //! - [`Capacity::Unmeasured`] — there is such a pool, the provider does
-//!   publish it, and nothing has read it. Every one of these is waiting on
-//!   Phase 32B, which is where telemetry lives and which does not exist yet.
+//!   publish it, and nothing has read it yet.
 //! - [`Capacity::DelegatedUpstream`] — there is such a pool and it belongs to
 //!   whichever upstream this resource is currently bound to, not to this
-//!   resource. The Glasshouse gateway, and only the gateway.
+//!   resource — the Glasshouse gateway, and only the gateway.
 //!
-//! # What this module does not do
-//!
-//! It reads nothing. There is no HTTP client, no header parser, no clock and
-//! no configuration reader here, and every [`Reading`] this module can build
-//! must be handed its value, its observation time and its source by a caller.
-//! That is Phase 32B's job. Consequently **every pool of every
-//! [`CapacityState`] the shipped binary constructs today is one of the four
-//! unknown states** — which is the honest answer, and is stated in the
-//! evidence ledger rather than hidden behind a type that looks populated.
+//! It reads nothing: no HTTP client, no header parser, no clock and no
+//! configuration reader here, and every [`Reading`] this module can build
+//! must be handed its value, its observation time and its source by a
+//! caller.
+// History: design-decisions.md, "Trims: gateway, profile and provider module docs", quota/mod.rs module doc.
 
 use std::collections::BTreeSet;
 
@@ -146,27 +106,16 @@ impl NativeAmount {
 
 /// What *kind of claim* a reading is — capability map line 1227.
 ///
-/// # Two axes, not one
-///
 /// [`ReadingSource`] names **where** a number came from; this names **what
-/// kind of claim it is**. They are not the same question and collapsing them
-/// loses one: two numbers can arrive by the same mechanism and be different
-/// claims (a provider's own `RateLimit-Limit` header and a ceiling Glasshouse
-/// inferred from watching that header change), and two numbers can be the
-/// same kind of claim through different mechanisms (a provider endpoint and a
-/// harness's own status output are both the account holder speaking about
-/// itself).
+/// kind of claim it is** — two axes, not one.
 ///
-/// # Why `unknown` is not a variant here
-///
-/// Line 1227 lists five words and only four of them are classes. A reading
-/// that does not exist cannot carry a source or a class, and inventing an
-/// `Unknown` variant would mean constructing a [`Reading`] for a measurement
-/// nobody took. Unknown is already [`Capacity`]'s four non-[`Capacity::Measured`]
-/// states, whose [`Capacity::reading`] answers `None` so a caller cannot read
-/// a number that was never taken. [`Capacity::telemetry_class`] is therefore
-/// `Option<TelemetryClass>` and [`Capacity::telemetry_class_str`] renders the
-/// fifth word for the `None` case — see [`UNKNOWN_TELEMETRY`].
+/// Line 1227 lists five words and only four of them are classes. Unknown is
+/// already [`Capacity`]'s four non-[`Capacity::Measured`] states, whose
+/// [`Capacity::reading`] answers `None` so a caller cannot read a number
+/// that was never taken. [`Capacity::telemetry_class`] is therefore
+/// `Option<TelemetryClass>` and [`Capacity::telemetry_class_str`] renders
+/// the fifth word for the `None` case — see [`UNKNOWN_TELEMETRY`].
+// History: design-decisions.md, "Trims: provider module docs", quota/mod.rs `TelemetryClass` doc.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum TelemetryClass {
     /// The party that owns the quota said so about itself: a provider's own
@@ -754,24 +703,18 @@ impl TelemetryClass {
 /// A capacity percentage that **cannot be presented as exact unless it is** —
 /// capability map line 1234.
 ///
-/// # Why this is a type and not a convention
-///
-/// [`NormalizedCapacity::percent`] used to answer a bare `u8`. A bare `u8`
-/// makes "check the source before you render this" a rule every caller has to
-/// remember, and line 1234 — *never label an inferred subscription percentage
-/// as exact* — is not a rule this project leaves to memory. There is no
-/// accessor here that yields a number without also yielding what kind of
-/// number it is: [`Percentage::exact`] answers `None` for an estimate, and
-/// [`Percentage::estimated`] is the only other way to reach the digits, and it
-/// hands back the confidence and the source description with them.
-///
-/// # The subscription case is guarded twice
+/// There is no accessor here that yields a number without also yielding what
+/// kind of number it is: [`Percentage::exact`] answers `None` for an
+/// estimate, and [`Percentage::estimated`] is the only other way to reach the
+/// digits, and it hands back the confidence and the source description with
+/// them.
 ///
 /// A first-party subscription's pools are [`Capacity::ProviderOpaque`], so
 /// [`Pool::normalized`] answers `None` for one and there is no percentage to
 /// mislabel in the first place. This type is the second guard, for the case
 /// where a percentage does exist and was computed from something weaker than
 /// the provider's own word.
+// History: design-decisions.md, "Trims: provider module docs", quota/mod.rs `Percentage` doc.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Percentage {
     /// Every reading behind this number came from the party that owns the
@@ -1283,26 +1226,17 @@ impl LimitingUnits {
 
 /// A provider- or harness-defined plan name — capability map line 1233.
 ///
-/// # Why a plan is a reading and not a setting
-///
-/// Line 1233 asks that a user be able to *enter a known plan* when the
-/// provider exposes no usable telemetry, and line 1231 asks that native
-/// harness status be read when a stable machine-readable interface exists.
-/// Those are the same fact arriving by two different origins — the user
-/// remembering their subscription tier, and the harness stating it — so a
-/// plan is a [`Capacity`] like every other quantity here, and which of the
-/// two supplied it is a [`ReadingSource`] rather than two separate fields.
-/// [`Capacity::prefer`] then does line 1228's work for free: a harness that
-/// reports its own plan overrides one the user typed, because the harness is
-/// authoritative about its own account and the user is remembering.
-///
-/// # What a plan is not
+/// A plan is a [`Capacity`] like every other quantity here, and which of a
+/// user's own entry or the harness's own report supplied it is a
+/// [`ReadingSource`] rather than two separate fields. [`Capacity::prefer`]
+/// then does line 1228's work for free: a harness that reports its own plan
+/// overrides one the user typed, because the harness is authoritative about
+/// its own account and the user is remembering.
 ///
 /// It is **not** a capacity. Knowing an account is on `max` says nothing
-/// about how much of this window is left, and this type carries no number for
-/// exactly that reason. It is what a later phase would need in order to look
-/// a published allowance up, and it is what a resource view can honestly
-/// state today.
+/// about how much of this window is left, and this type carries no number
+/// for exactly that reason.
+// History: design-decisions.md, "Trims: provider module docs", quota/mod.rs `KnownPlan` doc.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KnownPlan {
     name: String,
@@ -1850,25 +1784,18 @@ impl RemainingCapacityScore {
     /// Effective availability once a known quota reset is taken into account
     /// — capability map lines 1264 and 1265, design decision #3.
     ///
-    /// **The raw score is never mutated by this.** [`RemainingCapacityScore::fraction`]
-    /// and [`RemainingCapacityScore::routing_fraction`] still answer exactly
-    /// what they answered before this was called; `effective` is a third,
-    /// separately-named number derived from one of them and how soon the
-    /// binding pool's window turns. `seconds_until_reset` is `None` — no
-    /// reset known — is the identity: effective equals
-    /// [`RemainingCapacityScore::routing_fraction`] exactly, per the design
-    /// decision's own instruction not to fabricate a reset when none is
-    /// known. See [`CapacityState::seconds_until_reset`] for where a caller
-    /// gets this number.
+    /// **The raw score is never mutated by this.** `effective` is a third,
+    /// separately-named number derived from [`RemainingCapacityScore::routing_fraction`]
+    /// and how soon the binding pool's window turns. `seconds_until_reset`
+    /// of `None` is the identity: effective equals `routing_fraction` exactly.
     ///
     /// A reset within [`RESET_IMMINENT_SECONDS`] is treated as "happening
     /// now": conservation stops mattering and the effective value rises
     /// toward `1.0`. A reset [`RESET_DISTANT_SECONDS`] away or further is
-    /// treated exactly like no reset was known — line 1264's "far away
-    /// relative to the remaining capacity" case, where the effective value
-    /// stays at the (already conservative) routing fraction rather than
-    /// being boosted. Linear between the two, so a resource crossing either
-    /// boundary does not jump.
+    /// treated exactly like no reset was known, and the value stays at the
+    /// routing fraction. Linear between the two, so a resource crossing
+    /// either boundary does not jump.
+    // History: design-decisions.md, "Trims: provider module docs", quota/mod.rs `effective` doc.
     pub fn effective(&self, seconds_until_reset: Option<i64>) -> f64 {
         let raw = self.routing_fraction();
         let Some(seconds) = seconds_until_reset else {
@@ -2112,44 +2039,15 @@ impl CapacityState {
     /// The normalized remaining-capacity score for this resource —
     /// capability map lines 1259 and 1260.
     ///
-    /// # The limiting-dimension rule, widened (design decision #2)
-    ///
-    /// [`CapacityState::normalized`] already takes the minimum across
-    /// [`CapacityState::pools`]. Rate ceilings are not pools —
-    /// [`RateCeilings::requests_per_minute`] is a single ceiling with no
-    /// paired "remaining" reading of its own, so [`CapacityState::normalized`]
-    /// cannot see it at all. This widens the candidate set with one
-    /// synthetic pairing: the general request pool's own *remaining* reading
-    /// against the per-minute ceiling instead of the pool's own limit, when
-    /// both are stated in the same unit, and keeps whichever of the two
-    /// produces the tighter percentage.
-    ///
-    /// **Checked against today's own telemetry reader rather than assumed
-    /// (practice §23).** `crate::provider::telemetry::RateLimitHeaders::apply_to`
-    /// currently fills a pool's limit and the per-minute ceiling from the
-    /// *same* header reading in one call, so the two agree today for every
-    /// live host this build has observed — this widening changes nothing
-    /// for them. It matters the moment the two readings arrive from
-    /// different observations (a stale general limit beside a fresher
-    /// per-minute one, or a user-configured override on one but not the
-    /// other): without it, [`CapacityState::normalized`] would keep reading
-    /// the general pool's own limit even after a tighter per-minute ceiling
-    /// became known, which is exactly the invisibility capability map line
-    /// 1261 names.
-    ///
-    /// # Local inference (design decision #7)
-    ///
     /// A resource with [`LimitingUnits::None`] has nothing to normalize:
-    /// every pool is [`Capacity::Inapplicable`] by construction, so
-    /// [`CapacityState::normalized`] always answers `None` for one. Line
-    /// 1267 asks that local inference be treated as high-capacity while
-    /// still being able to fall on measured latency or concurrency, so this
-    /// returns a fixed high estimate carrying an explicit "no evidence" note
-    /// instead of `None`. **This build has no latency or concurrency reader
-    /// anywhere** — nothing in [`CapacityState`] carries either quantity —
-    /// so the honest answer is a score that says it is not backed by a
-    /// measurement, not a score that invents one. See the evidence ledger
-    /// for whether this closes line 1267 or only partially does.
+    /// every pool is [`Capacity::Inapplicable`] by construction. Line 1267
+    /// asks that local inference be treated as high-capacity while still
+    /// being able to fall on measured latency or concurrency (design
+    /// decision #7), so this returns a fixed high estimate carrying an
+    /// explicit "no evidence" note instead of `None` — this build has no
+    /// latency or concurrency reader anywhere, so the honest answer is a
+    /// score that says it is not backed by a measurement.
+    // History: design-decisions.md, "Trims: gateway, profile and provider module docs", quota/mod.rs `remaining_capacity_score` doc.
     pub fn remaining_capacity_score(&self) -> Option<RemainingCapacityScore> {
         if matches!(self.limits, LimitingUnits::None) {
             return Some(RemainingCapacityScore {
@@ -2233,24 +2131,14 @@ pub struct ReserveDecisionInputs {
     /// 35 already models, and duplicating it would be two scales for one
     /// question.
     ///
-    /// # Why the hard-capability set is not a second input beside it
-    ///
-    /// Capability map line 1289 says *"when their capability requirement
-    /// justifies it"*, and Phase 35 now has a literal capability set —
-    /// [`crate::routing::classify::TaskClassification::hard_capabilities`].
-    /// It must not be plumbed here, and the reason is in its own doc comment:
-    /// a [`crate::routing::classify::HardCapability`] names something a
-    /// *harness* must be wired for — repository access, a shell, a browser —
-    /// "rather than something a smarter model makes more likely to succeed".
-    ///
-    /// This decision is entirely about whether to spend a stronger model's
-    /// protected quota. A signal defined as *not satisfiable by choosing a
-    /// stronger model* therefore varies with something this consumer is not
-    /// measuring: wiring it in would let `run the tests and paste the output`
-    /// spend protected premium reserve because it needs a shell, while a
-    /// genuinely demanding pure-reasoning task, needing none of the three,
-    /// would not. The tier is the scale that varies with demand, and it is
-    /// the one this field carries.
+    /// [`crate::routing::classify::TaskClassification::hard_capabilities`]
+    /// must not be plumbed in beside it: a
+    /// [`crate::routing::classify::HardCapability`] names something a
+    /// *harness* must be wired for, not something a stronger model makes
+    /// more likely to succeed — a signal *not satisfiable by choosing a
+    /// stronger model* is not this field's question. The tier is the scale
+    /// that varies with demand, and it is the one this field carries.
+    // History: design-decisions.md, "Trims: provider module docs", quota/mod.rs `ReserveContext::tier` doc.
     pub tier: crate::routing::classify::WorkloadTier,
     /// Whether a resource outside the reserve band could adequately serve
     /// this task instead — capability map line 1288.
@@ -2274,43 +2162,14 @@ pub struct ReserveDecisionInputs {
     /// complete — capability map line 1294's guard on migration, and line
     /// 1610's on quota-driven migration.
     ///
-    /// # It is declared, never guessed, and a proxy must still not be
-    /// invented for it
-    ///
-    /// The only thing that may set this true is somebody saying so on
-    /// purpose about one named session:
-    /// `crate::session::SessionStore::declare_task_nearly_complete`, written
-    /// by the `glasshouse task-progress` verb and read back through the
-    /// scoped types the two routers carry
-    /// ([`crate::routing::disposable::DeclaredTaskProgress`] and
-    /// `crate::routing::session::SessionRouter`'s own declared set). It is a
-    /// `bool` here and a *scope* at the producer, exactly as
-    /// [`Self::user_override`] is, and it expires — see
-    /// [`crate::session::TASK_PROGRESS_EXPIRES_AFTER`].
-    ///
-    /// **Nothing in this build may infer it.** Glasshouse's own event
-    /// vocabulary ([`crate::events::LifecycleEvent`]) is deliberately binary
-    /// and retrospective — a turn started, a turn ended and how, the harness
-    /// is waiting for the user, the process exited — and two of its variants
-    /// carry doc comments saying in as many words that they are *not*
-    /// statements about the session's work. No harness this build integrates
-    /// reports task progress, and the one path that reaches
-    /// [`evaluate_reserve_spend`] runs *after* `TurnEnded { Completed }`, so
-    /// the only completion fact available there is that the turn is already
-    /// over.
-    ///
-    /// A turn count or an elapsed-time threshold would compile and would look
-    /// like a producer. It would also be wrong in the one situation this line
-    /// exists to protect: it would report "almost complete" for a task that
-    /// had merely been running a while, and this field is the *first* branch
-    /// [`evaluate_reserve_spend`] takes, outranking every other signal
-    /// including the user override. A fabricated value here does not degrade
-    /// the policy, it inverts it. That is why a declaration is the producer
-    /// and a proxy is not, and why the declaration expires: a statement that
-    /// outlived the task it described would invert the policy by the slower
-    /// route. `tests/subscription_pressure.rs`'s source scan holds both
-    /// construction sites to reading the declaration rather than writing a
-    /// literal.
+    /// **Nothing in this build may infer it.** No harness this build
+    /// integrates reports task progress, and this field is the *first*
+    /// branch [`evaluate_reserve_spend`] takes, outranking every other
+    /// signal including the user override: a fabricated value here does not
+    /// degrade the policy, it inverts it. `tests/subscription_pressure.rs`'s
+    /// source scan holds both construction sites to reading the declaration
+    /// rather than writing a literal.
+    // History: design-decisions.md, "Trims: gateway, profile and provider module docs", quota/mod.rs `ReserveContext::task_nearly_complete` doc.
     pub task_nearly_complete: bool,
 }
 
@@ -2320,39 +2179,11 @@ pub struct ReserveDecisionInputs {
 /// scheduler. Every branch states its own reason and cites the line it
 /// answers, so the reason a caller receives is also the box it closes.
 ///
-/// # Precedence, and why this order
-///
 /// 1. **Line 1294 first, unconditionally.** A task somebody declared almost
 ///    complete is never moved "solely because a reserve threshold was
-///    crossed" — the line's own words — so nothing below this can override
-///    it. Both lines' operative word is *solely*: the guard stops a
-///    threshold being the whole reason work moves, and a declaration is a
-///    second reason, contributed by the only party that knows. It is scoped
-///    and expiring at its producer, so "this task is nearly complete" can
-///    only ever be true of a session somebody named, recently.
-/// 2. **Line 1290 next.** An explicit user override is a statement about
-///    *this* task or session that the user made on purpose; it outranks
-///    every automatic signal below it, but not line 1294's guard, which
-///    protects work already in flight regardless of what either party
-///    intended about reserve. It is scoped at its producer — see
-///    [`crate::routing::disposable::ReserveOverride`] — so "the user
-///    overrode this" can only ever be true of a session the user named.
-/// 3. **The band itself.** Above [`CapacityBand::Reserve`], nothing here is
-///    protected in the first place and every request is allowed —
-///    the bands below `Reserve` are the only ones this function ever has
-///    an opinion about.
-/// 4. **Reset proximity** — lines 1291 and its distant-reset complement,
-///    1292.
-///    Imminent (within [`RESET_IMMINENT_SECONDS`]) makes the policy
-///    permissive outright; distant ([`RESET_DISTANT_SECONDS`] or further, or
-///    explicitly known and not imminent) makes it strictly conservative,
-///    denying even a task with no cheaper alternative unless it needs at
-///    least the heavy tier
-///    ([`crate::routing::classify::WorkloadTier::Heavy`] or
-///    [`crate::routing::classify::WorkloadTier::Frontier`]).
-/// 5. **Tier and alternatives** — lines 1289 and 1288. A task at the heavy
-///    tier or above justifies spending the reserve; a lighter task may spend
-///    it only when nothing cheaper is adequate.
+///    crossed" — scoped and expiring at its producer, so this can only ever
+///    be true of a session somebody named, recently.
+// History: design-decisions.md, "Trims: gateway, profile and provider module docs", quota/mod.rs `evaluate_reserve_spend` doc.
 pub fn evaluate_reserve_spend(inputs: ReserveDecisionInputs) -> ReserveDecision {
     use crate::routing::classify::WorkloadTier;
 

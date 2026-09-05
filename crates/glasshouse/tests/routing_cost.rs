@@ -30,7 +30,9 @@ use rusqlite::Connection;
 use glasshouse::gateway::{Route, Upstream};
 use glasshouse::integrations::IntegrationId;
 use glasshouse::profile::{BackendResource, LaunchProfile};
-use glasshouse::routing::evidence::{EvidenceLedger, NewObservation, ObservationQuery, Outcome};
+use glasshouse::routing::evidence::{
+    CostConfidence, EvidenceLedger, NewObservation, ObservationQuery, ObservedCost, Outcome,
+};
 use glasshouse::routing::{AssignedModel, CredentialId};
 use glasshouse::secret::{EnvironmentSecretStore, Secret, SecretRef, SecretStore};
 use glasshouse::{Cli, Runtime, bootstrap};
@@ -481,8 +483,22 @@ fn a_row_planted_under_another_projects_id_never_contributes_to_this_projects_to
     assert_eq!(value_after(&classification, INPUT_TOKENS), "5");
     assert_eq!(value_after(&classification, OUTPUT_TOKENS), "6");
     assert_eq!(value_after(&classification, CACHED_TOKENS), "7");
+    // The header names the project id, a hex hash that can itself contain
+    // "999" (CI saw `beta-599c7cd8455a0a67b12c08e9999f9925` fail this test
+    // with correct totals), so the planted row is looked for in the body
+    // only. The header check keeps the strip honest: it must remove the
+    // header line and never a line of totals.
+    let (header, body) = run
+        .stdout
+        .split_once('\n')
+        .expect("the report must have a header line");
     assert!(
-        !run.stdout.contains("999"),
+        header.starts_with("Routing consumption for project "),
+        "the first line must be the report header:\n{}",
+        run.stdout
+    );
+    assert!(
+        !body.contains("999"),
         "a row planted under another project's id must never appear in this project's totals:\n{}",
         run.stdout
     );
@@ -1328,6 +1344,8 @@ fn a_row_with_no_tokens_prints_null_never_zero_in_json() {
         "completed_at",
         "first_byte_ms",
         "completed_ms",
+        "cost_micro_usd",
+        "cost_confidence",
     ] {
         assert_eq!(
             value[key],
@@ -1340,6 +1358,43 @@ fn a_row_with_no_tokens_prints_null_never_zero_in_json() {
     assert_eq!(value["model"], "gateway-model");
     assert!(value["seq"].is_i64(), "{line}");
     assert_eq!(value["observed_at"], at);
+}
+
+/// GH-GATEWAY-SERVED-BY, requirement 6: a row that carries a cost prints
+/// `cost_micro_usd` and `cost_confidence` as its **last two keys**, after
+/// `failovers` — the widened key list `ObservationJson`'s own doc comment
+/// pins at twenty-four.
+#[test]
+fn a_planted_cost_prints_as_the_lines_last_two_keys() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+    let at = now() - 60;
+
+    fixture
+        .ledger()
+        .record(
+            NewObservation::new("cost-provider", "cost-model").with_cost(Some(ObservedCost {
+                micro_usd: 1234,
+                confidence: CostConfidence::Estimated,
+            })),
+            at,
+        )
+        .unwrap();
+
+    let run = fixture.routing_cost_json(&[]);
+    assert!(run.status.success(), "stderr: {}", run.stderr);
+    let lines: Vec<&str> = run.stdout.lines().collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "one row must print exactly one line:\n{}",
+        run.stdout
+    );
+    let line = lines[0];
+    assert!(
+        line.ends_with("\"cost_micro_usd\":1234,\"cost_confidence\":\"estimated\"}"),
+        "cost_micro_usd and cost_confidence must be the line's last two keys: {line}"
+    );
 }
 
 /// **Requirement 1's ordering.** Two rows recorded out of insertion order
@@ -1525,8 +1580,21 @@ fn a_row_planted_under_another_projects_id_never_appears_in_json() {
         "a foreign-project row must never appear in this project's --json output:\n{}",
         run.stdout
     );
-    let value: serde_json::Value = serde_json::from_str(lines[0]).unwrap();
-    assert_eq!(value["provider"], "beta-runner");
-    assert!(!run.stdout.contains("foreign-provider"));
-    assert!(!run.stdout.contains("999"));
+    // Every line is judged by its parsed fields, never by a substring of the
+    // raw text: a line also carries `seq` and unix-second timestamps, and a
+    // timestamp can spell "999" on its own. The planted row would show up
+    // as `foreign-provider`/`foreign-model` with 999 in every token column;
+    // the one line here must be beta's own row and nothing of the foreign
+    // one.
+    for line in &lines {
+        let value: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert_eq!(value["provider"], "beta-runner", "line: {line}");
+        assert_eq!(value["model"], "beta-model", "line: {line}");
+        assert_eq!(value["purpose"], "classification", "line: {line}");
+        assert_eq!(value["input_tokens"], 5, "line: {line}");
+        assert_eq!(value["output_tokens"], 6, "line: {line}");
+        assert_eq!(value["cached_input_tokens"], 7, "line: {line}");
+        assert_ne!(value["provider"], "foreign-provider", "line: {line}");
+        assert_ne!(value["model"], "foreign-model", "line: {line}");
+    }
 }

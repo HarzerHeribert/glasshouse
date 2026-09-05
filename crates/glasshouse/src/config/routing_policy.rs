@@ -248,35 +248,23 @@ impl ReservePoliciesConfig {
 /// Which routing model classifies a request, as recorded in configuration.
 ///
 /// The routing model is the cheap, fast, replaceable component the capability
-/// map describes in its preamble: before spending premium agent capacity,
-/// Glasshouse may ask it to classify a request and estimate the capability
-/// tier the work needs. Phase 2C's job — and this type's — is only to record
-/// *which* of three answers the user gave. Actually asking a model anything
-/// is Phase 34B, and choosing one for [`RoutingModelChoice::Automatic`] is
-/// Phase 34C; neither is built here, and this type is deliberately shaped so
-/// neither has to be rewritten to read it.
+/// map describes: before spending premium agent capacity, Glasshouse may ask
+/// it to classify a request and estimate the capability tier the work needs.
+/// This type only records *which* of three answers the user gave — actually
+/// asking a model is Phase 34B, choosing one for
+/// [`RoutingModelChoice::Automatic`] is Phase 34C, and neither is built here.
 ///
-/// # Why `Automatic` stores an intent and not a model
-///
-/// Phase 2C line 2 asks for a choice that "selects the cheapest sufficiently
-/// fast configured resource". That selection depends on provider health,
-/// rate-limit headroom, latency and price *at the moment of use* — every
-/// filter in Phase 34C is a live condition — so resolving it once during a
-/// first-run wizard and writing the winner down would freeze a decision the
-/// map explicitly wants re-evaluated ("Re-evaluate the automatic
-/// routing-model choice when its provider becomes degraded or
-/// rate-limited"). [`RoutingModelChoice::Automatic`] therefore carries no
-/// payload at all: it is the user saying "you pick", not a cached answer.
-///
-/// # This is a reference, never a credential
-///
-/// [`RoutingModelChoice::Pinned`] holds a provider *name* — a key into
-/// [`ProviderTable`] — and a model *name*. Both are as safe to write into a
-/// tracked project file as [`ProviderConfig::credential_env`]'s variable
-/// names already are, which is the same rule [`StoredCredentialRef`]
-/// follows. Resolving the named provider to an actual credential stays
-/// `SecretStore`'s job. See `tests::serialized_form_has_no_secret_capable_field`
-/// for the structural guard.
+/// `Automatic` stores an intent, not a model: the choice depends on provider
+/// health, rate-limit headroom, latency and price at the moment of use, so
+/// resolving it once during a wizard would freeze a decision the map wants
+/// re-evaluated. It carries no payload — the user saying "you pick", not a
+/// cached answer.
+/// A reference, never a credential: [`RoutingModelChoice::Pinned`] holds a
+/// provider *name* and a model *name*, as safe to write into a tracked
+/// project file as [`ProviderConfig::credential_env`]'s variable names —
+/// resolving the named provider to a credential stays `SecretStore`'s job
+/// (guarded by `tests::serialized_form_has_no_secret_capable_field`).
+// History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/config/routing_policy.rs `RoutingModelChoice`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "kebab-case")]
 pub enum RoutingModelChoice {
@@ -304,30 +292,21 @@ impl RoutingModelChoice {
     /// What this choice actually resolves to, given the provider names that
     /// are configured right now.
     ///
-    /// # A vanished provider is not a startup failure
+    /// A vanished provider is not a startup failure: unlike
+    /// [`EffectiveConfig::configured_provider`], which answers an unknown
+    /// name with [`ProviderLookupError::Unknown`] because a user who typed
+    /// `--provider nope` asked for something specific, a routing model is an
+    /// optimisation nobody asked for this run, and providers legitimately
+    /// come and go. A [`RoutingModelChoice::Pinned`] naming a provider no
+    /// longer configured degrades to [`RoutingModelResolution::Heuristics`]
+    /// with a [`RoutingFallback`] naming which provider went missing, rather
+    /// than failing to start.
     ///
-    /// This is the one lookup in this module that refuses to return an
-    /// error. [`EffectiveConfig::configured_provider`] answers an unknown
-    /// name with [`ProviderLookupError::Unknown`], because a user who typed
-    /// `--provider nope` on the command line asked for something specific
-    /// and must be told it does not exist. A routing model is not that:
-    /// nobody asked for it this run, it is an optimisation over a system
-    /// that already works without it, and providers legitimately come and go
-    /// as keys are rotated and configuration is edited. So a
-    /// [`RoutingModelChoice::Pinned`] naming a provider that is no longer
-    /// configured degrades to [`RoutingModelResolution::Heuristics`] — with
-    /// a [`RoutingFallback`] that says which provider went missing, so the
-    /// degrade is visible rather than silent — instead of making Glasshouse
-    /// fail to start. Phase 34B's "Allow deterministic heuristics to remain
-    /// the final fallback when every routing model is unavailable" is the
-    /// same instinct one phase earlier.
-    ///
-    /// `configured` is provider *names* — [`EffectiveConfig::provider_names`]
-    /// in production. Whether a named provider is currently
-    /// [`ProviderConfig::enabled`] is deliberately not consulted: that field's
-    /// own documentation records that "deciding whether routing may actually
-    /// use a disabled provider is a later phase's job", and answering it here
-    /// would be that phase arriving early.
+    /// `configured` is provider *names*
+    /// ([`EffectiveConfig::provider_names`] in production);
+    /// [`ProviderConfig::enabled`] is deliberately not consulted here, since
+    /// that is a later phase's job.
+    // History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/config/routing_policy.rs `RoutingModelChoice::resolve`.
     pub fn resolve(&self, configured: &[String]) -> RoutingModelResolution {
         match self {
             Self::Deterministic => {
@@ -672,26 +651,21 @@ pub struct RoutingConfig {
     /// capability map line 1712, *"allow the user to disable automatic
     /// routing for the current Glasshouse instance."*
     ///
-    /// `None` means this layer never said, exactly like every other field
-    /// here; `Some(false)` is a person saying *stop deciding for me*, and
-    /// [`EffectiveConfig::automatic_routing`] resolves it project over user
-    /// over a default of `true`.
+    /// `None` means this layer never said; `Some(false)` is a person saying
+    /// *stop deciding for me*, resolved project over user over a default of
+    /// `true` by [`EffectiveConfig::automatic_routing`].
     ///
-    /// # This is not [`RoutingModelChoice::Deterministic`]
+    /// Not [`RoutingModelChoice::Deterministic`], easy to confuse:
+    /// [`RoutingConfig::model`] chooses **what classifies a request** and a
+    /// launch is still ranked either way; this field turns the **ranking on
+    /// the launch path** off altogether, so `glasshouse launch` starts the
+    /// session the person's own flags describe without asking whether this
+    /// project has one worth continuing.
     ///
-    /// The two are easy to confuse and turn off different things.
-    /// [`RoutingConfig::model`] chooses **what classifies a request** — a
-    /// model, or deterministic heuristics — and a launch is ranked either
-    /// way. This field turns the **ranking on the launch path** off
-    /// altogether: `glasshouse launch` stops asking whether this project
-    /// already has a session worth continuing, and starts the session the
-    /// person's own flags describe.
-    ///
-    /// Off means off, including the *diagnosis*: see
-    /// `main.rs::launch_session` for why a launch with routing disabled does
-    /// not compute the ranking in order to report what it would have chosen.
-    /// `glasshouse route` still answers that question on demand, because
-    /// asking it is a thing a person does deliberately.
+    /// Off means off, including the diagnosis: see `main.rs::launch_session`
+    /// for why a disabled launch does not compute the ranking to report what
+    /// it would have chosen. `glasshouse route` still answers on demand.
+    // History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/config/routing_policy.rs `RoutingConfig::automatic`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     automatic: Option<bool>,
 }

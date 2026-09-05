@@ -1,28 +1,23 @@
 //! The semantic reducer seam — Phase 57B, map lines 1997-2003.
 //!
-//! # What this is, mirrored from
-//!
-//! This module is [`crate::memory::extract::model`] and
+//! This module mirrors [`crate::memory::extract::model`] and
 //! [`crate::memory::extract::disposable`]'s pattern, applied to a different
 //! job: a trait ([`Reducer`]) a caller asks to decide over numbered
 //! candidates, and the one disposable-backed implementation
 //! ([`ConfiguredReducer`]) that actually calls a model, over the same
-//! OpenAI-chat-completions wire protocol and through the same provider
-//! plumbing. It is a second *type* because the request and reply shapes are
-//! this job's own — never a second *idiom* for reaching a provider. Map line
-//! 1997's "never a firewall-private provider client" is satisfied the same
-//! way extraction's own client satisfies it: [`ConfiguredReducer`] is built
-//! from a [`crate::provider::Provider`] the routing layer chose, and it
-//! speaks the one protocol this build's disposable-job machinery already
-//! speaks.
+//! OpenAI-chat-completions wire protocol. It is a second *type* because the
+//! request and reply shapes are this job's own — never a second *idiom* for
+//! reaching a provider; [`ConfiguredReducer`] is built from a
+//! [`crate::provider::Provider`] the routing layer chose, satisfying map
+//! line 1997's "never a firewall-private provider client".
 //!
-//! # What may never leave this module
+//! No response body, and no transport error's own words, ever reach a
+//! [`ReducerErrorKind`] — every failure is one of a fixed set of phrases,
+//! because a provider's error body can echo a tool result that may itself
+//! contain user data.
 //!
-//! Exactly [`crate::memory::extract::model`]'s own rule: no response body,
-//! and no transport error's own words, ever reach a [`ReducerErrorKind`] —
-//! every failure here is one of a fixed set of phrases, because a provider's
-//! error body can echo the request, which is built from a tool result that
-//! may itself contain user data.
+//! History: design-decisions.md, "Trims: the remaining module docs, second
+//! packet", firewall/reducer.rs module doc.
 
 use std::collections::HashSet;
 use std::fmt;

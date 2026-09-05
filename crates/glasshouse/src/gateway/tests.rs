@@ -133,6 +133,30 @@ fn anthropic_upstream_to(base_url: &str) -> Upstream {
     .expect("the fixture's base URL is absolute")
 }
 
+/// An upstream serving only `openai-chat` — for testing the translated
+/// path, which an anthropic-messages-shaped request reaches through
+/// `unrouted`/`translate::place` rather than `route_for`. `targets` is
+/// empty on purpose: nothing here is ever reached by relay matching, only
+/// by `route_named`, which looks the route up by protocol slug alone.
+fn openai_chat_upstream_to(base_url: &str) -> Upstream {
+    Upstream::new(
+        "fixture".to_owned(),
+        vec![Route::new("openai-chat".to_owned(), &[], base_url)],
+        Secret::mint_for_test(PROVIDER_CREDENTIAL),
+        crate::routing::CredentialId::new(
+            "fixture",
+            crate::secret::SecretRef::Environment {
+                var: "FIXTURE_API_KEY".to_owned(),
+            },
+        ),
+    )
+    .expect("the fixture's base URL is absolute")
+}
+
+/// The smallest OpenAI Chat Completions response `openai_chat::decode_response`
+/// accepts: one choice, a `stop` finish reason, and a plain-text message.
+const OPENAI_CHAT_COMPLETION: &str = "{\"id\":\"chatcmpl-1\",\"choices\":[{\"index\":0,\"finish_reason\":\"stop\",\"message\":{\"role\":\"assistant\",\"content\":\"ok\"}}]}";
+
 /// The bytes a Claude Code child sends: a bearer token, a JSON body, and
 /// a length.
 fn messages_request(token: &str, body: &str) -> Vec<u8> {
@@ -461,6 +485,113 @@ fn the_gateway_adds_no_headers_of_its_own_to_a_forwarded_request() {
             "host",
         ],
         "the forwarded header set changed"
+    );
+}
+
+/// Capability map line 2451: a relayed exchange a backend actually served
+/// answers with a head naming that backend's provider and entitlement —
+/// never the credential's own secret bytes, on the same response the
+/// existing secret-hygiene tests above assert it on requests.
+#[test]
+fn a_relayed_response_names_the_serving_backend_and_never_its_secret() {
+    let fixture = FixtureUpstream::answering("HTTP/1.1 200 OK", "", "{\"ok\":true}");
+    let gateway = gateway_to(&fixture);
+
+    let response = read_all(send(
+        gateway.address(),
+        &messages_request(gateway.token().expose(), "{\"model\":\"probe\"}"),
+    ));
+
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+    assert!(
+        response.contains("x-glasshouse-provider: fixture\r\n"),
+        "a relayed response the backend served must name the serving provider: {response}"
+    );
+    assert!(
+        response.contains("x-glasshouse-entitlement: fixture/FIXTURE_API_KEY\r\n"),
+        "a relayed response the backend served must name the serving entitlement: {response}"
+    );
+    assert!(
+        !response.contains(PROVIDER_CREDENTIAL),
+        "no response head the gateway writes may ever contain the credential's own secret \
+         bytes: {response}"
+    );
+}
+
+/// Requirement 2: a refusal the gateway writes itself — here, a target
+/// belonging to no served protocol — carries neither header, because
+/// nothing served it.
+#[test]
+fn a_refusal_the_gateway_writes_itself_carries_neither_served_by_header() {
+    let fixture = FixtureUpstream::answering("HTTP/1.1 200 OK", "", "{}");
+    let gateway = gateway_to(&fixture);
+
+    let raw = format!(
+        "POST /this-target-belongs-to-no-served-protocol HTTP/1.1\r\n\
+         Host: 127.0.0.1\r\n\
+         Authorization: Bearer {}\r\n\
+         Content-Length: 2\r\n\r\n{{}}",
+        gateway.token().expose()
+    )
+    .into_bytes();
+    let response = read_all(send(gateway.address(), &raw));
+
+    assert!(response.starts_with("HTTP/1.1 404"), "{response}");
+    assert!(
+        !response.contains("x-glasshouse-provider"),
+        "a refusal the gateway wrote itself must carry no served-by header: {response}"
+    );
+    assert!(
+        !response.contains("x-glasshouse-entitlement"),
+        "a refusal the gateway wrote itself must carry no served-by header: {response}"
+    );
+    assert_eq!(
+        fixture.connections(),
+        0,
+        "an unrouted refusal must open nothing upstream"
+    );
+}
+
+/// Requirement 1's translated half: an exchange the ingress places through
+/// `translate::serve` names the serving backend on both of the translated
+/// path's writers — the document `deliver_document` reaches, and the
+/// stream head a `stream: true` request reaches through the
+/// document-to-stream conversion.
+#[test]
+fn a_translated_response_names_the_serving_backend_on_its_document_and_its_stream_head() {
+    let fixture = FixtureUpstream::answering("HTTP/1.1 200 OK", "", OPENAI_CHAT_COMPLETION);
+    let gateway =
+        Gateway::start(openai_chat_upstream_to(&fixture.base_url())).expect("loopback is bindable");
+
+    let document = read_all(send(
+        gateway.address(),
+        &messages_request(gateway.token().expose(), "{\"model\":\"probe\"}"),
+    ));
+    assert!(document.starts_with("HTTP/1.1 200 OK"), "{document}");
+    assert!(
+        document.contains("x-glasshouse-provider: fixture\r\n"),
+        "a translated document response must name the serving provider: {document}"
+    );
+    assert!(
+        document.contains("x-glasshouse-entitlement: fixture/FIXTURE_API_KEY\r\n"),
+        "a translated document response must name the serving entitlement: {document}"
+    );
+
+    let stream = read_all(send(
+        gateway.address(),
+        &messages_request(
+            gateway.token().expose(),
+            "{\"model\":\"probe\",\"stream\":true}",
+        ),
+    ));
+    assert!(stream.starts_with("HTTP/1.1 200 OK"), "{stream}");
+    assert!(
+        stream.contains("x-glasshouse-provider: fixture\r\n"),
+        "a translated stream head must name the serving provider: {stream}"
+    );
+    assert!(
+        stream.contains("x-glasshouse-entitlement: fixture/FIXTURE_API_KEY\r\n"),
+        "a translated stream head must name the serving entitlement: {stream}"
     );
 }
 

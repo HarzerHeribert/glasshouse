@@ -17,40 +17,7 @@
 //! expose provider API keys to a child harness when the local gateway can
 //! hold the credential itself".
 //!
-//! # One upstream, several protocols — and why not several upstreams
-//!
-//! The gateway serves more than one ingress protocol, and a provider
-//! declares a **separate base URL for each one** — see
-//! [`crate::provider::ProtocolSupport`], whose base URL is per protocol
-//! precisely because a provider may serve them at different paths. So an
-//! upstream is one provider, one credential, and a [`Route`] per protocol.
-//!
-//! The alternative shape — a set of `Upstream`s keyed by protocol — was
-//! rejected on the one property this module exists for. Each of them would
-//! need its own [`Secret`], and [`Secret`] is deliberately not `Clone` and
-//! can only be minted inside [`mod@crate::secret`], so building that set
-//! would mean either widening that module's API or resolving the same
-//! credential once per protocol. Both turn "the credential lives here and
-//! nowhere else" into "the credential lives in three places that happen to
-//! agree". One owner, several destinations, keeps the sentence true.
-//!
-//! Several *providers* is a different question, and still refused: which
-//! backend a session runs against is Phase 9H's sticky routing. See
-//! [`crate::profile::gateway_upstream`].
-//!
-//! # Why `ureq`
-//!
-//! Glasshouse has no async runtime and this phase does not add one. `ureq`
-//! is blocking, brings `rustls` rather than a system TLS stack, and — the
-//! property that actually decided it — hands back a response body as a
-//! [`Read`](std::io::Read). A body that is a reader is a body that can be
-//! moved to the harness a piece at a time, which is what "preserve streaming
-//! end-to-end" requires and what an implementation that returned `Vec<u8>`
-//! could not offer at any price.
-//!
-//! Its default features are off: `gzip` would transparently decompress a
-//! response and leave the `content-encoding` header describing something the
-//! client is no longer being sent.
+//! History: design-decisions.md, "Trims: gateway module docs", upstream.rs module doc.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -382,6 +349,59 @@ impl std::fmt::Debug for UpstreamBackend {
     }
 }
 
+/// Capability map line 2451's two response header names: which entitlement
+/// served an exchange, on every response head the gateway writes for one —
+/// never on a refusal, since nothing served those. See [`ServedBy`].
+pub(super) const PROVIDER_HEADER: &str = "x-glasshouse-provider";
+pub(super) const ENTITLEMENT_HEADER: &str = "x-glasshouse-entitlement";
+
+/// The provider and entitlement label a served exchange's response head
+/// carries — never the secret, only [`UpstreamBackend::provider`] and
+/// [`UpstreamBackend::credential_id`]'s label, the same string the session
+/// already records as `quota_context`.
+///
+/// Threaded through the translated path's writers as one value rather than
+/// two loose strings (CLAUDE.md rule 8): both are known together, from the
+/// one backend that served the exchange, and travel together to the two
+/// writers that need them.
+pub(super) struct ServedBy {
+    provider: String,
+    entitlement: String,
+}
+
+impl ServedBy {
+    pub(super) fn of(backend: &UpstreamBackend) -> Self {
+        Self {
+            provider: backend.provider().to_owned(),
+            entitlement: backend.credential_id().label(),
+        }
+    }
+
+    /// A stand-in value for a test that exercises a writer directly, with no
+    /// backend to build one from — `translate::tests`'s own
+    /// `stream_events_refuses_a_delta_...` is the caller.
+    #[cfg(test)]
+    pub(super) fn for_test(provider: &str, entitlement: &str) -> Self {
+        Self {
+            provider: provider.to_owned(),
+            entitlement: entitlement.to_owned(),
+        }
+    }
+
+    /// Push this exchange's two response headers onto `headers`, in the
+    /// order every writer emits them.
+    pub(super) fn push_onto(&self, headers: &mut Vec<(String, Vec<u8>)>) {
+        headers.push((
+            PROVIDER_HEADER.to_owned(),
+            self.provider.clone().into_bytes(),
+        ));
+        headers.push((
+            ENTITLEMENT_HEADER.to_owned(),
+            self.entitlement.clone().into_bytes(),
+        ));
+    }
+}
+
 /// Where the gateway forwards, and the credential it forwards with.
 ///
 /// # One serving backend, and the ones it could move to
@@ -399,16 +419,7 @@ impl std::fmt::Debug for UpstreamBackend {
 /// per turn, never for a cheaper model, and never across a protocol or a
 /// weakening of tool semantics. [`crate::routing::interactive`] owns every
 /// one of those decisions; this type owns only the consequence.
-///
-/// # Why an index and not a lock over the backends
-///
-/// [`Secret`] is deliberately not `Clone` and can be minted only inside
-/// [`mod@crate::secret`], so a design that swapped a whole `Upstream` under a
-/// lock would have to resolve credentials again or move them between threads
-/// under contention. An index behind an [`AtomicUsize`] moves one machine
-/// word; every credential stays exactly where it was resolved, and a
-/// connection thread reads the serving backend once at the top of its
-/// exchange, so a failover between two of its reads is not possible.
+// History: design-decisions.md, "Trims: gateway, profile and provider module docs", gateway/upstream.rs `Upstream` struct doc.
 pub struct Upstream {
     /// The assigned backend first, then failover candidates in the user's own
     /// configuration order. Never empty.
@@ -608,12 +619,11 @@ fn bearer(credential: &Secret) -> String {
 ///   [`AutoHeaderValue::None`] — the harness's own headers are forwarded, and
 ///   a gateway that added its own would be visible to the provider as a
 ///   client the harness is not.
-/// - `allow_non_standard_methods(true)` — the method is forwarded, not
-///   vetted.
 ///
 /// Timeouts are left at `ureq`'s defaults, which are unset. A streaming
 /// response may legitimately go minutes between events, and a receive
 /// timeout here would cut a long generation off mid-stream.
+// History: design-decisions.md, "Trims: gateway, profile and provider module docs", gateway/upstream.rs `agent` doc.
 pub(super) fn agent() -> Agent {
     Agent::new_with_config(
         Agent::config_builder()

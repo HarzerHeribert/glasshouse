@@ -105,14 +105,15 @@ pub(crate) fn signal_process(
     // `.cmd` shims, launched as `cmd.exe /C harness.cmd ...`, so the direct
     // child is `cmd.exe` and the real long-running process (`node.exe`) is a
     // grandchild — only the job-object path can reach it. See [`JobHandle`].
-    if let Some(job) = job {
-        if job.terminate().is_ok() {
-            return Ok(());
-        }
-        // TerminateJobObject itself failed (distinct from AssignProcessToJobObject
-        // having failed back at spawn time, which would have left `job` as
-        // `None`). Fall through to the direct killer as a last resort.
+    if let Some(job) = job
+        && job.terminate().is_ok()
+    {
+        return Ok(());
     }
+    // A `job` whose TerminateJobObject failed (distinct from
+    // AssignProcessToJobObject having failed back at spawn time, which would
+    // have left `job` as `None`) falls through to the direct killer as a last
+    // resort.
 
     // portable-pty 0.9.0's `WinChildKiller::kill` has its result inverted: it
     // calls `TerminateProcess`, which returns *non-zero on success*, but

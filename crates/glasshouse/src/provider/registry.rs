@@ -2,34 +2,21 @@
 //! Glasshouse can describe, honest about the fact that their quotas do not
 //! work the same way.
 //!
-//! # Why this is a derived view, not a rewrite
-//!
 //! The kinds themselves already exist and already ship: a harness's own
 //! subscription and a direct provider are [`crate::profile::BackendResource`]
-//! variants resolved for every launch, and the concrete providers — routers,
-//! generic templates, and the two local-inference servers — are
+//! variants resolved for every launch, and the concrete providers are
 //! [`crate::provider::templates`]. Nothing here replaces either. This module
 //! adds the one thing neither states on its own: **which quota shape each
-//! entry actually has**, which is the map's own fixed requirement for this
-//! phase — subscriptions, metered keys, and local inference are normalized
-//! into one list without being told apart, and told apart is exactly what a
-//! `BackendResource::DirectProvider { provider: "ollama" }` and a
-//! `BackendResource::DirectProvider { provider: "openrouter" }` are not
-//! today: both are "a direct provider" and nothing distinguishes the one
-//! that cannot run out of money from the one that can. That is
-//! [`Locality`] and [`QuotaModel`].
-//!
-//! # What this does not do
+//! entry actually has**. That is [`Locality`] and [`QuotaModel`].
 //!
 //! It does not add a network call — every entry here is built from
 //! [`crate::provider::templates`] and [`crate::integrations::IntegrationId`],
 //! both already-declared, static catalogs. It does not read or hold a
 //! credential — [`ResourceKind::DirectProvider`] carries a provider *name*,
 //! the same thing [`crate::profile::BackendResource::DirectProvider`] already
-//! carries. And it does not track live quota telemetry (a rolling-window
-//! reset time, a spent balance, a request count) — that is Phase 32B, which
-//! does not exist yet; [`QuotaModel`] names the *shape* a resource's quota
-//! takes, not its current state.
+//! carries. And it does not track live quota telemetry; [`QuotaModel`]
+//! names the *shape* a resource's quota takes, not its current state.
+// History: design-decisions.md, "Trims: provider module docs", registry.rs module doc.
 
 use crate::integrations::{IntegrationId, IntegrationKind};
 use crate::provider;
@@ -257,11 +244,7 @@ fn locality_of(provider_name: &str) -> Locality {
 ///   (line 1190), and Ollama and llama.cpp (lines 1191, 1192) — the last two
 ///   distinguished from every other entry by [`Locality::Local`];
 /// - one [`ResourceKind::GlasshouseGateway`].
-///
-/// This lists what Glasshouse can describe, not what a user has configured
-/// — a template with no credential is still a resource *kind* the registry
-/// knows about, the same way [`crate::provider::templates`] itself lists
-/// providers nobody has necessarily set up.
+// History: design-decisions.md, "Trims: provider module docs", registry.rs `registry` doc.
 pub fn registry() -> Vec<ResourceKind> {
     let mut out: Vec<ResourceKind> = IntegrationId::ALL
         .iter()

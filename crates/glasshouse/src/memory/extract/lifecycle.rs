@@ -1,37 +1,23 @@
 //! Turning a session's recorded lifecycle events into something extraction
 //! can read (Phase 21).
 //!
-//! # Why the event log, and not the terminal
+//! A `glasshouse hook` process is a separate short-lived program with no
+//! access to the interface's scrollback, so the event log is what
+//! Glasshouse actually has after a turn ends — and it is safe by
+//! construction: `lifecycle_events` has no column a conversation could
+//! reach (migration 5, enforced by
+//! `the_hook_command_never_reads_its_payload`), so a chunk built here
+//! cannot contain conversation text, because there is none to contain.
 //!
-//! Phase 21 asks the extractor to be fed *"bounded session/event chunks"*.
-//! The **event** half is what Glasshouse actually has after a turn ends: a
-//! `glasshouse hook` process is a separate short-lived program with no access
-//! to the interface's scrollback, and the project database is the only thing
-//! both it and the interface can see.
+//! The honest limit: an event chunk carries the *shape* of a session, not
+//! why a decision was made, so `glasshouse memory extract --activity`
+//! remains the way to feed extraction something a person chose.
 //!
-//! It is also the only source that is safe by construction. A hook payload
-//! carries the user's prompt and the model's last message; Glasshouse's
-//! handler drains that stream **unread**, and `lifecycle_events` has no
-//! column a conversation could reach — migration 5 says so and
-//! `the_hook_command_never_reads_its_payload` enforces it. So a chunk built
-//! here cannot contain conversation text, because there is none to contain.
-//!
-//! **State the cost plainly, because it is the honest limit of this
-//! path.** What an event chunk carries is the *shape* of a session — turns
-//! starting and ending, how a turn ended, how much text was delivered and
-//! from where, a process exiting, a gateway failing. That is enough for a
-//! model to record a finding about how a session behaved and nowhere near
-//! enough for it to recover why a decision was made. Until Glasshouse has a
-//! richer source that does not read a conversation, automatic extraction is
-//! bounded by this, and `glasshouse memory extract --activity` remains the
-//! way to feed it something a person chose.
-//!
-//! # Why the range is computed from what survived the budget
-//!
-//! [`SessionChunk::build`] keeps the newest entries when the budget binds. A
-//! provenance range naming events whose text never reached the model would be
-//! a claim this module cannot support, so [`chunk_for_session`] narrows the
-//! range to the entries that actually got in. See its implementation note.
+//! [`SessionChunk::build`] keeps the newest entries when the budget binds,
+//! so [`chunk_for_session`] narrows its provenance range to the entries
+//! that actually got in — naming an event whose text never reached the
+//! model would be a claim this module cannot support.
+//! History: design-decisions.md, "Trims: memory and session module docs", memory/extract/lifecycle.rs module doc.
 
 use crate::events::log::LoggedEvent;
 use crate::events::{LifecycleEvent, TurnOutcome};

@@ -90,29 +90,21 @@ pub fn install_panic_hook() {
 
 /// Install signal handling for interrupt and termination.
 ///
-/// While the terminal is not engaged, a signal exits immediately, matching what
-/// a user expects from a normal CLI command. While the TUI owns the terminal
-/// the first signal asks for a graceful shutdown and a second one forces the
-/// process down, restoring the terminal either way.
+/// While the terminal is not engaged, a signal exits immediately, matching
+/// what a user expects from a normal CLI command. While the TUI owns the
+/// terminal the first signal asks for a graceful shutdown and a second one
+/// forces the process down, restoring the terminal either way. "A second
+/// one" counts **signals**, not shutdown requests — closing a terminal
+/// delivers `SIGHUP` and a `POLLHUP` at the same instant, two observations
+/// of one event, and counting requests instead once forced the process down
+/// through `force_exit` (exit 130, no destructors) on roughly half of clean
+/// hangups on macOS and all of them in a Linux container. The residue of
+/// that race is answered in `interpret_signal` (named rather than linked:
+/// it is private, and a public doc comment linking a private item fails
+/// the gate).
 ///
-/// "A second one" counts **signals**, not shutdown requests, and the difference
-/// is not academic. This used to read `SHUTDOWN_REQUESTED` and treat a flag
-/// that was already set as an impatient second Ctrl-C. That was true for as
-/// long as a signal was the only thing that could set it — and it stopped being
-/// true when `tui::event::wait_for_terminal` began answering a terminal hangup
-/// by requesting shutdown itself. Closing a terminal delivers `SIGHUP` and a
-/// `POLLHUP` at the same instant: two observations of one event. Whenever the
-/// handler thread was scheduled second, one hangup looked like two interrupts
-/// and the process was forced down through `force_exit` — no destructors,
-/// exit code 130 — instead of shutting down cleanly and exiting 0. Measured at
-/// roughly even odds on macOS and **ten times out of ten** inside a Linux
-/// container.
-///
-/// The residue of that same race — the handler arriving *after* the wind-down
-/// has given the terminal back — is answered in `interpret_signal`, which is
-/// where "while the terminal is not engaged" above stopped being the whole
-/// story. (Named rather than linked: it is private, and a public doc comment
-/// that links a private item is a `rustdoc` warning and a failed gate job.)
+/// History: design-decisions.md, "Trims: the remaining module docs, second
+/// packet", `install_signal_handler`.
 pub fn install_signal_handler() -> Result<()> {
     ctrlc::set_handler(|| match interpret_signal() {
         SignalMeaning::LeaveImmediately | SignalMeaning::StopWaiting => force_exit(),
@@ -134,45 +126,24 @@ enum SignalMeaning {
 
 /// Decide what a signal means, and record that it arrived.
 ///
-/// This is the function that *asks* the policy; the handler above only acts on
-/// the answer. It is separate because a handler can only be exercised by
-/// ending the process, and the distinction it draws is worth a test.
-///
-/// # Why a terminal that has been *given back* is not a terminal that was
-/// never held
-///
-/// This used to ask [`TERMINAL_ENGAGED`] alone: nothing owns the terminal, so
-/// there is nothing to wind down, so leave. That is right for `glasshouse
-/// sessions`, and it is wrong for the last few milliseconds of every TUI run,
-/// because the two things that end a run when a terminal closes are **two
-/// observations of one event**: `tui::event`'s `POLLHUP` detector, and the
-/// `SIGHUP` the kernel delivers to the session at the same instant. The
-/// detector's answer is to wind down, and winding down restores the terminal —
-/// so if the handler thread is scheduled after that, the *same event* is read
-/// as "nothing owns the terminal" and the run is forced down with exit 130
-/// having done everything right.
-///
-/// Measured before this changed: **2.3% of clean hangups** ended at
-/// [`EXIT_INTERRUPTED`], on the tree that introduced `tui::event`'s watchdog
-/// and on the tree before it — 8 in 350 and 15 in 600 in a loaded Linux
-/// container. It is the tolerance `tests/terminal_loss.rs` used to carry, and
-/// it is a race *lost by exiting too fast*.
-///
-/// [`TERMINAL_EVER_ENGAGED`] is what tells the two apart, and the fix is to
-/// **remove** the special case rather than add one: a process that has ever
+/// This is the function that *asks* the policy; the handler above only acts
+/// on the answer, kept separate because the distinction is worth a test on
+/// its own. Asking [`TERMINAL_ENGAGED`] alone is wrong for the last few
+/// milliseconds of every TUI run: `tui::event`'s `POLLHUP` detector and the
+/// kernel's `SIGHUP` are two observations of one event, and if the detector
+/// restores the terminal before the signal handler runs, the same event
+/// reads as "nothing owns the terminal" and forces exit 130 having done
+/// everything right — measured at 2.3% of clean hangups before the fix.
+/// [`TERMINAL_EVER_ENGAGED`] tells the two apart: a process that has ever
 /// held the terminal falls through to the ordinary counting rule, so the
-/// hangup's `SIGHUP` is the first ask whichever side of the restore it lands
-/// on, and the two interleavings stop having different answers. Nothing about
-/// the wind-down gets slower; the branch that used to call
-/// [`std::process::exit`] now returns and lets it finish.
+/// hangup's `SIGHUP` is the first ask whichever side of the restore it
+/// lands on. This costs exactly **one** signal — a `SIGTERM`/`SIGINT`
+/// arriving after the terminal was given back is answered by
+/// [`request_shutdown`] instead of forcing, and the next one forces as
+/// always — which is why `tui::event`'s watchdog sends its `SIGTERM` twice.
 ///
-/// # What this costs, stated rather than buried
-///
-/// Exactly **one** signal. A `SIGTERM` or `SIGINT` arriving after the terminal
-/// has been given back is answered by [`request_shutdown`] instead of by
-/// forcing, and the next one forces as it always did. That matters for
-/// `tui::event`'s watchdog, which is why it sends its `SIGTERM` twice and says
-/// so; and it is the reason this counts rather than swallowing.
+/// History: design-decisions.md, "Trims: the remaining module docs, second
+/// packet", `interpret_signal`.
 fn interpret_signal() -> SignalMeaning {
     // Never held the terminal: an ordinary command, and a signal ends it now.
     if !TERMINAL_ENGAGED.load(Ordering::SeqCst) && !TERMINAL_EVER_ENGAGED.load(Ordering::SeqCst) {
@@ -313,26 +284,18 @@ impl Drop for TerminalGuard {
 /// This is what a session attached directly to the user's terminal needs.
 /// [`TerminalGuard`] is wrong for that job: a harness draws its own TUI and
 /// usually enters the alternate screen itself, so wrapping it in a second
-/// one would put the session's own output on a screen that is thrown away
-/// when Glasshouse leaves it — the user would watch their session scroll by
-/// and then see it vanish on exit.
+/// one would strand the user watching their session vanish on exit. Raw
+/// mode stops the local line discipline from buffering lines, echoing
+/// keystrokes, and — the part that matters most — turning Ctrl-C into a
+/// signal for *Glasshouse* rather than a `0x03` byte forwarded to the
+/// harness. Restoration goes through the same [`restore_terminal`] and
+/// `TERMINAL_ENGAGED` flag as [`TerminalGuard`], and that shared path emits
+/// `LeaveAlternateScreen` unconditionally even though this guard never
+/// entered one — deliberate, since the *harness* very likely did, and a
+/// harness that dies without leaving it would otherwise strand the user.
 ///
-/// Raw mode is what the session genuinely does need: it stops the local line
-/// discipline from buffering lines, echoing keystrokes, and — the part that
-/// matters most — turning Ctrl-C into a signal for *Glasshouse*. In raw mode
-/// Ctrl-C arrives as a plain `0x03` byte that gets forwarded to the harness,
-/// which is exactly where it belongs while a session owns the terminal.
-///
-/// Restoration goes through the same [`restore_terminal`] and
-/// `TERMINAL_ENGAGED` flag as [`TerminalGuard`], so a panic or a signal
-/// restores a raw-mode session just as reliably as a full-screen one.
-///
-/// That shared path also emits `LeaveAlternateScreen` on the way out, which
-/// this guard never entered. That is deliberate, not an oversight to tidy
-/// away: the *harness* very likely entered one, and a harness that dies
-/// without leaving it would otherwise strand the user on a screen they
-/// cannot get off. Sending it unconditionally repairs that case and costs
-/// nothing in the case where no alternate screen was ever entered.
+/// History: design-decisions.md, "Trims: the remaining module docs, second
+/// packet", `RawModeGuard`.
 #[derive(Debug)]
 pub struct RawModeGuard {
     _private: (),

@@ -1,51 +1,23 @@
 //! The normalized Glasshouse lifecycle-event stream.
-//!
 //! One stream, shared by the TUI, the router, memory, the API and the MCP
 //! surface. Adapters translate a harness's own vocabulary into
 //! [`LifecycleEvent`]; nothing downstream ever learns which harness produced
-//! one. That is the whole architectural requirement of the capability map's
-//! Phase 12, and it is why this module names no harness at all —
-//! `no_harness_is_named_in_the_core_event_stream` keeps it that way, and
-//! [`crate::session::lifecycle`] is the single place allowed to know either
-//! harness's spelling.
-//!
-//! # The two distinctions this module exists to preserve
-//!
-//! Both have already produced defects in products of this shape, so both are
-//! expressed in the types rather than left to a reader's discipline.
-//!
-//! **A process exiting is not a turn completing.** A harness exits zero when
-//! the user types `/quit` halfway through a task and exits zero when it has
-//! finished; the exit status cannot tell those apart, because the information
-//! is not in it. So [`ProcessExit`] has no `success()`, there is no
-//! conversion from it to [`TurnOutcome`], and [`task_outcome`] — the one
-//! function a consumer calls to ask "did the work finish?" — answers `None`
-//! for a session that only ever exited.
-//!
-//! **Waiting for the user is not idle.** [`LifecycleEvent::WaitingForUser`]
-//! is recorded only when a harness says so. Silence is never promoted to it,
-//! and never demoted from it either.
-//!
-//! # Why quiet can never become completion by accident
-//!
-//! The map carries a standing rule: *do not infer successful task completion
-//! solely because a child process became quiet.* Being careful is not a
-//! mechanism, so two independent ones enforce it:
-//!
-//! 1. [`LifecycleEvent::TurnEnded`] is constructed in exactly **one**
-//!    production function in this crate — the harness translator in
-//!    [`crate::session::lifecycle`], whose only input is an event name a
-//!    harness reported. `turn_completion_is_minted_in_exactly_one_place`
-//!    scans the source and fails if a second site appears.
-//! 2. [`task_outcome`] reads `TurnEnded` records and nothing else, so a
-//!    history full of clean exits and ended output still answers "unknown".
-//!
-//! # What is *not* here
-//!
-//! Durable storage. The map splits raw event recording into its own phase,
-//! and this module offers [`EventSink`] as the seam it will attach to: the
-//! bus hands every recorded event to a sink if one is installed, and holds a
-//! bounded in-memory history either way.
+//! one — `no_harness_is_named_in_the_core_event_stream` keeps it that way,
+//! and [`crate::session::lifecycle`] is the single place allowed to know
+//! either harness's spelling.
+//! A process exiting is not a turn completing: the exit status cannot tell
+//! `/quit` mid-task from finished work, so [`ProcessExit`] has no
+//! `success()`, no conversion to [`TurnOutcome`], and [`task_outcome`]
+//! answers `None` for a session that only ever exited. Waiting for the user
+//! is not idle either: [`LifecycleEvent::WaitingForUser`] is recorded only
+//! when a harness says so, never promoted to or demoted from by silence.
+//! Quiet cannot become completion by accident: [`LifecycleEvent::TurnEnded`]
+//! is minted in exactly **one** production function, the harness translator
+//! in [`crate::session::lifecycle`] (`turn_completion_is_minted_in_exactly_one_place`
+//! scans for a second site), and [`task_outcome`] reads it and nothing else.
+//! Durable storage is not here: this module offers [`EventSink`] as the seam
+//! it attaches to.
+// History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/events/mod.rs module doc.
 
 pub mod bus;
 pub mod log;
@@ -118,31 +90,22 @@ pub enum LifecycleEvent {
     /// hook saw it — one event per distinct path an `Edit`, `Write`,
     /// `MultiEdit` or `NotebookEdit` named.
     ///
-    /// # Touched means changed, and read-shaped tools are deliberately absent
+    /// Touched means changed: `Read`, `Grep` and `Glob` paths are not
+    /// recorded, because a memory can honestly reference a file the session
+    /// *changed*, and admitting a mere read here would let map line 1139's
+    /// `referenced` association be earned by a glance.
     ///
-    /// `Read`, `Grep` and `Glob` carry paths too and none of them is recorded.
-    /// A memory can honestly reference a file the session *changed*; that the
-    /// session looked at a file is a much weaker fact wearing the same shape,
-    /// and admitting it here would let map line 1139's `referenced`
-    /// association be earned by a glance.
+    /// The path is repo-relative and `/`-separated
+    /// ([`crate::memory::normalize_observed_path`]'s spelling), so a path
+    /// outside the project root is dropped before it ever reaches an event.
+    /// It is the user's own file name and nothing else: no content, no diff,
+    /// no tool output.
     ///
-    /// # The path, and what it is not
-    ///
-    /// Repo-relative and `/`-separated —
-    /// [`crate::memory::normalize_observed_path`]'s spelling, applied
-    /// by the writer, so a path outside the project root is dropped before it
-    /// ever reaches an event rather than stored and filtered later. It is the
-    /// user's own file name and nothing else: no content, no diff, no tool
-    /// output.
-    ///
-    /// # Not a state transition
-    ///
-    /// [`LifecycleEvent::implied_state`] answers `None`. A session editing a
-    /// file says nothing about whether it is running, idle or waiting — the
-    /// hook that records this fires while the harness is mid-turn, and
-    /// promoting that to `Running` would let a `PostToolUse` payload reach the
-    /// session state machine, which is exactly what `REPORTED_EVENTS` keeps
-    /// out.
+    /// Not a state transition: [`LifecycleEvent::implied_state`] answers
+    /// `None`, because the hook fires mid-turn and promoting this would let
+    /// a `PostToolUse` payload reach the session state machine, which
+    /// `REPORTED_EVENTS` keeps out.
+    // History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/events/mod.rs `LifecycleEvent::FileTouched`.
     FileTouched { path: String },
 }
 
@@ -436,28 +399,18 @@ pub struct Degradation {
 /// Degrade one unhealthy backend resource, and publish the fact against every
 /// session that was running on it.
 ///
-/// # Why this takes records rather than guessing
+/// Takes records rather than guessing: a session is affected if, and only
+/// if, its own record says it resolved to this backend resource — nothing
+/// is inferred from the harness, the launch profile, or a session being
+/// live. A session with no recorded backend resource is never affected
+/// (a native subscription, or one recorded before the column existed).
 ///
-/// A session is affected if, and only if, its own record says it resolved to
-/// this backend resource. Nothing is inferred from the harness, from the
-/// launch profile, or from the session being live.
-///
-/// The consequence is the capability line: **a session with no recorded
-/// backend resource is never affected.** That is a native subscription — a
-/// harness talking to its own vendor on the user's own account, which a
-/// Glasshouse gateway is not in the path of — or a session recorded before
-/// the column existed. Either way, a gateway that stopped answering has
-/// nothing to do with it, and degrading it would take away a session that is
-/// working perfectly.
-///
-/// # Why no session's lifecycle moves
-///
-/// A gateway failing is not a harness process failing, and the two need
-/// opposite responses. This publishes [`LifecycleEvent::GatewayUnhealthy`],
-/// which [`LifecycleEvent::implied_state`] deliberately maps to `None`: the
-/// harness is still running, still on screen, and still steerable by the user
-/// even while its backend is unreachable. Marking it failed would be a lie
-/// about a live process.
+/// No session's lifecycle moves: a gateway failing is not a harness process
+/// failing, so this publishes [`LifecycleEvent::GatewayUnhealthy`], which
+/// [`LifecycleEvent::implied_state`] deliberately maps to `None` — the
+/// harness is still running, still on screen, still steerable, and marking
+/// it failed would be a lie about a live process.
+// History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/events/mod.rs `degrade_resource`.
 pub fn degrade_resource(
     bus: &EventBus,
     records: &[crate::session::SessionRecord],

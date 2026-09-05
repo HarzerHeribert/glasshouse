@@ -153,43 +153,23 @@ fn routing_fallback_json(reason: &config::RoutingFallback) -> serde_json::Value 
 /// Where this project's work would be routed, and why — capability map line
 /// 1681.
 ///
-/// # One ranking, not two
-///
-/// The decision is `crate::commands::route::route_recommendation`, which is the whole of
-/// `glasshouse route` as well (see its own doc comment). This handler
-/// classifies nothing, scores nothing and orders nothing; it turns the
-/// answer into JSON. Ruling 2 of this verb's packet: if the command and the
-/// door could rank separately they could disagree about where work should
-/// go, and nothing would fail while they did.
-///
-/// # "Without executing it", and how that is enforced rather than intended
-///
-/// Nothing on this path writes. It never takes the [`SessionRuntime`] lock —
-/// it has no session to reach — never touches `SessionApi`, never records an
-/// event, and never opens the evidence ledger. What it does open, it opens
-/// to read: the session store and the checkpoint store, for the candidate
-/// set. `tests/routing_api.rs` asserts the negative over the shipped binary
-/// rather than leaving it to this comment: the session list, the event log
-/// and `routing_observations` are all unchanged across a call, and the
-/// harness the project is configured with is never invoked.
-///
-/// # Bounds
-///
+/// One ranking, not two: the decision is
+/// `crate::commands::route::route_recommendation`, which is the whole of
+/// `glasshouse route` as well. This handler classifies, scores and orders
+/// nothing; it turns the answer into JSON — if the command and the door
+/// could rank separately they could disagree about where work should go.
+/// Without executing it, enforced rather than intended: nothing on this
+/// path writes, takes the [`SessionRuntime`] lock, touches `SessionApi`,
+/// records an event, or opens the evidence ledger. `tests/routing_api.rs`
+/// asserts the negative over the shipped binary: the session list, the
+/// event log and `routing_observations` are all unchanged across a call,
+/// and the configured harness is never invoked.
 /// `alternatives` is capped at [`MAX_ROUTE_ALTERNATIVES`] here rather than
-/// left to the caller, and it is a `min` rather than a rejection — the same
-/// shape [`project_events`] and [`query_memory`] use. The rest of the
-/// response is bounded by construction: one destination, one contribution
-/// per scoring term, and at most five lines of caveat.
-///
-/// # Errors
-///
-/// A malformed config is reported as it is by [`routing_model_status`], the
-/// verb next door — those two errors name a config file the caller can
-/// actually act on. Everything after that is refused with a fixed sentence,
-/// for [`memory_error_message`]'s reason: `routing_destinations` opens the
-/// project's database, and **every** `database::DatabaseError` variant names
-/// that file's absolute path, which lies outside what this door is scoped to
-/// and is not something a caller on the far end of a socket could repair.
+/// left to the caller (a `min`, not a rejection); everything after a
+/// malformed-config error is refused with a fixed sentence, because
+/// `routing_destinations` opens the project's database and every
+/// `database::DatabaseError` variant names that file's absolute path.
+// History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/api/unix/routing.rs `recommend_route`.
 pub(super) fn recommend_route(
     runtime: &Runtime,
     task: Option<&str>,

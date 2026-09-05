@@ -1,55 +1,21 @@
-//! Where the repository is standing, read cheaply.
+//! Where the repository is standing, read cheaply — without a `git`
+//! subprocess: a project need not be a Git repository at all, and
+//! Glasshouse must still be able to take a checkpoint, so this opens two or
+//! three small files under `.git` and parses them directly.
 //!
-//! The map asks a checkpoint to *include the current Git branch and commit
-//! when available*, and "when available" is doing real work: a project need
-//! not be a Git repository at all, and Glasshouse must still be able to take
-//! a checkpoint.
+//! [`last_change_commit`], [`is_ancestor`] and [`changed_paths`] are the
+//! deliberate exceptions: they do run `git`, but never on the checkpoint
+//! path, and each clears `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE` and
+//! `GIT_COMMON_DIR` from the child so an inherited value cannot silently
+//! point them at another repository. All three answer `None` — rendered by
+//! their consumers as *unknown* — rather than assume a clean tree or fresh
+//! memory when `git` is absent or the project is not a repository.
 //!
-//! # No subprocess
-//!
-//! This opens two or three small files and parses them. It does not run
-//! `git`, and that is deliberate rather than incidental:
-//!
-//! - a checkpoint can be taken at a task boundary, on a thread that is also
-//!   serving a terminal, and spawning a process there is a latency nobody
-//!   asked for;
-//! - `git` need not be installed for a `.git` directory to exist and be
-//!   readable — a repository cloned onto a machine whose Git was uninstalled
-//!   is still a repository;
-//! - a subprocess inherits an environment, and `GIT_DIR` in that environment
-//!   would silently point this at another repository.
-//!
-//! # The one deliberate exception, and what it is scoped to
-//!
-//! [`last_change_commit`] and [`is_ancestor`] **do** run `git`, and the
-//! objections above are answered rather than waived. They are not on the
-//! checkpoint path: nothing takes a checkpoint through them, and no thread
-//! serving a terminal calls them — their caller is memory retrieval
-//! (`crate::memory::inject`'s file section and `glasshouse memory search
-//! --path`), which is already several database reads deep and is bounded at
-//! one `git log` per path and one `merge-base` per memory. A machine with no
-//! `git`, or a project that is no repository, makes both answer `None`,
-//! which their one consumer renders as *unknown* freshness and shows the
-//! memory anyway. And the environment objection is met head-on: both clear
-//! `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE` and `GIT_COMMON_DIR` from
-//! the child rather than trusting the caller's, so an inherited `GIT_DIR`
-//! cannot silently point them at another repository.
-//!
-//! There is no file-reading version of *"which commit last changed this
-//! path"*: answering it means walking the commit graph and diffing trees out
-//! of packfiles, which is a decompressor and a delta resolver, not two small
-//! files. Map line 1142's freshness is worth one bounded subprocess and is
-//! not worth that.
-//!
-//! # Worktrees, which is the case that actually bites
-//!
-//! In a linked worktree `.git` is a **file** holding `gitdir: <path>`, that
-//! directory has its own `HEAD` and its own `commondir`, and the refs live in
-//! the *common* directory rather than beside the HEAD. Glasshouse's own
-//! development happens in linked worktrees, so a reader that only handled the
-//! `.git`-is-a-directory case would have reported nothing in exactly the
-//! situation this project runs in every day. Both shapes are handled, and
-//! both are tested against real fixtures.
+//! A linked worktree's `.git` is a file holding `gitdir: <path>`, with its
+//! own `HEAD` and refs living in a separate common directory — Glasshouse's
+//! own development runs this way, so both shapes are handled and tested.
+//
+// History: design-decisions.md, "Trims: the remaining module docs", checkpoint/git.rs module doc.
 
 use std::path::{Path, PathBuf};
 
@@ -400,28 +366,13 @@ fn is_object_name(value: &str) -> bool {
 /// Run one `git` subcommand in `root` and return its trimmed stdout, or
 /// `None`.
 ///
-/// The single place this module spawns a process, so the environment scrub
-/// the module documentation promises is made once rather than remembered
-/// twice.
-///
-/// - **`current_dir(root)` and no `-C`, no `--git-dir`.** The repository is
-///   named by the working directory and by nothing a caller can smuggle in.
-/// - **Four variables removed.** `GIT_DIR`, `GIT_WORK_TREE`,
-///   `GIT_COMMON_DIR` and `GIT_INDEX_FILE` each override the working
-///   directory, and Glasshouse's own development runs inside linked
-///   worktrees where at least one of them is routinely set. Inheriting them
-///   would answer about whichever repository the parent happened to be
-///   pointed at — silently, and with a real commit.
-/// - **No shell, ever.** `args` are argv elements, so a path is a literal
-///   however it is spelled; the caller puts a `--` in the list before any
-///   path so a file named `-n` cannot become a flag.
-/// - **`stdin(null)`.** `git` must never block waiting for input on a path
-///   whose whole purpose is to answer a label quickly.
-///
-/// `None` for every way of not getting an answer — `git` absent, not a
-/// repository, a nonzero exit, output that is not UTF-8, an empty answer —
-/// because the one consumer renders all of them as *unknown* and a caller
-/// that could tell them apart would still do nothing different.
+/// The single place this module spawns a process. `current_dir(root)` with
+/// no `-C`/`--git-dir`; the four worktree-pointing variables removed so an
+/// inherited one cannot silently point this at another repository; no
+/// shell, so a path is always a literal argv element; `stdin(null)` so a
+/// call can never block waiting on input. `None` for every way of not
+/// getting an answer, since the one consumer treats them all as *unknown*.
+// History: design-decisions.md, "Trims: the remaining module docs", checkpoint/git.rs `git_output`.
 fn git_output(root: &Path, args: &[&str]) -> Option<String> {
     let output = std::process::Command::new("git")
         .args(args)
@@ -597,6 +548,62 @@ pub fn is_ancestor(root: &Path, ancestor: &str, descendant: &str) -> Option<bool
         Some(1) => Some(false),
         _ => None,
     }
+}
+
+/// Every repo-relative, `/`-separated path the working tree reports as
+/// changed against the index — tracked or not — for the guardrail door's
+/// preserve set (capability map line 1044).
+///
+/// Uses `git status --porcelain=v1 -z --untracked-files=all` directly
+/// rather than [`WorkingTreeStatus`] or `git_output`: `-z` survives paths
+/// with spaces or non-ASCII bytes, `--untracked-files=all` reports files the
+/// index-only reader cannot see, and `git_output`'s `None`-on-empty-stdout
+/// would collapse a clean tree into *unknown* — exactly the confusion line
+/// 1044 forbids, since a caller reading `None` as "nothing to preserve"
+/// would preserve nothing when it should preserve everything.
+/// `Some(vec![])` only for a genuinely clean tree.
+// History: design-decisions.md, "Trims: the remaining module docs", checkpoint/git.rs `changed_paths`.
+pub fn changed_paths(root: &Path) -> Option<Vec<String>> {
+    let output = std::process::Command::new("git")
+        .args([
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--",
+        ])
+        .current_dir(root)
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_INDEX_FILE")
+        .stdin(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let text = String::from_utf8(output.stdout).ok()?;
+
+    let mut records = text.split('\0').filter(|record| !record.is_empty());
+    let mut paths = Vec::new();
+    while let Some(record) = records.next() {
+        if record.len() < 3 {
+            continue;
+        }
+        let status = &record[..2];
+        if status.starts_with('R') || status.starts_with('C') {
+            // The old path is this record (with the status); the new path —
+            // where the working tree holds the file now — is the next `-z`
+            // record, with no status prefix of its own.
+            if let Some(new_path) = records.next() {
+                paths.push(new_path.to_owned());
+            }
+        } else {
+            paths.push(record[3..].to_owned());
+        }
+    }
+    Some(paths)
 }
 
 #[cfg(test)]
@@ -1061,5 +1068,113 @@ mod tests {
                 "a changed-file path must be relative to the repository root: {path}"
             );
         }
+    }
+
+    // -------------------------------------------------------------------
+    // `changed_paths` — a real repository, a real `git` subprocess.
+    // -------------------------------------------------------------------
+
+    fn git(root: &Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .args(args)
+            .current_dir(root)
+            .output()
+            .expect("git must be installed on every leg this gate runs");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    }
+
+    /// A repository with an identity of its own, so the test never depends
+    /// on the machine's `user.name`/`user.email` being configured.
+    fn git_init(root: &Path) {
+        git(root, &["init", "--quiet"]);
+        git(root, &["config", "user.name", "Glasshouse Test"]);
+        git(root, &["config", "user.email", "test@example.invalid"]);
+        git(root, &["config", "commit.gpgsign", "false"]);
+    }
+
+    /// A clean checkout — nothing staged, nothing untracked — reports an
+    /// empty list, not `None`: *clean* and *unknown* are different answers.
+    #[test]
+    fn a_clean_tree_is_some_empty_not_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        git_init(root);
+        std::fs::write(root.join("committed.txt"), "steady\n").unwrap();
+        git(root, &["add", "--", "committed.txt"]);
+        git(root, &["commit", "--quiet", "-m", "initial"]);
+
+        assert_eq!(changed_paths(root), Some(Vec::new()));
+    }
+
+    /// An untracked file the transitioning session never staged still shows
+    /// up — the gap `WorkingTreeStatus::detect` cannot close.
+    #[test]
+    fn an_untracked_file_is_reported() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        git_init(root);
+        std::fs::write(root.join("committed.txt"), "steady\n").unwrap();
+        git(root, &["add", "--", "committed.txt"]);
+        git(root, &["commit", "--quiet", "-m", "initial"]);
+
+        std::fs::write(root.join("notes.md"), "someone else's edit\n").unwrap();
+
+        assert_eq!(changed_paths(root), Some(vec!["notes.md".to_owned()]));
+    }
+
+    /// A tracked file modified but not staged is reported too.
+    #[test]
+    fn a_modified_tracked_file_is_reported() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        git_init(root);
+        std::fs::write(root.join("tracked.txt"), "before\n").unwrap();
+        git(root, &["add", "--", "tracked.txt"]);
+        git(root, &["commit", "--quiet", "-m", "initial"]);
+
+        std::fs::write(root.join("tracked.txt"), "after\n").unwrap();
+
+        assert_eq!(changed_paths(root), Some(vec!["tracked.txt".to_owned()]));
+    }
+
+    /// A path nested under a subdirectory is reported repo-relative and
+    /// `/`-separated, the same spelling `FileClaim::path` uses.
+    #[test]
+    fn a_nested_path_is_repo_relative_and_slash_separated() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        git_init(root);
+        std::fs::write(root.join("README.md"), "root\n").unwrap();
+        git(root, &["add", "--", "README.md"]);
+        git(root, &["commit", "--quiet", "-m", "initial"]);
+
+        std::fs::create_dir_all(root.join("src/nested")).unwrap();
+        std::fs::write(root.join("src/nested/new.rs"), "// new\n").unwrap();
+
+        assert_eq!(
+            changed_paths(root),
+            Some(vec!["src/nested/new.rs".to_owned()])
+        );
+    }
+
+    /// Not a repository at all: `None`, never an empty list that would read
+    /// as "nothing to preserve".
+    #[test]
+    fn a_non_repository_is_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(changed_paths(tmp.path()), None);
+    }
+
+    /// A path that does not exist at all is still no repository, and still
+    /// `None`.
+    #[test]
+    fn a_missing_root_is_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert_eq!(changed_paths(&tmp.path().join("does-not-exist")), None);
     }
 }

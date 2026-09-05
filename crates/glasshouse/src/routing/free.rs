@@ -1,43 +1,24 @@
 //! The free pool: which zero-cost resources exist, what is left of each, and
 //! which of them is currently able to serve.
 //!
-//! # Health comes from work, never from a probe
+//! Phase 9I line 534 asks Glasshouse to avoid consuming scarce free requests
+//! on health probes: [`FreePool::observe`] is the **only** thing that
+//! changes a resource's health, it takes a [`WorkloadOutcome`] that a real
+//! exchange produced, and there is no client, socket or timer anywhere in
+//! this file — `routing::tests::no_routing_policy_can_make_a_request` scans
+//! for that. The production feed is the gateway's own request path.
 //!
-//! Phase 9I line 534 asks Glasshouse to *"avoid consuming scarce free
-//! requests on health probes when actual workload can provide health
-//! signals"*. A health checker that burns the quota it is protecting is a
-//! defect with a passing test, so this module is built so that one cannot be
-//! written here: [`FreePool::observe`] is the **only** thing that changes a
-//! resource's health, it takes a [`WorkloadOutcome`] that a real exchange
-//! produced, and there is no client, no socket and no timer anywhere in this
-//! file — `routing::tests::no_routing_policy_can_make_a_request` scans for
-//! that.
+//! Phase 9I line 528: [`Allowance`] has one variant for a request pool and
+//! one for a token budget, with no shared arithmetic, because a token
+//! budget decremented by one per request reads as healthy for a very long
+//! time and then is not. A request pool holds only what a **real response
+//! said** — a limit, a remaining count and a reset instant, each `None`
+//! until a provider stated it; Glasshouse defines no window of its own.
 //!
-//! The production feed is the gateway's own request path: every exchange it
-//! completes already knows the credential it used, the status the provider
-//! returned and whether it reached the provider at all.
-//!
-//! # A request pool is not a token budget
-//!
-//! Phase 9I line 528 — *"track request-pool limits separately from
-//! token-priced limits"*. [`Allowance`] has one variant for each and no
-//! shared arithmetic, because the failure mode of collapsing them is
-//! specific and quiet: a token budget decremented by one per request reads as
-//! healthy for a very long time and then is not.
-//!
-//! What a request pool holds is what a **real response said** — a limit, a
-//! remaining count and a reset instant, each `None` until a provider actually
-//! stated it. Glasshouse defines no window of its own. A guessed window is
-//! how a router talks itself into believing a pool has refilled.
-//!
-//! # Per credential, because two keys are two allowances
-//!
-//! Phase 9I lines 537 and 538. Allowance state is keyed by [`CredentialId`]
-//! and health by credential **and** model, so exhausting one key says nothing
-//! about the other key, and exhausting one model says nothing about the
-//! others behind the same key. Keying either of these by provider is the
-//! mistake the two lines exist to name; `crates/glasshouse/tests/` carries
-//! the test that fails when it is made.
+//! Phase 9I lines 537, 538: allowance state is keyed by [`CredentialId`] and
+//! health by credential **and** model, so exhausting one key or model says
+//! nothing about another.
+// History: design-decisions.md, "Trims: routing module docs", routing/free.rs module doc.
 
 use std::time::{Duration, Instant};
 
@@ -457,30 +438,20 @@ impl ResourceHealth {
     /// One rate-limit or capacity failure — the two outcomes Phase 9I line
     /// 535 names — and the cooldown that follows.
     ///
-    /// **A cooldown a provider declared and one Glasshouse invented are not
-    /// the same kind of fact.** Capability map line 1319 makes the provider's
-    /// own answer *authoritative* for a temporary scheduling block, not
-    /// merely preferred, so the two take different paths here:
+    /// A cooldown a provider declared and one Glasshouse invented are not
+    /// the same kind of fact: capability map line 1319 makes the provider's
+    /// own answer *authoritative*. **A declared `retry_after` applies as
+    /// given, and immediately** — [`MAX_COOLDOWN`] does not apply to it,
+    /// since that bounds only what Glasshouse imposes *by itself* and
+    /// clamping a stated wait down would override the provider. **Without
+    /// one, the bounded doubling from [`BASE_COOLDOWN`] applies**, once
+    /// there have been [`FAILURES_BEFORE_COOLDOWN`] failures, and
+    /// [`Self::backoff`] applies [`MAX_COOLDOWN`] to that path.
     ///
-    /// - **A declared `retry_after` applies as given, and immediately.**
-    ///   [`FAILURES_BEFORE_COOLDOWN`] exists because *inventing* a cooldown
-    ///   out of one ordinary `429` would empty a pool of perfectly good
-    ///   resources; nothing is invented when the provider stated the wait
-    ///   itself, and scheduling work against a resource that just told us to
-    ///   hold is exactly the block line 1319 forbids. [`MAX_COOLDOWN`] does
-    ///   not apply either — it bounds what Glasshouse imposes *by itself*
-    ///   (see its own doc), never what a provider declared. Clamping a stated
-    ///   one-hour wait down to fifteen minutes is overriding the provider,
-    ///   which is the whole of what this line rules out.
-    /// - **Without one, the bounded doubling from [`BASE_COOLDOWN`] applies**,
-    ///   and only once there have been [`FAILURES_BEFORE_COOLDOWN`] of them.
-    ///   [`Self::backoff`] applies [`MAX_COOLDOWN`] itself, so the ceiling on
-    ///   the invented path is unchanged by the split.
-    ///
-    /// A declared wait that is *shorter* than a cooldown already in place
-    /// shortens it, for the same reason: authoritative means authoritative in
-    /// both directions, and it is the same rule that lets
-    /// [`WorkloadOutcome::Served`] clear a cooldown outright.
+    /// A declared wait *shorter* than a cooldown already in place shortens
+    /// it, for the same authoritative-in-both-directions reason
+    /// [`WorkloadOutcome::Served`] clears a cooldown outright.
+    // History: design-decisions.md, "Trims: routing module docs", routing/free.rs `fn fail`.
     fn fail(&mut self, retry_after: Option<Duration>, now: Instant) {
         self.consecutive_failures = self.consecutive_failures.saturating_add(1);
         match retry_after {
@@ -556,43 +527,26 @@ impl FreePool {
     /// `resource` — capability map line 1599's bridge, and the only entry
     /// point that does not learn.
     ///
-    /// # Why this is not [`FreePool::observe`]
+    /// Unlike [`FreePool::observe`], there is no outcome here to derive
+    /// anything from: a caller holding a persisted reading knows the failure
+    /// count and the deadline as *facts already established*, and replaying
+    /// them through `observe` would manufacture a cooldown length rather
+    /// than use the one the gateway actually granted.
     ///
-    /// `observe` takes one outcome and derives the rest: it counts the
-    /// failure, and it computes the cooldown itself from `BASE_COOLDOWN` or
-    /// the provider's stated `retry_after`. There is no outcome here to
-    /// derive anything from. A caller holding a persisted reading knows the
-    /// failure count and the deadline as *facts already established*, and
-    /// replaying them through `observe` would manufacture a cooldown length
-    /// this pool invented rather than the one the gateway actually granted.
-    ///
-    /// # `cooling_down_until` is the caller's conversion, and that is
-    /// deliberate
-    ///
-    /// [`Instant`] has no epoch, so a deadline that crossed a process
-    /// boundary as a wall-clock second can only be placed on this process's
-    /// monotonic clock by something holding **both clocks read at the same
-    /// moment**. This pool holds neither.
+    /// `cooling_down_until` is the caller's own conversion, since
+    /// [`Instant`] has no epoch and this pool holds no wall clock to convert
+    /// a persisted deadline with —
     /// [`crate::provider::telemetry::GatewayHealthReading::cooling_down_until`]
-    /// is that conversion and states the rule this method depends on: a
-    /// deadline that has already elapsed arrives as `None` — *not cooling
-    /// down* — never as an `Instant` in the past manufactured for the sake of
-    /// carrying a value.
+    /// does that conversion and returns `None` (*not cooling down*, never a
+    /// past `Instant`) once the deadline has elapsed. Last write wins,
+    /// exactly like `observe`.
     ///
-    /// Last write wins, exactly like `observe`: a resource this is called for
-    /// twice holds what the second call said.
-    ///
-    /// # `cooldown_cause` crosses honestly, never as a guess
-    ///
-    /// `GatewayHealthReading` persists `cooldown_cause` as an optional field,
-    /// serde-defaulted so a cache file written before it existed still
-    /// deserializes — as `None`, never a guess. The caller hands this method
-    /// exactly what that reading said: a genuinely recorded
-    /// [`CooldownCause::Declared`] or [`CooldownCause::Invented`] crosses as
-    /// itself, and an absent cause — no key in the file, or a resource that
-    /// simply is not cooling down — adopts as `None`, which
-    /// [`ResourceHealth::declared_wait_remaining`] reports as inert rather
-    /// than as a guess in either direction.
+    /// `cooldown_cause` crosses exactly as the reading stated it — a
+    /// genuinely recorded [`CooldownCause::Declared`] or
+    /// [`CooldownCause::Invented`] as itself, an absent cause as `None`,
+    /// serde-defaulted so a cache file predating the field still
+    /// deserializes rather than guessing.
+    // History: design-decisions.md, "Trims: routing module docs", routing/free.rs `fn adopt_observed`.
     pub fn adopt_observed(
         &mut self,
         resource: &FreeResource,
@@ -622,34 +576,24 @@ impl FreePool {
     /// credential's pool is known to have left — capability map line 1367,
     /// on the reading side.
     ///
-    /// `known_remaining` is what a real response actually stated is left, as
-    /// a caller read it back off disk; `in_flight` is how many of those a
-    /// concurrent process has already claimed and has not yet spent. The
-    /// difference is what a dispatcher deciding *now* may actually use, and
-    /// it is that difference this records, so
-    /// [`Allowance::is_exhausted`] — and therefore
-    /// [`FreePool::is_available`], which is the one gate
+    /// `known_remaining` is what a real response stated is left; `in_flight`
+    /// is how many a concurrent process has already claimed and not yet
+    /// spent. This records the difference, so [`Allowance::is_exhausted`] —
+    /// and therefore [`FreePool::is_available`], the one gate
     /// `crate::routing::disposable::DisposableRouting::choose` puts every
-    /// free candidate through — sees a pool that is empty when every
+    /// free candidate through — sees a pool that is empty once every
     /// remaining request is spoken for.
     ///
-    /// # Why this is not [`FreePool::record_pool`]
-    ///
-    /// `record_pool` carries *"what the provider claims is left"*, and no
-    /// provider claimed this. The subtraction is Glasshouse's own bookkeeping
-    /// about work it is itself about to do, and giving it its own name keeps
-    /// a reader of the allowance from mistaking a local claim for a
-    /// statement on the wire. It also keeps the two mutable in different
-    /// ways: a later real reading overwrites `remaining` outright, which is
-    /// correct, because a response is authoritative about the pool and a
-    /// reservation never was.
+    /// This is not [`FreePool::record_pool`], which carries what the
+    /// provider claims is left — no provider claimed this, it is
+    /// Glasshouse's own bookkeeping, and a later real reading still
+    /// overwrites `remaining` outright since a response is authoritative and
+    /// a reservation never was.
     ///
     /// A credential this pool has been told is [`Allowance::TokenPriced`] is
-    /// left exactly as it is: there is no request count to net anything out
+    /// left exactly as it is — there is no request count to net anything out
     /// of, and inventing one would be the conflation line 528 forbids.
-    /// Nothing here is a rule change — the rule that a pool with no requests
-    /// left cannot serve is [`Allowance::is_exhausted`]'s, unchanged, and
-    /// this only feeds it a truthful number.
+    // History: design-decisions.md, "Trims: routing module docs", routing/free.rs `fn withhold_in_flight`.
     pub fn withhold_in_flight(
         &mut self,
         credential: &CredentialId,

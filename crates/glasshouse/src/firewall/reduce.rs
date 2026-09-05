@@ -2,25 +2,21 @@
 //! construction (line 1983).
 //!
 //! One mechanism, applied at line granularity, covers every case the box
-//! names: a duplicate search hit, a repeated log line, a repeated
-//! test-progress line, and a repeated stack-trace line are all, at the
-//! byte level, **the same exact line appearing again**. A stack trace that
-//! recurs verbatim across several failures collapses because its own lines
-//! are each exact repeats of the first occurrence's lines — no separate
-//! "this looks like a stack trace" heuristic is needed or wanted, because a
-//! heuristic is exactly the kind of guess line 1983 forbids: a line this
-//! module cannot positively prove is a repeat is never touched.
+//! names — a duplicate search hit, log line, test-progress line, or
+//! stack-trace line are all, at the byte level, **the same exact line
+//! appearing again** — so a line this module cannot positively prove is a
+//! repeat is never touched: no heuristic, which line 1983 forbids. A run of
+//! blank lines collapses to its first line, and a single long,
+//! whitespace-free line (generated noise) has its middle elided, prefix and
+//! suffix kept verbatim.
 //!
-//! Two more rules, independently conservative: a run of blank lines
-//! collapses to its first line, and a single unbroken, whitespace-free line
-//! long enough to be generated noise (a base64 or hex dump on one line) has
-//! its middle elided, prefix and suffix kept verbatim.
+//! Every byte this module forwards is a verbatim slice of the original; the
+//! blob rule is the only place content is ever rewritten, and it rewrites
+//! with a clearly marked elision note, never generated replacement text
+//! (the evidence ledger's "never generate evidence" constraint).
 //!
-//! Every byte this module forwards is a verbatim slice of the original —
-//! `split_inclusive('\n')` hands out slices, not copies, and the blob rule
-//! is the only place content is ever rewritten, and it rewrites with a
-//! clearly marked elision note, never with generated replacement text (the
-//! evidence ledger's "never generate evidence" constraint).
+//! History: design-decisions.md, "Trims: the remaining module docs, second
+//! packet", firewall/reduce.rs module doc.
 
 const BLOB_MIN_CHARS: usize = 500;
 const BLOB_KEEP_CHARS: usize = 60;

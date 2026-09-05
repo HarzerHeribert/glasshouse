@@ -1,72 +1,23 @@
 //! Phase 9J — what the pairing between a harness and a model actually *is*.
-//!
-//! # Six things, stored six ways
-//!
-//! [`super::Vendor`] already means **who publishes the harness executable**,
-//! and its own documentation explains why collapsing that with who made the
-//! model and who serves it produces a router that "ends up believing a
-//! harness and a model are first-party partners because their names rhyme".
-//! This module is the other half of that sentence: the model side, and the
-//! relationship between the two.
-//!
-//! Line 554 of the capability map asks for six independent facts — harness
-//! vendor, model developer, model family, serving provider, gateway, wire
-//! protocol. They are six separate fields of [`Pairing`] and no one of them
-//! is ever derived from another. In particular [`ServingRoute::provider`] is
-//! never consulted to answer [`Pairing::developer`]: a reseller is not an
-//! author, and OpenRouter serving `claude-opus-5` makes OpenRouter neither
-//! Anthropic nor the model's developer.
-//!
-//! # `Unknown` is an answer, not a fallback
-//!
-//! [`ModelDeveloper::Unknown`] and [`PairingClass::Unknown`] are what
-//! Glasshouse says about a stealth or insufficiently attributed model, and
-//! they are deliberately reachable from the *front* of the ladder rather than
-//! the end of it. A model named after a company is not evidence it was made
-//! there — that is the same failure [`super::Vendor`] describes, one level
-//! down — so nothing here reads a developer out of a model's name, a
-//! provider's name, or a harness's branding. An id nothing attributes stays
-//! unattributed until a person says otherwise.
-//!
-//! # Three axes, because the map says three
-//!
-//! Line 559 requires protocol compatibility to be treated separately from
-//! model-behaviour compatibility and tool-semantic compatibility, and a
-//! single "compatible" verdict would be exactly the thing it forbids. So
-//! [`Pairing`] answers three questions with three types that cannot stand in
-//! for one another: [`ProtocolFit`], [`ModelBehaviourFit`], and
-//! [`crate::routing::ToolSemantics`]. They disagree in practice — a provider
-//! can serve a harness's own wire protocol (`ProtocolFit::Native`) while
-//! declaring nothing whatever about tool calls on it
-//! (`ToolSemantics::Unverified`), which is the state of every built-in
-//! provider template today.
-//!
-//! **`ModelBehaviourFit` is `Unverified` for every catalogued model**, and
-//! that is not an oversight: nothing in Glasshouse observes whether a model
-//! behaves the way a harness needs. Phase 33A's routing evidence ledger is
-//! what would feed it. Until then the only thing that can move it is a
-//! person who has run the pairing and found out — see
-//! [`ModelCorrection::behaviour`].
-//!
-//! # Declarative, and correctable without touching a router
-//!
-//! Two data structures decide everything here, and neither is code a router
-//! reads:
-//!
-//! - [`OfficialModelSupport`], declared by each adapter beside its other
-//!   [`Declared`] facts. A harness that adds official support for a model is
-//!   one string in one array — lines 558 and 562.
-//! - [`PairingOverrides`], built by `crate::config::pairing` out of the
-//!   user's own configuration file. Line 561: a correction is a
-//!   configuration edit, and `classify` is the only thing that reads it.
-//!
-//! # This module imports no configuration
-//!
-//! Same rule, and the same reason, as [`mod@crate::profile`]: the caller
-//! looks configuration up and hands the resolved values in. That keeps
-//! [`classify`] a pure function of its arguments — no file, no environment,
-//! no ambient lookup — and it is why [`PairingOverrides`] is a plain map this
-//! module defines and `crate::config` fills in.
+//! [`super::Vendor`] means who publishes the harness executable; this module
+//! is the model side, kept separate so a router does not believe a harness
+//! and a model are partners because their names rhyme. Line 554's six facts
+//! — harness vendor, model developer, model family, serving provider,
+//! gateway, wire protocol — are separate [`Pairing`] fields, none derived
+//! from another: [`ServingRoute::provider`] never answers
+//! [`Pairing::developer`], since a reseller is not an author.
+//! `Unknown` is an answer, not a fallback: nothing reads a developer out of
+//! a name or branding, so an unattributed id stays unattributed.
+//! Line 559's three compatibility axes get three types that cannot stand in
+//! for one another: [`ProtocolFit`], [`ModelBehaviourFit`] (`Unverified` for
+//! every catalogued model until Phase 33A's evidence ledger or a person's
+//! correction, [`ModelCorrection::behaviour`]), and
+//! [`crate::routing::ToolSemantics`]. Declarative: [`OfficialModelSupport`]
+//! (each adapter, lines 558/562) and [`PairingOverrides`] (the user's
+//! config, line 561, read only by `classify`) decide everything, none of it
+//! router code. This module imports no configuration, like
+//! [`mod@crate::profile`]: the caller hands resolved values in.
+// History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/harness/pairing/mod.rs module doc.
 
 use std::collections::BTreeMap;
 
@@ -943,27 +894,21 @@ fn attribute(id: &str, overrides: &PairingOverrides) -> ModelAttribution {
 
 /// Ask what the pairing between a harness and a model is.
 ///
-/// The one function that answers it. Every rung of the ladder is a statement
-/// somebody declared — an adapter's [`OfficialModelSupport`], the
-/// [`catalogue`], a user's [`PairingOverrides`], a provider's protocol list —
-/// and none of it is read out of a name.
+/// The one function that answers it. Every rung of the ladder is a
+/// statement somebody declared — an adapter's [`OfficialModelSupport`], the
+/// [`catalogue`], a user's [`PairingOverrides`], a provider's protocol list
+/// — and none of it is read out of a name.
 ///
-/// The order matters and is the map's, not this module's:
-///
-/// 1. **vendor-native** needs both halves of line 557 — the vendor declares
-///    the family as one of its own *and* the developer is that vendor's
-///    organisation. Either half alone is not enough, and the second half is
-///    what stops a reseller's model line being mistaken for a first-party one.
-/// 2. **vendor-supported** needs only the vendor's own list, because line 558
-///    is a claim by the harness vendor and stands whether or not the model's
-///    developer is known.
-/// 3. **unknown** for an unattributed model — line 560, and it comes *before*
-///    the protocol rungs on purpose. The wire is still described, separately,
-///    in [`Pairing::protocol_fit`]; what cannot be described is the
-///    relationship between a harness and a model nobody can name the author
-///    of.
-/// 4. the protocol rungs, for an attributed model with no vendor
-///    relationship.
+/// The order matters and is the map's, not this module's: **vendor-native**
+/// needs both halves of line 557 (the vendor declares the family *and* the
+/// developer is that vendor's organisation — either half alone lets a
+/// reseller's model line be mistaken for a first-party one);
+/// **vendor-supported** needs only the vendor's own list (line 558);
+/// **unknown** comes before the protocol rungs (line 560) because the wire
+/// is still described separately in [`Pairing::protocol_fit`], but the
+/// relationship to an unattributed model cannot be; then the protocol rungs
+/// for an attributed model with no vendor relationship.
+// History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/harness/pairing/mod.rs `classify`.
 pub fn classify(query: &PairingQuery, overrides: &PairingOverrides) -> Pairing {
     let adapter = super::adapter_for(query.harness);
     let harness_vendor = adapter

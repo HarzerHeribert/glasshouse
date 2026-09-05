@@ -310,17 +310,40 @@ fn writeln_str(out: &mut String, line: String) -> std::fmt::Result {
     writeln!(out, "{line}")
 }
 
+/// `glasshouse rate-route <session> useful|not-useful [--note TEXT]` — the
+/// door for [`glasshouse::evaluation::record_route_rating`], and map line
+/// 1846's own design note, *"The routing half of RC-B"* (2026-09-05).
+///
+/// Modelled on `commands::memory::memory_rate`: the write is the command's
+/// whole act, so a failure — including "this session was never routed" —
+/// propagates with `?` rather than being swallowed the way a bookkeeping
+/// side-effect would be. The destination printed back is read fresh after
+/// the write, rather than threaded through the return value, because
+/// [`glasshouse::evaluation::record_route_rating`]'s own signature (modelled
+/// line for line on [`glasshouse::evaluation::record_memory_rating`]) hands
+/// back only the appended `seq`.
+pub(crate) fn rate_route(
+    runtime: &Runtime,
+    session: &str,
+    verdict: glasshouse::evaluation::EvaluationOutcome,
+    note: Option<&str>,
+) -> anyhow::Result<String> {
+    use glasshouse::evaluation::{EvaluationObservations, now_unix, record_route_rating};
+
+    let seq = record_route_rating(runtime, session, verdict, note, now_unix())?;
+
+    let destination = EvaluationObservations::open(runtime)?
+        .routed_destination(session)?
+        .unwrap_or_default();
+
+    Ok(format!(
+        "{seq} {session} routed to {destination} rated {}\n",
+        verdict.as_str()
+    ))
+}
+
 /// Map lines 1834, 1835, 1845 and 1854, printed for a person — the consumer
 /// half of this package, and the reason its producers are not Cluster B.
-///
-/// # Why it lives in `glasshouse route` rather than in a command of its own
-///
-/// `route` is the report about routing: it already prints the ranking, the
-/// override, and what the ranking could not see. *How the routes this project
-/// took actually turned out* is the same subject and the same reader, and a
-/// second command would have meant a new `Command` variant in `cli.rs` —
-/// a file two other workers are editing this round (practice §77). Nothing
-/// here decides anything; the recommendation above is computed without it.
 ///
 /// # The rules this rendering exists to hold
 ///
@@ -329,12 +352,7 @@ fn writeln_str(out: &mut String, line: String) -> std::fmt::Result {
 /// `unknown` is its own bucket in every table, never folded into a
 /// neighbour, and a session whose harness never reported a turn end is
 /// counted as exactly that: not a failure, and not a success.
-///
-/// # Practice §65
-///
-/// The ledger is opened here, in the one function that reads it, and dropped
-/// when this returns. `route` is a command a person types; a ledger that
-/// cannot be opened costs this section and never the report.
+// History: design-decisions.md, "Trims: commands module docs, third packet", route.rs `route_outcomes_section`.
 fn route_outcomes_section(runtime: &Runtime) -> String {
     use glasshouse::evaluation::{EvaluationKind, EvaluationObservations};
 
@@ -369,24 +387,52 @@ fn route_outcomes_section(runtime: &Runtime) -> String {
     // session, because the gateway that ranks a failover holds no Glasshouse
     // session id — see `EvaluationKind::FailoverPrevented`.
     let preventions = ledger.counts_by_subject(EvaluationKind::FailoverPrevented, from, to);
+    // Map line 1837. Counted rather than joined, for the same reason: what
+    // this asks is *how often*, over every high-tier launch in the window.
+    let reserve_availability =
+        ledger.counts_by_subject(EvaluationKind::ReserveAvailabilityObserved, from, to);
 
-    let (by_class, by_pairing, pairing_responsiveness, by_evidence, by_tier, preventions) = match (
+    let (
         by_class,
         by_pairing,
         pairing_responsiveness,
         by_evidence,
         by_tier,
         preventions,
+        reserve_availability,
+    ) = match (
+        by_class,
+        by_pairing,
+        pairing_responsiveness,
+        by_evidence,
+        by_tier,
+        preventions,
+        reserve_availability,
     ) {
-        (Ok(class), Ok(pairing), Ok(responsiveness), Ok(evidence), Ok(tier), Ok(preventions)) => {
-            (class, pairing, responsiveness, evidence, tier, preventions)
-        }
+        (
+            Ok(class),
+            Ok(pairing),
+            Ok(responsiveness),
+            Ok(evidence),
+            Ok(tier),
+            Ok(preventions),
+            Ok(reserve_availability),
+        ) => (
+            class,
+            pairing,
+            responsiveness,
+            evidence,
+            tier,
+            preventions,
+            reserve_availability,
+        ),
         (Err(err), ..)
         | (_, Err(err), ..)
         | (_, _, Err(err), ..)
         | (_, _, _, Err(err), ..)
-        | (_, _, _, _, Err(err), _)
-        | (_, _, _, _, _, Err(err)) => {
+        | (_, _, _, _, Err(err), ..)
+        | (_, _, _, _, _, Err(err), _)
+        | (_, _, _, _, _, _, Err(err)) => {
             // `WindowNotRetained` is the honest one: retention trimmed rows
             // this window reaches back past, and a smaller number would be a
             // fabrication. It is reported, not rounded away.
@@ -402,8 +448,9 @@ fn route_outcomes_section(runtime: &Runtime) -> String {
         // no routed sessions, and returning early would hide it behind an
         // unrelated emptiness.
         return format!(
-            "{header}\n  no routed sessions recorded in this window\n{}",
-            render_failover_preventions(&preventions)
+            "{header}\n  no routed sessions recorded in this window\n{}{}",
+            render_failover_preventions(&preventions),
+            render_reserve_availability(&reserve_availability)
         );
     }
 
@@ -434,10 +481,63 @@ fn route_outcomes_section(runtime: &Runtime) -> String {
     // reading only one store per function.
     out.push_str(&expected_vs_actual_output_tokens_block(runtime, from, to));
     out.push_str(&render_failover_preventions(&preventions));
+    out.push_str(&render_reserve_availability(&reserve_availability));
+    out.push_str(&render_pairing_prior_crossover(&ledger, from, to));
     out.push_str(
         "\nA session whose harness never reported a turn end is counted as neither a success \
          nor a failure; a quiet or exited process is never read as either.\n",
     );
+    out
+}
+
+/// Map line 1846: from what point local pairing evidence predicts a routed
+/// session's outcome at least as well as the same-vendor prior did, beside
+/// [`render_reserve_availability`]'s own 1837 block and read from the same
+/// already-open ledger (practice §65 — one handle, opened once in
+/// [`route_outcomes_section`]).
+///
+/// **This section measures; it decides nothing.** It reads
+/// [`glasshouse::evaluation::EvaluationObservations::pairing_prior_crossover`]
+/// and renders what it found — nothing here touches
+/// `glasshouse::routing::session::PAIRING_PRIOR`, which stands regardless of
+/// what this comparison shows.
+fn render_pairing_prior_crossover(
+    ledger: &glasshouse::evaluation::EvaluationObservations,
+    from: i64,
+    to: i64,
+) -> String {
+    use glasshouse::routing::evidence::MIN_SAMPLE_FOR_SUMMARY;
+
+    let header = "\n  local pairing evidence vs the same-vendor prior (1846):\n";
+    let crossover = match ledger.pairing_prior_crossover(from, to) {
+        Ok(crossover) => crossover,
+        Err(err) => return format!("{header}    {err}\n"),
+    };
+
+    let mut out = header.to_owned();
+    for bucket in &crossover.buckets {
+        if bucket.sessions == 0 {
+            out.push_str(&format!("    k {}: none\n", bucket.bucket));
+        } else {
+            out.push_str(&format!(
+                "    k {}: prior right {}/{} \u{b7} local right {}/{}\n",
+                bucket.bucket,
+                bucket.prior_correct,
+                bucket.sessions,
+                bucket.local_correct,
+                bucket.sessions
+            ));
+        }
+    }
+    match crossover.crossover {
+        Some(bucket) => out.push_str(&format!(
+            "    local evidence at least as predictive from bucket {bucket}\n"
+        )),
+        None => out.push_str(&format!(
+            "    not yet: no bucket with at least {MIN_SAMPLE_FOR_SUMMARY} sessions where local \
+             evidence matches the prior\n"
+        )),
+    }
     out
 }
 
@@ -696,26 +796,11 @@ const SUPPORT_WORK_RECENT_LIMIT: usize = 10;
 /// harness choice can rest on evidence rather than on which vendor bills
 /// for it.
 ///
-/// Two ledgers, joined in Rust rather than in SQL, because they hold
-/// different rows for different reasons. The outcome-and-task-class half
-/// comes from
-/// [`glasshouse::evaluation::EvaluationObservations::outcomes_by_tier_and_harness`]
-/// — `evaluation_observations` joined to `sessions.harness`, exactly
-/// [`tier_outcome_section`]'s own join with a harness dimension added, one
-/// row per (harness, task class). The token/wall-clock/request-count half
-/// comes from
-/// [`glasshouse::routing::evidence::EvidenceLedger::request_stats_by_harness`]
-/// — `routing_observations.harness`, written directly at record time — and
-/// is computed once per harness rather than per task class, because
-/// `routing_observations` carries no tier at all; the same per-harness
-/// figures are printed on every task-class row for that harness. That is
-/// the box line's own split: *"tokens, wall-clock, request count"*
-/// unqualified, *"outcome … by task class"* qualified.
-///
 /// A harness with no `routing_observations` rows in the window (every
 /// session routed but nothing dispatched yet) prints `0 request(s)` and
 /// *"not exposed on 0 of 0 exchanges"* rather than being silently dropped
 /// from the token/wall-clock figures.
+// History: design-decisions.md, "Trims: commands module docs, third packet", route.rs `harness_efficiency_section`.
 fn harness_efficiency_section(runtime: &Runtime) -> String {
     use glasshouse::evaluation::{EvaluationObservations, TierOutcomeVerdict};
     use glasshouse::routing::evidence::EvidenceLedger;
@@ -932,6 +1017,55 @@ fn render_failover_preventions(counts: &[(String, i64)]) -> String {
     )
 }
 
+/// Map line 1837: how often protected quota remained available for a
+/// high-tier task at the moment it was routed.
+///
+/// `counts` is [`EvaluationKind::ReserveAvailabilityObserved`]'s subjects —
+/// [`glasshouse::provider::quota::CapacityBand`] words, or `"unknown"` for a
+/// destination with no reading. *Available* sums every band above
+/// [`glasshouse::provider::quota::CapacityBand::Reserve`]
+/// (`Tight`, `Healthy`, `Plenty`); below
+/// [`glasshouse::routing::evidence::MIN_SAMPLE_FOR_SUMMARY`] total rows,
+/// the sentence honestly says there is not enough to summarise rather than
+/// printing a ratio nobody could act on.
+fn render_reserve_availability(counts: &[(String, i64)]) -> String {
+    use glasshouse::provider::quota::CapacityBand;
+    use glasshouse::routing::evidence::MIN_SAMPLE_FOR_SUMMARY;
+
+    let count_of = |band: &str| -> i64 {
+        counts
+            .iter()
+            .find(|(subject, _)| subject == band)
+            .map(|(_, count)| *count)
+            .unwrap_or_default()
+    };
+    let total: i64 = counts.iter().map(|(_, count)| *count).sum();
+    if total < MIN_SAMPLE_FOR_SUMMARY as i64 {
+        return format!(
+            "\n  protected quota for high-tier tasks (1837): not enough high-tier launches \
+             ({total})\n"
+        );
+    }
+
+    let available = [
+        CapacityBand::Tight,
+        CapacityBand::Healthy,
+        CapacityBand::Plenty,
+    ]
+    .iter()
+    .map(|band| count_of(band.as_str()))
+    .sum::<i64>();
+    let at_reserve = count_of(CapacityBand::Reserve.as_str());
+    let exhausted = count_of(CapacityBand::Exhausted.as_str());
+    let unknown = count_of("unknown");
+
+    format!(
+        "\n  protected quota for high-tier tasks (1837): available {available} · at reserve \
+         {at_reserve} · exhausted {exhausted} · unknown {unknown} of {total} high-tier \
+         launches\n"
+    )
+}
+
 /// One table of [`RouteOutcomeCounts`], aligned on the bucket name.
 fn render_route_outcome_rows(counts: &[glasshouse::evaluation::RouteOutcomeCounts]) -> String {
     if counts.is_empty() {
@@ -960,6 +1094,12 @@ fn render_route_outcome_rows(counts: &[glasshouse::evaluation::RouteOutcomeCount
 /// turns it is out of.** The two denominators are different quantities —
 /// turns a harness reported on, and sessions that were routed — and a
 /// rendering that dropped either would let a reader divide the wrong pair.
+///
+/// **Rated and proxy counts are never summed** (map line 1846's design note,
+/// *"The routing half of RC-B"*, 2026-09-05): a bucket with no rated session
+/// prints exactly what it always has, byte-identical, and only a bucket
+/// carrying a rated session gains a trailing clause naming the rated counts
+/// apart from the proxy figures above.
 fn render_route_outcome_line(counts: &glasshouse::evaluation::RouteOutcomeCounts) -> String {
     let reported = counts.reported_turns();
     let verdicts = if reported == 0 {
@@ -975,14 +1115,21 @@ fn render_route_outcome_line(counts: &glasshouse::evaluation::RouteOutcomeCounts
         counts.sessions,
         if counts.sessions == 1 { "" } else { "s" }
     );
-    if counts.sessions_without_outcome > 0 {
+    let mut line = if counts.sessions_without_outcome > 0 {
         format!(
             "{verdicts}; {sessions}, {} with no turn end reported",
             counts.sessions_without_outcome
         )
     } else {
         format!("{verdicts}; {sessions}")
+    };
+    if counts.rated_useful > 0 || counts.rated_not_useful > 0 {
+        line.push_str(&format!(
+            " · rated {} useful / {} not-useful",
+            counts.rated_useful, counts.rated_not_useful
+        ));
     }
+    line
 }
 
 /// Map line 1845, the whole line: task success (from `by_pairing`, the same
@@ -1202,24 +1349,7 @@ pub(crate) enum NoRoute {
 /// routing observation — which is the whole of line 1681's *"without
 /// executing it"*, and is asserted over the shipped binary in
 /// `tests/routing_api.rs`.
-///
-/// One qualification since Phase 34D: with a routing model **configured** and
-/// a `--task` stated, this asks that model exactly as a launch would — so the
-/// two cannot disagree about the classification — and the *cost* of that one
-/// call is recorded under `purpose = "classification"`, as every routing-model
-/// call is. That is a fact about what the diagnostic spent, not about the
-/// work, which is still not executed. It never writes the sticky
-/// classification record a launch leaves behind (`remember_classification`),
-/// because a preview is not a decision.
-///
-/// Two differences from the launch path, both stated in the rendered output
-/// rather than hidden:
-///
-/// 1. it ranks across **every enabled harness**, because a caller asking
-///    where work should go has not yet chosen one, whereas a launch has;
-/// 2. it includes sessions that are still **running** (`DestinationScope`),
-///    because "switch to that terminal" is an answer a person can act on and
-///    is not one a second process can carry out.
+// History: design-decisions.md, "Trims: commands module docs, third packet", route.rs `route_recommendation`.
 pub(crate) fn route_recommendation(
     runtime: &Runtime,
     effective: &EffectiveConfig<'_>,

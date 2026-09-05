@@ -1,38 +1,23 @@
 //! The per-project SQLite database.
 //!
 //! Each project owns exactly one SQLite database file, physically separate
-//! from every other project's file, at `<state_dir>/glasshouse.db`. It is the
-//! only future home for that project's memory (the Phase 20 memory table will
-//! live here). Nothing else in Glasshouse is allowed to open a database file
-//! anywhere else: the path is derived from [`crate::Runtime`], never accepted
-//! from a caller.
+//! from every other project's file, at `<state_dir>/glasshouse.db`, its path
+//! derived from [`crate::Runtime`] and never accepted from a caller. What a
+//! table *means* lives with the module that owns it ([`crate::session::store`],
+//! [`crate::memory`]); only the schema itself lives here.
 //!
-//! The module deliberately stays small: a deterministic migration mechanism
-//! (`schema_migrations`), the `project_metadata` table that binds the database
-//! to one project identifier, and the tables later phases have needed —
-//! `sessions` and, from version 4, `memories` with its FTS5 index. It holds no
-//! credentials, no WAL configuration, and no async wrappers; what a table
-//! *means* lives with the module that owns it ([`crate::session::store`],
-//! [`crate::memory`]), and only the schema itself lives here.
+//! Safety properties enforced on every open: a newly created file is
+//! owner-only (`0600` on Unix); a symlink or other non-regular entry at the
+//! final path is refused (`symlink_metadata`, open-time only — not a
+//! guarantee against a later swap); a connection SQLite could only open
+//! read-only is refused rather than silently degrading; a database whose
+//! recorded project identifier differs from the active project is refused;
+//! a database written by a newer Glasshouse (higher schema version) is
+//! refused. Corrupt or too-new databases are never deleted or recreated —
+//! the user keeps their data and decides what to do.
 //!
-//! Safety properties enforced on every open:
-//!
-//! - A newly created database file is owner-only (`0600` on Unix).
-//! - A final database path that is a symbolic link is refused by an explicit
-//!   `symlink_metadata` check performed on every launch. This handles the
-//!   ordinary case; it is an open-time check, not a guarantee about files
-//!   being swapped while Glasshouse runs.
-//! - Any other non-regular entry at the final database path (directory,
-//!   device, FIFO, socket) is refused as well; nothing but a regular file is
-//!   ever opened or created there.
-//! - A connection that SQLite could only open read-only (for example a
-//!   mode-0400 file) is refused instead of silently degrading to a session
-//!   that cannot store anything.
-//! - A database whose recorded project identifier differs from the active
-//!   project is refused; it must have been copied across projects.
-//! - A database written by a newer Glasshouse (higher schema version) is
-//!   refused. Corrupt or too-new databases are never deleted or recreated:
-//!   the user keeps their data and decides what to do.
+//! History: design-decisions.md, "Trims: the remaining module docs, second
+//! packet", database/mod.rs module doc.
 
 use std::path::{Path, PathBuf};
 

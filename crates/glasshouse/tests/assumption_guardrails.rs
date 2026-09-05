@@ -414,6 +414,7 @@ fn a_trivial_edit_passes_with_no_gate_and_a_migration_triggers_a_short_preflight
     assert!(text_for(1041).contains("stop compounding"));
     assert!(text_for(1042).contains("failed-approach"));
     assert!(text_for(1043).contains("rewrite the task history"));
+    assert!(text_for(1044).contains("exclude every path"));
 
     // Line 1051: the seven responses, in the map's order.
     let responses: Vec<&str> = substantial["responses"]
@@ -1067,6 +1068,167 @@ fn another_projects_server_sees_none_of_it() {
         )
         .unwrap_err();
     assert!(err.to_string().contains("different project"), "{err}");
+}
+
+// -------------------------------------------------------------------------
+// Line 1044 — the preserve set
+// -------------------------------------------------------------------------
+
+fn git(root: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .args(args)
+        .current_dir(root)
+        .output()
+        .expect("git must be installed on every leg this gate runs");
+    assert!(
+        output.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+/// A repository with an identity of its own, so the test never depends on
+/// the machine's `user.name`/`user.email` being configured.
+fn git_init(root: &Path) {
+    git(root, &["init", "--quiet"]);
+    git(root, &["config", "user.name", "Glasshouse Test"]);
+    git(root, &["config", "user.email", "test@example.invalid"]);
+    git(root, &["config", "commit.gpgsign", "false"]);
+}
+
+/// A project root that is a real, readable Git repository — unlike
+/// [`Fixture::project_root`]'s bare `.git` directory, which `git status`
+/// itself refuses (proven by [`a_non_repository_project_reports_unknown`]
+/// below): this is where `changed_paths` has something to read.
+fn real_git_project_root(fixture: &Fixture, name: &str) -> PathBuf {
+    let root = fixture.base.join("workspace").join(name);
+    std::fs::create_dir_all(&root).expect("create project root");
+    git_init(&root);
+    std::fs::write(root.join("README.md"), "root\n").unwrap();
+    git(&root, &["add", "--", "README.md"]);
+    git(&root, &["commit", "--quiet", "-m", "initial"]);
+    std::fs::canonicalize(&root).expect("canonicalize project root")
+}
+
+/// The behavioural contract, end to end over the MCP door: session A holds
+/// its own claim and transitions an assumption to `refuted`; session B
+/// holds an active claim elsewhere; the working tree carries an edit under
+/// A's own claim and one nobody claimed. The reply's `preserve` names B's
+/// claim and the unclaimed edit, never A's own claim or A's own edit — and
+/// nothing on disk moves.
+#[test]
+fn rollback_preserves_what_is_not_yours() {
+    let fixture = Fixture::new();
+    let root = real_git_project_root(&fixture, "alpha");
+    let session_a = fixture.seed_session(&root);
+    let session_b = fixture.seed_session(&root);
+
+    // A claim names a path that already exists in the project. Absolute,
+    // because a relative one resolves against the test binary's own working
+    // directory, not the fixture's project root.
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/mine.rs"), "session a's own edit\n").unwrap();
+    std::fs::write(root.join("src/b.rs"), "session b's own edit\n").unwrap();
+    let mine = root.join("src/mine.rs");
+    let bs = root.join("src/b.rs");
+    fixture.run(
+        &root,
+        &["claim", mine.to_str().unwrap(), "--session", &session_a],
+    );
+    fixture.run(
+        &root,
+        &["claim", bs.to_str().unwrap(), "--session", &session_b],
+    );
+
+    std::fs::write(root.join("notes.md"), "nobody claimed this\n").unwrap();
+    let before_mine = std::fs::read_to_string(root.join("src/mine.rs")).unwrap();
+    let before_notes = std::fs::read_to_string(root.join("notes.md")).unwrap();
+
+    let mut server = McpServer::start(&fixture, &root);
+    let recorded = server.ok(
+        "glasshouse_record_assumption",
+        six_fields(Some(&session_a), "the premise under test"),
+    );
+    let id = recorded["id"].as_str().unwrap().to_owned();
+
+    let refuted = server.ok(
+        "glasshouse_update_assumption",
+        json!({ "assumption": id, "state": "refuted" }),
+    );
+    assert_eq!(refuted["assumption"]["state"], "refuted", "{refuted}");
+
+    let preserve = &refuted["preserve"];
+    assert_eq!(
+        preserve["claimed_elsewhere"],
+        json!(["src/b.rs"]),
+        "{refuted}"
+    );
+    let unclaimed: Vec<&str> = preserve["unclaimed_changes"]
+        .as_array()
+        .unwrap_or_else(|| panic!("unclaimed_changes must be an array, not null: {refuted}"))
+        .iter()
+        .map(|value| value.as_str().unwrap())
+        .collect();
+    assert!(
+        unclaimed.contains(&"notes.md"),
+        "an unclaimed change must be named: {refuted}"
+    );
+    assert!(
+        !unclaimed.contains(&"src/mine.rs"),
+        "the transitioning session's own claimed edit must not be named: {refuted}"
+    );
+
+    // A transition that neither refutes nor chooses rollback/isolate carries
+    // no `preserve` field at all — every other transition's reply stays
+    // byte-identical to before this package.
+    let ordinary = server.ok(
+        "glasshouse_update_assumption",
+        json!({ "assumption": id, "state": "proposed" }),
+    );
+    assert!(
+        ordinary.get("preserve").is_none(),
+        "an ordinary transition's reply must omit preserve entirely: {ordinary}"
+    );
+
+    // Nothing on disk was touched by any of this.
+    assert_eq!(
+        std::fs::read_to_string(root.join("src/mine.rs")).unwrap(),
+        before_mine,
+        "the door must never revert anything itself"
+    );
+    assert_eq!(
+        std::fs::read_to_string(root.join("notes.md")).unwrap(),
+        before_notes,
+        "the door must never revert anything itself"
+    );
+}
+
+/// A project whose `.git` is not a repository `git` itself can read (the
+/// ordinary [`Fixture::project_root`]) answers `unclaimed_changes: null`,
+/// never an empty list that would read as nothing to preserve.
+#[test]
+fn a_non_repository_project_reports_unknown() {
+    let fixture = Fixture::new();
+    let root = fixture.project_root("alpha");
+    let session = fixture.seed_session(&root);
+
+    let mut server = McpServer::start(&fixture, &root);
+    let recorded = server.ok(
+        "glasshouse_record_assumption",
+        six_fields(Some(&session), "the premise under test"),
+    );
+    let id = recorded["id"].as_str().unwrap().to_owned();
+
+    let refuted = server.ok(
+        "glasshouse_update_assumption",
+        json!({ "assumption": id, "state": "refuted" }),
+    );
+    assert_eq!(
+        refuted["preserve"]["unclaimed_changes"],
+        Value::Null,
+        "{refuted}"
+    );
 }
 
 // -------------------------------------------------------------------------

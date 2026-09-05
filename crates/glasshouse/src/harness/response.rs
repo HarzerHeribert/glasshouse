@@ -1,51 +1,23 @@
 //! Phase 9K's harness half: turning a Glasshouse response profile into the
 //! closest safe thing one harness actually has, and recording which one that
 //! was.
-//!
-//! [`mod@crate::profile::response`] is the domain model — five independent
-//! axes, presets, roles and a six-layer precedence chain, and it knows nothing
-//! about any harness. This module is the other side of line 602: *"Let the
-//! HarnessAdapter translate a Glasshouse response profile into the closest
-//! safe native harness configuration."*
-//!
-//! # The vocabulary stays inside the adapter
-//!
-//! Line 603 asks for Claude Code output styles and Codex personalities to be
-//! treated as *adapter examples* rather than universal Glasshouse concepts, so
-//! there is no `OutputStyle` type here and no enum of style names. What
-//! crosses the seam is a [`NativeStyle`], whose `selection` is a plain string
-//! in the harness's own words, carrying the evidence it was read from —
-//! exactly the shape [`Declared`](super::Declared) already uses for every
-//! other adapter fact.
-//!
-//! # What may never happen, expressed as a type that cannot say it
-//!
-//! Line 607: *"Never replace the complete native harness system prompt merely
-//! to control verbosity, tone, or answer structure."* [`AppliedMechanism`] has
-//! three variants — a native mechanism, an additive instruction, and nothing —
-//! and **no variant that means "replaced"**. Nothing downstream can record a
-//! replacement because nothing upstream can perform one: the only things
-//! [`apply`] produces are a settings key the harness itself documents and
-//! arguments an adapter declared as *additive*.
-//!
-//! Claude Code makes the distinction concrete and dangerous enough to be worth
-//! stating: `claude --help` on 2.1.247 documents both `--system-prompt
-//! <prompt>` ("System prompt to use for the session") and
-//! `--append-system-prompt <prompt>` ("Append a system prompt to the default
-//! system prompt"). The first is the line-607 violation; only the second is
-//! declared by the adapter, and
-//! `the_launch_never_replaces_a_native_system_prompt` fails on a build where
-//! the first appears in a launch.
-//!
-//! # The gateway is not in this file
-//!
-//! Line 608: *"Do not make gateway-side system-prompt rewriting the default
-//! way Glasshouse applies a response profile."* This module imports nothing
-//! from [`mod@crate::gateway`] and has no path into it. The only two
-//! mechanisms [`apply`] can choose are the harness's own; a gateway-side
-//! transformation is a thing a **user configures on a provider** and
-//! [`crate::config::response`] surfaces as backend metadata — line 609 — never
-//! something Glasshouse reaches for on its own.
+//! [`mod@crate::profile::response`] is the domain model and knows nothing
+//! about any harness. The vocabulary stays inside the adapter (line 603):
+//! no `OutputStyle` type or enum of style names here — what crosses the seam
+//! is a [`NativeStyle`], whose `selection` is a plain string in the
+//! harness's own words, carrying the evidence it was read from.
+//! Line 607, *"never replace the complete native harness system prompt"*,
+//! is expressed as a type that cannot say it: [`AppliedMechanism`] has three
+//! variants — a native mechanism, an additive instruction, and nothing —
+//! and no variant that means "replaced". Claude Code makes the danger
+//! concrete: `--system-prompt` is the line-607 violation, only
+//! `--append-system-prompt` is declared by the adapter, and
+//! `the_launch_never_replaces_a_native_system_prompt` fails on a build
+//! where the first appears in a launch.
+//! The gateway is not in this file (line 608): this module imports nothing
+//! from [`mod@crate::gateway`]; a gateway-side transformation is a thing a
+//! user configures on a provider, never something Glasshouse reaches for.
+// History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/harness/response.rs module doc.
 
 use std::ffi::OsString;
 
@@ -325,30 +297,22 @@ impl Application {
 
 /// Apply `resolved` to `adapter`, preferring the harness's own mechanism.
 ///
-/// This is line 601 as a function. The order is fixed and each step has a
-/// reason:
+/// This is line 601 as a function, fixed order: nothing above the harness
+/// default asked for anything → apply nothing
+/// ([`ResolvedProfile::is_harness_default`] distinguishes "nobody asked"
+/// from "asked for the defaults"); a native mechanism that can represent
+/// this profile → take it (the adapter enforces line 601's "without
+/// weakening coding instructions" half by declaring none when it would);
+/// an additive instruction → the profile's own sentences, appended beside
+/// the system prompt, never replacing it; otherwise nothing, and say why.
 ///
-/// 1. **Nothing above the harness default asked for anything** — apply
-///    nothing. An unconfigured Glasshouse must leave a harness exactly as it
-///    found it, and [`ResolvedProfile::is_harness_default`] is what makes
-///    "nobody asked" distinguishable from "somebody asked for the defaults".
-/// 2. **A native mechanism that can represent this profile** — take it. The
-///    adapter decides whether it can; a harness whose only styles would weaken
-///    its coding instructions declares none for that profile and falls
-///    through, which is the *"without weakening coding instructions"* half of
-///    line 601 and is enforced inside the adapter that knows its own styles.
-/// 3. **An additive instruction** — the profile's own sentences, appended
-///    beside the harness's system prompt, never replacing it.
-/// 4. **Nothing, and say why.**
-///
-/// # The floor rides along with whatever wins
-///
-/// A native style is the harness vendor's own wording and Glasshouse does not
-/// get to edit it, so when an additive mechanism also exists the floor
-/// sentence — [`floor_directive`] — is appended beside the native selection.
-/// That is not belt-and-braces: the native selection expresses the five axes,
-/// and [`crate::profile::response::REQUIRED_REPORTS`] is not one of the axes.
-/// It is the thing no axis may reduce.
+/// The floor rides along with whatever wins: a native style is the harness
+/// vendor's own wording Glasshouse cannot edit, so when an additive
+/// mechanism also exists the floor sentence ([`floor_directive`]) is
+/// appended beside the native selection —
+/// [`crate::profile::response::REQUIRED_REPORTS`] is not one of the five
+/// axes a native selection expresses, it is the thing no axis may reduce.
+// History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/harness/response.rs `apply`.
 pub fn apply(adapter: &dyn super::HarnessAdapter, resolved: &ResolvedProfile) -> Application {
     let id = adapter.id();
     if resolved.is_harness_default() {

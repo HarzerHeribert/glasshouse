@@ -27,6 +27,14 @@ MUTATE = Path(__file__).resolve().parents[1] / "mutate.sh"
 
 PASS_CMD = [sys.executable, "-c", "import sys; sys.exit(0)"]
 FAIL_CMD = [sys.executable, "-c", "import sys; sys.exit(1)"]
+# cargo's own shape for a tree that does not build: an error line, no
+# `test ... FAILED` line, non-zero exit.
+COMPILE_FAIL_CMD = [
+    sys.executable, "-c",
+    "print('error[E0425]: cannot find value `x` in this scope'); "
+    "print('error: could not compile `glasshouse` (lib test) due to 1 previous error'); "
+    "import sys; sys.exit(101)",
+]
 
 # --- tree-resolution fixtures ------------------------------------------------
 # GH-MUTATE-TREE: mutate.sh derives its own tree from its own on-disk location
@@ -239,6 +247,24 @@ def main() -> int:
         if sha(killed_file) != before:
             failures.append("file not byte-identical after a KILLED mutation")
 
+        # 3b. A mutation whose test output is a compile error -- cargo's shape,
+        # no `test ... FAILED` line -- reports COMPILE-ERROR, never KILLED, and
+        # exits 3: nothing ran, so nothing is proven (pane-lead's finding,
+        # 2026-09-05: four false KILLEDs in one day under warnings = "deny").
+        compile_file = tmp_path / "compile.rs"
+        compile_file.write_text(SOURCE)
+        before = sha(compile_file)
+        result = run_mutate(
+            "--file", str(compile_file), "--find", "a + b", "--replace", "a - b",
+            "--allow-dirty", "--test-cmd", *COMPILE_FAIL_CMD,
+        )
+        if result.returncode != 3:
+            failures.append(f"COMPILE-ERROR mutation should exit 3, got {result.returncode}\n{result.stdout}\n{result.stderr}")
+        if "COMPILE-ERROR" not in result.stdout or "-> KILLED" in result.stdout:
+            failures.append(f"compile-error mutation was not reported as COMPILE-ERROR:\n{result.stdout}")
+        if sha(compile_file) != before:
+            failures.append("file not byte-identical after a COMPILE-ERROR mutation")
+
         # 4. A mutation whose test passes reports SURVIVED and exits 1.
         survived_file = tmp_path / "survived.rs"
         survived_file.write_text(SOURCE)
@@ -283,7 +309,7 @@ def main() -> int:
             print(f"  - {f}", file=sys.stderr)
         return 1
 
-    print("test_mutate: ok — refusal, KILLED, SURVIVED and --expect-survive all leave the file byte-identical")
+    print("test_mutate: ok — refusal, KILLED, COMPILE-ERROR, SURVIVED and --expect-survive all leave the file byte-identical")
     return 0
 
 

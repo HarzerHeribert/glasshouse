@@ -1,44 +1,23 @@
 //! First-run onboarding wizard (Phase 2C).
 //!
-//! Glasshouse is approachable for users who already have one or more coding
-//! agents installed: on first launch it detects supported harnesses and
-//! useful local tools, shows what was found, and lets the user enable or
-//! ignore each integration before the normal interface opens. This module is
-//! that wizard.
-//!
-//! # What this wizard records, and what it deliberately does not
-//!
-//! Five screens: a welcome, the integration list, an optional
+//! On first launch this detects supported harnesses and useful local tools,
+//! shows what was found, and lets the user enable or ignore each before the
+//! normal interface opens: a welcome, the integration list, an optional
 //! bypass-acknowledgement step, an optional provider step, and an optional
-//! routing-model step, then a summary. The last three are optional in the
-//! strong sense — a user who presses `Tab` through all of them finishes with
-//! a configuration that works, needs no API key, and asks nothing of a
-//! subsystem that is not built yet.
+//! routing-model step, then a summary.
 //!
-//! The routing-model step is the newest, and it shows where this module
-//! draws its line. Phase 2C asks for three choices — Automatic, Choose
-//! model, and Do later — and this wizard offers exactly those three and
-//! *records which one the user picked*. It does not classify anything, does
-//! not choose a model for "Automatic", and does not build a fallback chain;
-//! those are Phases 34B and 34C, and a wizard that pretended to do them
-//! would be a screen that looks finished and does nothing. The choice is
-//! stored as a reference — a provider name and a model name, never a
-//! credential (see [`crate::config::RoutingModelChoice`]) — and "Do later"
-//! records nothing at all, leaving deterministic routing heuristics in
-//! charge. Both the Summary and the routing screen itself say so in a line,
-//! so a user who declines is told what they are getting rather than left to
-//! infer it.
+//! The routing-model step offers exactly Phase 2C's three choices —
+//! Automatic, Choose model, Do later — and *records which one the user
+//! picked*, as a reference (provider, model, never a credential; see
+//! [`crate::config::RoutingModelChoice`]); it does not classify anything or
+//! build a fallback chain (Phases 34B/34C). "Do later" leaves deterministic
+//! routing heuristics in charge; the provider step configures from a
+//! built-in template and stops there (the gateway is Phase 9D).
 //!
-//! The same restraint applies one step earlier: the provider step configures
-//! a provider from a built-in template and stops there. The Glasshouse
-//! gateway is Phase 9D and is not part of this setup.
-//!
-//! # Architecture
-//!
-//! The state machine ([`state::WizardState`]), the rendering
-//! (`view::render`), and the event loop ([`run`]) are three separate
-//! pieces — see `state`'s module documentation for why. Only [`run`] touches
-//! a terminal; everything else is unit-tested directly.
+//! The state machine ([`state::WizardState`]), the rendering, and the event
+//! loop ([`run`]) are separate; only [`run`] touches a terminal. History:
+//! design-decisions.md, "Trims: the remaining module docs, second packet",
+//! onboarding/mod.rs module doc.
 
 mod state;
 mod view;

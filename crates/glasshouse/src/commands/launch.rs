@@ -150,33 +150,19 @@ fn fresh_destination_profile(
 
 /// The cost class of the destination a launch actually routed to — map line
 /// 1835's *"low-cost or free route"* versus *"the premium route it
-/// displaced"*, as a fact rather than a guess.
+/// displaced"*, as a fact rather than a guess. Not
+/// `destination.backend().cost()`: that hardcodes `Cost::Metered` as a
+/// fail-closed constant, so the real value comes from
+/// [`ProviderConfig::cost_of`] instead — the same lookup `disposable_candidates`
+/// and `gateway_upstream` use — with the project layer winning over the user
+/// layer.
 ///
-/// # Why this is not `destination.backend().cost()`
+/// `None` when the destination names no configured provider (a harness's own
+/// sign-in) or assigns its model only at session start (gateway-backed):
+/// recorded as [`glasshouse::evaluation::UNKNOWN_COST_CLASS`] in its own
+/// bucket, never folded into `metered`.
 ///
-/// [`destination_backend`] hardcodes `Cost::Metered` for every destination it
-/// builds, and says so: the session router reads a backend's provider,
-/// credential, model and tool semantics and never its cost, so the field is
-/// the fail-closed constant rather than a measurement. Recording *that* as a
-/// route's class would give line 1835 one bucket for ever and report a
-/// tautology.
-///
-/// So the class is read where the fact actually lives:
-/// [`ProviderConfig::cost_of`], the same one lookup `disposable_candidates`
-/// and `gateway_upstream` use, applied to the destination's own provider and
-/// model with the project layer winning over the user layer. `glasshouse::
-/// profile` and `glasshouse::routing` may not import `glasshouse::config`, so
-/// main.rs is where this can be answered at all.
-///
-/// # `None` is the third answer, and it is honest
-///
-/// A destination on a harness's own sign-in names no configured provider, and
-/// a gateway-backed one assigns its model when the session starts. Neither
-/// has a marked cost, and Glasshouse does not know what a subscription costs
-/// at the margin. That is recorded as
-/// [`glasshouse::evaluation::UNKNOWN_COST_CLASS`] and counted in its own
-/// bucket — never folded into `metered`, which would be a number nobody
-/// measured.
+/// History: design-decisions.md, "Trims: commands module docs", routed_cost_class.
 fn routed_cost_class(
     user: &UserConfig,
     project: Option<&ProjectConfig>,
@@ -191,26 +177,16 @@ fn routed_cost_class(
 }
 
 /// Whether the pool this launch handed the router held any observed health
-/// reading for the destination it chose — map line 1854's *sparse* half.
+/// reading for the destination it chose — map line 1854's *sparse* half,
+/// keyed exactly as [`observed_provider_health`] keys it (the destination's
+/// own credential and model label), so a hit means the same resource. *Stale*
+/// is answered by the age of the provider file the pool was filled from,
+/// against [`glasshouse::evaluation::HEALTH_EVIDENCE_HORIZON_SECONDS`].
 ///
-/// The key is built exactly as [`observed_provider_health`] builds it, from
-/// the destination's own credential and model label, so a hit here means the
-/// same resource and not a resource that merely renders the same.
+/// *Incorrectly segmented*, line 1854's third word, has no producer on this
+/// path and stays open on that word alone.
 ///
-/// **Two of line 1854's three words now, not one.** `routing::evidence`'s
-/// `Confidence` belongs to the gateway's aggregate ledger, which
-/// `SessionRouter` never reads, and a
-/// [`glasshouse::routing::free::FreePool`] health entry carries no
-/// observation time — but the cache the pool was filled from does, per
-/// provider file, and [`ObservedHealth`] carries it here. So *sparse* is
-/// answered by whether the pool held this destination and *stale* by how old
-/// the file that supplied it was, against
-/// [`glasshouse::evaluation::HEALTH_EVIDENCE_HORIZON_SECONDS`].
-///
-/// *Incorrectly segmented*, line 1854's third, still has no producer
-/// anywhere on this path and is not invented: nothing in this build compares
-/// a health reading's segmentation against the resource it was attributed
-/// to, and the line stays open on that word alone.
+/// History: design-decisions.md, "Trims: commands module docs", routing_evidence_for.
 fn routing_evidence_for(
     health: &crate::commands::routing_destinations::ObservedHealth,
     destination: &glasshouse::routing::session::Destination,
@@ -280,26 +256,19 @@ fn record_tier_movement(
 }
 
 /// Capability map line 1970: one ledger row per pool fallback the launch
-/// path acted on. The same open-write-drop shape as
-/// [`record_tier_movement`], for the same reasons — and **a decision that
-/// made no fallback writes nothing**, because "the broker stayed put" is
-/// the row's absence, exactly as a held tier is.
+/// path acted on, in the same open-write-drop shape as
+/// [`record_tier_movement`] — a decision that made no fallback writes
+/// nothing, because "the broker stayed put" is the row's absence.
 ///
-/// The row carries the fallback whole **without a migration**: `purpose` is
-/// the trigger, `quota_context` is the account the work LEFT (so the
-/// entitlements view's own per-account reader finds it), and the account
-/// the work went TO is the `sessions.entitlement` column migration 22
-/// added, written by this same launch from this same decision. `provider`
-/// and `model` are the chosen destination's.
+/// `purpose` is the trigger, `quota_context` is the account the work LEFT,
+/// `provider`/`model` are the chosen destination's, and the account the
+/// work went TO is `sessions.entitlement`. `cost`, when given, is map line
+/// 1307's [`glasshouse::routing::session::Routed::cost`], carried in from
+/// the same decision rather than recomputed from a `PriceTable` that may
+/// since have changed — the only launch writer with a `Destination` in
+/// scope, so most rows leave it `NULL`.
 ///
-/// Map line 1307's own producer: `cost`, when given, is
-/// [`glasshouse::routing::session::Routed::cost`] — the value **that
-/// decision itself computed**, carried in rather than recomputed here from a
-/// `PriceTable` that may since have changed on disk. This is the only launch
-/// writer with a `Destination` in scope
-/// (`record_tier_movement`'s `TierMovement` carries none), so it is the only
-/// production caller `cost_micro_usd` has today; most rows still leave it
-/// `NULL`, on every decision that made no fallback at all.
+/// History: design-decisions.md, "Trims: commands module docs", record_entitlement_fallback.
 fn record_entitlement_fallback(
     runtime: &Runtime,
     harness: glasshouse::integrations::IntegrationId,
@@ -440,29 +409,21 @@ const ROUTING_LATENCY_PURPOSE: &str = glasshouse::routing::evidence::ROUTING_LAT
 
 /// Map line 1849: record what routing added to this launch, from the start
 /// of the decision (`started`) to its end — the point after which profile
-/// resolution, the gateway and the process spawn happen identically whether
-/// or not a task was stated, and are therefore the launch's own cost rather
-/// than routing's.
+/// resolution, the gateway and the process spawn are the launch's own cost
+/// rather than routing's. Called only when a classification ran, so a
+/// launch that states no task opens no ledger and leaves no row — the row's
+/// absence is the honest reading of "nothing was added".
 ///
-/// Called only when a classification ran, so a launch that states no task
-/// opens no ledger (practice §65) and leaves no row: the row's absence is
-/// the honest reading of "nothing was added". Opened, written and dropped
-/// here, before any gateway holds its own handle.
+/// Timing columns are unix seconds (migration 11); a sub-second decision
+/// reads back as `0` through `duration_ms()`, with the millisecond figure
+/// logged beside it.
 ///
-/// The ledger's timing columns are unix **seconds** (migration 11), so a
-/// sub-second decision reads back as `0` through `duration_ms()`; the
-/// millisecond figure goes to the log beside it. A finer column is a schema
-/// decision this package does not take.
+/// This row carries no session id, deliberately and permanently: the
+/// decision it measures happens before `store.create` mints one, and the
+/// column is for an exchange some session was served, not for the routing
+/// decision that preceded it.
 ///
-/// **This row carries no session id** — `glasshouse::database` migration
-/// 24's `session_id` stays `NULL` here, deliberately and permanently. The
-/// decision this row measures is taken *before* `store.create` mints a
-/// session, so there is no id to write; and the row is about the routing
-/// decision rather than about an exchange some session was served, which is
-/// the only thing that column is for. Filling it from a session recorded
-/// later would make "the launch decided this before any session existed"
-/// indistinguishable from "this exchange belonged to that session", which is
-/// the distinction the nullable column exists to keep.
+/// History: design-decisions.md, "Trims: commands module docs", record_routing_latency.
 fn record_routing_latency(
     runtime: &Runtime,
     started: std::time::Instant,
@@ -1026,6 +987,16 @@ pub(crate) fn launch_session(
                 runtime,
                 routed.chosen().id(),
                 classified.as_ref(),
+                observed_at,
+            );
+            // Map line 1837, on the same instant: whether protected quota
+            // remained available for this launch, from the tier the decision
+            // used and the destination's own capacity band.
+            glasshouse::evaluation::record_reserve_availability(
+                runtime,
+                routed.chosen().id(),
+                routed_tier(classified.as_ref()),
+                routed.chosen().capacity_facts().band(),
                 observed_at,
             );
             // Line 1467: the session this work landed on is the sticky one.
@@ -1672,6 +1643,16 @@ pub(crate) fn launch_session(
             classified.as_ref(),
             observed_at,
         );
+        // Map line 1837, on the same instant: whether protected quota
+        // remained available for this launch, from the tier the decision
+        // used and the destination's own capacity band.
+        glasshouse::evaluation::record_reserve_availability(
+            runtime,
+            record.id.as_str(),
+            routed_tier(classified.as_ref()),
+            routed.chosen().capacity_facts().band(),
+            observed_at,
+        );
     }
 
     tracing::info!(
@@ -1859,32 +1840,23 @@ impl DeferredBriefing {
     }
 }
 
-/// The `briefed with ...` line both delivery rungs print, once, on a
-/// successful delivery — never composed twice so the wording cannot drift
-/// between rungs.
 /// Map lines 2402-2405: register Phase 60's edit-intent `PreToolUse` hook
 /// for a Claude Code session, unless a configuration layer turned
-/// coordination off.
+/// coordination off. Never a second `--settings` flag (Claude Code keeps
+/// only the last one), so this reads the document `install_session_document`
+/// already wrote, adds one `PreToolUse` key, and writes it back in place;
+/// `args` is never touched.
 ///
-/// **Never a second `--settings` flag**, for the reason
-/// [`crate::commands::resume::install_context_firewall_hook`] states at
-/// length: Claude Code keeps only the last one, so the only safe way to add
-/// a hook is to merge it into the document `install_session_document`
-/// already wrote. This reads that file back, adds one `PreToolUse` key, and
-/// writes it in place; `args` is never touched.
+/// `mode = "off"` installs nothing at all — line 2405's own words, and the
+/// reason this returns before reading the executable path or the session
+/// directory; an inert hook would still spawn a process per `Edit`.
 ///
-/// **`mode = "off"` installs nothing at all** — line 2405's own words, and
-/// the reason this returns before reading the executable path or the session
-/// directory. Not installed-and-inert: an inert hook would still spawn a
-/// process for every `Edit` the session makes.
+/// Best effort: a failure here is a session that starts without
+/// coordination rather than one that fails to start, and it is logged
+/// rather than propagated. No version floor and no probe: the worst a
+/// build that ignores the entry can do is not run it.
 ///
-/// Best effort, matching every other registration on this path: a failure
-/// here is a session that starts without coordination rather than one that
-/// fails to start, and it is logged rather than propagated. There is no
-/// version floor and no probe — unlike the firewall's `updatedToolOutput`,
-/// nothing this hook returns needs a Claude Code newer than the one that
-/// first accepted a `PreToolUse` entry, and the worst a build that ignores
-/// the entry can do is not run it.
+/// History: design-decisions.md, "Trims: commands module docs", install_edit_intent_hook.
 fn install_edit_intent_hook(
     selection: &session::HarnessSelection,
     effective: EffectiveConfig<'_>,

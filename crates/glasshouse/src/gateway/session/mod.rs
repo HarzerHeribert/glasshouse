@@ -17,14 +17,7 @@
 //! the reason there is no probe to write: there is nowhere here to make a
 //! request from.
 //!
-//! # One lock, taken briefly
-//!
-//! A connection thread calls `SessionRouting::observe_exchange` after its
-//! exchange is finished and its socket is closed, so the lock is never held
-//! across I/O. The `Upstream` it may then switch is moved by a single atomic
-//! store, and every connection thread reads its serving backend once at the
-//! top of its own exchange — so a failover can never split one request
-//! between two providers.
+//! History: design-decisions.md, "Trims: gateway module docs", session/mod.rs module doc.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -244,12 +237,6 @@ impl SessionRouting {
     /// [`InteractiveRouting::on_provider_failure`] used before this method
     /// existed.
     ///
-    /// Kept separate from [`Self::bind`] rather than folded into it: `bind`
-    /// answers only when a backend was actually resolved (its early `return`
-    /// above), while a pairing preference is known whether or not that
-    /// lookup succeeds, and a caller that skipped `bind` for a real reason
-    /// should not lose its pairing configuration as a side effect.
-    ///
     /// `preference_slug` is [`PairingPreference::slug`]'s own spelling, not
     /// the type itself — `crate::profile`, the only caller, may not import
     /// `crate::config` (see that module's own documentation), so it resolves
@@ -258,6 +245,7 @@ impl SessionRouting {
     /// default `EffectiveConfig::native_pairing_preference` itself falls back
     /// to — this method never refuses a launch over a configuration value it
     /// cannot parse.
+    // History: design-decisions.md, "Trims: gateway, profile and provider module docs", gateway/session/mod.rs `set_pairing_preference`.
     pub fn set_pairing_preference(&self, preference_slug: &str, overrides: PairingOverrides) {
         let preference =
             PairingPreference::from_slug(preference_slug).unwrap_or(PairingPreference::Strong);
@@ -270,25 +258,6 @@ impl SessionRouting {
     /// which Glasshouse session this gateway is serving, so that every row
     /// this type's own `record_routing_observation` writes can name it.
     ///
-    /// [`Self::set_pairing_preference`]'s shape, and separate from
-    /// [`Self::bind`] for its reason: `bind` answers only when a backend
-    /// actually resolved, while the session this gateway serves is known
-    /// whether or not that lookup succeeded.
-    ///
-    /// # Told by the launch, not learned from the wire
-    ///
-    /// `main.rs`'s two launch doors call this — `launch_session` after
-    /// `store.create` returns the record and before the harness is spawned,
-    /// and `resolve_resume_overlay` for the record being resumed. A gateway
-    /// is started once per launched session, so there is exactly one answer
-    /// per gateway and nothing here ever changes it from the wire. In
-    /// particular this is **not** derived from a request: the relay reads no
-    /// body by construction (`super::ingress`'s own
-    /// `an_exchange_has_nowhere_to_put_a_body`), and the harness's
-    /// `metadata.user_id` names an account, not a Glasshouse session — see
-    /// `docs/product/design-decisions.md`, *A session identity on the
-    /// routing evidence rows*.
-    ///
     /// `session_id` is a plain `&str`, not `crate::session::SessionId`: this
     /// module is structurally unable to see the session model at all (this
     /// file's own module documentation, and `gateway::tests::
@@ -296,6 +265,7 @@ impl SessionRouting {
     /// enforces it with a source scan), so the id crosses this boundary as
     /// its string and nothing else — the caller's own typed id, narrowed at
     /// the one call.
+    // History: design-decisions.md, "Trims: gateway, profile and provider module docs", gateway/session/mod.rs `serve_session`.
     pub fn serve_session(&self, session_id: &str) {
         self.lock().session_id = Some(session_id.to_owned());
     }
@@ -469,39 +439,7 @@ impl SessionRouting {
     /// - `assignment` must be `Some`, because a provider/model identity
     ///   recorded for an unbound session would be invented rather than
     ///   observed.
-    ///
-    /// `assignment` is a snapshot the caller took **at dispatch**, not a
-    /// read of whatever [`Self::bind`] or a failover has since made current.
-    /// A connection thread only reaches this call after the exchange is
-    /// already on the wire, and reading `self.lock().assignment` at that
-    /// point would attribute the exchange to a bind or re-bind that happened
-    /// *during* it rather than the one that actually served it — the
-    /// defect this parameter exists to close. So its absence means "there
-    /// was no assignment when this exchange was served", not "there is
-    /// none now".
-    ///
-    /// `dispatched_at_unix` and `completed_at_unix` come from the accept
-    /// loop, the only place in this partition with a timestamp on both sides
-    /// of `ingress::serve`. `exchange.first_byte_at` comes from inside that
-    /// call instead — `ingress::forward` is the only place that ever sees the
-    /// provider's response arrive — and is `None` on every exchange that
-    /// never reached a provider, exactly like every other honest absence this
-    /// method reads off `exchange` rather than invents.
-    ///
-    /// # What the row's `outcome` means now that a `failure_class` sits beside it
-    ///
-    /// `outcome` still answers *did the turn succeed*, at the transport level
-    /// this producer can see. Before framing was observed, a `2xx` was
-    /// always [`RoutingOutcome::Succeeded`]; a `2xx` whose stream was cut
-    /// short, or whose body was permitted and never came, is now
-    /// [`RoutingOutcome::Failed`] with the class that says why. The
-    /// invariant this keeps is simple and a test holds it: a row carries a
-    /// failure class exactly when its outcome is not a success.
-    ///
-    /// `retries` is written as `0` on every row — a count, not a default:
-    /// `ingress::forward` calls `Agent::run` once and `ureq` performs no
-    /// transparent retry. `tool_rounds` and `repairs` stay `NULL`; see the
-    /// ledger's own header for why nothing at this layer can count them.
+    // History: design-decisions.md, "Trims: gateway, profile and provider module docs", gateway/session/mod.rs `record_routing_observation`.
     pub(super) fn record_routing_observation(
         &self,
         ledger: &EvidenceLedger,
@@ -642,17 +580,6 @@ impl SessionRouting {
     /// lines 529, 534, 535, 537 and 538. It is called once per connection,
     /// after the exchange is over.
     ///
-    /// `ledger` and `now_unix` feed Phase 9J's native-pairing prior and Phase
-    /// 33A's local evidence into the one ranking decision this build makes
-    /// (`InteractiveRouting::on_provider_failure`) — the same
-    /// [`EvidenceLedger`] and completion timestamp
-    /// [`Self::record_routing_observation`] is given, so a failover reads the
-    /// very observations this gateway's own accept loop wrote. `None`
-    /// reproduces this policy's pre-batch-46 behaviour exactly (see
-    /// [`crate::routing::interactive::InteractiveRouting::on_provider_failure`]'s
-    /// own doc): with nothing to weigh, every survivor ties and the first one
-    /// found wins, the same as before this package.
-    ///
     /// `stated_retry_after` is what **the provider itself said** about how
     /// long to wait, read off this same response's headers by
     /// [`stated_retry_after`] — capability map line 1319. `None` means the
@@ -665,6 +592,7 @@ impl SessionRouting {
     /// line 1334's `failovers`. Every early return is
     /// [`ExchangeEffect::Unchanged`]: an exchange that said nothing moved
     /// nothing.
+    // History: design-decisions.md, "Trims: gateway, profile and provider module docs", gateway/session/mod.rs `observe_exchange`.
     #[allow(clippy::too_many_arguments)]
     pub(super) fn observe_exchange(
         &self,
@@ -891,15 +819,6 @@ fn model_key(model: &AssignedModel) -> String {
 /// capability map line 1319's producer end, narrowed to the one fact the
 /// decision is allowed to carry.
 ///
-/// # Why the whole [`RateLimitHeaders`] does not travel further than this
-///
-/// A `Retry-After` is a duration and nothing else. The rest of that value —
-/// limits, remaining counts, reset instants, the header names it was read
-/// from — is capacity telemetry with its own destination
-/// ([`SessionRouting::observe_quota_headers`] and the on-disk quota cache),
-/// and a scheduling block has no business seeing it. So this is where the
-/// narrowing happens, once, at the boundary between the two.
-///
 /// # `None` stays `None`
 ///
 /// The provider saying nothing is not the same fact as the provider saying
@@ -910,6 +829,7 @@ fn model_key(model: &AssignedModel) -> String {
 /// [`RateLimitHeaders::read`]), and [`u64::try_from`] is the second, local
 /// refusal rather than a clamp — a negative wait is a header this code does
 /// not understand, not a zero-second one.
+// History: design-decisions.md, "Trims: gateway, profile and provider module docs", gateway/session/mod.rs `stated_retry_after`.
 pub(super) fn stated_retry_after(headers: &RateLimitHeaders) -> Option<Duration> {
     headers
         .retry_after_seconds()
@@ -1026,35 +946,12 @@ pub(super) const EXHAUSTED_QUOTA_HORIZON_SECONDS: i64 = 300;
 /// provider, on the same reasoning as [`classify`]: nothing can be said about
 /// a provider that never saw the request.
 ///
-/// # Every rule, and what it reads
-///
-/// - `401`, `403` → [`FailureClass::CredentialFailure`]; `402` →
-///   [`FailureClass::ExhaustedQuota`] — the account cannot pay, the
-///   `phase-9h` live finding [`classify`] records above.
-/// - `429` → [`FailureClass::Throttle`], **unless** the response's own
-///   headers say nothing remains (`remaining = 0`) and the window reopens at
-///   or beyond [`EXHAUSTED_QUOTA_HORIZON_SECONDS`] from when the response
-///   arrived — then [`FailureClass::ExhaustedQuota`]. The reopening instant
-///   is the provider's reset field when it sent one, else its
-///   `Retry-After`; with neither, or with anything remaining, a `429` is a
-///   throttle. Line 1365: cadence throttling stays apart from a spent
-///   window, and the distinction is *read*, never guessed.
-/// - any other `4xx` → [`FailureClass::RequestIncompatibility`]; `5xx` →
-///   [`FailureClass::Upstream5xx`].
-/// - `2xx`/`3xx` are decided by framing alone: a stream that ended short of
-///   its declared length or before its terminating chunk →
-///   [`FailureClass::StreamAbort`]; a body that was permitted and never
-///   came, zero bytes and a clean end → [`FailureClass::EmptyCompletion`];
-///   otherwise served, `None`.
-/// - a transport failure → [`FailureClass::Timeout`] when
-///   `ingress::transport_detail` said so, else [`FailureClass::Unknown`]
-///   with the detail still on the exchange's own log line.
-///
 /// # What is never read
 ///
 /// No byte of the body. A `200` whose body describes a model error is
 /// served here, and the ledger's own header says so; the harness that
 /// received the body is the thing that can read it.
+// History: design-decisions.md, "Trims: gateway, profile and provider module docs", gateway/session/mod.rs `failure_class`.
 pub(super) fn failure_class(exchange: &Exchange, quota: &RateLimitHeaders) -> Option<FailureClass> {
     match &exchange.outcome {
         Outcome::Forwarded {
@@ -1131,15 +1028,7 @@ fn quota_is_exhausted(quota: &RateLimitHeaders, observed_at_unix: Option<i64>) -
 /// failure"). Every other outcome (`Unauthenticated`, `Declined`,
 /// `Unrouted`, `ClientGone`, `Idle`) never reached the provider at all, for
 /// reasons that have nothing to do with the provider's health.
-///
-/// [`crate::events::GatewayFailure::TimedOut`] and
-/// [`crate::events::GatewayFailure::Rejected`] are never produced here:
-/// `ingress::Outcome` has no production path that distinguishes either from
-/// a plain `Unreachable` today — `Outcome::Unreachable`'s own `detail` is a
-/// diagnostic phrase for `tracing`, not a second, finer-grained outcome, and
-/// re-deriving one by matching on that text would be reading `ingress`'s
-/// output more closely than `ingress`'s own module documentation allows this
-/// directory to. `ingress.rs` is this package's `FORBIDDEN FILES`.
+// History: design-decisions.md, "Trims: gateway, profile and provider module docs", gateway/session/mod.rs `gateway_failure`.
 pub(super) fn gateway_failure(exchange: &Exchange) -> Option<crate::events::GatewayFailure> {
     match &exchange.outcome {
         Outcome::Unreachable { .. } => Some(crate::events::GatewayFailure::Unreachable),

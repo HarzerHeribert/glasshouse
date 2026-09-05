@@ -52,29 +52,21 @@ const HOOK_EVENTS: &[&str] = &[
 
 /// The events Glasshouse asks Claude Code to report.
 ///
-/// A subset of [`HOOK_EVENTS`], and deliberately so: these are the ones that
-/// say something about the *session's* state. `PreToolUse` and `PostToolUse`
-/// fire many times per turn and would be noise for a lifecycle that only
-/// distinguishes running from waiting.
+/// A subset of [`HOOK_EVENTS`]: these say something about the *session's*
+/// state. `PreToolUse`/`PostToolUse` fire many times per turn and would be
+/// noise for a lifecycle that only distinguishes running from waiting.
 ///
-/// `SessionStart` is **not** here, and not by oversight: Claude Code 2.1.245
-/// does not fire it. A settings document declaring one was installed and the
-/// hook never ran, while `UserPromptSubmit` from the same document did.
+/// `SessionStart` is not here: Claude Code 2.1.245 does not fire it, though
+/// a settings document declaring it installs cleanly and `UserPromptSubmit`
+/// from the same document does fire.
 ///
-/// `PreCompact` **is** here, added 2026-09-01, map line 310. Until then this
-/// build asked Claude Code for nothing about its own compaction — not because
-/// the harness had no such event, but because nobody had looked past
-/// `claude --help` for one. **Run and observed** against Claude Code 2.1.257:
-/// a headless session (`--print --input-format=stream-json
-/// --output-format=stream-json --settings <a document declaring a
-/// `PreCompact` command>`) sent a manual `/compact`; the installed hook ran,
-/// its stdin payload read
-/// `{"session_id":"<the --session-id given>",...,"hook_event_name":"PreCompact","trigger":"manual",...}`,
-/// and the stream's own `system status` event carried a `compact_result`.
-/// `session::lifecycle::precedes_native_compaction` already matched the
-/// string `"PreCompact"` before this change — Codex sends exactly that
-/// spelling and has since Phase 8 — so subscribing to it here is what closes
-/// map line 310, not a change to the translation.
+/// `PreCompact` is here (map line 310), confirmed against Claude Code
+/// 2.1.257: a manual `/compact` ran the installed hook, whose payload
+/// carried `"hook_event_name":"PreCompact"`.
+/// `session::lifecycle::precedes_native_compaction` already matched that
+/// string — Codex has sent it since Phase 8 — so subscribing here closes
+/// the map line without changing the translation.
+// History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/harness/claude_code.rs `REPORTED_EVENTS`.
 const REPORTED_EVENTS: &[&str] = &[
     "UserPromptSubmit",
     "PermissionRequest",
@@ -314,19 +306,12 @@ const APPEND_SYSTEM_PROMPT: AdditiveInjection = AdditiveInjection {
 /// see [`BUILT_IN_OUTPUT_STYLES`].
 ///
 /// The match reads the harness's own descriptions rather than inventing a
-/// correspondence:
-///
-/// - `Concise` says "responds tersely, leading with results and skipping
-///   preamble and narration", which is a terse-or-concise verbosity *and*
-///   silent narration. Both, because the description claims both, and a style
-///   selected on half of what it says would be applying more than was asked
-///   for.
-/// - `Explanatory` says "explains its implementation choices", which is
-///   `Verbosity::Elaborate`.
-///
-/// Audience, evidence presentation and answer format are not matched on at
-/// all: no built-in style speaks about them, and reading one into a style
-/// would be exactly the invention the rest of this file refuses.
+/// correspondence: `Concise` claims both a terse-or-concise verbosity and
+/// silent narration, so it is selected only when both match; `Explanatory`
+/// claims `Verbosity::Elaborate`. Audience, evidence presentation and
+/// answer format are not matched on at all, since no built-in style speaks
+/// about them.
+// History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/harness/claude_code.rs `closest_output_style`.
 fn closest_output_style(profile: &ResponseProfile) -> Option<&'static OutputStyle> {
     let wanted = match (profile.verbosity(), profile.narration()) {
         (Verbosity::Terse | Verbosity::Concise, Narration::Silent) => "Concise",
@@ -656,32 +641,25 @@ pub fn supports_updated_tool_output(version: (u32, u32, u32)) -> bool {
 }
 
 /// The shell command line `context-firewall hook` runs as this session's
-/// `PostToolUse` hook — the session's mode and thresholds baked in as flags
-/// on the registered command, per map line 1991's own requirement, and
-/// carrying no reducer name because no flag here could name one (map line
+/// `PostToolUse` hook — mode and thresholds baked in as flags on the
+/// registered command (map line 1991), carrying no reducer name (map line
 /// 1992).
 ///
 /// `session` is the **Glasshouse** session identifier, baked in exactly as
-/// the lifecycle hook's own `--session` is
-/// ([`crate::harness::HookCommand::shell_command`]) and for the same reason:
-/// a hook runs as a fresh process with whatever environment the harness gives
-/// it, and the `session_id` in a `PostToolUse` payload is *Claude Code's*
-/// identifier, not one this project's tables know. Migration 26's
-/// `file_touched` rows have to name a Glasshouse session, so the id is
-/// carried on the command line at registration or it is not available at all.
-/// It is hexadecimal and cannot carry a space, so it is not quoted — the same
-/// judgement [`crate::harness::HookCommand::shell_command`] states for its
-/// own.
+/// the lifecycle hook's own `--session`
+/// ([`crate::harness::HookCommand::shell_command`]): a `PostToolUse`
+/// payload's `session_id` is *Claude Code's* own identifier, not one this
+/// project's tables know, and migration 26's `file_touched` rows must name
+/// a Glasshouse session — so the id is carried on the command line at
+/// registration or not available at all. Hexadecimal, so unquoted.
 ///
-/// `min_semantic_tokens` is `None` for a session no layer of map lines
-/// 2023/2024's policy resolution set one for — the flag is then omitted
-/// entirely, matching this builder's behaviour before that resolver existed,
-/// rather than spelling out the hook subcommand's own CLI default for the
-/// first time.
+/// `min_semantic_tokens` is `None`, and the flag omitted entirely, for a
+/// session no layer of map lines 2023/2024's policy resolution set one for.
 ///
 /// Quoted the same way [`HookCommand::shell_command`] quotes its own
-/// program path, for the same reason: a Windows path is full of backslashes
-/// and an unquoted one would not survive a POSIX shell either.
+/// program path: a Windows path is full of backslashes and an unquoted one
+/// would not survive a POSIX shell either.
+// History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/harness/claude_code.rs context-firewall hook command builder.
 pub fn context_firewall_command_line(
     program: &std::path::Path,
     mode: crate::config::firewall::FirewallMode,

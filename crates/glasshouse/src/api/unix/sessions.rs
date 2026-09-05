@@ -511,37 +511,23 @@ pub(super) fn unmute_session(
 /// Deliver Glasshouse's own implementation policy to `session`, once —
 /// capability map lines 955-990.
 ///
-/// # Why this is a separate function and not a second `Injection`
-///
-/// [`deliver_memory`] carries text Glasshouse *quoted*; this carries text
-/// Glasshouse *wrote*. `memory::inject`'s whole module exists to keep an
-/// untrusted body from forging a label, and there is no untrusted body here —
-/// every byte is a literal in `glasshouse::policy`. Routing this through
-/// `Injection` would mean either widening a type whose single constructor is
-/// the containment argument, or pretending a constant is a memory. So it gets
-/// its own marker pair, distinct from `MEMORY_MARKER`, and a reader can tell
-/// the two apart because they *are* two things.
-///
-/// # Once per session, several lines
-///
-/// The policy does not change and a session that has it does not need it
-/// again; `policied` is the record, and it is checked before the first line
-/// goes out so a session is never given half of a second copy. It is written
-/// only after every line has actually been sent, for the reason
-/// [`deliver_memory`] writes its own ledger late: a policy that did not
-/// arrive must not be recorded as one the session already has.
-///
+/// A separate function, not a second `Injection`: [`deliver_memory`] carries
+/// text Glasshouse *quoted*, this carries text Glasshouse *wrote* — every
+/// byte a literal in `glasshouse::policy`, with no untrusted body to keep
+/// from forging a label, so it gets its own marker pair, distinct from
+/// `MEMORY_MARKER`.
+/// Once per session: `policied` is the record, checked before the first
+/// line goes out so a session is never given half of a second copy, and
+/// written only after every line has actually been sent, for the reason
+/// [`deliver_memory`] writes its own ledger late.
 /// Several lines because thirty rules do not fit in one — a delivery longer
 /// than a terminal's canonical line limit is discarded *and* wedges that
 /// session's input permanently, which is why `policy::deliveries` bounds
-/// every element and this function sends them one at a time. See
-/// `glasshouse::policy`'s own header for the measurement.
+/// every element and this function sends them one at a time.
 ///
-/// # Failure is never a delivery failure
-///
-/// As [`deliver_memory`]: a send that fails is logged and swallowed, and the
-/// task still goes. A worker that starts without the policy is better than a
-/// worker that does not start.
+/// Failure is never a delivery failure, as [`deliver_memory`]: a send that
+/// fails is logged and swallowed, and the task still goes.
+// History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/api/unix/sessions.rs `deliver_policy`.
 pub(super) fn deliver_policy(
     api: &mut SessionApi<'_>,
     runtime: &Runtime,

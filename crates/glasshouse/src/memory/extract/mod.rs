@@ -1,67 +1,24 @@
 //! Turning session activity into durable project memory (Phase 21).
 //!
-//! # What exists here and what deliberately does not
-//!
-//! This is the **producer** for the store Phases 20, 22 and 23 built. It
+//! This is the **producer** for the store Phases 20, 22 and 23 built: it
 //! bounds and scrubs session activity, asks a model for structured memories,
-//! validates what comes back against a contract it cannot argue with, and
-//! records what survives.
+//! validates the reply, and records what survives. It does **not** call a
+//! provider — Phase 39's disposable-job interface is the seam for that — so
+//! [`ExtractionModel`] is tested against fakes.
 //!
-//! It does **not** call a provider. Phase 21 says *"allow a configurable
-//! cheap or local model to perform memory extraction"*, and the mechanism
-//! that would provide one — Phase 39's disposable-job interface — does not
-//! exist yet. So [`ExtractionModel`] is the seam, tested against fakes, and
-//! this batch's report states exactly what Phase 39 must supply. Building
-//! half a provider call path here would be a second answer to a question
-//! another phase owns.
-//!
-//! Four things **trigger** extraction, and Phase 29 is the name for what
-//! they start: a *memory commit*. `main.rs`'s hook path runs one after a
-//! completed turn, after a commit lands, and before a harness compacts its
-//! own context; `glasshouse memory commit` runs one a person asked for. All
-//! four go through [`Extractor::run`] with a different
-//! [`ExtractionTrigger`], which is recorded both on the
-//! [`ExtractionOutcome`] and on every memory the run stored — a second
-//! extraction path for any of them would be a second answer to what is worth
-//! remembering.
-//!
-//! (This paragraph used to say nothing triggered extraction at all. Batch 51
-//! wired the first two and Phase 29 wired the rest; it is kept in the past
-//! tense here because the module's structure — a trigger the caller passes
-//! in, rather than a trigger this module decides — is still the reason
-//! `ExtractionTrigger` exists.)
-//!
-//! # The acceptance condition, and where it lives
+//! Four things trigger extraction, each through [`Extractor::run`] with a
+//! different [`ExtractionTrigger`], recorded on the [`ExtractionOutcome`]
+//! and on every memory stored.
 //!
 //! **The extractor must never be fed, and must never emit, credential
-//! material.** `memories.body` is free text and the schema cannot stop a
-//! secret being put in it — the pinned-schema test
-//! `the_project_database_schema_has_nowhere_to_put_a_credential` says so in
-//! its own doc comment and hands the control to this module.
+//! material** — `memories.body` is free text no schema can keep a secret
+//! out of — enforced at three places: [`chunk::SessionChunk::build`] and
+//! [`Prompt::build`] scrub what reaches a model; [`schema::judge`] screens
+//! each element before reading any field (see [`credentials`]).
 //!
-//! It is enforced at exactly three places, each with its own regression test
-//! and its own mutation:
-//!
-//! 1. [`chunk::SessionChunk::build`] scrubs every entry, so no chunk in the
-//!    program holds un-scrubbed activity;
-//! 2. [`Prompt::build`] scrubs the block of already-stored memories it
-//!    quotes back, because a memory recorded before this module existed was
-//!    never screened;
-//! 3. [`schema::judge`] screens each emitted element **before reading any of
-//!    its fields** and refuses it whole rather than redacting it.
-//!
-//! The first two are why nothing reaches a model. The third is why nothing
-//! reaches a row. See [`credentials`] for why the two directions are
-//! deliberately asymmetric — scrubbed in, refused out.
-//!
-//! # Failure is not the session's problem
-//!
-//! [`Extractor::run`] returns [`ExtractionOutcome`] and **no `Result`**.
-//! There is no error channel for a caller to propagate, which is the
-//! structural form of Phase 21's *"keep memory-extraction failure non-fatal
-//! to the coding session"*: an unavailable model, an unparseable reply, a
-//! store that refuses a row, and a model implementation that panics all
-//! produce an outcome describing what happened.
+//! [`Extractor::run`] returns [`ExtractionOutcome`] and **no `Result`**,
+//! keeping extraction failure non-fatal to the coding session.
+// History: design-decisions.md, "Trims: memory export and extraction module docs", memory/extract/mod.rs module doc.
 
 pub mod authority;
 pub mod chunk;
@@ -93,29 +50,15 @@ pub const EXISTING_MEMORY_CHARS: usize = 160;
 
 /// Why extraction ran — Phase 29's *memory commit*, in the only form it has.
 ///
-/// # A memory commit is this pipeline with a trigger, not a second pipeline
+/// Phase 29 asks for four ways to start a memory commit; this module answers
+/// with four constructors of this type rather than a second extractor,
+/// because a second extractor would be a second answer to *what is worth
+/// remembering*, a second credential screen and a second duplicate check.
+/// Every variant is recorded on the memories the run produced
+/// (`memories.extraction_trigger`) and on its [`ExtractionOutcome`].
 ///
-/// Phase 29 line 1147 asks for *"a lightweight memory commit operation that
-/// extracts durable project knowledge from recently completed work"*, and
-/// lines 1148–1151 ask for four ways to start one. That is exactly this
-/// module with four constructors of this type: a second extractor would be a
-/// second answer to *what is worth remembering*, a second credential screen,
-/// and a second duplicate check — three places for the same question to be
-/// answered differently.
-///
-/// So the variants below are the whole of the difference between a memory
-/// commit a person asked for and one a harness event started, and every one
-/// of them is recorded on the memories the run produced
-/// (`memories.extraction_trigger`, written by [`Extractor::run`]) as
-/// well as on its [`ExtractionOutcome`].
-///
-/// # Not `Copy`, because one variant carries a commit
-///
-/// [`Self::GitCommit`] names the object that made the boundary a boundary,
-/// which is a `String`. Carrying it here rather than passing it beside the
-/// trigger is what makes *"the commit is the reason this ran"* unrepresentable
-/// as anything else: there is no way to construct this variant without one,
-/// and no way for another trigger to acquire one.
+/// Not `Copy`: [`Self::GitCommit`] carries the commit `String` that made the
+/// boundary a boundary, so there is no way to construct it without one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExtractionTrigger {
     /// A turn ended with [`crate::events::TurnOutcome::Completed`].
@@ -277,34 +220,17 @@ impl Prompt {
     /// Assemble a **request** prompt: a contract this repository wrote,
     /// followed by one request a person actually typed.
     ///
-    /// # Why this exists beside [`Prompt::build`] rather than replacing it
-    ///
-    /// [`Prompt::build`] assembles a session transcript, which is the one
-    /// thing a classification job must never send: a routing decision is
-    /// about a single request, and quoting the conversation at a cheap model
-    /// would put a whole session's activity through a resource chosen for
-    /// being disposable. The two constructors therefore differ in what they
-    /// assemble and agree on the only thing this newtype exists to guarantee
-    /// — that every byte reaching a model went through
-    /// [`credentials::scrub`] or was written in this repository's source.
-    ///
-    /// # The `&'static str` is the guarantee, not a convenience
-    ///
-    /// `contract` and `schema` are unscrubbed, so they must be text that
-    /// cannot have come from a person, a file or a database. `&'static str`
-    /// is the type that says so: a runtime-assembled `String` cannot be
-    /// passed here, so the only unscrubbed half of the result is a literal
-    /// compiled into the binary. They are two arguments rather than one for
-    /// the same reason [`Prompt::build`] pushes `PROMPT_CONTRACT` and then
-    /// `RESPONSE_SCHEMA` — what a job is for and what its reply must look
-    /// like are separately documented and separately revised.
-    /// `request_text` is the half that *did* come from a person, and
-    /// it is scrubbed — a request that pasted a key in gets the key removed
-    /// before anything leaves the process, which is the same direction
-    /// [`Prompt::build`] scrubs its `existing` memories for.
-    ///
-    /// The caller keeps the original text for its own report; only what
-    /// reaches the model is altered.
+    /// Exists beside [`Prompt::build`], which assembles a session
+    /// transcript — the one thing a classification job must never send,
+    /// since a routing decision is about a single request. Both constructors
+    /// agree on the guarantee this newtype exists for: every byte reaching a
+    /// model went through [`credentials::scrub`] or was written in this
+    /// repository's source. `contract` and `schema` are `&'static str`
+    /// because that is the type that cannot have come from a person, a file
+    /// or a database; `request_text` is the half that did, so it is
+    /// scrubbed. The caller keeps the original text for its own report; only
+    /// what reaches the model is altered.
+    // History: design-decisions.md, "Trims: memory export and extraction module docs", memory/extract/mod.rs `Prompt::for_request`.
     pub fn for_request(contract: &'static str, schema: &'static str, request_text: &str) -> Self {
         let mut out =
             String::with_capacity(contract.len() + schema.len() + request_text.len() + 64);
@@ -337,25 +263,18 @@ impl Prompt {
 
 /// What one provider said a call cost, in tokens.
 ///
-/// # Every field is optional, and an absence is never a zero
+/// Every field is optional and an absence is never a zero: `usage` is
+/// optional in the protocols this seam is asked over, and providers
+/// disagree about which fields they populate, so each count is [`None`]
+/// when unreported — matching `NewObservation`'s own nullable, `Option<i64>`
+/// token columns, since collapsing "not recorded" into a reported zero is
+/// the fabrication the capability map refuses by name.
 ///
-/// `usage` is optional in the protocols this seam is asked over, and
-/// providers disagree about which of its fields they populate. So each count
-/// here is [`None`] when the provider did not report it — a distinct fact
-/// from a reported zero, and the reason
-/// `crate::routing::evidence::NewObservation`'s own token fields are
-/// `Option<i64>` and its columns nullable. Collapsing the two would make
-/// "this build recorded nothing here" indistinguishable from "this call used
-/// no input tokens" at every consumer downstream, which is the shape of
-/// fabrication the capability map refuses by name: *a fabricated value here
-/// does not degrade the policy, it inverts it.*
-///
-/// Deliberately not here: a **cost**. A monetary figure needs per-model
-/// pricing this build does not have, and `routing_observations` pairs
-/// `cost_micro_usd` with a `cost_confidence` by `CHECK` for exactly that
-/// reason — a stored number must carry a stated confidence, and there is
-/// none to state. Tokens are what a provider actually reports; a price is
-/// what somebody would have to invent.
+/// Deliberately not here: a **cost**. `routing_observations` pairs
+/// `cost_micro_usd` with a `cost_confidence` by `CHECK`, and there is no
+/// confidence to state for a monetary figure this build has no per-model
+/// pricing for — tokens are what a provider reports, a price is invented.
+// History: design-decisions.md, "Trims: memory export and extraction module docs", memory/extract/mod.rs cost-in-tokens doc.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TokenUsage {
     pub input_tokens: Option<i64>,
@@ -729,25 +648,19 @@ impl<'a> Extractor<'a> {
 
     /// Extract from one bounded chunk.
     ///
-    /// # There is no error channel, and that is the design
-    ///
-    /// Phase 21 requires extraction failure to be *"non-fatal to the coding
-    /// session"*. A `Result` here would put the decision in every caller's
-    /// hands, and one caller using `?` on a lifecycle-event path would make
-    /// a failed extraction end a session. So this returns an outcome, always,
-    /// and every failure is a field on it.
+    /// No error channel, by design: Phase 21 requires extraction failure to
+    /// be *"non-fatal to the coding session"*, and a `Result` here would let
+    /// one caller's `?` end a session on a failed extraction. So this always
+    /// returns an outcome, and every failure is a field on it.
     ///
     /// A model implementation that **panics** is caught rather than allowed
-    /// to unwind into the caller, because a disposable support job taking a
-    /// coding session down is the same defect wearing a worse hat.
-    /// `AssertUnwindSafe` is sound here for a specific reason: nothing has
-    /// been written to the store when the model is called, so a panic
-    /// unwinding out of it cannot leave a partially-recorded extraction
-    /// behind — the outcome is discarded whole and reported as
-    /// [`ExtractionFailure::ModelPanicked`]. Note the caveat: the default
-    /// panic hook still prints to stderr, so a Glasshouse that runs
-    /// extraction while a TUI owns the terminal must install a hook of its
-    /// own.
+    /// to unwind into the caller. `AssertUnwindSafe` is sound here because
+    /// nothing has been written to the store when the model is called, so
+    /// the outcome is discarded whole and reported as
+    /// [`ExtractionFailure::ModelPanicked`] — though the default panic hook
+    /// still prints to stderr, so a build running extraction while a TUI
+    /// owns the terminal must install a hook of its own.
+    // History: design-decisions.md, "Trims: memory export and extraction module docs", memory/extract/mod.rs `Extractor::run`.
     pub fn run(&self, chunk: &SessionChunk, trigger: ExtractionTrigger) -> ExtractionOutcome {
         let mut outcome = ExtractionOutcome::empty(trigger, self.model.describe(), chunk);
 
@@ -899,24 +812,21 @@ impl<'a> Extractor<'a> {
     /// Map line 1139's reliability guard, and the writer behind it.
     ///
     /// **The check is byte-equality against the chunk's own `file_touched`
-    /// set, and nothing else.** Not a prefix match, not a normalised
-    /// comparison, not a "does this look like a path" test — the model was
-    /// shown `edited <path>` for each of those paths verbatim
-    /// (`lifecycle::describe`), so a returned path either is one of them or
-    /// is something the model produced rather than copied. Anything softer
-    /// would let a plausible near-miss earn
-    /// [`crate::memory::FileAssociation::Referenced`], which is precisely the
-    /// fabricated producer the refusal register refused for this line.
+    /// set, and nothing else** — not a prefix match, not normalised, not "does
+    /// this look like a path" — because the model was shown `edited <path>`
+    /// for each of those paths verbatim, so a returned path either is one of
+    /// them or was produced rather than copied. Anything softer would let a
+    /// plausible near-miss earn
+    /// [`crate::memory::FileAssociation::Referenced`]. Normalisation happens
+    /// *after* the check, inside
+    /// [`crate::memory::MemoryStore::record_referenced_files`], so two
+    /// spellings of one file cannot compare equal and widen what counts as
+    /// copied.
     ///
-    /// Normalisation happens **after** the check, inside
-    /// [`crate::memory::MemoryStore::record_referenced_files`], for the same
-    /// reason: normalising first would make two spellings of one file compare
-    /// equal and quietly widen what counts as copied.
-    ///
-    /// A store failure is a `tracing::warn!` and nothing more. The memory is
+    /// A store failure is a `tracing::warn!` and nothing more: the memory is
     /// already recorded, and losing its file association is strictly better
-    /// than losing it — the posture `main.rs::record_observed_files`
-    /// documents for the other writer.
+    /// than losing it.
+    // History: design-decisions.md, "Trims: memory export and extraction module docs", memory/extract/mod.rs file-touched reliability guard.
     fn record_referenced_paths(
         &self,
         memory: &MemoryId,

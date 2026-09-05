@@ -57,30 +57,22 @@ pub enum CorrelationVerdict {
 /// What this project's ledger has observed about whether two routes fail
 /// together — capability map lines 1370, 1373, 1374 and 1376, as one value.
 ///
-/// # What is counted
-///
 /// An **informative failure event** is a correlatable failure
 /// ([`FailureClass::is_correlatable`]) on one route during which the other
-/// route was *observed at all* — had an exchange with a recorded outcome
-/// whose window overlaps the failure's within
+/// route was *observed at all* within
 /// [`CORRELATION_OVERLAP_TOLERANCE_SECONDS`]. A failure while the other
-/// route was idle says nothing about the pair and is counted nowhere: line
-/// 1370's "measured, never assumed" cuts both ways, and treating an
-/// unobserved route as having survived would manufacture independence.
+/// route was idle is counted nowhere: line 1370's "measured, never assumed"
+/// cuts both ways, and treating an unobserved route as having survived
+/// would manufacture independence.
 ///
 /// Of the informative events, `overlaps` are those where the other route
-/// failed with the **same class** inside the tolerance, and `lone` are those
-/// where it was observed and did not. Each failure event is matched at most
-/// once, so a burst of five on each side is ten events and not twenty-five
-/// pairs.
+/// failed with the **same class** inside the tolerance, `lone` those where
+/// it was observed and did not; each failure event is matched at most once.
 ///
-/// # Why the confidence moves both ways (line 1374)
-///
-/// [`Self::confidence`] is `overlaps / (overlaps + lone)`. A new overlapping
-/// failure raises it; a new failure the other route sat out lowers it.
-/// Nothing here is a stored flag: the value is recomputed from the rows on
-/// every read and never persisted, because the rows are the claim and the
-/// rows keep arriving.
+/// [`Self::confidence`] is `overlaps / (overlaps + lone)`, recomputed from
+/// the rows on every read and never persisted, because the rows are the
+/// claim and the rows keep arriving.
+// History: design-decisions.md, "Trims: routing module docs", routing/evidence/signals.rs `struct RouteCorrelation` doc.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RouteCorrelation {
     routes: (RouteIdentity, RouteIdentity),
@@ -267,26 +259,17 @@ pub fn correlate_routes(observations: &[RoutingObservation]) -> RouteCorrelation
 /// [`correlate_routes`] measures, restricted to [`FailureClass::Throttle`]
 /// and to one provider's own models rather than every route in the ledger.
 ///
-/// # One of the map line's four scopes is still not here
-///
-/// Line 1317 names four: provider-wide, model-specific, account-specific,
-/// request-pool-specific. Three now have a producer in this build.
-/// **Account-specific** gained its key with Phase 56A: every gateway
-/// exchange row carries the serving credential's label in
-/// [`RoutingObservation::quota_context`]
-/// (`crate::gateway::session` stamps `credential().label()` on every
-/// observation), so a second account of one provider is now something the
-/// rows can tell apart — the earlier note here that *"no row carries an
-/// account identity"* described the build before that column had its
-/// producer. The variant is still emitted only when the evidence permits:
-/// rows without a `quota_context` contribute nothing to it, and a ledger
-/// with one account's rows classifies exactly as it always did.
-/// **Request-pool-specific** still has neither a producer nor a consumer:
-/// `routing::free::is_request_pool` has no production caller, and the one
-/// production allowance read asks only `is_exhausted`, which a pooled and a
-/// token-priced credential both answer the same way (refusal register, row
-/// 531). Fabricating it would be exactly the invention line 1317's own
-/// "when evidence permits" refuses.
+/// Line 1317 names four scopes: provider-wide, model-specific,
+/// account-specific, request-pool-specific. **Account-specific** gained its
+/// key with Phase 56A — every gateway exchange row carries the serving
+/// credential's label in [`RoutingObservation::quota_context`] — emitted
+/// only when the evidence permits: rows without a `quota_context`
+/// contribute nothing to it. **Request-pool-specific** still has neither a
+/// producer nor a consumer: `routing::free::is_request_pool` has no
+/// production caller, and the one production allowance read asks only
+/// `is_exhausted`, which a pooled and a token-priced credential both answer
+/// the same way (refusal register, row 531).
+// History: design-decisions.md, "Trims: routing module docs", routing/evidence/signals.rs `enum ThrottleScope` doc.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum ThrottleScope {
     /// A throttle on this route overlapped, within
@@ -593,24 +576,17 @@ pub fn recent_credential_throttles(
 /// line 1971's *"spend ceilings"* half, read from the rows this ledger
 /// actually holds.
 ///
-/// # Why tokens, and why that is not this reader's own decision
-///
-/// `routing_observations.cost_micro_usd` has one producer now — map line
-/// 1307, `main.rs::record_entitlement_fallback`, carrying
-/// [`crate::routing::session::Routed::cost`] — but it writes only on an
-/// entitlement-fallback event, at [`CostConfidence::Estimated`] built from
-/// the user's own `pricing.toml` rather than a provider-reported figure. The
-/// overwhelming majority of rows still leave the column `NULL`, so a reader
-/// here that answered in money would answer `None` for nearly every window,
-/// and a ceiling that can almost never be reached is a rule the broker can
-/// almost never be held to. Map line 1465's reader already settled the same
-/// question the same way, in production, in [`RoutingOverhead`]'s own
-/// words: *"'Spend' is tokens, input plus output as the provider reported
-/// them, because that is the only currency this ledger holds."* This reader
-/// is that sentence applied per account. Cached input tokens are excluded
-/// for line 1465's reason too: providers disagree on whether they are
-/// already inside `input_tokens`, and a sum that might double-count is worse
-/// than one that names what it omits.
+/// `routing_observations.cost_micro_usd` has one producer (map line 1307),
+/// and it writes only on an entitlement-fallback event, at
+/// [`CostConfidence::Estimated`] — so a reader that answered in money would
+/// answer `None` for nearly every window, and a ceiling almost never
+/// reached is a rule almost never enforced. Map line 1465's reader settled
+/// the same question the same way, in [`RoutingOverhead`]'s own words:
+/// *"'Spend' is tokens... because that is the only currency this ledger
+/// holds."* This reader is that sentence applied per account. Cached input
+/// tokens are excluded for the same reason: providers disagree on whether
+/// they are already inside `input_tokens`.
+// History: design-decisions.md, "Trims: routing module docs", routing/evidence/signals.rs `struct CredentialSpend` doc.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CredentialSpend {
     /// Input plus output tokens summed over the rows that carried a count —
@@ -795,4 +771,30 @@ pub fn recent_credential_cost(
         unpriced_rows,
         account_narrowed,
     }
+}
+
+/// Map line 1158's producer, beside [`recent_credential_spend`]: a session's
+/// estimated context size, read off the **latest** row this session's own
+/// gateway exchanges wrote, never guessed. See `design-decisions.md`,
+/// *"Context size is read off the gateway's own exchange, never guessed"*,
+/// for why this is a reading and not a model, and for the wire rule below:
+/// Anthropic Messages bills `input_tokens` excluding what the cache served,
+/// so the prompt size is their sum; every other known wire's own figure
+/// already includes the cached subset, so it stands alone, and an unknown
+/// wire takes the same conservative floor. `None` — never `Some(0)` — when
+/// this session wrote no row with a known input-token count.
+pub fn estimated_context_tokens(
+    observations: &[RoutingObservation],
+    session_id: &str,
+) -> Option<i64> {
+    let latest = observations
+        .iter()
+        .filter(|row| row.session_id.as_deref() == Some(session_id))
+        .filter(|row| row.input_tokens.is_some())
+        .max_by_key(|row| (row.observed_at_unix, row.seq))?;
+    let input = latest.input_tokens?;
+    Some(match latest.route.as_deref() {
+        Some("anthropic-messages") => input + latest.cached_input_tokens.unwrap_or(0),
+        _ => input,
+    })
 }

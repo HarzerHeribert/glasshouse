@@ -1,5 +1,6 @@
 use rusqlite::{OptionalExtension, params};
 
+use crate::harness::pairing::PairingClass;
 use crate::routing::evidence::{MIN_SAMPLE_FOR_SUMMARY, UNKNOWN_HARNESS};
 
 use super::{
@@ -245,53 +246,21 @@ impl EvaluationObservations {
 /// §77's reason: a second worker's reader and this one must not be able to
 /// land on the same lines.
 ///
-/// # The proxy's join key, closed by `GH-TURN-OUTCOME-ROW`
+/// The proxy for 1821/1831 needs a [`EvaluationKind::MemoryRetrieved`] row's
+/// `session_id` to find "the retrieving session", and a same-session row
+/// saying how its turn ended. The queries below join on
+/// [`EvaluationKind::TurnOutcomeObserved`] — a row `record_turn_outcome`
+/// writes for **every** session that reaches the hook's `TurnEnded` arm,
+/// routed or not, unlike [`EvaluationKind::RoutingOutcomeObserved`] (which
+/// never arises for a door-spawned session and still feeds the routing
+/// readers below, unchanged). Of the four negative signals the design
+/// names — failover, retry, override, early abandonment — only **override**
+/// ([`EvaluationKind::RoutingOverrideDecided`], `subject = "overridden"`) has
+/// a row shape this ledger can join on a session id at all; the other three
+/// are omitted from the join by name, not invented.
 ///
-/// The design decision's proxy for 1821/1831 is *"the retrieving session's
-/// turn ended `Completed` … with no failover, retry, override or early
-/// abandonment recorded against it."* That needs a
-/// [`EvaluationKind::MemoryRetrieved`] row's `session_id` to find "the
-/// retrieving session" at all, and a same-session row saying how its turn
-/// ended. `GH-RETRIEVAL-ATTRIBUTION` gave the launch-time briefing door —
-/// `api/unix.rs::deliver_memory` — the first: a successful injection carries
-/// the session it was delivered to. `main.rs::memory_search_grouped`'s two
-/// callers still pass `None`: `glasshouse memory search` has no session to
-/// attribute a person's own command to, and the machine door's
-/// `query_memory` has no session field on its `Request::QueryMemory` to
-/// thread one from at all.
-///
-/// The second used to be [`EvaluationKind::RoutingOutcomeObserved`], and that
-/// row **never arises for a door-spawned session**:
-/// [`crate::evaluation::record_routing_outcome`] refuses to write anything for a session with no
-/// prior routed destination, and only `main.rs::launch_session` (the CLI
-/// `glasshouse launch` path) ever calls [`crate::evaluation::record_routed_session`] — the
-/// door's own `Request::SpawnSession`/`Request::SendMessage`, which is what
-/// actually calls `deliver_memory`, never routes a session at all. So the two
-/// producers could never meet on one session (refusal register, *"Phase 51's
-/// memory proxy — 1821 and 1831"*).
-///
-/// The queries below join instead on [`EvaluationKind::TurnOutcomeObserved`]
-/// — a row `record_turn_outcome` writes for **every** session that reaches
-/// the hook's `TurnEnded` arm, routed or not. A door-spawned session's turn
-/// end now lands a row on the same session id `deliver_memory` already
-/// attached to its retrieval, so the join has a real producer on both sides
-/// that actually meet. [`EvaluationKind::RoutingOutcomeObserved`] is
-/// unchanged and still feeds the routing readers below; this join no longer
-/// uses it.
-///
-/// Of the four negative signals the design names — failover, retry,
-/// override, early abandonment — only **override**
-/// ([`EvaluationKind::RoutingOverrideDecided`], `subject = "overridden"`)
-/// has a row shape this ledger can join on a session id at all, and that row
-/// is written only for a routed (launched) session, so it never suppresses a
-/// door-spawned session's proxy hit — there being no override row to find is
-/// the correct answer for a session an override could never have applied to.
-/// [`EvaluationKind::FailoverPrevented`] carries no `session_id` by its own
-/// design (see that variant's doc comment), no evaluation kind here
-/// observes a "retry", and [`crate::events::TurnOutcome`] has exactly two
-/// values — `Completed` and `Failed` — so "early abandonment" is not a
-/// state this ledger can tell apart from ordinary silence. Those three are
-/// therefore omitted from the join by name, not invented.
+/// History: design-decisions.md, "Trims: the remaining module docs, second
+/// packet", evaluation/readers.rs `impl EvaluationObservations` (memory readers).
 impl EvaluationObservations {
     /// **Map line 1821**: *"Measure how often retrieved memory is actually
     /// useful to the receiving agent."*
@@ -749,13 +718,25 @@ pub struct RouteOutcomeCounts {
     /// unknown bucket, and it is reported rather than dropped.** A quiet
     /// process is not a failure and an exited one is not a success; a count
     /// that silently omitted these would make every ratio here a fraction of
-    /// an unstated denominator.
+    /// an unstated denominator. Never includes a session that was rated:
+    /// [`Self::rated_useful`] and [`Self::rated_not_useful`] hold those.
     pub sessions_without_outcome: i64,
+    /// Sessions in this bucket whose **latest** [`EvaluationKind::RoutingRated`]
+    /// row carries [`EvaluationOutcome::Useful`] — map line 1846's design
+    /// note, *"The routing half of RC-B"* (2026-09-05). Counted apart from
+    /// [`Self::completed`], never summed into it: an explicit rating
+    /// **replaces** the [`EvaluationKind::RoutingOutcomeObserved`] proxy for
+    /// that session rather than adding to it, so [`Self::completed`] and
+    /// [`Self::failed`] exclude every session counted here.
+    pub rated_useful: i64,
+    /// The same rule for [`EvaluationOutcome::NotUseful`].
+    pub rated_not_useful: i64,
 }
 
 impl RouteOutcomeCounts {
     /// The denominator for the success ratio: turns a harness actually
-    /// reported on. Never includes [`Self::sessions_without_outcome`].
+    /// reported on. Never includes [`Self::sessions_without_outcome`] or
+    /// either rated count.
     pub fn reported_turns(&self) -> i64 {
         self.completed + self.failed
     }
@@ -804,21 +785,17 @@ impl EvaluationObservations {
     /// and **map line 1854**'s sparse half with
     /// [`EvaluationKind::RoutingEvidenceObserved`].
     ///
-    /// # The window applies to every row counted
-    ///
-    /// Both the decision and the turn verdicts must fall inside `[from, to]`.
-    /// The alternative — decisions in the window, outcomes whenever — makes
-    /// the number depend on when it was asked, which is exactly the property
-    /// a rate is supposed not to have. A session routed at the very end of
-    /// the window therefore appears with no outcome, and appears in
+    /// Both the decision and the turn verdict must fall inside `[from, to]` —
+    /// counting outcomes whenever would make the number depend on when it
+    /// was asked, which a rate must not do — so a session routed at the very
+    /// end of the window appears in
     /// [`RouteOutcomeCounts::sessions_without_outcome`] rather than nowhere.
-    ///
-    /// # The latest decision per session wins
-    ///
     /// `MAX(seq)` with a bare `subject` beside it is SQLite's documented
-    /// behaviour — the bare column comes from the row the aggregate selected
-    /// — and it is what makes a session that was routed twice count once,
-    /// under the class it was last routed to.
+    /// behaviour, which makes a session routed twice count once, under the
+    /// class it was last routed to.
+    ///
+    /// History: design-decisions.md, "Trims: the remaining module docs,
+    /// second packet", `route_outcomes_by`.
     pub fn route_outcomes_by(
         &self,
         decision: EvaluationKind,
@@ -850,14 +827,28 @@ impl EvaluationObservations {
                         AND observed_at >= ?2
                         AND observed_at <= ?3
                       GROUP BY session_id
+                 ),
+                 rating AS (
+                     SELECT session_id AS session_id,
+                            outcome    AS outcome,
+                            MAX(seq)   AS seq
+                       FROM evaluation_observations
+                      WHERE kind = ?8
+                        AND session_id IS NOT NULL
+                        AND observed_at >= ?2
+                        AND observed_at <= ?3
+                      GROUP BY session_id
                  )
                  SELECT COALESCE(d.bucket, ?7),
                         COUNT(*),
-                        COALESCE(SUM(v.completed), 0),
-                        COALESCE(SUM(v.failed), 0),
-                        SUM(CASE WHEN v.session_id IS NULL THEN 1 ELSE 0 END)
+                        COALESCE(SUM(CASE WHEN r.session_id IS NULL THEN v.completed ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN r.session_id IS NULL THEN v.failed ELSE 0 END), 0),
+                        SUM(CASE WHEN r.session_id IS NULL AND v.session_id IS NULL THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN r.outcome = ?9 THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN r.outcome = ?10 THEN 1 ELSE 0 END)
                    FROM decision AS d
                    LEFT JOIN verdict AS v ON v.session_id = d.session_id
+                   LEFT JOIN rating AS r ON r.session_id = d.session_id
                   GROUP BY COALESCE(d.bucket, ?7)
                   ORDER BY COALESCE(d.bucket, ?7)",
             )
@@ -872,6 +863,9 @@ impl EvaluationObservations {
                     TURN_COMPLETED,
                     TURN_FAILED,
                     UNKNOWN_COST_CLASS,
+                    EvaluationKind::RoutingRated.as_str(),
+                    EvaluationOutcome::Useful.as_str(),
+                    EvaluationOutcome::NotUseful.as_str(),
                 ],
                 read_outcome_row,
             )
@@ -921,16 +915,30 @@ impl EvaluationObservations {
                         AND observed_at >= ?2
                         AND observed_at <= ?3
                       GROUP BY session_id
+                 ),
+                 rating AS (
+                     SELECT session_id AS session_id,
+                            outcome    AS outcome,
+                            MAX(seq)   AS seq
+                       FROM evaluation_observations
+                      WHERE kind = ?9
+                        AND session_id IS NOT NULL
+                        AND observed_at >= ?2
+                        AND observed_at <= ?3
+                      GROUP BY session_id
                  )
                  SELECT COALESCE(s.pairing_class, ?7),
                         COUNT(*),
-                        COALESCE(SUM(v.completed), 0),
-                        COALESCE(SUM(v.failed), 0),
-                        SUM(CASE WHEN v.session_id IS NULL THEN 1 ELSE 0 END)
+                        COALESCE(SUM(CASE WHEN r.session_id IS NULL THEN v.completed ELSE 0 END), 0),
+                        COALESCE(SUM(CASE WHEN r.session_id IS NULL THEN v.failed ELSE 0 END), 0),
+                        SUM(CASE WHEN r.session_id IS NULL AND v.session_id IS NULL THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN r.outcome = ?10 THEN 1 ELSE 0 END),
+                        SUM(CASE WHEN r.outcome = ?11 THEN 1 ELSE 0 END)
                    FROM decision AS d
                    LEFT JOIN sessions AS s
                           ON s.id = d.session_id AND s.project_id = ?8
                    LEFT JOIN verdict AS v ON v.session_id = d.session_id
+                   LEFT JOIN rating AS r ON r.session_id = d.session_id
                   GROUP BY COALESCE(s.pairing_class, ?7)
                   ORDER BY COALESCE(s.pairing_class, ?7)",
             )
@@ -946,12 +954,261 @@ impl EvaluationObservations {
                     TURN_FAILED,
                     UNKNOWN_COST_CLASS,
                     self.project_id,
+                    EvaluationKind::RoutingRated.as_str(),
+                    EvaluationOutcome::Useful.as_str(),
+                    EvaluationOutcome::NotUseful.as_str(),
                 ],
                 read_outcome_row,
             )
             .map_err(sql_err("read routed sessions by pairing class"))?;
         collect_outcome_counts(rows)
     }
+}
+
+/// **Map line 1846**'s own question, kept in its own block (practice §77) so
+/// it cannot land on the same lines as another worker's: from what point
+/// does local pairing evidence predict a routed session's outcome at least
+/// as well as the same-vendor prior (`routing::session::PAIRING_PRIOR`) did
+/// before any local evidence existed.
+///
+/// **This measures the prior's predictiveness; it never re-tunes it.**
+/// Nothing here reads or writes `routing::session::PAIRING_PRIOR` or
+/// `routing::session::PAIRING_PRIOR_EVIDENCE_THRESHOLD` (both private to
+/// that module) — the design note behind this line (*"The routing half of
+/// RC-B"*, 2026-09-05) has the prior stand regardless of what this
+/// comparison finds; it exists for a person reading the numbers to argue
+/// with, not for this reader to act on.
+impl EvaluationObservations {
+    /// One row per session in `[from, to]` with a routing decision, a
+    /// pairing class, and an outcome — the latest
+    /// [`EvaluationKind::RoutingRated`] verdict when one exists, the
+    /// [`EvaluationKind::RoutingOutcomeObserved`] proxy otherwise, the same
+    /// substitution [`Self::route_outcomes_by`] makes — bucketed by how much
+    /// earlier evidence *of that session's own pairing class* this project
+    /// already held when it was routed.
+    ///
+    /// `k` counts a class's own earlier-sessions history, ordered by when
+    /// each was routed, never this session's position in `[from, to]` — a
+    /// bucket keyed on anything else would answer a different question than
+    /// line 1846 asks. `k = 0` is scored as a wrong local prediction rather
+    /// than skipped: an empty bucket has nothing to "agree" with itself
+    /// about, so excluding it would be dishonest, not neutral.
+    ///
+    /// History: design-decisions.md, "Trims: the remaining module docs,
+    /// second packet", `pairing_prior_crossover`.
+    pub fn pairing_prior_crossover(
+        &self,
+        from: i64,
+        to: i64,
+    ) -> Result<PairingCrossover, EvaluationError> {
+        self.refuse_unretained_window(from)?;
+        let rows: Vec<(String, i64, String, i64, i64, Option<String>)> = {
+            let conn = self.lock();
+            let mut statement = conn
+                .prepare(
+                    "WITH decision AS (
+                         SELECT session_id AS session_id, MAX(seq) AS seq
+                           FROM evaluation_observations
+                          WHERE kind = ?1
+                            AND session_id IS NOT NULL
+                            AND observed_at >= ?2
+                            AND observed_at <= ?3
+                          GROUP BY session_id
+                     ),
+                     decision_row AS (
+                         SELECT d.session_id AS session_id, o.observed_at AS decided_at
+                           FROM decision AS d
+                           JOIN evaluation_observations AS o
+                             ON o.kind = ?1 AND o.session_id = d.session_id AND o.seq = d.seq
+                     ),
+                     verdict AS (
+                         SELECT session_id AS session_id,
+                                SUM(CASE WHEN subject = ?5 THEN 1 ELSE 0 END) AS completed,
+                                SUM(CASE WHEN subject = ?6 THEN 1 ELSE 0 END) AS failed
+                           FROM evaluation_observations
+                          WHERE kind = ?4
+                            AND session_id IS NOT NULL
+                            AND observed_at >= ?2
+                            AND observed_at <= ?3
+                          GROUP BY session_id
+                     ),
+                     rating AS (
+                         SELECT session_id AS session_id, outcome AS outcome, MAX(seq) AS seq
+                           FROM evaluation_observations
+                          WHERE kind = ?7
+                            AND session_id IS NOT NULL
+                            AND observed_at >= ?2
+                            AND observed_at <= ?3
+                          GROUP BY session_id
+                     )
+                     SELECT d.session_id, dr.decided_at, COALESCE(s.pairing_class, ?9),
+                            COALESCE(v.completed, 0), COALESCE(v.failed, 0), r.outcome
+                       FROM decision AS d
+                       JOIN decision_row AS dr ON dr.session_id = d.session_id
+                       LEFT JOIN sessions AS s ON s.id = d.session_id AND s.project_id = ?8
+                       LEFT JOIN verdict AS v ON v.session_id = d.session_id
+                       LEFT JOIN rating AS r ON r.session_id = d.session_id",
+                )
+                .map_err(sql_err("read sessions for the pairing-prior crossover"))?;
+            let mapped = statement
+                .query_map(
+                    params![
+                        EvaluationKind::RoutingCostClassObserved.as_str(),
+                        from,
+                        to,
+                        EvaluationKind::RoutingOutcomeObserved.as_str(),
+                        TURN_COMPLETED,
+                        TURN_FAILED,
+                        EvaluationKind::RoutingRated.as_str(),
+                        self.project_id,
+                        UNKNOWN_COST_CLASS,
+                    ],
+                    |row| {
+                        Ok((
+                            row.get::<_, String>(0)?,
+                            row.get::<_, i64>(1)?,
+                            row.get::<_, String>(2)?,
+                            row.get::<_, i64>(3)?,
+                            row.get::<_, i64>(4)?,
+                            row.get::<_, Option<String>>(5)?,
+                        ))
+                    },
+                )
+                .map_err(sql_err("read sessions for the pairing-prior crossover"))?;
+            let mut rows = Vec::new();
+            for row in mapped {
+                rows.push(
+                    row.map_err(sql_err("read one session for the pairing-prior crossover"))?,
+                );
+            }
+            rows
+        };
+
+        // One vector per pairing class, in the order each session was
+        // routed — the history [`Self`]'s local prediction walks.
+        let mut by_class: std::collections::BTreeMap<String, Vec<(i64, String, bool)>> =
+            std::collections::BTreeMap::new();
+        for (session_id, decided_at, pairing_class, completed, failed, rating) in rows {
+            let success =
+                if let Some(outcome) = rating.as_deref().and_then(EvaluationOutcome::from_stored) {
+                    match outcome {
+                        EvaluationOutcome::Useful => true,
+                        EvaluationOutcome::NotUseful => false,
+                        // `ROUTE_RATING_VERDICTS` never writes another value —
+                        // treated as no rating rather than guessed at.
+                        _ => continue,
+                    }
+                } else if completed > 0 || failed > 0 {
+                    completed > failed
+                } else {
+                    // No rating and no reported turn: nothing for an outcome to
+                    // be. Not evidence, not scored, not counted toward `k`.
+                    continue;
+                };
+            by_class
+                .entry(pairing_class)
+                .or_default()
+                .push((decided_at, session_id, success));
+        }
+
+        let mut buckets = [
+            CrossoverBucket::new("0-4"),
+            CrossoverBucket::new("5-9"),
+            CrossoverBucket::new("10-19"),
+            CrossoverBucket::new("20+"),
+        ];
+
+        for (pairing_class, mut group) in by_class {
+            // Earliest-routed first; the session id breaks a tie so two
+            // decisions landing in the same second stay deterministic.
+            group.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+            let prior_predicts_success = pairing_class == PairingClass::VendorNative.slug();
+            let mut earlier_successes = 0usize;
+            for (k, (_, _, success)) in group.into_iter().enumerate() {
+                let prior_correct = prior_predicts_success == success;
+                // k = 0: no history to predict from, scored wrong outright.
+                let local_correct =
+                    k > 0 && (earlier_successes as f64 / k as f64 >= 0.5) == success;
+
+                let bucket = &mut buckets[bucket_index(k)];
+                bucket.sessions += 1;
+                if prior_correct {
+                    bucket.prior_correct += 1;
+                }
+                if local_correct {
+                    bucket.local_correct += 1;
+                }
+
+                if success {
+                    earlier_successes += 1;
+                }
+            }
+        }
+
+        let crossover = buckets
+            .iter()
+            .find(|bucket| {
+                bucket.sessions >= MIN_SAMPLE_FOR_SUMMARY as i64
+                    && bucket.local_correct >= bucket.prior_correct
+            })
+            .map(|bucket| bucket.bucket);
+
+        Ok(PairingCrossover {
+            buckets: buckets.to_vec(),
+            crossover,
+        })
+    }
+}
+
+/// The k-bucket [`EvaluationObservations::pairing_prior_crossover`] groups
+/// on — the four widths the packet's own contract fixes: `0-4`, `5-9`,
+/// `10-19` and `20+`.
+fn bucket_index(k: usize) -> usize {
+    match k {
+        0..=4 => 0,
+        5..=9 => 1,
+        10..=19 => 2,
+        _ => 3,
+    }
+}
+
+/// One [`EvaluationObservations::pairing_prior_crossover`] bucket: how many
+/// sessions carried that much prior same-class evidence, and how often each
+/// of the two predictions — the same-vendor prior's and the local success
+/// rate's — matched what actually happened.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CrossoverBucket {
+    /// `0-4`, `5-9`, `10-19` or `20+` — never a derived label.
+    pub bucket: &'static str,
+    pub sessions: i64,
+    pub prior_correct: i64,
+    pub local_correct: i64,
+}
+
+impl CrossoverBucket {
+    fn new(bucket: &'static str) -> Self {
+        Self {
+            bucket,
+            sessions: 0,
+            prior_correct: 0,
+            local_correct: 0,
+        }
+    }
+}
+
+/// [`EvaluationObservations::pairing_prior_crossover`]'s result — map line
+/// 1846's own question, answered as a bucket table plus the first bucket (if
+/// any) where local evidence caught up to the prior.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct PairingCrossover {
+    /// Always the four buckets in order, sessions zero where nothing landed
+    /// there — never a sparse list a renderer must fill in itself.
+    pub buckets: Vec<CrossoverBucket>,
+    /// The first bucket, in order, with at least
+    /// [`crate::routing::evidence::MIN_SAMPLE_FOR_SUMMARY`] sessions where
+    /// local evidence was at least as often correct as the prior. [`None`]
+    /// when no bucket qualifies yet.
+    pub crossover: Option<&'static str>,
 }
 
 /// Map line 1480's own reader — kept in its own block, practice §77, so it
@@ -1146,6 +1403,11 @@ fn read_harness_outcome_row(
             completed: row.get(3)?,
             failed: row.get(4)?,
             sessions_without_outcome: row.get(5)?,
+            // Map line 1951's own reader has no rating split — see this
+            // function's header — so every session here is still counted
+            // by its proxy, exactly as before `RoutingRated` existed.
+            rated_useful: 0,
+            rated_not_useful: 0,
         },
     ))
 }
@@ -1203,6 +1465,8 @@ fn read_outcome_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<RouteOutcomeCou
         completed: row.get(2)?,
         failed: row.get(3)?,
         sessions_without_outcome: row.get(4)?,
+        rated_useful: row.get(5)?,
+        rated_not_useful: row.get(6)?,
     })
 }
 

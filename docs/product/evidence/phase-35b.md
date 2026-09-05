@@ -850,3 +850,25 @@ The packet named `routing/evidence/readers.rs` as the conditional home of the re
 ## One successor line, recorded and not chased
 
 `session/store/context.rs:63` carries the same *"Glasshouse observes neither a provider cache's presence nor its lifetime"* sentence, in the session store's own advisory estimate rather than in routing scoring. It was outside this packet and was not touched. Whether that subsystem should now read the measured ratio is a real question and a small one; it is Debt, not a defect.
+
+---
+
+# Line 1534 — COMPLETE 2026-09-05, on the producer 1158 gained the same day
+
+`GH-CONTEXT-SIZE` (Sonnet, Amber; two decisions, two mutations), report **`.agent-runtime/report-context-size.md`**. Design of record: `design-decisions.md`, *Context size is read off the gateway's own exchange, never guessed*. The entry above kept 1534 open because every context field reaching the scorer was already spent by Phase 36's affinity facets and the missing link was a context-size producer; that producer is line 1158's `estimated_context_tokens` (`phase-30.md`), which landed in the same package.
+
+## Include context quality in candidate scoring. (line 1534)
+
+Contract: Given a destination carrying an estimated context size, when the session router scores it, Glasshouse adds a `context quality` contribution that is exactly `0.0` (saying *lean*) at or under 32,000 tokens and grows linearly to at most `−0.1` at 160,000 tokens and beyond — while preserving `0.0` and an explicit *unknown* for a destination with no estimate, so a ranking on a build with no relayed exchanges is byte-for-byte what it was.
+
+Production: `src/routing/session/scoring.rs :: context_quality`, pushed right after `measured_cache_temperature`; `src/routing/session/mod.rs :: SessionContextFacts::{with_estimated_context_tokens, estimated_context_tokens}` and the three constants beside `MEASURED_CACHE_TEMPERATURE_MAGNITUDE_CEILING`. The ceiling equals the cache temperature's and sits strictly below `CACHE_LIKELY_LOST`, so a size reading never outranks a structural fact about the move; compactions are not read here — `discovery.rs`'s native-context facet already scores them.
+
+Regression: `routing_score::context_quality_scores_zero_at_the_lean_floor_and_caps_at_the_ceiling`, `routing_score::a_lean_session_outranks_an_otherwise_identical_bloated_one`.
+
+| mutation | change | result | killed by |
+|---|---|---|---|
+| sign-inverted | `-CONTEXT_QUALITY_MAGNITUDE_CEILING * fraction` → `+` | KILLED | `a_lean_session_outranks_an_otherwise_identical_bloated_one` (the bloated destination won) and the four-point magnitude test |
+
+Limits: the interpolation is asserted at four points (0, 96k, 160k, 500k), not swept; the two constants stand in for a per-model context window this build does not hold — when one reaches the catalogue the term becomes a fraction of it and the constants go (the design note names this successor).
+
+**Phase 35B stands at 25 of 25.**

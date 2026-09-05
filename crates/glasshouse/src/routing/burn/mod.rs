@@ -1,68 +1,22 @@
 //! Phase 32E — burn rate and exhaustion forecasting: what the evidence
 //! ledger's own rows say about how fast a constrained resource is being
-//! spent, and whether it will reach its next reset.
+//! spent, and whether it will reach its next reset. Capability map lines
+//! 1274 and 1276–1283.
 //!
-//! Capability map lines 1274 and 1276–1283.
+//! Four public functions, each a mutation's target: [`task_class_request_rates`]
+//! (1276), [`burn_rate`] (1277), [`forecast`] (1278–1279), and [`live_rows`]
+//! (1282), which gates what the other three may see. Everything else is
+//! read, not re-decided.
 //!
-//! # What this module decides, and what it deliberately reuses
+//! No clock, no store, no socket: every function takes rows and a
+//! `now_unix` the caller read, and returns a value.
 //!
-//! Four readings, each a public function so a mutation can zero exactly one
-//! of them (the same shape `super::pressure`'s two terms take, and for the
-//! same reason):
+//! A **request** rate is the unit throughout — a completed request
+//! produces a row whether or not anything measured its tokens.
 //!
-//! - [`task_class_request_rates`] — line 1276. A short moving average of
-//!   requests consumed per task class, over the rows migration 23 made able
-//!   to carry one.
-//! - [`burn_rate`] — line 1277. Requests per hour against one resource,
-//!   keyed the way [`super::evidence::recent_credential_throttles`] keys a
-//!   credential: provider, narrowed by
-//!   [`super::evidence::RoutingObservation::quota_context`] when the caller
-//!   names one.
-//! - [`forecast`] — lines 1278 and 1279. Time-to-exhaustion, and whether
-//!   that lands before the resource's own reset.
-//! - [`live_rows`] — line 1282. Which rows the three above are allowed to
-//!   see at all.
-//!
-//! Everything else is *read*, not re-decided: the remaining amount is
-//! `crate::provider::quota::Capacity<NativeAmount>` exactly as the provider
-//! stated it, and the reset is
-//! `crate::provider::quota::CapacityState::seconds_until_reset` computed
-//! against the caller's clock.
-//!
-//! # Purity
-//!
-//! No clock, no store, no socket — `super::pressure`'s discipline, restated
-//! because this module is the one most tempted to break it. Every function
-//! here takes rows and a `now_unix` the caller read, and returns a value.
-//! Nothing opens a ledger, and nothing can widen the `project_id` scope
-//! `EvidenceLedger::consumption_in_window` already applied: this module
-//! never sees a connection.
-//!
-//! # Nothing here parses a response body
-//!
-//! A **request** rate is the unit throughout, because a completed request
-//! produces a row whether or not anything measured its tokens. A token rate
-//! is offered only from rows whose `input_tokens`/`output_tokens` are
-//! already `Some` — written by a *translated* gateway exchange, which parsed
-//! its own response for its own reasons — and is [`None`] otherwise. Line
-//! 1275, token consumption per task class, is now served the same way: since
-//! `GH-TASK-CLASS-COST-JOIN` every served row of a classified launch carries
-//! its `task_class`, and since Phase 56 a translated exchange carries its
-//! token counts, so [`task_class_request_rates`] can read a token rate over
-//! rows that exist. `crate::gateway::ingress` remains structurally unable to
-//! carry a token count, and a relayed row stays uncounted for exactly that
-//! reason — this module still never invents one from a ratio.
-//!
-//! # A forecast that is not known is absent, never a number
-//!
-//! Every function returns `None` rather than a figure when its inputs are
-//! insufficiently known — too few rows, a remaining amount that is a
-//! percentage rather than a count, a unit that is not requests, a burn rate
-//! of zero. This is the same stance `super::pressure` takes for an unread
-//! resource: neither preferred nor withheld. A `None` here makes
-//! `super::pressure::exhaustion_forecast_pressure` inert and makes
-//! `crate::shell`'s capacity line print exactly what it printed before this
-//! module existed.
+//! Every function returns `None`, never a figure, when its inputs are
+//! insufficiently known.
+// History: design-decisions.md, "Trims: routing/burn/mod.rs", module doc.
 
 use super::evidence::{HARNESS_TURN_PURPOSE, MIN_SAMPLE_FOR_SUMMARY, RoutingObservation};
 use super::request::TaskClass;
@@ -129,33 +83,22 @@ pub const SECONDS_PER_HOUR: f64 = 3600.0;
 
 /// Line 1282: the rows that are still evidence about *now*.
 ///
-/// Two exclusions, and each one has a defect it prevents:
+/// Two exclusions: rows before a **located** reset boundary, and rows
+/// before the last gap wider than [`IDLE_GAP_SECONDS`]. A boundary is
+/// located only for a **non-positive** `seconds_until_reset`
+/// (`CapacityState::seconds_until_reset` returns it as-is, never clamped);
+/// nothing in `crate::provider::quota` publishes a window length, so a
+/// positive reset excludes nothing here rather than invent one. This is
+/// the conservative direction: it can keep a row it might have dropped,
+/// never drop one that is still evidence.
 ///
-/// 1. **Before a reset boundary this build can actually locate.** Rows spent
-///    against a quota that has since been given back would forecast the
-///    exhaustion of capacity that no longer applies. But the *only* reset
-///    fact any caller here has is `seconds_until_reset`, and nothing in
-///    `crate::provider::quota` publishes a window **length** — so the
-///    previous turn cannot be derived from the next one without inventing a
-///    period nobody stated, which is exactly the fabrication this module
-///    refuses everywhere else.
-///
-///    So one boundary is located and one only: a **non-positive**
-///    `seconds_until_reset`, which `CapacityState::seconds_until_reset`
-///    returns as-is rather than clamping, means the window turned
-///    `-seconds` ago and that instant *is* the boundary. A positive reset
-///    excludes nothing on this ground, and rows are then bounded only by
-///    the caller's own window and by the idle gap below. This is the
-///    conservative direction: it can keep a row it might have dropped, and
-///    it can never drop a row that is still evidence.
-/// 2. **Before an idle gap longer than [`IDLE_GAP_SECONDS`].** Rows are
-///    ordered by `observed_at` ascending (the ordering
-///    `EvidenceLedger::consumption_in_window` guarantees); the last gap
-///    wider than the constant is a boundary, and only rows after it are
-///    live.
+/// Rows are ordered by `observed_at` ascending — the ordering
+/// `EvidenceLedger::consumption_in_window` guarantees — so the last gap
+/// wider than the constant is a boundary, and only rows after it are live.
 ///
 /// The result borrows: no row is copied, and a caller that wants the count
 /// of what was excluded can compare lengths.
+// History: design-decisions.md, "Trims: routing/burn/mod.rs", `live_rows` doc.
 pub fn live_rows(
     rows: &[RoutingObservation],
     now_unix: i64,
@@ -393,27 +336,21 @@ pub struct ClassOutput {
 
 /// Map line 1301: the output-token half of the join this phase's census
 /// named missing — `docs/product/evidence/phase-32g.md`'s Censused
-/// 2026-09-02 entry. One entry per class with at least one row in the
-/// window that names both a class and an output-token count, in
-/// [`TaskClass::ALL`]'s declaration order; a class with no such row at all
-/// is **absent**, the same convention [`task_class_request_rates`] keeps for
-/// its own rate.
+/// 2026-09-02 entry. One entry per class with at least one row that names
+/// both a class and an output-token count, in [`TaskClass::ALL`]'s
+/// declaration order; a class with no such row is **absent**, the same
+/// convention [`task_class_request_rates`] keeps.
 ///
-/// Restricted to `purpose = `[`HARNESS_TURN_PURPOSE`] rows: this is the
-/// gateway's own served-exchange traffic, the same rows
-/// [`super::evidence::NewObservation::with_task_class`]'s own doc names as
-/// what this reader counts — never `record_routing_latency`'s
-/// routing-decision row, which carries a class but no tokens and would only
-/// ever contribute nothing here.
+/// Restricted to `purpose = `[`HARNESS_TURN_PURPOSE`] rows — the gateway's
+/// own served-exchange traffic — never `record_routing_latency`'s
+/// routing-decision row, which carries a class but no tokens.
 ///
-/// The window is `[now_unix - window_seconds, now_unix]`, read off each
-/// row's own `observed_at_unix` — a plain calendar window rather than
-/// [`live_rows`]'s reset-and-idle-gap boundary, because this reader has no
-/// resource reset to bound against and a caller here passes rows straight
-/// from [`super::evidence::EvidenceLedger::consumption_in_window`] with the
-/// same window already applied at the SQL layer; the second check here is
-/// what lets this function also be exercised directly, over a hand-built
-/// row list, without a ledger in the loop at all.
+/// The window is `[now_unix - window_seconds, now_unix]`, a plain calendar
+/// window rather than [`live_rows`]'s reset-and-idle-gap boundary: this
+/// reader has no resource reset to bound against, and a caller passes rows
+/// already windowed at the SQL layer by
+/// [`super::evidence::EvidenceLedger::consumption_in_window`].
+// History: design-decisions.md, "Trims: routing/burn/mod.rs", `output_tokens_by_class` doc.
 pub fn output_tokens_by_class(
     rows: &[RoutingObservation],
     now_unix: i64,

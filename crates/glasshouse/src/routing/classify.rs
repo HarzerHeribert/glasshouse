@@ -1,39 +1,23 @@
 //! Lightweight task classification — Phase 35.
 //!
-//! # What "lightweight" rules out
+//! [`classify_heuristically`] is a pure, deterministic function of the
+//! request text, and [`classify`]'s model path takes an *already-produced*
+//! [`TaskClassification`] as an argument rather than calling anything
+//! itself, so the module never makes a network call of its own —
+//! [`mod@super`]'s own doc comment states the same discipline for the two
+//! routing-policy classes.
 //!
-//! The map's own preamble frames this as the thing Glasshouse asks *before*
-//! spending premium agent capacity — [`super::disposable::JobKind::Classification`]
-//! is already the name for that job in the disposable-routing policy class.
-//! A classifier that had to make a network call for every request would not
-//! be lightweight and could not "run on a cheap, free, or local model" in any
-//! meaningful sense, so this module makes none: [`classify_heuristically`] is
-//! a pure, deterministic function of the request text, and [`classify`]'s
-//! model path takes an *already-produced* [`TaskClassification`] as an
-//! argument rather than calling anything itself — the same discipline
-//! [`mod@super`]'s own doc comment states for the two routing-policy classes,
-//! extended to this one.
+//! `crate::config::RoutingModelChoice` decides *whether* a routing model is
+//! configured; this module is downstream of that decision, not a duplicate:
+//! a caller turns a model reply into a [`TaskClassification`] and hands it to
+//! [`classify`], or falls through to [`classify_heuristically`] when no
+//! routing model is configured. Neither path has a production caller yet.
 //!
-//! # Nothing here decides which model does the classifying
-//!
-//! `crate::config::RoutingModelChoice` and `RoutingModelResolution` (Phase
-//! 2C) already record *whether* a routing model is configured and resolve it
-//! against the providers that exist. This module is downstream of that
-//! decision, not a duplicate of it: whatever calls a routing model is
-//! expected to turn its reply into a [`TaskClassification`] and hand it to
-//! [`classify`], and whatever finds no routing model configured falls
-//! through to [`classify_heuristically`] instead. Neither path is wired to a
-//! caller yet — see the module-level "no production caller" note in this
-//! phase's evidence entry.
-//!
-//! # Confidence is an escalation lever, not a report card
-//!
-//! Phase 35's line about escalating "uncertain tier assignments... conservatively"
-//! is answered by [`TaskClassification::conservative_workload_tier`] and
-//! [`TaskClassification::conservative_safe_for_disposable_model`], which never
-//! read better than the raw fields and only ever move in the direction of
-//! *more* capability or *less* trust — the same fail-closed shape
-//! [`super::Cost::Metered`] already uses as its default.
+//! [`TaskClassification::conservative_workload_tier`] and
+//! [`TaskClassification::conservative_safe_for_disposable_model`] never read
+//! better than the raw fields and only ever move toward *more* capability or
+//! *less* trust — the same fail-closed shape [`super::Cost::Metered`] uses.
+// History: design-decisions.md, "Trims: routing module docs", routing/classify.rs module doc.
 
 use std::fmt;
 
@@ -68,22 +52,18 @@ impl fmt::Display for Complexity {
 /// (capability map lines 1395-1400 and 1404).
 ///
 /// Ordered, so a policy may escalate by moving one step up
-/// ([`WorkloadTier::escalate`]) without a `match` of its own. This is
-/// deliberately not the same type as any future Phase 34F model-capability
-/// ceiling: a task's *requirement* and a model's *ceiling* are compared by a
-/// router, not merged into one enum, for the reason
-/// [`super::AssignedModel`]'s doc comment gives for keeping "no model" and "a
-/// named model" apart — collapsing a requirement and a capability into one
-/// scale would let a router compare a task's tier against its own tier and
-/// believe that proved something.
+/// ([`WorkloadTier::escalate`]) without a `match` of its own. A task's
+/// *requirement* and a model's *ceiling* stay separate types, compared by a
+/// router, rather than one merged scale — the same reason
+/// [`super::AssignedModel`] keeps "no model" and "a named model" apart.
 ///
 /// [`Self::Deterministic`] (Tier 0) and [`Self::Frontier`] (Tier 4) have no
-/// producer yet: nothing in this module or its callers currently classifies
-/// a task into either. That is deliberate — this project adds a variant when
-/// its producer lands, never in advance (`src/evaluation/mod.rs:89` states
-/// the same rule for its own enum) — and every consumer of this type must
-/// stay exhaustive over all five so that the day a producer does exist, a
-/// missed call site is a compile error rather than a silent wrong decision.
+/// producer yet — this project adds a variant when its producer lands, never
+/// in advance (`src/evaluation/mod.rs:89` states the same rule for its own
+/// enum) — and every consumer must stay exhaustive over all five so a missed
+/// call site is a compile error, not a silent wrong decision, the day one
+/// does land.
+// History: design-decisions.md, "Trims: routing module docs", routing/classify.rs `WorkloadTier` doc.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum WorkloadTier {
     /// Tier 0: deterministic or trivial work that should not require an LLM
@@ -946,33 +926,24 @@ fn optional_str<'a>(document: &'a serde_json::Value, field: &'static str) -> Opt
 
 /// Read one model reply as a [`TaskClassification`] attributed to `label`.
 ///
-/// # Every classifying field is required, and nothing has a default
-///
 /// A model that omits `workload_tier` has not classified the request, and a
 /// classification assembled around a default would be a fabrication wearing
-/// [`ClassificationSource::Model`] — indistinguishable, at every consumer
-/// downstream, from a tier the model actually chose. So this returns an error
-/// and the caller falls back to [`classify_heuristically`], which is honest
-/// about being a heuristic. That is the same direction
-/// [`crate::memory::extract::TokenUsage`]'s fields take for an unreported count.
+/// [`ClassificationSource::Model`] — indistinguishable downstream from a tier
+/// the model actually chose — so this returns an error and the caller falls
+/// back to [`classify_heuristically`], which is honest about being a
+/// heuristic.
 ///
-/// # The two recommendation fields are the exception, and why that is not a default
+/// `expected_duration` and `execution_shape` (map lines 1457, 1458) are the
+/// exception: read when present, **`None` when absent or unrecognised**,
+/// never an error and never stored as if the model had said it. Every
+/// reader goes through [`TaskClassification::expected_duration`] and
+/// [`TaskClassification::expected_execution_shape`], so a reply predating the
+/// two keys parses exactly as it always did, and an invented fourth shape
+/// reads as recommending nothing rather than as a failed classification.
 ///
-/// `expected_duration` and `execution_shape` (map lines 1457 and 1458) are
-/// read when present and **`None` when absent or unrecognised** — never an
-/// error, and never a value stored as if the model had said it. `None` is
-/// its own fact ("the producer did not state one"), and every reader goes
-/// through [`TaskClassification::expected_duration`] and
-/// [`TaskClassification::expected_execution_shape`], which derive the answer
-/// from the ten fields the model *did* state. A reply from a model that
-/// predates the two keys therefore parses exactly as it always did, and a
-/// model that invents a fourth shape is read as having recommended nothing
-/// rather than as having failed to classify.
-///
-/// `label` names the resource that answered, for
-/// [`ClassificationSource::Model`]. It is the caller's own description of a
-/// model it configured — a provider name, a model name and a route — and
-/// never anything the reply said.
+/// `label` names the resource that answered — the caller's own description
+/// of a model it configured, never anything the reply said.
+// History: design-decisions.md, "Trims: routing module docs", routing/classify.rs `fn parse_classification`.
 pub fn parse_classification(
     reply: &str,
     label: impl Into<String>,

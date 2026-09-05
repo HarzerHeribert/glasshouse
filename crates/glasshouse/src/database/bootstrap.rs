@@ -56,24 +56,17 @@ fn inspect_existing(db_path: &Path) -> Result<Option<fs::Metadata>, DatabaseErro
 /// caller should create it), `Ok(true)` when an existing regular, nonempty
 /// file is ready to open.
 ///
-/// **A zero-byte file at this path has exactly one meaning, and it is
-/// "truncated".** Glasshouse never creates a database *here*: a first creation
-/// happens on a private sibling and arrives at this path whole, in one
-/// [`hard link`](publish), with its schema and its project binding already
-/// committed behind it. So there is no such thing as a database in the making
-/// at this path, nothing to wait for, and nothing to tell apart — a zero-byte
-/// file is a database that used to hold this project's sessions, memories and
-/// checkpoints and was truncated by a crashed copy, an interrupted restore or
-/// a disk-full write.
+/// A zero-byte file at this path has exactly one meaning: **truncated**.
+/// Glasshouse never creates a database here — a first creation happens on a
+/// private sibling and arrives at this path whole, in one
+/// [`hard link`](publish), schema and project binding already committed — so
+/// a zero-byte file can only be one truncated by a crashed copy, an
+/// interrupted restore, or a disk-full write. It is refused on the spot,
+/// without opening, writing, or waiting: touching it would destroy the
+/// evidence the user needs to recover it.
 ///
-/// It is therefore refused on the spot, without opening a connection and
-/// without waiting: nothing here reads, writes or locks the file, because a
-/// refusal that touched the file it refused would destroy the evidence the
-/// user needs to recover it, and a refusal that waited would only be
-/// pretending the question is still open. (This is what wave 108's
-/// `wait_out_a_concurrent_creation` existed for, and what the private-file
-/// creation below retired: the two meanings it had to tell apart no longer
-/// both exist.)
+/// History: design-decisions.md, "Trims: the remaining module docs, second
+/// packet", `check_existing`.
 fn check_existing(db_path: &Path) -> Result<bool, DatabaseError> {
     let Some(metadata) = inspect_existing(db_path)? else {
         return Ok(false);
@@ -129,18 +122,15 @@ pub(super) const PRIVATE_INFIX: &str = ".tmp-";
 ///
 /// When the path *is* absent this never creates the file at `db_path`. It
 /// creates `<db_path>.tmp-<pid>-<start>-<nonce>` instead, migrates and binds
-/// **that**, and then publishes it with one hard link ([`publish`]). The
-/// invariant the rest of this module rests on falls out of that: a file at
-/// `db_path` is always a complete, migrated, project-bound database or a
-/// truncated one, and never one in the making. A caller arriving mid-creation
-/// sees no file at all, does its own creation, and one of the two wins the
-/// link; the loser discards its own finished database and opens the winner's,
-/// which is complete by construction.
+/// **that**, and then publishes it with one hard link ([`publish`]). So a
+/// file at `db_path` is always a complete, migrated, project-bound database
+/// or a truncated one, never one in the making: a caller arriving
+/// mid-creation sees no file at all, does its own creation, and one of the
+/// two wins the link; the loser discards its finished database and opens
+/// the winner's, complete by construction.
 ///
-/// In a burst of *n* first bootstraps this runs *n* small migrations on *n*
-/// private files rather than making *n* − 1 callers queue on one lock behind a
-/// migration of unbounded length, which is what [`configure`]'s five second
-/// busy timeout used to be a bet against.
+/// History: design-decisions.md, "Trims: the remaining module docs, second
+/// packet", `prepare_file`.
 pub(super) fn prepare_file(db_path: &Path, project_id: &str) -> Result<(), DatabaseError> {
     if check_existing(db_path)? {
         return Ok(());
@@ -275,24 +265,19 @@ fn migrate_privately(private: &Path, project_id: &str) -> Result<(), DatabaseErr
 /// Make the finished private database appear at the final path, whole.
 ///
 /// [`std::fs::hard_link`] is `link(2)` on unix and `CreateHardLinkW` on
-/// Windows (NTFS); the two paths are siblings, so this is never a cross-volume
-/// link, which is the one thing either call refuses outright. A hard link is
-/// the primitive this whole design turns on: the final directory entry appears
-/// with the full, committed content already behind it, so there is no instant
-/// at which that path exists and is incomplete. It shares the inode, so
-/// removing the private name afterwards leaves the final one intact — with the
-/// `0600` mode the private file was created with, since the mode belongs to
-/// the inode and not to the name.
+/// Windows; the two paths are siblings so this is never a cross-volume link.
+/// A hard link is the primitive this whole design turns on: the final
+/// directory entry appears with the full, committed content already behind
+/// it, and shares the inode, so removing the private name afterwards leaves
+/// the final one (and its `0600` mode) intact. **Never a rename** — a
+/// rename would silently *replace* a truncated database rather than
+/// refusing it ([`DatabaseError::EmptyExisting`]). `AlreadyExists` is the
+/// race signal on both platforms: a sibling published first, so this
+/// process discards its own finished work and lets its caller open the
+/// sibling's — ordinary, and not an error.
 ///
-/// **Never a rename.** A rename would silently *replace* whatever is at the
-/// final path, and refusing a truncated database rather than overwriting it is
-/// a promise this project keeps ([`DatabaseError::EmptyExisting`]).
-///
-/// `AlreadyExists` is the race signal, and it is `AlreadyExists` on both
-/// platforms: a sibling published first. That sibling's file is a complete
-/// migrated database by construction, so this process discards its own
-/// finished work and lets its caller open the sibling's. Losing here is
-/// ordinary and costs one small migration; it is not an error.
+/// History: design-decisions.md, "Trims: the remaining module docs, second
+/// packet", `publish`.
 fn publish(private: &Path, db_path: &Path) -> Result<(), DatabaseError> {
     let outcome = match fs::hard_link(private, db_path) {
         Ok(()) => Ok(()),
@@ -338,23 +323,17 @@ pub(super) fn journal_beside(private: &Path) -> PathBuf {
 /// gone, and leave every other one exactly where it is.
 ///
 /// A creator killed between `create_new` and its publish leaves its private
-/// file (and possibly its `-journal`) behind. Nothing downstream will ever
-/// look at those files again — the name carries a nonce, so the next creation
-/// picks a different one — so they are pure leakage, and collecting them is
-/// the honest thing to do the next time a launch finds no database here.
+/// file (and possibly its `-journal`) behind; nothing downstream will ever
+/// look at those again, so collecting them is the honest thing to do. The
+/// dangerous mistake is collecting a file whose creator is *still working*
+/// — a live sibling's private database mid-migration — so the question
+/// asked is not "is this file old" but "is the process named in this
+/// file's own name gone", answered by the crate's one production liveness
+/// probe ([`crate::session::supervision::observe`]). Every failure here is
+/// swallowed: none is a reason to refuse to bootstrap a project.
 ///
-/// The dangerous mistake is collecting a file whose creator is *still
-/// working*: that is a live sibling's private database mid-migration, and
-/// deleting it destroys work in flight for no gain. So the question asked here
-/// is not "is this file old" or "does this look abandoned" but "is the process
-/// named in this file's own name gone", answered by the crate's one production
-/// liveness probe ([`crate::session::supervision::observe`], which has a
-/// macOS, a Linux and a Windows arm).
-///
-/// Every failure here is swallowed: a directory that cannot be listed, a file
-/// that cannot be removed, a name that does not parse. None of them is a
-/// reason to refuse to bootstrap a project, and the cost of each is a few
-/// kilobytes.
+/// History: design-decisions.md, "Trims: the remaining module docs, second
+/// packet", `sweep_abandoned_private_files`.
 fn sweep_abandoned_private_files(db_path: &Path) {
     let (Some(dir), Some(name)) = (
         db_path.parent(),

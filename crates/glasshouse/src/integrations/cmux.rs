@@ -1,70 +1,23 @@
 //! cmux as an *optional* presentation backend — Phase 17, capability map
 //! lines 754–763, and Phase 54, lines 1892–1895.
-//!
-//! # What this module is, and what it is not
-//!
-//! cmux is a terminal multiplexer with a documented command-line surface.
-//! When Glasshouse is running inside it, a person can ask for a session to
-//! be *presented externally*: Glasshouse opens a new cmux workspace in the
-//! project root, runs an ordinary Glasshouse launch in that pane, and
-//! remembers the pane as the session's presentation metadata. Afterwards the
-//! pane can be brought to the front (`glasshouse sessions focus`) and text
-//! can reach it through cmux when Glasshouse's own door cannot.
-//!
-//! That is the whole of it. cmux is a **workspace and presentation backend**
-//! (line 763), never the orchestration core: nothing in `session/**` or
-//! `shell/**` names it, the session abstraction learns one nullable string
-//! (line 762 — see [`crate::session::SessionRecord::presentation_ref`]), and
-//! every core function works identically when cmux is absent, changes, or
-//! disappears (lines 755, 1894). A tripwire test in
-//! `tests/cmux_presentation.rs` scans those layers' sources for the word
-//! and fails the moment one of them learns it.
-//!
-//! # Only the documented surface (line 1893)
-//!
-//! Every cmux invocation goes through [`Subcommand`], whose variants are the
-//! complete list of what this module may run: `ping`, `identify --json`,
-//! `workspace create`, `workspace select`, and `send`. All five are named in
-//! `cmux --help` and `cmux docs api`; none of them is the socket protocol, an
-//! `rpc` call, or a JSON schema copied out of cmux's internals. The same
-//! tripwire test checks that no other cmux verb appears in this file's
-//! production code, so widening the surface is a deliberate, visible act.
-//!
-//! # Basic expose-and-focus, and why it stops there (lines 1892, 1895)
-//!
-//! "Basic expose-and-focus" is exactly three verbs: **open** a pane for a
-//! session, **focus** it, and **send** a line to it when the door is not an
-//! option. It does not lay panes out, split them, rename them, close them,
-//! read their screens, watch their events, or drive cmux's browser. Richer
-//! automation is deferred on purpose: line 1892 keeps cmux optional until
-//! repeated use proves external-pane workflows essential, and line 1895 says
-//! richer automation waits until the basic workflow has proved useful. The
-//! evidence that would unlock it is usage, not a design — and until then the
-//! allow-list above is the boundary.
-//!
-//! # Detection is presence *and* an answer (line 754)
-//!
-//! [`detect`] says cmux is available only when both halves hold: the
-//! process is inside a cmux surface (the same `CMUX_SOCKET_PATH` evidence
-//! [`super::Discovery`] already reports, corroborated by the surface and
-//! workspace variables), *and* `cmux ping` answers. A variable left set in
-//! a dead environment — a shell whose cmux has since quit, a copied
-//! environment — reads as **absent**, because a backend that cannot answer
-//! is not one Glasshouse may hand a session to.
-//!
-//! # Security
-//!
-//! - The pane's command names the project root and Glasshouse's own
-//!   resolved directories and flags; no credential, token, or provider
-//!   value is ever placed in a `cmux` argument. `CMUX_SOCKET_CAPABILITY` is
-//!   never read.
-//! - A stored presentation reference is an opaque string until it is about
-//!   to be handed back to cmux, at which point [`PaneRef::parse`] admits only
-//!   the `workspace:N` / `surface:N` shape. A row carrying anything else is
-//!   refused by name rather than passed through.
-//! - The pane's command is quoted for the login shell cmux runs it under
-//!   ([`shell_command`]), so a project root containing a space or a quote
-//!   cannot become two words or an injected command.
+//! cmux is a terminal multiplexer: Glasshouse opens a workspace pane for a
+//! session, runs an ordinary launch in it, and remembers the pane as
+//! presentation metadata — never the orchestration core (line 763):
+//! nothing in `session/**` or `shell/**` names cmux, and
+//! `tests/cmux_presentation.rs` scans those layers and fails if one does.
+//! Only the documented surface (line 1893): every invocation goes through
+//! [`Subcommand`]'s complete list (`ping`, `identify --json`, `workspace
+//! create`, `workspace select`, `send`), all named in `cmux --help`; the
+//! same tripwire test checks no other verb appears in this file.
+//! Basic expose-and-focus only (lines 1892, 1895): open a pane, focus it,
+//! send a line when the door is not an option — richer automation waits
+//! for usage evidence, not a design.
+//! [`detect`] requires both a cmux surface *and* a live `cmux ping` (line
+//! 754): a variable left set in a dead environment reads as absent.
+//! Security: no credential ever reaches a `cmux` argument;
+//! [`PaneRef::parse`] admits only `workspace:N`/`surface:N`; the pane
+//! command is quoted for the login shell ([`shell_command`]).
+// History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/integrations/cmux.rs module doc.
 
 use std::collections::HashMap;
 use std::ffi::{OsStr, OsString};

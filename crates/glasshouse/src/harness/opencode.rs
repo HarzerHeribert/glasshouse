@@ -45,25 +45,18 @@ const BACKEND_SELECTION: &[BackendSelection] = &[
 /// The protocol an OpenCode provider entry built on `@ai-sdk/openai-compatible`
 /// speaks.
 ///
-/// **Read off a real request line**, the same standard
-/// [`crate::profile::ingress_targets`] holds itself to. OpenCode 1.18.22 was
-/// launched against a listener on `127.0.0.1:8731` with a generated
-/// configuration declaring exactly the provider entry
-/// [`OpenCode::direct_provider_launch`] composes, and the listener recorded:
+/// Read off a real request line: OpenCode 1.18.22 launched against a
+/// listener on `127.0.0.1:8731` with a generated configuration declaring
+/// exactly the provider entry [`OpenCode::direct_provider_launch`] composes,
+/// and the listener recorded a `POST /v1/chat/completions` with
+/// `Authorization: Bearer <the named environment variable's value>`.
 ///
-/// ```text
-/// POST /v1/chat/completions HTTP/1.1
-/// Authorization: Bearer <the value of the named environment variable>
-/// User-Agent: opencode/1.18.22 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14
-/// ```
-///
-/// Two things follow beyond the protocol itself, and both are relied on
-/// below. The base URL goes through **verbatim** — `/v1` came from the
-/// provider's own declared URL and `/chat/completions` was appended by the
-/// harness, so this adapter neither adds nor strips a path segment, exactly
-/// as Codex's does. And the credential arrived as `Authorization: Bearer`
-/// having been named in the document as `{env:NAME}` rather than written
-/// into it.
+/// The base URL goes through **verbatim** — `/v1` came from the provider's
+/// own declared URL and `/chat/completions` was appended by the harness, so
+/// this adapter neither adds nor strips a path segment, exactly as Codex's
+/// does. The credential arrived as `Authorization: Bearer` having been named
+/// in the document as `{env:NAME}` rather than written into it.
+// History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/harness/opencode.rs `PROTOCOLS`.
 const PROTOCOLS: &[WireProtocol] = &[WireProtocol::OpenAiChat];
 
 /// The environment variable that points OpenCode at one additional
@@ -146,47 +139,25 @@ impl HarnessAdapter for OpenCode {
     }
 
     /// OpenCode is the first harness Glasshouse launches whose provider
-    /// configuration is **document-shaped**, and this is the whole of line
-    /// 362: an isolated generated configuration file, written where
-    /// Glasshouse owns it, for one child process.
-    ///
-    /// # Why a document at all
-    ///
-    /// `opencode --help` on 1.18.22 lists every option the binary takes, and
-    /// none of them names a base URL, an API key or a provider definition.
-    /// `--model <provider>/<model>` *selects* among providers that already
-    /// exist; `opencode providers` walks a person through authenticating one
-    /// interactively. A provider that is not already configured can only be
-    /// brought into existence by a configuration document. That is what
-    /// "requires file-based provider configuration" means here, and it was
-    /// established from the installed binary rather than assumed.
-    ///
-    /// # Why the credential is not in the document
-    ///
-    /// OpenCode substitutes `{env:NAME}` anywhere in a configuration
-    /// document's text before parsing it — the bundle's own
-    /// `ConfigVariable.substitute` does the replacement out of the child's
-    /// environment. So the document names the provider's own credential
-    /// variable and the *value* travels the way every other harness's
-    /// credential already does, in the child's environment, placed by
-    /// [`crate::profile::resolve`]. Probed end to end: a document containing
-    /// `"apiKey": "{env:NAME}"` produced `Authorization: Bearer <value>` on
-    /// the wire.
-    ///
-    /// The consequence worth stating plainly: **a generated configuration
-    /// file here never contains a secret**, and it cannot start to without
-    /// this method being handed one, which [`DirectProviderRequest`] makes
-    /// impossible.
-    ///
-    /// # Three refusals, none of them a substitution
-    ///
-    /// `None` here means "this harness cannot be launched that way", as
-    /// everywhere else, and it is answered when the protocol is not
-    /// OpenAI-chat: nothing is translated. A missing **model** is refused one
-    /// level up with its own message — see
-    /// [`OpenCode::direct_provider_requires_model`] — and so is a file name
-    /// that could leave the directory Glasshouse owns, which this adapter
-    /// cannot produce because it never names a path at all.
+    /// configuration is **document-shaped**: an isolated generated
+    /// configuration file, written where Glasshouse owns it, for one child
+    /// process (line 362).
+    /// A document is required because `opencode --help` on 1.18.22 lists no
+    /// option naming a base URL, an API key or a provider definition; only a
+    /// configuration document can bring a not-yet-configured provider into
+    /// existence.
+    /// The credential is not in the document: OpenCode substitutes
+    /// `{env:NAME}` anywhere in a configuration document's text before
+    /// parsing it, out of the child's environment, so the *value* travels
+    /// in the environment via [`crate::profile::resolve`] — probed end to
+    /// end, `"apiKey": "{env:NAME}"` produced `Authorization: Bearer
+    /// <value>` on the wire. A generated configuration file never contains
+    /// a secret.
+    /// `None` means "this harness cannot be launched that way": answered
+    /// when the protocol is not OpenAI-chat, or (one level up, its own
+    /// message) when the model is missing — see
+    /// [`OpenCode::direct_provider_requires_model`].
+    // History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/harness/opencode.rs `OpenCode::direct_provider_launch`.
     fn direct_provider_launch(
         &self,
         request: &DirectProviderRequest<'_>,

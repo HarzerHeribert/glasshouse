@@ -1,30 +1,23 @@
 //! Soft, project-scoped, turn-scoped file claims — capability map lines 2392
 //! to 2398, Phase 60's A+F slice.
 //!
-//! # What a claim is, and the four things it is not
-//!
 //! A claim is one row saying *"this Glasshouse session is working on this
 //! file, and still wanted it as of this second."* It is **coordination
-//! metadata**. Taking one never blocks, never locks, never changes a file's
+//! metadata**: taking one never blocks, never locks, never changes a file's
 //! permissions, and never fails another session's write; two sessions may
-//! hold a claim on the same path, and that is the overlap a later package
-//! reports rather than an error raised here. Nothing in this build consults a
+//! hold a claim on the same path, and nothing in this build consults a
 //! claim before deciding anything.
+//! It belongs to a session, never to a process (line 2396): the owner is a
+//! [`SessionId`], so a recycled process identifier can never resolve to a
+//! live claim, and a claim for a session this project does not have is
+//! refused before a row exists.
 //!
-//! # It belongs to a session, never to a process
+//! Project isolation (line 2397) holds three times over: the database file
+//! *is* the project, migration 27's two triggers refuse a row whose
+//! `project_id` is not the bound one, and every statement below also names
+//! `project_id` explicitly.
 //!
-//! Line 2396. The owner is a [`SessionId`], so a recycled process identifier
-//! can never resolve to a live claim — there is no process identifier here to
-//! recycle. A claim for a session this project does not have is refused
-//! before a row exists.
-//!
-//! # Project isolation
-//!
-//! Line 2397, and it holds three times over: the database file *is* the
-//! project, migration 27's two triggers refuse a row whose `project_id` is
-//! not the bound one, and every statement below also names `project_id`
-//! explicitly. A claim taken in one project cannot be named by a query in
-//! another.
+//! History: design-decisions.md, "Trims: memory and session module docs", session/store/claims.rs module doc.
 
 use rusqlite::OptionalExtension;
 
@@ -33,24 +26,19 @@ use super::{SessionId, SessionLifecycle, SessionStore, SessionStoreError};
 /// How long a claim nobody renewed stays active — line 2394's *"safe
 /// stale-claim timeout"*.
 ///
-/// # Why two hours
-///
-/// This is a **backstop**, not the ordinary release path. A claim is normally
+/// A **backstop**, not the ordinary release path: a claim is normally
 /// released when the turn ends (`commands::hook`'s `TurnEnded` arm), and a
 /// claim whose owning session has stopped or failed is neither reported by
-/// [`SessionStore::active_claims`] nor kept, whatever the clock says. What is
-/// left for a timeout is the case both of those miss: a machine that lost power,
-/// or a harness killed hard enough that no hook ran and no lifecycle write
-/// landed.
+/// [`SessionStore::active_claims`] nor kept. What is left for a timeout is
+/// the case both of those miss: a machine that lost power, or a harness
+/// killed hard enough that no hook ran and no lifecycle write landed.
 ///
-/// The two failure directions are not symmetric. Too short expires a claim
-/// under a session that is still editing, and the claim silently stops
-/// describing real work. Too long leaves a ghost that outlives the machine it
-/// was made on. Two hours is longer than any single harness turn — a turn is
-/// one prompt-to-stop cycle, minutes rather than hours, and a session working
-/// for longer than that renews as it goes — and short enough that a claim
+/// Two hours is longer than any single harness turn — a session working
+/// longer than that renews as it goes — and short enough that a claim
 /// orphaned by a crash does not survive the working day. It is a judgement,
 /// not a measurement, and it is one constant so that changing it is one edit.
+///
+/// History: design-decisions.md, "Trims: memory and session module docs", session/store/claims.rs STALE_CLAIM_AFTER.
 pub const STALE_CLAIM_AFTER: i64 = 2 * 60 * 60;
 
 /// The lifecycle states whose sessions may hold a claim.

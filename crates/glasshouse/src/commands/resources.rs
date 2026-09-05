@@ -4,35 +4,24 @@ use glasshouse::Runtime;
 use glasshouse::config::{self, EffectiveConfig, ProjectConfig, UserConfig};
 
 /// Render `glasshouse resources` — Phase 32B's production caller, and the
-/// reason its boxes are closeable at all.
+/// reason its boxes are closeable at all: Phase 32 found
+/// `provider::registry::registry()` had no production caller, and Phase 32A
+/// found the launch path reads only `CapacityState`'s quota *shape*. This is
+/// the thing in the shipped binary that reads the model, and every
+/// telemetry reader Phase 32B builds is reached from here and nowhere else.
 ///
-/// # What this function is for, beyond printing
+/// Harness status is read first — a local, quarter-second process
+/// invocation that spends no quota and needs no credential — so a bare
+/// `glasshouse resources` still takes a real reading instead of showing
+/// `unknown` for free. Network probes are opt-in, matching `glasshouse
+/// pairing` and `glasshouse response`.
 ///
-/// Phase 32 recorded that `provider::registry::registry()` had no production
-/// caller, and Phase 32A recorded that the launch path reads exactly one
-/// projection out of `CapacityState` — its quota *shape* — with every pool,
-/// window and rate ceiling below that proven only by tests. Both ledgers
-/// named the same missing piece: something in the shipped binary that reads
-/// the model. This is that, and every telemetry reader Phase 32B builds is
-/// reached from here and from nowhere else in the binary.
+/// The `Result` is only for the user's own configuration files: no
+/// telemetry read below can produce an `Err` — capability map line 1238 is
+/// enforced by `provider::telemetry` and `provider::resources` having no
+/// fallible signature to propagate.
 ///
-/// # The order of reads, and why the cheap one is not optional
-///
-/// Harness status first, because it is a local process invocation of about a
-/// quarter of a second that spends no quota and needs no credential — so the
-/// bare command still takes a real reading, and a user who runs
-/// `glasshouse resources` with no flags is not shown a screen of `unknown`
-/// that Glasshouse could have filled in for free. Network probes are opt-in,
-/// matching `glasshouse pairing` and `glasshouse response`, which is the
-/// shape this command was modelled on.
-///
-/// # It cannot fail on telemetry
-///
-/// The `Result` here is for reading the user's own configuration files, which
-/// is the same failure every other command in this file can have. No
-/// telemetry read below can produce an `Err`: capability map line 1238 is
-/// enforced in `provider::telemetry` and `provider::resources` by there being
-/// no fallible signature to propagate.
+/// History: design-decisions.md, "Trims: commands module docs", resources_report.
 pub(crate) fn resources_report(
     runtime: &Runtime,
     verbose: bool,
@@ -336,41 +325,26 @@ fn routing_overhead(
 }
 
 /// Capability map line 1443 — *"show the currently selected routing model in
-/// resource diagnostics"* — as the last block of `glasshouse resources`.
+/// resource diagnostics"* — as the last block of `glasshouse resources`. Not
+/// the settings screen: `docs/product/evidence/phase-34c.md` ruled that
+/// showing the configured [`glasshouse::config::RoutingModelChoice`] where
+/// you set it is configuration, not diagnosis. Here the routing model is
+/// named next to the capacity, health and quota of the resources it would
+/// be chosen from.
 ///
-/// # Why this surface, and why it is not the settings screen
+/// `Automatic` is an intent, not a name, so the block runs the real
+/// decision ([`automatic_classification_choice`], the function `glasshouse
+/// classify` calls) and names the resource it picked — and says `would` in
+/// every arm, since `routing::classify::classify`'s only production caller
+/// is the `glasshouse classify` diagnostic; the `in use` row says so
+/// unconditionally, which is the spectacle Phase 47 exists to prevent.
 ///
-/// The Settings overlay already renders the configured
-/// [`glasshouse::config::RoutingModelChoice`], and `docs/product/evidence/phase-34c.md`
-/// ruled that showing a value on the screen where you set it is
-/// configuration, not diagnosis. This is the diagnostic surface: the routing
-/// model is named next to the capacity, health and quota of the very
-/// resources it would be chosen from, which is where the question *"why did
-/// routing behave that way"* is actually asked.
+/// No credential, ever: nothing below reads
+/// [`glasshouse::routing::disposable::DisposableChoice`]'s
+/// [`glasshouse::routing::CredentialId`] — only a provider name, a model
+/// name and the policy's own explanation.
 ///
-/// # The honesty constraint, and it is the point of the block
-///
-/// `Automatic` is an intent — the word the Settings overlay shows — and
-/// naming only that would answer a different question than a person reading
-/// `glasshouse resources` is asking. So the block runs the real decision
-/// ([`automatic_classification_choice`], the same function `glasshouse
-/// classify` calls) and names the resource it picked.
-///
-/// **And it says `would`, in every arm.** Nothing in this build classifies
-/// anything on its own: `routing::classify::classify`'s only production
-/// caller is the `glasshouse classify` diagnostic, and nothing else asks a
-/// routing model a question. Rendering a "currently selected routing model"
-/// beside live capacity numbers with no signal that it classifies nothing is
-/// the spectacle Phase 47 exists to prevent, so the `in use` row says so in
-/// as many words and is not conditional on anything.
-///
-/// # No credential, ever
-///
-/// [`glasshouse::routing::disposable::DisposableChoice`] carries a
-/// [`glasshouse::routing::CredentialId`], and nothing below reads it. A
-/// provider name, a model name and the policy's own explanation are what this
-/// block prints — the same rule `memory::extract::model`'s header states for
-/// the label a classification is attributed to.
+/// History: design-decisions.md, "Trims: commands module docs", render_routing_model.
 fn render_routing_model(
     out: &mut String,
     runtime: &Runtime,

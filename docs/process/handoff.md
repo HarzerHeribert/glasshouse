@@ -41,6 +41,53 @@ validated and waiting on the commit. Next action: `.agent-runtime/CONTINUATION.m
 
 Last updated: 2026-09-02, late night (Europe/Berlin)
 
+## Checkpoint — 2026-09-06 (01:30), wave 139: 1312 / 1398 (93.8%) — Phase 59 complete, the product site live, the trailing sweep green on all sixteen glasshouse cells
+
+- **State:** `main` at `3f138ee` plus this checkpoint, pushed. **Phase 59 is complete**: line 2053 closed on the corrected measurement (production part to `#[cfg(test)]` + `mod tests`; content lines ≤ 20), eight invariant-exception blocks listed in `phase-59.md`. Nine multi-file trims landed tonight in eight integrations. The product site (`c038163`) is deployed by its own Pages workflow. Live: the pane lead (Fable xhigh) with its subs — the Windows path-normalisation review first, then `GH-PANE-NOTEBOOK-VIEW`, 61E-RUNTIME with the cancellation token.
+- **Sweep:** `33997706886` on `c038163` concluded green on all sixteen glasshouse cells; the pane windows-latest cell stays red until the lead's merge. Five earlier sweeps were cancelled by the next push each — hold pushes until a sweep concludes (finding 49).
+- **Next, by risk:** the lead's merge-ready commit → `cargo test -p pane` → push → the pane cell; `GH-PANE-2456-CONTAMINATION` (Red, the primary's) after it; product work from the map — Phase 60's approved slice (2414–2416) and Phase 38's 1608 are the open lines not in the refusal register; the day's dogfooding session (rule 6).
+
+## Checkpoint — 2026-09-06 (after midnight), wave 138: 1311 / 1398 (93.8%) — the routing-2 trim lands, the pane lane hands to a Fable successor lead, and mutate.sh tells a compile error from a kill
+
+- **State:** `main` at `efb1b55` plus this checkpoint's commit, pushed. Phase 59 is open only on 2053. Live: three trims (`trim-rest-docs-2`, `trim-api-events-harness-config-docs-2`, `trim-commands-docs-3`; Sonnet medium, Green) and the pane lead's successor in `.worktrees/pane-lead` (Fable xhigh), which reviews and integrates three reported sub-worker diffs — the Windows path-normalisation defect first, hard.
+- **Ruled:** the untracked `sites/` (the user's product page, never ours to touch) trips `integrate.sh`'s dirty check; the routing-2 integration ran with `status.showUntrackedFiles=no` for that one call because the worker's files are disjoint from it (`051dffe`). Decision 8 of the guarded-continuations plan: no existing facility reaches a directly-launched pane, so the cancellation token is built in 61E-RUNTIME. `GH-PANE-NOTEBOOK-VIEW` follows `pane-61e-handles`. The plan itself stays HELD for the user's Codex verification.
+- **Trailing sweep:** `525969a` red on the pane windows-latest cell (known; the fix is in the lane) and on `route_health_keeps_line_1765s …` under windows-11-arm msrv — strike 2 this week, one rerun issued; a third strike buys a determinism packet.
+- **Next, by risk:** integrate the three trims in one call when their panes idle (fold each staging file, commit with the files named); the lead's merge-ready commit → `cargo test -p pane` on `main` → push → the pane cell as verdict; then 2053's residue measurement and the tick → Phase 59 complete; then product work and the day's dogfooding session (rule 6).
+
+## Checkpoint — 2026-09-05 (night), waves 118–137: 1311 / 1398 (93.8%) — pane 61B, 61C and 61D merged, Phase 37 complete, 2054 closed, three 61C ticks taken back off on the lane's own audit, the served-by producers, twenty-nine files trimmed, the first fully green sixteen-cell sweep
+
+Fable 5.1 orchestrators from ~18:00 (`b2416cc7`, then `c07a9ff3` from 20:42). The
+ledger's waves 118–136 are the account; `.agent-runtime/CONTINUATION.md` is the hot
+hand-off. This is the index.
+
+**Closed:** 2438, 2439 (the pane adapter) · 1158, 1534 (context size read off the
+gateway's own exchange) · 2431, 2432 (the ruler) · 442 · 1044 · 1837, 1846 (the route
+rating and local pairing evidence) · 2444–2450 (61C, merged as `a67358e` after the
+lead found and fixed its own no-production-caller shape) · **1594** (Phase 37
+complete) · **2054** (every refused line the user named is settled by design). **Un-ticked** on the lead's own audit: 2446, 2449, 2450 — the screen drawn into a test double, the local store without a writer, the command list reached only by tests; they re-tick on a demonstration through the binary. Phases 9E, 21K, 35B and 37 complete. Phase 59 is open only on 2053: twenty-nine files trimmed, the remainder packaged by module (`.agent-runtime/CONTINUATION.md`, *Queue*).
+
+**Landed without a tick:** `routing-cost --json` (2430's meter) · the package-aware
+blast radius · the served-by headers and currency keys (2451's producers) ·
+terminal_loss's determinism · the Windows let-chain fix · the Codex non-interactive
+note · the `pane (windows-latest)` cell · sixty sibling worktrees and sixteen stale
+ones removed on the user's instruction · `.DS_Store` ignored.
+
+**Sweeps:** `33984063363` on `982a6f2` was the first fully green sixteen-cell run.
+Every red since was enumerated per cell: the conformance rebind test's three strikes
+(determinism packet live), one `session_supervision` flake, one test false positive
+fixed by the dogfooding session, and the new pane Windows cell red on a Unix-only
+import until the lead's 61D merge carries the fix.
+
+**Rulings of record:** 2451's response half gets a real producer · Codex is a stated
+duplication with the adapter as authority · 2456 is a Glasshouse-side Red package
+after 61D · `sandbox-grants.md` §4.2 and §4.3 · exec is granted on the resolved
+binary (the lead's) · 1594's size cap is a property of warmth (`design-decisions.md`).
+
+**Also this session:** 61D merged with nothing ticked (four escapes found by two verifiers, fixed); the rebind test's barriers passed their first macOS sweep; the first dogfooding session in two days (`docs/process/dogfooding.md`); the user's guarded-continuations design handoff assessed — plan and draft amendment in `.agent-runtime/report-guarded-continuations-{plan,spec-draft}.md`, held for the Codex session's verification (`phase-61.md` §61E). **Live at hand-off:** the pane lead on 61E's tools package and the 61C fixups; two remainder trims. **Next by risk:** the 61D merge and 2456 · the
+determinism report · trims `v1_to_v13.rs`, `profile/response.rs`, `profile/mod.rs` ·
+the next dogfooding session with a support-work provider configured and the firewall
+in `shadow`.
+
 ## Checkpoint — 2026-09-05 (evening), waves 116–117: 1295 / 1399 (92.6%) — pane stood up in its own lane, the dispatch defect fixed, 442 built and verified, seven lines closed
 
 Sole orchestrator from ~16:20 (`glasshouse-78`, Opus 5 xhigh; the user rules the

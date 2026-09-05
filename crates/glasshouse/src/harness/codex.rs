@@ -32,26 +32,12 @@ pub struct Codex;
 /// from `REPORTED_EVENTS`: an aborted turn is the harness's own business and
 /// says nothing a `SessionLifecycle` records that `Stop` does not.
 ///
-/// **Re-read from Codex 0.153.3** (`strings` on the real binary behind any
-/// `codex` wrapper, grepped for these descriptions — see git history for the
-/// 0.149.1/0.150.1/0.151.0 readings and the earlier wrong-artifact one). Same
-/// twelve events, same spelling, same order, same descriptions:
+/// Re-read periodically against the installed Codex (`strings` on the real
+/// binary, grepped for the `HookEventsToml` variant names) — see
+/// [`CATALOGUE_OBSERVED_VERSION`] for the version this was last read from,
+/// and git history for superseded readings.
 ///
-/// ```text
-///   Event                 Description
-///   PreToolUse            Before a tool executes
-///   PermissionRequest     When permission is requested
-///   PostToolUse           After a tool executes
-///   PreCompact            Before context compaction
-///   PostCompact           After context compaction
-///   SessionStart          When a new session starts
-///   SessionEnd            Right before a session ends
-///   UserPromptSubmit      When the user submits a prompt
-///   SubagentStart         When a subagent is created
-///   SubagentStop          Right before a subagent ends its turn
-///   Stop                  Right before Codex ends its turn
-///   Interrupt             Right before an interrupted turn is aborted
-/// ```
+/// History: design-decisions.md, "Trims: config, checkpoint, evaluation and codex module docs", codex.rs module doc `HOOK_EVENTS`.
 const HOOK_EVENTS: &[&str] = &[
     "PreToolUse",
     "PermissionRequest",
@@ -69,31 +55,20 @@ const HOOK_EVENTS: &[&str] = &[
 
 /// The Codex version `HOOK_EVENTS` was last read from.
 ///
-/// **This catalogue is observed, not documented.** Codex publishes no
-/// machine-readable list of its hook events — `codex --help`, `codex debug`
-/// and `codex features` all say nothing about them, and a `hooks.json`
-/// naming an event Codex does not recognise is accepted in silence. So the
-/// sole thing a test can cheaply hold Codex to is that the version this was
-/// read from is still the version installed.
+/// **This catalogue is observed, not documented**: Codex publishes no
+/// machine-readable list of its hook events, and a `hooks.json` naming an
+/// event Codex does not recognise is accepted in silence. So the sole thing
+/// a test can cheaply hold Codex to is that this version is still installed
+/// — see `tests/session_hook.rs::the_codex_hook_catalogue_was_read_from_the_installed_codex`.
 ///
-/// See `tests/session_hook.rs::the_codex_hook_catalogue_was_read_from_the_installed_codex`.
-/// When it fails, re-read the catalogue, reconcile `HOOK_EVENTS` with it, and
-/// move this constant — **in that order**. Bumping the constant alone is the
-/// one edit that makes the check worthless.
+/// When it fails, re-read the catalogue, reconcile `HOOK_EVENTS` with it,
+/// and move this constant — **in that order**. Bumping the constant alone
+/// is the one edit that makes the check worthless. Re-read it from the
+/// binary (`strings -n 4 <the real codex binary> | grep -o
+/// 'HookEventsToml.\{0,150\}'`), not the TUI's *Review hooks* screen, so the
+/// check can be driven from a tool call.
 ///
-/// Re-read it from the binary, not from the TUI. Codex ships as a native
-/// executable (behind whatever `codex` on `PATH` happens to wrap), and it
-/// carries two independent tables that agree: the one-line descriptions
-/// above, and the `HookEventsToml` variant-name list. Both are literal
-/// `&str` constants, so `strings` reads them without running anything:
-///
-/// ```text
-/// strings -n 4 <the real codex binary> | grep -o 'HookEventsToml.\{0,150\}'
-/// ```
-///
-/// The interactive *Review hooks* screen is the same data rendered, and it
-/// remains a valid reading — but it cannot be driven from a tool call, which
-/// made this check unactionable for any agent until 2026-09-05.
+/// History: design-decisions.md, "Trims: config, checkpoint, evaluation and codex module docs", codex.rs `CATALOGUE_OBSERVED_VERSION`.
 pub const CATALOGUE_OBSERVED_VERSION: &str = "0.153.3";
 /// The events Glasshouse asks Codex to report.
 ///
@@ -161,30 +136,22 @@ const BACKEND_SELECTION: &[BackendSelection] = &[
 /// Codex has one, `--help` is not where it lives, and it is still
 /// `Unverified` — because half a fact is not a declaration.
 ///
-/// The earlier reading concluded from a complete `codex --help` that no
-/// persona or tone mechanism existed. The command was read correctly and the
-/// conclusion was wrong: on 0.150.1, `codex features list` reports
-/// `personality  stable  true`, the binary's own status line reads "Use
-/// /personality to customize how Codex communicates", and its bundled prompt
-/// catalogue carries one overlay per personality (`personality_friendly`,
-/// `personality_pragmatic`) templated into the base instructions at
-/// `{{ personality }}`. The field also sits *beside* `model_reasoning_effort`
-/// and `model_verbosity` in the same settings list rather than inside either,
-/// which is what makes it communication policy and not reasoning effort.
-///
-/// So [`super::CommunicationStyle`]'s `mechanism` half is established. Its
-/// `change` half is not: whether `/personality` re-styles the running
-/// conversation or only one started afterwards cannot be read out of any
-/// artifact this environment offers, and settling it needs an interactive TUI
-/// driven through a real turn. A slash command *looks* like an in-place
-/// mechanism, and recording `InPlace` on that basis is exactly the guess
-/// [`Declared`] exists to make impossible — a wrong `InPlace` here would have
-/// Glasshouse silently fail to apply a profile, and a wrong `NewSession`
-/// would throw away a warm session to apply one it already had.
+/// `codex features list` reports `personality stable true` and its bundled
+/// prompt catalogue carries one overlay per personality, sitting *beside*
+/// `model_reasoning_effort` and `model_verbosity` — which is what makes it
+/// communication policy and establishes [`super::CommunicationStyle`]'s
+/// `mechanism` half. Its `change` half is not established: whether
+/// `/personality` re-styles the running conversation or only one started
+/// afterwards cannot be read out of any artifact this environment offers,
+/// and a wrong guess here would either silently fail to apply a profile or
+/// throw away a warm session to apply one it already had — exactly the
+/// guess [`Declared`] exists to make impossible.
 ///
 /// The experiment that would close this: start `codex`, run `/personality
 /// friendly` mid-conversation, and see whether the *current* thread changes
 /// voice or only the next one does.
+///
+/// History: design-decisions.md, "Trims: config, checkpoint, evaluation and codex module docs", codex.rs `COMMUNICATION_STYLE`.
 const COMMUNICATION_STYLE: Declared<super::CommunicationStyle> = Declared::Unverified;
 
 /// The `{ "N" = "V", ... }` inline TOML table for `headers`, or `None` when
@@ -225,6 +192,13 @@ const NATIVE_FAMILIES: &[&str] = &["gpt-5"];
 /// family it ships as its default line.
 const SUPPORTED_MODELS: &[&str] = &["o3"];
 
+// Non-interactive mode is `codex exec [PROMPT]` — verified 2026-09-05 against
+// codex-cli 0.153.3 (`codex exec --help`: "Run Codex non-interactively").
+// Nothing in this crate invokes it, and `HarnessDescription` has no slot for
+// it: `crates/pane`'s ruler carries the same argv in its own harness table and
+// names this file as the authority — a stated duplication kept under rule 8
+// (`.agent-runtime/pane/ask-primary-2451-and-codex.md`, option 2) instead of a
+// readout command built for one reader. Change the argv here and there together.
 impl HarnessAdapter for Codex {
     fn id(&self) -> IntegrationId {
         IntegrationId::Codex
@@ -251,30 +225,20 @@ impl HarnessAdapter for Codex {
     }
 
     /// A custom provider composed entirely out of `-c` overrides, so **no
-    /// file is written at all** — not `~/.codex/config.toml`, not a generated
-    /// profile beside it, not anything.
+    /// file is written at all** — the strongest possible form of "avoid
+    /// overwriting the user's normal configuration": nothing to overwrite,
+    /// nothing to clean up. Every override was accepted by Codex 0.149.1
+    /// under `--strict-config`, so the set is verified rather than assumed.
     ///
-    /// That is the strongest possible form of "avoid overwriting the user's
-    /// normal configuration": there is nothing to overwrite and nothing to
-    /// clean up. Every override below was accepted by Codex 0.149.1 under
-    /// `--strict-config`, which rejects a key it does not know, so the set is
-    /// verified rather than assumed.
-    ///
-    /// The base URL goes through verbatim. Codex appends `/responses` to it —
-    /// a `base_url` of `http://127.0.0.1:8731/v1` was observed producing
-    /// `POST /v1/responses` — so the `/v1` belongs to the provider's own
-    /// declared URL and this adapter neither adds nor removes a path segment.
-    ///
-    /// `env_key` names an environment variable **of the child process**;
-    /// its value is what Codex sends as `authorization: Bearer <value>`. With
-    /// that variable absent Codex refuses outright ("Missing environment
-    /// variable: `…`") rather than falling back to the user's own paid
-    /// account — which is why the credential's absence is a refusal here too
+    /// The base URL goes through verbatim — Codex appends `/responses` to
+    /// it, so `/v1` belongs to the provider's own declared URL and this
+    /// adapter neither adds nor removes a path segment. `env_key` names an
+    /// environment variable of the child process; with it absent Codex
+    /// refuses outright rather than falling back to the user's own paid
+    /// account, which is why the credential's absence is a refusal here too
     /// rather than a launch that quietly costs the user money.
     ///
-    /// `http_headers` is one more override in the same set, present only
-    /// when the provider declares headers at all — see `http_headers_table`
-    /// below.
+    /// History: design-decisions.md, "Trims: config, checkpoint, evaluation and codex module docs", codex.rs `direct_provider_launch`.
     fn direct_provider_launch(
         &self,
         request: &DirectProviderRequest<'_>,
@@ -375,30 +339,18 @@ impl HarnessAdapter for Codex {
 
     /// Read a Codex rollout header.
     ///
-    /// Evidence, all read from Codex 0.149.0 across the 555 real rollout
-    /// files in `~/.codex/sessions/` on the development machine, on
-    /// 2026-08-25:
+    /// Evidence, from Codex 0.149.0 across the 555 real rollout files in
+    /// `~/.codex/sessions/` on the development machine, 2026-08-25: this
+    /// reads `payload.id`, never `payload.session_id` (present in only 527
+    /// of 555, `id` in all). `originator == "codex-tui"` with
+    /// `parent_thread_id` absent or null selects exactly the 70 real
+    /// interactive CLI sessions in the 555 files, zero counterexamples —
+    /// `source == "cli"` corroborates but is deliberately not required, so
+    /// an unrelated Codex update to `source` cannot break this rule, and
+    /// `forked_from_id` is not disqualifying since every occurrence is
+    /// already excluded by the rule above.
     ///
-    /// - Every rollout's first line is a JSON object with
-    ///   `"type":"session_meta"` — 555 of 555.
-    /// - `payload.id` is present in all 555 and always equals the UUID in the
-    ///   file name. `payload.session_id` is present in only 527 of 555. This
-    ///   reads `id`, never `session_id`.
-    /// - `payload.cwd` is present in all 555; `payload.timestamp` is an
-    ///   RFC3339 UTC instant (`"2026-06-02T20:14:47.633Z"`), present in every
-    ///   interactive record.
-    /// - `payload.originator` is one of `codex-tui` (241), `Codex Desktop`
-    ///   (229), `codex_exec` (81), `codex_work_desktop` (4).
-    /// - `payload.parent_thread_id` marks a subagent thread (173 rollouts
-    ///   have it); a subagent's `cwd` is the same as its parent's, so `cwd`
-    ///   alone cannot tell them apart.
-    /// - `originator == "codex-tui"` with `parent_thread_id` absent or null
-    ///   selects exactly the 70 real interactive CLI sessions in the 555
-    ///   files, zero counterexamples — all 70 also carry `source == "cli"`,
-    ///   which corroborates but is deliberately not required, so an
-    ///   unrelated Codex update to `source` cannot break this rule.
-    ///   `forked_from_id` is not treated as disqualifying: every one of its
-    ///   128 occurrences is already excluded by the rule above.
+    /// History: design-decisions.md, "Trims: config, checkpoint, evaluation and codex module docs", codex.rs `read_session_record`.
     fn read_session_record(&self, header: &str) -> Option<NativeSessionRecord> {
         let value: serde_json::Value = serde_json::from_str(header).ok()?;
         if value.get("type").and_then(serde_json::Value::as_str) != Some("session_meta") {

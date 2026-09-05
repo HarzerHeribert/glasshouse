@@ -46,34 +46,19 @@ impl fmt::Display for CacheState {
 /// cache-state estimates as advisory when the provider does not expose
 /// authoritative cache telemetry."*
 ///
-/// # Why this is a wrapper and not a comment on [`CacheState`]
+/// A wrapper, not a comment on [`CacheState`]: its field is private and its
+/// only constructors are [`AdvisoryCacheState::estimate`] and
+/// [`AdvisoryCacheState::unknown`], so nothing outside this module can claim
+/// an authority it does not have — every cache state in this crate arrives
+/// wrapped in the word "advisory".
 ///
-/// The line is a requirement about how the value may be *used*, and a comment
-/// is not a mechanism. This type's field is private and its only constructors
-/// are [`AdvisoryCacheState::estimate`] and [`AdvisoryCacheState::unknown`],
-/// so no code outside this module can produce an `AdvisoryCacheState::Hot`
-/// from an authority it claims to have. There is no authoritative counterpart
-/// type, and there is no `From<CacheState>`: every cache state in this crate
-/// arrives wrapped in the word "advisory", in every signature that carries
-/// one. That is the whole of line 1163.
-///
-/// # What the estimate is made of, and what it is not
-///
-/// Elapsed time since the session's last recorded activity, and nothing else.
-/// Glasshouse observes neither a provider cache's presence nor its lifetime —
-/// [`crate::routing::session::prompt_cache_state`] says so in its own
-/// evidence string, and `crate::config::pairing`'s warm-session window says
-/// provider caches "expire in minutes". So this is a decay curve over a
-/// published TTL, not a reading, and it is labelled as one.
-///
-/// **It is deliberately not a function of resumability** — map line 1161,
-/// *"independently from session resumability."* Resumability is
-/// [`super::record::SessionRecord::disposition`], which is decided by `lifecycle` and
-/// whether a native identifier was recorded; neither is an input here. A
-/// closed session with no native identifier that was active a moment ago is
-/// [`CacheState::Hot`] and not resumable at all, and a resumable session idle
-/// since yesterday is [`CacheState::Cold`]. The independence is structural,
-/// because the inputs do not overlap.
+/// Estimated from elapsed time since the session's last recorded activity
+/// alone; Glasshouse observes neither a provider cache's presence nor its
+/// lifetime. **Deliberately not a function of resumability** — map line
+/// 1161: resumability comes from
+/// [`super::record::SessionRecord::disposition`], and the two never overlap
+/// as inputs.
+// History: design-decisions.md, "Trims: session module docs, second packet", session/store/context.rs `AdvisoryCacheState`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AdvisoryCacheState(CacheState);
 
@@ -205,27 +190,17 @@ impl fmt::Display for CheckpointRecency {
 /// A lightweight flag for whether a session is still working on the task it
 /// started — map line 1165.
 ///
-/// # What it counts, and why that is the honest signal available
+/// Counts completed task boundaries from this session's own `turn_ended`
+/// rows in the project event log — `main`'s hook path treats
+/// `TurnEnded { Completed }` as the moment a harness finishes a task, so this
+/// is Glasshouse's own record of boundaries it already acted on.
 ///
-/// Completed task boundaries this session has crossed, read from its own
-/// `turn_ended` rows in the project event log. `main`'s hook path treats
-/// `TurnEnded { Completed }` as *the* moment a harness says a task finished —
-/// it is what triggers memory extraction and an automatic checkpoint — so the
-/// count is Glasshouse's own record of the boundaries it acted on, not a new
-/// interpretation of anything.
-///
-/// # What it deliberately is not
-///
-/// It says nothing about what the tasks **were**. Phase 36's affinity score
-/// wants same-task work; `crate::routing::session::session_affinity` records
-/// that no producer for task *identity* exists in this build, and this flag
-/// does not become one — two consecutive turns on one feature are
-/// indistinguishable here from two on unrelated ones. Comparing tasks would
-/// mean storing what the task is, and a session record must never hold
-/// transcript content. What this does give a router is the difference between
-/// a session whose whole context is one piece of work and a session carrying
-/// seventeen finished ones, which is a real distinction it could not draw at
-/// all before.
+/// Says nothing about what the tasks **were**: comparing tasks would mean
+/// storing transcript content, which a session record must never hold. Two
+/// turns on one feature are indistinguishable here from two on unrelated
+/// ones — this only distinguishes a session doing one thing from one
+/// carrying many finished tasks.
+// History: design-decisions.md, "Trims: session module docs, second packet", session/store/context.rs `TaskContinuity`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskContinuity {
     /// The event log holds nothing at all for this session, so nothing has
@@ -261,22 +236,17 @@ impl fmt::Display for TaskContinuity {
 /// What Glasshouse can say about one session's context — Phase 30, read
 /// together so that a caller cannot assemble half of it.
 ///
-/// # Line 1158 is absent from this struct on purpose
+/// # Line 1158 is still absent from this struct, now by a different design
 ///
-/// *"Track an estimated context-size value for a session when the harness
-/// exposes enough information"* — no harness exposes it. The hook path is the
-/// only channel a harness reports through, it carries an event name and
-/// nothing else, and its payload is drained into `io::sink()` unread by
-/// `main`'s own hook handler. The one place in this schema with token counts,
-/// `routing_observations`, has them permanently NULL: its module documentation
-/// states they are "not supplied", because the only producer is the gateway
-/// and the gateway never parses a response body. `HarnessTelemetry`, the
-/// harness-side telemetry seam, carries a plan name and nothing more.
-///
-/// A field here would therefore have to be estimated from something that is
-/// not a context size — message counts, elapsed turns — and a future router
-/// would read it as telemetry. There is no field, and this paragraph is the
-/// record of why.
+/// The refusal this section once recorded ended: `routing_observations` now
+/// carries the gateway's own token counts (migration 24). But a copied token
+/// count would be a second source of truth — the same reason [`SessionContext`]
+/// itself gives migration 15 no field for one — so the estimate is not stored
+/// here either. It is read on demand by
+/// [`crate::routing::evidence::estimated_context_tokens`] over
+/// `routing_observations` and attached to
+/// [`crate::routing::session::SessionContextFacts`]. See `design-decisions.md`,
+/// *"Context size is read off the gateway's own exchange, never guessed"*.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionContext {
     pub session: SessionId,

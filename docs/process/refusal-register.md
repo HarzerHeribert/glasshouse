@@ -1254,7 +1254,7 @@ not.** Six were checked against current source and the register:
 | 1158 | 30 | refused in `phase-30.md` |
 | **514** | 9H | **REFUSED — missing caller** |
 | **531** | 9I | **REFUSED — missing caller *and* consumer** (Cluster D holds; one supporting fact corrected) |
-| **1594** | 37 | **REFUSED — and it was already recorded** in `phase-37.md:6,32`, reproduced here with a passing tripwire test |
+| **1594** | 37 | **CLOSED 2026-09-05** — the refusal's missing producers landed (bloat: 1534's `context quality`; noise: 1586), and `GH-ROUTER-FRESH-OVER-BLOATED` closed it once the size cap was made a property of warmth; `phase-37.md`, last section |
 
 **Six of six.** A phase is one line from complete *because* that line is the
 hard one — the cheap lines in it were closed first, by construction. **Ranking

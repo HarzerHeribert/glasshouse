@@ -1,45 +1,27 @@
-//! The capability registry — map line 1382: *"describe each harness and
-//! model resource with a small set of capabilities used for routing."*
+//! The capability registry — map line 1382: describe each harness and model
+//! resource with a small set of capabilities used for routing.
 //!
-//! # Why this is not a second [`HardCapability`]
+//! [`super::classify::HardCapability`] states what a *task* needs;
+//! [`ResourceCapabilities`] states what a *resource* can do. Merging the two
+//! scales would let a router compare a task's tier against its own tier and
+//! believe that proved something. [`axis_for`] is the one function that
+//! joins them; nothing else here or in [`super::session`] collapses the two.
 //!
-//! [`super::classify::HardCapability`] states what a *task* needs.
-//! [`ResourceCapabilities`] describes what a *resource* can do. Merging the
-//! two into one scale would let a router compare a task's tier against its
-//! own tier and believe that proved something —
-//! `super::classify`'s own doc comment on line 79 already refuses this for
-//! the same reason. [`axis_for`] is the one comparison function that joins
-//! them; nothing else in this module or [`super::session`] collapses the
-//! two.
+//! [`ResourceCapabilities`] is *built from* [`crate::harness::Capabilities`]
+//! plus [`ResourceFacts`] — a model/resource fact a harness adapter never
+//! sees — rather than being a bigger version of the adapter-declared type,
+//! so a harness adapter never has to declare a model's context window or
+//! price/speed class.
 //!
-//! # Why this is not a widening of `harness::Capabilities`
+//! Every axis is a [`Declared<bool>`], never a bare bool: `Unverified` is
+//! not absent, and [`ResourceCapabilities::axis`] returns *established
+//! present*, *established absent*, or *not established*.
 //!
-//! Map line 1382 asks for "each harness **and model** resource". A harness
-//! adapter has no business declaring a model's context window or its
-//! price/speed class, so [`ResourceCapabilities`] is *built from*
-//! [`crate::harness::Capabilities`] plus [`ResourceFacts`] — a model/resource
-//! fact a harness adapter never sees — rather than being a bigger version of
-//! the adapter-declared type.
-//!
-//! # Why every axis is a [`Declared<bool>`]
-//!
-//! `Unverified` is not absent. `harness::Capabilities`' own tests pin that an
-//! unverified axis must never be scored as a `no`
-//! (`an_unverified_capability_is_not_treated_as_present`), and this registry
-//! carries the same rule forward: [`ResourceCapabilities::axis`] returns
-//! *established present*, *established absent*, or *not established* —
-//! never a bare bool.
-//!
-//! # 1390 — updatable without changing the core router
-//!
-//! [`super::session::capability_fit`] contains no `match` on a resource's
-//! identity and no capability values of its own; it only asks
-//! [`ResourceCapabilities::axis`] a question and applies a fixed scoring
-//! formula. To add a resource, correct an axis, or add a new model-level
-//! fact, construct or edit a [`ResourceFacts`] value — nothing in
-//! `session.rs` changes. `Destination::with_resource_facts` (`super::session`)
-//! is where a caller attaches one; the harness half comes from the adapter
-//! [`crate::harness::adapter_for`] already returns.
+//! Map line 1390: [`super::session::capability_fit`] holds no `match` on a
+//! resource's identity and no capability values of its own — it only asks
+//! [`ResourceCapabilities::axis`] and applies a fixed formula, so adding a
+//! resource or fact means editing a [`ResourceFacts`] value, never this file.
+// History: design-decisions.md, "Trims: routing module docs", routing/capability.rs module doc.
 
 use crate::harness::{Capabilities as HarnessCapabilities, Declared};
 

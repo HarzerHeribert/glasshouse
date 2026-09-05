@@ -1,57 +1,23 @@
 //! The one production caller of [`crate::routing::disposable::DisposableRouting`]
-//! (Phase 9I lines 530, 531, 532, 540), and — since GH-ROUTED-EXTRACTION-CLIENT
-//! — the thing that then **calls the resource it chose**.
-//!
-//! # What this is
+//! (Phase 9I lines 530, 531, 532, 540), and the thing that then **calls the
+//! resource it chose**.
 //!
 //! [`RoutedModel`] is an [`ExtractionModel`] that asks the disposable routing
-//! policy which resource should perform this bounded support job —
-//! preferring a free one (line 530), letting an explicitly configured free
-//! model such as a Nemotron variant participate by name (line 531), and
-//! reporting why the resource it landed on is the one in use (line 540) —
-//! and then builds nothing itself and sends nothing itself. Its caller hands
-//! it a [`ConfiguredModel`] for the chosen resource, and it makes the call
-//! through that.
+//! policy which resource performs this bounded support job, then calls
+//! through the [`ConfiguredModel`] its caller supplies for that resource —
+//! the client arrives from outside because turning a [`DisposableChoice`]
+//! into one needs the provider table, config layering and a
+//! [`crate::secret::SecretStore`], all of which live only in `main.rs`.
 //!
-//! # Why the client arrives from outside
-//!
-//! Turning a [`DisposableChoice`] into a client needs the provider table,
-//! the layering rule that resolves a provider's configuration, and a
-//! [`crate::secret::SecretStore`]. All three live in `main.rs`, which is the
-//! only place in this build that reads a user's configuration, and none of
-//! them may live here: `crate::routing` is pure by rule and this module is
-//! the seam directly above it. So [`RoutedModel::with_client`] takes a
-//! client the caller resolved for the choice this type already made, the
-//! same shape `main.rs::context_firewall_reducer_model` and
-//! `main.rs::classification_model` already use one layer over.
-//!
-//! # The consent boundary is the caller's, and it did not move
-//!
-//! A [`RoutedModel`] with **no** client behaves exactly as this type did
-//! before it could call anything: it chooses, it says what it chose, and
-//! [`ExtractionModel::complete`] fails with [`ModelError::Unavailable`]. That
-//! is not a leftover — it is the state every user who has not configured
-//! `[memory] extraction_model` is still in, and `main.rs`'s own
-//! `configured_extraction_model` documents why: *a free-model list is a
-//! statement about cost; it is not a request that a hook running inside a
-//! coding session start making outbound requests.*
-//!
-//! What changed is what happens **after** that consent. The configured
-//! extraction model used to bypass the router entirely, so the policy chose
-//! only when nothing would be called and the model that was called had never
-//! been routed. Now the configured model is one candidate among the user's
-//! own free ones and `DisposableRouting::choose` ranks them all, which is
-//! what makes line 530's *prefer free models when quality is sufficient*
-//! true on the path that actually spends something.
-//!
-//! # What the call teaches, and where it goes
+//! The consent boundary is the caller's and did not move: with **no**
+//! client, a [`RoutedModel`] chooses, says what it chose, and
+//! [`ExtractionModel::complete`] fails with [`ModelError::Unavailable`] —
+//! the state every unconfigured user is still in.
 //!
 //! [`WorkloadOutcome`] is [`crate::routing::free::FreePool`]'s only teacher
-//! (line 534), and until this batch nothing on this path produced one. The
-//! translation from one finished exchange to one outcome happens **here**,
-//! once, exactly as [`WorkloadOutcome`]'s own documentation requires — and
-//! the result goes to the observer the caller supplied, which is what makes
-//! it durable for the next short-lived process that dispatches an extraction.
+//! (line 534), produced here once per exchange and sent to the observer the
+//! caller supplied.
+// History: design-decisions.md, "Trims: memory export and extraction module docs", memory/extract/disposable.rs module doc.
 
 use std::time::Instant;
 
@@ -143,48 +109,25 @@ impl RoutedModel {
         Self::from_outcome(routing.choose(job, candidates, pool, Instant::now(), None))
     }
 
-    /// Same as [`Self::new`], but with GH-CLASSIFY-CALLER's fifth link: a
-    /// real [`crate::routing::classify::TaskClassification`] of
-    /// `request_text` reaches the metered-fallback path's `tier` input (map
-    /// line 1550) instead of the fixed
-    /// [`crate::routing::classify::WorkloadTier::Leaf`] [`Self::new`] still
-    /// passes.
-    ///
-    /// `classify_heuristically`, not [`crate::routing::classify::classify`]:
-    /// this caller has no model answer to prefer, the same "no cheap model is
-    /// available" case Phase 35's own production caller (`glasshouse
-    /// classify`) is already built for.
+    /// Same as [`Self::new`], but a real
+    /// [`crate::routing::classify::TaskClassification`] of `request_text`
+    /// reaches the metered-fallback path's `tier` input (map line 1550)
+    /// instead of the fixed [`crate::routing::classify::WorkloadTier::Leaf`].
     ///
     /// **Not called by `main.rs`, and `JobKind::MemoryExtraction` must not
-    /// call it.** Two things block it, and only the first is about ordering.
+    /// call it**: the only text available there is the **chunk** — a
+    /// transcript of a finished turn, not a request — and wiring it in would
+    /// let a cheap extraction job spend the protected premium reserve
+    /// (`WorkloadTier::Heavy`, tier 3+) whenever the conversation it
+    /// summarises happened to be demanding, varying the tier with topic
+    /// instead of this job's own demand.
     ///
-    /// *Ordering:* `disposable_extraction_model` builds and calls its model
-    /// closure before `run_extraction_after_turn` reads this session's events
-    /// or builds its chunk, so no text exists at the point the routing
-    /// decision is made. That part is fixable by reordering `main.rs`.
-    ///
-    /// *Semantics — the blocking one:* reordering would hand this constructor
-    /// the **chunk**, which is a transcript of a finished turn, not a request.
-    /// [`crate::routing::classify::classify_heuristically`] is documented as
-    /// classifying *a request*, and the tier it yields feeds
-    /// `evaluate_reserve_spend`, whose distant-reset branch spends protected
-    /// premium reserve only at `WorkloadTier::Heavy` (tier 3) or above. A transcript of hard
-    /// debugging work is full of the keywords that produce `Heavy` — so
-    /// wiring the chunk here would let a *cheap* extraction job spend the
-    /// reserve because the conversation it is summarising happened to be
-    /// demanding. The tier would vary with conversation topic rather than
-    /// with this job's own demand, which is the opposite of what the gate is
-    /// protecting.
-    ///
-    /// This constructor is therefore correct and ready for a `JobKind` that
-    /// carries a real user request — `Classification`, `Reranking`,
-    /// `Evaluation` — none of which has a production caller today.
-    /// `MemoryExtraction`, the only one that does, is disposable by design and
-    /// keeps [`Self::new`]'s fixed `WorkloadTier::Leaf`.
-    ///
-    /// It keeps [`FreePool::new`] for the same reason it keeps the fixed
-    /// tier: it has no caller, so there is no process whose persisted health
-    /// this could honestly be reading.
+    /// Ready for a `JobKind` that carries a real user request —
+    /// `Classification`, `Reranking`, `Evaluation` — none of which has a
+    /// production caller today. `MemoryExtraction`, the only one that does,
+    /// keeps [`Self::new`]'s fixed tier and [`FreePool::new`] for the same
+    /// reason: it has no caller.
+    // History: design-decisions.md, "Trims: memory export and extraction module docs", memory/extract/disposable.rs `new_for_request`.
     pub fn new_for_request(
         job: JobKind,
         request_text: &str,
@@ -269,23 +212,14 @@ impl RoutedModel {
     /// map line 1367's release half, and the mirror of [`Self::observing`].
     ///
     /// Called once, from whichever comes first: the end of
-    /// [`ExtractionModel::complete_observed`], where the exchange has
-    /// finished and the pool is genuinely free again — success or failure
-    /// alike, because a call that failed spent the request just the same —
-    /// or this type's drop, which covers a model that was built and never
-    /// asked anything.
-    ///
-    /// # Both, and neither is the belt to the other's braces
-    ///
-    /// Releasing at the end of the call is what makes the pool usable again
-    /// *while this process is still finishing*, which is the whole point of
-    /// a reservation being narrower than a process. Releasing on drop is
-    /// what covers the run that never called: `main.rs` builds the model
-    /// before it knows whether there is anything to extract, and a chunk
-    /// with nothing in it must not hold a request until the deadline.
-    ///
-    /// Neither covers a process killed mid-call, and neither is meant to:
-    /// that is what the record's own expiry is for.
+    /// [`ExtractionModel::complete_observed`] (success or failure alike,
+    /// since a failed call spent the request just the same), which frees the
+    /// pool while this process is still finishing; or this type's drop,
+    /// which covers a model built and never asked anything — `main.rs`
+    /// builds the model before it knows whether there is anything to
+    /// extract. Neither covers a process killed mid-call; the record's own
+    /// expiry is for that.
+    // History: design-decisions.md, "Trims: memory export and extraction module docs", memory/extract/disposable.rs release doc.
     pub fn releasing(mut self, release: impl Fn() + Send + Sync + 'static) -> Self {
         self.release = Some(Box::new(release));
         self

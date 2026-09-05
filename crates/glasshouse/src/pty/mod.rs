@@ -1,69 +1,23 @@
 //! Terminal-backed child processes.
 //!
-//! Every harness Glasshouse manages is a real interactive program that expects
-//! a terminal: it draws a TUI, reads keystrokes, and reacts to window resizes.
-//! This module is the one place that knows how a pseudo-terminal is created and
-//! how a child process is signalled, so the rest of Glasshouse can treat a
-//! Claude Code session on macOS and a Codex session on native Windows
-//! identically.
-//!
-//! Platform coverage comes from `portable-pty`, which uses Unix PTY primitives
-//! on macOS and Linux and ConPTY on native Windows. Using that crate rather
-//! than hand-rolling both backends is deliberate: it is an established
-//! primitive that solves exactly this problem, and reimplementing ConPTY would
-//! be complexity with no product benefit.
-//!
-//! There is intentionally no trait here. A single concrete [`PtyProcess`] is
-//! already a common interface that hides every platform difference; adding a
-//! trait for one implementation would be abstraction without a second
-//! implementation to justify it.
-//!
-//! # Seam for harness launches
-//!
-//! Production code does not assemble harness commands by hand:
-//! [`crate::launch::HarnessLaunch`] is the sanctioned route, and it derives
-//! the child's working directory through `TerminalCommand::for_harness`
-//! from the active [`Project`] alone — specifically via
-//! [`Project::display_root`], which denotes the canonical project root but is
-//! stripped of Windows' verbatim `\\?\` prefix so a process can actually be
-//! started there. `for_harness` is `pub(crate)` for exactly that reason: no
-//! external caller can build a "harness" command with an arbitrary directory,
-//! and no path on [`crate::launch::HarnessLaunch`] exposes a way to set or
-//! change one.
-//!
-//! This is structure within the sanctioned harness API, not a sandbox.
-//! [`TerminalCommand::new`] and [`PtyProcess::spawn`] remain public for
-//! genuinely generic PTY/platform commands (tests, tooling), and Rust cannot
-//! identify misuse of those generic APIs: the project-root guarantee holds
-//! for whatever goes through [`crate::launch::HarnessLaunch`], and only for
-//! that.
-//!
-//! # Constraint for whatever renders this process's output
-//!
-//! On Windows, ConPTY emits a Device Status Report query (`ESC[6n`, "where is
-//! the cursor?") on the pty's output as part of bringing the pseudo-console
-//! up, and it blocks -- the child does not get to run, let alone produce any
-//! output of its own -- until something on the other end writes back
-//! `ESC[<row>;<col>R`. This is not a rendering glitch to clean up later: an
-//! unanswered query is a full hang, indistinguishable from the harness
-//! process itself having wedged, with nothing in the pty output to explain
-//! why.
-//!
-//! This module is deliberately not where that gets answered. `PtyProcess`
-//! only moves bytes in and out of the child; it has no notion of what a byte
-//! *means*, and answering a control sequence requires exactly that. The
-//! right place is Glasshouse's terminal-emulation layer (Phase 5 of the
-//! capability map, which renders a harness's output and is the one place
-//! that already parses the terminal control sequences flowing through this
-//! module) -- whoever builds it needs to answer this query as part of
-//! bringing a session up on Windows, or every Windows session will hang
-//! silently before producing a single rendered byte.
-//!
-//! `crates/glasshouse/tests/pty_smoke.rs` answers this query itself (see
-//! that file's module doc for how), which is the only reason its tests can
-//! exercise a real child process on Windows at all -- without it, every test
-//! needing child output or child exit hangs on exactly this handshake and
-//! times out.
+//! This module is the one place that knows how a pseudo-terminal is created
+//! and a child process is signalled, via `portable-pty` (Unix PTY
+//! primitives, ConPTY on Windows) and one concrete [`PtyProcess`] rather
+//! than a trait with one impl, so the rest of Glasshouse can treat any
+//! harness identically. Production code derives the working directory
+//! through `TerminalCommand::for_harness` from the active [`Project`] alone
+//! (`pub(crate)`, so no external caller can pass an arbitrary directory);
+//! [`TerminalCommand::new`] and [`PtyProcess::spawn`] stay public for
+//! generic PTY work, but the project-root guarantee holds only for
+//! [`crate::launch::HarnessLaunch`]. On Windows, ConPTY blocks the child on
+//! an unanswered cursor-position
+//! query (`ESC[6n`) — a full hang, not a rendering glitch — which this
+//! module deliberately does not answer (`PtyProcess` moves bytes, it does
+//! not parse them); Glasshouse's terminal-emulation layer (Phase 5) must,
+//! or every Windows session hangs silently. `pty_smoke.rs` answers it itself
+//! to exercise a real child process on Windows at all. History:
+//! design-decisions.md, "Trims: the remaining module docs, second packet",
+//! pty/mod.rs module doc.
 
 pub mod process;
 
@@ -379,36 +333,23 @@ impl PtyOutput {
 /// Read the next chunk from a terminal, retrying a read that a signal
 /// interrupted.
 ///
-/// `None` means nothing more is coming — end-of-file, or an error that is not
-/// retryable. `Some(n)` is always a non-zero count.
+/// `None` means nothing more is coming — end-of-file, or an error that is
+/// not retryable. `Some(n)` is always a non-zero count.
 ///
-/// # Why an interrupted read is not an ending
-///
-/// [`std::io::Read::read`] does not retry `EINTR` itself — only the
-/// `read_exact`/`read_to_end` family does — so a signal arriving while a
-/// reader thread is blocked in `read` surfaces here as
-/// [`std::io::ErrorKind::Interrupted`], and it says nothing at all about the
-/// far end.
-///
-/// Every reader above this one is the *only* thing draining its terminal, and
-/// none of them is ever restarted: `spawn_reader` is called from
-/// `SessionRuntime::start` and `consider_restart` and nowhere else, and
-/// `attach`'s two pumps are spawned once per session. Folding an interrupted
-/// read in with a hangup therefore ends that drain for good, publishes
-/// `OutputEnded` for a harness that is still alive, and leaves the
-/// pseudo-terminal to fill until the harness blocks on its own `write` — the
-/// same outcome the poisoned-lock arms in `pump` already refuse to cause, and
-/// which those arms' own comment calls far worse than a gap in the history.
-///
-/// Every other error kind still ends the loop, because that is what they mean
-/// here: a pty reports the end of a session as end-of-file on some platforms
-/// and as a read error on others, and neither is a fault to report — the exit
-/// status comes from the process, not from this.
-///
-/// Not platform-conditional. `Interrupted` is a Unix concept in practice and
-/// Windows reads essentially never produce it, so retrying it there costs a
-/// comparison on a branch that is not taken; making the arm `#[cfg(unix)]`
-/// would buy nothing and leave two spellings of one decision.
+/// [`std::io::Read::read`] does not retry `EINTR` itself, so a signal
+/// arriving while a reader thread is blocked surfaces as
+/// [`std::io::ErrorKind::Interrupted`] and says nothing about the far end.
+/// Every reader above this one is the *only* thing draining its terminal and
+/// is never restarted, so folding an interrupted read in with a hangup
+/// would end that drain for good and leave the pseudo-terminal to fill
+/// until the harness blocks on its own `write` — worse than a gap in the
+/// history. Every other error kind still ends the loop: a pty reports a
+/// session's end as EOF on some platforms and a read error on others, and
+/// neither is a fault to report. Not `#[cfg(unix)]`-gated: `Interrupted` is
+/// a Unix concept in practice, and Windows reads essentially never produce
+/// it, so the extra branch there is never taken but costs nothing to keep.
+/// History: design-decisions.md, "Trims: the remaining module docs, second
+/// packet", `next_chunk`.
 pub(crate) fn next_chunk(reader: &mut impl Read, buffer: &mut [u8]) -> Option<usize> {
     loop {
         match reader.read(buffer) {
@@ -422,16 +363,10 @@ pub(crate) fn next_chunk(reader: &mut impl Read, buffer: &mut [u8]) -> Option<us
 
 /// What a session's terminal is doing with the bytes written to it.
 ///
-/// # Why anything above the pty needs to know
-///
-/// A terminal line discipline in **canonical mode** assembles input one line
-/// at a time in a kernel buffer, and that buffer has a hard ceiling. A write
-/// that pushes a line past the ceiling loses data, and **the kernels do not
-/// lose it the same way** — see [`CanonicalOverflow`], which names the two
-/// behaviours that were measured and is why this type carries the hazard
-/// rather than assuming the one the defect was first found on.
-///
-/// Measured against a real pty, one fresh pty per case, 20 trials of each:
+/// **Canonical mode** assembles input one line at a time in a kernel buffer
+/// with a hard ceiling; a write past it loses data, and **the kernels do
+/// not lose it the same way** — see [`CanonicalOverflow`]. Measured, 20
+/// trials of each:
 ///
 /// ```text
 /// macOS 25.5   1023 + CR = 1024 -> arrives, terminal still works
@@ -440,14 +375,12 @@ pub(crate) fn next_chunk(reader: &mut impl Read, buffer: &mut [u8]) -> Option<us
 ///              4096 + CR = 4097 -> arrives TRUNCATED to 4095, terminal fine
 /// ```
 ///
-/// Both are data loss the writing side is not told about, which is what makes
-/// one refusal the right answer to both; only the wreckage differs.
-///
-/// In **raw** mode there is no line and no such ceiling: the same 2000-byte
-/// write arrives intact. A harness TUI puts its own tty into raw mode as it
-/// starts; a plain shell, and a harness before its first draw, does not. The
-/// two cases need different answers, which is why
-/// [`PtyProcess::line_discipline`] obtains one rather than assuming it.
+/// Both are data loss the writing side is not told about, so one refusal is
+/// the right answer to both; only the wreckage differs. In **raw** mode
+/// there is no such ceiling — a harness TUI puts its own tty into raw mode
+/// as it starts, a plain shell does not — so [`PtyProcess::line_discipline`]
+/// obtains the mode rather than assuming it. History: design-decisions.md,
+/// "Trims: the remaining module docs, second packet", `LineDiscipline`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LineDiscipline {
     /// `ICANON` is set, and this platform's ceiling is known.
@@ -553,33 +486,19 @@ pub struct CanonicalLine {
 impl CanonicalLine {
     /// The most bytes one line may carry, **its terminator included**.
     ///
-    /// # These numbers are the kernel's, and they differ
+    /// **macOS/BSD**: `MAX_CANON`, `1024`. **Linux**: `4096`, the `n_tty`
+    /// line discipline's own buffer (`N_TTY_BUF_SIZE`) — not the `255` POSIX
+    /// minimum `<linux/limits.h>` and `fpathconf` report, which would refuse
+    /// 256-byte lines that demonstrably arrive; this number was originally
+    /// compiled in with BSD's wedge description, since corrected by
+    /// measurement to [`CanonicalOverflow::TruncatesTheLine`]. **Everything
+    /// else**, Windows included: no limit, [`LineDiscipline::Unknown`]
+    /// rather than [`LineDiscipline::Canonical`]. Each is compiled in per
+    /// target, and `tests/canonical_line_limit.rs` measures it back on
+    /// whichever platform runs, in both directions.
     ///
-    /// - **macOS and the BSDs**: `MAX_CANON`, `1024`, from
-    ///   `<sys/syslimits.h>`. The measurement in [`LineDiscipline`]'s doc
-    ///   comment is what establishes that the terminator is counted.
-    /// - **Linux**: `4096`, the `n_tty` line discipline's own buffer
-    ///   (`N_TTY_BUF_SIZE`). Linux's `<linux/limits.h>` says `MAX_CANON` is
-    ///   255 and `fpathconf(_PC_MAX_CANON)` agrees, but the driver does not
-    ///   — that constant is the POSIX minimum rather than the kernel's
-    ///   buffer, and enforcing it would refuse 256-byte lines that
-    ///   demonstrably arrive. `fpathconf` is the portable spelling and it is
-    ///   wrong on the platform where it differs most.
-    ///
-    ///   **This number was originally compiled in from that documented buffer
-    ///   size and not measured, and the description that came with it was
-    ///   BSD's.** The boundary has since been measured against a real Linux
-    ///   pty and 4096 is exactly right — 4096 total arrives whole, 4097 does
-    ///   not — but what happens above it is [`CanonicalOverflow::TruncatesTheLine`],
-    ///   not the wedge this constant was first documented with.
-    /// - **Everything else**, Windows included: no limit, and such a
-    ///   terminal is [`LineDiscipline::Unknown`] rather than
-    ///   [`LineDiscipline::Canonical`].
-    ///
-    /// Each is compiled in per target, and
-    /// `tests/canonical_line_limit.rs` measures it back on whichever platform
-    /// the test runs on — in both directions, so a value too high and a value
-    /// too low each fail there rather than in production.
+    /// History: design-decisions.md, "Trims: the remaining module docs,
+    /// second packet", `CanonicalLine::max_bytes`.
     pub const fn max_bytes(self) -> usize {
         self.max_bytes
     }
@@ -650,27 +569,17 @@ impl CanonicalLine {
     }
 
     /// This platform's canonical-mode ceiling and the hazard one byte over
-    /// it, or `None` where no canonical ceiling applies.
+    /// it, or `None` where no canonical ceiling applies. See
+    /// [`CanonicalLine::max_bytes`] for the numbers and [`CanonicalOverflow`]
+    /// for the two behaviours, both measured against a real pty. Public
+    /// because it is a fact about the **platform**, not one terminal — a
+    /// caller sizing a delivery before it has a session (the memory
+    /// injection ceiling) needs the number without a pty in hand — and
+    /// because `PtyProcess::line_discipline`, its only consumer, is
+    /// `#[cfg(unix)]`, so a private constant was dead code on Windows.
     ///
-    /// See [`CanonicalLine::max_bytes`] for the numbers and
-    /// [`CanonicalOverflow`] for the two behaviours; both halves of each arm
-    /// below were measured against a real pty rather than read from a header,
-    /// which is how the Linux arm's description came to be corrected.
-    ///
-    /// # Why it is public, and why that is not a workaround
-    ///
-    /// It is a fact about the **platform**, not about any one terminal: a
-    /// caller sizing a delivery before it has a session to ask — the memory
-    /// injection ceiling is exactly such a caller — needs the number without
-    /// a pty in hand.
-    ///
-    /// It also has to be reachable on a target that compiles no reader for
-    /// it. `PtyProcess::line_discipline` is the only consumer and it is
-    /// `#[cfg(unix)]`, so as a private constant this was dead code on
-    /// Windows and `-D warnings` turned that into a failed build. Deleting
-    /// the Windows arm would have silenced it by throwing away the fact that
-    /// Windows has no ceiling, which is the one thing this constant is for
-    /// there.
+    /// History: design-decisions.md, "Trims: the remaining module docs,
+    /// second packet", `CanonicalLine::PLATFORM`.
     #[cfg(any(
         target_os = "macos",
         target_os = "ios",
@@ -744,32 +653,22 @@ impl std::fmt::Debug for PtyProcess {
 
 /// Allocate a pseudo-terminal, retrying a bounded number of times.
 ///
-/// # Why this retries
+/// macOS's `openpty(3)` has a race under concurrent allocation that
+/// intermittently fails even nowhere near `kern.tty.ptmx_max` (reproduced
+/// with 16 concurrent processes holding four pseudo-terminals each; a
+/// single process churning the same total produced none); `errno` comes
+/// back `-6`, not a valid errno at all, so the condition cannot be
+/// classified and must be handled by retrying. This covers exactly one
+/// call — the allocation — and nothing has been started when it fails, so
+/// retrying is side-effect free by construction, unlike retrying a spawn
+/// would be. A genuinely exhausted host still fails, just
+/// [`PTY_ALLOCATION_ATTEMPTS`] times over roughly
+/// [`PTY_ALLOCATION_RETRY_DELAY`] each. The allocator is a parameter so a
+/// test can inject transient failures; production passes
+/// `native_pty_system()`.
 ///
-/// macOS's `openpty(3)` has a race under concurrent allocation: when several
-/// processes or threads ask for a pseudo-terminal at the same moment, it
-/// intermittently fails even with the host nowhere near
-/// `kern.tty.ptmx_max`. A local probe pinned this down precisely — 16
-/// concurrent processes holding at most four pseudo-terminals each (64 live
-/// against a cap of 511, with 17 in use on the host) reproduced it, while
-/// the same total churn driven from a single process at 8000 allocations a
-/// second produced none. The failure leaves `errno` at `-6`, which is not a
-/// valid errno at all; that alone shows the failure path does not report
-/// itself properly, so the condition cannot be classified from the error
-/// value and must be handled by retrying.
-///
-/// This is not a blind retry wrapper around spawning. It covers exactly one
-/// call — the allocation — and nothing has been started when it fails: no
-/// child process exists, no file has been written, no terminal has been
-/// engaged. Retrying is therefore side-effect free by construction, which is
-/// what makes it safe in a way that retrying a spawn would not be.
-///
-/// A genuinely exhausted host still fails, just [`PTY_ALLOCATION_ATTEMPTS`]
-/// times over roughly [`PTY_ALLOCATION_RETRY_DELAY`] each, and the caller
-/// gets the last real error rather than a synthesized one.
-///
-/// The allocator is a parameter rather than a hard-coded call so a test can
-/// inject transient failures; production passes `native_pty_system()`.
+/// History: design-decisions.md, "Trims: the remaining module docs, second
+/// packet", `open_pty`.
 fn open_pty(
     size: PtySize,
     mut allocate: impl FnMut(PtySize) -> Result<PtyPair>,
@@ -805,28 +704,19 @@ fn open_pty(
 
 /// End and reap a child that a failed spawn is about to abandon.
 ///
-/// `portable_pty::Child` is `std::process::Child` on Unix (portable-pty 0.9.0,
-/// `src/lib.rs:271`), whose `Drop` neither kills nor reaps. Dropping one on an
-/// error path therefore leaves the harness running with nobody holding its
-/// terminal, and its pid unreaped for the life of this process — the two leaks
-/// [`PtyProcess::drop`] exists to prevent, on the one path where there is no
-/// `PtyProcess` yet to run it.
+/// `portable_pty::Child` is `std::process::Child` on Unix, whose `Drop`
+/// neither kills nor reaps, so dropping one on an error path leaves the
+/// harness running unreaped — the two leaks [`PtyProcess::drop`] exists to
+/// prevent, on the one path where there is no `PtyProcess` yet to run it.
+/// `wait` is unconditional: a child already exited is exactly the case that
+/// leaves a permanent zombie. On Unix this reaches the whole process group
+/// like [`PtyProcess::signal`]; on Windows it can only reach the direct
+/// child, since the Job Object that reaches grandchildren is created later
+/// in `spawn` — strictly better than leaking both, and the most this point
+/// can do.
 ///
-/// The `wait` is unconditional rather than conditional on the kill having
-/// succeeded: a child that had already exited is exactly the case that leaves
-/// a permanent zombie, and a killed one returns from `wait` immediately.
-///
-/// # Platform
-///
-/// On Unix this reaches the child's whole process group, the same way
-/// [`PtyProcess::signal`] does. On Windows it can only reach the direct child:
-/// the Job Object that makes a kill reach grandchildren is created further
-/// down `spawn`, after the point every caller of this function has failed at,
-/// so a harness whose real work lives in a grandchild (`cmd.exe` shim around
-/// `node.exe`) could still leave that grandchild behind here. That is strictly
-/// better than today's leak of both and is the most this point in `spawn` can
-/// do; moving the Job Object above the reader and writer would be the fix, and
-/// is not attempted here.
+/// History: design-decisions.md, "Trims: the remaining module docs, second
+/// packet", `end_abandoned_child`.
 fn end_abandoned_child(child: &mut Box<dyn portable_pty::Child + Send + Sync>) {
     #[cfg(unix)]
     let _ = process::signal_process(ProcessSignal::Kill, child.as_ref());
@@ -880,33 +770,20 @@ impl PtyProcess {
             )
         })?;
 
-        // The slave handle must be dropped here.
+        // The slave handle must be dropped here: on Unix this is what makes
+        // the output reader see EOF (the last open fd for the slave side).
+        // On Windows it does *not* produce EOF — `ConPtySlavePty` shares the
+        // master's `Arc<Mutex<Inner>>`, and the pipe is released only by
+        // `ClosePseudoConsole`, which runs when the *master* is dropped —
+        // but dropping the slave here is still correct and necessary. So a
+        // reader must treat "the process was observed to have exited"
+        // (`try_wait`/`wait`), never EOF, as the authoritative stop
+        // condition on every platform, and dropping this `PtyProcess` (which
+        // can block on `ClosePseudoConsole` until output drains) must never
+        // happen on a UI thread.
         //
-        // On Unix this is what makes the output reader see EOF: the pty only
-        // reports end-of-file once every open fd for the slave side is
-        // closed, and this was the last one Glasshouse itself would
-        // otherwise still be holding.
-        //
-        // On Windows this line does *not* produce EOF. `ConPtySlavePty`
-        // shares an `Arc<Mutex<Inner>>` with the master, so dropping it
-        // closes no descriptor; the pipe's write end lives inside conhost
-        // and is released only by `ClosePseudoConsole`, which runs when the
-        // *master* — the `MasterPty` this `PtyProcess` owns — is dropped,
-        // not the slave. Dropping the slave here is still correct and
-        // necessary (a `SlavePty` has nothing left to do once
-        // `spawn_command` has returned, and Unix genuinely needs it gone),
-        // it just does not give Windows callers an EOF-based way to notice
-        // the child is done.
-        //
-        // Constraint this implies for a future interactive reader thread
-        // (Phase 4): it must not treat "no more bytes" as its stop
-        // condition, because on Windows that may never come while the pty is
-        // still held open. Treat "the process was observed to have exited"
-        // (`try_wait`/`wait`) as the authoritative stop condition on every
-        // platform instead. And because releasing the pty — dropping this
-        // `PtyProcess` — is what eventually lets `ClosePseudoConsole` run,
-        // and that call can block until buffered output has drained to a
-        // reader, that drop must never happen on a UI thread.
+        // History: design-decisions.md, "Trims: the remaining module docs,
+        // second packet", `PtyProcess::spawn_with` (slave-drop comment).
         drop(pair.slave);
 
         // Not `?`. The harness is already running at this point and is not
@@ -1016,29 +893,19 @@ impl PtyProcess {
 
     /// What the session's terminal is doing with input **right now**.
     ///
-    /// # Read every time, never cached
-    ///
-    /// A child owns its own tty and may change its mode at any instant: a
+    /// Never cached: a child may change its tty's mode at any instant (a
     /// harness enters raw mode as it draws its first frame, leaves it while
-    /// it shells out, and re-enters it afterwards. A remembered answer would
-    /// be a lie with a timestamp, so this asks the kernel on every call and
-    /// callers are expected to call it immediately before the write it
-    /// governs. The residual race is one syscall wide and is stated where it
-    /// is acted on — see `SessionRuntime::send_text_from`.
+    /// it shells out), so this asks the kernel on every call and callers are
+    /// expected to call it immediately before the write it governs — the
+    /// residual race is one syscall wide (see `SessionRuntime::send_text_from`).
+    /// Reads `tcgetattr` on the **master** fd: a pty pair shares one
+    /// `termios`, so the master's answer *is* the slave's line discipline,
+    /// verified (not assumed) in `tests/canonical_line_limit.rs`. The fd
+    /// (`MasterPty::as_raw_fd`) is borrowed for the call and never stored,
+    /// closed, or duplicated.
     ///
-    /// # What it reads
-    ///
-    /// `tcgetattr` on the **master** fd. A pty pair shares one `termios`
-    /// between its two ends, so the master's answer *is* the slave's line
-    /// discipline — which is the thing that matters and the only side
-    /// Glasshouse holds. Verified rather than assumed: a child that runs
-    /// `stty -icanon` on its own tty flips this from
-    /// [`LineDiscipline::Canonical`] to [`LineDiscipline::Raw`], measured in
-    /// `tests/canonical_line_limit.rs`.
-    ///
-    /// `portable-pty` exposes the fd through `MasterPty::as_raw_fd`. It is
-    /// borrowed for the duration of the call and never stored, closed, or
-    /// duplicated.
+    /// History: design-decisions.md, "Trims: the remaining module docs,
+    /// second packet", `PtyProcess::line_discipline`.
     #[cfg(unix)]
     pub fn line_discipline(&self) -> LineDiscipline {
         let (Some(fd), Some((max_bytes, overflow))) =

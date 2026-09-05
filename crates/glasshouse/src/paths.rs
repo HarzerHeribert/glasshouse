@@ -122,26 +122,18 @@ impl RuntimePaths {
 /// Refuse a path whose first component is a literal `~`, rather than
 /// silently creating a directory named `~`.
 ///
-/// `~` only ever expands to the home directory inside a shell. None of the
-/// five callers of this function run one — `--data-dir`/`--config-dir`/
-/// `--log-file` land here as already-parsed [`Path`] arguments, and
-/// `GLASSHOUSE_DATA_DIR`/`GLASSHOUSE_CONFIG_DIR` as raw environment strings —
-/// so a literal `~` is unambiguous evidence of a shell-expansion step that
-/// never ran (a non-interactive launcher such as a systemd unit, a CI job, or
-/// a cmux pane setting the env var directly). Refusing costs no
-/// home-directory lookup and matches this codebase's stated preference for
-/// refusing untrusted input over guessing what it meant (see
-/// `shim::check_name`'s doc).
+/// `~` only ever expands to the home directory inside a shell, and none of
+/// this function's five callers run one, so a literal `~` is unambiguous
+/// evidence of a shell-expansion step that never ran (a non-interactive
+/// launcher such as a systemd unit or a CI job). Refusing matches this
+/// codebase's stated preference for refusing untrusted input over guessing
+/// what it meant. `path` is formatted with `{path:?}` rather than `{path}`:
+/// on Unix a CLI argument or environment variable may contain any byte but
+/// NUL, so an unescaped echo could inject a newline into whatever this error
+/// is logged into.
 ///
-/// `source` names the flag or environment variable, so the error tells the
-/// caller which of the two disagreed with what it received. `path` is
-/// formatted with `{path:?}` (escaped, quoted) rather than `{path}` (raw):
-/// on Unix, both a CLI argument and an environment variable may contain any
-/// byte but NUL, so an unescaped echo could inject a newline into whatever
-/// this error is logged into.
-///
-/// `pub(crate)` so `cli.rs` can wire it under `--log-file`, the fifth input
-/// sharing this hazard.
+/// History: design-decisions.md, "Trims: the remaining module docs, second
+/// packet", `reject_literal_tilde`.
 pub(crate) fn reject_literal_tilde(path: &Path, source: &str) -> Result<PathBuf> {
     if path.starts_with("~") {
         anyhow::bail!(

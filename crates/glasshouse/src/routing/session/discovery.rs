@@ -748,31 +748,26 @@ fn provider_unavailable_cause(
     None
 }
 
-/// The gate step 2 runs. Five constraints and no others, for the same
-/// reason [`crate::routing::interactive`]'s `compatible` has two: each is a
-/// fact about whether the destination *can* serve, not a preference about
-/// whether it *should*.
+/// The gate step 2 runs. Five constraints and no others, each a fact about
+/// whether the destination *can* serve, not a preference about whether it
+/// *should*.
 ///
-/// Two of the five — map lines 1517 and 1518 — are asked on both passes,
-/// like tool semantics and protocol: whether a destination lacks a required
-/// hard capability, or whether its provider has refused the credential or
-/// declared a still-active cooldown, does not depend on which tier the
-/// movement settled. Both follow the same "established, not merely unread"
-/// rule as the others: an unverified capability axis and an *invented*
-/// cooldown are not "cannot," so neither excludes — see [`is_adequate`] and
-/// [`provider_unavailable_cause`].
+/// Two — map lines 1517 and 1518 — are asked on both passes: whether a
+/// destination lacks a required hard capability, or its provider has
+/// refused the credential or declared a still-active cooldown, does not
+/// depend on which tier the movement settled. Both follow the same
+/// "established, not merely unread" rule: an unverified capability axis and
+/// an *invented* cooldown are not "cannot," so neither excludes.
 ///
 /// The fifth — map line 1516 — fires only on an **established** ceiling
-/// strictly below the required tier. A destination with no ceiling stated
-/// passes, because "nobody has said" is not "cannot"; the same rule the
-/// other constraints already follow for `Unverified` tool semantics and an
-/// unknown protocol.
+/// strictly below the required tier; a destination with no ceiling stated
+/// passes, since "nobody has said" is not "cannot."
 ///
-/// `minimum_tier` is the tier the gate reads — [`TierMovement::gate_tier`]
-/// once the movement is decided, and `None` for the pass that decides it
-/// (the two capability constraints only). It is an argument rather than
+/// `minimum_tier` is [`TierMovement::gate_tier`] once the movement is
+/// decided, `None` for the pass that decides it — an argument rather than
 /// `inputs.requirements.minimum_tier` so a downgrade (line 1562) can admit
 /// a resource the classified tier would have refused, in exactly one place.
+// History: design-decisions.md, "Trims: routing module docs", routing/session/discovery.rs `fn hard_constraint`.
 pub(super) fn hard_constraint(
     destination: &Destination,
     inputs: &RouterInputs<'_>,

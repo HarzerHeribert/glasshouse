@@ -1,46 +1,23 @@
 //! The extraction contract: what a model is asked for, and what is accepted
 //! back.
 //!
-//! # The response is untrusted input
+//! A model's reply is untrusted text, parsed per element (so one bad memory
+//! costs one memory, not the whole extraction) and screened for credential
+//! material before any field is read — [`judge`] screens first so a later
+//! error may safely name the value it rejected.
 //!
-//! A model's reply is text from outside the program. It is parsed like any
-//! other untrusted document: per element, so one bad memory costs one memory
-//! rather than the whole extraction, and **screened for credential material
-//! before any field of it is read**.
+//! `kind`, `support`, `disposition` and `confidence` are each required
+//! fields making a distinction the map asks for checkable: a validator can
+//! refuse a response that contradicts itself, which a prompt alone cannot
+//! produce.
 //!
-//! That ordering is deliberate and is the reason [`judge`] does the screen
-//! first. Once an element has passed, every field in it is known to be
-//! credential-free, so a later error may safely name the value it rejected.
-//! Screening field by field would leave the fields nobody reads unscreened,
-//! and an error raised before the screen could echo a credential into a log.
-//!
-//! # Required fields, and why five of them are enums
-//!
-//! `kind` is Phase 21's *"classify every emitted memory into one supported
-//! memory kind"*. The other three enums each exist to make a distinction the
-//! map asks for **representable, and therefore checkable**:
-//!
-//! | field | the line it serves |
-//! |---|---|
-//! | `support` | *omit speculative claims that were not established* |
-//! | `disposition` | *distinguish failed approaches from accepted decisions* |
-//! | `confidence` | *treat uncertain authority classification conservatively* |
-//!
-//! A prompt that merely *asks* a model to distinguish two things produces no
-//! evidence that it did. A schema that makes the distinction a required
-//! field, and a validator that refuses a response contradicting itself,
-//! produces a test. Which half is enforced and which half is only asked for
-//! is stated per rule below, because the difference is the whole value.
-//!
-//! # What is asked for and cannot be enforced here
-//!
-//! Whether a statement is *true*, whether it is an obvious source-code fact,
-//! and whether rediscovering it would be expensive are judgments about the
-//! project that only the producer can make — the same three
-//! `memory::policy` declined to fake at the storage layer, for the
-//! same reason. They are stated in [`PROMPT_CONTRACT`] and evaluated
-//! nowhere. Saying so is more useful than a keyword heuristic that would
-//! refuse real memories and admit fake ones.
+//! Whether a statement is *true*, an obvious source-code fact, or expensive
+//! to rediscover are judgments only the producer can make — the same three
+//! `memory::policy` declined to fake at the storage layer. They are stated
+//! in [`PROMPT_CONTRACT`] and evaluated nowhere, because that is more useful
+//! than a keyword heuristic that would refuse real memories and admit fake
+//! ones.
+// History: design-decisions.md, "Trims: memory export and extraction module docs", memory/extract/schema.rs module doc.
 
 use serde::Deserialize;
 

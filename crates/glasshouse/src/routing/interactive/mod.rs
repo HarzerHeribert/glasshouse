@@ -1,70 +1,33 @@
 //! Sticky routing for one live harness-backed gateway session (Phase 9H).
 //!
-//! # The session owns the assignment; the assignment is not a session
+//! [`Assignment`] is a value with no identity of its own — no session id, no
+//! lifecycle — held by the gateway a session started and dying with it
+//! (Phase 9H line 507). Nothing in this file names `crate::session`, and
+//! `tests::the_assignment_is_not_a_session_of_its_own` scans for it, the
+//! same move `gateway::mod` makes for the same reason.
 //!
-//! Phase 9H line 507 asks Glasshouse to *"treat the gateway assignment as
-//! backend state belonging to the harness-backed session rather than as an
-//! independent agent session"*. [`Assignment`] is therefore a value with no
-//! identity of its own: no session id, no lifecycle, no start or end, nothing
-//! that could be listed beside the user's real sessions. It is held by the
-//! gateway a session started and dies with it.
+//! Lines 508/509: a normal turn keeps the same backend **even when a
+//! cheaper free model is sitting right there**, so
+//! [`InteractiveRouting::next_turn`] takes the alternatives as an argument
+//! rather than deciding without seeing them.
 //!
-//! That is structural, not promised. Nothing in this file names
-//! `crate::session`, and `tests::the_assignment_is_not_a_session_of_its_own`
-//! scans for it — the same move `gateway::mod` already makes for the same
-//! reason, and for the same product principle: the harness stays the harness.
+//! Lines 513/514: **the same model identifier served by a different
+//! provider** is a same-family failover; **any different model identifier**
+//! is a migration, offered but never taken transparently — a conservative
+//! rule chosen over pattern-matching model names into a taxonomy, since
+//! silently changing the model under a live session is what line 514
+//! forbids.
 //!
-//! # Sticky means *nothing on a normal turn asks the question*
-//!
-//! Lines 508 and 509 are two halves of one behaviour, and the second is the
-//! one that is easy to lose. It is not enough that a normal turn happens to
-//! keep the same backend; a normal turn must keep it **even when a cheaper
-//! free model is sitting right there**. So [`InteractiveRouting::next_turn`]
-//! takes the alternatives as an argument. A version of this function that
-//! could not see them would satisfy the line by accident, and the first
-//! optimisation someone added would break it silently.
-//!
-//! # A failover is not a migration, and the difference is decidable today
-//!
-//! Lines 513 and 514 ask for same-family failover to be preferred and a
-//! *material* model-family change to be treated as a migration decision.
-//! Rather than invent a taxonomy by pattern-matching model names, this module
-//! uses the conservative rule the available facts support:
-//!
-//! - **the same model identifier served by a different provider** is a
-//!   same-family move — it is literally the same model, which is the common
-//!   real case (one model offered by two routers) — so it is a
-//!   [`FailureResponse::FailOver`];
-//! - **any different model identifier** is treated as material, so it is
-//!   offered as a migration and never taken transparently.
-//!
-//! Erring this way costs an automatic recovery that a family table would have
-//! allowed. Erring the other way silently changes the model under a live
-//! coding session, which is exactly what line 514 forbids.
-//!
-//! # Phase 9J and Phase 33A rank the survivors; they do not choose the group
-//!
-//! [`InteractiveRouting::on_provider_failure`] used to take the first
-//! candidate in each group (same-model, then different-model) and return
-//! immediately — the ordering above is unaffected by anything below this
-//! paragraph. What changed is *which* candidate wins **within** a group,
-//! once more than one survives `compatible`: `score_candidate` classifies
-//! each one against the harness the failing session was serving
-//! ([`pairing::classify`], Phase 9J) and weighs it against local observed
-//! evidence for that exact `(provider, model, route, harness)` combination
-//! (`crate::routing::evidence::ObservedEvidenceSource`, Phase 33A), and
-//! `best` picks the highest-scoring survivor, the caller's own order
-//! breaking a tie. A candidate can never be *excluded* this way — only
-//! `compatible` refuses one — so this is design decision 1's "additive,
-//! never a filter" made literal for this policy's own decision.
-//!
-//! Every candidate also carries a **failure-domain diversity** contribution
-//! (Phase 33C, `failure_domain_contribution`): a candidate sharing the
-//! failed backend's provider is penalised, because `Backend` carries no base
-//! URL and the provider is the only honest proxy this build has for "lands
-//! on the same infrastructure" (see [`super::domain::FailureDomain`]). A
-//! different provider scores `0.0` rather than a bonus — line 1378 forbids
-//! rewarding a candidate for independence nothing has established.
+//! [`InteractiveRouting::on_provider_failure`] ranks survivors within a
+//! group (same-model, then different-model) by `score_candidate` — Phase
+//! 9J's native-pairing prior plus Phase 33A's local evidence — and `best`
+//! picks the top score, never excluding a candidate `compatible` did not
+//! already refuse (design decision 1's "additive, never a filter"). Every
+//! candidate also carries a failure-domain diversity term (Phase 33C):
+//! sharing the failed backend's provider is penalised, a different provider
+//! scores `0.0` rather than a bonus, since line 1378 forbids rewarding
+//! independence nothing has established.
+// History: design-decisions.md, "Trims: routing module docs", routing/interactive/mod.rs module doc.
 
 use crate::config::pairing::{
     ContinuitySource, ObservationSource, PairingPreference, native_pairing_prior_contribution,
@@ -504,77 +467,25 @@ impl InteractiveRouting {
     }
 
     /// Map lines 566 and 569: which of several eligible backends a **fresh**
-    /// session starts on, and the full explanation of why.
+    /// session starts on — unlike [`Self::assign`], which records a choice
+    /// already made, this is the first moment Glasshouse compares two
+    /// backends at session start rather than taking `Upstream::serving()`
+    /// unconditionally.
     ///
-    /// [`Self::assign`] above is the older, narrower entry point: the caller
-    /// had already chosen, and `assign` recorded the choice. This one is the
-    /// caller *asking*. It exists because line 566 asks for a positive
-    /// **initial** routing prior — "initial" is a moment, and until this
-    /// function there was no moment in Glasshouse where a starting session
-    /// compared two backends. `crate::gateway::session::SessionRouting::bind`
-    /// took `Upstream::serving()`, the first configured backend, and its own
-    /// doc said so: *"Nothing here chooses; the choice was made when the
-    /// upstream was built."*
+    /// Weighed in order: hard constraints (line 568, via
+    /// [`apply_hard_constraints`] — the only step that can reject a
+    /// candidate); the native-pairing prior and local observed evidence
+    /// (line 566, Phase 33A) from `score_candidate`, the same function
+    /// [`Self::on_provider_failure`] scores failover survivors with; and
+    /// session continuity (line 569) from
+    /// [`session_continuity_contribution`], bounded and on the prior's own
+    /// scale so `best` sums them — additive, never a filter, past the
+    /// constraint step. The prior is constant across every candidate set
+    /// the shipped binary can build, since candidates share one harness and
+    /// model, so only evidence and continuity separate them here.
     ///
-    /// # What is weighed, and in what order
-    ///
-    /// 1. **Hard constraints first** (line 568), through
-    ///    [`apply_hard_constraints`] and therefore structurally rather than
-    ///    by convention: a session pin is a
-    ///    [`HardConstraint::UserConstraint`] and removes a candidate outright.
-    ///    Unlike `score_candidate`'s own receipt-shaped call, this check can
-    ///    actually reject, so the [`EligibleCandidate`](crate::routing::EligibleCandidate)s
-    ///    below are a filter's output and not a formality.
-    /// 2. **The native-pairing prior** (line 566) and **local observed
-    ///    evidence** (Phase 33A), from `score_candidate` — the same function,
-    ///    unchanged, that [`Self::on_provider_failure`] already scores
-    ///    failover survivors with.
-    /// 3. **Session continuity** (line 569), from
-    ///    [`session_continuity_contribution`] — bounded, never negative, and
-    ///    on the prior's own scale so that `best` can weigh the two against
-    ///    each other by simple sum. That is what "commensurable" has to mean
-    ///    here: not that a warm session is compared to a prior by a special
-    ///    rule, but that neither term knows the other exists and
-    ///    [`RoutingExplanation::total`] adds them up.
-    ///
-    /// A candidate is never *excluded* by any of steps 2 or 3 — only step 1
-    /// can remove one, and only for a constraint the user or the protocol
-    /// imposed. That is design decision 1 ("additive, never a filter") at the
-    /// one caller where a prior could most easily have been written as
-    /// `if native { return it }`.
-    ///
-    /// # What a build with nothing configured does
-    ///
-    /// Exactly what it did before this function existed. With
-    /// [`NoObservations`](crate::config::pairing::NoObservations),
-    /// [`NoWarmSessions`](crate::config::pairing::NoWarmSessions) and no
-    /// vendor-native candidate, every contribution is `0.0`, every candidate
-    /// ties, and `best` keeps the first — which is `Upstream::backends()`'
-    /// own order, which is the user's configuration order.
-    ///
-    /// # What this function cannot decide, and it is not a gap here
-    ///
-    /// **The native-pairing prior is constant across every candidate set the
-    /// shipped binary can build**, so at this caller it contributes a real
-    /// number to every explanation and separates nothing.
-    /// [`pairing::classify`] reads `query.route` exactly once, and only to
-    /// compute `Pairing::protocol_fit` — a field
-    /// `native_pairing_prior_contribution` never looks at — so
-    /// [`pairing::PairingClass`] is a function of the harness, the model and
-    /// the user's corrections alone. A session start's candidates are
-    /// `crate::gateway::upstream::Upstream::backends`, which carry a
-    /// provider, a credential and a cost and **no model**: the one model
-    /// comes from the launch profile and is the same for all of them. Same
-    /// harness plus same model means same class means same prior.
-    ///
-    /// `tests::the_native_pairing_prior_is_constant_across_a_real_session_start_candidate_set`
-    /// holds that as an executable fact rather than a comment. What *does*
-    /// separate candidates here is local evidence and session continuity,
-    /// both of which are keyed by [`pairing::EvidenceKey`] and therefore vary
-    /// with the route.
-    ///
-    /// `None` only when `candidates` is empty: there is nothing to start on,
-    /// and `best` may not be called with nothing.
+    /// `None` only when `candidates` is empty.
+    // History: design-decisions.md, "Trims: routing module docs", routing/interactive/mod.rs `fn start`.
     pub fn start(
         &self,
         harness: &str,
@@ -688,40 +599,28 @@ impl InteractiveRouting {
     /// Lines 512, 513, 514, 517 and 518: what a real provider failure does.
     ///
     /// `candidates` are the other backends configured for this session's
-    /// protocol. The order is the caller's — the user's own ordering is the
-    /// tiebreaker, exactly as it is in the free pool — but every candidate
-    /// that survives `compatible` is now scored by Phase 9J's native-pairing
-    /// prior and Phase 33A's local evidence (`score_candidate`), and the
-    /// best-scoring one wins rather than simply the first one found. With no
-    /// evidence at all (`evidence` answers `None` for everything, as
-    /// [`crate::config::pairing::NoObservations`] always does) every
-    /// candidate scores `0.0` and this reproduces "first compatible
-    /// candidate" exactly, which is what every test in this module that
-    /// passes `NoObservations` is checking.
+    /// protocol, in the caller's order (the tiebreaker); every candidate
+    /// surviving `compatible` is scored by Phase 9J's native-pairing prior
+    /// and Phase 33A's local evidence (`score_candidate`), and the
+    /// best-scoring one wins. With no evidence at all
+    /// ([`crate::config::pairing::NoObservations`]) every candidate scores
+    /// `0.0`, reproducing "first compatible candidate" exactly.
     ///
     /// `evidence` is [`crate::config::pairing::ObservationSource`] rather
-    /// than a concrete store for the same reason
-    /// `native_pairing_prior_contribution` itself takes one: this function
-    /// stays a pure function of its arguments (see this module's own header)
-    /// with no knowledge of `crate::routing::evidence::EvidenceLedger` or how
-    /// its caller reached it.
+    /// than a concrete store so this function stays pure, with no knowledge
+    /// of `crate::routing::evidence::EvidenceLedger` or how its caller
+    /// reached it.
     ///
-    /// `preference` and `overrides` are Phase 9J line 576's own patch: the
-    /// user's configured native-pairing preference and corrections, resolved
-    /// once from configuration by `crate::profile`'s gateway path and carried
-    /// here by `crate::gateway::session::SessionRouting`, which is why this
-    /// method takes them as arguments rather than storing them on `self` —
-    /// `self.pin` is session *policy* state that a pin or an unpin replaces
-    /// wholesale, while a resolved preference must survive that replacement
-    /// unchanged.
+    /// `preference` and `overrides` (Phase 9J line 576) are taken as
+    /// arguments rather than stored on `self`, because `self.pin` is
+    /// session *policy* state a pin or unpin replaces wholesale, while a
+    /// resolved preference must survive that replacement unchanged.
     ///
-    /// `correlations` is Phase 33C lines 1370–1376's answer to *do these
-    /// two front doors fail together* — read off the same ledger as
-    /// `evidence`, by the same caller, and passed beside it for the same
-    /// reason: this function stays pure. [`RouteCorrelations::default`]
-    /// (every pair unmeasured) reproduces the ranking exactly as it was
-    /// before that package, which is what every test here that passes it
-    /// checks.
+    /// `correlations` (Phase 33C lines 1370–1376) is read off the same
+    /// ledger as `evidence` for the same reason: this function stays pure.
+    /// [`RouteCorrelations::default`] (every pair unmeasured) reproduces
+    /// the pre-Phase-33C ranking exactly.
+    // History: design-decisions.md, "Trims: routing module docs", routing/interactive/mod.rs `fn on_provider_failure`.
     #[allow(clippy::too_many_arguments)]
     pub fn on_provider_failure(
         &self,
@@ -1066,32 +965,22 @@ fn route_of(backend: &Backend) -> RouteIdentity {
 /// correlation changes a decision: what the ledger has **measured** about
 /// `candidate` failing at the same moments as the backend that just failed.
 ///
-/// # A sibling of `failure_domain_contribution`, not a change to it
+/// A sibling of `failure_domain_contribution`, not a change to it:
+/// [`FailureDomain::between`] is a certainty about provider identity, this
+/// term is evidence about behaviour, and it is only consulted for a pair
+/// identity calls [`FailureDomain::Unknown`] — a same-provider candidate
+/// gets [`None`] here, since the provider term already carries the whole
+/// penalty and a second term would count it twice.
 ///
-/// [`FailureDomain::between`] is a certainty about provider identity and
-/// stays exactly what it was; this term is evidence about behaviour, and it
-/// is only ever consulted for a pair that identity calls
-/// [`FailureDomain::Unknown`]. A same-provider candidate gets [`None`] here:
-/// the provider term already carries the whole penalty, and a second term
-/// for the same fact would count it twice. Keeping the two terms apart is
-/// also what keeps line 1851's count meaning what `glasshouse route` prints
-/// beside it — *steered off a candidate sharing the failed backend's
-/// provider* — while line 1852 is derived from this term alone.
+/// The magnitude is [`RouteCorrelation::confidence`] scaled by
+/// [`SHARED_FAILURE_DOMAIN_PENALTY`] — line 1374's "confidence-weighted",
+/// recomputed from the rows on every failover rather than stored.
 ///
-/// # What the magnitude is
-///
-/// [`RouteCorrelation::confidence`] scaled by [`SHARED_FAILURE_DOMAIN_PENALTY`]:
-/// a pair observed failing together every time is penalised exactly as a
-/// shared provider is, a pair that never did is penalised nothing, and a
-/// pair between moves between — line 1374's "confidence-weighted", with the
-/// weight recomputed from the rows on every failover rather than stored.
-///
-/// # Line 1376
-///
-/// Below [`super::evidence::MIN_CORRELATION_SAMPLE`] events the term is
-/// `0.0` — indistinguishable in the ranking from no correlation at all —
-/// and its detail says how many of how many, so the explanation `glasshouse
-/// route` prints names the sample size before anything reads as meaningful.
+/// Below [`super::evidence::MIN_CORRELATION_SAMPLE`] events (line 1376) the
+/// term is `0.0`, and its detail names the sample size so `glasshouse
+/// route`'s explanation shows how many of how many before anything reads
+/// as meaningful.
+// History: design-decisions.md, "Trims: routing module docs", routing/interactive/mod.rs `fn route_correlation_contribution`.
 fn route_correlation_contribution(
     current: &Backend,
     candidate: &Backend,
@@ -1143,33 +1032,22 @@ fn correlation_penalty(confidence: f64) -> f64 {
 /// What the failure-domain term did to one ranking — **capability map line
 /// 1851**, derived rather than decided.
 ///
-/// # Why this is a derivation and not a rejection
-///
 /// Design decision 1 makes failure-domain diversity *additive, never a
-/// filter*: `failure_domain_contribution` is a `-1.0` term inside an
-/// explanation, and nothing anywhere refuses a candidate for sharing the
-/// failed backend's provider. So no production code path *decides* that a
-/// failover was prevented, and inventing one would change the policy in
-/// order to measure it.
+/// filter*, so no production code path *decides* a failover was prevented;
+/// inventing one would change the policy in order to measure it. What can
+/// be established honestly is a comparison: rank the survivors once as
+/// production does, once with that term's magnitude removed, and see if the
+/// winners differ.
 ///
-/// What can be established honestly is a comparison: rank the survivors
-/// once as production does, and once with that one term's magnitude removed.
-/// If the winners differ, the term is what moved the decision.
-///
-/// # The displaced candidate always shares the failed provider
-///
-/// This is a property of the arithmetic rather than a claim. Every
-/// candidate's score differs between the two rankings by its own
-/// failure-domain magnitude, which is `0.0` for every candidate except one
+/// This makes the displaced candidate always share the failed provider, as
+/// a property of the arithmetic: every candidate's score differs between
+/// the two rankings only by its own failure-domain magnitude — `0.0` except
 /// on the failed backend's own provider, where it is
-/// `SHARED_FAILURE_DOMAIN_PENALTY`. A candidate scoring `0.0` for that
-/// term therefore has the same total in both rankings, while every other
-/// candidate's total can only be lower in the production ranking — so a
-/// `0.0` winner of the term-free ranking still wins the production one, with
-/// `best`'s first-seen tie-break unchanged because both rankings walk the
-/// same order. A winner that *changes* is therefore always a candidate that
-/// shared the upstream, which is exactly the map line's *"failover onto the
-/// same unhealthy upstream"*.
+/// `SHARED_FAILURE_DOMAIN_PENALTY` — so a `0.0` winner of the term-free
+/// ranking still wins the production one, and a winner that *changes* is
+/// always a candidate that shared the upstream, exactly the map line's
+/// *"failover onto the same unhealthy upstream"*.
+// History: design-decisions.md, "Trims: routing module docs", routing/interactive/mod.rs `struct FailureDomainEffect` doc.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FailureDomainEffect {
     displaced: Option<String>,

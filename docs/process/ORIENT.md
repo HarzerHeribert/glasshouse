@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1297 closed · 101 active committed open (93%)** — across 26 phases.
+**1312 closed · 87 active committed open (94%)** — across 20 phases.
 
 Not in the work queue: **7 deferred gate criteria** (Phase 52, Phase 53) awaiting a user decision, and **229 parked experimental lines**. They are visible in the map; they are not release-blocking work.
 
@@ -24,23 +24,17 @@ closures are usually at the top. Open the map at the line number given.
 
 | phase | title | open | closed | map line |
 |---|---|---|---|---|
-| Phase 9E | Secret storage | **1** | 12 | `432` |
 | Phase 9H | Sticky gateway routing for harness-backed interactive sessions | **1** | 13 | `501` |
 | Phase 15 | Orchestrator wake-up flow | **1** | 7 | `731` |
 | Phase 21F | Memory retrieval quality | **1** | 10 | `927` |
-| Phase 21K | Assumption-aware implementation guardrails | **1** | 42 | `992` |
-| Phase 30 | Session context metadata | **1** | 7 | `1156` |
 | Phase 32C | Subscription capacity estimation | **1** | 11 | `1242` |
 | Phase 32D | Normalized remaining-capacity score | **1** | 11 | `1257` |
 | Phase 32G | Provider-aware request-cost estimation | **1** | 9 | `1296` |
 | Phase 34C | Automatic routing-model selection | **1** | 12 | `1429` |
-| Phase 35B | Candidate scoring | **1** | 24 | `1523` |
-| Phase 37 | Basic session-aware router | **1** | 10 | `1590` |
 | Phase 38 | Quota-preserving routing | **1** | 6 | `1604` |
 | Phase 9 | Antigravity adapter | **2** | 5 | `330` |
 | Phase 20 | Minimal durable project memory | **2** | 16 | `805` |
 | Phase 33 | Resource health | **2** | 13 | `1309` |
-| Phase 59 | Decompression: the code's physical shape catches up with its architecture | **2** | 6 | `2043` |
 | Phase 33B | Reliability-adjusted agent performance | **3** | 11 | `1345` |
 | Phase 60 | Parallel-session file coordination | **3** | 13 | `2374` |
 | Phase 21E | Decision ladder and conflict handling | **4** | 8 | `907` |
@@ -48,16 +42,16 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 21G | Memory revalidation | **6** | 3 | `941` |
 | Phase 32A | Unified quota and capacity model | **7** | 14 | `1196` |
 | Phase 9K | Harness-aware response profiles | **8** | 29 | `578` |
-| Phase 51 | Evaluation hooks | **15** | 22 | `1818` |
-| Phase 61 | pane: the first-party harness | **29** | 5 | `2419` |
+| Phase 51 | Evaluation hooks | **13** | 24 | `1818` |
+| Phase 61 | pane: the first-party harness | **24** | 11 | `2419` |
 
-**Fully closed (83):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 7, Phase 8, Phase 9A, Phase 9B, Phase 9C, Phase 9D, Phase 9F, Phase 9G, Phase 9I, Phase 9J, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 16, Phase 17, Phase 18, Phase 19, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 21H, Phase 21I, Phase 21J, Phase 22, Phase 23, Phase 24, Phase 25, Phase 26, Phase 27, Phase 28, Phase 29, Phase 32, Phase 32B, Phase 32E, Phase 32F, Phase 33A, Phase 33C, Phase 34, Phase 34A, Phase 34B, Phase 34D, Phase 34E, Phase 34F, Phase 35, Phase 35A, Phase 35C, Phase 35D, Phase 36, Phase 39, Phase 40, Phase 41, Phase 42, Phase 43, Phase 44, Phase 45, Phase 46, Phase 47, Phase 48, Phase 49, Phase 50, Phase 54, Phase 54A, Phase 55, Phase 56, Phase 56A, Phase 57, Phase 58.
+**Fully closed (89):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 7, Phase 8, Phase 9A, Phase 9B, Phase 9C, Phase 9D, Phase 9E, Phase 9F, Phase 9G, Phase 9I, Phase 9J, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 16, Phase 17, Phase 18, Phase 19, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 21H, Phase 21I, Phase 21J, Phase 21K, Phase 22, Phase 23, Phase 24, Phase 25, Phase 26, Phase 27, Phase 28, Phase 29, Phase 30, Phase 32, Phase 32B, Phase 32E, Phase 32F, Phase 33A, Phase 33C, Phase 34, Phase 34A, Phase 34B, Phase 34D, Phase 34E, Phase 34F, Phase 35, Phase 35A, Phase 35B, Phase 35C, Phase 35D, Phase 36, Phase 37, Phase 39, Phase 40, Phase 41, Phase 42, Phase 43, Phase 44, Phase 45, Phase 46, Phase 47, Phase 48, Phase 49, Phase 50, Phase 54, Phase 54A, Phase 55, Phase 56, Phase 56A, Phase 57, Phase 58, Phase 59.
 
 ## The nearly-finished phases, in full
 
 Every phase with **three or fewer** open lines, quoted verbatim. These are
 where a single package finishes a phase, so they are listed here and the
-other ~79 open lines are not.
+other ~72 open lines are not.
 
 For any other phase: `scripts/discover.py --phase <id>` prints its open
 lines and evidence together. **Do not open the 178 KB map to read them.**
@@ -65,10 +59,6 @@ lines and evidence together. **Do not open the 178 KB map to read them.**
 The number is the map line number, which is also the capability's id.
 `validate_round.py` checks a packet's quotes against the map, so paste
 these unwrapped.
-
-### Phase 9E — Secret storage  (1 open, 12 closed)
-
-- **442** ☐ Prefer a Secret Service-compatible keyring on Linux when available.
 
 ### Phase 9H — Sticky gateway routing for harness-backed interactive sessions  (1 open, 13 closed)
 
@@ -81,14 +71,6 @@ these unwrapped.
 ### Phase 21F — Memory retrieval quality  (1 open, 10 closed)
 
 - **932** ☐ Penalize memories whose assumptions conflict with current repository state.
-
-### Phase 21K — Assumption-aware implementation guardrails  (1 open, 42 closed)
-
-- **1044** ☐ Preserve user changes and unrelated worker changes when rolling back or isolating an invalidated experiment.
-
-### Phase 30 — Session context metadata  (1 open, 7 closed)
-
-- **1158** ☐ Track an estimated context-size value for a session when the harness exposes enough information.
 
 ### Phase 32C — Subscription capacity estimation  (1 open, 11 closed)
 
@@ -105,14 +87,6 @@ these unwrapped.
 ### Phase 34C — Automatic routing-model selection  (1 open, 12 closed)
 
 - **1440** ☐ Avoid using a scarce premium subscription session as the classifier when a cheaper adequate routing resource exists.
-
-### Phase 35B — Candidate scoring  (1 open, 24 closed)
-
-- **1534** ☐ Include context quality in candidate scoring.
-
-### Phase 37 — Basic session-aware router  (1 open, 10 closed)
-
-- **1594** ☐ Prefer a fresh session when existing relevant sessions are cold, bloated, or semantically poor and a good checkpoint exists.
 
 ### Phase 38 — Quota-preserving routing  (1 open, 6 closed)
 
@@ -137,11 +111,6 @@ these unwrapped.
 
 - **1879** ☐ Do not add a graph database solely to visualize project memory.
 - **1882** ☐ Evaluate whether SQLite relations are insufficient before adopting a dedicated graph database.
-
-### Phase 59 — Decompression: the code's physical shape catches up with its architecture  (2 open, 6 closed)
-
-- **2053** ☐ Keep doc comments to the invariant and the reason it holds now, moving the history of how a decision was reached to the design or measurements record behind a one-line pointer.
-- **2054** ☐ Re-open the refused lines the user named as product-relevant — context quality (1534), cache temperature and affinity (1535, 1545), low-confidence memory (1129), preserving user changes on rollback (1044), and nearly-complete tasks under a reserve or quota threshold (1294, 1610) — and settle each by design and risk rather than by the count of open boxes.
 
 ### Phase 33B — Reliability-adjusted agent performance  (3 open, 11 closed)
 
@@ -235,10 +204,10 @@ to do, and the orchestrator should follow its own rule.
 Newest first, from `docs/process/handoff.md`. Read the top one in full;
 the rest are context you probably do not need.
 
+- Checkpoint — 2026-09-06 (01:30), wave 139: 1312 / 1398 (93.8%) — Phase 59 complete, the product site live, the trailing sweep green on all sixteen glasshouse cells
+- Checkpoint — 2026-09-06 (after midnight), wave 138: 1311 / 1398 (93.8%) — the routing-2 trim lands, the pane lane hands to a Fable successor lead, and mutate.sh tells a compile error from a kill
+- Checkpoint — 2026-09-05 (night), waves 118–137: 1311 / 1398 (93.8%) — pane 61B, 61C and 61D merged, Phase 37 complete, 2054 closed, three 61C ticks taken back off on the lane's own audit, the served-by producers, twenty-nine files trimmed, the first fully green sixteen-cell sweep
 - Checkpoint — 2026-09-05 (evening), waves 116–117: 1295 / 1399 (92.6%) — pane stood up in its own lane, the dispatch defect fixed, 442 built and verified, seven lines closed
-- Checkpoint — 2026-09-03, batch 96: 1270 / 1355 (93.7%) — four more Phase 59 splits land, the shell line closes, and the orchestrator moves to Opus 5
-- Checkpoint — 2026-09-03, batch 95: 1267 / 1355 (93.5%) — Phase 28 complete, the bootstrap creation atomic, and Phase 59's first splits landing
-- Checkpoint — 2026-09-02, batch 94: 1264 / 1347 (93.9%) — the bootstrap race closed under independent verification, ten accepted lines land, Phases 33C and 34B complete, and Phase 28's producer found in Phase 57's hook
 
 ## Evidence ledger files
 

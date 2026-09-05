@@ -439,7 +439,7 @@ Fixed architectural requirements
 ☑ Define a SecretStore abstraction independent from project memory and provider configuration.
 ☑ Prefer the macOS Keychain for user-entered provider secrets on macOS when available.
 ☑ Prefer Windows Credential Manager for user-entered provider secrets on Windows when available.
-☐ Prefer a Secret Service-compatible keyring on Linux when available.
+☑ Prefer a Secret Service-compatible keyring on Linux when available.
 ☑ Allow environment-variable references as a cross-platform secret source.
 ☑ Provide a clearly labeled fallback when a native secure secret store is unavailable.
 ☑ Store only secret references in provider configuration whenever possible.
@@ -1041,7 +1041,7 @@ Bounded implementation and correction
 ☑ When a critical premise is refuted, stop compounding the implementation and explicitly choose rollback, repair, re-plan, preserve as an experiment, or ask the user.
 ☑ Preserve useful evidence and a concise failed-approach record even when the implementation itself is discarded.
 ☑ Never silently rewrite the task history to make a failed premise appear as though it had always been understood correctly.
-☐ Preserve user changes and unrelated worker changes when rolling back or isolating an invalidated experiment.
+☑ Preserve user changes and unrelated worker changes when rolling back or isolating an invalidated experiment.
 
 User and orchestrator visibility
 
@@ -1155,7 +1155,7 @@ Phase 29 — Memory commits
 
 Phase 30 — Session context metadata
 
-☐ Track an estimated context-size value for a session when the harness exposes enough information.
+☑ Track an estimated context-size value for a session when the harness exposes enough information.
 ☑ Track the number of observed compactions for a session when known.
 ☑ Track the most recent request or turn time for a session.
 ☑ Track an estimated prompt-cache state independently from session resumability.
@@ -1531,7 +1531,7 @@ Fixed architectural requirements
 ☑ Include workload-tier fit in candidate scoring.
 ☑ Include hard capability satisfaction as a prerequisite rather than a soft bonus.
 ☑ Include existing session affinity in candidate scoring.
-☐ Include context quality in candidate scoring.
+☑ Include context quality in candidate scoring.
 ☑ Include prompt-cache temperature in candidate scoring.
 ☑ Include normalized remaining capacity in candidate scoring.
 ☑ Include provider health in candidate scoring.
@@ -1591,7 +1591,7 @@ Phase 37 — Basic session-aware router
 
 ☑ Route at task or session boundaries rather than switching providers blindly on every conversational turn.
 ☑ Prefer an existing relevant session when its affinity outweighs the benefit of starting a new session.
-☐ Prefer a fresh session when existing relevant sessions are cold, bloated, or semantically poor and a good checkpoint exists.
+☑ Prefer a fresh session when existing relevant sessions are cold, bloated, or semantically poor and a good checkpoint exists.
 ☑ Consider harness capability fit when choosing a destination.
 ☑ Consider session affinity when choosing a destination.
 ☑ Consider prompt-cache state when choosing a destination.
@@ -1834,7 +1834,7 @@ Phase 51 — Evaluation hooks
 ☑ Measure how often workload-tier classification predicts successful execution without escalation.
 ☑ Measure how often a low-cost or free route succeeds compared with the premium route it displaced.
 ☑ Measure the accuracy of estimated subscription headroom against observed throttling and resets.
-☐ Measure how often protected quota remains available for high-tier tasks when needed.
+☑ Measure how often protected quota remains available for high-tier tasks when needed.
 ☐ Measure how often a critical assumption is refuted before broad implementation versus after substantial edits.
 ☐ Measure elapsed time, tool rounds, and changed-file churn between the first unsupported premise and its correction.
 ☐ Measure how much implementation work is discarded or substantially rewritten after an assumption is invalidated.
@@ -1843,7 +1843,7 @@ Phase 51 — Evaluation hooks
 ☐ Compare guardrails disabled, advisory, and risk-gated modes on comparable tasks.
 ☐ Measure whether fresh-session or cross-harness verification contributes independent evidence rather than agreement alone.
 ☑ Measure native versus cross-vendor harness-model pairings by task success, usable tool calls, repair loops, effective TTFC, reliability, and user overrides.
-☐ Measure how quickly local pairing evidence becomes more predictive than the initial same-vendor prior.
+☑ Measure how quickly local pairing evidence becomes more predictive than the initial same-vendor prior.
 ☐ Measure output-token reduction, time to actionable information, profile overrides, missing caveats, and additional steering for each response profile.
 ☐ Measure response-profile effects separately by harness-model pairing and application mechanism.
 ☑ Measure routing latency added before interactive task execution.
@@ -2050,8 +2050,8 @@ Recorded from the user's ruling of 2026-09-03: *Glasshouse is not sloppy; it is 
 ☑ Split the configuration module by concern — loading and layering, entitlements and plans, routing policy, firewall, response profiles — so that a change to one concern touches one file.
 ☑ Split the routing evidence module into the ledger that writes rows, the readers that summarise them, and the joins across tables.
 ☑ Split the shell into state, view and per-screen modules so that a screen's behaviour lives in one file.
-☐ Keep doc comments to the invariant and the reason it holds now, moving the history of how a decision was reached to the design or measurements record behind a one-line pointer.
-☐ Re-open the refused lines the user named as product-relevant — context quality (1534), cache temperature and affinity (1535, 1545), low-confidence memory (1129), preserving user changes on rollback (1044), and nearly-complete tasks under a reserve or quota threshold (1294, 1610) — and settle each by design and risk rather than by the count of open boxes.
+☑ Keep doc comments to the invariant and the reason it holds now, moving the history of how a decision was reached to the design or measurements record behind a one-line pointer.
+☑ Re-open the refused lines the user named as product-relevant — context quality (1534), cache temperature and affinity (1535, 1545), low-confidence memory (1129), preserving user changes on rollback (1044), and nearly-complete tasks under a reserve or quota threshold (1294, 1610) — and settle each by design and risk rather than by the count of open boxes.
 
 
 ────────
@@ -2428,8 +2428,8 @@ record: the session artifact *The Glasshouse Native Harness*.
 61A — The ruler
 
 ☐ Run one fixed task set through Claude Code and through a candidate harness and report tokens per completed task, wall-clock and outcome side by side.
-☐ Score per workload tier so a win on one tier is visible even when the aggregate is not.
-☐ Do not present a harness comparison that measures tokens per turn instead of tokens per completed task.
+☑ Score per workload tier so a win on one tier is visible even when the aggregate is not.
+☑ Do not present a harness comparison that measures tokens per turn instead of tokens per completed task.
 
 61B — The crate and the adapter
 
@@ -2441,11 +2441,11 @@ record: the session artifact *The Glasshouse Native Harness*.
 
 61C — The loop and the three seams
 
-☐ Run a task in turns against the Anthropic Messages protocol, standalone, with resume from a rollout file.
-☐ Route through Glasshouse's gateway when `ANTHROPIC_BASE_URL` names it; behave identically otherwise except for the hop.
+☑ Run a task in turns against the Anthropic Messages protocol, standalone, with resume from a rollout file.
+☑ Route through Glasshouse's gateway when `ANTHROPIC_BASE_URL` names it; behave identically otherwise except for the hop.
 ☐ Read memory and checkpoints from Glasshouse's MCP surface when reachable, and from a local store when not.
-☐ Emit the harness hook protocol's events so Glasshouse's memory extraction, context firewall and event bus see `pane` unchanged.
-☐ Load `CLAUDE.md` and `AGENTS.md`, `.claude/settings.json` hooks and permissions, `.claude/commands`, the skills directories and `.mcp.json` from the project with nothing edited.
+☑ Emit the harness hook protocol's events so Glasshouse's memory extraction, context firewall and event bus see `pane` unchanged.
+☑ Load `CLAUDE.md` and `AGENTS.md`, `.claude/settings.json` hooks and permissions, `.claude/commands`, the skills directories and `.mcp.json` from the project with nothing edited.
 ☐ Show the two-region TUI — conversation column and telemetry sidebar — with the sidebar collapsing honestly when Glasshouse is absent.
 ☐ Offer slash commands: `/model`, `/entitlements`, `/handles`, `/supervisor`, `/rollback`, `/budget`, `/memory`, and every project command and skill by name.
 ☐ Show which entitlement served each request and what it cost, from the gateway's response and routing ledger.
@@ -2479,3 +2479,7 @@ record: the session artifact *The Glasshouse Native Harness*.
 ☐ Give every session an inbox and a `send` that delivers into the recipient's next batch; ride Glasshouse's event bus and direct session messaging when present, a local socket when not.
 ☐ Show inbox depth, batches delivered and live handlers in the telemetry sidebar.
 ☐ Do not deliver an event as its own turn when a batch window is open, and do not make the model poll for a background result.
+
+61E — Code over live objects, amended 2026-09-06 (direct verified completion — the user's decision to implement it directly; `runtime-contract.md` §9)
+
+☐ End a task from within the program: a top-level `return` renders and persists the terminal response and sends no further request, and no execution that threw, was refused, was cancelled or whose guard was unmet becomes one.

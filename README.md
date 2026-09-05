@@ -54,12 +54,12 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`█████████████████████████████████████░░░` **1297 closed** · **101 active committed open** (92%)
+`█████████████████████████████████████░░░` **1312 closed** · **87 active committed open** (93%)
 
 Separately tracked, and not release-blocking: **7 deferred gate criteria** (Phase 52, Phase 53) awaiting a decision, and **229 parked experimental lines** under Maybe / Experimental.
 
 <details>
-<summary>Per-phase breakdown (83 of 109 active phases complete)</summary>
+<summary>Per-phase breakdown (89 of 109 active phases complete)</summary>
 
 | Phase | Done |
 |---|---|
@@ -81,7 +81,7 @@ Separately tracked, and not release-blocking: **7 deferred gate criteria** (Phas
 | Phase 9B — Scoped harness wrappers and shims | 9/9 ✅ |
 | Phase 9C — Provider protocol model | 12/12 ✅ |
 | Phase 9D — Built-in provider templates | 14/14 ✅ |
-| Phase 9E — Secret storage | 12/13 |
+| Phase 9E — Secret storage | 13/13 ✅ |
 | Phase 9F — Direct provider launch profiles | 13/13 ✅ |
 | Phase 9G — Glasshouse local gateway process | 19/19 ✅ |
 | Phase 9H — Sticky gateway routing for harness-backed interactive sessions | 13/14 |
@@ -111,7 +111,7 @@ Separately tracked, and not release-blocking: **7 deferred gate criteria** (Phas
 | Phase 21H — Simplicity-first implementation policy | 10/10 ✅ |
 | Phase 21I — Production-aware implementation checks | 11/11 ✅ |
 | Phase 21J — Implementation review checklist | 9/9 ✅ |
-| Phase 21K — Assumption-aware implementation guardrails | 42/43 |
+| Phase 21K — Assumption-aware implementation guardrails | 43/43 ✅ |
 | Phase 22 — Memory lifecycle and supersession | 9/9 ✅ |
 | Phase 23 — Memory full-text search | 7/7 ✅ |
 | Phase 24 — Memory reranking | 6/6 ✅ |
@@ -120,7 +120,7 @@ Separately tracked, and not release-blocking: **7 deferred gate criteria** (Phas
 | Phase 27 — Context injection | 11/11 ✅ |
 | Phase 28 — File-aware memory lookup | 5/5 ✅ |
 | Phase 29 — Memory commits | 8/8 ✅ |
-| Phase 30 — Session context metadata | 7/8 |
+| Phase 30 — Session context metadata | 8/8 ✅ |
 | Phase 31 — Compaction-aware behavior | 2/7 |
 | Phase 32 — Resource registry | 12/12 ✅ |
 | Phase 32A — Unified quota and capacity model | 14/21 |
@@ -143,11 +143,11 @@ Separately tracked, and not release-blocking: **7 deferred gate criteria** (Phas
 | Phase 34F — Model capability and tier calibration | 11/11 ✅ |
 | Phase 35 — Lightweight task classification | 14/14 ✅ |
 | Phase 35A — Candidate generation | 11/11 ✅ |
-| Phase 35B — Candidate scoring | 24/25 |
+| Phase 35B — Candidate scoring | 25/25 ✅ |
 | Phase 35C — Capacity-aware tier escalation and downgrade | 9/9 ✅ |
 | Phase 35D — Routing under subscription pressure | 8/8 ✅ |
 | Phase 36 — Session affinity | 8/8 ✅ |
-| Phase 37 — Basic session-aware router | 10/11 |
+| Phase 37 — Basic session-aware router | 11/11 ✅ |
 | Phase 38 — Quota-preserving routing | 6/7 |
 | Phase 39 — Gateway-backed disposable jobs | 9/9 ✅ |
 | Phase 40 — Fresh-session handoff | 9/9 ✅ |
@@ -161,7 +161,7 @@ Separately tracked, and not release-blocking: **7 deferred gate criteria** (Phas
 | Phase 48 — CLI ergonomics | 8/8 ✅ |
 | Phase 49 — Configuration | 16/16 ✅ |
 | Phase 50 — Tracked project knowledge as an optional feature | 7/7 ✅ |
-| Phase 51 — Evaluation hooks | 22/37 |
+| Phase 51 — Evaluation hooks | 24/37 |
 | Phase 52 — Criteria before adding semantic/vector retrieval (deferred experiment gate) | 1/6 |
 | Phase 53 — Criteria before adding graph storage (deferred experiment gate) | 3/5 |
 | Phase 54 — Criteria before deeper cmux coupling | 4/4 ✅ |
@@ -171,9 +171,9 @@ Separately tracked, and not release-blocking: **7 deferred gate criteria** (Phas
 | Phase 56A — Entitlement pool and subscription broker: several accounts, one scheduler | 13/13 ✅ |
 | Phase 57 — Context firewall: tool-output compaction between harness and model | 27/27 ✅ |
 | Phase 58 — Context economy: cache-stable translation, entitlement-aware reduction, and a measured token budget | 15/15 ✅ |
-| Phase 59 — Decompression: the code's physical shape catches up with its architecture | 6/8 |
+| Phase 59 — Decompression: the code's physical shape catches up with its architecture | 8/8 ✅ |
 | Phase 60 — Parallel-session file coordination | 13/16 |
-| Phase 61 — pane: the first-party harness | 5/34 |
+| Phase 61 — pane: the first-party harness | 11/35 |
 | Phase 52 — Criteria before adding semantic/vector retrieval (deferred experiment gate) | 1/6 — deferred gate |
 | Phase 53 — Criteria before adding graph storage (deferred experiment gate) | 3/5 — deferred gate |
 

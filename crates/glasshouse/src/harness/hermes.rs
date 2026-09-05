@@ -39,29 +39,22 @@ const BACKEND_SELECTION: &[BackendSelection] = &[
 /// Hermes's own personality overlay, and the one declaration in this crate
 /// whose change cost is `InPlace`.
 ///
-/// The earlier reading of this line was `Unverified` on the grounds that
-/// `hermes --help` documents no output-style mechanism. That is true and it
-/// was the wrong place to look: Hermes keeps this one in its configuration
-/// and its slash-command table, neither of which `--help` prints. `--tui`
-/// and `--cli` remain what that reading said they were — terminal
+/// Hermes keeps this in its configuration and slash-command table, neither
+/// of which `hermes --help` prints; `--tui`/`--cli` are terminal
 /// presentation, not how the agent communicates.
 ///
-/// **Why it qualifies.** `CommunicationStyle` is communication policy only.
+/// It qualifies because `CommunicationStyle` is communication policy only:
 /// `cli.py`'s `_resolve_personality_prompt` builds the overlay from a
-/// `system_prompt`, a `tone` and a `style`, and the `/personality` handler
-/// assigns `self.system_prompt` and nothing else — no toolset, no approval
-/// setting, no reasoning parameter. So it is not the disqualified shape that
+/// `system_prompt`, a `tone` and a `style`, and `/personality` assigns
+/// `self.system_prompt` and nothing else — not the disqualified shape
 /// OpenCode's and Antigravity's `--agent` turned out to be.
 ///
-/// **Why `InPlace` rather than `NewSession`.** Two independent readings, and
-/// they agree. In the interactive session Glasshouse embeds, `/personality`
-/// sets the overlay and clears the cached agent so the next turn rebuilds
-/// with it — while the conversation itself lives on the REPL object's own
-/// `conversation_history`, which that rebuild never touches. In the gateway
-/// path, `_apply_personality_to_session` says the same thing in its own
-/// docstring: it "appl[ies] a personality change to an existing session
-/// without resetting history", takes effect "on the next turn", and returns
-/// `history_reset` false always. Neither path gives up a warm session.
+/// `InPlace`, not `NewSession`: in the interactive session, `/personality`
+/// clears the cached agent so the next turn rebuilds with it while
+/// `conversation_history` on the REPL object is untouched; in the gateway
+/// path, `_apply_personality_to_session` applies the change "without
+/// resetting history" and returns `history_reset` false always.
+// History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/harness/hermes.rs `COMMUNICATION_STYLE`.
 const COMMUNICATION_STYLE: Declared<CommunicationStyle> = Declared::verified(
     CommunicationStyle {
         mechanism: "personality overlay, selected with `/personality <name>` inside a running \

@@ -15,18 +15,7 @@
 //! towards the cross-protocol translation the capability map refuses until a
 //! concrete pair needs it.
 //!
-//! # What "byte-for-byte" honestly means
-//!
-//! A proxy terminates one connection and opens another, so *connection*
-//! framing cannot survive: `content-length` is re-derived, `transfer-encoding`
-//! is re-applied, and hop-by-hop headers belong to the hop they were written
-//! for. What survives untouched is the part that carries meaning — the
-//! method, the request target, every end-to-end header, and every byte of
-//! the body, in order.
-//!
-//! Header *names* arrive here through [`HeaderName`], which lower-cases them.
-//! That is the same normalisation HTTP/2 mandates and is semantically the
-//! identity, so it is not a rewrite in any sense a client can observe.
+//! History: design-decisions.md, "Trims: gateway module docs", http.rs module doc.
 
 use std::io::{BufRead, Read, Write};
 

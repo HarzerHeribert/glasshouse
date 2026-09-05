@@ -23,12 +23,15 @@ use super::state::{
 
 /// Draw the current step of `state` into `frame`.
 ///
-/// Every screen fits an 80x24 terminal without scrolling. Below that, the
-/// integration list scrolls to follow the selection, so every row stays
-/// reachable rather than being cut off at the bottom edge; the other regions
-/// simply get less space from Ratatui's layout solver rather than panicking —
-/// nothing here computes a size by subtraction, which is the usual way a
-/// "must not panic on a tiny terminal" requirement gets violated.
+/// Every screen fits an 80x24 terminal without scrolling, except the
+/// Summary's worst case (`render_summary`), which scrolls and announces
+/// that it has more to show rather than cutting a row silently. Below
+/// 80x24, the integration list scrolls to follow the selection, so every
+/// row stays reachable rather than being cut off at the bottom edge; the
+/// other regions simply get less space from Ratatui's layout solver rather
+/// than panicking — nothing here computes a size by subtraction, which is
+/// the usual way a "must not panic on a tiny terminal" requirement gets
+/// violated.
 pub fn render(state: &WizardState, frame: &mut Frame) {
     let area = frame.area();
     let [title_area, body_area, footer_area] = Layout::default()
@@ -49,7 +52,7 @@ pub fn render(state: &WizardState, frame: &mut Frame) {
         Step::Routing => render_routing_step(state, frame, body_area),
         Step::Summary => render_summary(state, frame, body_area),
     }
-    render_footer(state, frame, footer_area);
+    render_footer(state, frame, footer_area, body_area);
 }
 
 fn render_title(state: &WizardState, frame: &mut Frame, area: Rect) {
@@ -552,7 +555,57 @@ fn render_routing_model_input(
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
 }
 
+/// Draw the Summary, scrolled to `state.summary_scroll()` and clamped to
+/// what actually fits — see [`render_summary`] for the overflow decision.
 fn render_summary(state: &WizardState, frame: &mut Frame, area: Rect) {
+    let lines = summary_lines(state, area.width);
+
+    // `Paragraph::line_count` would answer this directly, but it is
+    // `pub(crate)` in this ratatui version unless the `unstable-rendered-
+    // line-info` feature is enabled, and enabling a new feature is outside
+    // this packet. `wrap_summary_rows` hand-rolls the same `Wrap { trim:
+    // false }` word-boundary wrapping instead — see its doc.
+    let rows = wrap_summary_rows(&lines, area.width);
+    let total = rows.len() as u16;
+
+    if total <= area.height {
+        // Byte-for-byte what this function has always rendered: no scroll
+        // is possible, so none is applied, and the hand-rolled wrap above
+        // was only consulted to reach this branch.
+        frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+        return;
+    }
+
+    let max_scroll = total.saturating_sub(area.height);
+    let offset = state.summary_scroll().min(max_scroll);
+    let start = offset as usize;
+    let end = (start + area.height as usize).min(rows.len());
+    let mut visible: Vec<Line<'static>> = rows[start..end].to_vec();
+
+    let remaining_below = total.saturating_sub(end as u16);
+    if remaining_below > 0 {
+        let noun = if remaining_below == 1 { "row" } else { "rows" };
+        let last = visible.len() - 1;
+        visible[last] = Line::from(format!("↓ {remaining_below} more {noun} — Down / PageDown"))
+            .right_aligned();
+    }
+    if offset > 0 {
+        let noun = if offset == 1 { "row" } else { "rows" };
+        visible[0] = Line::from(format!("↑ {offset} {noun} above")).right_aligned();
+    }
+
+    frame.render_widget(Paragraph::new(visible), area);
+}
+
+/// Whether the Summary body, at `state.summary_scroll()` and the given
+/// area, has more content than the area shows — the condition
+/// `render_footer` needs to decide whether the scroll hint belongs in the
+/// footer, without duplicating [`render_summary`]'s own wrapping.
+fn summary_overflows(state: &WizardState, width: u16, height: u16) -> bool {
+    wrap_summary_rows(&summary_lines(state, width), width).len() as u16 > height
+}
+
+fn summary_lines(state: &WizardState, width: u16) -> Vec<Line<'static>> {
     let mut lines = vec![Line::from(
         "Setup is complete once you finish. These choices are saved to your \
          user-level Glasshouse configuration and can be changed later by reopening \
@@ -570,7 +623,7 @@ fn render_summary(state: &WizardState, frame: &mut Frame, area: Rect) {
         } else {
             None
         };
-        lines.push(Line::from(summary_row(&head, path.as_deref(), area.width)));
+        lines.push(Line::from(summary_row(&head, path.as_deref(), width)));
     }
 
     let acknowledged: Vec<&str> = state
@@ -611,18 +664,86 @@ fn render_summary(state: &WizardState, frame: &mut Frame, area: Rect) {
         "Routing model:",
         &state.routing_selection(),
     ));
-    // No blank separator before the gateway note, and the omission is
-    // load-bearing rather than an oversight: at 80x24 with every integration
-    // detected and a degraded pin to explain, this screen's worst case is
-    // exactly the 22 body rows it gets. That blank line was the twenty-third.
-    // `every_summary_section_survives_the_worst_case_at_80x24` is what keeps
-    // the next line anyone adds here from silently falling off the bottom
-    // instead — a wrapped paragraph has no scrollback, so nothing would say
-    // it had.
+    // No blank separator before the gateway note — see
+    // `every_summary_section_survives_the_worst_case_at_80x24`.
     lines.push(Line::from(
         "The Glasshouse gateway is not part of this setup yet.",
     ));
-    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
+    lines
+}
+
+/// Wraps `lines` to `width` columns the way `Paragraph`'s
+/// `Wrap { trim: false }` would, one output row per element.
+///
+/// Hand-rolled because `Paragraph::line_count` is `pub(crate)` in this
+/// ratatui version unless the `unstable-rendered-line-info` feature is
+/// enabled, and this packet does not touch `Cargo.toml` to add it (GH-
+/// SUMMARY-SCROLL). Every Summary line is plain, single-spaced text — the
+/// one styled line, "Providers", is a short heading that never approaches
+/// `width` — so a line that already fits keeps its own styling untouched,
+/// and only a line that overflows is re-wrapped as plain text: split on
+/// whitespace, greedily pack words onto a row, and break a word mid-way
+/// only when the word alone is longer than `width`.
+fn wrap_summary_rows(lines: &[Line<'static>], width: u16) -> Vec<Line<'static>> {
+    if width == 0 {
+        return vec![Line::from("")];
+    }
+    let width = width as usize;
+    let mut rows = Vec::new();
+    for line in lines {
+        if line.width() <= width {
+            rows.push(line.clone());
+            continue;
+        }
+        for row in wrap_plain_text(&line.to_string(), width) {
+            rows.push(Line::from(row));
+        }
+    }
+    if rows.is_empty() {
+        rows.push(Line::from(""));
+    }
+    rows
+}
+
+/// Greedy word-wrap for one already-overflowing line — see
+/// [`wrap_summary_rows`].
+fn wrap_plain_text(text: &str, width: usize) -> Vec<String> {
+    if text.is_empty() {
+        return vec![String::new()];
+    }
+    let mut rows = Vec::new();
+    let mut current = String::new();
+    for word in text.split_whitespace() {
+        let word_len = word.chars().count();
+        if word_len > width {
+            if !current.is_empty() {
+                rows.push(std::mem::take(&mut current));
+            }
+            let mut rest = word;
+            while rest.chars().count() > width {
+                let split_at = rest
+                    .char_indices()
+                    .nth(width)
+                    .map_or(rest.len(), |(idx, _)| idx);
+                let (head, tail) = rest.split_at(split_at);
+                rows.push(head.to_owned());
+                rest = tail;
+            }
+            current = rest.to_owned();
+            continue;
+        }
+        if current.is_empty() {
+            current = word.to_owned();
+        } else if current.chars().count() + 1 + word_len <= width {
+            current.push(' ');
+            current.push_str(word);
+        } else {
+            rows.push(std::mem::take(&mut current));
+            current = word.to_owned();
+        }
+    }
+    rows.push(current);
+    rows
 }
 
 /// One integration's Summary row, guaranteed to occupy exactly one terminal
@@ -666,7 +787,7 @@ fn summary_row(head: &str, path: Option<&str>, width: u16) -> String {
     format!("{head} (\u{2026}{tail})")
 }
 
-fn render_footer(state: &WizardState, frame: &mut Frame, area: Rect) {
+fn render_footer(state: &WizardState, frame: &mut Frame, area: Rect, body_area: Rect) {
     let text = if state.path_input().is_some() {
         "Type path   Enter confirm   Esc cancel input   Ctrl+C quit setup"
     } else {
@@ -695,7 +816,13 @@ fn render_footer(state: &WizardState, frame: &mut Frame, area: Rect) {
                 RoutingStepView::PickProvider { .. } => "↑/↓ move   Enter/Space choose   Esc back",
                 RoutingStepView::ModelInput { .. } => "Type model   Enter confirm   Esc back",
             },
-            Step::Summary => "Enter / Tab finish   Esc cancel",
+            Step::Summary => {
+                if summary_overflows(state, body_area.width, body_area.height) {
+                    "Enter / Tab finish   ↑↓ PgUp PgDn scroll   Esc cancel"
+                } else {
+                    "Enter / Tab finish   Esc cancel"
+                }
+            }
         }
     };
     frame.render_widget(

@@ -25,6 +25,8 @@ fn every_kind_the_type_can_produce_is_one_the_schema_constant_declares() {
         EvaluationKind::TurnOutcomeObserved,
         EvaluationKind::SessionRouteDecided,
         EvaluationKind::RoutingConsumptionEstimated,
+        EvaluationKind::ReserveAvailabilityObserved,
+        EvaluationKind::RoutingRated,
     ];
     let names: Vec<&str> = declared.iter().map(|kind| kind.as_str()).collect();
     assert_eq!(

@@ -2,39 +2,19 @@
 //! producer of
 //! [`crate::provider::quota::ReserveDecisionInputs::task_nearly_complete`].
 //!
-//! # What a declaration is, and the two things it is not
-//!
 //! A declaration is one row saying *"whoever is running this Glasshouse
 //! session says its current task is nearly complete, and still said so as of
-//! this second."* It is a **statement somebody made on purpose**, about one
-//! named session, that stops being true on its own.
-//!
-//! It is not an **inference**. Nothing in this build observes task progress:
-//! [`crate::events::LifecycleEvent`] is binary and retrospective, and the
-//! only completion fact available where the reserve verdict is computed is
-//! that a turn is already over. Every available proxy — a turn count, an
-//! elapsed time — reports "almost complete" for work that has merely been
-//! running a while, which is precisely the long-running work a protected
-//! reserve exists to keep serving. The field this feeds is the *first*
-//! branch [`crate::provider::quota::evaluate_reserve_spend`] takes,
-//! outranking every other signal including the user's own override, so a
-//! fabricated value there does not degrade the policy — it inverts it, at
-//! the one moment the protection matters.
-//!
-//! It is not a **setting**. A configuration value is sticky by nature, and a
-//! declaration that outlives the task it described re-creates that inversion
-//! by a slower route: the reserve would be permanently open on behalf of a
-//! task that finished last week. So the source is a row that expires, and
-//! the shape is [`super::claims`]'s — session-scoped, project-scoped, and a
-//! no-match by default, which is what makes its arrival a no-op for every
-//! caller that declares nothing.
-//!
-//! # Project isolation
-//!
+//! this second."* It is a **statement somebody made on purpose**, not an
+//! **inference**: every available proxy reports "almost complete" for work
+//! that has merely been running a while, and this field feeds the *first*
+//! branch [`crate::provider::quota::evaluate_reserve_spend`] takes, so a
+//! fabricated value inverts the policy rather than merely degrading it.
+//! Nor is it a **setting**: the source is a row that expires, shaped like
+//! [`super::claims`]'s — session-scoped, project-scoped, and a no-match by
+//! default.
 //! Migration 28's two triggers refuse a row whose `project_id` is not the
-//! bound one, every statement below also names `project_id` explicitly, and
-//! the database file *is* the project. A declaration made in one project
-//! cannot be named by a query in another.
+//! bound one, and the database file *is* the project.
+//! History: design-decisions.md, "Trims: memory and session module docs", session/store/progress.rs module doc.
 
 use std::collections::BTreeSet;
 
@@ -44,30 +24,21 @@ use super::{SessionId, SessionLifecycle, SessionStore, SessionStoreError};
 
 /// How long a declaration nobody renewed keeps protecting its session's work.
 ///
-/// # Why thirty minutes, and why shorter than a claim
+/// The two failure directions are not symmetric. Expiring too early costs
+/// the operator the protection they asked for, and they get it back by
+/// declaring again — the reserve falls back to deciding on its own signals,
+/// so an early expiry is the *safe* direction. Expiring too late keeps
+/// forcing the first branch to `Allow` for whatever that session does next,
+/// a stale statement applied to a task nobody described — the inversion
+/// the design note refuses, arriving by the slower route.
 ///
-/// The two failure directions are **not symmetric, and they are not
-/// symmetric the other way round from [`super::STALE_CLAIM_AFTER`]**, which
-/// is why this is a second constant and not a reuse of that one.
+/// So the horizon points short: thirty minutes is longer than a harness
+/// turn — a session genuinely finishing a task renews as it goes — and
+/// short enough that a declaration somebody forgot cannot protect an
+/// unrelated later task. It is a judgement, not a measurement, and it is
+/// one constant so that changing it is one edit.
 ///
-/// Expiring too early costs the operator the protection they asked for, and
-/// they get it back by declaring again. The behaviour it falls back to is
-/// exactly today's — the reserve decides on its own signals — so an early
-/// expiry is the *safe* direction.
-///
-/// Expiring too late is the failure this whole design exists to prevent. A
-/// declaration left standing keeps forcing the first branch to `Allow` for
-/// whatever that session does next, which is a stale statement about a task
-/// that is gone being applied to a task nobody described. That is the
-/// inversion the design note refuses, arriving by the slower route.
-///
-/// So the horizon points short. Thirty minutes is longer than a harness turn
-/// — a turn is one prompt-to-stop cycle, minutes rather than hours, and a
-/// session genuinely finishing a task renews as it goes — and short enough
-/// that a declaration somebody forgot cannot protect an unrelated later
-/// task. A task still not finished half an hour after somebody called it
-/// nearly complete was not nearly complete. It is a judgement, not a
-/// measurement, and it is one constant so that changing it is one edit.
+/// History: design-decisions.md, "Trims: memory and session module docs", session/store/progress.rs TASK_PROGRESS_EXPIRES_AFTER.
 pub const TASK_PROGRESS_EXPIRES_AFTER: i64 = 30 * 60;
 
 /// The horizon is deliberately shorter than a file claim's, and the constant

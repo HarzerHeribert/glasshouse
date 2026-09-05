@@ -1,36 +1,23 @@
 //! Phase 9K's configuration half: how a person records a response profile,
 //! and what `glasshouse response` prints.
-//!
 //! [`mod@crate::profile::response`] is a pure domain model that imports no
 //! configuration, and [`mod@crate::harness::response`] is the adapter-side
-//! translation. This module is the caller both of those assume: it reads the
-//! layered configuration, builds the six-layer
-//! [`crate::profile::response::PrecedenceStack`] line 596
-//! describes, asks [`crate::profile::response::resolve`], asks each
-//! adapter what it would apply, and renders the answers.
-//!
-//! # Why the report lives here and not in `main.rs`
-//!
-//! The same reason [`mod@super::pairing`] gives, and it is §35: a caller only
-//! the binary can reach is a caller no test enters through, and a capability
-//! proven by tests that all set the world up themselves is proven against a
-//! build whose production path could be deleted. [`report`] is what
-//! `main.rs`'s `response` arm calls, in one line, and it is what
-//! `tests/response_profiles.rs` calls too — so a mutation to the layering
-//! below is a mutation to the path the shipped binary runs.
-//!
-//! # Project scope
-//!
-//! Line 597 requires a project's response-profile configuration to stay inside
-//! that project. It does, structurally and for free:
-//! [`ProjectConfig`](super::ProjectConfig) is read from
-//! `<project root>/.glasshouse/config.toml` by
-//! [`load_project_config`](super::load_project_config), which takes the
+//! translation; this module is the caller both assume: it reads layered
+//! configuration, builds the six-layer
+//! [`crate::profile::response::PrecedenceStack`] line 596 describes, asks
+//! [`crate::profile::response::resolve`], asks each adapter what it would
+//! apply, and renders the answers.
+//! [`report`] lives here, not in `main.rs` (§35, same reason as
+//! [`mod@super::pairing`]): `main.rs`'s `response` arm and
+//! `tests/response_profiles.rs` call the same one line.
+//! Project scope (line 597) is structural, for free:
+//! [`ProjectConfig`](super::ProjectConfig) is read via
+//! [`load_project_config`](super::load_project_config) for the one
 //! [`Project`](crate::Project) whose root Glasshouse resolved, and
-//! [`EffectiveConfig`] holds exactly one of them. There is no path by which a
-//! second project's file is opened, and
+//! [`EffectiveConfig`] holds exactly one of them —
 //! `a_projects_response_profile_does_not_reach_another_project` runs the
 //! binary's own resolution in two project roots to show it.
+// History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/config/response.rs module doc.
 
 use serde::{Deserialize, Serialize};
 

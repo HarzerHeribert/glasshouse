@@ -1,146 +1,23 @@
 //! The operating system's own credential store, and the labelled fallback
 //! for when there isn't one (Phase 9E, lines 1 and 2).
 //!
-//! # Two stores, one trait, and a third that composes them
+//! [`NativeSecretStore`] is the OS store (Keychain, Credential Manager, or a
+//! Secret Service keyring, chosen for refusing a locked collection rather
+//! than waiting on it); [`super::EnvironmentSecretStore`] is the existing
+//! cross-platform source; [`PreferNativeSecretStore`] runs the native store
+//! first, the environment second, naming which in [`SecretStore::describe`].
 //!
-//! - [`NativeSecretStore`] is the OS store itself. On macOS it is the
-//!   Keychain, reached through `keyring`'s `apple-native` backend; on Windows
-//!   it is Credential Manager, through `windows-native`. On every other
-//!   platform [`NativeSecretStore::detect`] answers
-//!   [`Unavailable::UnsupportedPlatform`] and no instance can be built at
-//!   all — see "Which platforms, and why not the third" below.
-//! - [`super::EnvironmentSecretStore`] is the cross-platform source that
-//!   already existed, unchanged.
-//! - [`PreferNativeSecretStore`] is what Glasshouse actually runs with: the
-//!   native store first, the environment second, and a
-//!   [`SecretStore::describe`] that says *which arrangement is in force* so
-//!   a user never has to guess whether their key is in the Keychain or in a
-//!   shell profile.
+//! `keyring` 3.x silently resolves to a **mock** store, dropping every
+//! credential, when no backend feature is enabled; this module names the
+//! platform's own builder instead, so a missing feature fails to compile.
 //!
-//! # The mock hazard, which shapes everything below
-//!
-//! `keyring` 3.x resolves `keyring::default` to its **mock** store when no
-//! backend feature is enabled for the target. The mock store accepts a
-//! credential, hands it back within the same process, and persists nothing.
-//! A build that linked it would report a working secure store and silently
-//! lose every credential written to it — precisely the silent degradation
-//! line 2 forbids. The failure mode is not a build error; it is a build that
-//! looks like it works.
-//!
-//! Three things keep it out, and none of them is a comment:
-//!
-//! 1. The dependency is declared **per target, always with a backend
-//!    feature** (see `crates/glasshouse/Cargo.toml`), so a platform with no
-//!    proven store does not link `keyring` at all.
-//! 2. This module never calls `keyring::Entry::new`, which reads a
-//!    process-global builder that `keyring::set_default_credential_builder`
-//!    can replace with anything. It names the platform's own builder —
-//!    `keyring::macos` or `keyring::windows` — and those module paths
-//!    **only exist when that platform's backend feature is on**. Enabling
-//!    `keyring` without a backend therefore stops compiling rather than
-//!    quietly resolving to the mock.
-//! 3. `tests::the_store_is_built_by_the_platforms_own_backend_and_never_the_mock`
-//!    downcasts the credential this module builds and fails if it is a
-//!    `keyring::mock::MockCredential`, and
-//!    `tests/secret_native.rs` fails if the manifest ever declares `keyring`
-//!    without a backend feature or outside a per-target section.
-//!
-//! # Which platforms, and how the third one refuses
-//!
-//! All three are here now, and the third one arrived by fixing the reason it
-//! was refused rather than by accepting it.
-//!
-//! The refusal was this: keyring 3.6.3's Secret Service backend reaches the
-//! bus through `SecretService::connect`, leaving `dbus-secret-service`'s
-//! prompt timeout unset; that crate then defaults an unanswered unlock prompt
-//! to `ONE_YEAR_SECONDS` and blocks the calling thread for it. A locked
-//! collection is not an error there — `keyring`'s `map_matching_items`
-//! unlocks locked items before reading them, and `get_collection` unlocks a
-//! locked collection before writing — so a Linux desktop with a locked
-//! keyring would **hang a launch**. Worse, a probe could not see it coming:
-//! probing an account that was never written matches no item, so it returns
-//! before anything needs unlocking and reports the store as healthy.
-//!
-//! **`dbus-secret-service` itself can refuse; `keyring` just never asks it
-//! to.** `connect_with_max_prompt_timeout(_, 0)` is documented as *"prevent
-//! the prompt from appearing at all: the operation will immediately be
-//! canceled"*, and `Collection::is_locked` reads the `Locked` property
-//! without touching an item. `keyring` calls neither and exposes no way for a
-//! caller to, so the Linux arm depends on `dbus-secret-service` directly.
-//! Zero is the Linux `SecKeychainSetUserInteractionAllowed(0)`, and the
-//! backend probes a *collection* rather than an item because a collection is
-//! the thing that can be locked.
-//!
-//! # The crate, and the four properties it was chosen on
-//!
-//! Against `secret-service` 5.2.0, the pure-Rust zbus client, which was the
-//! obvious alternative and is not what this uses:
-//!
-//! 1. **Can it refuse?** `dbus-secret-service` can, above. `secret-service`
-//!    reads `Locked` too, but `blocking::Item::delete` calls
-//!    `ensure_unlocked()` unconditionally, and its `exec_prompt_blocking` is
-//!    `receive_completed_iter.next()` — an **unbounded** wait on a signal,
-//!    with no timeout anywhere in the crate. Deleting a credential from a
-//!    collection that locked since the last check would hang with no ceiling
-//!    at all, which is worse than the year this arm was refused over.
-//! 2. **What does it drag in?** `dbus-secret-service` brings `libdbus-sys`,
-//!    so `libdbus-1-dev` and `pkg-config` are needed on every Linux build
-//!    host — a real cost, accepted by the user on 2026-09-05 — and **no
-//!    executor**. `secret-service` brings zbus and an async runtime.
-//! 3. **Is the blocking API real?** `dbus-secret-service` is synchronous to
-//!    the bottom: libdbus is a blocking C API. `secret-service::blocking` is
-//!    a shim over `zbus::blocking`, whose own documentation warns it stalls
-//!    if a runtime is already running. This crate owns no runtime by design
-//!    (see `design-decisions.md` on `ureq`), and now still owns none.
-//! 4. **Maintained?** Both. `dbus-secret-service` 4.1.0 is by `keyring`'s own
-//!    maintainer and exists to be `keyring`'s Secret Service transport.
-//!
-//! Property 1 decided it: this whole arm exists to refuse rather than wait,
-//! and only one of the two can.
-//!
-//! # A reference names a credential; the store decides where it lives
-//!
-//! [`SecretRef::Environment`] does not mean "this value must come from the
-//! environment". It names a credential *by the variable a harness expects to
-//! receive it in*, which is the only name Glasshouse has for a provider
-//! credential anywhere. A store is free to answer that name from wherever it
-//! keeps credentials, and that is exactly what line 1's "prefer the macOS
-//! Keychain" is: the same reference, answered from the Keychain first. This
-//! is why preferring the Keychain needed no change to
-//! [`crate::profile::resolve`] or to the gateway — both already ask a store
-//! rather than reading the environment themselves.
-//!
-//! [`SecretRef::OsCredential`] is the explicit form, for a credential filed
-//! under a service and account that is not derived from a variable name. It
-//! is still names only, and still safe to store in configuration and to
-//! print.
-//!
-//! # What is never carried out of here
-//!
-//! `keyring::Error::BadEncoding` carries the **raw bytes** of whatever was
-//! in the store, and `keyring::Error::Ambiguous` carries credential
-//! handles. Neither is ever wrapped, formatted or re-raised:
-//! `classify` reduces every `keyring::Error` to a fixed `&'static str`
-//! chosen by variant alone, so no byte that came out of the store can reach
-//! a message, a log or a `Debug`.
-//!
-//! One thing *is* carried besides that fixed text, and it is carried on
-//! purpose: [`StoreRefusal`] keeps the platform's own **status** — `Windows
-//! ERROR_NO_SUCH_LOGON_SESSION`, an `OSStatus` message — from the only two
-//! `keyring::Error` variants whose payload is a status code rather than
-//! store data. That type documents the reasoning; `backend::platform_status`
-//! is the match that enforces it, and
-//! `tests::a_store_error_never_carries_anything_the_store_returned` and
-//! `tests::a_store_refusals_status_comes_from_no_variant_that_carries_store_data`
-//! are what fail if either drifts.
-//!
-//! The Secret Service arm obeys the same rule against a different error type:
-//! the only thing carried out of a `dbus_secret_service::Error` is the D-Bus
-//! error **name** — a fixed `org.freedesktop.*` identifier — and never the
-//! message beside it, which is free text the provider composes and the one
-//! field that could echo something it read.
-//! `tests::a_secret_service_refusals_status_comes_from_no_variant_that_carries_a_payload`
-//! is what fails if that drifts.
+//! [`SecretRef`] is a *name*, never a location, which is why preferring the
+//! Keychain needed no change to [`crate::profile::resolve`] or the gateway.
+//! No platform error's payload ever reaches a Glasshouse message: `classify`
+//! reduces every error to fixed text chosen by variant alone.
+//
+// History: design-decisions.md, "Trims: migration and native-secret module
+// docs", secret/native.rs module doc.
 
 use super::{EnvironmentSecretStore, Secret, SecretRef, SecretStore};
 
@@ -209,40 +86,22 @@ pub enum Unavailable {
 
 /// What the platform's store said when it refused to open.
 ///
-/// # Why this carries more than one fixed sentence
-///
-/// It used to be a bare variant, and "the native secure store could not be
-/// opened" was the whole of what a user — or a test — could learn. On
-/// 2026-09-02 the Windows ARM64 gate ran the round trips for the first time
-/// and all five of them skipped with exactly that sentence, which cannot
-/// tell *this session has no credential set* from *the backend is broken*.
-/// Those two call for opposite responses, and the store had already said
-/// which it was: `CredReadW` answered `ERROR_NO_SUCH_LOGON_SESSION` and
-/// Glasshouse discarded it at the one line that turns a `keyring::Error`
-/// into an [`Unavailable`].
-///
-/// # What may be carried, and why it is not a leak
-///
-/// `classification` is `classify`'s fixed text, chosen by the error's
-/// *variant alone*. `status` is the platform's own status, taken from the
-/// only two `keyring::Error` variants whose payload is a status code rather
-/// than something the store returned:
-///
-/// - `PlatformFailure` and `NoStorageAccess` wrap, on Windows,
-///   `keyring::windows::Error(u32)` — built from `GetLastError()` and
-///   rendered as `Windows ERROR_NO_SUCH_LOGON_SESSION` or `Windows error
-///   code <n>`; on macOS, a `security_framework` error built from an
-///   `OSStatus`. Neither is constructed from a byte the store returned.
-/// - `BadEncoding` (the raw stored bytes) and `Ambiguous` (credential
-///   handles, which `keyring`'s own `Display` prints with `{:?}`) are
-///   **excluded by the match**, not by inspecting what they happen to hold,
-///   and so are `TooLong` and `Invalid`, whose payloads are names.
-///
-/// `tests::a_store_error_never_carries_anything_the_store_returned` asserts
-/// that the match names none of the data-carrying variants, and
+/// Carries more than one fixed sentence because the two failures it can
+/// describe call for opposite user responses -- *this session has no
+/// credential set* versus *the backend is broken* -- and a bare variant
+/// cannot tell them apart. `classification` is `classify`'s fixed text,
+/// chosen by the error's *variant alone*; `status` is the platform's own
+/// status, taken only from the two `keyring::Error` variants whose payload
+/// is a status code rather than something the store returned --
+/// `PlatformFailure`/`NoStorageAccess`, never `BadEncoding`, `Ambiguous`,
+/// `TooLong` or `Invalid`, which are excluded by the match itself, not by
+/// inspecting what they hold.
+/// `tests::a_store_error_never_carries_anything_the_store_returned` and
 /// `tests::a_store_refusals_status_comes_from_no_variant_that_carries_store_data`
-/// plants a value in each of their payloads and fails if one reaches a
-/// message. The first is what still holds when a variant is added.
+/// are what fail if either drifts.
+///
+/// History: design-decisions.md, "Trims: migration and native-secret
+/// module docs", secret/native.rs `StoreRefusal`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StoreRefusal {
     /// Fixed text chosen by the store error's variant alone.
@@ -594,38 +453,21 @@ mod backend {
     /// Turn off the Keychain's authorization dialogs for this process,
     /// once, before any Keychain call is made.
     ///
-    /// # Why this is not optional
+    /// Not optional: for an item this binary did not create, decryption
+    /// consults an access control list that does not name it, and
+    /// `SecKeychainFindGenericPassword` blocks in
+    /// `SecurityServer::ClientSession::decrypt` until a user answers a
+    /// dialog -- found by `glasshouse doctor` hanging against exactly that
+    /// item. `doctor` is piped into files and the same read runs on the
+    /// session-start path, so a dialog would freeze the TUI with nothing
+    /// visible behind it. With interaction off the call instead fails
+    /// cleanly and resolution falls back to the environment: refusing
+    /// plainly is the whole of line 2, blocking forever is not a fallback.
+    /// The cost: a credential filed by hand with the `security` CLI is not
+    /// read; the supported path is to store it *through* Glasshouse.
     ///
-    /// `SecKeychainFindGenericPassword` decrypts the item, and decryption
-    /// consults the item's access control list. For an item **this binary
-    /// did not create** — one added with `security add-generic-password`,
-    /// or written by a different build — the list does not name it, and the
-    /// call blocks in `SecurityServer::ClientSession::decrypt` until a user
-    /// answers a dialog. Found by running `glasshouse doctor` against
-    /// exactly that item: it hung, and a stack sample put it in that call.
-    ///
-    /// A hang there is not a cosmetic problem. `doctor` is a
-    /// non-interactive command that is piped into files, and the same read
-    /// happens on the path that starts a session, where it would freeze the
-    /// TUI with no dialog visible behind it. So interaction is disabled and
-    /// the call fails cleanly instead: the store answers "no", resolution
-    /// falls back to the environment, and
-    /// [`super::PreferNativeSecretStore::describe`] says so. **Refusing
-    /// plainly is the whole of line 2; blocking forever is not a fallback at
-    /// all.**
-    ///
-    /// The cost, stated honestly: a credential a user filed by hand with the
-    /// `security` CLI is not read, where before this it would have been read
-    /// after a prompt. The supported way to put one where Glasshouse can
-    /// read it is to store it *through* Glasshouse, which puts this binary
-    /// on the item's access control list and needs no dialog thereafter.
-    ///
-    /// Declared here rather than by taking a dependency on
-    /// `security-framework`: the framework is already linked by the one
-    /// `keyring` pulls in, and the dependency for this batch was settled as
-    /// `keyring` alone. `Boolean` is a `u8` and `OSStatus` an `i32`; the
-    /// status is deliberately ignored, because a platform that refuses to
-    /// turn interaction off is one whose reads will simply fail below.
+    /// History: design-decisions.md, "Trims: migration and native-secret
+    /// module docs", secret/native.rs `fn silence_authorization_dialogs` (macos).
     #[cfg(target_os = "macos")]
     fn silence_authorization_dialogs() {
         #[link(name = "Security", kind = "framework")]
@@ -649,29 +491,19 @@ mod backend {
     /// Nothing to silence: Credential Manager cannot raise a dialog.
     ///
     /// `CredReadW`, `CredWriteW` and `CredDeleteW` are local RPC calls into
-    /// LSA against the **calling user's own** credential set. They present
-    /// no UI, wait for no user, and either answer or return an error code:
-    /// a session with no credential store answers `ERROR_NO_SUCH_LOGON_SESSION`
-    /// immediately, which `probe` turns into
-    /// [`super::Unavailable::StoreUnreachable`]. There is therefore no
-    /// Windows analogue of the macOS hang, and no call to make here.
+    /// LSA against the calling user's own credential set: no UI, no wait,
+    /// only an answer or an error code -- so there is no Windows analogue
+    /// of the macOS hang. Measured on the Windows ARM64 CI VM on
+    /// 2026-09-02: an ssh session (process session 0) got
+    /// `ERROR_NO_SUCH_LOGON_SESSION` from every call with no Rust involved,
+    /// while a scheduled task under the same user's interactive logon
+    /// (process session 1) succeeded -- Credential Manager is per logon
+    /// session, not per user. Kept as a same-named no-op rather than
+    /// dropped, so `probe` has one shape on every platform and a future
+    /// backend that *can* prompt has an obvious place to refuse from.
     ///
-    /// **That branch is not hypothetical.** Measured on the Windows ARM64
-    /// CI VM on 2026-09-02: every `CredReadW`, `CredWriteW` and
-    /// `CredDeleteW` issued from the runner's ssh session — a public-key
-    /// logon, process session 0 — returned `1312`,
-    /// `ERROR_NO_SUCH_LOGON_SESSION`, with no Rust and no `keyring` in the
-    /// call. The same calls in a scheduled task under the same user's
-    /// **interactive** logon (process session 1) succeeded, and the probe
-    /// read returned `1168`, `ERROR_NOT_FOUND`, which is `NoEntry` and
-    /// therefore the store answering. Credential Manager is per logon
-    /// session, not per user, and the product's job on the refusing path is
-    /// exactly what it does: fall back and say so.
-    ///
-    /// Kept as a same-named no-op rather than dropped, so `probe` has one
-    /// shape on every platform and a future backend that *can* prompt —
-    /// the Secret Service is exactly that, which is why it is not here —
-    /// has an obvious place it must refuse from.
+    /// History: design-decisions.md, "Trims: migration and native-secret
+    /// module docs", secret/native.rs `fn silence_authorization_dialogs` (windows).
     #[cfg(target_os = "windows")]
     fn silence_authorization_dialogs() {}
 
@@ -802,35 +634,22 @@ mod backend {
     //! A Secret Service keyring, through `dbus-secret-service`, and **refusing
     //! rather than waiting**.
     //!
-    //! # The invariant
+    //! **The invariant: no call this module makes can wait for a user.** The
+    //! connection opens with `connect_with_max_prompt_timeout(_, 0)`, which
+    //! cancels a prompt instead of raising one, and nothing here names
+    //! `unlock`, `ensure_unlocked` or `create_collection` -- a locked
+    //! collection is **read** through its `Locked` property and refused,
+    //! never opened. This is the Linux equivalent of macOS's
+    //! `SecKeychainSetUserInteractionAllowed(0)`, and is why this arm is
+    //! written against `dbus-secret-service` directly rather than `keyring`.
     //!
-    //! No call this module makes can wait for a user. The connection is opened
-    //! with `connect_with_max_prompt_timeout(_, 0)`, which
-    //! `dbus-secret-service` documents as *"prevent the prompt from appearing
-    //! at all: the operation will immediately be canceled"*
-    //! (`src/prompt.rs:42-45` returns `Error::Prompt` before the prompt is even
-    //! raised when the timeout is zero). Every D-Bus call it makes carries a
-    //! 2-second reply timeout (`src/proxy/mod.rs:17`). Nothing here names
-    //! `unlock`, `ensure_unlocked` or `create_collection`, so there is no path
-    //! that would need a prompt in the first place: a locked collection is
-    //! **read** through its `Locked` property and refused.
+    //! The probe reads a *collection*, not an item: a collection can be
+    //! locked and probing an item cannot see it, so searching for a
+    //! never-written account would match nothing and report a locked
+    //! keyring healthy, exactly the miss this arm exists to close.
     //!
-    //! That is the Linux equivalent of macOS's
-    //! `SecKeychainSetUserInteractionAllowed(0)`, and having one is the whole
-    //! reason this arm is written against `dbus-secret-service` directly rather
-    //! than through `keyring` — see the module documentation's "Which
-    //! platforms, and how the third one refuses".
-    //!
-    //! # Why the probe is a collection and not an item
-    //!
-    //! macOS and Windows probe by reading an account that is never written,
-    //! because their stores have no state to ask about beyond "does the store
-    //! answer". The Secret Service does: a collection is locked or it is not,
-    //! and probing an item cannot see it. Searching for an account nothing ever
-    //! wrote matches no item and returns before anything needs unlocking, which
-    //! is exactly how a probe reports a store healthy and then freezes on the
-    //! first real read. So this probe reads `Locked` on the default collection,
-    //! and `PROBE_ACCOUNT` is deliberately **not** gated in for this target.
+    //! History: design-decisions.md, "Trims: migration and native-secret
+    //! module docs", secret/native.rs `mod backend` (linux).
 
     use std::collections::HashMap;
 

@@ -99,18 +99,7 @@ fn default_snapshot_body_chars() -> usize {
 /// initiative (`unix::pump_watches`) is unchanged for the same reason. New
 /// vocabulary on a wire format only earns its place if silence keeps meaning
 /// what it meant.
-///
-/// # This is an attribution boundary, not a security one
-///
-/// A caller that states an origin it is not is **out of scope**, deliberately
-/// and without a defence, and no part of this type should be read as a claim
-/// about who a peer is. There is nothing here to authenticate: anything that
-/// can reach this socket can already send any bytes it likes under any origin
-/// it likes, and it is the *same user* on both sides. What the field buys is
-/// that the honest callers stop being indistinguishable — `api::client`,
-/// which knows it is a person's command line, and `unix::pump_watches`, which
-/// knows it is Glasshouse's own delivery, no longer write log rows that are
-/// equal field for field.
+// History: design-decisions.md, "Trims: api/protocol.rs", `RequestOrigin` doc.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RequestOrigin {
@@ -253,16 +242,7 @@ pub enum Request {
     /// quietly excluded from orchestration with nothing to say when it came
     /// back. It is capped at `unix::MAX_MUTE_SECONDS` server-side, so a
     /// caller may ask for less and cannot ask for more.
-    ///
-    /// # It does not survive a restart, deliberately
-    ///
-    /// The state lives in the `glasshouse api serve` process that owns the
-    /// session's pseudo-terminal and nowhere else. That process is the only
-    /// thing that can deliver a machine message to a session in the first
-    /// place — a door that has just started is not running the session that
-    /// was muted — so there is no interval in which a lost mute lets a
-    /// message through that a persisted one would have stopped. Nothing is
-    /// migrated and nothing is written to disk.
+    // History: design-decisions.md, "Trims: api/protocol.rs", `Request::MuteSession` doc.
     MuteSession { session: String, seconds: u64 },
     /// Lift a mute before it expires — capability map line 1717.
     ///
@@ -274,18 +254,6 @@ pub enum Request {
     /// The tail of one live session's terminal output — capability map line
     /// 745, *"allow the user to enter any orchestrated worker while it is
     /// running."*
-    ///
-    /// The third of the three verbs that together are a person being *in* a
-    /// running worker: [`Request::SendMessage`] puts words in,
-    /// [`Request::Interrupt`] stops what is happening, and this is the half
-    /// that shows what came back. Until it existed a client built from this
-    /// door could type into a worker and could not see it.
-    ///
-    /// Answered through `session::api::SessionApi::recent_output`, the same
-    /// project-scoped seam its two neighbours resolve through, and read-only
-    /// in the strong sense [`Request::RecommendRoute`] is: it sends nothing
-    /// to the session, signals nothing, spawns nothing, writes to no store
-    /// and records no event.
     ///
     /// # A session with no live process is a refusal, not an empty string
     ///
@@ -300,16 +268,7 @@ pub enum Request {
     /// different answers because they are different facts, and a caller
     /// deciding whether to wait or to restart a worker needs to tell them
     /// apart.
-    ///
-    /// # The bound
-    ///
-    /// `max_bytes` is capped server-side at `unix::MAX_RECENT_OUTPUT_BYTES`
-    /// regardless of what is asked for, so a caller may lower the ceiling
-    /// and cannot raise it — the same shape as [`Request::QueryMemory`]'s
-    /// `limit`. It matters more here than anywhere else on this door: a
-    /// session's scrollback is bounded by the *runtime*, at a size no caller
-    /// chose, and this is the one verb whose response would otherwise grow
-    /// with how long a worker has been talking.
+    // History: design-decisions.md, "Trims: api/protocol.rs", `Request::RecentOutput` doc.
     RecentOutput {
         session: String,
         #[serde(default = "default_recent_output_bytes")]
@@ -338,14 +297,6 @@ pub enum Request {
     /// Where this work would be routed, and why — capability map line 1681,
     /// *"an inspectable routing recommendation without executing it."*
     ///
-    /// Read-only, and more strongly so than the rest of this door: it starts
-    /// no session, sends no text, takes no checkpoint, writes no routing
-    /// observation, and mutates no store. The whole verb is
-    /// `main.rs`'s own `route_recommendation` — the same function
-    /// `glasshouse route` is, so the command and the door cannot disagree
-    /// about where work would go (there is one ranking, not two) — rendered
-    /// as JSON rather than as a report.
-    ///
     /// `task` is the free-form description of the work, classified exactly
     /// as `glasshouse route --task` classifies it: by keyword, into
     /// `TaskRequirements`, never executed and never interpolated into a
@@ -361,13 +312,7 @@ pub enum Request {
     /// caller may lower the ceiling and cannot raise it. Every other part of
     /// the response is bounded by construction: one destination, and one
     /// contribution per scoring term.
-    ///
-    /// There is deliberately no override here — no `to`, no `fresh`, no
-    /// `now`. Those are a *user* telling the router where to go
-    /// (`glasshouse route`'s own line 1602 flags), and this verb exists to
-    /// ask it a question. Nothing else on this door speaks that vocabulary
-    /// either: [`Request::SpawnSession`] names a harness, not a routing
-    /// override.
+    // History: design-decisions.md, "Trims: api/protocol.rs", `Request::RecommendRoute` doc.
     RecommendRoute {
         #[serde(default)]
         task: Option<String>,
@@ -431,13 +376,6 @@ pub enum Request {
     /// Search this project's durable memory — capability map line 1111's
     /// project-scoped `memory.search`, and Phase 21F lines 935/936.
     ///
-    /// Project-scoped twice over: this door is opened for one already-resolved
-    /// project and carries no field naming another (see `super`'s own doc
-    /// comment), and the query underneath it —
-    /// `memory::search::MemoryStore::search` — filters on
-    /// `memories.project_id` in its own `WHERE` clause rather than trusting
-    /// that.
-    ///
     /// `limit` is capped at `unix::MAX_MEMORY_LIMIT` regardless of what is
     /// asked for — line 1115. A caller may lower the ceiling; it cannot raise
     /// it.
@@ -452,9 +390,7 @@ pub enum Request {
     /// `association` reads `"observed"` on every row — a correlation the
     /// producer recorded because the file changed during the session that
     /// produced the memory, never a claim that the memory refers to it.
-    /// `query` plays no role in this mode: a path lookup runs no `MATCH`, so
-    /// there is no text for it to search. `path` absent leaves this verb
-    /// byte-for-byte what it was.
+    // History: design-decisions.md, "Trims: api/protocol.rs", `Request::QueryMemory` doc.
     QueryMemory {
         query: String,
         #[serde(default)]
@@ -546,15 +482,6 @@ pub enum Request {
     /// Ask the guardrail about an intended change — Phase 21K lines
     /// 1004–1009, 1013, 1036, 1049, 1052, 1053.
     ///
-    /// `change` is what the agent **states** about the change: files and
-    /// subsystems touched, reversibility, blast radius, the flags for a
-    /// migration, a destructive operation, a security or data-integrity
-    /// impact, an unfamiliar integration, an architectural change or a broad
-    /// refactor, the evidence class its premise rests on, and a coarse
-    /// budget (with what has been spent, when re-evaluating). Nothing is
-    /// read from the session to fill any of it in, and an unknown field —
-    /// `reasoning`, `transcript` — is refused rather than ignored.
-    ///
     /// Answers a risk class, **which factor** decided it, a verdict from the
     /// configured mode and the session's per-task override, at most three
     /// critical-assumption prompts, a page of guidance in the map's own
@@ -569,6 +496,7 @@ pub enum Request {
     /// [`Request::TakeCheckpoint`] uses, unless `guardrails.mode` is `off`
     /// (line 1036). Without a session the answer is the same and nothing is
     /// written.
+    // History: design-decisions.md, "Trims: api/protocol.rs", `Request::Preflight` doc.
     Preflight {
         #[serde(default)]
         session: Option<String>,
@@ -609,10 +537,15 @@ pub enum Request {
     /// to `waived_by_user` is refused unless `origin` is `user` — the door
     /// cannot check that, but it can insist it be said.
     ///
-    /// `record_failed_approach`, with `state: refuted`, writes one
-    /// `failed_attempt` memory through the existing store, with provenance
-    /// naming the assumption (line 1019); the transition's `subject` is the
-    /// memory's id. Without the flag, a refutation writes no memory at all.
+    /// A transition to `refuted`, or whose `response` is `re-plan` or
+    /// `handoff` — the rollback and isolate choices line 1041 offers — gets
+    /// one more field in the reply: `preserve`, a
+    /// `guardrails::PreserveSet` naming every path another live session
+    /// claims and every changed path this session never claimed. Glasshouse
+    /// reverts nothing itself; the reply only names what an agent about to
+    /// roll back or isolate must not touch (line 1044). Every other
+    /// transition's reply omits the field, byte-identical to before.
+    // History: design-decisions.md, "Trims: api/protocol.rs", `Request::UpdateAssumption` doc.
     UpdateAssumption {
         /// An assumption identifier, or an unambiguous leading part of one.
         assumption: String,

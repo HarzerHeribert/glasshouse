@@ -94,31 +94,21 @@ pub(crate) fn memory_report(
 }
 
 /// `glasshouse memory search --path <p> [--for-edit]` — the CLI half of
-/// capability map lines 1143, 1141 and 1142, and the flag the 1143 evidence
-/// entry recorded as missing.
+/// capability map lines 1143, 1141 and 1142.
 ///
 /// Answers from [`glasshouse::memory::MemoryStore::for_path`], the same
 /// reader the socket door and the briefing's file section use, so the three
-/// surfaces cannot disagree about what a file is associated with. Not through
-/// [`memory_search_grouped`]: that helper records every retrieval through it
-/// as a *search* in the evaluation ledger, and a path lookup runs no query —
-/// recording it as one would misreport what was asked, which is the same
-/// reasoning `api::unix::query_memory_for_path` gives for opening the store
-/// directly.
-///
-/// # What each row says beyond the memory itself
+/// surfaces cannot disagree about what a file is associated with. Not
+/// through [`memory_search_grouped`]: that records every retrieval as a
+/// *search* in the evaluation ledger, and a path lookup runs no query.
 ///
 /// `assoc=` is read per row (line 1139's second provenance), `freshness=` is
-/// line 1142's commit-order label, and the advisory line above the results is
-/// line 1142's own sentence: **the source at the path is the evidence**. A
-/// `stale` row is printed in its rank like any other — the label never
-/// withholds, reorders or rescores.
+/// line 1142's commit-order label printed in rank order without reordering
+/// or rescoring, and `for_edit` (line 1141) sorts constraints, decisions and
+/// failed approaches ahead of features, findings and todos within each
+/// authority rung; off, the order is byte-for-byte what `Lookup` gives.
 ///
-/// `for_edit` is line 1141: within each authority rung, constraints,
-/// decisions and failed approaches sort ahead of features, findings and
-/// todos. Off, the order is byte-for-byte what a `Lookup` gives.
-///
-/// One `git log` for the whole report, since every row is about one file.
+/// History: design-decisions.md, "Trims: commands module docs", memory_path_report.
 pub(crate) fn memory_path_report(
     runtime: &Runtime,
     path: &str,
@@ -811,25 +801,21 @@ pub(crate) fn memory_rate(
 /// `glasshouse memory challenge <id> <reason>` — Phase 21F lines 937/938:
 /// let the receiving agent say, explicitly, that current evidence
 /// contradicts a memory, rather than silently distrusting it in a way
-/// nothing records.
+/// nothing records. Reuses Phase 21C's `mark_for_review` rather than
+/// inventing a seventh reason: a challenge *is* "something changed that may
+/// invalidate this" — the review mechanism already built for that.
 ///
-/// Reuses Phase 21C's `mark_for_review` and its six reasons rather than
-/// inventing a seventh state: a challenge *is* "something changed that may
-/// invalidate this; a person or a stronger agent has to look" — the review
-/// mechanism already built for that. The retrieval half of 937/938 is true
-/// the moment this returns: `SearchScope::Current` only ever returns
-/// `Active` memories (see `memory/search.rs`'s own documentation), so the
+/// The retrieval half of 937/938 is true the moment this returns:
+/// `SearchScope::Current` only ever returns `Active` memories, so the
 /// challenged memory drops out of every default search immediately and
-/// stays reachable only as history — `glasshouse memory search --history`.
+/// stays reachable only as history.
 ///
 /// 938's "before further automatic injection into the same task" has no
-/// consumer in this build: Phase 27 (automatic injection) does not exist, so
-/// there is nothing that injects a memory for this to gate. Closed on the
-/// retrieval half only — see the packet's own reasoning, echoing §33's rule
-/// of asking the capability as a question a user would ask: *can Glasshouse
-/// stop presenting a challenged memory as settled?* Yes. *Can it stop an
-/// automatic injection from using it?* There is no automatic injection to
-/// stop.
+/// consumer here: Phase 27 (automatic injection) does not exist, so there
+/// is nothing that injects a memory for this to gate. Closed on the
+/// retrieval half only.
+///
+/// History: design-decisions.md, "Trims: commands module docs", memory_challenge.
 pub(crate) fn memory_challenge(
     runtime: &Runtime,
     id: &str,
@@ -1056,48 +1042,27 @@ pub(crate) fn memory_resolve_conflict(
     Ok(format!("{} is now {}\n", record.id, record.status))
 }
 
-/// `glasshouse memory extract` — Phase 21's manual run, for debugging and
-/// evaluating extraction itself.
-///
-/// Everything except the model call is the production path: the chunk is
-/// bounded and scrubbed by `SessionChunk::build`, the reply goes through the
-/// same contract validation, credential screen, conservative classification
-/// and duplicate check, and what survives is written to the project's real
-/// memory store.
 /// `glasshouse memory commit` — map line 1148, *"allow a memory commit to be
-/// triggered manually."*
+/// triggered manually."* Calls [`run_extraction`] with
+/// [`glasshouse::memory::ExtractionTrigger::Manual`], the same function the
+/// `TurnEnded` and `PreCompact` arms of [`report_hook_with`] call, so the
+/// event window, credential screen, duplicate check, bound, and the
+/// working-tree and routing observations are identical by construction
+/// rather than by two implementations agreeing. Deliberately not
+/// [`memory_extract`], which evaluates the contract from a file without a
+/// provider; this one asks the model the user configured.
 ///
-/// # It is the same operation the harness triggers, not a hand-written twin
-///
-/// This calls [`run_extraction`] with
-/// [`glasshouse::memory::ExtractionTrigger::Manual`], which is the same
-/// function the `TurnEnded` and `PreCompact` arms of [`report_hook_with`]
-/// call. Everything a person could get wrong by hand — the event window, the
-/// credential screen, the duplicate check, the bound, the working-tree
-/// observation, the routing observation — is therefore identical by
-/// construction rather than by two implementations agreeing.
-///
-/// It is deliberately *not* [`memory_extract`]. That command exists to
-/// evaluate the contract without a provider, takes its reply from a file, and
-/// says so on every run; this one asks the model the user configured, which
-/// is what makes it a memory commit rather than a harness.
-///
-/// # Defaulting to the most recently active session
-///
-/// `SessionStore::list` is ordered `last_activity_at DESC`, which is the
-/// project's own answer to *"what was I just working on"* and the same order
-/// `glasshouse sessions` prints. A project with no sessions is an error
-/// naming the flag rather than a silent success: there is no honest
-/// "recently completed work" to commit, and reporting *stored 0* would be
+/// Defaults to the most recently active session (`SessionStore::list`,
+/// `last_activity_at DESC`); a project with no sessions is an error naming
+/// the flag rather than a silent *stored 0*, which would be
 /// indistinguishable from a model that looked and found nothing.
 ///
-/// # One database handle at a time
+/// The session lookup is scoped so `ProjectSessions` closes before
+/// [`run_extraction`] opens the event log and the memory store — one
+/// database handle at a time, billed under Windows' mandatory locks
+/// otherwise.
 ///
-/// The session lookup is scoped so `ProjectSessions` is closed before
-/// [`run_extraction`] opens the event log and the memory store. That is
-/// practice §65's rule taken seriously on a path that has the choice: a
-/// handle held across work that does not need it is free on this developer's
-/// machine and billed under Windows' mandatory locks.
+/// History: design-decisions.md, "Trims: commands module docs", memory_commit.
 pub(crate) fn memory_commit(runtime: &Runtime, session: Option<&str>) -> anyhow::Result<String> {
     use std::fmt::Write as _;
 

@@ -2,7 +2,7 @@
 
 Split from the single evidence ledger this project used to keep at the repository root (see `docs/product/evidence/README.md` for the full index and the entry template / evidence rules that used to precede it).
 
-### Phase 21K — assumption-aware implementation guardrails, 42 of 43 (lines 996–1053); 1044 refused
+### Phase 21K — assumption-aware implementation guardrails, 43 of 43 (lines 996–1053); 1044 closed 2026-09-05 (entry at the end)
 
 Package `GH-ASSUMPTION-GUARDRAILS`, 2026-08-31, Fable specialist at xhigh.
 **Forty-three lines against one mechanism, built on the Phase 43 shape — over
@@ -121,7 +121,7 @@ Unix-only tests are `#[cfg(unix)]` for the fake-harness reason every neighbour's
 are). **Windows exercises the migration and the door only through the
 cross-platform MCP tests — the same coverage Phase 43 shipped with.**
 
-## 1044 — REFUSED
+## 1044 — REFUSED (2026-08-31; superseded by the entry at the end of this file)
 
 *"Preserve user changes and unrelated worker changes when rolling back or
 isolating an invalidated experiment."* Glasshouse performs no rollback and no
@@ -135,3 +135,26 @@ nothing forces the call (1000's harness independence is the reason); guidance
 lines are carried in the map's own words and the agent's compliance is not
 observable by Glasshouse (Phase 51 RC-D's measurement); budget "materially
 exceeded" is any stated axis strictly over its bound, no margin.
+
+## 1044 — COMPLETE 2026-09-05: Glasshouse names what a rollback must not touch, and still reverts nothing
+
+`GH-ROLLBACK-PRESERVE` (Sonnet high, Amber), report **`.agent-runtime/report-rollback-preserve.md`**. Design of record: `design-decisions.md`, *Rollback preserves what is not yours, and Glasshouse names it rather than doing it*. The refusal above stands in its first half — Glasshouse performs no rollback — and ends in its second: the reason an agent reverts someone else's work is that it cannot tell whose work it is, and that is a fact Glasshouse holds (Phase 60's file claims, the working tree).
+
+### Preserve user changes and unrelated worker changes when rolling back or isolating an invalidated experiment. (line 1044)
+
+Contract: Given an agent transitioning an assumption to `refuted`, or recording the rollback (`re-plan`) or isolate (`handoff`) response, when the door replies, Glasshouse names the repo-relative paths under another live session's active claim (`claimed_elsewhere`) and the changed paths this session never claimed (`unclaimed_changes`) — while preserving that it reverts nothing itself, that the transition row is unchanged, and that a tree it cannot read yields `null`, never an empty list that reads as nothing to preserve.
+
+Production: `guardrails/mod.rs :: preserve_set` (pure: other sessions' claims, deduplicated and sorted; changed paths minus this session's claims; `None` when the tree could not be read), `:: transition_wants_preserve` (the gate: `refuted`, or the `re-plan`/`handoff` response), the `Guidance` entry for 1044 beside 1041's; `checkpoint/git.rs :: changed_paths` (`git status --porcelain=v1 -z --untracked-files=all`, `Some(vec![])` for a clean tree, `None` for no answer); `api/unix/assumptions.rs :: update_assumption` attaches `preserve` to the reply from the store and root the handler already holds; the MCP tool inherits it through the shared `handle`.
+
+Regression: `assumption_guardrails::rollback_preserves_what_is_not_yours` (two sessions, a real `git init` fixture), `assumption_guardrails::a_non_repository_project_reports_unknown`, the 1044 guidance-text assertion in the substantial-preflight test, nine `guardrails::tests::*` unit tests on `preserve_set`/`transition_wants_preserve`, six `checkpoint::git::tests::*` on `changed_paths`.
+
+| mutation | change | result | killed by |
+|---|---|---|---|
+| own-claims-preserved | `preserve_set`: `.filter(\|claim\| &claim.session_id != session)` → `.filter(\|_claim\| true)` | KILLED | `assumption_guardrails::rollback_preserves_what_is_not_yours` — `claimed_elsewhere` was `["src/b.rs", "src/mine.rs"]` (the session's own path leaked in) instead of `["src/b.rs"]` |
+
+**Ruling on the worker's flagged judgment (primary, at integration):** `GuardrailResponse` has no `rollback` or `isolate` variant; the worker mapped `RePlan` (*re-plan from the premise that was refuted*) to the rollback choice and `Handoff` (*hand the work to another session, with a checkpoint*) to isolate, documented at `PRESERVING_RESPONSES`. Accepted: the `refuted` state is the unconditional trigger and carries the line; the response mapping only widens it, and both readings follow the variants' own words. Packet error, the orchestrator's: the reply is built in `api/unix/assumptions.rs`, not `api/unix/mod.rs`; the worker edited both and said so.
+
+Limits: no rename/copy path is exercised; a user edit to a path the experiment also claimed is indistinguishable from the experiment's own and is not preserved by name (the guidance says so and points at the VCS); macOS only from this box — `changed_paths` has no `#[cfg]` and the GitHub Linux and Windows cells are its other legs.
+
+**Phase 21K stands at 43 of 43.**
+

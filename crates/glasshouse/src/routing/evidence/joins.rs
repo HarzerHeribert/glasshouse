@@ -243,39 +243,23 @@ pub struct SubscriptionHeadroomEstimate {
 /// see [`SubscriptionHeadroomEstimate`] and [`HeadroomBand`] for the type's
 /// own honesty rules. No new table, no migration, no persisted estimator
 /// state: every call re-derives the estimate from rows the caller already
-/// holds, the same "today's history IS the ledger's own rows in window"
-/// premise every other reader in this module keeps.
+/// holds.
 ///
-/// Reads five things, none of them queried here:
-///
-/// - **accepted-request counts** and **throttle events with their
-///   recency**, from `observations` — this provider's own informative rows
-///   (`outcome.is_some()`, excluding [`CORRELATION_PURPOSE`] rows, the same
-///   filter [`classify_throttle_scope`] applies), narrowed to
-///   `credential_label` by the widen-when-unsure rule
-///   [`recent_credential_throttles`] and [`recent_credential_spend`] already
-///   apply: only when **every** informative row names its account does the
-///   count narrow, and one contextless row widens the whole estimate to
-///   provider scope rather than silently dropping it (map line 1246);
-/// - **token usage where rows carry it** — never turned into a figure, only
-///   recorded on the returned value's [`HeadroomBasis`] (line 1251);
-/// - **reset behavior**, as `seconds_until_reset` — the caller's own
-///   gateway-quota-cache reading, already computed for the provider-wide
-///   capacity facet and handed in rather than re-read. Map line 1248: when
-///   this is `None`, a fallback is learned from `scoped`'s own
-///   throttle→success recoveries rather than left unused — see
-///   [`ResetBasis`]. The learned value never displaces a real reading;
-///   [`SubscriptionHeadroomEstimate::reset_basis`] says which one applied;
-/// - **historical sessions**, as `recent_session_count` — this project's own
-///   count of sessions charged to this account (`sessions.entitlement`,
-///   migration 22), read by the caller and handed in: this function stays a
-///   pure read over values already fetched, the shape every other reader in
-///   this module keeps.
+/// Reads accepted-request counts and throttle events (narrowed to
+/// `credential_label` only when **every** informative row names its
+/// account; one contextless row widens to provider scope, map line 1246),
+/// token usage (never turned into a figure, only recorded on
+/// [`HeadroomBasis`], line 1251), reset behavior via `seconds_until_reset`
+/// (line 1248: `None` falls back to a value learned from `scoped`'s own
+/// throttle→success recoveries — see [`ResetBasis`] — never displacing a
+/// real reading), and `recent_session_count` — none of them queried here,
+/// all handed in by the caller.
 ///
 /// `None` — unknown — when nothing at all is available: no informative row,
 /// no session count, no reset reading. An account this genuinely unmeasured
 /// is not "exhausted" and not "ample"; it is unmeasured, the 32B line-1239
 /// discipline every other facet on `ResolvedEntitlement` already keeps.
+// History: design-decisions.md, "Trims: routing module docs", routing/evidence/joins.rs `fn estimate_subscription_headroom`.
 pub fn estimate_subscription_headroom(
     observations: &[RoutingObservation],
     provider: &str,
@@ -804,18 +788,11 @@ impl EvidenceLedger {
     /// estimate row's own `observed_at` — the actual consumption the
     /// launch's estimate was a prediction *of*.
     ///
-    /// # Why this reads across two tables from one connection
-    ///
     /// [`crate::evaluation::EvaluationObservations`] and this ledger wrap
     /// separate [`Connection`]s onto the **same** project database file —
     /// [`Self::effort_shadow`] already reads `evaluation_observations` this
-    /// way, correlating a routing row to the session's next harness verdict.
-    /// This reader is that precedent's mirror image: here
-    /// `evaluation_observations` (kind
-    /// [`crate::evaluation::EvaluationKind::RoutingConsumptionEstimated`])
-    /// is the driving table and `routing_observations` is summed per match,
-    /// but it is the same one-file, one-query join, scoped by
-    /// [`Self::project_id`] on both sides rather than opening a second
+    /// way — so this is the same one-file, one-query join, scoped by
+    /// [`Self::project_id`] on both sides, rather than opening a second
     /// ledger handle for a read this connection can already serve.
     ///
     /// A session with an estimate row and **no** matching routing row (or
@@ -823,6 +800,7 @@ impl EvidenceLedger {
     /// actual, never a fabricated zero — [`Self::consumption_by_purpose`]'s
     /// own rule for an absent sum. [`Self::output_estimate_accuracy`]
     /// reports it as *pending*.
+    // History: design-decisions.md, "Trims: routing module docs", routing/evidence/joins.rs `fn estimate_pairs`.
     fn estimate_pairs(
         &self,
         now_unix: i64,
@@ -930,23 +908,22 @@ impl EvidenceLedger {
     /// tokens per second — one [`SeparationMeasure`] per figure.
     ///
     /// Scoped to [`HARNESS_TURN_PURPOSE`] rows, the same restriction
-    /// [`Self::translation_cache_savings`] applies for the same reason: only
-    /// a translated exchange ever carries `first_tool_call_ms`,
-    /// `first_token_ms` or a tool round to measure at all. The usable-turn
-    /// verdict is [`Self::effort_shadow`]'s own subquery — the session's next
+    /// [`Self::translation_cache_savings`] applies, since only a translated
+    /// exchange ever carries `first_tool_call_ms`, `first_token_ms` or a tool
+    /// round to measure. The usable-turn verdict is [`Self::effort_shadow`]'s
+    /// own subquery — the session's next
     /// [`crate::evaluation::EvaluationKind::TurnOutcomeObserved`] row at or
-    /// after the exchange — never [`RoutingObservation::outcome`], which is a
-    /// transport 2xx proxy and not a verdict (see that field's own doc
-    /// comment). An exchange whose session recorded no such row is excluded
-    /// from every measure here, not folded into either side.
+    /// after the exchange — never [`RoutingObservation::outcome`], a
+    /// transport 2xx proxy and not a verdict; an exchange whose session
+    /// recorded no such row is excluded from every measure here.
     ///
     /// **Effective TTFC is attached per row from its own route**, not
-    /// computed per exchange: a single exchange carries no failure rate of
-    /// its own, so each row's contribution to that measure is its
+    /// computed per exchange: each row's contribution is its
     /// `(provider, model)`'s [`RouteResponsiveness::effective_ttfc_ms`] over
     /// this same window, computed once per route and read off for every row
     /// that route served. Raw TTFC, TTFT and decode tokens/s are each row's
     /// own figure.
+    // History: design-decisions.md, "Trims: routing module docs", routing/evidence/joins.rs `fn responsiveness_separation`.
     pub fn responsiveness_separation(
         &self,
         now_unix: i64,
@@ -1093,20 +1070,19 @@ impl EvidenceLedger {
     ///
     /// **Two statements, not one.** The verdict is *the session's next
     /// [`crate::evaluation::EvaluationKind::TurnOutcomeObserved`] row at or
-    /// after the exchange's `observed_at`* — a correlated "first row at or
-    /// after" lookup expressed as a scalar subquery per candidate row — and
-    /// this reader's median is computed in Rust from the raw sample the way
-    /// every other median on this ledger is, so the classified
-    /// rows are fetched flat, with the verdict subquery inline, and folded
-    /// here rather than in a single `GROUP BY`. [`EffortShadow::unread`] is a
-    /// second, simpler statement over the same window and purpose: a row
-    /// whose `turn_shape` this reader could not decode is never folded into
-    /// either turn shape, so its count comes from a query that does not
-    /// filter on `output_tokens` at all — an unread row's tokens are unread
-    /// for the same reason its shape is.
+    /// after the exchange's `observed_at`* — a correlated subquery per
+    /// candidate row — and this reader's median is computed in Rust from the
+    /// raw sample, so the classified rows are fetched flat, with the verdict
+    /// subquery inline, and folded here rather than in a `GROUP BY`.
+    /// [`EffortShadow::unread`] is a second, simpler statement over the same
+    /// window and purpose: a row whose `turn_shape` this reader could not
+    /// decode is never folded into either turn shape, so its count comes
+    /// from a query with no `output_tokens` filter at all — an unread row's
+    /// tokens are unread for the same reason its shape is.
     ///
     /// Only [`HARNESS_TURN_PURPOSE`] rows with `output_tokens IS NOT NULL`
     /// enter a group.
+    // History: design-decisions.md, "Trims: routing module docs", routing/evidence/joins.rs `fn effort_shadow`.
     pub fn effort_shadow(
         &self,
         now_unix: i64,

@@ -40,6 +40,13 @@ here: the runtime has no code path that writes a payload into a message).
     turn. A top-level `return` ends the task with that value. Return when the
     task is answered, not before.
 
+    Returning a string answers the person directly — it is rendered and kept
+    as your reply, and nothing is asked of you afterwards, so fill it from what
+    the run actually produced rather than from what you expected it to. Do not
+    answer from a call that threw, was refused, was cancelled, or whose guard
+    did not hold: yield instead and say what you found. Call `yieldNow(reason)`
+    to hand back from inside a branch; it is a yield, not an error.
+
     A cell that throws is answered, not retried. You get the error, the line,
     and every binding that completed before the throw. Write the next cell.
 

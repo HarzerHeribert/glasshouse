@@ -1,54 +1,23 @@
 //! The project-level implementation policy Glasshouse carries to every agent
-//! it briefs — capability map lines 955-964 (Phase 21H, simplicity-first),
-//! 968-978 (Phase 21I, production-aware checks) and 982-990 (Phase 21J, the
+//! it briefs — capability map lines 955-964, 968-978 and 982-990 (Phases
+//! 21H, 21I, 21J: simplicity-first, production-aware checks, the
 //! pre-completion review checklist).
 //!
-//! # What a "policy" can honestly be here
+//! Glasshouse has no analyser that could enforce any of those lines, so its
+//! one honest mechanism is to **carry the policy to the agent** as text
+//! Glasshouse wrote, delivered like a briefing: the rules as data, one
+//! renderer. Unlike [`crate::memory::inject`], this text is Glasshouse's own
+//! — a literal with nothing interpolated — so it gets its own marker pair,
+//! distinct from [`crate::memory::inject::MEMORY_MARKER`] and, like it, not
+//! forgeable by a memory body (`tests/implementation_policy.rs`). Delivery
+//! goes through [`crate::session::api::SessionApi::send_text`]; a
+//! canonical-mode terminal discards (and wedges) any line over `MAX_CANON`
+//! (1024 bytes on macOS/BSD), so the policy ships as several lines under
+//! [`MAX_DELIVERY_BYTES`], with [`POLICY_CEILING_BYTES`] bounding the whole
+//! rendered policy (line 964).
 //!
-//! Every line in those three phases names something an *agent* should prefer,
-//! avoid, weigh or check. Glasshouse does not read anybody's diff and has no
-//! analyser that could enforce one of them. Its one honest mechanism is
-//! therefore to **carry the policy to the agent** — as text Glasshouse wrote,
-//! delivered the way a briefing is delivered, and inspectable by a person
-//! before it is ever sent. That is what this module is: the rules as data,
-//! and one renderer.
-//!
-//! So a line here is served in exactly the sense that the instruction reaches
-//! the agent that could act on it. Line 970 in particular — *"flag unindexed
-//! scans"* — is carried as an instruction to the agent and is **not** an
-//! analyser Glasshouse runs; see [`Rule`]'s own note.
-//!
-//! # This is the *other* side of the trust boundary
-//!
-//! [`crate::memory::inject`] exists to keep extracted memory separated from
-//! what a person actually wrote, because a memory body is untrusted content
-//! that may itself read like an order. This text is the opposite case: it is
-//! **Glasshouse's own**, constant, and an instruction on purpose. Nothing
-//! from a project, a memory, a session or an environment is interpolated into
-//! it — every byte below is a literal in this file — so there is no untrusted
-//! input for a quoting rule to defend against.
-//!
-//! It still gets its own marker pair, distinct from
-//! [`crate::memory::inject::MEMORY_MARKER`], for the reason the distinction
-//! exists at all: a reader that cannot tell Glasshouse's instruction from a
-//! quoted memory has lost the separation whichever way it errs. And because
-//! `inject`'s `quote` rewrites `[` and `]` in every memory body, a memory can
-//! no more forge *these* markers than it can forge its own — which is
-//! asserted rather than assumed, in `tests/implementation_policy.rs`.
-//!
-//! # Why delivery is several lines and the ceiling is two numbers
-//!
-//! A delivery goes through [`crate::session::api::SessionApi::send_text`],
-//! which appends a carriage return into a pseudo-terminal. A terminal in
-//! canonical mode discards any line longer than `MAX_CANON` — 1024 bytes on
-//! macOS and the BSDs — **and wedges that session's input permanently**;
-//! `inject::MAX_INJECTED_BYTES` documents the measurement. Thirty rules do
-//! not fit in one such line and never will, so the policy is delivered as
-//! several, each independently under [`MAX_DELIVERY_BYTES`] and each carrying
-//! the marker pair, its position, and enough legend to be read on its own.
-//! [`POLICY_CEILING_BYTES`] is the separate bound on the whole rendered
-//! policy — the "do not let this grow into a document" bound, which is the
-//! one line 964 would object to losing.
+//! History: design-decisions.md, "Trims: the remaining module docs, second
+//! packet", policy/mod.rs module doc.
 
 use serde::{Deserialize, Serialize};
 

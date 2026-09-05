@@ -2,67 +2,35 @@
 //! capacity **band** and the nearness of its reset do to the session
 //! router's ranking, and the reserve policy the scope of work runs under.
 //!
-//! # What this module decides, and what it deliberately reuses
+//! Capability map lines 1570–1577, 1606/1612: [`capacity_band_pressure`]
+//! penalises a premium destination in the **tight** band (less so the
+//! nearer its reset), and routes a **reserve**-band one to the
+//! protected-reserve policy this build already has; [`low_tier_spend`]
+//! keeps a premium destination under pressure off low-tier work while a
+//! healthy zero-cost alternative is among the candidates. Everything else
+//! is *read*, not re-decided, from existing sources — inventing a second
+//! copy of any of them would be two scales for one question.
 //!
-//! Capability map lines 1570–1577, and 1606/1612 as Phase 38 restates them.
-//! Two contributions, one public function each so a mutation can zero exactly
-//! one of them (the same shape as `super::session`'s seven):
+//! What is tunable is configuration, never a hierarchy in this source:
+//! `routing.capacity_band_thresholds`, a provider's `reserve_percent`, and
+//! `routing.reserve.*` — `tests/subscription_pressure.rs` scans this file
+//! for those names and for the absence of any provider's or model's.
 //!
-//! - [`capacity_band_pressure`] — lines 1570, 1571, 1573, 1574 and 1577. A
-//!   premium destination in the **tight** band is penalised, and less so the
-//!   nearer its reset; one in the **reserve** band is put to the
-//!   protected-reserve policy this build already has,
-//!   [`crate::provider::quota::evaluate_reserve_spend`], under the policy the
-//!   caller's scope selects.
-//! - [`low_tier_spend`] — line 1575. A premium destination already under
-//!   pressure is not spent on low-tier work while a healthy zero-cost
-//!   alternative adequate for that work is among the candidates.
+//! Every contribution below has a test in `tests/subscription_pressure.rs`
+//! holding two destinations that differ **only** in its axis and resolving
+//! differently; a term that cannot separate anything (no reading, unknown
+//! tier, a zero-cost destination) contributes exactly `0.0` and says why —
+//! neither "assume healthy" nor "assume exhausted".
 //!
-//! Everything else here is *read*, not re-decided: the band comes from
-//! [`crate::provider::quota::RemainingCapacityScore::band`] against the
-//! thresholds the user configures (line 1270) and the provider's own protected
-//! reserve percentage (line 1288); the reset comes from
-//! [`crate::provider::quota::CapacityState::seconds_until_reset`]; the task's
-//! tier is Phase 35's [`WorkloadTier`]; and the precedence a reserve-band
-//! decision follows is Phase 32F's own function. Inventing a second copy of
-//! any of those would be two scales for one question, which is the mistake
-//! `ReserveDecisionInputs::tier`'s doc comment already refuses.
+//! "Premium" is one fact, [`super::Cost`]: whether the destination costs
+//! the user anything at the margin, fail-closed to [`super::Cost::Metered`]
+//! for anything not marked free. The *shape* of the quota is not consulted.
 //!
-//! # The rule every term obeys — a term must be able to separate a pair
-//!
-//! `docs/product/evidence/phase-9j.md`'s last entry: a signal constant across
-//! the candidate set cannot change a ranking. Every contribution below has a
-//! test in `tests/subscription_pressure.rs` holding two destinations that
-//! differ **only** in its axis and resolving differently, and every case in
-//! which a term cannot separate anything — no reading, unknown tier, a
-//! zero-cost destination — contributes exactly `0.0` and says in its evidence
-//! that it is inert and why. That is not "assume healthy" and not "assume
-//! exhausted": an unread resource is neither preferred nor withheld, the
-//! stance `super::session::quota_pressure` already takes for the same
-//! reading.
-//!
-//! # "Premium" is one fact, and it is [`super::Cost`]
-//!
-//! The lines say *premium subscription*. The fact that decides it here is
-//! whether the destination costs the user anything at the margin —
-//! [`super::Backend::cost`], which is [`super::Cost::Metered`] for everything
-//! nobody has marked free (fail-closed, per that type's own doc) and
-//! [`super::Cost::Free`] for a model the user named in a provider's
-//! `free_models`. Nothing about the *shape* of the quota (a rolling window, a
-//! balance) is consulted: a metered key in its tight band is spent as
-//! carefully as a subscription in its tight band, and a reset time is what
-//! separates the two shapes when one exists, not a second flag.
-//!
-//! # Purity
-//!
-//! No clock, no store, no socket, no name. `seconds_until_reset` is a value
-//! the caller computed against its own clock, and the set-level facts in
-//! [`Alternatives`] are computed by the router from the candidate set it
-//! holds. **No provider, model or harness is named in this file** — the
-//! policy is tunable through configuration (`routing.reserve.*`,
-//! `routing.capacity_band_thresholds`, a provider's `reserve_percent`) and
-//! never through a hierarchy written here; line 1612 is enforced by a test
-//! that scans this source.
+//! No clock, no store, no socket, no name: **no provider, model or harness
+//! is named in this file** — the policy is tunable only through
+//! configuration, and line 1612 is enforced by a test that scans this
+//! source.
+// History: design-decisions.md, "Trims: routing module docs", routing/pressure.rs module doc.
 
 use std::fmt;
 
@@ -461,32 +429,23 @@ pub fn capacity_band_pressure(inputs: &PressureInputs<'_>) -> Contribution {
 /// Line 1280: what a forecast of exhaustion before the next reset
 /// contributes.
 ///
-/// # It is inert unless a forecast exists, and it says so
-///
 /// `super::burn::forecast` answers `None` for a resource with too few rows,
-/// no measured request-unit remaining amount, no known reset, or a zero burn
-/// rate — the four ways line 1278's *"sufficiently known"* is not met. Every
-/// one of them reaches this term as `inputs.forecast == None`, and every one
-/// of them contributes exactly `0.0`. That is what keeps a ranking on a
-/// build with no forecast identical to what it was before this module
-/// existed, which is a property with its own test
+/// no measured request-unit remaining amount, no known reset, or a zero
+/// burn rate — the four ways line 1278's *"sufficiently known"* is not
+/// met — and every one contributes exactly `0.0`, keeping a ranking with no
+/// forecast identical to what it was before this module existed
 /// (`a_destination_with_no_forecast_ranks_exactly_as_it_did`).
 ///
-/// # "Well before", and why it is not "before"
-///
-/// [`super::burn::WELL_BEFORE_RESET_FRACTION`] carries the reasoning: a
-/// forecast landing just short of the reset is inside the estimator's own
-/// tolerance, and reacting to it would be line 1281's overreaction wearing a
-/// different hat. A resource forecast to exhaust *after* the reset, or in
-/// the last half of the window before it, contributes `0.0` and names the
-/// figures it was comparing — an informational line, not a silent one.
-///
-/// # The words are hedged here too
+/// [`super::burn::WELL_BEFORE_RESET_FRACTION`] exists because a forecast
+/// landing just short of the reset is inside the estimator's own tolerance,
+/// and reacting to it would be line 1281's overreaction wearing a different
+/// hat: a resource forecast to exhaust after the reset, or in the last half
+/// of the window before it, contributes `0.0` and names the figures it was
+/// comparing.
 ///
 /// The evidence text says *estimated* and *at the current rate*, never
-/// *will*. The explanation this contributes to is read by a person through
-/// `glasshouse route`, so line 1283's restraint applies to it exactly as it
-/// applies to `crate::shell`'s capacity line.
+/// *will* — line 1283's restraint, same as `crate::shell`'s capacity line.
+// History: design-decisions.md, "Trims: routing module docs", routing/pressure.rs `fn exhaustion_forecast_pressure`.
 pub fn exhaustion_forecast_pressure(inputs: &PressureInputs<'_>) -> Contribution {
     let Some(forecast) = inputs.forecast else {
         return Contribution::new(
@@ -734,37 +693,23 @@ fn reserve_band(inputs: &PressureInputs<'_>, band: CapacityBand) -> Contribution
 /// precedence with every tier-dependent branch taken **conservatively** when
 /// it is not.
 ///
-/// # The unknown tier, decided against line 1459
+/// Line 1459's conservative-on-low-confidence rule extends to an absent
+/// tier: the reserve exists *for* high-tier work (line 1571), so an
+/// unestablished tier is not admitted on the tier branch — the same outcome
+/// the lowest tier gets, with a reason naming the tier unknown rather than
+/// claiming the task doesn't need the heavy tier. Every other branch (the
+/// user's override, an imminent reset, no cheaper adequate resource) admits
+/// the spend regardless of tier, same as Phase 32F. A test holds the
+/// unknown-tier verdict equal to the lowest tier's across every input.
 ///
-/// Line 1459 says a low-confidence classification is a reason for a
-/// conservative rule. An absent one is the limit of low confidence. The
-/// reserve exists *for* high-tier work (line 1571), so a task not established
-/// to be high-tier is not admitted on the tier branch — the same outcome the
-/// lowest tier would get, with a reason that says the tier was unknown rather
-/// than one claiming the task "does not require the heavy tier". Every other
-/// branch — the user's override, an imminent reset, the absence of any
-/// cheaper adequate resource — is the same as Phase 32F's and admits the
-/// spend regardless of tier. A test in this module holds the unknown-tier
-/// verdict equal, on `is_allowed`, to the lowest tier's across every input
-/// combination, so the copy cannot drift from the original.
-///
-/// # Line 1610, and the one thing that may make `task_nearly_complete` true
-///
-/// Line 1610 (*"avoid migrating a nearly completed task solely to preserve a
-/// small amount of quota"*) is line 1294's guard seen from Phase 38, and
-/// both turn on the word **solely**: the guard stops a threshold being the
-/// whole reason work moves. A second reason may only come from the party
-/// that knows, so `task_nearly_complete` below is a **declaration** —
-/// somebody said so, on purpose, about this session, recently — carried in
-/// by the caller through `PressureInputs::task_nearly_complete` and scoped
-/// there.
-///
-/// This module still infers nothing, and that half of
-/// `docs/product/design-decisions.md`'s *"A task is never 'nearly
-/// complete'"* is untouched: a proxy from turn counts or elapsed time would
-/// report "almost complete" for work that had merely been running a while,
-/// inverting the protection at exactly the moment it exists for. The value
-/// arrives from a caller or it is `false`; nothing here derives it.
+/// Line 1610 (*"avoid migrating a nearly completed task solely to preserve
+/// quota"*) is line 1294's guard from Phase 38, turning on **solely**: a
+/// second reason may only come from the party that knows, so
+/// `task_nearly_complete` is a **declaration** carried in by the caller
+/// through `PressureInputs::task_nearly_complete`, never inferred here —
+/// `design-decisions.md`'s *"A task is never 'nearly complete'"* on its own,
+/// since a turn-count or elapsed-time proxy would invert the protection.
+// History: design-decisions.md, "Trims: routing module docs", routing/pressure.rs `fn reserve_verdict`.
 pub fn reserve_verdict(
     band: CapacityBand,
     tier: Option<WorkloadTier>,

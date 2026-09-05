@@ -408,3 +408,24 @@ Regression (macOS + Linux, the Linux half run for real in `docker rust:1.98.0` w
 Mutations (verifier's line numbers, re-derived at `native.rs:1651` and `:1562`; the report's are stale by 18): `skip-locked-check` — **KILLED** by `a_locked_collection_is_refused_before_anything_can_prompt`, the fake's `proceed` reached; `unsupported-not-unreachable` — **KILLED** by two `secret_native` tests; `set-succeeds-without-writing` (the macOS arm, proving the round trips are not vacuous) — **KILLED** three ways; `prompt-timeout-nonzero` (`0` → `5`) — **KILLED** on both platforms. Two false KILLEDs from denied warnings were caught by reading the compiler and discarded (§80 case 4).
 
 Limits: the live round trip (above); `cargo check --target x86_64-unknown-linux-gnu` cannot run on this host because `ring` needs a C cross-compiler — pre-existing, not this dependency — and was replaced by the native Linux run, which is stronger. **Debt, not a defect:** `backend::get` swallows a lock that arrives *after* `detect()` succeeded via `.ok()?`, so `resolve` returns `None` and `PreferNativeSecretStore` falls back to the environment — no hang, no leak, the same `Option` shape the macOS and Windows arms have.
+
+## 442 — COMPLETE 2026-09-05: the round trip ran against a real, unlocked Secret Service
+
+`GH-SECRET-SERVICE-CI-FIXTURE` (Sonnet high, Amber), report **`.agent-runtime/report-secret-service-ci-fixture.md`**; the backend itself is the entry above (`GH-SECRET-SERVICE-BACKEND`, Red, verifier ACCEPT). The one clause LOCALLY VERIFIED left open — the round trip against a live Secret Service — is now proven on the Linux leg the gates reach.
+
+### Prefer a Secret Service-compatible keyring on Linux when available. (line 442)
+
+Contract: Given a Linux host with an unlocked Secret Service, when a credential names the OS store, Glasshouse stores, resolves and deletes it there — while preserving that a locked or absent keyring refuses within a bound with an instruction and never blocks.
+
+State: **COMPLETE.** Both gates source one fixture, `scripts/lib/secret-service-fixture.sh` + `secret-service-fixture-inner.sh`: a private bus from `dbus-run-session`, `gnome-keyring-daemon --unlock --daemonize --components=secrets` on it, readiness by `busctl … GetNameOwner org.freedesktop.secrets` (not `busctl list`, which shows an *activatable* name before anyone owns it and let a client trigger D-Bus's own activation of a second daemon — the race the worker found and fixed), a `secret-tool` store/lookup/clear round trip printed as one proof line, then `exec cargo test`. The bus and the daemon die with the wrapped command. `ci-local.sh`'s `run_linux()` and `ci-extended.yml`'s Linux cells (a `Test (Linux, under the Secret Service fixture)` step; macOS and Windows keep the original step verbatim) both use it; the Linux image gains `dbus gnome-keyring libsecret-tools`.
+
+Regression, run for real (no `SKIPPED` line) in the Linux container by `scripts/ci-local.sh --linux`, twice, warm and cold: `secret_native::a_credential_in_the_native_store_is_readable_there_and_invisible_to_the_environment`, `secret_native::deleting_a_credential_that_is_not_there_is_success`, `secret_native::on_linux_a_keyring_that_cannot_be_reached_refuses_quickly_and_says_what_to_do` — `test result: ok. 10 passed; 0 failed`; `--lib` 2132 passed both runs; the fixture proof line `SECRET SERVICE FIXTURE: org.freedesktop.secrets reachable and unlocked (secret-tool round trip ok)` in both logs.
+
+| mutation | change | result | observed |
+|---|---|---|---|
+| locked-daemon | a one-off variant of the inner script locks the default collection before `exec` (not committed; shipped code untouched) | the round trips **skip with the locked classification**, never fail or hang, under a 60 s timeout | `SKIPPED: … the keyring's default collection is locked, and Glasshouse will not wait for an unlock prompt; unlock the keyring in your desktop session and start Glasshouse again — test result: ok. 10 passed … finished in 0.11s` |
+
+Limits: the GitHub ubuntu cells' first run under the fixture is the push carrying this commit — read the `Test (Linux, under the Secret Service fixture)` step there; a real desktop keyring (not a headless daemon) is the user's own later proof, as ruled on 2026-09-03; the locked-case mutation is a script demonstration, and the shipped refusal path's own regression is `on_linux_a_keyring_that_cannot_be_reached_refuses_quickly_and_says_what_to_do`. Scope the worker could not touch, fixed at integration: `scripts/tests/test_pane_workspace_exclusion.py`'s `--workspace` line count for `ci-extended.yml`, 5 → 6 (the new Linux step carries `--exclude pane`; all 25 script tests green).
+
+**Phase 9E stands at 13 of 13.**
+

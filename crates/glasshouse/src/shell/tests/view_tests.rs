@@ -2377,11 +2377,15 @@ fn route_health_keeps_line_1765s_five_concepts_on_separate_lines() {
         let mut state = sample();
         state.handle_key(KeyEvent::new(KeyCode::Char('h'), KeyModifiers::NONE));
         // Never failed, yet unavailable; paced by Glasshouse until a
-        // different instant from the provider's own reset.
+        // different instant from the provider's own reset. 330 s, not 300:
+        // `describe_deadline` floors to whole minutes against its own clock
+        // read, so at exactly 300 s one slow second rendered "4 minutes" —
+        // three times in one week on hosted runners (waves 137–138). The
+        // 30 s of slack keeps the assertion below at "5 minutes".
         state.open_route_health(vec![crate::shell::state::RouteHealthRow {
             credential_rejected: true,
             available_now: false,
-            cooling_down_until_unix: Some(now + 300),
+            cooling_down_until_unix: Some(now + 330),
             stated_limit: Some(300),
             stated_window_seconds: Some(60),
             quota_resets_at_unix: Some(now + 1_800),

@@ -272,40 +272,23 @@ impl<'a> CheckpointStore<'a> {
         row.map(read_stored).transpose()
     }
 
-    /// The most recent checkpoint for one session.
+    /// The most recent checkpoint for one session — proved end to end
+    /// against a real harness process in `tests/checkpoint_portability.rs`,
+    /// both for a worker that died and for one put back afterwards.
     ///
-    /// This is what "the most recent checkpoint survives a crash" means in
-    /// practice: the session's process is gone and its checkpoint is still
-    /// here, because it was written to the project database rather than kept
-    /// in the process that died. Proved end to end against a real harness
-    /// process in `tests/checkpoint_portability.rs`, both for a worker that
-    /// died and for one that was put back afterwards.
+    /// Order is `checkpoints.seq DESC, id DESC` — write order, not clock
+    /// order: `created_at` reads whole seconds and cannot separate two
+    /// checkpoints written inside one, so `seq`, a counter
+    /// [`CheckpointStore::save`] stamps inside the insert, breaks the tie
+    /// instead. Unlike a clock, `seq` cannot step backwards (NTP, a resumed
+    /// laptop), and unlike the pre-version-14 `id DESC`-only tiebreak on
+    /// `randomblob` — measured a coin flip, 414 of 798 same-second pairs
+    /// resolving to the older checkpoint — it is not one. `id DESC` remains
+    /// only for rows that never went through `save` and carry `seq`'s schema
+    /// default of 0, and rows written before version 14 keep the
+    /// `(created_at, id)` order migration 14 backfilled them with.
     ///
-    /// # "Most recent" is write order, not clock order
-    ///
-    /// `created_at` comes from [`CheckpointStore::now`], which is
-    /// `session::store::system_clock` and reads **whole seconds**, so it
-    /// cannot separate two checkpoints written inside one second — and a
-    /// manual `glasshouse checkpoint save` beside the task-boundary
-    /// checkpoint `shell::checkpoint_task_boundaries` takes lands there
-    /// easily. Until schema version 14 the tie was broken by `id DESC` on
-    /// 16 bytes of `randomblob`, which is a coin flip: measured over 800
-    /// back-to-back pairs through this function, 798 of which shared a
-    /// second, **414 resolved to the older checkpoint**.
-    ///
-    /// The order is now `checkpoints.seq DESC`, a counter stamped by
-    /// [`CheckpointStore::save`] inside the insert. It is a write count and
-    /// not a time, so a clock that steps backwards — NTP, a resumed laptop —
-    /// cannot make an older checkpoint win either. `id DESC` remains only as
-    /// a last tiebreak for rows that never went through `save` and so carry
-    /// the schema default of 0; those sort oldest, together, in a stable
-    /// order.
-    ///
-    /// Rows written before version 14 were backfilled from
-    /// `(created_at, id)`, so their between-second order is exactly what it
-    /// always was and their within-second order is what the old query
-    /// reported — see migration 14, which says why nothing better is
-    /// available for them.
+    /// History: design-decisions.md, "Trims: config, checkpoint, evaluation and codex module docs", store.rs `latest_for`.
     pub fn latest_for(&self, session: &SessionId) -> Result<Option<Stored>, StoreError> {
         self.first(
             "SELECT id, document FROM checkpoints WHERE session_id = ?1 \

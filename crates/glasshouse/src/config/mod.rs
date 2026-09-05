@@ -1,56 +1,23 @@
 //! User-level and optional project-level Glasshouse configuration.
-//!
-//! Two files, same small shape:
-//!
-//! - `<config_dir>/config.toml` — user-level. Onboarding decisions and
-//!   per-integration enable/executable overrides. Loaded by every run;
-//!   never created automatically for you to lose data to — a missing file
-//!   just means the defaults apply (see [`UserConfig::load`]).
-//! - `<project root>/.glasshouse/config.toml` — project-level, optional,
-//!   and layered *over* the user file (see [`EffectiveConfig`]). It is
-//!   never written except in response to an explicit user decision — see
-//!   [`write_project_config_with_consent`].
-//!
-//! The schema is deliberately tiny. The capability map is explicit that
-//! configuration should stay small until real usage demonstrates a need for
-//! more (Phase 49): a field belongs here once a user can actually make the
-//! decision it records, and not before. [`RoutingConfig`] is the newest such
-//! addition and shows where the line is — it stores *which* routing model
-//! the user picked in the first-run wizard, plus the bounded routing-policy
-//! preferences the Phase 2D settings view lets them change. It deliberately
-//! stores no health observations, live prices, or fallback decisions: those
-//! belong to the later router that consumes these preferences. Phase 9A's launch
-//! profiles are the same shape: [`ProfileTable`] holds
-//! *inert* profile configuration (which harness, which backend resource,
-//! which approval mode) — never a resolved overlay, never a credential, and
-//! never the project's own memory. Resolving a stored profile into something
-//! that can actually launch a harness happens in [`crate::profile`], not
-//! here.
-//!
-//! ## No secrets here — structurally, not just by convention
-//!
-//! [`IntegrationConfig`], [`ProfileConfig`] and [`ProviderConfig`], the
-//! per-item shapes either file stores, hold onboarding decisions, executable
-//! overrides, inert profile selections and *names* — never an API key,
-//! token, or any other credential. That is Phase 9E's rule applied here:
-//! "Never write API keys into tracked `.glasshouse` project files" and
-//! "Store only secret references in provider configuration whenever
-//! possible." A [`ProfileConfig::backend`] naming
-//! [`ProfileBackend::DirectProvider`] carries only the provider's own
-//! *name*; a [`ProviderConfig::credential_store`] carries a
-//! [`StoredCredentialRef`], which is two names. Resolving any of them to a
-//! credential is the separate `SecretStore` abstraction's job (not built by
-//! this module), never this one's. See
-//! `tests::serialized_form_has_no_secret_capable_field` for a structural
-//! guard, not just a string search.
-//!
-//! Phase 59 split this directory by concern: [`hooks`] (per-integration
-//! enable/hooks-consent), [`profile`] (launch profiles), [`provider`]
-//! (provider config, quota, model facts), [`entitlement`] (entitlement
-//! resolution), [`routing_policy`] (routing/score/reserve policy types),
-//! [`loading`] (`UserConfig`/`ProjectConfig` and the TOML I/O they share) and
-//! [`effective`] (the `EffectiveConfig` layering reader). This file keeps
-//! only the module wiring, [`ConfigError`] and re-exports.
+//! Two files, same small shape: `<config_dir>/config.toml` (user-level,
+//! loaded by every run, never auto-created — [`UserConfig::load`]) and
+//! `<project root>/.glasshouse/config.toml` (optional, layered over the
+//! user file — [`EffectiveConfig`] — never written except by explicit user
+//! consent, [`write_project_config_with_consent`]).
+//! The schema is deliberately tiny (Phase 49): a field belongs here once a
+//! user can actually make the decision it records. [`RoutingConfig`] and
+//! [`ProfileTable`] store only inert selections — never a resolved overlay,
+//! a health observation, a live price, or a credential; resolving happens
+//! in [`crate::profile`] and the later router, not here.
+//! No secrets here, structurally: [`IntegrationConfig`], [`ProfileConfig`]
+//! and [`ProviderConfig`] hold only names and references
+//! ([`StoredCredentialRef`]), never an API key or token (Phase 9E) —
+//! resolving one is `SecretStore`'s job, guarded structurally by
+//! `tests::serialized_form_has_no_secret_capable_field`.
+//! Phase 59 split this directory by concern: [`hooks`], [`profile`],
+//! [`provider`], [`entitlement`], [`routing_policy`], [`loading`] and
+//! [`effective`]; this file keeps only wiring, [`ConfigError`], re-exports.
+// History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/config/mod.rs module doc.
 
 pub mod capability;
 pub mod effective;

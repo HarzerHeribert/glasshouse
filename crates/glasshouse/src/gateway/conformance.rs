@@ -13,67 +13,13 @@
 //! helper: a request is written to a socket as bytes, and every assertion is
 //! made against what came off the wire at the other end.
 //!
-//! # The properties
-//!
-//! 1. **A request body arrives byte-for-byte.** The payload carries a
-//!    `tool_use` block with nested objects and arrays, and text in several
-//!    scripts plus an emoji, so that its byte length and its character length
-//!    differ. The assertion is on bytes and on that byte length, which is
-//!    what makes it fail for a gateway that preserved *meaning* — a JSON
-//!    round-trip that changed whitespace, key order or escaping would still
-//!    parse to the same document and is exactly the regression the capability
-//!    map forbids.
-//! 2. **A provider's error reaches the harness intact, and the diagnostic
-//!    keeps only its status.** Those are two halves of one rule and they pull
-//!    in opposite directions: the harness must see the whole body, and the
-//!    log must see none of it. Both are asserted on the same exchange, so an
-//!    implementation cannot satisfy one by giving up the other.
-//! 3. **No rendering carries either secret.** Every `Debug` this module can
-//!    reach, every response byte the client was sent, and the transport
-//!    error's own detail, scanned for a planted provider credential and for a
-//!    gateway token. Asserted twice: once over the paths a single-protocol
-//!    gateway had, and once over the three-protocol ones, because a routed
-//!    exchange and a refused-before-routing one render different fields.
-//! 4. **A request reaches the base URL its own protocol declared, and no
-//!    other.** The gateway serves up to three wire protocols from one
-//!    provider, each with its own base URL, and chooses between them on the
-//!    request target alone. The load-bearing half of every assertion here is
-//!    the negative one — the *other* base URLs were never connected to —
-//!    because the implementation this replaced appended every target to a
-//!    single base URL and would pass the positive half for all three.
-//! 5. **Streaming survives on every ingress.** The Anthropic path's twin of
-//!    this lives in [`mod@super`]; a gateway that started buffering only the
-//!    two new ones would leave that test green. The fixture blocks until the
-//!    client says it has the first chunk, so a buffering implementation
-//!    cannot produce the second one at all.
-//! 6. **A target belonging to no served protocol is refused, and nothing is
-//!    opened upstream.** Claude Code sends one such target before its first
-//!    request. The assertion is on the fixtures' *connection counts*: a
-//!    gateway that opened a connection, thought better of it and answered
-//!    `404` would pass an assertion on the status and would still have sent
-//!    a request somewhere nobody asked for it to go.
-//!
-//! # Two planted values, and why the token is planted twice
-//!
-//! [`PROVIDER_CREDENTIAL`] and [`PLANTED_TOKEN`] are known strings, so
-//! `!contains` on them is a real assertion rather than a shape check.
-//!
-//! The token is planted *and* a real minted one is used, because the two
-//! answer different questions. A minted token is 64 hex characters, and
-//! `mod.rs`'s `debug_on_a_gateway_token_prints_a_fixed_marker_and_never_the_token`
-//! records what goes wrong when short fragments of one are scanned for: hex
-//! runs occur in ordinary text, so the scan reports leaks that are
-//! coincidences and the test fails at random. A test that fails at random is
-//! worth less than no test. So the minted token — held by a real
-//! [`Gateway`] that really answered a request — is scanned for whole, and the
-//! *fragment* scan runs against a planted value drawn from an alphabet that
-//! makes a coincidence impossible rather than merely unlikely.
+//! History: design-decisions.md, "Trims: gateway module docs", conformance.rs module doc.
 
 #![cfg(test)]
 
 use std::io::{Read, Write};
 use std::net::{Ipv4Addr, Shutdown, SocketAddr, TcpListener, TcpStream};
-use std::sync::{Arc, Mutex, mpsc};
+use std::sync::{Arc, Barrier, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use clap::Parser;
@@ -852,13 +798,26 @@ fn a_rebind_during_an_in_flight_exchange_is_still_attributed_to_the_binding_that
     let tmp = tempfile::tempdir().unwrap();
     let ledger = evidence_ledger_fixture(tmp.path());
 
-    // Stalls before answering, so there is a real window between dispatch
-    // and completion for the test to re-bind into.
-    let fixture = FixtureUpstream::start(|_request, out| {
-        std::thread::sleep(Duration::from_millis(200));
-        let _ = write!(out, "HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{{}}");
-        let _ = out.flush();
-        let _ = out.shutdown(Shutdown::Write);
+    // Two rendezvous points replace the two sleeps that used to order
+    // dispatch against re-bind by guessing how long each side would take.
+    // `dispatched` releases once the fixture has the request in hand (before
+    // it does anything else), proving the exchange is genuinely in flight;
+    // the test then re-binds and releases `may_answer`, so the fixture's
+    // response cannot land until after the re-bind, whatever the runner's
+    // load. Neither wait can spuriously satisfy itself early: a `Barrier`
+    // only opens once both sides have called `wait`.
+    let dispatched = Arc::new(Barrier::new(2));
+    let may_answer = Arc::new(Barrier::new(2));
+    let fixture = FixtureUpstream::start({
+        let dispatched = Arc::clone(&dispatched);
+        let may_answer = Arc::clone(&may_answer);
+        move |_request, out| {
+            dispatched.wait();
+            may_answer.wait();
+            let _ = write!(out, "HTTP/1.1 200 OK\r\ncontent-length: 2\r\n\r\n{{}}");
+            let _ = out.flush();
+            let _ = out.shutdown(Shutdown::Write);
+        }
     });
     let gateway = gateway_to_with_evidence_ledger(&fixture, Arc::clone(&ledger));
 
@@ -875,16 +834,17 @@ fn a_rebind_during_an_in_flight_exchange_is_still_attributed_to_the_binding_that
         as_text(&send_and_read(address, &messages_request(&token, "{}")))
     });
 
-    // The exchange above has been dispatched (it is blocked inside the
-    // fixture's 200ms stall) but has not completed. Re-bind now, before it
-    // does.
-    std::thread::sleep(Duration::from_millis(50));
+    // The exchange above is now provably dispatched (the fixture has the
+    // request and is waiting on `may_answer`) but not complete. Re-bind now,
+    // before releasing the response.
+    dispatched.wait();
     gateway.routing().bind(
         "harness-b",
         ANTHROPIC_MESSAGES,
         AssignedModel::named("model-b"),
         gateway.upstream(),
     );
+    may_answer.wait();
 
     let response = in_flight.join().expect("the client thread does not panic");
     assert!(
@@ -2794,17 +2754,7 @@ fn every_turn_goes_to_the_assigned_backend_and_a_free_alternative_is_never_conne
 /// through a socket the test does not hold, neither half is visible on a
 /// platform that closes gracefully.
 ///
-/// The exchange is the unreachable-provider refusal, because that is the
-/// path that hands the request body to the outbound hop — where it is
-/// dropped unread when the connection fails — and then answers `502` with
-/// the body still on the wire. The body is 32 KiB deliberately: larger than
-/// the ingress's `BufReader`, so some of it is provably still in the
-/// kernel's receive queue rather than buffered in userspace, and far smaller
-/// than a loopback receive buffer, so the client's own `write_all` completes
-/// without the ingress reading anything for it to. Nothing is timed: the
-/// channel below carries the client's "the request is written" and the join
-/// carries "the response is complete", so there is no sleep standing in for
-/// either wait.
+/// History: design-decisions.md, "Trims: gateway module docs", conformance.rs `an_answered_client_sees_an_end_of_stream_with_nothing_of_its_own_left_unread`.
 #[test]
 fn an_answered_client_sees_an_end_of_stream_with_nothing_of_its_own_left_unread() {
     let token = GatewayToken(PLANTED_TOKEN.to_owned());

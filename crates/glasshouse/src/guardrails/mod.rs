@@ -1,66 +1,30 @@
 //! Phase 21K — assumption guardrails: the few premises a change rests on,
 //! **stated by the agent through the door**, recorded, tracked and surfaced.
 //!
-//! # The failure this counters, and the one thing Glasshouse never does
-//!
 //! Capability map line 996 names a model-independent failure mode: an
 //! uncertain inference silently becomes the premise of a large
-//! implementation, and is disproven only after substantial work. The
-//! guardrail is a small, deterministic mechanism around that moment — before
-//! a substantial change, ask for the few critical assumptions it rests on;
-//! record each with its evidence; track it; and tell the person when one is
-//! refuted.
+//! implementation, disproven only after substantial work. **Glasshouse never
+//! infers an assumption** (line 998); every record here was *said* by an
+//! agent, treated as untrusted text with no column for a rationale.
 //!
-//! **Glasshouse never infers an assumption.** It reads no transcript, no
-//! terminal output and no reasoning for one (line 998). Every record here was
-//! *said* by an agent, in the fields of `api::protocol::Request` and their
-//! MCP twins, and every field is treated as untrusted text: bounded, stripped
-//! of anything that could act on a terminal, and never rendered into a block
-//! that reaches an agent without the same discipline `crate::memory::inject`
-//! applies (see [`quote`]). There is no column for a rationale, no column for
-//! a chain of thought, and no request field that would carry one — the
-//! argument types on the MCP door refuse unknown fields outright.
+//! [`classify`] is a fixed, model-free ladder over the factors the agent
+//! states (line 1004); trivial, local, reversible edits are never gated
+//! (line 1005). [`decide`] turns the class into a [`Verdict`] — advisory by
+//! default, [`Verdict::Gated`] only for `guardrails.blocking` categories
+//! under `risk_gated`, every gate carrying who decided it and the override
+//! that lifts it. The preflight answers with **at most three** prompts.
 //!
-//! # Deterministic and cheap, and therefore honest about what it is
-//!
-//! [`classify`] is a fixed ladder over the factors the agent states about an
-//! intended change (line 1004): a migration, a destructive operation, a
-//! security or data-integrity impact, an unfamiliar integration, an
-//! architectural change, a broad refactor, a wide blast radius, an
-//! irreversible edit, a weakly evidenced premise, or simply a large
-//! footprint. The first rung that matches names the factor (line 1049), and
-//! **trivial, local, reversible edits are never gated** (line 1005). There is
-//! no model in the loop and no heuristic over text: a description is stored
-//! for the person to read and is never classified.
-//!
-//! [`decide`] turns the class into a [`Verdict`] from the configured
-//! [`GuardrailMode`] and the per-task [`GuardrailOverride`]. Advisory is the
-//! default and is non-blocking; only the categories in `guardrails.blocking`
-//! may ever answer [`Verdict::Gated`], and only under `risk_gated` (lines
-//! 1052, 1008). Every gate carries who decided it and the override that lifts
-//! it (line 1053).
-//!
-//! # A template, not a plan
-//!
-//! The preflight answers with **at most three** prompts (lines 1007, 1013)
-//! chosen from the factors that fired, plus a fixed page of guidance whose
-//! sentences are the map's own lines (997, 1009, 1024–1032, 1038, 1040–1043)
-//! rendered for the agent. The guidance is what makes those lines true of
-//! this build: Glasshouse cannot make an agent prefer direct evidence, but it
-//! can put that instruction in front of the agent at the one moment it
-//! matters, through a harness-independent door (line 1000).
-//!
-//! # Where the state lives
-//!
-//! [`store`] — two tables, one migration, append-only transitions. The
-//! current state of an assumption is its latest transition and nothing is
-//! ever `UPDATE`d; see that module's header for the schema and its triggers.
+//! [`store`] holds the state: two tables, append-only transitions, never
+//! `UPDATE`d. History: design-decisions.md, "Trims: the remaining module
+//! docs, second packet", guardrails/mod.rs module doc.
 
 pub mod store;
 
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
+
+use crate::session::{FileClaim, SessionId};
 
 pub use store::{
     AssumptionId, AssumptionRecord, AssumptionStore, AssumptionView, GuardrailError, NewAssumption,
@@ -1021,6 +985,12 @@ pub const GUIDANCE_SUBSTANTIAL: &[Guidance] = &[
                the user.",
     },
     Guidance {
+        line: 1044,
+        text: "Before reverting anything, exclude every path the reply lists under preserve — \
+               another live session or the user owns it; Glasshouse names them and reverts \
+               nothing.",
+    },
+    Guidance {
         line: 1042,
         text: "Preserve useful evidence and a concise failed-approach record even when the \
                implementation itself is discarded.",
@@ -1086,6 +1056,97 @@ pub const RESPONSES: &[ResponseOption] = &[
         means: "stop and ask the person",
     },
 ];
+
+/// The two [`RESPONSES`] choices line 1044 answers for — this table's own
+/// words: [`GuardrailResponse::RePlan`] discards the work built on the
+/// refuted premise ("re-plan from the premise that was refuted"), which is
+/// the rollback line 1041 names; [`GuardrailResponse::Handoff`] is the
+/// isolate/preserve-as-experiment choice — its own `means` already says "with
+/// a checkpoint", so handing off is how the invalidated experiment is kept
+/// rather than deleted. Neither `GuardrailResponse` variant is spelled
+/// "rollback" or "isolate"; these are the closest real ones, by the meaning
+/// the table already gives them, and this is where that reading lives so it
+/// is made once.
+const PRESERVING_RESPONSES: [GuardrailResponse; 2] =
+    [GuardrailResponse::RePlan, GuardrailResponse::Handoff];
+
+/// Whether an appended transition is one line 1044 answers for: a move to
+/// `refuted`, or one of the two rollback/isolate responses.
+pub fn transition_wants_preserve(
+    state: Option<AssumptionState>,
+    response: Option<GuardrailResponse>,
+) -> bool {
+    state == Some(AssumptionState::Refuted)
+        || response.is_some_and(|response| PRESERVING_RESPONSES.contains(&response))
+}
+
+/// The paths a rollback or isolation must not touch — capability map line
+/// 1044. Computed at the moment of the transition from three facts already
+/// on hand: which paths another live session has declared it is changing
+/// (`claims`), which paths the working tree currently reports changed
+/// (`changed`, `None` when that could not be read), and which session is
+/// doing the choosing (`session`). See
+/// `docs/product/design-decisions.md`, *Rollback preserves what is not
+/// yours*, for the ruling this implements.
+///
+/// `claimed_elsewhere` is exact — every entry is another session's own
+/// declared claim, never the transitioning session's. `unclaimed_changes` is
+/// conservative: a changed path the transitioning session never claimed
+/// lands here whether it is the user's edit or an unclaiming worker's own —
+/// Glasshouse cannot tell those two apart and does not try, because both are
+/// simply *not the experiment's*, which is the only distinction the line
+/// needs. A path claimed only by another session can therefore appear in
+/// both. `unclaimed_changes` is `None` exactly when `changed` is `None` — an
+/// unreadable tree stays *unknown*, never an empty list that reads as
+/// nothing to preserve.
+pub fn preserve_set(
+    claims: &[FileClaim],
+    changed: Option<&[String]>,
+    session: &SessionId,
+) -> PreserveSet {
+    let mut claimed_elsewhere: Vec<String> = claims
+        .iter()
+        .filter(|claim| &claim.session_id != session)
+        .map(|claim| claim.path.clone())
+        .collect();
+    claimed_elsewhere.sort();
+    claimed_elsewhere.dedup();
+
+    let unclaimed_changes = changed.map(|changed| {
+        let own: std::collections::BTreeSet<&str> = claims
+            .iter()
+            .filter(|claim| &claim.session_id == session)
+            .map(|claim| claim.path.as_str())
+            .collect();
+        let mut unclaimed: Vec<String> = changed
+            .iter()
+            .filter(|path| !own.contains(path.as_str()))
+            .cloned()
+            .collect();
+        unclaimed.sort();
+        unclaimed.dedup();
+        unclaimed
+    });
+
+    PreserveSet {
+        claimed_elsewhere,
+        unclaimed_changes,
+    }
+}
+
+/// The reply's own reading of what a rollback or isolation must not touch —
+/// [`preserve_set`]'s result, and the type the door's transition reply
+/// carries as `preserve` when [`transition_wants_preserve`] answers `true`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct PreserveSet {
+    /// Repo-relative paths under another live session's active claim,
+    /// deduplicated and sorted. Never the transitioning session's own.
+    pub claimed_elsewhere: Vec<String>,
+    /// Repo-relative paths the working tree reports changed that the
+    /// transitioning session never claimed. `None` only when the tree could
+    /// not be read at all.
+    pub unclaimed_changes: Option<Vec<String>>,
+}
 
 /// One axis of a budget review.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -1434,7 +1495,7 @@ mod tests {
             .collect();
         for line in [
             997, 1009, 1024, 1025, 1026, 1027, 1028, 1029, 1030, 1031, 1032, 1038, 1039, 1040,
-            1041, 1042, 1043,
+            1041, 1042, 1043, 1044,
         ] {
             assert!(lines.contains(&line), "guidance is missing line {line}");
         }
@@ -1505,5 +1566,121 @@ mod tests {
         let err = serde_json::from_str::<ChangeFactors>(r#"{"footprint": 1, "reasoning": "..."}"#)
             .unwrap_err();
         assert!(err.to_string().contains("reasoning"), "{err}");
+    }
+
+    // -----------------------------------------------------------------
+    // Line 1044 — the preserve set.
+    // -----------------------------------------------------------------
+
+    fn claim(session: &str, path: &str) -> FileClaim {
+        FileClaim {
+            session_id: SessionId::new(session),
+            path: path.to_owned(),
+            claimed_at: 0,
+            renewed_at: 0,
+            expires_at: 0,
+        }
+    }
+
+    #[test]
+    fn another_sessions_claim_is_preserved_and_the_transitioning_sessions_own_is_not() {
+        let a = SessionId::new("session-a");
+        let claims = [
+            claim("session-a", "src/mine.rs"),
+            claim("session-b", "src/b.rs"),
+        ];
+        let set = preserve_set(&claims, None, &a);
+        assert_eq!(set.claimed_elsewhere, vec!["src/b.rs".to_owned()]);
+        assert_eq!(set.unclaimed_changes, None);
+    }
+
+    #[test]
+    fn claimed_elsewhere_is_deduplicated_and_sorted() {
+        let a = SessionId::new("session-a");
+        let claims = [
+            claim("session-c", "z.rs"),
+            claim("session-b", "a.rs"),
+            claim("session-b", "a.rs"),
+        ];
+        let set = preserve_set(&claims, None, &a);
+        assert_eq!(
+            set.claimed_elsewhere,
+            vec!["a.rs".to_owned(), "z.rs".to_owned()]
+        );
+    }
+
+    #[test]
+    fn unclaimed_changes_excludes_the_transitioning_sessions_own_claim() {
+        let a = SessionId::new("session-a");
+        let claims = [claim("session-a", "src/mine.rs")];
+        let changed = vec!["src/mine.rs".to_owned(), "notes.md".to_owned()];
+        let set = preserve_set(&claims, Some(&changed), &a);
+        assert_eq!(set.unclaimed_changes, Some(vec!["notes.md".to_owned()]));
+    }
+
+    /// A path claimed only by another session is conservative in both
+    /// halves at once: it is that session's own claim, and it is also a
+    /// change the transitioning session never claimed.
+    #[test]
+    fn a_path_claimed_only_by_another_session_can_appear_in_both() {
+        let a = SessionId::new("session-a");
+        let claims = [claim("session-b", "src/b.rs")];
+        let changed = vec!["src/b.rs".to_owned()];
+        let set = preserve_set(&claims, Some(&changed), &a);
+        assert_eq!(set.claimed_elsewhere, vec!["src/b.rs".to_owned()]);
+        assert_eq!(set.unclaimed_changes, Some(vec!["src/b.rs".to_owned()]));
+    }
+
+    /// An unreadable working tree stays *unknown* — never an empty list that
+    /// would read as nothing to preserve.
+    #[test]
+    fn an_unreadable_tree_is_none_not_empty() {
+        let a = SessionId::new("session-a");
+        let set = preserve_set(&[], None, &a);
+        assert_eq!(set.unclaimed_changes, None);
+    }
+
+    #[test]
+    fn a_clean_readable_tree_is_some_empty() {
+        let a = SessionId::new("session-a");
+        let set = preserve_set(&[], Some(&[]), &a);
+        assert_eq!(set.unclaimed_changes, Some(Vec::new()));
+    }
+
+    #[test]
+    fn transition_wants_preserve_on_refuted_regardless_of_response() {
+        assert!(transition_wants_preserve(
+            Some(AssumptionState::Refuted),
+            None
+        ));
+        assert!(transition_wants_preserve(
+            Some(AssumptionState::Refuted),
+            Some(GuardrailResponse::Continue)
+        ));
+    }
+
+    #[test]
+    fn transition_wants_preserve_on_the_rollback_and_isolate_responses() {
+        assert!(transition_wants_preserve(
+            Some(AssumptionState::Supported),
+            Some(GuardrailResponse::RePlan)
+        ));
+        assert!(transition_wants_preserve(
+            None,
+            Some(GuardrailResponse::Handoff)
+        ));
+    }
+
+    #[test]
+    fn transition_wants_preserve_is_false_for_every_other_combination() {
+        assert!(!transition_wants_preserve(
+            Some(AssumptionState::Supported),
+            Some(GuardrailResponse::Continue)
+        ));
+        assert!(!transition_wants_preserve(
+            Some(AssumptionState::Probing),
+            Some(GuardrailResponse::Verify)
+        ));
+        assert!(!transition_wants_preserve(None, None));
     }
 }

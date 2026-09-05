@@ -1,36 +1,7 @@
 //! Phase 9K — what a *response profile* is: communication policy, and nothing
 //! else.
 //!
-//! # A response profile is not a [`LaunchProfile`](super::LaunchProfile)
-//!
-//! They share a module because a module is where related vocabulary lives, and
-//! they share nothing else. A [`LaunchProfile`](super::LaunchProfile) says which harness runs,
-//! against which backend, with which model and which approval mode — it can
-//! refuse a session, spend a credential, and change what the agent is allowed
-//! to do. A [`ResponseProfile`] says how the answer should read. It cannot
-//! refuse anything, it holds no credential, and Phase 10's own architectural
-//! requirement keeps the two separately represented rather than collapsed into
-//! one identifier.
-//!
-//! The map's first fixed architectural requirement for this phase is the whole
-//! of it:
-//!
-//! > Response profiles govern user-facing communication only and remain
-//! > independent from reasoning depth, diligence, validation, permissions,
-//! > safety, and tool use.
-//!
-//! So there is deliberately no field here for effort, no field for permission
-//! mode, and no field for tool access. Those exist elsewhere in Glasshouse —
-//! [`ApprovalSelection`](super::ApprovalSelection) is the permission one — and
-//! a response profile that could set them would be the collapse the
-//! requirement forbids.
-//!
 //! # Five axes, because the map says five, and they are independent
-//!
-//! Lines 588–592 name verbosity, audience, progress narration, evidence
-//! presentation and final-answer format, each *independently*. They are five
-//! fields of five types, and the independence is structural rather than
-//! promised:
 //!
 //! - no `From`/`Into` exists between any two of them, so a value of one can
 //!   never be assigned to another;
@@ -42,38 +13,7 @@
 //! Phase 9J's three compatibility axes are the precedent, and the mutation
 //! that matters is the same one: a build in which one axis quietly sets
 //! another is killed by `the_five_dimensions_are_independent`.
-//!
-//! # Concision never reduces diagnostics
-//!
-//! The second fixed requirement says a response profile must not *"use
-//! concision to suppress diagnostics, evidence, or verification"*, and line
-//! 594 spells out what a concise preset still owes: changed files,
-//! verification, risks and blockers.
-//!
-//! That is enforced by making it unable to vary. [`REQUIRED_REPORTS`] is a
-//! constant, [`ResponseProfile::required_reports`] returns it without reading
-//! `self`, and [`ResponseProfile::directives`] appends
-//! [`floor_directive`] to *every* profile it renders,
-//! whatever the five axes say. There is no combination of the 4 × 3 × 3 × 3 ×
-//! 3 = 324 that can drop it, and
-//! `every_profile_reports_changed_files_verification_risks_and_blockers`
-//! enumerates all 324 rather than sampling.
-//!
-//! A sentence in a prompt would have been the other way to do this, and it is
-//! the way the requirement was written to prevent.
-//!
-//! # This module imports no configuration and no adapter
-//!
-//! The same rule, and the same reason, as [`mod@super`] and
-//! [`mod@crate::harness::pairing`]: the caller reads configuration, asks the
-//! adapter, and hands the resolved values in. [`resolve`] is a pure function
-//! of the layers it is given — no file, no environment, no ambient lookup —
-//! and `crate::config::response` is the caller that rule assumes.
-//!
-//! In particular nothing here knows the word "output style". That vocabulary
-//! belongs to one harness, it reaches Glasshouse through
-//! [`crate::harness::response`], and line 603 requires it to stay an adapter
-//! example rather than becoming a universal Glasshouse concept.
+// History: design-decisions.md, "Trims: gateway, profile and provider module docs", profile/response.rs module doc.
 
 use std::fmt;
 

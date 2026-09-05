@@ -3,60 +3,30 @@
 //! [`classify`] is a third, independent thing: not a policy that picks a
 //! backend, but the lightweight, model-optional classification of a request
 //! (Phase 35) that a future policy — Phase 34F/35B, neither built yet — would
-//! read before picking one. Nothing in this module or its siblings consumes
-//! a [`classify::TaskClassification`] today; see that module's doc comment.
+//! read before picking one; nothing here consumes a
+//! [`classify::TaskClassification`] today.
 //!
-//! # Two policy classes, and the reason they are two types
+//! Phase 9I line 533's two policy classes are separated **structurally**:
+//! [`interactive::InteractiveRouting`] and [`disposable::DisposableRouting`]
+//! have distinct result types with no conversion between them; neither
+//! module names the other
+//! (`tests::the_two_policy_classes_do_not_name_each_other` scans both); and
+//! they decide differently on identical input — given a catalogue where a
+//! free and a paid model both serve, disposable picks the free one and
+//! interactive keeps the backend the session started on.
 //!
-//! Phase 9I line 533 asks Glasshouse to *"keep interactive harness routing
-//! and disposable-support-job routing as separate policy classes"*. That
-//! sentence is easy to satisfy on paper and easy to lose: one router with a
-//! `disposable: bool` parameter would read as compliance and would be one
-//! careless call site away from routing a live coding session the way a
-//! throwaway classification job is routed.
+//! Nothing here opens a socket, resolves a credential, or reads the clock:
+//! every function is pure over values the caller supplies, including `now`
+//! (never [`std::time::Instant::now`] called inside a policy) — a policy
+//! that could probe would eventually spend the free requests Phase 9I line
+//! 534 protects, and one reading its own clock could not be tested for a
+//! cooldown boundary without waiting for one.
 //!
-//! So the separation here is **structural**, in three independent ways:
-//!
-//! 1. [`interactive::InteractiveRouting`] and
-//!    [`disposable::DisposableRouting`] are distinct types with distinct
-//!    result types — [`interactive::Assignment`] and
-//!    [`disposable::DisposableChoice`]. Neither result converts into the
-//!    other: there is no `From`, no `Into`, no shared trait, and no public
-//!    field on either, so a caller holding one cannot produce the other
-//!    without going through the policy that mints it.
-//! 2. Neither module names the other. `interactive.rs` contains no mention
-//!    of `disposable`, and `disposable.rs` none of `interactive`;
-//!    `tests::the_two_policy_classes_do_not_name_each_other` scans both
-//!    sources to keep it that way, the same move
-//!    `gateway::mod`'s import scan already makes.
-//! 3. They **decide differently on identical input**, which is the part that
-//!    matters: given one catalogue in which a free model and a paid model
-//!    both serve, the disposable class picks the free one and the
-//!    interactive class keeps the backend the session started on. A test
-//!    that only checked the type separation would pass for a router that had
-//!    quietly become one policy.
-//!
-//! # What this module refuses to do
-//!
-//! Nothing here opens a socket, resolves a credential, or reads the clock.
-//! Every function is a pure function of values the caller supplies —
-//! including `now`, which is a parameter and never [`std::time::Instant::now`]
-//! called inside a policy. That is not tidiness:
-//!
-//! - a policy that could probe would eventually probe, and Phase 9I line 534
-//!   says free requests must not be spent on health probes (see
-//!   [`free::FreePool`], whose only mutator is fed by real workload);
-//! - a policy that read its own clock could not be tested for a cooldown
-//!   boundary without waiting for one.
-//!
-//! # Credentials appear here only as names
-//!
-//! [`CredentialId`] holds a [`SecretRef`] — an environment variable name, or
-//! a store service and account. Never a value. Phase 9I lines 537 and 538
-//! require quota state to be tracked *per credential*, which means a
-//! credential has to be a map key, and a map key is a thing that gets
-//! printed. `SecretRef` is already the one shape in Glasshouse that is safe
-//! to write into a tracked configuration file, so it is the one used here.
+//! [`CredentialId`] holds a [`SecretRef`], never a value, because Phase 9I
+//! lines 537/538 require quota state per credential, so a credential is a
+//! map key — and `SecretRef` is the one shape in Glasshouse already safe to
+//! write into a tracked configuration file.
+// History: design-decisions.md, "Trims: routing module docs", routing/mod.rs module doc.
 
 pub mod burn;
 pub mod capability;
@@ -302,33 +272,23 @@ impl AssignedModel {
     }
 }
 
-/// Whether a change of backend leaves provider-side prompt caching usable.
-///
-/// # Pinning down "likely", because Phase 9H line 516 uses that word
-///
-/// The line is *"warn when failover is likely to invalidate provider-side
-/// prompt caching"*, and a capability whose trigger is a feeling is not a
-/// capability. So the rule is written down once, here, and every warning in
+/// Whether a change of backend leaves provider-side prompt caching usable —
+/// Phase 9H line 516's "warn when failover is likely to invalidate
+/// provider-side prompt caching", written down once so every warning in
 /// Glasshouse comes from it:
 ///
-/// - **Different provider.** The cache is held by the provider. A request
-///   that goes to a different service reaches a cache that never saw this
-///   conversation. Certain, so [`CacheLocality::Lost`].
-/// - **Different model.** A provider-side cache is keyed by the model as well
-///   as the prefix — a cached prefix for one model is not a cached prefix for
-///   another. Certain, so [`CacheLocality::Lost`].
-/// - **Same provider and model, different credential.** Provider-side caches
-///   are commonly scoped to the account a key belongs to, and Glasshouse has
-///   established that for **no** configured provider — every template in
+/// - **Different provider or different model**: certain, [`CacheLocality::Lost`],
+///   since the cache is held by the provider and keyed by the model as well
+///   as the prefix.
+/// - **Same provider and model, different credential**: [`CacheLocality::LikelyLost`],
+///   a likelihood rather than a fact, since Glasshouse has established
+///   account-scoping for **no** configured provider — every template in
 ///   [`crate::provider::templates`] declares its capabilities `Unverified`.
-///   So this is the case the map's "likely" is actually about, and it is
-///   [`CacheLocality::LikelyLost`]: warned, and said as a likelihood rather
-///   than as a fact.
-/// - **Nothing moved.** [`CacheLocality::Preserved`].
+/// - **Nothing moved**: [`CacheLocality::Preserved`].
 ///
-/// The consequence worth stating: rotating a credential (Phase 9I line 537)
-/// is a cache event too, which is not obvious and is why the rule is a
-/// function rather than a comment.
+/// Rotating a credential (Phase 9I line 537) is a cache event too, which is
+/// why this is a function rather than a comment.
+// History: design-decisions.md, "Trims: routing module docs", routing/mod.rs `enum CacheLocality` doc.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CacheLocality {
     /// The request still goes to the same provider, model and credential.
@@ -1106,26 +1066,20 @@ pub enum TierRelation {
 /// The seam map line 1970's tier-preserving fallback consumes: are these two
 /// destinations' models of the same user-assigned capability tier?
 ///
-/// # The axis, now landed
-///
-/// `classify::WorkloadTier` ranks *how hard the task is*, and
-/// `capability::CapabilityAxis` answers *can it do this at all* — neither is
-/// "how capable is this model, relative to others". Phase 34F's answer to
-/// that question is the resolved ceiling a user assigns a model (an
-/// override, or a capability record's own `ceiling`): the same `WorkloadTier`
-/// vocabulary, read as *the tier this model is trusted to serve*. The caller
-/// resolves that once per destination — `main.rs::destination_tier_ceiling`,
-/// beside where it attaches [`session::Destination::with_tier_ceiling`] — and
-/// attaches it via [`session::Destination::with_capability_tier`]; this
-/// function compares the two attached values and reads no configuration of
-/// its own, matching every other free function in this module.
+/// Neither `classify::WorkloadTier` (how hard the task is) nor
+/// `capability::CapabilityAxis` (can it do this at all) answers "how capable
+/// is this model, relative to others" — Phase 34F's answer is the resolved
+/// ceiling a user assigns a model, in the same `WorkloadTier` vocabulary,
+/// read as *the tier this model is trusted to serve*. The caller resolves
+/// that once per destination and attaches it via
+/// [`session::Destination::with_capability_tier`]; this function only
+/// compares the two attached values.
 ///
 /// [`TierRelation::Unknown`] is not [`TierRelation::Same`]: a destination
 /// whose model nobody assigned a tier answers unknown, and the fallback's
-/// tier steps never fire on it — the ruling's own direction, *"You can't put
-/// a fable 5 task and switch it to a nemotron v3"*, and a fallback that
-/// silently downgrades the model *"is worse than a refusal, because the work
-/// continues and looks fine"*.
+/// tier steps never fire on it — the ruling's own direction, that a
+/// fallback silently downgrading the model is worse than a refusal.
+// History: design-decisions.md, "Trims: routing module docs", routing/mod.rs `fn same_capability_tier`.
 pub fn same_capability_tier(
     from: Option<crate::routing::classify::WorkloadTier>,
     to: Option<crate::routing::classify::WorkloadTier>,
