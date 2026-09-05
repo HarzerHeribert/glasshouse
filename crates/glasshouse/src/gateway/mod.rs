@@ -1,46 +1,23 @@
 //! The local Glasshouse gateway: the process, and now its protocol (Phase
 //! 9G).
 //!
-//! # What the gateway is, and the one thing it must never become
-//!
 //! The gateway is an **optional local proxy** — a transport, credential,
 //! telemetry, reliability and backend-routing hop for requests that originate
 //! in a real harness. It is never a coding harness, never an agent loop,
 //! never the owner of an interactive session, and never a replacement for a
-//! harness's own tools. Glasshouse's whole premise is that the harness stays
-//! the harness; a gateway that started driving a model would quietly undo
-//! that.
+//! harness's own tools.
 //!
 //! That rule is **structural here rather than promised**. No file in this
 //! directory imports `crate::session`, `crate::shell`, `crate::tui` or
 //! `crate::harness`, and
 //! `tests::the_gateway_imports_none_of_the_modules_that_would_make_it_a_harness`
-//! scans every one of them to keep it that way. A module that cannot see the
-//! session model cannot own a session, and a reviewer can check that with a
-//! source scan instead of reading for intent — the same move
-//! `harness::no_adapter_depends_on_the_session_model` already makes for the
-//! adapters.
-//!
-//! # What this module owns, and what the ingress owns
-//!
-//! Here: a listener, an address, a token, an upstream, and the moment each of
-//! them stops existing. In `ingress`: what happens on one connection. In
-//! `http`: the small amount of HTTP that routing needs. In [`upstream`]:
-//! where a request goes and the credential it goes with. In [`translate`]:
-//! the one branch of the ingress that may parse a body — a target the
-//! provider does not serve, for a pair the table supports (Phase 56).
-//!
-//! # Loopback, and an ephemeral port
+//! scans every one of them to keep it that way.
+//! History: design-decisions.md, "Trims: gateway/mod.rs", module doc.
 //!
 //! The listener binds `127.0.0.1:0`. Loopback is not a default waiting to be
 //! overridden: there is no configuration in this module that could bind
 //! anywhere else, so a gateway that is reachable from the network cannot be
-//! produced by getting a setting wrong. Port `0` asks the operating system
-//! for a free port and is what lets two Glasshouse instances on one machine
-//! coexist — neither one names a port, so neither can contend for one. The
-//! port that was actually chosen is read back with `local_addr` and kept.
-//!
-//! # The token is an authentication secret, not an identifier
+//! produced by getting a setting wrong.
 //!
 //! `session::store`'s native session identifiers come from SQLite's
 //! `randomblob`, and that is right for an identifier: it needs to be unique.
@@ -53,26 +30,17 @@
 //! [`crate::secret::Secret`] treats a credential: no `Display`, no `Deref`,
 //! no `AsRef<str>`, no serde, and a manual [`Debug`](std::fmt::Debug) that
 //! prints [`crate::secret::REDACTED`] — the same marker, not a second one
-//! invented here. It lives in memory for the lifetime of one instance and is
-//! never written to a log, a diagnostic, or a file.
-//!
-//! # The credential the child never sees
+//! invented here.
 //!
 //! A gateway-backed child harness is given [`GatewayToken`] and **not** the
-//! provider's key. The gateway checks that token on arrival and attaches the
-//! real credential itself, from an [`upstream::Upstream`] that holds it in
-//! this process's memory. So the value in the child's environment is
-//! worthless off this machine and dies with the instance — which is the
-//! whole of "never expose provider API keys to a child harness when the
-//! local gateway can hold the credential itself".
-//!
-//! # Blocking threads, deliberately
+//! provider's key. So the value in the child's environment is worthless off
+//! this machine and dies with the instance — which is the whole of "never
+//! expose provider API keys to a child harness when the local gateway can
+//! hold the credential itself".
 //!
 //! Glasshouse has no async runtime and this phase does not add one for a
 //! single-user loopback proxy. One thread accepts; each accepted connection
-//! gets a thread of its own and blocks on it. The cost is one thread per
-//! in-flight request, which for one developer's harness is a number in the
-//! low single digits.
+//! gets a thread of its own and blocks on it.
 
 mod http;
 mod ingress;
@@ -214,51 +182,22 @@ impl fmt::Debug for GatewayToken {
 /// authenticates against it, the upstream it forwards to, and the thread
 /// that accepts.
 ///
-/// # Shutdown, and why it is a polled flag
-///
 /// `accept` blocks, and a blocked `accept` cannot be interrupted portably.
 /// Dropping a `Gateway` must still return promptly, so the listener is set
 /// **non-blocking** and the accept thread polls a stop flag every
 /// `ACCEPT_POLL` (25ms), then joins.
-///
-/// **Why this and not the alternative.** The other portable trick is to
-/// connect to your own listener to wake the accept. It is worse here on
-/// every platform and worst on Windows: the wake-up connection races with a
-/// real client's, so the loop may accept the client and leave the wake-up in
-/// the backlog; and a self-connect on Windows can be delayed or refused by
-/// local filtering software, which turns "shut down" into "hang until a
-/// firewall decides". Non-blocking accept, by contrast, is the same code on
-/// all three platforms — `ioctlsocket(FIONBIO)` on Windows, `O_NONBLOCK`
-/// elsewhere — and `WSAEWOULDBLOCK` reaches Rust as
-/// [`ErrorKind::WouldBlock`] exactly as `EWOULDBLOCK` does. Nothing here is
-/// conditional on the platform, so there is no platform-specific path to get
-/// wrong.
+/// History: design-decisions.md, "Trims: gateway/mod.rs", Gateway struct doc.
 ///
 /// The consequence that *is* platform-specific is handled where it lands: on
 /// Windows and the BSDs (including macOS) an accepted socket inherits the
 /// listener's non-blocking flag, while on Linux it does not — so `ingress`
 /// clears it on every accepted stream rather than assuming.
 ///
-/// # Lifetime
-///
 /// Dropping this value stops the accept loop, joins its thread, and with it
 /// drops the listener, which releases the port. That covers a normal return
 /// and an unwinding panic alike.
 ///
-/// In-flight connection threads are **not** joined. A streaming response can
-/// legitimately be minutes long, and a shutdown that waited for one would be
-/// the hang this design exists to avoid; those threads own their own sockets
-/// and end when their exchange does, or when the process exits.
-///
-/// It deliberately registers **no** [`crate::shutdown::on_forced_exit`]
-/// cleanup, for two reasons that both matter. First, that hook exists for
-/// resources which *survive* [`std::process::exit`] — a harness left running
-/// in its own session with nothing to hang it up. A listening socket is not
-/// one of those: it is a descriptor owned by this process, and process exit
-/// closes it and releases the port on every platform Glasshouse supports.
-/// Second, that registry holds exactly one callback, so registering here
-/// would silently displace the one an attached session installs to kill its
-/// harness — trading a cleanup that is unnecessary for one that is not.
+/// In-flight connection threads are **not** joined.
 #[derive(Debug)]
 pub struct Gateway {
     address: SocketAddr,
@@ -302,20 +241,13 @@ impl Gateway {
     /// boundary between this gateway and a later `glasshouse resources`
     /// invocation.
     ///
-    /// `None` reproduces [`Self::start`] exactly: nothing is ever written to
-    /// disk, and every existing caller of [`Self::start`] — including every
-    /// test in [`super::conformance`] that runs a real accept loop — is
-    /// unaffected. **No caller resolves
-    /// [`crate::paths::RuntimePaths::resolve`] here, and none may be added
-    /// here**: this module has never had a project or a data directory in
-    /// scope, and a gateway that resolved its own OS-standard directory
-    /// would write into whichever machine happens to be running `cargo test`
-    /// every time a conformance test forwards a request with a rate-limit
-    /// header — see [`crate::provider::telemetry::GatewayQuotaCache`]'s own
-    /// doc for why that is the wrong owner for the resolve step. A caller
-    /// that wants persistence resolves its own
+    /// `None` reproduces [`Self::start`] exactly. No caller resolves
+    /// [`crate::paths::RuntimePaths::resolve`] here, and none may be added:
+    /// this module has never had a project or a data directory in scope. A
+    /// caller that wants persistence resolves its own
     /// [`crate::paths::RuntimePaths`] and hands this a
     /// [`crate::provider::telemetry::GatewayQuotaCache::new`] built from it.
+    /// History: design-decisions.md, "Trims: gateway/mod.rs", start_with_quota_cache doc.
     ///
     /// Private on purpose, exactly as [`Self::start`] is: reached from
     /// outside this module only through [`start_if_required_with_quota_cache`].
@@ -328,31 +260,16 @@ impl Gateway {
 
     /// [`Self::start_with_quota_cache`], with a
     /// [`crate::routing::evidence::EvidenceLedger`] every real forwarded
-    /// exchange that has been bound to an assignment is recorded to —
-    /// capability map Phase 33A, this package's own production producer. See
-    /// [`crate::gateway::session::SessionRouting::record_routing_observation`]
-    /// for exactly what is and is not recorded from one exchange.
-    ///
-    /// `None` reproduces [`Self::start_with_quota_cache`] exactly — the same
-    /// additive guarantee that constructor already gives
-    /// [`Self::start`], and for the same reason: this module has never had a
-    /// project or a data directory in scope (see
-    /// [`Self::start_with_quota_cache`]'s own doc), so a caller that wants a
-    /// durable evidence ledger resolves its own [`crate::Runtime`] and hands
-    /// this an already-opened
-    /// [`crate::routing::evidence::EvidenceLedger::open`].
-    ///
-    /// **Not called from `crates/glasshouse/src/main.rs` today** — the same
-    /// gap [`Self::start_with_quota_cache`]'s own doc records for the quota
-    /// cache, and for the identical reason: `main.rs` is this package's
-    /// `FORBIDDEN FILES`. See the report for the exact patch.
-    ///
-    /// `health_cache` is [`crate::provider::telemetry::GatewayHealthCache`],
-    /// capability map lines 1311/1321/1322/1324's own bridge, additive the
-    /// identical way `quota_cache` is: `None` writes nothing and reproduces
-    /// this function's pre-health-cache behaviour exactly, so every existing
-    /// caller — including every [`super::conformance`] test that does not
-    /// pass one — is unaffected.
+    /// exchange bound to an assignment is recorded to — capability map Phase
+    /// 33A. `health_cache` is
+    /// [`crate::provider::telemetry::GatewayHealthCache`], capability map
+    /// lines 1311/1321/1322/1324's bridge, additive the same way: `None` for
+    /// either parameter reproduces [`Self::start_with_quota_cache`] exactly,
+    /// so every existing caller — including every [`super::conformance`]
+    /// test — is unaffected. **Not called from
+    /// `crates/glasshouse/src/main.rs` today** — `main.rs` is this package's
+    /// `FORBIDDEN FILES`; see the report for the exact patch.
+    /// History: design-decisions.md, "Trims: gateway/mod.rs", start_with_telemetry doc.
     ///
     /// Private on purpose: reached from outside this module only through
     /// [`start_if_required_with_telemetry`].
@@ -766,25 +683,19 @@ fn accept_loop(
 /// normally.
 ///
 /// **Deliberately narrower than [`FreePool::is_available`].** That check
-/// alone cannot be the guard here, because it folds two different kinds of
-/// cooldown into one bool: a provider's own declared wait, which line 1319
-/// makes authoritative, and a bounded cooldown Glasshouse *invents* after
-/// ordinary repeated failures. Phase 9I line 534 and
-/// [`routing::free`](crate::routing::free)'s own `MAX_COOLDOWN` doc make the
-/// second kind deliberately still probed by real work — "the only way to
-/// find out ... is to let real work try it" — and
-/// `gateway::conformance::a_pinned_session_stays_on_its_failing_provider_and_never_reaches_the_other_one`
-/// pins that: three ordinary `503`s must all still reach the provider. Only
-/// the first kind is what line 1368 asks to stop retrying in place, so this
-/// reads the most recent rate-limit headers this gateway observed —
-/// [`SessionRouting::quota_headers`], already public for capability map line
-/// 1229 — rather than trusting the pool's bool to say why it is `false`.
+/// folds two kinds of cooldown into one bool: a provider's own declared wait
+/// (line 1319 makes this authoritative) and a bounded cooldown Glasshouse
+/// invents after ordinary repeated failures, which real work must still be
+/// allowed to probe (Phase 9I line 534,
+/// `gateway::conformance::a_pinned_session_stays_on_its_failing_provider_and_never_reaches_the_other_one`).
+/// Only the first kind is what line 1368 asks to stop retrying in place, so
+/// this reads the most recent rate-limit headers this gateway observed
+/// rather than trusting the pool's bool for why it is `false`.
+/// History: design-decisions.md, "Trims: gateway/mod.rs", paced_refusal doc.
 ///
-/// A sibling credential of the same provider is still offered the chance to
-/// serve in its place first; deciding to actually rotate to it is
-/// [`session::SessionRouting::observe_exchange`]'s own job, on the exchange
-/// that runs, and this only asks whether one exists, so it never mutates the
-/// assignment itself.
+/// A sibling credential is still offered the chance to serve first; actually
+/// rotating to it is [`session::SessionRouting::observe_exchange`]'s own job,
+/// so this never mutates the assignment itself.
 fn paced_refusal(
     routing: &SessionRouting,
     upstream: &Upstream,
@@ -943,27 +854,21 @@ pub fn start_if_required_with_telemetry(
 
 /// [`start_if_required_with_telemetry`], with a [`DegradeSink`] a started
 /// gateway calls once per exchange whose outcome is a genuine gateway
-/// failure — map line 1735, "detect gateway failure separately from harness
-/// process failure."
+/// failure — map line 1735.
 ///
-/// `None` reproduces [`start_if_required_with_telemetry`] exactly, the same
-/// additive guarantee every sink on this door already gives.
-///
-/// `crates/glasshouse/src/main.rs` calls this at **both** of its gateway
-/// launch sites — `launch_session` and the resume path's
-/// `resolve_resume_overlay` — and passes a real sink at each.
+/// `None` reproduces [`start_if_required_with_telemetry`] exactly.
+/// `crates/glasshouse/src/main.rs` calls this at both of its gateway launch
+/// sites — `launch_session` and the resume path's `resolve_resume_overlay`
+/// — passing a real sink at each.
 ///
 /// # The ownership answer, because the obvious one does not compile
 ///
 /// A sink needs an `EventBus` and a session list, and neither exists when
-/// either site starts its gateway: the launch path opens its `EventRecorder`
-/// 184 lines later, and has no `SessionRecord` at all until the store has
-/// created one. So the sink cannot close over them. `main.rs::DegradeRelay`
-/// is what it closes over instead — a handle created before the gateway and
-/// filled once both halves exist, which holds any failure that arrives in
-/// between and replays it on installation. A failure in that window is
-/// therefore neither a panic nor a silent loss, and nothing on this start
-/// path waits for the recorder to be ready.
+/// either site starts its gateway. `main.rs::DegradeRelay` is what it closes
+/// over instead — a handle created before the gateway and filled once both
+/// halves exist, replaying any failure that arrived in between. Nothing on
+/// this start path waits for the recorder to be ready.
+/// History: design-decisions.md, "Trims: gateway/mod.rs", start_if_required_with_degrade_sink doc.
 pub fn start_if_required_with_degrade_sink(
     profiles: &[LaunchProfile],
     upstream: impl FnOnce() -> Result<Upstream>,
