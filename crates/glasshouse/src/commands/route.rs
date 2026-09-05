@@ -369,24 +369,52 @@ fn route_outcomes_section(runtime: &Runtime) -> String {
     // session, because the gateway that ranks a failover holds no Glasshouse
     // session id — see `EvaluationKind::FailoverPrevented`.
     let preventions = ledger.counts_by_subject(EvaluationKind::FailoverPrevented, from, to);
+    // Map line 1837. Counted rather than joined, for the same reason: what
+    // this asks is *how often*, over every high-tier launch in the window.
+    let reserve_availability =
+        ledger.counts_by_subject(EvaluationKind::ReserveAvailabilityObserved, from, to);
 
-    let (by_class, by_pairing, pairing_responsiveness, by_evidence, by_tier, preventions) = match (
+    let (
         by_class,
         by_pairing,
         pairing_responsiveness,
         by_evidence,
         by_tier,
         preventions,
+        reserve_availability,
+    ) = match (
+        by_class,
+        by_pairing,
+        pairing_responsiveness,
+        by_evidence,
+        by_tier,
+        preventions,
+        reserve_availability,
     ) {
-        (Ok(class), Ok(pairing), Ok(responsiveness), Ok(evidence), Ok(tier), Ok(preventions)) => {
-            (class, pairing, responsiveness, evidence, tier, preventions)
-        }
+        (
+            Ok(class),
+            Ok(pairing),
+            Ok(responsiveness),
+            Ok(evidence),
+            Ok(tier),
+            Ok(preventions),
+            Ok(reserve_availability),
+        ) => (
+            class,
+            pairing,
+            responsiveness,
+            evidence,
+            tier,
+            preventions,
+            reserve_availability,
+        ),
         (Err(err), ..)
         | (_, Err(err), ..)
         | (_, _, Err(err), ..)
         | (_, _, _, Err(err), ..)
-        | (_, _, _, _, Err(err), _)
-        | (_, _, _, _, _, Err(err)) => {
+        | (_, _, _, _, Err(err), ..)
+        | (_, _, _, _, _, Err(err), _)
+        | (_, _, _, _, _, _, Err(err)) => {
             // `WindowNotRetained` is the honest one: retention trimmed rows
             // this window reaches back past, and a smaller number would be a
             // fabrication. It is reported, not rounded away.
@@ -402,8 +430,9 @@ fn route_outcomes_section(runtime: &Runtime) -> String {
         // no routed sessions, and returning early would hide it behind an
         // unrelated emptiness.
         return format!(
-            "{header}\n  no routed sessions recorded in this window\n{}",
-            render_failover_preventions(&preventions)
+            "{header}\n  no routed sessions recorded in this window\n{}{}",
+            render_failover_preventions(&preventions),
+            render_reserve_availability(&reserve_availability)
         );
     }
 
@@ -434,6 +463,7 @@ fn route_outcomes_section(runtime: &Runtime) -> String {
     // reading only one store per function.
     out.push_str(&expected_vs_actual_output_tokens_block(runtime, from, to));
     out.push_str(&render_failover_preventions(&preventions));
+    out.push_str(&render_reserve_availability(&reserve_availability));
     out.push_str(
         "\nA session whose harness never reported a turn end is counted as neither a success \
          nor a failure; a quiet or exited process is never read as either.\n",
@@ -929,6 +959,55 @@ fn render_failover_preventions(counts: &[(String, i64)]) -> String {
         "\n  {prevented} of {total} gateway failovers went somewhere the failure-domain term \
          changed the winner to — that many were steered off a candidate sharing the failed \
          backend's provider (map line 1851)\n"
+    )
+}
+
+/// Map line 1837: how often protected quota remained available for a
+/// high-tier task at the moment it was routed.
+///
+/// `counts` is [`EvaluationKind::ReserveAvailabilityObserved`]'s subjects —
+/// [`glasshouse::provider::quota::CapacityBand`] words, or `"unknown"` for a
+/// destination with no reading. *Available* sums every band above
+/// [`glasshouse::provider::quota::CapacityBand::Reserve`]
+/// (`Tight`, `Healthy`, `Plenty`); below
+/// [`glasshouse::routing::evidence::MIN_SAMPLE_FOR_SUMMARY`] total rows,
+/// the sentence honestly says there is not enough to summarise rather than
+/// printing a ratio nobody could act on.
+fn render_reserve_availability(counts: &[(String, i64)]) -> String {
+    use glasshouse::provider::quota::CapacityBand;
+    use glasshouse::routing::evidence::MIN_SAMPLE_FOR_SUMMARY;
+
+    let count_of = |band: &str| -> i64 {
+        counts
+            .iter()
+            .find(|(subject, _)| subject == band)
+            .map(|(_, count)| *count)
+            .unwrap_or_default()
+    };
+    let total: i64 = counts.iter().map(|(_, count)| *count).sum();
+    if total < MIN_SAMPLE_FOR_SUMMARY as i64 {
+        return format!(
+            "\n  protected quota for high-tier tasks (1837): not enough high-tier launches \
+             ({total})\n"
+        );
+    }
+
+    let available = [
+        CapacityBand::Tight,
+        CapacityBand::Healthy,
+        CapacityBand::Plenty,
+    ]
+    .iter()
+    .map(|band| count_of(band.as_str()))
+    .sum::<i64>();
+    let at_reserve = count_of(CapacityBand::Reserve.as_str());
+    let exhausted = count_of(CapacityBand::Exhausted.as_str());
+    let unknown = count_of("unknown");
+
+    format!(
+        "\n  protected quota for high-tier tasks (1837): available {available} · at reserve \
+         {at_reserve} · exhausted {exhausted} · unknown {unknown} of {total} high-tier \
+         launches\n"
     )
 }
 

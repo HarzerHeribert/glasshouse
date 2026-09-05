@@ -1834,7 +1834,7 @@ Phase 51 — Evaluation hooks
 ☑ Measure how often workload-tier classification predicts successful execution without escalation.
 ☑ Measure how often a low-cost or free route succeeds compared with the premium route it displaced.
 ☑ Measure the accuracy of estimated subscription headroom against observed throttling and resets.
-☐ Measure how often protected quota remains available for high-tier tasks when needed.
+☑ Measure how often protected quota remains available for high-tier tasks when needed.
 ☐ Measure how often a critical assumption is refuted before broad implementation versus after substantial edits.
 ☐ Measure elapsed time, tool rounds, and changed-file churn between the first unsupported premise and its correction.
 ☐ Measure how much implementation work is discarded or substantially rewritten after an assumption is invalidated.

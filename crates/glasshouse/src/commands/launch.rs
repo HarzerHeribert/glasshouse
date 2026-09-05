@@ -1028,6 +1028,16 @@ pub(crate) fn launch_session(
                 classified.as_ref(),
                 observed_at,
             );
+            // Map line 1837, on the same instant: whether protected quota
+            // remained available for this launch, from the tier the decision
+            // used and the destination's own capacity band.
+            glasshouse::evaluation::record_reserve_availability(
+                runtime,
+                routed.chosen().id(),
+                routed_tier(classified.as_ref()),
+                routed.chosen().capacity_facts().band(),
+                observed_at,
+            );
             // Line 1467: the session this work landed on is the sticky one.
             remember_classification(&sticky_cache, classified.as_ref(), routed.chosen().id());
             // Line 1716, on the path that migrates. Taken before
@@ -1670,6 +1680,16 @@ pub(crate) fn launch_session(
             runtime,
             record.id.as_str(),
             classified.as_ref(),
+            observed_at,
+        );
+        // Map line 1837, on the same instant: whether protected quota
+        // remained available for this launch, from the tier the decision
+        // used and the destination's own capacity band.
+        glasshouse::evaluation::record_reserve_availability(
+            runtime,
+            record.id.as_str(),
+            routed_tier(classified.as_ref()),
+            routed.chosen().capacity_facts().band(),
             observed_at,
         );
     }

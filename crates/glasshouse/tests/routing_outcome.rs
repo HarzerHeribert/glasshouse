@@ -41,6 +41,19 @@ const CREDENTIAL_VAR: &str = "GLASSHOUSE_ROUTING_OUTCOME_KEY";
 const FREE_MODEL: &str = "probe/free-model";
 const METERED_MODEL: &str = "probe/premium-model";
 
+/// A task `classify_heuristically` reads as **standard**-tier code
+/// modification — the same text `tests/tier_escalation.rs`'s
+/// `STANDARD_REPO_TASK` uses, written out so a classifier change fails these
+/// tests rather than rescaling with them.
+const STANDARD_TASK: &str = "refactor the launch profile handling in this project";
+
+/// A task the same heuristics read as **heavy** (`run ` is a shell keyword),
+/// from heuristics and no model call — `tests/tier_escalation.rs`'s own
+/// `HEAVY_SHELL_TASK`. This fixture's destinations are direct-provider
+/// backends with no subscription quota reading, so a launch classified at
+/// this tier is the case line 1837 calls `unknown`.
+const HEAVY_TASK: &str = "run the tests in this project";
+
 fn tempdir() -> tempfile::TempDir {
     tempfile::tempdir().unwrap()
 }
@@ -121,12 +134,31 @@ impl Fixture {
     /// not start — a launch that quietly refused would make every assertion
     /// below vacuous.
     fn launch(&self, profile: &str) -> String {
+        self.launch_args(&["launch", "claude-code", "--headless", "--profile", profile])
+    }
+
+    /// Launch under `profile`, classified by `task` — the same fixture,
+    /// with a `--task` argument the heuristic classifier reads without a
+    /// model call, exactly as `tests/tier_escalation.rs`'s `HEAVY_SHELL_TASK`
+    /// does.
+    fn launch_with_task(&self, profile: &str, task: &str) -> String {
+        self.launch_args(&[
+            "launch",
+            "claude-code",
+            "--headless",
+            "--profile",
+            profile,
+            "--task",
+            task,
+        ])
+    }
+
+    fn launch_args(&self, args: &[&str]) -> String {
         let before = self.session_ids();
-        let launched =
-            self.glasshouse(&["launch", "claude-code", "--headless", "--profile", profile]);
+        let launched = self.glasshouse(args);
         assert!(
             launched.status.success(),
-            "the launch under `{profile}` must succeed:\n{}",
+            "the launch must succeed:\n{}",
             both_streams(&launched)
         );
         let mut created: Vec<String> = self
@@ -137,7 +169,7 @@ impl Fixture {
         assert_eq!(
             created.len(),
             1,
-            "a launch under `{profile}` must create exactly one session; before: {before:?}"
+            "a launch must create exactly one session; before: {before:?}"
         );
         created.remove(0)
     }
@@ -224,6 +256,17 @@ impl Fixture {
             .into_iter()
             .find(|row| row.session_id.as_deref() == Some(session))
             .and_then(|row| row.subject)
+    }
+
+    /// The `(subject, detail)` a [`EvaluationKind::ReserveAvailabilityObserved`]
+    /// row recorded for one session, or `None` when no such row exists.
+    fn reserve_availability_of(&self, session: &str) -> Option<(Option<String>, Option<String>)> {
+        self.ledger()
+            .recent_of_kind(EvaluationKind::ReserveAvailabilityObserved, 50)
+            .unwrap()
+            .into_iter()
+            .find(|row| row.session_id.as_deref() == Some(session))
+            .map(|row| (row.subject, row.detail))
     }
 }
 
@@ -495,5 +538,97 @@ fn a_session_with_no_routing_decision_records_no_outcome() {
     assert!(
         fixture.cost_class_of(record.id.as_str()).is_none(),
         "and nothing attributed a route to it either"
+    );
+}
+
+/// **Acceptance 5** (map line 1837). A launch classified above the routine
+/// tier records the destination's capacity band as its protected-quota
+/// reading — `unknown` here, because this fixture's direct-provider
+/// destinations carry no subscription capacity reading at all.
+#[test]
+fn a_heavy_tier_launch_records_reserve_availability_as_unknown_with_no_reading() {
+    let tmp = tempdir();
+    let fixture = Fixture::new(tmp.path());
+
+    let session = fixture.launch_with_task("freebie", HEAVY_TASK);
+
+    let (subject, detail) = fixture
+        .reserve_availability_of(&session)
+        .expect("a heavy-tier launch must record a protected-quota reading");
+    assert_eq!(
+        subject.as_deref(),
+        Some("unknown"),
+        "a destination with no capacity reading must record `unknown`, never a fabricated band"
+    );
+    assert_eq!(
+        detail.as_deref(),
+        Some("heavy"),
+        "detail is the tier word the routing decision used"
+    );
+}
+
+/// **Acceptance 6** (map line 1837). A launch at or below the routine tier,
+/// and a launch that states no task at all, write no protected-quota row —
+/// *needed* is the line's own word.
+#[test]
+fn a_standard_or_unclassified_launch_writes_no_reserve_availability_row() {
+    let tmp = tempdir();
+    let fixture = Fixture::new(tmp.path());
+
+    let standard = fixture.launch_with_task("freebie", STANDARD_TASK);
+    assert!(
+        fixture.reserve_availability_of(&standard).is_none(),
+        "a standard-tier launch is routine support work, and 1837 asks about the reserve the \
+         routine tier does not draw on"
+    );
+
+    let unclassified = fixture.launch("freebie");
+    assert!(
+        fixture.reserve_availability_of(&unclassified).is_none(),
+        "a launch with no `--task` classified nothing, so there is no tier for 1837 to ask about"
+    );
+}
+
+/// **Acceptance 7** (map line 1837). `glasshouse route` prints the
+/// denominator-carrying summary once there are enough high-tier launches to
+/// summarise, and the honest *not enough* sentence below that floor.
+#[test]
+fn route_outcomes_section_prints_the_protected_quota_line() {
+    let tmp = tempdir();
+    let fixture = Fixture::new(tmp.path());
+
+    // Below `MIN_SAMPLE_FOR_SUMMARY`: one high-tier launch is not enough to
+    // summarise as a rate.
+    fixture.launch_with_task("freebie", HEAVY_TASK);
+    let sparse = both_streams(&fixture.glasshouse(&["route"]));
+    assert!(
+        sparse.contains(
+            "protected quota for high-tier tasks (1837): not enough high-tier \
+                          launches (1)"
+        ),
+        "below the sample floor, the line must say so rather than print a ratio nobody could \
+         act on:\n{sparse}"
+    );
+
+    // Four more take the window to five, `MIN_SAMPLE_FOR_SUMMARY`'s own
+    // floor — every one of them lands on the same unread destination, so
+    // the whole count is `unknown` and none is `available`, `at reserve` or
+    // `exhausted`.
+    for _ in 0..4 {
+        fixture.launch_with_task("freebie", HEAVY_TASK);
+    }
+    let report = both_streams(&fixture.glasshouse(&["route"]));
+    let normalised = report.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        normalised.contains(
+            "protected quota for high-tier tasks (1837): available 0 · at reserve 0 · \
+             exhausted 0 · unknown 5 of 5 high-tier launches"
+        ),
+        "the summary must carry all four counts and their shared denominator:\n{report}"
+    );
+    assert!(
+        !report.contains("(1837): not enough"),
+        "at the floor the summary form must replace the not-enough sentence, not sit beside \
+         it:\n{report}"
     );
 }

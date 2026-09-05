@@ -257,6 +257,23 @@ pub enum EvaluationKind {
     /// rather than a fabricated zero; see
     /// [`crate::evaluation::record_routing_consumption_estimate`]'s own doc comment.
     RoutingConsumptionEstimated,
+    /// Whether protected quota remained available for a task the reserve
+    /// exists to protect — map line 1837, design decision *"Protected
+    /// quota's availability is recorded when a high-tier task is routed, and
+    /// read back as a rate"* (2026-09-05). Decided at the moment a launch is
+    /// routed, from two facts the router already holds: the task's workload
+    /// tier ([`RoutingTier`], the same value [`Self::RoutingTierObserved`]
+    /// records) and the chosen destination's capacity band
+    /// (`Destination::capacity_facts().band()`).
+    ///
+    /// **Written only when the tier is `Heavy` or `Frontier`** — the tiers
+    /// the reserve exists to protect; a `Standard`, `Leaf`, `Deterministic`
+    /// or unclassified launch writes nothing, because *needed* is the line's
+    /// own word. `subject` is the band the router read, in
+    /// [`crate::provider::quota::CapacityBand`]'s own spelling, or
+    /// `"unknown"` when the destination carried no reading; `detail` is the
+    /// tier word; `session_id` is the launched session's.
+    ReserveAvailabilityObserved,
 }
 
 /// The `subject` this ledger writes for a destination whose cost class no
@@ -476,6 +493,7 @@ impl EvaluationKind {
             Self::TurnOutcomeObserved => "turn_outcome_observed",
             Self::SessionRouteDecided => "session_route_decided",
             Self::RoutingConsumptionEstimated => "routing_consumption_estimated",
+            Self::ReserveAvailabilityObserved => "reserve_availability_observed",
         }
     }
 
@@ -502,6 +520,7 @@ impl EvaluationKind {
             "turn_outcome_observed" => Some(Self::TurnOutcomeObserved),
             "session_route_decided" => Some(Self::SessionRouteDecided),
             "routing_consumption_estimated" => Some(Self::RoutingConsumptionEstimated),
+            "reserve_availability_observed" => Some(Self::ReserveAvailabilityObserved),
             _ => None,
         }
     }

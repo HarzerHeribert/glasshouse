@@ -358,6 +358,73 @@ pub fn record_routing_consumption_estimate(
     }
 }
 
+/// Record whether protected quota remained available for a high-tier launch
+/// — the producer for [`EvaluationKind::ReserveAvailabilityObserved`], map
+/// line 1837.
+///
+/// Its callers are `commands::launch`'s two routed exits, called beside
+/// [`record_routing_consumption_estimate`] on the same `observed_at_unix`.
+///
+/// **Written only when the tier is [`crate::routing::classify::WorkloadTier::Heavy`]
+/// or [`crate::routing::classify::WorkloadTier::Frontier`]** — the tiers the
+/// reserve exists to protect. A launch classified at or below
+/// [`crate::routing::classify::WorkloadTier::Standard`], or not classified at
+/// all, returns without writing: *needed* is the line's own word, and a row
+/// for routine support work would answer a question line 1837 does not ask.
+///
+/// # What is stored
+///
+/// `subject` is `band.map(CapacityBand::as_str).unwrap_or("unknown")` — the
+/// destination's own band when the router read one, and the honest
+/// `"unknown"` bucket when it did not, never a fabricated band. `detail` is
+/// the tier word ([`RoutingTier::as_str`]); `session_id` is the launched
+/// session's.
+///
+/// **This never fails a launch**, exactly as [`record_routing_consumption_estimate`]
+/// does not: it is on a person's own command path and an evaluation row is
+/// not worth a session.
+pub fn record_reserve_availability(
+    runtime: &Runtime,
+    session_id: &str,
+    tier: RoutingTier,
+    band: Option<crate::provider::quota::CapacityBand>,
+    observed_at_unix: i64,
+) {
+    use crate::routing::classify::WorkloadTier;
+
+    let workload_tier = match tier {
+        RoutingTier::Unclassified => None,
+        RoutingTier::Classified { tier, .. } => Some(tier),
+    };
+    match workload_tier {
+        Some(WorkloadTier::Heavy) | Some(WorkloadTier::Frontier) => {}
+        _ => return,
+    }
+
+    let observation = NewObservation::new(EvaluationKind::ReserveAvailabilityObserved)
+        .with_subject(band.map_or("unknown", crate::provider::quota::CapacityBand::as_str))
+        .with_session_id(session_id)
+        .with_detail(tier.as_str());
+
+    let ledger = match EvaluationObservations::open(runtime) {
+        Ok(ledger) => ledger,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "could not open the evaluation ledger; the session is routed, but its \
+                 protected-quota reading was not recorded"
+            );
+            return;
+        }
+    };
+    if let Err(err) = ledger.record(observation, observed_at_unix) {
+        tracing::warn!(
+            error = %err,
+            "could not record a high-tier launch's protected-quota reading"
+        );
+    }
+}
+
 /// Record one launch's session-boundary routing decision — the producer for
 /// [`EvaluationKind::RoutingOverrideDecided`] and
 /// [`EvaluationKind::RoutingContinuationDecided`], map lines 1829 and 1830.
