@@ -345,15 +345,6 @@ pub(crate) fn rate_route(
 /// Map lines 1834, 1835, 1845 and 1854, printed for a person — the consumer
 /// half of this package, and the reason its producers are not Cluster B.
 ///
-/// # Why it lives in `glasshouse route` rather than in a command of its own
-///
-/// `route` is the report about routing: it already prints the ranking, the
-/// override, and what the ranking could not see. *How the routes this project
-/// took actually turned out* is the same subject and the same reader, and a
-/// second command would have meant a new `Command` variant in `cli.rs` —
-/// a file two other workers are editing this round (practice §77). Nothing
-/// here decides anything; the recommendation above is computed without it.
-///
 /// # The rules this rendering exists to hold
 ///
 /// Every ratio prints its denominator and no ratio prints a percentage — a
@@ -361,12 +352,7 @@ pub(crate) fn rate_route(
 /// `unknown` is its own bucket in every table, never folded into a
 /// neighbour, and a session whose harness never reported a turn end is
 /// counted as exactly that: not a failure, and not a success.
-///
-/// # Practice §65
-///
-/// The ledger is opened here, in the one function that reads it, and dropped
-/// when this returns. `route` is a command a person types; a ledger that
-/// cannot be opened costs this section and never the report.
+// History: design-decisions.md, "Trims: commands module docs, third packet", route.rs `route_outcomes_section`.
 fn route_outcomes_section(runtime: &Runtime) -> String {
     use glasshouse::evaluation::{EvaluationKind, EvaluationObservations};
 
@@ -810,26 +796,11 @@ const SUPPORT_WORK_RECENT_LIMIT: usize = 10;
 /// harness choice can rest on evidence rather than on which vendor bills
 /// for it.
 ///
-/// Two ledgers, joined in Rust rather than in SQL, because they hold
-/// different rows for different reasons. The outcome-and-task-class half
-/// comes from
-/// [`glasshouse::evaluation::EvaluationObservations::outcomes_by_tier_and_harness`]
-/// — `evaluation_observations` joined to `sessions.harness`, exactly
-/// [`tier_outcome_section`]'s own join with a harness dimension added, one
-/// row per (harness, task class). The token/wall-clock/request-count half
-/// comes from
-/// [`glasshouse::routing::evidence::EvidenceLedger::request_stats_by_harness`]
-/// — `routing_observations.harness`, written directly at record time — and
-/// is computed once per harness rather than per task class, because
-/// `routing_observations` carries no tier at all; the same per-harness
-/// figures are printed on every task-class row for that harness. That is
-/// the box line's own split: *"tokens, wall-clock, request count"*
-/// unqualified, *"outcome … by task class"* qualified.
-///
 /// A harness with no `routing_observations` rows in the window (every
 /// session routed but nothing dispatched yet) prints `0 request(s)` and
 /// *"not exposed on 0 of 0 exchanges"* rather than being silently dropped
 /// from the token/wall-clock figures.
+// History: design-decisions.md, "Trims: commands module docs, third packet", route.rs `harness_efficiency_section`.
 fn harness_efficiency_section(runtime: &Runtime) -> String {
     use glasshouse::evaluation::{EvaluationObservations, TierOutcomeVerdict};
     use glasshouse::routing::evidence::EvidenceLedger;
@@ -1378,24 +1349,7 @@ pub(crate) enum NoRoute {
 /// routing observation — which is the whole of line 1681's *"without
 /// executing it"*, and is asserted over the shipped binary in
 /// `tests/routing_api.rs`.
-///
-/// One qualification since Phase 34D: with a routing model **configured** and
-/// a `--task` stated, this asks that model exactly as a launch would — so the
-/// two cannot disagree about the classification — and the *cost* of that one
-/// call is recorded under `purpose = "classification"`, as every routing-model
-/// call is. That is a fact about what the diagnostic spent, not about the
-/// work, which is still not executed. It never writes the sticky
-/// classification record a launch leaves behind (`remember_classification`),
-/// because a preview is not a decision.
-///
-/// Two differences from the launch path, both stated in the rendered output
-/// rather than hidden:
-///
-/// 1. it ranks across **every enabled harness**, because a caller asking
-///    where work should go has not yet chosen one, whereas a launch has;
-/// 2. it includes sessions that are still **running** (`DestinationScope`),
-///    because "switch to that terminal" is an answer a person can act on and
-///    is not one a second process can carry out.
+// History: design-decisions.md, "Trims: commands module docs, third packet", route.rs `route_recommendation`.
 pub(crate) fn route_recommendation(
     runtime: &Runtime,
     effective: &EffectiveConfig<'_>,

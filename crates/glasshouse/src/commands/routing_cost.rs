@@ -72,63 +72,7 @@ pub(crate) fn routing_cost_report(runtime: &Runtime, hours: u32) -> anyhow::Resu
 /// coding-agent group, below, that this bites hardest: it has a real request
 /// count and no token count at all, and the two must never be allowed to
 /// look like the same kind of absence.
-///
-/// Capability map line 1331's gateway half applies the same rule to a
-/// different pair of columns: `first-byte samples` is a real count (honestly
-/// `0` when nothing timed), and `time to first byte` is `render_time_to_first_byte`'s
-/// own *not recorded* — never `0ms` — for exactly that case. Unlike the token
-/// columns above, the coding-agent group is the one group this build **can**
-/// honestly time, because a first-byte instant is a clock reading rather than
-/// a read of the response body: a relayed exchange whose reply the gateway
-/// could not read leaves the token columns `NULL`, and a `NULL` column
-/// prints as *not counted*, never `0`.
-///
-/// `GH-STREAM-FIRST-EVENTS` (lines 1331/1332) adds two more such pairs beside
-/// it, `first-token`/`TTFT` and `first-tool-call`/`TTFC` — but only a
-/// **translated** exchange can ever supply a sample for either:
-/// `crate::gateway::translate` decodes every provider event anyway, so the
-/// instant a qualifying one passes is a clock reading, same as the byte
-/// above; a relayed exchange leaves both `NULL`.
-///
-/// `GH-TOOL-ROUNDS-ON-TRANSLATED` (1334's last two quantities and 1350) adds
-/// one more line, `tool rounds`, through [`render_tool_rounds`]: rounds
-/// begun, repairs, and rounds per minute of the group's summed serving time
-/// — *not recorded*, never `0`, for a group that never counted a round. It is
-/// printed as an outcome-adjacent measure and never folded into a score, the
-/// same restraint `render_savings_section` and this function's own token
-/// figures already keep.
-///
-/// # Phase 33B's four figures, and why they are four lines
-///
-/// `GH-STREAM-TIMING-MS` gives those latency lines a resolution worth
-/// comparing (`crate::database` migration 25) and names them for what each
-/// one measures:
-///
-/// - **`TTFC (tool-using responsiveness)`** — line 1347. The primary
-///   responsiveness measure for tool-using agent work, and *primary* here is
-///   the label and the position: it leads the four, ahead of TTFT.
-/// - **`TTFT (generation responsiveness)`** — line 1348. Kept as a separate
-///   measure of generation responsiveness and never presented as agent
-///   productivity, which is why it is not merged into the line above it.
-/// - **`decode tokens/s (model serving)`** — line 1349, through
-///   [`render_decode_rate`]. A characteristic of how the model is served,
-///   never a statement about task progress.
-/// - **`tool rounds`** — line 1350, unchanged.
-///
-/// **Line 1355 is the restraint that governs all four**: raw TTFC, TTFT,
-/// throughput and rounds per minute stay visible separately rather than
-/// collapsing into one performance headline. There is no total here, no
-/// score, and no arithmetic joining any two of them — each is its own line
-/// with its own label and its own *not recorded*. `effective TTFC`, the
-/// fifth figure 1355 names, has no producer in this build at all; when
-/// `GH-EFFECTIVE-TTFC` supplies one it gets a line of its own under the same
-/// rule and never a slot inside one of these.
-///
-/// `(seconds only)` on a latency line is [`render_latency_ms`]'s marker for
-/// a group whose rows all predate migration 25: the figure is a
-/// one-second clock rendered in milliseconds, which is honest and nearly
-/// useless, and saying so is cheaper than letting a reader compare it
-/// against a measured one.
+// History: design-decisions.md, "Trims: commands module docs, third packet", routing_cost.rs `render_routing_cost`.
 #[allow(clippy::too_many_arguments)]
 fn render_routing_cost(
     project_id: &str,

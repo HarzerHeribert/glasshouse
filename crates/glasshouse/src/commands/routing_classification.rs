@@ -66,15 +66,9 @@ pub(crate) fn heuristic_answer(
     )
 }
 
-/// Classify the work a routing decision is about — Phase 34D's producer,
-/// and the one place the four Phase 34E economy rules this package closes
-/// are decided.
-///
 /// Returns `None` when no task was stated: no request is built, no model is
 /// asked, no ledger is opened, and the caller hands the router
 /// `TaskRequirements::default()` exactly as it did before this existed.
-///
-/// With a task, in this order:
 ///
 /// 1. **An explicit destination is deterministic** (line 1470). `--to` or
 ///    `--fresh` decides; heuristics classify for the explanation only and
@@ -90,10 +84,7 @@ pub(crate) fn heuristic_answer(
 ///    rendered [`RouterRequest`] as the request text. A model that does not
 ///    answer usably falls back to heuristics and says so on stderr, exactly
 ///    as `glasshouse classify` does.
-///
-/// Line 1459 is applied by every reader of the answer rather than here:
-/// [`RouterAnswer::requirements`] carries the *conservative* tier, and
-/// [`RouterAnswer::explain`] says when confidence was low and what it did.
+// History: design-decisions.md, "Trims: commands module docs, third packet", routing_classification.rs `classify_for_routing`.
 pub(crate) fn classify_for_routing(
     runtime: &Runtime,
     effective: &EffectiveConfig<'_>,
@@ -455,19 +446,12 @@ pub(crate) const EXTRACTION_PURPOSE: &str = glasshouse::routing::evidence::EXTRA
 /// [`disposable_extraction_model`] chooses a resource, says so, and calls
 /// nothing.
 ///
-/// That is deliberately stricter than "the user has configured a free
-/// model". A free-model list is a statement about cost; it is not a request
-/// that a hook running **inside a coding session** start making outbound
-/// requests. Line 834 says *configurable*, and this is the configuration.
-///
 /// **What consent does not decide is *which* resource serves.** Once it is
 /// given, [`disposable_extraction_model`] puts the named model into the
 /// candidate set beside the user's own free ones and lets
 /// `DisposableRouting::choose` rank them — line 530's *prefer free models
 /// when quality is sufficient*, on the path that actually spends something.
-/// It used to bypass the router entirely, which meant the policy chose only
-/// when nothing would be called and the model that was called had never been
-/// routed.
+// History: design-decisions.md, "Trims: commands module docs, third packet", routing_classification.rs `configured_extraction_choice`.
 fn configured_extraction_choice(
     effective: &EffectiveConfig<'_>,
 ) -> Option<glasshouse::config::ExtractionModelRef> {
@@ -516,10 +500,6 @@ fn configured_provider(
     }
 }
 
-/// The configured extraction model as one more resource
-/// `DisposableRouting::choose` may rank — map line 530 applied to the model
-/// the user named for this job.
-///
 /// # `None` is not a refusal, it is *not expressible as a candidate*
 ///
 /// A [`glasshouse::routing::disposable::DisposableCandidate`] carries a
@@ -538,6 +518,7 @@ fn configured_provider(
 /// provider's free list is `Free`, and one nobody marked is `Metered` and is
 /// gated by Phase 32F's protected reserve exactly like any other metered
 /// candidate.
+// History: design-decisions.md, "Trims: commands module docs, third packet", routing_classification.rs `configured_extraction_candidate`.
 fn configured_extraction_candidate(
     user: &UserConfig,
     project: Option<&ProjectConfig>,
@@ -663,14 +644,6 @@ fn extraction_client_for(
 /// made durable for the next process that dispatches one — Phase 9I line
 /// 534's other half, across a process boundary.
 ///
-/// # Why this is here and not in `routing`
-///
-/// `crate::routing::disposable` may not name a cache, a path or the
-/// interactive policy class (`the_two_policy_classes_do_not_name_each_other`),
-/// and `crate::routing::free` is a pure value. The bridge belongs to the
-/// caller that has both, which is this file — the same place
-/// [`observed_health_of`] reads the identical cache back.
-///
 /// # The merge, and the one thing it costs
 ///
 /// [`glasshouse::provider::telemetry::GatewayHealthCache::store`] replaces a
@@ -685,10 +658,7 @@ fn extraction_client_for(
 /// earned (map line 1854's *stale* half). The alternative is discarding it
 /// outright, which is worse, and the deadline that actually gates scheduling
 /// is an absolute unix second on the entry itself and is unaffected.
-///
-/// A failure here is one debug line: this runs inside a hook process, and
-/// Glasshouse's bookkeeping is never more important than the session it keeps
-/// books about.
+// History: design-decisions.md, "Trims: commands module docs, third packet", routing_classification.rs `persist_support_work_health`.
 fn persist_support_work_health(
     paths: &glasshouse::paths::RuntimePaths,
     resource: &glasshouse::routing::free::FreeResource,
@@ -755,13 +725,6 @@ fn persist_support_work_health(
     cache.store(&provider, &entries, now_unix);
 }
 
-/// Phase 9I lines 530, 531 and 540's production caller, and
-/// GH-ROUTED-EXTRACTION-CLIENT's: route this extraction through
-/// `glasshouse::routing::disposable::DisposableRouting` over the resources
-/// the user has actually configured, report the choice, and — when the user
-/// has consented to a model being called at all — perform the extraction
-/// through the resource that won.
-///
 /// # The order, and what each step decides
 ///
 /// 1. **Consent** ([`configured_extraction_choice`]): no `[memory]
@@ -776,11 +739,7 @@ fn persist_support_work_health(
 /// 4. **The client**: resolved for the resource that won, by
 ///    [`extraction_client_for`], through the same `SecretStore` path
 ///    everything else here uses.
-///
-/// Falls back to [`NoExtractionModel`] when the configuration cannot be
-/// read at all — the same non-fatal-to-the-session posture
-/// [`report_hook_with`]'s own doc comment describes for every other failure
-/// on this path.
+// History: design-decisions.md, "Trims: commands module docs, third packet", routing_classification.rs `disposable_extraction_model`.
 pub(crate) fn disposable_extraction_model(
     runtime: &Runtime,
     session: &glasshouse::session::SessionId,
@@ -990,18 +949,7 @@ pub(crate) fn disposable_extraction_model(
     // count, so a pool that keeps losing races ends in `NoResource` rather
     // than in a loop, and **nothing waits**: a hook process is a guest in
     // the harness's turn.
-    //
-    // # When the policy stands by a candidate the pool cannot withdraw
-    //
-    // `FreePool::is_available` is the gate every **free** candidate passes
-    // through, so withholding a credential's whole remainder removes it. A
-    // **metered** candidate is ranked by the protected-reserve policy
-    // instead and is not withdrawn by an empty request pool — that is
-    // `routing::disposable`'s own rule and not this caller's to change. So a
-    // credential whose claim was refused is remembered, and a policy that
-    // chooses it again ends the loop: the dispatch proceeds exactly as it
-    // did before this line had a producer, and the explanation says the
-    // allowance was spoken for rather than letting it pass in silence.
+    // History: design-decisions.md, "Trims: commands module docs, third packet", routing_classification.rs `disposable_extraction_model` (claim-refusal note).
     let mut lease = None;
     if consented.is_some() {
         let mut refused: Vec<String> = Vec::new();
@@ -1094,20 +1042,7 @@ pub(crate) fn disposable_extraction_model(
     // that was *used*, not a second decision made for the ledger's benefit.
     // Asking `routing.choose` again here would produce a different `Instant`
     // and could produce a different answer.
-    //
-    // # Which thread, and why it is safe (practice §65)
-    //
-    // This one, the hook process's main thread, and *before* anything is
-    // spawned. `report_hook_with` evaluates `model(&id)` — this function — as
-    // an argument to `run_extraction`, so Rust has finished here before
-    // `run_extraction` opens the event log, opens `ProjectMemory`, or starts
-    // the extraction thread that owns that memory handle for as long as the
-    // bound allows. The ledger handle is therefore opened, used and dropped
-    // while this process holds exactly one other connection to the project
-    // database — the `ProjectSessions` handle `report_hook_with` is sitting
-    // on, which is idle and holds no lock — and that is the same shape
-    // `EventRecorder::open(runtime).record_observed(..)` on this very path
-    // already has. Nothing here outlives the turn, and no handle is kept.
+    // History: design-decisions.md, "Trims: commands module docs, third packet", routing_classification.rs `disposable_extraction_model` (thread-safety note).
     //
     // Every branch that reaches here made a routing decision, including the
     // consented one — which is the change: the model that gets called is now
@@ -1195,15 +1130,7 @@ pub(crate) fn memory_extraction_diagnostics_enabled(runtime: &Runtime) -> bool {
 /// to the next candidate or to `NoResource` in today's words, and
 /// `routing::disposable` neither gains a rule nor learns that a cache
 /// exists.
-///
-/// One credential is asked once however many models it serves: an allowance
-/// is per credential (line 538), and two models behind one key draw down one
-/// pool.
-///
-/// `notes` collects the sentence a person needs to understand a fallback
-/// they did not expect — the policy can say *"this resource cannot serve"*
-/// but not *"because another dispatch is already spending its last
-/// request"*.
+// History: design-decisions.md, "Trims: commands module docs, third packet", routing_classification.rs `withhold_reserved_requests`.
 fn withhold_reserved_requests(
     reservations: &glasshouse::provider::telemetry::DispatchReservationCache,
     pool: &mut glasshouse::routing::free::FreePool,
@@ -1266,30 +1193,10 @@ fn reserved_elsewhere_note(credential_label: &str, model: &str, remaining: u32) 
 /// currently resolve, contributes nothing — never a candidate with an
 /// invented model name or a credential this process cannot actually use.
 ///
-/// # Where the metered half comes from, and why it is not a permission gate
-///
-/// `docs/product/design-decisions.md`'s *"Metered capacity for background
-/// jobs"* records that ordinary support work may spend metered quota as a
-/// last resort. [`ProviderConfig::metered_models`] **is** that decision
-/// applied per provider, not a switch that sits above it: an empty list is
-/// the coherent off state (this function then builds only free candidates
-/// for that provider, exactly as before this batch), and naming a model
-/// there is the user's decision already made — nothing here asks again.
-/// Whether a candidate this loop builds is actually *usable* is
-/// [`glasshouse::routing::disposable::DisposableRouting::choose`]'s job:
-/// free capacity still wins whenever any can serve (line 533), and Phase
-/// 32F's protected-reserve policy still gates every metered one.
-///
 /// A model named in both lists resolves through
 /// [`ProviderConfig::cost_of`] — `Free` wins, and it is added once, not
 /// twice.
-///
-/// Each candidate carries whatever real capacity data `telemetry` has cached
-/// for its provider — map lines 1536 and 1549, the same
-/// [`glasshouse::provider::resources::observed_capacity`] `resources_report`
-/// reads for `glasshouse resources`, applied here for the first time to a
-/// candidate a routing *decision* actually ranks rather than only a report a
-/// person reads.
+// History: design-decisions.md, "Trims: commands module docs, third packet", routing_classification.rs `disposable_candidates`.
 pub(crate) fn disposable_candidates(
     user: &UserConfig,
     project: Option<&ProjectConfig>,
@@ -1577,10 +1484,7 @@ fn classification_model(
 /// model reached around this function is a model whose cost nothing decided,
 /// and `tests/classification_call.rs` mutates this call away to prove
 /// something is watching.
-///
-/// Where the inputs come from — including the health pool, which this path
-/// no longer leaves empty — is [`automatic_classification_choice`]'s header.
-/// This function is the half that turns the choice into a model.
+// History: design-decisions.md, "Trims: commands module docs, third packet", routing_classification.rs `automatic_classification_model`.
 fn automatic_classification_model(
     runtime: &Runtime,
     user: &UserConfig,
@@ -1615,35 +1519,17 @@ fn automatic_classification_model(
 /// now — the decision itself, separated from building the model so that a
 /// diagnostic can name the same pick without asking anything to classify.
 ///
-/// # Why the diagnostic must share this function rather than repeat it
-///
-/// `glasshouse resources` reports the model this would choose (map line
-/// 1443). A report that rebuilt the candidate list and the policy beside this
-/// one would be a second implementation of the decision, free to drift from
-/// the one that actually runs — and a diagnostic that names a different model
-/// than the classifier uses is worse than none. So there is one function, and
-/// the report and the classifier differ only in what they do with its answer.
-///
 /// `classification` is `None` for a caller with no request in hand, which is
 /// exactly what [`DisposableRouting::choose`] documents that value as meaning
 /// — the fixed [`WorkloadTier::Leaf`] the policy used before a classification
 /// existed to ask. The report says so rather than implying a request was
 /// classified.
 ///
-/// # The health pool is read, not empty
-///
-/// The gateway writes what it learned from real request outcomes to
-/// [`glasshouse::provider::telemetry::GatewayHealthCache`], and
-/// [`observed_health_of`] reads that back for exactly the candidates this
-/// call is about. Passing `FreePool::new()` here — which this path did until
-/// this batch — meant every candidate was treated as available, so
-/// `choose`'s health and allowance filter could never exclude anything on the
-/// production path (map line 1433, practice §36).
-///
 /// **No `ReserveOverride`.** That input is scoped to sessions the user named
 /// by hand with `glasshouse sessions reserve`, and this decision is made for
 /// no session at all — there is no identity here for the override to apply
 /// to, and inventing one would grant a reserve exemption nobody asked for.
+// History: design-decisions.md, "Trims: commands module docs, third packet", routing_classification.rs `automatic_classification_choice`.
 pub(crate) fn automatic_classification_choice(
     runtime: &Runtime,
     user: &UserConfig,
@@ -1790,11 +1676,6 @@ pub(crate) fn automatic_classification_choice(
 
 /// Ask the configured routing model to classify `request_text`.
 ///
-/// This is the caller `routing::classify::classify`'s `Some(..)` arm was
-/// written for and never had: the module is downstream of the decision about
-/// *which* model classifies, and this is where that decision is made and
-/// carried out.
-///
 /// # The three resolutions, and which one changes nothing
 ///
 /// `RoutingModelResolution::Heuristics` returns before anything is read,
@@ -1803,16 +1684,7 @@ pub(crate) fn automatic_classification_choice(
 /// database, and prints exactly what it printed before this function existed.
 /// `tests/classification_call.rs` holds that byte-for-byte against the
 /// heuristic's own output.
-///
-/// # What reaches the model is the rendered request, and nothing else
-///
-/// Phase 34D: `request` is the structured [`RouterRequest`] — the task,
-/// bounded, and the few session facts its caller held — and its rendering
-/// is the whole of the request text `Prompt::for_request` scrubs and sends.
-/// The heuristic tier the `Automatic` arm needs for the classification job
-/// itself is read off the same request's task text.
-///
-/// [`RouterRequest`]: glasshouse::routing::request::RouterRequest
+// History: design-decisions.md, "Trims: commands module docs, third packet", routing_classification.rs `classify_with_routing_model`.
 pub(crate) fn classify_with_routing_model(
     runtime: &Runtime,
     request: &glasshouse::routing::request::RouterRequest,
@@ -1872,21 +1744,6 @@ pub(crate) fn classify_with_routing_model(
     classify_through_chain(runtime, &user, project.as_ref(), &effective, first, &prompt)
 }
 
-/// Ask `first` to classify, and when it cannot — unreachable, or answering
-/// outside the schema — walk `routing.model_fallback` once (capability map
-/// lines 1423 and 1795), never sending anything to a remote model while
-/// `routing.classification_local_only` is set (line 1427).
-///
-/// # What one attempt leaves behind
-///
-/// Every attempt that reached a provider leaves one `routing_observations`
-/// row through [`record_classification_observation`], carrying the parse
-/// outcome and the clock at dispatch and completion — the producers
-/// capability map lines 1422/1432 and 1421/1435 were missing. An attempt
-/// that never reached a provider (a build failure, a transport error, or a
-/// remote model declined under local-only) leaves no row, which is the
-/// honest shape: there is no call whose cost could be recorded.
-///
 /// # The chain is walked once, and never back onto itself
 ///
 /// Each `(provider, model)` is tried at most once per classification: a
@@ -1903,13 +1760,7 @@ pub(crate) fn classify_with_routing_model(
 /// a route, or one of this file's own fixed sentences — never a base URL, a
 /// credential, or a provider's response body, which
 /// [`routing_model_failure`] already keeps out of the sentence.
-///
-/// # Without a chain, this is exactly the behaviour it replaced
-///
-/// One attempt, one row, and the same failure sentence on standard error —
-/// a single failure is reported bare, without the model's name in front of
-/// it, so nothing a person or a test read before this function existed
-/// changed shape.
+// History: design-decisions.md, "Trims: commands module docs, third packet", routing_classification.rs `classify_through_chain`.
 fn classify_through_chain(
     runtime: &Runtime,
     user: &UserConfig,
@@ -2053,27 +1904,11 @@ fn render_chain_failures(failures: &[(String, String)]) -> String {
 /// no `ModelCall` — so a classification row's outcome is always a statement
 /// about a reply that arrived.
 ///
-/// `dispatched_at_unix` and `completed_at_unix` are the clock either side
-/// of the call, in whole seconds because that is what the columns hold;
-/// `RoutingObservation::duration_ms` is therefore honest to the second, and
-/// [`glasshouse::routing::evidence::ClassificationRecord`] says so. This is
-/// deliberately not `ModelCall::observation`'s job: that producer's own doc
-/// records that it leaves timing unwritten, and this caller is the one
-/// that actually held the clock.
-///
-/// # Why the handle is opened here and dropped here (practice §65)
-///
-/// `EvidenceLedger` holds an open SQLite connection for its whole lifetime,
-/// and a handle opened for work that never happens blocks a later writer on
-/// Windows while being invisible on Unix. So it is opened at the one point
-/// its consumer exists — after a provider has actually answered and there is
-/// a `ModelCall` to record — and not on the path where `glasshouse classify`
-/// asks no model at all, which is every run until somebody configures one.
-///
 /// No error channel, for the same reason [`record_extraction_observation`]
 /// has none: a classification a person asked for is not made worse by the
 /// bookkeeping failing, and Glasshouse's books are never more important than
 /// the answer they are about.
+// History: design-decisions.md, "Trims: commands module docs, third packet", routing_classification.rs `record_classification_observation`.
 fn record_classification_observation(
     runtime: &Runtime,
     call: &glasshouse::memory::extract::ModelCall,
@@ -2250,26 +2085,6 @@ fn attach_prices(
 /// on-disk [`glasshouse::provider::telemetry::GatewayQuotaCache`] and no
 /// network call of its own.
 ///
-/// Every field defaults to "nothing known" when no reading has ever been
-/// cached for this provider — a fresh install, or a provider only ever used
-/// through a harness's own native subscription — which
-/// `routing::disposable::DisposableRouting::score` renders as an honest
-/// `0.0` contribution rather than a guess.
-/// What a real response last stated is left in `provider`'s request pool, or
-/// [`None`] because nothing has measured one — capability map line 1367's
-/// ceiling.
-///
-/// # The same reading `--probe`'s own budget asks for, and the same key
-///
-/// [`glasshouse::provider::resources::observed_capacity`] over this
-/// provider's [`glasshouse::provider::registry::ResourceKind`], whose
-/// `requests().remaining()` is `Some` only when a rate-limit header actually
-/// said so — the identical path
-/// [`glasshouse::provider::resources::authorize_probe`] reads for line 1369,
-/// and identically **provider-wide**, because
-/// `glasshouse::provider::telemetry::GatewayQuotaCache` is keyed by provider
-/// name and nothing in this build measures a remainder per credential.
-///
 /// A credential is still the right key for the *reservation* — see
 /// `glasshouse::provider::telemetry::DispatchReservationCache` — and this is
 /// the one place the two granularities meet: a provider's stated remainder is
@@ -2282,6 +2097,7 @@ fn attach_prices(
 /// pool and a token-priced resource both answer it, and both mean this
 /// dispatch reserves nothing and behaves exactly as it did before line 1367
 /// had a producer.
+// History: design-decisions.md, "Trims: commands module docs, third packet", routing_classification.rs `paced_request_remainder`.
 fn paced_request_remainder(
     provider: &str,
     effective: &EffectiveConfig<'_>,

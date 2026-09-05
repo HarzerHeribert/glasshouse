@@ -141,45 +141,26 @@ impl HarnessSelection {
         Some(args)
     }
 
-    /// Write the one document Glasshouse owns for this session, and return
-    /// the arguments that make the harness read it.
+    /// Write the one document Glasshouse owns for this session, and return the
+    /// arguments that make the harness read it.
     ///
-    /// # Why lifecycle hooks and a response profile share one function
+    /// At most one document per file name, and at most one flag pointing at
+    /// it: when the adapter's hook installation and its response-profile
+    /// settings name the same file, the profile's keys are merged into the
+    /// hook document and the hook installation's own arguments are used once
+    /// — a second, unmerged `--settings` silently discards the first on at
+    /// least one real harness (Claude Code; see design-decisions.md).
     ///
-    /// Because for Claude Code they share one *file*, and finding that out the
-    /// hard way would have cost a feature silently. Probed on Claude Code
-    /// 2.1.247 on 2026-08-27: `claude --settings A --settings B doctor`
-    /// validates only `B`. A second `--settings` does not merge and does not
-    /// error — **it discards the first**. So a response profile that appended
-    /// its own `--settings` after `install_hooks` had appended one would have
-    /// turned off every lifecycle hook in the session, and nothing would have
-    /// said so.
+    /// Where the document goes is the adapter's declared [`HookDestination`]:
+    /// [`GlasshouseOwned`](HookDestination::GlasshouseOwned) is always
+    /// written, inside the project's own state, never the harness's
+    /// configuration. [`ProjectLocal`](HookDestination::ProjectLocal) is
+    /// written only with `project_hooks_consent`, since it lands inside the
+    /// user's own repository.
     ///
-    /// The rule this encodes: **at most one document per file name, and at
-    /// most one flag pointing at it.** When the adapter's hook installation
-    /// and its response-profile settings name the same file, the profile's
-    /// keys are merged into the hook document and the hook installation's own
-    /// arguments are used once.
-    ///
-    /// # Where the document goes
-    ///
-    /// Unchanged from before, and it is the adapter's declared
-    /// [`HookDestination`] that decides:
-    ///
-    /// - [`GlasshouseOwned`](HookDestination::GlasshouseOwned) — a directory
-    ///   Glasshouse owns, inside the project's own state, never the harness's
-    ///   own configuration. Always written; this is what keeps a Glasshouse
-    ///   session leaving the user's `claude` exactly as it found it.
-    /// - [`ProjectLocal`](HookDestination::ProjectLocal) — a fixed path
-    ///   inside the user's own project, because that harness reads hooks from
-    ///   nowhere else. Written only when `project_hooks_consent` is `true`;
-    ///   otherwise this creates no file and no directory for the hooks, and a
-    ///   response profile that needs a settings document gets its own,
-    ///   Glasshouse-owned one. A working session with less telemetry is still
-    ///   a working session; a surprise file in the user's repository is not.
-    ///
-    /// An empty result is the ordinary case of a harness with no verified hook
-    /// mechanism and nothing to apply, which is not a failure.
+    /// An empty result is the ordinary case of a harness with no verified
+    /// hook mechanism, not a failure.
+    // History: design-decisions.md, "Trims: session module docs, second packet", session/select/mod.rs `install_session_document`.
     pub fn install_session_document(
         &self,
         report: &HookCommand,

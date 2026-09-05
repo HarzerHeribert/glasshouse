@@ -919,15 +919,7 @@ pub(crate) fn tag_session(
 /// in the configuration is the canonical id rather than whatever prefix was
 /// typed — the hook path that later reads it has resolved its own id the same
 /// way, and two spellings of one session must not fail to match.
-///
-/// # Why the user layer
-///
-/// Writes go to the user-level configuration, like every other write outside
-/// the settings UI: [`glasshouse::config::write_project_config_with_consent`]
-/// puts a file inside the user's repository and its own doc comment reserves
-/// that for a caller that has obtained explicit confirmation. Typing this
-/// command is consent to record a preference, not consent to add a file to a
-/// checked-out tree.
+// History: design-decisions.md, "Trims: commands module docs, third packet", sessions.rs `reserve_override_session`.
 pub(crate) fn reserve_override_session(
     runtime: &Runtime,
     session: &str,

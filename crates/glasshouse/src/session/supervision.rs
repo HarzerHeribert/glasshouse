@@ -1,54 +1,26 @@
 //! Knowing which of this project's recorded sessions are still running, and
 //! refusing to start a second one beside them.
 //!
-//! Phase 10 records what a session *is*. This module is about what a session's
-//! process is *doing right now*, which is a different question and has a
-//! different failure mode: on 2026-08-26 three `glasshouse` processes had
-//! outlived the pane that started them by nineteen hours, spinning at ~99% CPU
-//! each. Nothing in this project could see them, so nothing reported them and
-//! nothing would have refused to start a fourth beside them.
+//! Three rules this module exists to keep:
+//! - **Only sessions this project recorded.** No process enumeration
+//!   anywhere in this file — a control plane that scans the machine for
+//!   things that look like harnesses will eventually adopt somebody else's.
+//! - **Alive-and-disowned is its own condition**,
+//!   [`Supervision::Quarantined`]: neither stopped nor healthy.
+//! - **This module reports and refuses; it never ends anything** — no
+//!   `kill`, no signal, no `Child::wait`.
+//!   `nothing_in_supervision_ends_a_process` is the guard.
 //!
-//! # The three rules this module exists to keep
-//!
-//! - **Supervision covers only sessions this project recorded.** Every entry
-//!   point here starts from a [`SessionRecord`] and a process identity that
-//!   *this* project wrote down. There is no process enumeration anywhere in
-//!   this file, and there must never be one: a control plane that scans the
-//!   machine for things that look like harnesses will eventually adopt
-//!   somebody else's.
-//! - **Alive-and-disowned is its own condition.** A process that is running
-//!   but cannot be verified as the session it was recorded as is neither
-//!   stopped nor healthy. It is [`Supervision::Quarantined`], and the whole
-//!   point of the word is that it is a third answer.
-//! - **This module reports and refuses. It never ends anything.** There is no
-//!   `kill` in this file, no signal, no `Child::wait`, and no code path that
-//!   terminates a process. Deciding to end someone's session is theirs;
-//!   `nothing_in_supervision_ends_a_process` is the guard that keeps it that
-//!   way when somebody later finds this module and thinks it should reap.
-//!
-//! # Why a process id is not an identity
-//!
-//! Process ids are reused. A record holding `4711` will eventually match a
-//! stranger, and then Glasshouse would either report a text editor as this
-//! project's session or refuse to start a session because of one. The pair
-//! *(id, start time)* is what cannot be inherited, and [`observe`] reads the
-//! start time from the kernel on all three platforms — normalised to
-//! milliseconds since the Unix epoch, because Linux's native unit is ticks
-//! since boot and repeats after every reboot.
-//!
-//! The third part is the host. A project directory can be shared between
-//! machines; a process id from another one means nothing here, and a record
-//! carrying a foreign host is never verified and never assumed dead.
-//!
-//! # Which process is recorded
-//!
-//! The Glasshouse process that started the session and is responsible for it —
-//! `std::process::id()` at the moment [`super::store::SessionStore::create`]
-//! writes the row. For `glasshouse launch`, that process *is* the session's
-//! process: it blocks in `session::attach` for the session's whole life and
-//! its death ends the session. Those are the processes the 2026-08-26 incident
-//! was about. See `docs/product/evidence/phase-10a.md` for what is not yet
-//! recorded and why.
+//! Identity is `(process id, start time, host)`, never a bare pid: pids are
+//! reused, and a foreign host's pid means nothing here. [`observe`] reads
+//! the start time from the kernel, normalised to milliseconds since the Unix
+//! epoch (Linux's native unit is ticks since boot and repeats after every
+//! reboot). The process recorded is the Glasshouse process that created the
+//! session row — `std::process::id()` at
+//! [`super::store::SessionStore::create`] — which for `glasshouse launch`
+//! blocks in `session::attach` for the session's whole life. See
+//! `docs/product/evidence/phase-10a.md`.
+// History: design-decisions.md, "Trims: session module docs, second packet", session/supervision.rs module doc.
 
 use std::fmt;
 use std::path::PathBuf;

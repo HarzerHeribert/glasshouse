@@ -105,29 +105,17 @@ pub enum SessionDisposition {
 
 /// The wire protocol a session's route speaks, as it was **recorded**.
 ///
-/// # Why this is not `crate::harness::WireProtocol`
+/// Not `crate::harness::WireProtocol`: Phase 6 line 294 forbids this module
+/// from naming `crate::harness` at all (checked by
+/// `harness::tests::the_session_model_depends_on_no_adapter`), and a stored
+/// vocabulary needs its own lifetime — the schema's `CHECK` fixes the words a
+/// row may hold, and a row from last month must stay readable when the live
+/// enum gains a variant. `session::wire_protocol` is the one total,
+/// exhaustive function between them.
 ///
-/// Phase 6 line 294 — checked, and guarded by a source scan in
-/// `harness::tests::the_session_model_depends_on_no_adapter` — requires
-/// adapter-specific parsing to stay isolated from the core session model, and
-/// this module may not name `crate::harness` at all. That constraint turns
-/// out to describe something true rather than merely forbidding an import: a
-/// *stored* vocabulary and a *live* one have different lifetimes. A row
-/// written last month has to stay readable when `WireProtocol` gains a
-/// variant, and the schema's `CHECK` is what fixes the stored words. So the
-/// two vocabularies are separate types, and `session::wire_protocol` is the
-/// one total, exhaustive function between them — which makes a new
-/// `WireProtocol` a compile error there, at the one place somebody has to
-/// decide how it should be stored.
-///
-/// # `Unknown` is an answer and NULL is not
-///
-/// [`SessionProtocol::Unknown`] means Glasshouse established no wire protocol
-/// for this session, which is what a launch profile naming none against a
-/// harness declaring several produces. A NULL column means the build that
-/// wrote the row recorded nothing here. Two facts, two representations,
-/// because a single slot holding both is the collapse this phase's second
-/// architectural requirement exists to prevent.
+/// [`SessionProtocol::Unknown`] is an answer — no protocol was established —
+/// and distinct from NULL, which means nothing was recorded at all.
+// History: design-decisions.md, "Trims: session module docs, second packet", session/store/record.rs `SessionProtocol`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionProtocol {
     AnthropicMessages,
@@ -521,30 +509,23 @@ pub struct SessionRecord {
     /// Written only by [`super::SessionStore::record_seen_commit`].
     pub last_seen_commit: Option<String>,
     /// Which configured `[entitlements.<name>]` account served this session,
-    /// by **name** — map line 1972's *"what it served"*, made answerable of
-    /// the durable record.
+    /// by **name** — map line 1972's *"what it served"*.
     ///
-    /// [`Self::backend_resource`] cannot answer this and no widening of it
-    /// could: it holds a
-    /// [`crate::profile::BackendResource::slug`], whose whole vocabulary is
-    /// `native`, `direct-provider:<provider>` and `glasshouse-gateway` — a
-    /// **kind** of resource. Two Claude accounts of one vendor, which is
-    /// precisely Phase 56A's unit of capacity, both slug to `native`. This
-    /// column names the **instance**.
+    /// [`Self::backend_resource`] cannot answer this: it holds a
+    /// [`crate::profile::BackendResource::slug`], a **kind** of resource
+    /// (`native`, `direct-provider:<provider>`, `glasshouse-gateway`), and
+    /// two accounts of one vendor both slug to `native`. This column names
+    /// the **instance**.
     ///
-    /// `None` means the serving account was never established — a session
-    /// recorded before this column existed, a launch under a resource no
-    /// `[entitlements]` entry describes, or a gateway-backed profile whose
-    /// upstream is assigned after launch. All three are the same fact,
-    /// *"nothing recorded"*, and the column does not distinguish them; it is
-    /// [`Self::launch_profile`]'s `None` and it is never a name.
-    ///
-    /// A name, never a credential: an entitlement authenticates through a
-    /// [`crate::secret::SecretRef`] resolved at the moment of use, and this
-    /// struct's own doc says why nothing else may travel here.
+    /// `None` means nothing was recorded — a session predating this column,
+    /// a resource with no matching `[entitlements]` entry, or a gateway
+    /// profile whose upstream is assigned after launch — never a credential:
+    /// an entitlement authenticates through a resolved
+    /// [`crate::secret::SecretRef`].
     ///
     /// Written only by [`super::SessionStore::create`], from
     /// [`NewSession::entitlement`].
+    // History: design-decisions.md, "Trims: session module docs, second packet", session/store/record.rs `entitlement` field.
     pub entitlement: Option<String>,
 }
 
