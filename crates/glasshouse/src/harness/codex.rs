@@ -5,14 +5,11 @@
 //! the hook state it records in its own configuration, and the session
 //! rollouts it writes.
 //!
-//! The **hook catalogue** below was re-read from Codex 0.150.1 on 2026-08-30
-//! and had gained one event; see `HOOK_EVENTS` and
-//! [`CATALOGUE_OBSERVED_VERSION`]. It was **re-read again from Codex 0.151.0
-//! on 2026-08-30**, the same day, after the provenance test caught the
-//! version drift: all twelve events, in the same order, with the same
-//! descriptions — nothing changed. The rollout-header evidence on
-//! [`Codex::read_session_record`] is still the 0.149.0 reading and is
-//! deliberately not restamped — it was never re-derived.
+//! The **hook catalogue** below is periodically re-read against the
+//! installed Codex; see `HOOK_EVENTS` and [`CATALOGUE_OBSERVED_VERSION`] for
+//! the current reading and git history for superseded ones. The rollout-header
+//! evidence on [`Codex::read_session_record`] is still the 0.149.0 reading and
+//! is deliberately not restamped — it was never re-derived.
 
 use std::ffi::OsString;
 
@@ -30,68 +27,31 @@ pub struct Codex;
 
 /// Codex's own hook event catalogue, in the spelling its `hooks.json` uses.
 ///
-/// Read from the **hook review screen**, which enumerates every event Codex
-/// supports with a one-line description — the authoritative artifact, and not
-/// the one an earlier revision of this file cited. First read from 0.149.1,
-/// **re-read from 0.150.1 on 2026-08-30**, where the screen rendered:
+/// The catalogue of what Codex *supports*, not of what Glasshouse asks for
+/// (see [`REPORTED_EVENTS`]). `Interrupt` is here but deliberately absent
+/// from `REPORTED_EVENTS`: an aborted turn is the harness's own business and
+/// says nothing a `SessionLifecycle` records that `Stop` does not.
+///
+/// **Re-read from Codex 0.153.3** (`strings` on the real binary behind any
+/// `codex` wrapper, grepped for these descriptions — see git history for the
+/// 0.149.1/0.150.1/0.151.0 readings and the earlier wrong-artifact one). Same
+/// twelve events, same spelling, same order, same descriptions:
 ///
 /// ```text
-///   Event                 Installed   Active      Description
-///   PreToolUse            0           0           Before a tool executes
-///   PermissionRequest     3           3           When permission is requested
-///   PostToolUse           2           2           After a tool executes
-///   PreCompact            1           1           Before context compaction
-///   PostCompact           1           1           After context compaction
-///   SessionStart          3           3           When a new session starts
-///   SessionEnd            1           1           Right before a session ends
-///   UserPromptSubmit      3           3           When the user submits a prompt
-///   SubagentStart         0           0           When a subagent is created
-///   SubagentStop          0           0           Right before a subagent ends its turn
-///   Stop                  3           3           Right before Codex ends its turn
-///   Interrupt             0           0           Right before an interrupted turn is aborted
+///   Event                 Description
+///   PreToolUse            Before a tool executes
+///   PermissionRequest     When permission is requested
+///   PostToolUse           After a tool executes
+///   PreCompact            Before context compaction
+///   PostCompact           After context compaction
+///   SessionStart          When a new session starts
+///   SessionEnd            Right before a session ends
+///   UserPromptSubmit      When the user submits a prompt
+///   SubagentStart         When a subagent is created
+///   SubagentStop          Right before a subagent ends its turn
+///   Stop                  Right before Codex ends its turn
+///   Interrupt             Right before an interrupted turn is aborted
 /// ```
-///
-/// `Interrupt` is the one that moved: it is **new since 0.149.1** and is
-/// listed here because this constant is the catalogue of what Codex
-/// *supports*, not of what Glasshouse asks for. It is deliberately absent
-/// from [`REPORTED_EVENTS`] — an aborted turn is the harness's own business
-/// and says nothing a `SessionLifecycle` records that `Stop` does not.
-///
-/// `PreCompact` and `PostCompact` were **unchanged** across that bump, in
-/// both spelling and position, which is what the 2026-08-30 runtime probe of
-/// map line 327 rested on.
-///
-/// **Re-read again from 0.151.0 on 2026-08-30** (the provenance test caught
-/// the drift the same day it was installed). All twelve events, same
-/// spelling, same order, same descriptions — nothing moved this time:
-///
-/// ```text
-///   Event                 Installed   Active      Review      Description
-///   PreToolUse            0           0           0           Before a tool executes
-///   PermissionRequest     3           2           1           When permission is requested
-///   PostToolUse           2           2           0           After a tool executes
-///   PreCompact            1           0           1           Before context compaction
-///   PostCompact           1           0           1           After context compaction
-///   SessionStart          3           2           1           When a new session starts
-///   SessionEnd            1           0           1           Right before a session ends
-///   UserPromptSubmit      3           2           1           When the user submits a prompt
-///   SubagentStart         0           0           0           When a subagent is created
-///   SubagentStop          0           0           0           Right before a subagent ends its turn
-///   Stop                  3           2           1           Right before Codex ends its turn
-///   Interrupt             0           0           0           Right before an interrupted turn is aborted
-/// ```
-///
-/// The screen grew a fourth `Review` column since 0.150.1 (splitting what was
-/// one `Active` count into `Active` + pending-`Review`), which is a rendering
-/// change, not a catalogue change — it does not affect `HOOK_EVENTS` or
-/// [`REPORTED_EVENTS`].
-///
-/// That earlier revision listed ten events in `snake_case`, taken from the
-/// `[hooks.state."<path>:<event>:0:0"]` keys in `config.toml`. Those keys are
-/// real, but they are the spelling Codex uses to *record trust*, not the
-/// spelling it reads from a hooks document — a hooks file on this machine used
-/// PascalCase. The wrong artifact was cited, the casing was wrong throughout,
-/// and `SessionEnd` was missing altogether.
 const HOOK_EVENTS: &[&str] = &[
     "PreToolUse",
     "PermissionRequest",
@@ -112,18 +72,29 @@ const HOOK_EVENTS: &[&str] = &[
 /// **This catalogue is observed, not documented.** Codex publishes no
 /// machine-readable list of its hook events — `codex --help`, `codex debug`
 /// and `codex features` all say nothing about them, and a `hooks.json`
-/// naming an event Codex does not recognise is accepted in silence. The only
-/// artifact that enumerates them is an interactive TUI screen, so the sole
-/// thing a test can cheaply hold Codex to is that the version this was read
-/// from is still the version installed.
+/// naming an event Codex does not recognise is accepted in silence. So the
+/// sole thing a test can cheaply hold Codex to is that the version this was
+/// read from is still the version installed.
 ///
 /// See `tests/session_hook.rs::the_codex_hook_catalogue_was_read_from_the_installed_codex`.
-/// When it fails, re-read the review screen (start a Codex session in a
-/// project carrying a `hooks.json` and answer *Review hooks*), reconcile
-/// `HOOK_EVENTS` with what it shows, and move this constant — in that
-/// order. Bumping the constant alone is the one edit that makes the check
-/// worthless.
-pub const CATALOGUE_OBSERVED_VERSION: &str = "0.151.0";
+/// When it fails, re-read the catalogue, reconcile `HOOK_EVENTS` with it, and
+/// move this constant — **in that order**. Bumping the constant alone is the
+/// one edit that makes the check worthless.
+///
+/// Re-read it from the binary, not from the TUI. Codex ships as a native
+/// executable (behind whatever `codex` on `PATH` happens to wrap), and it
+/// carries two independent tables that agree: the one-line descriptions
+/// above, and the `HookEventsToml` variant-name list. Both are literal
+/// `&str` constants, so `strings` reads them without running anything:
+///
+/// ```text
+/// strings -n 4 <the real codex binary> | grep -o 'HookEventsToml.\{0,150\}'
+/// ```
+///
+/// The interactive *Review hooks* screen is the same data rendered, and it
+/// remains a valid reading — but it cannot be driven from a tool call, which
+/// made this check unactionable for any agent until 2026-09-05.
+pub const CATALOGUE_OBSERVED_VERSION: &str = "0.153.3";
 /// The events Glasshouse asks Codex to report.
 ///
 /// A subset of [`HOOK_EVENTS`], deliberately not the remaining per-tool
