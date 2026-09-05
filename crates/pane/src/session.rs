@@ -18,6 +18,7 @@ use crate::contract::{Block, Conversation, Message, ProjectConfig, Role, ServedB
 use crate::glasshouse::{self, Glasshouse, LifecycleEvent, LocalMemory};
 use crate::project;
 use crate::rollout::{self, Rollout};
+use crate::runtime::handles::HandleTable;
 use crate::sandbox::profile::Profile;
 use crate::tools::invoke::{self, Args, ToolContext, ToolError};
 use crate::tools::registry;
@@ -123,7 +124,7 @@ fn render_to_terminal(conversation: &Conversation, served_by: &ServedBy) {
     let Ok(mut terminal) = Terminal::new(CrosstermBackend::new(io::stdout())) else {
         return;
     };
-    let _ = terminal.draw(|frame| tui::render(frame, conversation, served_by));
+    let _ = terminal.draw(|frame| tui::render(frame, conversation, served_by, &HandleTable::new()));
 }
 
 /// Every acceptance test below, and any real pipe, takes this path. Draws
@@ -135,7 +136,7 @@ fn render_to_terminal(conversation: &Conversation, served_by: &ServedBy) {
 fn render_as_lines(conversation: &Conversation, served_by: &ServedBy) {
     let backend = TestBackend::new(100, 40);
     let mut terminal = Terminal::new(backend).expect("an in-memory backend never fails to init");
-    let _ = terminal.draw(|frame| tui::render(frame, conversation, served_by));
+    let _ = terminal.draw(|frame| tui::render(frame, conversation, served_by, &HandleTable::new()));
     let buffer = terminal.backend().buffer();
     for y in 0..buffer.area.height {
         let mut line = String::new();
