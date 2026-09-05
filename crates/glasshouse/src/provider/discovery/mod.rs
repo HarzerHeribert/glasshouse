@@ -1,41 +1,23 @@
 //! Real network probes against a configured provider: connectivity, and the
 //! model catalogue behind a `GET <base>/models`.
 //!
-//! # This replaces a precondition check
-//!
-//! Phase 9D line 1 asks that a user be able to test a provider *before*
-//! enabling it for routing. The first version of that check could not make a
-//! request — the batch that shipped it had no HTTP client on its branch — so
-//! it proved what could be proven without one (the template resolves, a base
-//! URL exists, a credential variable is set) and said so on screen. `ureq` is
-//! here now, for the gateway, so the check is a request. The preconditions
-//! are still checked first, because a request that cannot possibly work is
-//! not worth opening a socket for, but they are no longer the answer.
-//!
-//! # Exactly one request, and only when asked
+//! The preconditions are still checked first, because a request that cannot
+//! possibly work is not worth opening a socket for, but they are no longer
+//! the answer.
 //!
 //! Nothing in this module runs on a timer, on start, or on a cache expiry.
 //! Every function here makes exactly one HTTP request and only because a
-//! keystroke asked for it — see [`mod@crate::provider::cache`] for the other
-//! half of that rule, which is what makes starting Glasshouse silent.
-//!
-//! # Nothing here blocks the interface
-//!
+//! keystroke asked for it — see [`mod@crate::provider::cache`].
 //! Every function in this module blocks its own thread, and every one of them
 //! is bounded — see [`ProbeTimeouts`]. The caller is responsible for running
 //! them somewhere other than the thread drawing the terminal;
-//! `shell::spawn_provider_probe` is the one place that does it, and its doc
-//! comment explains why a blocking call on the draw thread is the specific
-//! bug this batch existed to avoid.
-//!
-//! # The credential
-//!
+//! `shell::spawn_provider_probe` is the one place that does it.
 //! A [`ProbeRequest`] may carry a resolved [`Secret`]. It has a hand-written
 //! [`Debug`](std::fmt::Debug) that prints [`crate::secret::REDACTED`] in its
 //! place, it is never written to the cache, and no failure message in this
 //! module is built from text that passed anywhere near it — see
-//! the private `unreachable_reason`, which is deliberately built from a fixed set of
-//! phrases rather than from an error's own words.
+//! the private `unreachable_reason`.
+// History: design-decisions.md, "Trims: provider module docs", discovery/mod.rs module doc.
 
 use std::fmt;
 use std::time::{Duration, Instant};
@@ -278,24 +260,18 @@ pub enum ModelFetch {
 /// What one probe found, **with the rate-limit headers it came back with** —
 /// capability map line 1229.
 ///
-/// # Why the headers are here and not on [`ProbeOutcome`]
-///
-/// A [`ProbeOutcome`] answers "did this endpoint answer, and how". Adding a
-/// header list to its variants would put quota telemetry inside the type
-/// [`mod@crate::shell::state`] renders as a one-line connectivity result, and
-/// every existing caller would have to learn to ignore it. This type wraps
-/// that answer instead, so [`connectivity`] keeps its exact signature and
-/// nothing that only wants the outcome changes at all.
-///
-/// # Only the headers Glasshouse asked for
+/// A [`ProbeOutcome`] answers "did this endpoint answer, and how". This type
+/// wraps that answer instead of adding a header list to its variants, so
+/// [`connectivity`] keeps its exact signature and nothing that only wants
+/// the outcome changes at all.
 ///
 /// `headers` is what [`crate::provider::telemetry::retain_rate_limit_headers`]
 /// kept, which is an allowlist and not a filter — see
-/// [`crate::provider::telemetry::RATE_LIMIT_HEADERS`] for why that matters,
-/// and note in particular that OpenRouter's `GET /api/v1/models` answers with
-/// a `set-cookie` header. A probe result is a diagnostic a user may be invited
-/// to share, and a diagnostic that captured "the response headers" would carry
-/// a session cookie into it.
+/// [`crate::provider::telemetry::RATE_LIMIT_HEADERS`] for why that matters.
+/// A probe result is a diagnostic a user may be invited to share, and a
+/// diagnostic that captured "the response headers" would carry a session
+/// cookie into it.
+// History: design-decisions.md, "Trims: provider module docs", discovery/mod.rs `ProbeResponse` doc.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProbeResponse {
     outcome: ProbeOutcome,
@@ -345,27 +321,17 @@ pub fn connectivity(request: &ProbeRequest, timeouts: ProbeTimeouts) -> ProbeOut
 /// capability map line 1229's API half, and the first of two places in
 /// Glasshouse that read a quota number off a response.
 ///
-/// # This is not the only seam any more, and the other one had to earn it
-///
-/// This module already makes a request **because a keystroke asked it to**,
-/// it already holds the response, and until this phase it discarded the
-/// headers. Reading them costs no extra request, which is capability map
+/// Reading them costs no extra request, which is capability map
 /// line 1230's "without excessive request cost" applied to the whole
 /// telemetry story: a probe that already ran is free.
 ///
-/// The gateway's forwarding path is the *second* seam, and getting there took
-/// a correction rather than a design from the start: an earlier packet held
-/// that Phase 9I line 528 — *"the gateway forwards headers without reading
-/// them, and a parser there would make it a reader of the payload it exists
-/// to pass through"* — forbade the gateway's response path outright. That
-/// overreached. Reading a response *header* is not reading the *payload*: the
+/// Reading a response *header* is not reading the *payload*: the
 /// gateway already parses the status line and header block to forward them,
 /// and only the body is what it is forbidden to look inside. So
 /// `crate::gateway::ingress` now reads this same allowlist, headers only,
 /// from every response it forwards — see that module and
-/// [`mod@crate::provider::telemetry`]'s "a second seam" for why that route
-/// carries a reading — `POST /chat/completions` — this module can never
-/// produce, since Glasshouse must not spend a token to check a quota.
+/// [`mod@crate::provider::telemetry`]'s "a second seam".
+// History: design-decisions.md, "Trims: provider module docs", discovery/mod.rs `connectivity_with_headers` doc.
 pub fn connectivity_with_headers(request: &ProbeRequest, timeouts: ProbeTimeouts) -> ProbeResponse {
     let started = Instant::now();
     match send(request, timeouts) {

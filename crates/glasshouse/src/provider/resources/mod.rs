@@ -1,41 +1,24 @@
 //! Phase 32B: `glasshouse resources` — what Glasshouse believes about every
 //! model resource it can describe, and **where each belief came from**.
 //!
-//! # Why this command exists at all
-//!
-//! Phase 32 built [`mod@crate::provider::registry`] and recorded, in its own
-//! evidence ledger, that `registry()` had no production caller: *"Nothing in
-//! the shipped binary currently prints 'here is everything Glasshouse can
-//! describe' to a user."* Phase 32A built [`mod@crate::provider::quota`] and
-//! recorded the same limit one layer down — the launch path reads exactly one
-//! projection out of the capacity model, its quota *shape*, and every pool,
-//! window and rate ceiling below that was proven only by tests.
-//!
-//! Both were right to say so, and both were pointing at the same missing
-//! thing: a surface that reads the model. This is it, and it is modelled on
-//! `glasshouse pairing` and `glasshouse response` — read-only, one screen,
-//! reports what Glasshouse believes rather than deciding anything, and makes
-//! no network request unless asked.
-//!
-//! # The one rule this whole surface exists to obey
+//! This is modelled on `glasshouse pairing` and `glasshouse response` —
+//! read-only, one screen, reports what Glasshouse believes rather than
+//! deciding anything, and makes no network request unless asked.
 //!
 //! Capability map line 1240 asks that the telemetry source be surfaced, and
-//! line 1234 that an inferred percentage never be labelled exact. Neither is
-//! enforced by this module's care. Every number printed here arrives as a
-//! [`Capacity`], whose [`Capacity::telemetry_class_str`] answers
+//! line 1234 that an inferred percentage never be labelled exact. Every
+//! number printed here arrives as a [`Capacity`], whose
+//! [`Capacity::telemetry_class_str`] answers
 //! [`crate::provider::quota::UNKNOWN_TELEMETRY`] when nothing was read, and
 //! every percentage arrives as a [`crate::provider::quota::Percentage`],
 //! whose only rendering path marks an estimate as one. This module cannot
 //! print an unlabelled figure because it has no access to one.
 //!
-//! # What it reads, and what it costs
-//!
 //! Without `--probe` it makes **no network request**: it reads the user's
-//! configuration and — because it is a local process invocation costing about
-//! a quarter of a second and no quota — each installed harness's own status
-//! interface. With `--probe <provider>` it makes exactly one request, to a
-//! provider the user has configured, and folds in whatever rate-limit headers
-//! come back.
+//! configuration and each installed harness's own status interface. With
+//! `--probe <provider>` it makes exactly one request, to a provider the
+//! user has configured, and folds in whatever rate-limit headers come back.
+// History: design-decisions.md, "Trims: provider module docs", resources/mod.rs module doc.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -60,43 +43,20 @@ use crate::routing::evidence::{
 /// The status interface of a harness that has one, as a command line
 /// Glasshouse constructs itself.
 ///
-/// # This list is what the installed binaries actually offer, checked
+/// Only Claude Code exposes a stable, machine-readable status today:
+/// `claude auth status --json`, whose `subscriptionType` names the plan.
+/// Codex's `codex doctor --json` carries no usage, quota, limit, credit,
+/// remaining, reset, plan, window or balance field, so it is deliberately
+/// absent rather than listed-and-parsed-for-nothing. Antigravity and Cursor
+/// CLI have no status or usage subcommand at all. What Claude Code exposes
+/// is a **plan and not a usage figure** — capability map line 1231's *"or
+/// status information"* clause, not its *"usage"* clause.
 ///
-/// Practice §5's rule — *check a declaration against the use, not the claim*
-/// — and the reason this project has been wrong about a harness's declared
-/// surface five times. Checked on 2026-08-27 against the binaries installed
-/// on this machine:
-///
-/// - **Claude Code** — `claude auth status --json`. `--json` is listed in
-///   `claude auth status --help` as the **default** output, which is as
-///   stable a declaration as a CLI gives. It emits a small object whose
-///   `subscriptionType` names the plan.
-/// - **Codex** — `codex doctor --json` exists and is stamped
-///   `"schemaVersion": 1`, so it is genuinely stable and machine-readable.
-///   It carries **no** usage, quota, limit, credit, remaining, reset, plan,
-///   window or balance field: twenty-three checks about installation, auth
-///   configuration, network reachability and disk. It is not a usage
-///   interface and is deliberately absent from this list rather than
-///   listed-and-parsed-for-nothing.
-/// - **Antigravity** — the `agy` binary's `--help` lists no status or usage
-///   subcommand at all.
-/// - **Cursor CLI** — likewise.
-///
-/// So one harness of four exposes machine-readable status, and what it
-/// exposes is a **plan and not a usage figure**. That is capability map line
-/// 1231's *"or status information"* clause and not its *"usage"* clause, and
-/// the evidence ledger says so rather than letting the list imply more.
-///
-/// # Why the arguments live here and not on the harness adapter
-///
-/// They should live on the adapter. [`IntegrationId::executable_candidates`]
-/// argues exactly this about the executable *name* — *"keeping a second copy
-/// here would be a second place for it to be wrong, and the two would
-/// drift"* — and a status command is the same kind of fact. The name is not
-/// duplicated: [`harness_status_command`] resolves it through
+/// The arguments live here, not on the harness adapter: the name is not
+/// duplicated — [`harness_status_command`] resolves it through
 /// [`IntegrationId::executable_candidates`], so only the **arguments** are
-/// here. `crates/glasshouse/src/harness/**` is outside this package's
-/// partition; see the report for the two-line trait method this wants to be.
+/// here.
+// History: design-decisions.md, "Trims: provider module docs", resources/mod.rs `HARNESS_STATUS_ARGS` doc.
 const HARNESS_STATUS_ARGS: &[(IntegrationId, &[&str])] =
     &[(IntegrationId::ClaudeCode, &["auth", "status", "--json"])];
 
@@ -299,15 +259,8 @@ impl GatheredTelemetry {
     /// [`Self::with_provider_headers`], the same seam `--probe` already
     /// uses, so `report`'s D3 staleness handling and D5's "prefer
     /// authoritative" ordering both apply to a gateway-sourced reading
-    /// exactly as they do to a probed one — there is no second code path for
-    /// this source to disagree with the first through.
-    ///
-    /// **Not yet called from `glasshouse resources`.** The caller this
-    /// method exists for is `main.rs::resources_report`, which this
-    /// package's `FORBIDDEN FILES` does not let it reach — see the report
-    /// for the one line that call site needs. Tests exercise this method
-    /// directly, which is what proves the model side of the bridge without
-    /// claiming the production reach it does not yet have (practice §35).
+    /// exactly as they do to a probed one.
+    // History: design-decisions.md, "Trims: provider module docs", resources/mod.rs `gather_gateway_quota` doc.
     pub fn gather_gateway_quota(mut self, cache: &GatewayQuotaCache) -> Self {
         for (provider, headers, observed_at_unix) in cache.load_all() {
             self = self.with_provider_headers(provider, headers, observed_at_unix);
@@ -560,23 +513,17 @@ pub fn budget_exhausted_for(
 /// applies to it has been folded in — the function every box in this phase
 /// ultimately closes through.
 ///
-/// # The order is capability map line 1228, and it is not cosmetic
-///
 /// Configuration first, then the harness's own report, then the provider's
-/// own headers — weakest source applied first, strongest last — because
-/// [`Capacity::prefer`] resolves each collision in favour of the more
-/// authoritative claim regardless of order, and applying them in this order
-/// means the *stale* case behaves the same way: a fresh manual entry never
-/// displaces a provider's own word, only fills a gap it left.
+/// own headers — weakest source applied first, strongest last, capability
+/// map line 1228 — because [`Capacity::prefer`] resolves each collision in
+/// favour of the more authoritative claim regardless of order.
 ///
-/// # Line 1238, structurally
-///
-/// Every step is total. A missing reading, an unparseable one, a harness that
-/// is not installed and a provider that answered no headers all leave the
-/// state exactly as the previous step left it, and the worst case is the
-/// state [`CapacityState::for_resource`] built with nothing read at all —
-/// which is a complete, printable answer. There is no path through this
-/// function that yields an error for a caller to fail a session on.
+/// Every step is total (line 1238). A missing reading, an unparseable one, a
+/// harness that is not installed and a provider that answered no headers all
+/// leave the state exactly as the previous step left it, and the worst case
+/// is the state [`CapacityState::for_resource`] built with nothing read at
+/// all — which is a complete, printable answer.
+// History: design-decisions.md, "Trims: provider module docs", resources/mod.rs `observed_capacity` doc.
 pub fn observed_capacity(
     kind: &ResourceKind,
     effective: &EffectiveConfig<'_>,
@@ -1490,27 +1437,18 @@ pub enum ProbeAuthorization {
 /// line 1369, run before [`probe_provider`] rather than inside it, so a
 /// refusal never opens a socket.
 ///
-/// # Where the remainder comes from, and why this is not a new read
-///
-/// The same [`GatewayQuotaCache`] reading `resources_report` already folds
-/// into `telemetry` before this runs (`GatheredTelemetry::gather_gateway_quota`),
-/// through the exact production path every other number in the report reads
-/// it through: [`observed_capacity`] for `name`'s own
+/// This reads [`observed_capacity`] for `name`'s own
 /// [`ResourceKind::DirectProvider`], whose `requests().remaining()` is
 /// `Some` only when a real response's rate-limit headers stated one. No new
 /// network path and no new credential resolution — this asks the same cache
-/// the report already reads, keyed the same way it already is: by provider
-/// name, not by credential. [`GatewayQuotaCache`]'s own `path_for` and
-/// [`GatheredTelemetry::with_provider_headers`] are both keyed by provider
-/// alone, so a request-pool reading here is provider-wide by construction —
-/// the same granularity `--probe <name>` itself already probes at.
+/// the report already reads, keyed by provider name, not by credential, so a
+/// request-pool reading here is provider-wide by construction — the same
+/// granularity `--probe <name>` itself already probes at.
 ///
 /// An unconfigured provider, a pool nothing has measured, and a
-/// non-request-pool resource all answer [`ProbeAuthorization::Allowed`]: the
-/// first because there is nothing to compare a cost against and
-/// [`probe_provider`] already reports it as not configured; the other two
-/// because "unknown" and "this provider is not limited by a request count at
-/// all" both mean there is no remainder to spend down.
+/// non-request-pool resource all answer [`ProbeAuthorization::Allowed`]:
+/// there is no remainder to spend down in any of those three cases.
+// History: design-decisions.md, "Trims: provider module docs", resources/mod.rs `authorize_probe` doc.
 pub fn authorize_probe(
     effective: &EffectiveConfig<'_>,
     telemetry: &GatheredTelemetry,

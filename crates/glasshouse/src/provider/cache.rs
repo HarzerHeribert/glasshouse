@@ -1,41 +1,23 @@
 //! The discovered-model catalogue and where it is kept between runs.
 //!
-//! # Why this is in the data directory and not the configuration file
-//!
-//! A discovered catalogue is not configuration. The user did not type it, it
-//! has a provenance and an age, and Glasshouse rewrites it on its own when
-//! asked to refresh. A `cargo`-style configuration file is a record of
-//! decisions a person made; putting four hundred model identifiers and a
-//! machine-written timestamp in one would make `config.toml` unreadable and
-//! would make a `git diff` of it meaningless. [`crate::paths`] already
+//! A discovered catalogue is not configuration. [`crate::paths`] already
 //! separates the two locations, so this uses the one it already has:
 //! [`crate::paths::RuntimePaths::provider_cache_dir`].
 //!
-//! # Why the timestamp is a field and not an inference
-//!
 //! Phase 9D line 3 says "with a timestamp", and this is where that is
 //! honoured. It is stored, it is loaded, and every rendering of a cached
-//! catalogue shows it — see `shell::view`. A cache whose age cannot be seen
-//! is the failure mode the line exists to prevent: a model list from three
-//! weeks ago looks exactly like one from three seconds ago, and only one of
-//! them should be acted on.
-//!
-//! # Nothing here fetches
+//! catalogue shows it — see `shell::view`.
 //!
 //! This module reads and writes files. It has no HTTP client, no timer and
 //! no expiry policy, and [`ModelCache::load`] never falls back to the
-//! network. That is deliberate and is the whole of line 3: starting
-//! Glasshouse with a cached catalogue must issue no request at all, and the
-//! surest way to guarantee that is for the loading path to be incapable of
-//! making one. Refreshing is [`mod@crate::provider::discovery`]'s job and
+//! network. Refreshing is [`mod@crate::provider::discovery`]'s job and
 //! happens only when a key is pressed.
-//!
-//! # No credential is ever written here
 //!
 //! A catalogue holds a provider name, two URLs, a timestamp and a list of
 //! model identifiers. There is no field a credential could occupy, and the
 //! test `a_planted_credential_never_reaches_the_cache_file_on_disk` asserts
 //! that against the bytes actually written rather than against the type.
+// History: design-decisions.md, "Trims: provider module docs", cache.rs module doc.
 
 use std::path::{Path, PathBuf};
 

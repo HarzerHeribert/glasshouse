@@ -8151,3 +8151,364 @@ with it.
     //! passed on. That is the whole of what this module reads that is not a key,
     //! and it is stated here rather than buried because it is the one line of the
     //! ruling that needed a judgement.
+
+## Trims: provider module docs — history moved out of comments by `GH-TRIM-PROVIDER-DOCS`, 2026-09-05
+
+### `cache.rs` — module doc
+
+    The user did not type it, it has a provenance and an age, and Glasshouse rewrites it on its own when
+    asked to refresh. A `cargo`-style configuration file is a record of
+    decisions a person made; putting four hundred model identifiers and a
+    machine-written timestamp in one would make `config.toml` unreadable and
+    would make a `git diff` of it meaningless.
+
+    A cache whose age cannot be seen
+    is the failure mode the line exists to prevent: a model list from three
+    weeks ago looks exactly like one from three seconds ago, and only one of
+    them should be acted on.
+
+    That is deliberate and is the whole of line 3: starting
+    Glasshouse with a cached catalogue must issue no request at all, and the
+    surest way to guarantee that is for the loading path to be incapable of
+    making one.
+
+### `discovery/mod.rs` — module doc
+
+    Phase 9D line 1 asks that a user be able to test a provider *before*
+    enabling it for routing. The first version of that check could not make a
+    request — the batch that shipped it had no HTTP client on its branch — so
+    it proved what could be proven without one (the template resolves, a base
+    URL exists, a credential variable is set) and said so on screen. `ureq` is
+    here now, for the gateway, so the check is a request.
+
+    for the other half of that rule, which is what makes starting Glasshouse silent.
+
+    and its doc
+    comment explains why a blocking call on the draw thread is the specific
+    bug this batch existed to avoid.
+
+    which is deliberately built from a fixed set of
+    phrases rather than from an error's own words.
+
+### `discovery/mod.rs` — `ProbeResponse` doc
+
+    A [`ProbeOutcome`] answers "did this endpoint answer, and how". Adding a
+    header list to its variants would put quota telemetry inside the type
+    [`mod@crate::shell::state`] renders as a one-line connectivity result, and
+    every existing caller would have to learn to ignore it.
+
+    and note in particular that OpenRouter's `GET /api/v1/models` answers with
+    a `set-cookie` header.
+
+### `discovery/mod.rs` — `connectivity_with_headers` doc
+
+    This module already makes a request **because a keystroke asked it to**,
+    it already holds the response, and until this phase it discarded the
+    headers.
+
+    and getting there took
+    a correction rather than a design from the start: an earlier packet held
+    that Phase 9I line 528 — *"the gateway forwards headers without reading
+    them, and a parser there would make it a reader of the payload it exists
+    to pass through"* — forbade the gateway's response path outright. That
+    overreached.
+
+    carries a reading — `POST /chat/completions` — this module can never
+    produce, since Glasshouse must not spend a token to check a quota.
+
+### `pricing.rs` — module doc
+
+    *"Allow provider price metadata to be updated independently from the
+    router implementation."*
+
+    the same directory `user_config_file` lives in — this
+    is configuration a person wrote, not a machine-cached catalogue like
+    `provider_cache_dir`.
+
+    Every other `Unverified`/`Verified`
+    entry in [`mod@crate::provider`] exists because this project refuses to
+    guess a capability nobody established, and a shipped price nobody priced
+    against a real invoice would be exactly that guess — worse, because a
+    silently-wrong shipped price is harder to notice than an absent one.
+
+    This module only builds the table; the honesty rule it exists to serve is
+    enforced at the consumer,
+    `routing::session::expected_marginal_cost`.
+
+    — the same `known`/`unknown` idiom
+    `routing::session::AffinityFacet` already applies to every other scored
+    signal that may or may not have arrived.
+
+    Parsing additionally bounds the document size and
+    range-checks every number before it is admitted, so a `1e308` or a
+    negative entry cannot reach a score as anything but a parse failure for
+    that document.
+
+### `registry.rs` — module doc
+
+    which is the map's own fixed requirement for this
+    phase — subscriptions, metered keys, and local inference are normalized
+    into one list without being told apart, and told apart is exactly what a
+    `BackendResource::DirectProvider { provider: "ollama" }` and a
+    `BackendResource::DirectProvider { provider: "openrouter" }` are not
+    today: both are "a direct provider" and nothing distinguishes the one
+    that cannot run out of money from the one that can.
+
+    (a rolling-window
+    reset time, a spent balance, a request count) — that is Phase 32B, which
+    does not exist yet;
+
+### `registry.rs` — `registry` doc
+
+    This lists what Glasshouse can describe, not what a user has configured
+    — a template with no credential is still a resource *kind* the registry
+    knows about, the same way [`crate::provider::templates`] itself lists
+    providers nobody has necessarily set up.
+
+### `resources/mod.rs` — module doc
+
+    Phase 32 built [`mod@crate::provider::registry`] and recorded, in its own
+    evidence ledger, that `registry()` had no production caller: *"Nothing in
+    the shipped binary currently prints 'here is everything Glasshouse can
+    describe' to a user."* Phase 32A built [`mod@crate::provider::quota`] and
+    recorded the same limit one layer down — the launch path reads exactly one
+    projection out of the capacity model, its quota *shape*, and every pool,
+    window and rate ceiling below that was proven only by tests.
+
+    Both were right to say so, and both were pointing at the same missing
+    thing: a surface that reads the model. This is it, and it is
+
+    Neither is
+    enforced by this module's care.
+
+    — because it is a local process invocation costing about
+    a quarter of a second and no quota —
+
+### `resources/mod.rs` — `HARNESS_STATUS_ARGS` doc
+
+    Practice §5's rule — *check a declaration against the use, not the claim*
+    — and the reason this project has been wrong about a harness's declared
+    surface five times. Checked on 2026-08-27 against the binaries installed
+    on this machine.
+
+    `--json` is listed in
+    `claude auth status --help` as the **default** output, which is as
+    stable a declaration as a CLI gives.
+
+    `codex doctor --json` exists and is stamped
+    `"schemaVersion": 1`, so it is genuinely stable and machine-readable.
+    It carries **no** usage, quota, limit, credit, remaining, reset, plan,
+    window or balance field: twenty-three checks about installation, auth
+    configuration, network reachability and disk. It is not a usage
+    interface.
+
+    the `agy` binary's `--help` lists no status or usage
+    subcommand at all.
+
+    and
+    the evidence ledger says so rather than letting the list imply more.
+
+    They should live on the adapter. [`IntegrationId::executable_candidates`]
+    argues exactly this about the executable *name* — *"keeping a second copy
+    here would be a second place for it to be wrong, and the two would
+    drift"* — and a status command is the same kind of fact.
+
+    `crates/glasshouse/src/harness/**` is outside this package's
+    partition; see the report for the two-line trait method this wants to be.
+
+### `resources/mod.rs` — `gather_gateway_quota` doc
+
+    exactly as they do to a probed one — there is no second code path for
+    this source to disagree with the first through.
+
+    **Not yet called from `glasshouse resources`.** The caller this
+    method exists for is `main.rs::resources_report`, which this
+    package's `FORBIDDEN FILES` does not let it reach — see the report
+    for the one line that call site needs. Tests exercise this method
+    directly, which is what proves the model side of the bridge without
+    claiming the production reach it does not yet have (practice §35).
+
+### `resources/mod.rs` — `observed_capacity` doc
+
+    and applying them in this order
+    means the *stale* case behaves the same way: a fresh manual entry never
+    displaces a provider's own word, only fills a gap it left.
+
+    and the worst case is the
+    state [`CapacityState::for_resource`] built with nothing read at all.
+    There is no path through this
+    function that yields an error for a caller to fail a session on.
+
+### `resources/mod.rs` — `authorize_probe` doc
+
+    The same [`GatewayQuotaCache`] reading `resources_report` already folds
+    into `telemetry` before this runs (`GatheredTelemetry::gather_gateway_quota`),
+    through the exact production path every other number in the report reads
+    it through.
+
+    [`GatewayQuotaCache`]'s own `path_for` and
+    [`GatheredTelemetry::with_provider_headers`] are both keyed by provider
+    alone.
+
+    the
+    first because there is nothing to compare a cost against and
+    [`probe_provider`] already reports it as not configured; the other two
+    because "unknown" and "this provider is not limited by a request count at
+    all" both mean there is no remainder to spend down.
+
+### `quota/mod.rs` — module doc
+
+    the same way
+    [`mod@crate::provider::registry`] is a derived view over
+    [`crate::provider::templates`]. Putting it beside the type it describes
+    keeps the whole quota story in one module tree and needs no new
+    top-level module registration.
+
+    Phase 32 established that the four quota *shapes* are not the same shape:
+    a subscription has a rolling window, a metered key has a balance, a free
+    pool has a request count, and local inference has neither. A model that
+    flattened them into one "percent remaining" number would satisfy the word
+    "unified" and break the requirement in the same motion.
+
+    so it can
+    never be what is left after the raw reading was thrown away.
+
+    The map's own rule is that Glasshouse must never invent exact token
+    balances for opaque subscriptions, and a model that reports a number it
+    cannot know is worse than one that says `unknown`. But collapsing the four
+    jobs "unknown" does is how a later phase talks itself into filling one in.
+
+    A local inference
+    server has no credit balance; asking is a category error.
+
+    A first-party subscription's remaining
+    tokens. ... and that is the
+    map's rule expressed as a state rather than as a comment.
+
+    Every one of these is waiting on
+    Phase 32B, which is where telemetry lives and which does not exist yet.
+
+    That is Phase 32B's job. Consequently **every pool of every
+    [`CapacityState`] the shipped binary constructs today is one of the four
+    unknown states** — which is the honest answer, and is stated in the
+    evidence ledger rather than hidden behind a type that looks populated.
+
+### `quota/mod.rs` — `TelemetryClass` doc
+
+    They are not the same question and collapsing them
+    loses one: two numbers can arrive by the same mechanism and be different
+    claims (a provider's own `RateLimit-Limit` header and a ceiling Glasshouse
+    inferred from watching that header change), and two numbers can be the
+    same kind of claim through different mechanisms (a provider endpoint and a
+    harness's own status output are both the account holder speaking about
+    itself).
+
+    A reading
+    that does not exist cannot carry a source or a class, and inventing an
+    `Unknown` variant would mean constructing a [`Reading`] for a measurement
+    nobody took.
+
+### `quota/mod.rs` — `Percentage` doc
+
+    [`NormalizedCapacity::percent`] used to answer a bare `u8`. A bare `u8`
+    makes "check the source before you render this" a rule every caller has to
+    remember, and line 1234 — *never label an inferred subscription percentage
+    as exact* — is not a rule this project leaves to memory.
+
+### `quota/mod.rs` — `KnownPlan` doc
+
+    Line 1233 asks that a user be able to *enter a known plan* when the
+    provider exposes no usable telemetry, and line 1231 asks that native
+    harness status be read when a stable machine-readable interface exists.
+    Those are the same fact arriving by two different origins — the user
+    remembering their subscription tier, and the harness stating it.
+
+    It is what a later phase would need in order to look
+    a published allowance up, and it is what a resource view can honestly
+    state today.
+
+### `quota/mod.rs` — `effective` doc
+
+    [`RemainingCapacityScore::fraction`]
+    and [`RemainingCapacityScore::routing_fraction`] still answer exactly
+    what they answered before this was called.
+
+    per the design
+    decision's own instruction not to fabricate a reset when none is
+    known. See [`CapacityState::seconds_until_reset`] for where a caller
+    gets this number.
+
+    line 1264's "far away
+    relative to the remaining capacity" case, where the effective value
+    stays at the (already conservative) routing fraction rather than
+    being boosted.
+
+### `quota/mod.rs` — `remaining_capacity_score` doc
+
+    **Checked against today's own telemetry reader rather than assumed
+    (practice §23).** `crate::provider::telemetry::RateLimitHeaders::apply_to`
+    currently fills a pool's limit and the per-minute ceiling from the
+    *same* header reading in one call, so the two agree today for every
+    live host this build has observed — this widening changes nothing
+    for them. It matters the moment the two readings arrive from
+    different observations (a stale general limit beside a fresher
+    per-minute one, or a user-configured override on one but not the
+    other).
+
+    See the evidence ledger
+    for whether this closes line 1267 or only partially does.
+
+### `quota/mod.rs` — `ReserveContext::tier` doc
+
+    Capability map line 1289 says *"when their capability requirement
+    justifies it"*, and Phase 35 now has a literal capability set. It must
+    not be plumbed here, and the reason is in its own doc comment.
+
+    This decision is entirely about whether to spend a stronger model's
+    protected quota. wiring it in would let `run the tests and paste the output`
+    spend protected premium reserve because it needs a shell, while a
+    genuinely demanding pure-reasoning task, needing none of the three,
+    would not.
+
+### `quota/mod.rs` — `ReserveContext::task_nearly_complete` doc
+
+    written
+    by the `glasshouse task-progress` verb, exactly as
+    [`Self::user_override`] is.
+
+    Glasshouse's own event
+    vocabulary ([`crate::events::LifecycleEvent`]) is deliberately binary
+    and retrospective — a turn started, a turn ended and how, the harness
+    is waiting for the user, the process exited — and two of its variants
+    carry doc comments saying in as many words that they are *not*
+    statements about the session's work. The one path that reaches
+    [`evaluate_reserve_spend`] runs *after* `TurnEnded { Completed }`, so
+    the only completion fact available there is that the turn is already
+    over.
+
+    A turn count or an elapsed-time threshold would compile and would look
+    like a producer. It would also be wrong in the one situation this line
+    exists to protect: it would report "almost complete" for a task that
+    had merely been running a while. That is why a declaration is the
+    producer and a proxy is not, and why the declaration expires: a
+    statement that outlived the task it described would invert the policy
+    by the slower route.
+
+### `quota/mod.rs` — `evaluate_reserve_spend` doc
+
+    Both lines' operative word is *solely*: the guard stops a
+    threshold being the whole reason work moves, and a declaration is a
+    second reason, contributed by the only party that knows.
+
+    An explicit user override is a statement about
+    *this* task or session that the user made on purpose; it
+    protects work already in flight regardless of what either party
+    intended about reserve, so "the user
+    overrode this" can only ever be true of a session the user named.
+
+    the
+    bands below `Reserve` are the only ones this function ever has
+    an opinion about.
+
+    or
+    explicitly known and not imminent
