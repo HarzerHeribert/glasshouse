@@ -885,3 +885,24 @@ fn a_call_whose_stdout_exceeds_the_pipe_buffer_completes() {
     );
     assert!(result.stderr.is_empty(), "{result:?}");
 }
+
+/// `macos::exec_scope` and `linux::exec_scope` decide "resolved" from
+/// `Path::is_absolute`, and `invoke::exec_grant` returns an absolute path only
+/// for a name it resolved on `PATH` and found runnable. The two agree exactly
+/// as long as every declared executable is a bare name: an absolute declared
+/// executable that does not resolve would be reported as resolved by the
+/// appliers and as fallen-back by the grant (the 61D verifier's finding 4).
+/// The registry is where that precondition could break, so it is pinned here.
+#[test]
+fn every_declared_executable_is_a_bare_name() {
+    for tool in registry::ALL.iter() {
+        let executable = tool.executable();
+        assert!(
+            !executable.contains('/')
+                && !executable.contains('\\')
+                && !Path::new(executable).is_absolute(),
+            "{}: `{executable}` is not a bare name, and exec_scope would disagree with exec_grant about it",
+            tool.name()
+        );
+    }
+}

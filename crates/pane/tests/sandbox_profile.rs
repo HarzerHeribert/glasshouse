@@ -1403,6 +1403,97 @@ fn a_chained_command_line_is_admitted_only_if_every_segment_is() {
     }
 }
 
+/// A redirect operand — `>&2`, `2>&1`, `<&0`, `&>file` — is part of the
+/// command's own segment, not a separator that starts a new one, and not a
+/// nonsense segment (`1`, `2`, `0`, `file`) of its own.
+#[test]
+fn a_redirect_operand_is_not_a_command_segment() {
+    let fixture = Fixture::new("redirect-operand");
+    let admitting = Profile::compile(
+        &fixture.root,
+        Some(
+            r#"{"permissions":{
+                "allow":["Bash(cargo test*)","Bash(echo*)","Bash(cargo build*)","Bash(tail*)"]
+            }}"#,
+        ),
+    );
+    for admitted in [
+        "cargo test 2>&1",
+        "echo x >&2",
+        "cargo build &> build.log",
+        "cargo test 2>&1 | tail -20",
+    ] {
+        admitting
+            .admits_command(admitted)
+            .unwrap_or_else(|denied| panic!("{admitted:?} should be admitted: {denied}"));
+    }
+
+    // The same four lines, with the command word's own pattern absent:
+    // refused for want of that pattern, never for the redirect operand.
+    let refusing = Profile::compile(&fixture.root, Some(r#"{"permissions":{"allow":[]}}"#));
+    for refused in [
+        "cargo test 2>&1",
+        "echo x >&2",
+        "cargo build &> build.log",
+        "cargo test 2>&1 | tail -20",
+    ] {
+        let denied = refusal(refusing.admits_command(refused));
+        assert!(
+            denied.rule.contains("permissions.allow"),
+            "{refused:?} should be refused for want of an allow, not a nonsense segment: {:?}",
+            denied.rule
+        );
+    }
+}
+
+/// A background `&`, `&&`, `;`, `|`, `$(…)` and a backtick still split a new
+/// segment, each refused by name when its command is not admitted — item 2
+/// of the packet's REQUIRED BEHAVIOR, positively.
+#[test]
+fn a_background_or_chained_command_is_still_its_own_segment() {
+    let fixture = Fixture::new("background-or-chained");
+    let profile = Profile::compile(
+        &fixture.root,
+        Some(r#"{"permissions":{"allow":["Bash(cargo test*)"]}}"#),
+    );
+    for refused in [
+        "cargo test & curl x",
+        "cargo test && curl x",
+        "cargo test; curl x",
+        "cargo test | curl x",
+        "$(curl x)",
+        "cargo test `curl x`",
+    ] {
+        let denied = refusal(profile.admits_command(refused));
+        assert!(
+            denied.rule.contains("curl"),
+            "{refused:?} should be refused by name for `curl`: {:?}",
+            denied.rule
+        );
+    }
+}
+
+/// A leading redirect does not hide the command word from the pattern match,
+/// and a leading word that only looks like one (a literal digit, no operator)
+/// is not stripped.
+#[test]
+fn a_leading_redirect_does_not_hide_the_command_word() {
+    let fixture = Fixture::new("leading-redirect");
+    let profile = Profile::compile(
+        &fixture.root,
+        Some(r#"{"permissions":{"allow":["Bash(cargo test*)"]}}"#),
+    );
+    profile
+        .admits_command("2>&1 cargo test")
+        .unwrap_or_else(|denied| panic!("`2>&1 cargo test` should be admitted: {denied}"));
+    let denied = refusal(profile.admits_command("1 cargo test"));
+    assert!(
+        denied.rule.contains("permissions.allow"),
+        "`1 cargo test` is a literal word, not a redirect, and should be refused whole: {:?}",
+        denied.rule
+    );
+}
+
 /// Item 5: every path pattern globs, so a `deny` written `mcp__git__*` that
 /// denied nothing and said nothing was the one shape this module must not
 /// have — a silent grant.

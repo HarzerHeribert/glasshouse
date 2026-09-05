@@ -557,8 +557,12 @@ impl Profile {
             );
         }
         for segment in &segments {
+            // A leading redirect is not the command: `2>&1 cargo test` is
+            // matched on `cargo test`, never on the operand that happens to
+            // come first. `segment` itself is still what a refusal quotes.
+            let command_word = skip_leading_redirects(segment);
             for pattern in &self.command_deny {
-                if match_segment(pattern, segment, true) {
+                if match_segment(pattern, command_word, true) {
                     return denied(format!(
                         "`Bash({pattern})` in permissions.deny matches `{segment}`"
                     ));
@@ -567,7 +571,7 @@ impl Profile {
             if !self
                 .command_allow
                 .iter()
-                .any(|pattern| match_segment(pattern, segment, false))
+                .any(|pattern| match_segment(pattern, command_word, false))
             {
                 return denied(format!(
                     "no `Bash` pattern in permissions.allow admits `{segment}`"
@@ -970,9 +974,11 @@ fn expand_tilde(path: &Path, home: Option<&Path>) -> PathBuf {
 }
 
 /// Every part of a command line a shell would run as a command of its own:
-/// the sequence and pipeline operators (`;`, `&&`, `||`, `|`, `&` and a
-/// newline), plus the contents of a command substitution (`$(…)`, backticks),
-/// which is a command line in its own right.
+/// the sequence and pipeline operators (`;`, `&&`, `||`, `|`, a background
+/// `&` and a newline), plus the contents of a command substitution (`$(…)`,
+/// backticks), which is a command line in its own right — but **not** a `&`
+/// that is part of a redirect operator (`2>&1`, `>&2`, `<&0`, `&>file`,
+/// `&>>file`), because that `&` never starts a new command.
 ///
 /// Deliberately not a shell parser: quoting is not tracked, so a literal `;`
 /// inside quotes splits too. That asks about more parts than a shell would
@@ -995,6 +1001,10 @@ fn command_segments(command_line: &str) -> Vec<String> {
                 out.extend(command_segments(&inner));
                 index = next;
             }
+            '&' if is_redirect_ampersand(&chars, index) => {
+                current.push('&');
+                index += 1;
+            }
             ';' | '\n' | '&' | '|' => {
                 flush_segment(&mut out, &mut current);
                 index += 1;
@@ -1007,6 +1017,51 @@ fn command_segments(command_line: &str) -> Vec<String> {
     }
     flush_segment(&mut out, &mut current);
     out
+}
+
+/// Whether the `&` at `index` is part of a redirect operator rather than a
+/// background or `&&` operator: immediately after a `>` or `<` (`2>&1`,
+/// `<&0`), or immediately before a `>` (`&>file`, `&>>file`). A leading
+/// file-descriptor digit needs no separate check here — it was already an
+/// ordinary character pushed onto the current segment before this `&` was
+/// reached.
+fn is_redirect_ampersand(chars: &[char], index: usize) -> bool {
+    let prev = index.checked_sub(1).and_then(|i| chars.get(i));
+    let next = chars.get(index + 1);
+    matches!(prev, Some('>') | Some('<')) || matches!(next, Some('>'))
+}
+
+/// Whether `word` is entirely one redirect operator with its operand
+/// attached — `N>file`, `N>&M`, `<file`, `>file`, `>>file`, `&>file`,
+/// `&>>file` — the same forms [`command_segments`] no longer splits on.
+fn is_redirect_word(word: &str) -> bool {
+    if let Some(rest) = word.strip_prefix("&>>").or_else(|| word.strip_prefix("&>")) {
+        return !rest.is_empty();
+    }
+    let digits_end = word
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(word.len());
+    let rest = &word[digits_end..];
+    let operand = rest
+        .strip_prefix(">>")
+        .or_else(|| rest.strip_prefix('>'))
+        .or_else(|| rest.strip_prefix('<'));
+    matches!(operand, Some(operand) if !operand.is_empty())
+}
+
+/// `segment` with every leading redirect word removed, so matching begins at
+/// the command: `2>&1 cargo test` becomes `cargo test`, while `1 cargo test`
+/// — a literal word, not an operator — is returned unchanged.
+fn skip_leading_redirects(segment: &str) -> &str {
+    let mut rest = segment.trim_start();
+    loop {
+        let word_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let word = &rest[..word_end];
+        if word.is_empty() || !is_redirect_word(word) {
+            return rest;
+        }
+        rest = rest[word_end..].trim_start();
+    }
 }
 
 /// The text up to the `close` that balances the one already consumed, and the
