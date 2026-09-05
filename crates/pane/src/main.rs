@@ -9,6 +9,13 @@ fn main() -> std::io::Result<()> {
         }
         return Ok(());
     }
+    if args.first().map(String::as_str) == Some("session") {
+        if let Err(message) = pane::session::dispatch(&args[1..]) {
+            eprintln!("{message}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
 
     let mut input = stdin().lock();
     let mut output = stdout().lock();
