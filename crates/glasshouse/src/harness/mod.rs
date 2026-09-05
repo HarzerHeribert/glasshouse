@@ -1,42 +1,23 @@
 //! The contract every supported harness is reached through.
 //!
 //! Glasshouse core knows how to start a process in a pseudo-terminal, draw it,
-//! and record it. It does not know that Claude Code resumes with `--resume`
-//! while Codex resumes with a `resume` subcommand, that Codex reads hooks from
-//! a file inside the project while Claude Code reads them from a settings
-//! document, or that the Antigravity CLI is installed under the name `agy`.
-//! All of that lives here, behind [`HarnessAdapter`], and nowhere else.
+//! and record it, never harness-specific facts (resume flags, hook config
+//! location, install name) — all of that lives behind [`HarnessAdapter`].
+//! Every fact an adapter states is a [`Declared`] value: `Verified`, carrying
+//! the exact place it came from (a `--help` line, a config file, a session
+//! record), or `Unverified` — no third state means "probably". A missing
+//! declaration costs a feature; an invented one costs trust, quietly, since
+//! an adapter is where a confidently wrong sentence launches the wrong
+//! program or resumes the wrong conversation.
+//! Declarations here were derived on 2026-08-25 from installs of Claude Code
+//! 2.1.245, Codex 0.149.0, Antigravity CLI 1.1.20, OpenCode 1.18.22, Cursor
+//! CLI 2026.08.11, Pi 0.73.1, and Hermes Agent 0.15.1, each adapter recording
+//! what it read.
 //!
-//! # Declarations are evidence, not recollection
-//!
-//! Every fact an adapter states about its harness is a [`Declared`] value: it
-//! is either `Verified`, carrying the exact place the fact came from — a line
-//! of the installed binary's `--help`, one of its own configuration files, a
-//! session record it wrote — or it is `Unverified`, which is what an
-//! unavailable fact looks like. There is deliberately no third state that
-//! means "probably".
-//!
-//! This is not ceremony. An adapter is the one place in Glasshouse where a
-//! confidently wrong sentence launches the wrong program, resumes the wrong
-//! conversation, or tells a user a capability exists that does not. A missing
-//! declaration costs a feature; an invented one costs trust, and quietly.
-//!
-//! The declarations here were derived on 2026-08-25 from Claude Code 2.1.245,
-//! Codex 0.149.0, Antigravity CLI 1.1.20, OpenCode 1.18.22, Cursor CLI
-//! 2026.08.11, Pi 0.73.1, and Hermes Agent 0.15.1, every one of them installed
-//! on the development machine and interrogated there. Each adapter module
-//! records what it read, and a declaration nobody could read is `Unverified`
-//! rather than filled in from the obvious answer.
-//!
-//! # What core may and may not do with an adapter
-//!
-//! An adapter produces *descriptions*: the executable names to look for, the
-//! arguments that start or resume a session, the bytes that deliver a message
-//! or an interrupt. It never spawns anything, never touches a
-//! [`crate::session::runtime::SessionRuntime`], and never parses terminal
-//! output. That direction is the architecture: the generic runtime stays
-//! usable for any process, and adapters stay small enough to be read in one
-//! sitting and checked against a real install.
+//! An adapter produces *descriptions* only — executable names, session
+//! arguments, message/interrupt bytes — and never spawns anything, touches
+//! [`crate::session::runtime::SessionRuntime`], or parses terminal output.
+// History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/harness/mod.rs module doc.
 
 pub mod antigravity;
 pub mod claude_code;
@@ -1272,24 +1253,19 @@ pub trait HarnessAdapter: std::fmt::Debug + Send + Sync {
     /// Whether this harness's direct-provider mechanism is unusable without a
     /// model named for it.
     ///
-    /// Default `false`, which is what every harness answered before this
-    /// existed: pointing it at a provider is enough and the harness picks a
-    /// model itself.
-    ///
-    /// `true` is for a harness that selects the *provider* through the
-    /// model. OpenCode's `--model <provider>/<model>` is the case this
-    /// exists for: a profile that configures a provider and names no model
-    /// leaves the harness configured and unused, starting on whatever
-    /// backend it defaulted to. For a user who asked to be pointed somewhere
-    /// else that is the silent, billable failure
-    /// [`crate::profile::resolve`]'s credential step already refuses, so it
-    /// is refused too — and never guessed at, because a model identifier
-    /// invented by Glasshouse is exactly the invention that module exists to
-    /// refuse.
+    /// Default `false`: pointing it at a provider is enough and the harness
+    /// picks a model itself. `true` is for a harness that selects the
+    /// *provider* through the model — OpenCode's `--model <provider>/<model>`
+    /// is the case this exists for, where a profile naming a provider but no
+    /// model leaves the harness configured and unused on whatever backend it
+    /// defaulted to. That is the silent, billable failure
+    /// [`crate::profile::resolve`]'s credential step already refuses, never
+    /// guessed at with an invented model identifier.
     ///
     /// Read **before** [`HarnessAdapter::direct_provider_launch`] is called,
     /// so a missing model is a refusal that says so rather than a `None`
     /// that reads as "this harness declares no mechanism".
+    // History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/harness/mod.rs `HarnessAdapter::direct_provider_requires_model`.
     fn direct_provider_requires_model(&self) -> bool {
         false
     }
@@ -1412,25 +1388,21 @@ pub fn all() -> impl Iterator<Item = &'static dyn HarnessAdapter> {
 /// Whether a harness's declared executable candidates resolve to something
 /// installed and directly usable on this machine.
 ///
-/// This answers Phase 9F line 466's precondition — "require the selected
-/// coding harness executable to be installed and usable before offering an
-/// interactive direct-provider or gateway-backed launch profile" — as a
-/// value, so [`crate::profile::resolve_checked`] can refuse on it without
-/// this crate's `profile` module having to search `PATH` itself.
+/// Answers Phase 9F line 466's precondition as a value, so
+/// [`crate::profile::resolve_checked`] can refuse on it without this crate's
+/// `profile` module having to search `PATH` itself.
 /// [`ExecutablePresence::detect`] performs the same search
 /// [`mod@crate::session::select`] and `glasshouse doctor` already do: every
-/// declared candidate name in turn, first usable one wins — see
-/// `integrations::resolve_first_usable_with`, which this mirrors.
+/// declared candidate name in turn, first usable one wins.
 ///
-/// **This is `PATH` discovery only.** It does not know about an explicitly
-/// configured executable path — that lookup belongs to
-/// [`mod@crate::session::select`], which reads configuration this crate's
-/// `harness` and `profile` modules deliberately do not import (see
-/// `profile`'s own module documentation). A caller that has already resolved
-/// a harness through `session::select` knows more than a fresh
-/// [`ExecutablePresence::detect`] call can, and should hand
-/// [`crate::profile::resolve_checked`] the [`ExecutablePresence::Usable`] it
-/// already established instead of asking this type to search `PATH` again.
+/// `PATH` discovery only: it does not know about an explicitly configured
+/// executable path, which belongs to [`mod@crate::session::select`] (this
+/// crate's `harness`/`profile` modules deliberately do not import
+/// configuration). A caller that has already resolved a harness through
+/// `session::select` should hand [`crate::profile::resolve_checked`] the
+/// [`ExecutablePresence::Usable`] it already established, rather than
+/// asking this type to search `PATH` again.
+// History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/harness/mod.rs `ExecutablePresence`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ExecutablePresence {
     /// A candidate resolved to something installed and directly usable.

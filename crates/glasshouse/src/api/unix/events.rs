@@ -24,40 +24,18 @@ const MAX_EVENTS_LIMIT: usize = 1000;
 ///
 /// Incremental: `after` is the log position the caller has already consumed,
 /// and `head` — the log's current position, returned even when `events` is
-/// empty — is what it hands back next time, so a caller that sees nothing
-/// new still has a cursor rather than only after the first event ever
-/// exists. `limit` is capped at [`MAX_EVENTS_LIMIT`] regardless of what is
-/// asked for.
+/// empty — is what it hands back next time. `limit` is capped at
+/// [`MAX_EVENTS_LIMIT`] regardless of what is asked for.
 ///
-/// # Why this reads [`EventLog::since`] and not `observed_since`
+/// Reads [`EventLog::since`], not `observed_since`: the caller is in another
+/// process, so the harness-report filter that avoids double-counting an
+/// in-process [`EventBus`] subscriber would instead delete every spawn,
+/// intervention and exit no other process witnessed — see [`EventRecorder`].
 ///
-/// Because the caller is **in another process**. `observed_since` filters to
-/// harness-reported rows for one stated reason — a reader subscribed to this
-/// process's own [`EventBus`] would otherwise see every in-process event
-/// twice — and that reason is a fact about `shell::run`, which holds both a
-/// subscription and a log tail. Nothing on the far end of this socket holds
-/// either. Applying the filter here does not de-duplicate anything; it
-/// deletes the entire class of events this process is the only witness to,
-/// which is every spawn, intervention and exit of every orchestrated worker
-/// — see [`EventRecorder`] for the other half of the same defect.
-///
-/// The narrower query is still right where its premise holds, and it is
-/// still used there: [`pump_watches`] wants exactly the harness reports,
-/// because `TurnEnded` is minted only in a hook process and a completion
-/// carries the reporting harness's name.
-///
-/// # Why it flushes first
-///
-/// Recording is asynchronous by construction (see [`EventRecorder`]), so an
-/// orchestrator that sends a message and immediately asks what happened
-/// would otherwise race its own write. The wait is bounded and its failure
-/// is ignored: a slow writer makes this answer *older*, never absent, and
-/// the caller's cursor brings it back next call.
-///
-/// This makes the door's **own** writes visible before it answers. It cannot
-/// do the same for a harness report, which is written by a separate
-/// `glasshouse hook` process on its own schedule — no reader anywhere can
-/// know that one is pending.
+/// Flushes first because recording is asynchronous ([`EventRecorder`]); the
+/// wait is bounded and its failure ignored, so a slow writer only makes this
+/// answer older, never absent — the caller's cursor brings it back next call.
+// History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/api/unix/events.rs `project_events`.
 pub(super) fn project_events(
     runtime: &Runtime,
     after: i64,
@@ -482,31 +460,21 @@ impl WatchState {
 
 /// Deliver any completion each watch has not yet seen — lines 734-737, 739.
 ///
-/// Called from the door's own background tick, which is what makes this a
-/// production installation rather than a mechanism waiting for one: nothing
-/// outside `glasshouse api serve` has to remember to call it.
+/// Called from the door's own background tick: nothing outside `glasshouse
+/// api serve` has to remember to call it.
 ///
-/// # Why this reads the log rather than the bus
+/// Reads the log, not the bus: a turn ending is reported by the harness's
+/// own lifecycle hook in a separate short-lived process (`glasshouse hook
+/// <session> Stop`), and that row in the event log is the only place this
+/// process can see it — the hook's process is gone before anyone could have
+/// subscribed to anything.
 ///
-/// A turn ending is reported by the harness's own lifecycle hook, in a
-/// **separate short-lived process** (`glasshouse hook <session> Stop`), which
-/// translates it through `session::lifecycle::event_for` — the single
-/// construction site of `TurnEnded` — and appends it to the project's event
-/// log. That row is the only place this process can see it: the hook's
-/// process is gone by the time anyone could have subscribed to anything.
-///
-/// So this is line 734's *"from native lifecycle hooks"* in the literal
-/// sense. It is not a screen-scraper and it cannot become one: nothing here
-/// reads a session's output, and `TurnEnded` cannot be minted from silence.
-///
-/// # Why the cursor advances past rows that did not match
-///
-/// `observed_since` returns every observed row, not only this worker's. A
-/// cursor that advanced only on a match would re-read the same unmatched
-/// rows on every tick forever, and would eventually re-read a matched row
-/// too once the batch limit cut it off. Advancing past everything seen is
-/// what makes "read exactly once" a property of the loop rather than of the
-/// filter.
+/// The cursor advances past every observed row, not only the ones that
+/// matched: `observed_since` returns every observed row for every worker, so
+/// advancing only on a match would re-read the same unmatched rows forever.
+/// Advancing past everything seen is what makes "read exactly once" a
+/// property of the loop rather than of the filter.
+// History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/api/unix/events.rs `pump_watches`.
 pub(super) fn pump_watches(state: &WatchState, live: &Mutex<SessionRuntime>, watches: &Watches) {
     // Lock order: `watches` first, then `live`. See [`Watches`].
     let mut registry = watches
@@ -686,35 +654,22 @@ fn assumption_summary(
 }
 
 /// What Glasshouse actually observed about the turn that just ended — line
-/// 737's "concise result summary", closed at exactly the width the evidence
-/// supports and no wider.
+/// 737's "concise result summary".
 ///
-/// # Every character of this comes from a fixed vocabulary
+/// Built only from [`LifecycleEvent::kind`]'s own words (a `&'static str`
+/// from the eleven the enum defines) joined with an arrow, plus one integer
+/// — no value read out of a hook payload, a session's scrollback, or a
+/// harness's own event spelling can reach this string, because none of
+/// those is in the type it is built from. A summary quoting a worker's
+/// output would breach the boundary `tests/session_hook.rs` holds for the
+/// project database.
 ///
-/// The rendered kinds are [`LifecycleEvent::kind`]'s own words — a
-/// `&'static str` from the eleven the enum defines — joined with an arrow,
-/// plus one integer. **No value read out of a hook payload, a session's
-/// scrollback, or a harness's own event spelling can reach this string**,
-/// because none of those is in the type it is built from. That is not care
-/// on the author's part; it is what `LoggedEvent` makes available.
-///
-/// This matters more than concision. A summary quoting a worker's output
-/// would breach the same boundary `tests/session_hook.rs` holds for the
-/// project database — the hook path deliberately drains its payload into
-/// `io::sink()` unread — and it would do it on the one path whose whole
-/// purpose is to carry information *out* of a worker and into another agent.
-///
-/// # What it can honestly say, and what it cannot
-///
-/// It says: the shape of the turn, in Glasshouse's own vocabulary, and how
-/// long it took. `turn_started → waiting_for_user → turn_ended in 41s` tells
-/// an orchestrator that the worker stopped to ask something and then
-/// finished, which is real and actionable.
-///
-/// It does **not** say what the worker did, produced, or concluded.
-/// Glasshouse does not observe that anywhere — the only place it exists is
-/// the conversation, which this door does not read. An orchestrator that
-/// needs the result asks the worker (line 738) or reads a checkpoint.
+/// It says the shape of the turn and how long it took —
+/// `turn_started → waiting_for_user → turn_ended in 41s` — never what the
+/// worker did, produced, or concluded; Glasshouse does not observe that
+/// anywhere. An orchestrator that needs the result asks the worker (line
+/// 738) or reads a checkpoint.
+// History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/api/unix/events.rs `summarize`.
 fn summarize(log: &EventLog, session: &SessionId, seq: i64, at: i64) -> String {
     let history = match log.recent_for_session(session, SUMMARY_KINDS * 4) {
         Ok(history) => history,

@@ -1,46 +1,23 @@
 //! Phase 34F — a model's capability as configurable data, not router logic.
-//!
-//! # What this widens, and what it does not duplicate
-//!
-//! [`super::ProviderConfig::model_ceilings`] already lets a user state the
-//! highest workload tier a model may serve — capability map line 1796, one
-//! axis. This module is the same idea widened to the rest of line 1796's
-//! neighbourhood (lines 1475–1479, 1482–1485): structured-output
-//! suitability, task-kind suitability, the harness-model pairing class, and
-//! how much evidence backs the calibration — stored beside `model_ceilings`
-//! on the same [`super::ProviderConfig`], keyed by the same model
-//! identifier. [`ModelCapabilityRecord`] deliberately does **not** carry its
-//! own ceiling concept separate from the existing one: [`resolve_ceiling`]
-//! is the one function that reads both and states which wins.
-//!
-//! # `backend` and `model` are not fields here
-//!
-//! Line 1482 asks calibration to stay local to harness, launch profile,
-//! model, backend, and protocol. Two of those five are already structural
-//! by the time a [`ModelCapabilityRecord`] exists: `model` is the map key
-//! [`super::ProviderConfig::model_capabilities`] stores it under (exactly
-//! [`super::ProviderConfig::model_ceilings`]'s own shape), and `backend` is
-//! *which* `[providers.<name>]` table the record lives in — a local
-//! quantized model and a hosted model of the same name are configured under
-//! two different provider entries, so they are already two different
-//! records before this module adds anything (line 1485,
-//! `two_providers_with_the_same_model_name_resolve_independently`). What
-//! this module adds is the other two axes, `harness` and `launch_profile`,
-//! plus `protocol` — narrowing fields on the record itself, checked by
+//! Widens [`super::ProviderConfig::model_ceilings`] (line 1796, one axis) to
+//! the rest of lines 1475–1479, 1482–1485's neighbourhood — structured-output
+//! and task-kind suitability, pairing class, calibration evidence — stored
+//! beside `model_ceilings` on the same [`super::ProviderConfig`], keyed by
+//! the same model identifier. [`ModelCapabilityRecord`] carries no separate
+//! ceiling concept: [`resolve_ceiling`] is the one function that reads both
+//! and states which wins.
+//! `backend` and `model` are not fields here: `model` is already the map
+//! key, and `backend` is which `[providers.<name>]` table the record lives
+//! in, so a local and a hosted model of the same name are already two
+//! records (line 1485). This module adds only `harness`, `launch_profile`
+//! and `protocol` — narrowing fields checked by
 //! [`ModelCapabilityRecord::applies_to`].
-//!
-//! # User assignment outranks a benchmark seed, and a seed never refuses
-//!
-//! The user's 56A ruling (`docs/product/design-decisions.md`, "Step 4's
-//! fallback order") is explicit: public benchmark data is *"a baseline"*,
-//! never an authority, and a wrong tier here does not misdescribe — it
-//! misroutes work. [`CeilingResolution::hard_ceiling`] is where that ruling
-//! becomes code: a [`CapabilityProvenance::Benchmark`] record's ceiling
-//! never reaches a hard routing constraint, because line 1484 requires a
-//! prior to be usable for ranking and never for refusing something the user
-//! never restricted. Only [`CapabilityProvenance::User`] — the user's own
-//! assignment, whether written as a `model_ceilings` override or as a
-//! capability record — may reject a candidate.
+//! User assignment outranks a benchmark seed, and a seed never refuses
+//! (56A ruling): [`CeilingResolution::hard_ceiling`] never lets a
+//! [`CapabilityProvenance::Benchmark`] ceiling reach a hard routing
+//! constraint (line 1484) — only [`CapabilityProvenance::User`] may reject
+//! a candidate.
+// History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/config/capability.rs module doc.
 
 use serde::{Deserialize, Serialize};
 

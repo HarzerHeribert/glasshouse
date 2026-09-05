@@ -150,25 +150,18 @@ fn lock_injected(
 /// capability map lines 1125-1127 and 1131-1134.
 ///
 /// The whole selection lives in
-/// [`glasshouse::memory::inject::select_briefing`] (this door always supplies
-/// `Some(task)`, so behaviour here is unchanged from when this called
-/// [`inject::briefing`] directly — `GH-LAUNCH-BRIEFING` is the `None` caller,
-/// for a launch with no task to query on), which is cross-platform and knows
-/// nothing about this door; what belongs here is only the two things this
-/// door owns: which project's memory is being read (the runtime this socket
-/// was opened for — there is no request field naming a project, see
-/// `super`'s module doc comment), and what this session has already been
+/// [`glasshouse::memory::inject::select_briefing`], which is cross-platform
+/// and knows nothing about this door; what belongs here is only the two
+/// things this door owns: which project's memory is being read (the runtime
+/// this socket was opened for — there is no request field naming a project,
+/// see `super`'s module doc comment), and what this session has already been
 /// sent.
 ///
-/// # Never a reason to fail a delivery
-///
-/// Every failure path returns `None` and logs. A session that starts and
-/// receives its task without memory is strictly better than one that does
-/// not start, and a memory store that cannot be opened is not a reason to
-/// refuse to talk to a worker. The error is logged rather than answered
-/// with, and it never reaches the injected text: `database::DatabaseError`
-/// names the project file's absolute path in every variant, and nothing this
-/// module puts on a session's terminal is built from an error at all.
+/// Never a reason to fail a delivery: every failure path returns `None` and
+/// logs. A session that starts and receives its task without memory is
+/// strictly better than one that does not start, and nothing this module
+/// puts on a session's terminal is built from an error at all.
+// History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/api/unix/memory.rs `select_memory`.
 pub(super) fn select_memory(
     runtime: &Runtime,
     session: &SessionId,
@@ -272,31 +265,21 @@ fn memory_retrieval_diagnostics_enabled(runtime: &Runtime) -> bool {
 
 /// Deliver a selected briefing to `session`, and record what it carried.
 ///
-/// # Line 1128: a message, not a write into the harness's own history
-///
-/// This goes through [`SessionApi::send_text`] — the same seam
+/// Goes through [`SessionApi::send_text`] — the same seam
 /// `Request::SendMessage` uses — and touches no harness session file,
-/// transcript or resume state. Glasshouse's memory arrives the way anything
-/// else Glasshouse says arrives, which is what keeps it distinguishable from
-/// the harness's own record of the conversation.
+/// transcript or resume state, so memory arrives the way anything else
+/// Glasshouse says arrives.
 ///
-/// # Always [`MessageOrigin::Machine`], even under a person's own request
+/// Always [`MessageOrigin::Machine`], even under a person's own request: the
+/// briefing is selected by [`select_memory`] and composed by
+/// `memory::inject::briefing`, not written by the person, so stamping it
+/// with the requester's origin would record Glasshouse's own words as
+/// theirs — the exact confusion the origin field exists to end.
 ///
-/// The briefing rides along with `Request::SendMessage`, which now carries an
-/// origin — and this delivery deliberately ignores it. A person asking to
-/// send a line did not write this text and has never seen it: it is selected
-/// from the project's memory by [`select_memory`] and composed by
-/// `memory::inject::briefing`. Stamping it with the requester's origin would
-/// record Glasshouse's own words as the person's, which is the exact
-/// confusion the origin exists to end. The person's line, sent immediately
-/// after this one, carries their origin; this one is Glasshouse speaking and
-/// says so.
-///
-/// # Injection failure is never a delivery failure
-///
-/// A refused or failed injection is logged and swallowed. The ledger is
-/// updated only on a send that actually succeeded, so a memory that did not
-/// arrive is not recorded as one the session already has.
+/// Injection failure is never a delivery failure: a refused or failed
+/// injection is logged and swallowed, and the ledger is updated only on a
+/// send that actually succeeded.
+// History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/api/unix/memory.rs `deliver_memory`.
 pub(super) fn deliver_memory(
     runtime: &Runtime,
     api: &mut SessionApi<'_>,
@@ -406,25 +389,18 @@ pub(super) fn get_memory(runtime: &Runtime, memory: &str) -> Response {
 ///
 /// Answered from `memory::snapshot::snapshot`, the same producer the TUI's
 /// project overview reads (`shell::build_project_overview_memory`), so the
-/// two cannot disagree about what "current" means. There is no second
-/// snapshot implementation behind this door and there must not be one.
+/// two cannot disagree about what "current" means.
 ///
-/// # Bounded on both axes, server-side (line 1115)
+/// Bounded on both axes, server-side (line 1115): a caller's `limit` and
+/// `body_chars` are each `min`'d against a constant here, so they may only
+/// ever *lower* the ceiling — `usize::MAX` on both yields the same bounded
+/// response as the ceiling itself.
 ///
-/// A caller's `limit` and `body_chars` are each `min`'d against a constant
-/// here before they reach [`glasshouse::memory::snapshot::SnapshotBudget`],
-/// so they may only ever *lower*
-/// the ceiling. Passing `usize::MAX` to both — the executable form of
-/// "dumping the complete memory database into agent context" — yields the
-/// same bounded response as passing the ceiling itself.
-///
-/// # Sections, not a flattened dump
-///
-/// The response keeps `snapshot`'s own structure: one entry per
-/// `MemoryKind`, present even when empty, each reporting how many entries it
-/// left out. A section that hit its cap says so, and a body that was cut says
-/// so, so a caller can tell "this project has nothing of that kind" from
-/// "there is more of it than you asked for" without a second call.
+/// Sections, not a flattened dump: the response keeps `snapshot`'s own
+/// structure, one entry per `MemoryKind`, present even when empty, each
+/// reporting how many entries it left out — so a caller can tell "nothing of
+/// that kind" from "there is more than you asked for" without a second call.
+// History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/api/unix/memory.rs `current_memory`.
 pub(super) fn current_memory(runtime: &Runtime, limit: usize, body_chars: usize) -> Response {
     use glasshouse::memory::ProjectMemory;
     use glasshouse::memory::snapshot::{SnapshotBudget, snapshot};
@@ -497,36 +473,25 @@ fn snapshot_entry_json(entry: &glasshouse::memory::snapshot::SnapshotEntry) -> s
 }
 
 /// Search this project's durable memory — box 10, capability map line 1111's
-/// project-scoped `memory.search`, and Phase 21F lines 935/936: the machine
-/// door carries each result's authority, validity state, and — for a memory
-/// that may constrain implementation — its rationale and invalidation
-/// conditions, as structured fields rather than only inside a rendered
-/// string.
-///
-/// # Project scope, and why there is no project argument
-///
-/// Line 1114. The scope is structural: this door is opened for one resolved
-/// [`Runtime`] and no request field names a project (see `super`'s module doc
-/// comment), and `MemoryStore::search` filters on `memories.project_id` in
-/// its own `WHERE` clause underneath that rather than trusting it. The two
-/// are independent, which is the point — see `memory::store`'s own
-/// "Project isolation" section for why the read boundary is not redundant
-/// with the trigger.
+/// project-scoped `memory.search`, and Phase 21F lines 935/936: results carry
+/// authority, validity state, and — for a memory that may constrain
+/// implementation — rationale and invalidation conditions as structured
+/// fields, not only inside a rendered string.
+/// Project scope is structural, not a request field (line 1114): this door
+/// is opened for one resolved [`Runtime`], and `MemoryStore::search` filters
+/// on `memories.project_id` in its own `WHERE` clause underneath that rather
+/// than trusting it — see `memory::store`'s "Project isolation" section for
+/// why the read boundary is not redundant with the trigger.
 ///
 /// `invariants_and_constraints`/`other` is `main.rs`'s own
-/// `memory_search_grouped` (line 929), the exact search
-/// `glasshouse memory search` runs; `report` is `render_memory_report`'s
-/// exact text over the same result, so this door and that command can never
-/// disagree about what a query finds. One search, not two: the CLI's report
-/// text is rendered from the already-fetched grouping rather than searched
-/// for a second time.
-///
-/// # `path`, capability map line 1143
+/// `memory_search_grouped` (line 929), the exact search `glasshouse memory
+/// search` runs; `report` is `render_memory_report`'s exact text over the
+/// same result, so this door and that command can never disagree about what
+/// a query finds.
 ///
 /// `path` present switches this to [`query_memory_for_path`] and `query` is
-/// not consulted — see [`Request::QueryMemory`]'s own doc comment for why a
-/// path lookup has no text to search. `path` absent is byte-for-byte what
-/// this door has always answered.
+/// not consulted — see [`Request::QueryMemory`]'s own doc comment for why.
+// History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/api/unix/memory.rs `query_memory`.
 pub(super) fn query_memory(
     runtime: &Runtime,
     query: &str,
@@ -577,37 +542,21 @@ pub(super) fn query_memory(
 /// [`glasshouse::memory::MemoryStore::for_path`], migration 17's read door
 /// rather than a text search.
 ///
-/// # `association`, and why it is always `"observed"`
-///
-/// Every row carries an `association` field alongside the body and rationale
-/// [`memory_result_json`] already puts there — line 1143 asks for the
-/// rationale *behind a constraint*, and which relationship produced the row
-/// is part of reading that rationale honestly. `for_path`'s own doc comment
-/// says it does not narrow by [`FileAssociation`], and this build's only
-/// writer, `MemoryStore::record_observed_files`, only ever stores
-/// [`FileAssociation::Observed`] — so `association` is that constant on
-/// every row today, not a per-row lookup this door invents. It reads
-/// `"observed"` rather than `"referenced"` for the same reason
-/// `memory::inject`'s line 1140 section does: the file changed during the
-/// session that produced the memory, which this build can prove; that the
-/// memory refers to the file is map line 1139's own claim, and 1139 is not
-/// satisfied by anything shipped here.
-///
+/// `association` reads `"observed"` on every row today: `for_path` does not
+/// narrow by [`FileAssociation`], and this build's only writer,
+/// `MemoryStore::record_observed_files`, only ever stores
+/// [`FileAssociation::Observed`] — so it is a constant this door carries,
+/// not a per-row lookup it invents.
 /// No `report`: `render_memory_report`'s prose is written for a text search
 /// and would misdescribe a path lookup as one, so this answers with `path`
-/// naming what was looked up instead. `query` is not accepted here — see
-/// [`query_memory`].
+/// naming what was looked up instead.
 ///
 /// Opens the project's memory directly, the same shape [`get_memory`] and
-/// [`current_memory`] use, rather than through `crate::commands::memory::memory_search_grouped`:
-/// that helper is `main.rs`'s text-search core and records every retrieval
-/// through it as a *search* (`evaluation::record_memory_retrieval`); a path
-/// lookup runs no query and recording it as one would misreport what was
-/// asked. `glasshouse memory search --path` is the same reader again, so the
-/// CLI and this door cannot disagree about what a file is associated with.
-///
-/// One `git log` for the whole answer and at most two `merge-base` per row:
-/// every row is about the same file, so the last-change commit is read once.
+/// [`current_memory`] use, rather than through
+/// `crate::commands::memory::memory_search_grouped`: that helper records
+/// every retrieval through it as a *search*
+/// (`evaluation::record_memory_retrieval`), and a path lookup runs no query.
+// History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/api/unix/memory.rs `query_memory_for_path`.
 fn query_memory_for_path(runtime: &Runtime, path: &str, history: bool, limit: usize) -> Response {
     use glasshouse::checkpoint::git::{Freshness, last_change_commit};
     use glasshouse::memory::search::{RetrievalIntent, SearchScope};
@@ -752,35 +701,20 @@ fn memory_result_json(record: &glasshouse::memory::MemoryRecord) -> serde_json::
 /// — capability map line 1116, *"include provenance with machine-retrieved
 /// memory so an agent can verify important claims against source or code."*
 ///
-/// Deliberately the vocabulary `tests/memory_provenance.rs` already proves
-/// round-trips, field for field and spelling for spelling — the two
-/// *locating* fields `source_session_id` and `source_commit`, the event
-/// slice, and all ten of Phase 21B's `DecisionProvenance` fields — rather
-/// than a second provenance shape invented for this door. An agent that
-/// wants to check a claim against code has `source_commit`; against the
-/// conversation that produced it, `source_session_id` and `source_events`;
-/// against the reasoning, `rationale`, `evidence` and `source_excerpt`.
+/// The vocabulary `tests/memory_provenance.rs` proves round-trips, field for
+/// field: the two *locating* fields `source_session_id` and `source_commit`,
+/// the event slice, and all ten of Phase 21B's `DecisionProvenance` fields.
 ///
 /// Every field is `null` when absent and never `""` or `0` (§71): a decision
 /// nobody recorded a security assumption for is a different fact from one
-/// that recorded there was none, and `MemoryRecord`'s own doc comments say
-/// so field by field.
+/// that recorded there was none.
 ///
-/// `rationale` also appears at the top level of [`memory_result_json`], where
-/// Phase 21F line 936 put it; it is repeated rather than moved so that this
-/// change adds a field to the door's answer and removes none.
-///
-/// # Secrets
-///
-/// Nothing here is a credential by construction. `memory::store`'s module
-/// documentation states there is no column for a token, a key, or a provider
-/// secret; the screening is on the producer side, where
-/// `memory::extract::schema::judge` inspects each emitted element **whole**
-/// before any field is read. `source_excerpt` is the sharpest of these
-/// because it is verbatim session text — and it is exactly as screened as
-/// `body`, which this door has carried since Phase 21F. This is a `json!`
-/// over named fields, never a `Debug` format of a struct, so the
-/// `provider/discovery.rs::ProbeRequest` shape cannot reappear here.
+/// Nothing here is a credential by construction: `memory::store` has no
+/// column for a token, key, or provider secret, and the screening is on the
+/// producer side, where `memory::extract::schema::judge` inspects each
+/// emitted element whole before any field is read. This is a `json!` over
+/// named fields, never a `Debug` format of a struct.
+// History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/api/unix/memory.rs `provenance_json`.
 fn provenance_json(record: &glasshouse::memory::MemoryRecord) -> serde_json::Value {
     use glasshouse::memory::ProjectPhase;
 

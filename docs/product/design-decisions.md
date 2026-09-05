@@ -15058,3 +15058,1839 @@ package's whole job rather than a constraint on the fixups (the lead's correctio
     //! [`MemoryStatus`] is a third, independent axis: where the memory sits in its
     //! lifecycle. Migration 4's comment records why none of the three may be
     //! folded into another.
+
+## Trims: api, events, harness and config module docs, second packet — history moved out of comments by `GH-TRIM-API-EVENTS-HARNESS-CONFIG-DOCS-2`, 2026-09-06
+
+### `crates/glasshouse/src/api/mod.rs` — module doc
+
+//! The external control door for one project's Glasshouse — Phase 42.
+//!
+//! Everything a person can do from `glasshouse sessions`, `glasshouse
+//! memory`, and `glasshouse checkpoint` is a local, one-shot process
+//! invocation that opens the project's own database and exits. Nothing
+//! outside that process can list, message, or interrupt a session while it
+//! is running, because a `SessionRuntime`'s pseudo-terminal handles are
+//! private to whichever process started them — there is no cross-process
+//! way to reach one.
+//!
+//! `glasshouse api serve` is what closes that gap: a single process that
+//! owns its own `SessionRuntime` and answers requests against it, plus the
+//! project's memory and checkpoint stores, over a Unix domain socket. It
+//! does not attach to a concurrent `glasshouse` shell or headless launch's
+//! own runtime — nothing can, for the reason above — so a session started
+//! outside this door is visible here (the store is shared) but not
+//! controllable here (send/interrupt honestly answer `ApiError::NotLive`,
+//! the same error `glasshouse sessions` itself would give for a session no
+//! live process holds).
+//!
+//! **This module has two halves, and only one of them existed until now.**
+//! `unix` answers the door; `client` knocks on it. For Phase 42's whole life
+//! nothing in this repository did the knocking — `UnixStream::connect`
+//! appeared nowhere in `crates/glasshouse/src`, so a transport that could
+//! carry a person's keystrokes into a running worker had no person on either
+//! end of it, and capability map lines 746 and 747 were returned
+//! premise-invalid for exactly that. `glasshouse api send`, `glasshouse api
+//! interrupt` and `glasshouse api read` are the missing end. They share
+//! nothing with the server but `protocol`'s wire shape, and they deliberately
+//! take **no socket path** — see `client`'s own doc comment for why that
+//! omission is the project boundary rather than a gap in it.
+//!
+//! **The read verb is what made those three a person being *in* a worker**
+//! (line 745). Send and interrupt shipped first and could only write: a user
+//! could type into a running worker and see nothing come back.
+//! `Request::RecentOutput` answers with the tail of the session's scrollback
+//! through `session::api::SessionApi::recent_output`, which had lived in this
+//! repository with no production caller outside its own tests. It is not an
+//! interactive attach — see `client`'s doc comment for that boundary — and it
+//! is bounded server-side, because a worker's scrollback is the largest and
+//! the most sensitive thing this door returns.
+//!
+//! **Why a Unix socket, not a subcommand-per-call.** A subcommand-per-call
+//! ("`glasshouse api send-message ...`") is a fresh process per request, and
+//! a fresh process cannot hold the `SessionRuntime` that spawning and
+//! messaging a session need — every call would have to re-attach to
+//! *something* long-lived regardless, so the long-lived thing might as well
+//! be the door itself. A socket answers requests without needing a shell
+//! already open, which a purely in-process API could not.
+//!
+//! **Why this is a bin-crate module, not `glasshouse::api`.** This phase's
+//! packet holds `cli.rs` and `main.rs` but not `lib.rs`, which another
+//! phase's partition does not own either; declaring `mod api;` from
+//! `main.rs` keeps this door inside the binary that already owns
+//! `run_headless`'s `Arc<Mutex<SessionRuntime>>` pattern, which this reuses,
+//! without editing a file outside this package's grant. The consequence is
+//! that this module is proven only by running the shipped binary — see
+//! `tests/session_model.rs`'s API cluster — never by an in-process unit
+//! test, which is the right proof for an external door anyway.
+//!
+//! **Project scope.** The socket is opened for one already-resolved
+//! `Runtime`, resolved the same way every other subcommand resolves it
+//! (`--scope`, or the working directory's Git root). Every handler in
+//! `unix` reaches sessions through `session::api::SessionApi`, which
+//! refuses a foreign session by construction — see that type's own doc
+//! comment — and memory and checkpoints through `memory::ProjectMemory` and
+//! `checkpoint::store::ProjectCheckpoints`, both opened against this same
+//! runtime. There is no request field naming a project: the door itself is
+//! the scope.
+//!
+//! **Authentication.** See `unix::authorize` for the mechanism and its
+//! limits — a filesystem-permission and peer-credential check, not a secret.
+
+### `crates/glasshouse/src/api/unix/events.rs` — `project_events`
+
+/// This project's lifecycle events, harness-independent — capability map
+/// line 701.
+///
+/// Incremental: `after` is the log position the caller has already consumed,
+/// and `head` — the log's current position, returned even when `events` is
+/// empty — is what it hands back next time, so a caller that sees nothing
+/// new still has a cursor rather than only after the first event ever
+/// exists. `limit` is capped at [`MAX_EVENTS_LIMIT`] regardless of what is
+/// asked for.
+///
+/// # Why this reads [`EventLog::since`] and not `observed_since`
+///
+/// Because the caller is **in another process**. `observed_since` filters to
+/// harness-reported rows for one stated reason — a reader subscribed to this
+/// process's own [`EventBus`] would otherwise see every in-process event
+/// twice — and that reason is a fact about `shell::run`, which holds both a
+/// subscription and a log tail. Nothing on the far end of this socket holds
+/// either. Applying the filter here does not de-duplicate anything; it
+/// deletes the entire class of events this process is the only witness to,
+/// which is every spawn, intervention and exit of every orchestrated worker
+/// — see [`EventRecorder`] for the other half of the same defect.
+///
+/// The narrower query is still right where its premise holds, and it is
+/// still used there: [`pump_watches`] wants exactly the harness reports,
+/// because `TurnEnded` is minted only in a hook process and a completion
+/// carries the reporting harness's name.
+///
+/// # Why it flushes first
+///
+/// Recording is asynchronous by construction (see [`EventRecorder`]), so an
+/// orchestrator that sends a message and immediately asks what happened
+/// would otherwise race its own write. The wait is bounded and its failure
+/// is ignored: a slow writer makes this answer *older*, never absent, and
+/// the caller's cursor brings it back next call.
+///
+/// This makes the door's **own** writes visible before it answers. It cannot
+/// do the same for a harness report, which is written by a separate
+/// `glasshouse hook` process on its own schedule — no reader anywhere can
+/// know that one is pending.
+
+### `crates/glasshouse/src/api/unix/events.rs` — `pump_watches`
+
+/// Deliver any completion each watch has not yet seen — lines 734-737, 739.
+///
+/// Called from the door's own background tick, which is what makes this a
+/// production installation rather than a mechanism waiting for one: nothing
+/// outside `glasshouse api serve` has to remember to call it.
+///
+/// # Why this reads the log rather than the bus
+///
+/// A turn ending is reported by the harness's own lifecycle hook, in a
+/// **separate short-lived process** (`glasshouse hook <session> Stop`), which
+/// translates it through `session::lifecycle::event_for` — the single
+/// construction site of `TurnEnded` — and appends it to the project's event
+/// log. That row is the only place this process can see it: the hook's
+/// process is gone by the time anyone could have subscribed to anything.
+///
+/// So this is line 734's *"from native lifecycle hooks"* in the literal
+/// sense. It is not a screen-scraper and it cannot become one: nothing here
+/// reads a session's output, and `TurnEnded` cannot be minted from silence.
+///
+/// # Why the cursor advances past rows that did not match
+///
+/// `observed_since` returns every observed row, not only this worker's. A
+/// cursor that advanced only on a match would re-read the same unmatched
+/// rows on every tick forever, and would eventually re-read a matched row
+/// too once the batch limit cut it off. Advancing past everything seen is
+/// what makes "read exactly once" a property of the loop rather than of the
+/// filter.
+
+### `crates/glasshouse/src/api/unix/events.rs` — `summarize`
+
+/// What Glasshouse actually observed about the turn that just ended — line
+/// 737's "concise result summary", closed at exactly the width the evidence
+/// supports and no wider.
+///
+/// # Every character of this comes from a fixed vocabulary
+///
+/// The rendered kinds are [`LifecycleEvent::kind`]'s own words — a
+/// `&'static str` from the eleven the enum defines — joined with an arrow,
+/// plus one integer. **No value read out of a hook payload, a session's
+/// scrollback, or a harness's own event spelling can reach this string**,
+/// because none of those is in the type it is built from. That is not care
+/// on the author's part; it is what `LoggedEvent` makes available.
+///
+/// This matters more than concision. A summary quoting a worker's output
+/// would breach the same boundary `tests/session_hook.rs` holds for the
+/// project database — the hook path deliberately drains its payload into
+/// `io::sink()` unread — and it would do it on the one path whose whole
+/// purpose is to carry information *out* of a worker and into another agent.
+///
+/// # What it can honestly say, and what it cannot
+///
+/// It says: the shape of the turn, in Glasshouse's own vocabulary, and how
+/// long it took. `turn_started → waiting_for_user → turn_ended in 41s` tells
+/// an orchestrator that the worker stopped to ask something and then
+/// finished, which is real and actionable.
+///
+/// It does **not** say what the worker did, produced, or concluded.
+/// Glasshouse does not observe that anywhere — the only place it exists is
+/// the conversation, which this door does not read. An orchestrator that
+/// needs the result asks the worker (line 738) or reads a checkpoint.
+
+### `crates/glasshouse/src/api/unix/memory.rs` — `select_memory`
+
+/// Choose the project memory a session about to be given `task` should have —
+/// capability map lines 1125-1127 and 1131-1134.
+///
+/// The whole selection lives in
+/// [`glasshouse::memory::inject::select_briefing`] (this door always supplies
+/// `Some(task)`, so behaviour here is unchanged from when this called
+/// [`inject::briefing`] directly — `GH-LAUNCH-BRIEFING` is the `None` caller,
+/// for a launch with no task to query on), which is cross-platform and knows
+/// nothing about this door; what belongs here is only the two things this
+/// door owns: which project's memory is being read (the runtime this socket
+/// was opened for — there is no request field naming a project, see
+/// `super`'s module doc comment), and what this session has already been
+/// sent.
+///
+/// # Never a reason to fail a delivery
+///
+/// Every failure path returns `None` and logs. A session that starts and
+/// receives its task without memory is strictly better than one that does
+/// not start, and a memory store that cannot be opened is not a reason to
+/// refuse to talk to a worker. The error is logged rather than answered
+/// with, and it never reaches the injected text: `database::DatabaseError`
+/// names the project file's absolute path in every variant, and nothing this
+/// module puts on a session's terminal is built from an error at all.
+
+### `crates/glasshouse/src/api/unix/memory.rs` — `deliver_memory`
+
+/// Deliver a selected briefing to `session`, and record what it carried.
+///
+/// # Line 1128: a message, not a write into the harness's own history
+///
+/// This goes through [`SessionApi::send_text`] — the same seam
+/// `Request::SendMessage` uses — and touches no harness session file,
+/// transcript or resume state. Glasshouse's memory arrives the way anything
+/// else Glasshouse says arrives, which is what keeps it distinguishable from
+/// the harness's own record of the conversation.
+///
+/// # Always [`MessageOrigin::Machine`], even under a person's own request
+///
+/// The briefing rides along with `Request::SendMessage`, which now carries an
+/// origin — and this delivery deliberately ignores it. A person asking to
+/// send a line did not write this text and has never seen it: it is selected
+/// from the project's memory by [`select_memory`] and composed by
+/// `memory::inject::briefing`. Stamping it with the requester's origin would
+/// record Glasshouse's own words as the person's, which is the exact
+/// confusion the origin exists to end. The person's line, sent immediately
+/// after this one, carries their origin; this one is Glasshouse speaking and
+/// says so.
+///
+/// # Injection failure is never a delivery failure
+///
+/// A refused or failed injection is logged and swallowed. The ledger is
+/// updated only on a send that actually succeeded, so a memory that did not
+/// arrive is not recorded as one the session already has.
+
+### `crates/glasshouse/src/api/unix/memory.rs` — `current_memory`
+
+/// A concise snapshot of what this project currently knows — capability map
+/// line 1113's `memory.current`.
+///
+/// Answered from `memory::snapshot::snapshot`, the same producer the TUI's
+/// project overview reads (`shell::build_project_overview_memory`), so the
+/// two cannot disagree about what "current" means. There is no second
+/// snapshot implementation behind this door and there must not be one.
+///
+/// # Bounded on both axes, server-side (line 1115)
+///
+/// A caller's `limit` and `body_chars` are each `min`'d against a constant
+/// here before they reach [`glasshouse::memory::snapshot::SnapshotBudget`],
+/// so they may only ever *lower*
+/// the ceiling. Passing `usize::MAX` to both — the executable form of
+/// "dumping the complete memory database into agent context" — yields the
+/// same bounded response as passing the ceiling itself.
+///
+/// # Sections, not a flattened dump
+///
+/// The response keeps `snapshot`'s own structure: one entry per
+/// `MemoryKind`, present even when empty, each reporting how many entries it
+/// left out. A section that hit its cap says so, and a body that was cut says
+/// so, so a caller can tell "this project has nothing of that kind" from
+/// "there is more of it than you asked for" without a second call.
+
+### `crates/glasshouse/src/api/unix/memory.rs` — `query_memory`
+
+/// Search this project's durable memory — box 10, capability map line 1111's
+/// project-scoped `memory.search`, and Phase 21F lines 935/936: the machine
+/// door carries each result's authority, validity state, and — for a memory
+/// that may constrain implementation — its rationale and invalidation
+/// conditions, as structured fields rather than only inside a rendered
+/// string.
+///
+/// # Project scope, and why there is no project argument
+///
+/// Line 1114. The scope is structural: this door is opened for one resolved
+/// [`Runtime`] and no request field names a project (see `super`'s module doc
+/// comment), and `MemoryStore::search` filters on `memories.project_id` in
+/// its own `WHERE` clause underneath that rather than trusting it. The two
+/// are independent, which is the point — see `memory::store`'s own
+/// "Project isolation" section for why the read boundary is not redundant
+/// with the trigger.
+///
+/// `invariants_and_constraints`/`other` is `main.rs`'s own
+/// `memory_search_grouped` (line 929), the exact search
+/// `glasshouse memory search` runs; `report` is `render_memory_report`'s
+/// exact text over the same result, so this door and that command can never
+/// disagree about what a query finds. One search, not two: the CLI's report
+/// text is rendered from the already-fetched grouping rather than searched
+/// for a second time.
+///
+/// # `path`, capability map line 1143
+///
+/// `path` present switches this to [`query_memory_for_path`] and `query` is
+/// not consulted — see [`Request::QueryMemory`]'s own doc comment for why a
+/// path lookup has no text to search. `path` absent is byte-for-byte what
+/// this door has always answered.
+
+### `crates/glasshouse/src/api/unix/memory.rs` — `query_memory_for_path`
+
+/// [`query_memory`]'s `path` mode — capability map line 1143, *"the
+/// rationale behind a file-related constraint"* — through
+/// [`glasshouse::memory::MemoryStore::for_path`], migration 17's read door
+/// rather than a text search.
+///
+/// # `association`, and why it is always `"observed"`
+///
+/// Every row carries an `association` field alongside the body and rationale
+/// [`memory_result_json`] already puts there — line 1143 asks for the
+/// rationale *behind a constraint*, and which relationship produced the row
+/// is part of reading that rationale honestly. `for_path`'s own doc comment
+/// says it does not narrow by [`FileAssociation`], and this build's only
+/// writer, `MemoryStore::record_observed_files`, only ever stores
+/// [`FileAssociation::Observed`] — so `association` is that constant on
+/// every row today, not a per-row lookup this door invents. It reads
+/// `"observed"` rather than `"referenced"` for the same reason
+/// `memory::inject`'s line 1140 section does: the file changed during the
+/// session that produced the memory, which this build can prove; that the
+/// memory refers to the file is map line 1139's own claim, and 1139 is not
+/// satisfied by anything shipped here.
+///
+/// No `report`: `render_memory_report`'s prose is written for a text search
+/// and would misdescribe a path lookup as one, so this answers with `path`
+/// naming what was looked up instead. `query` is not accepted here — see
+/// [`query_memory`].
+///
+/// Opens the project's memory directly, the same shape [`get_memory`] and
+/// [`current_memory`] use, rather than through `crate::commands::memory::memory_search_grouped`:
+/// that helper is `main.rs`'s text-search core and records every retrieval
+/// through it as a *search* (`evaluation::record_memory_retrieval`); a path
+/// lookup runs no query and recording it as one would misreport what was
+/// asked. `glasshouse memory search --path` is the same reader again, so the
+/// CLI and this door cannot disagree about what a file is associated with.
+///
+/// One `git log` for the whole answer and at most two `merge-base` per row:
+/// every row is about the same file, so the last-change commit is read once.
+
+### `crates/glasshouse/src/api/unix/memory.rs` — `provenance_json`
+
+/// Everything that lets a caller trace one memory back to where it came from
+/// — capability map line 1116, *"include provenance with machine-retrieved
+/// memory so an agent can verify important claims against source or code."*
+///
+/// Deliberately the vocabulary `tests/memory_provenance.rs` already proves
+/// round-trips, field for field and spelling for spelling — the two
+/// *locating* fields `source_session_id` and `source_commit`, the event
+/// slice, and all ten of Phase 21B's `DecisionProvenance` fields — rather
+/// than a second provenance shape invented for this door. An agent that
+/// wants to check a claim against code has `source_commit`; against the
+/// conversation that produced it, `source_session_id` and `source_events`;
+/// against the reasoning, `rationale`, `evidence` and `source_excerpt`.
+///
+/// Every field is `null` when absent and never `""` or `0` (§71): a decision
+/// nobody recorded a security assumption for is a different fact from one
+/// that recorded there was none, and `MemoryRecord`'s own doc comments say
+/// so field by field.
+///
+/// `rationale` also appears at the top level of [`memory_result_json`], where
+/// Phase 21F line 936 put it; it is repeated rather than moved so that this
+/// change adds a field to the door's answer and removes none.
+///
+/// # Secrets
+///
+/// Nothing here is a credential by construction. `memory::store`'s module
+/// documentation states there is no column for a token, a key, or a provider
+/// secret; the screening is on the producer side, where
+/// `memory::extract::schema::judge` inspects each emitted element **whole**
+/// before any field is read. `source_excerpt` is the sharpest of these
+/// because it is verbatim session text — and it is exactly as screened as
+/// `body`, which this door has carried since Phase 21F. This is a `json!`
+/// over named fields, never a `Debug` format of a struct, so the
+/// `provider/discovery.rs::ProbeRequest` shape cannot reappear here.
+
+### `crates/glasshouse/src/api/unix/mod.rs` — module doc
+
+//! The request handlers every control-API transport shares, and the Unix
+//! domain socket transport that was the first of them.
+//!
+//! Two halves live here, and only one of them is Unix-specific. The handlers
+//! — [`dispatch`] and everything it calls — are plain functions over the
+//! project's stores and this process's [`SessionRuntime`], and they compile
+//! on every platform Glasshouse ships for, because the MCP door
+//! (`super::mcp`, Phase 43) reaches them over stdio on every one of those
+//! platforms. The socket transport — [`serve`], [`handle_connection`], and
+//! the peer-credential check behind them — is `#[cfg(unix)]`, item by item,
+//! for the same reason the module used to be gated as a whole: a Unix domain
+//! socket is a Unix thing. The module keeps its name because the handlers
+//! are the same handlers, the co-editing rounds in flight on this file are
+//! easier to reconcile against a file that stayed put, and a rename is a
+//! cheap follow-up once those have landed.
+//!
+//! [`ServerContext`] is the seam between the halves: it owns what every
+//! handler needs and offers exactly one verb, `handle`. A transport holds a
+//! context and nothing else, which is how the rule that no door may reach a
+//! store except through `dispatch` is a property of the types rather than a
+//! matter of discipline.
+
+### `crates/glasshouse/src/api/unix/mod.rs` — `MAX_RECENT_OUTPUT_BYTES`
+
+/// The hard ceiling on how much of a session's terminal output
+/// [`Request::RecentOutput`] returns in one call, regardless of the
+/// `max_bytes` a caller asks for — the same shape as [`MAX_MEMORY_LIMIT`] and
+/// [`MAX_SNAPSHOT_BODY_CHARS`] above, and load-bearing for a reason neither
+/// of those has.
+///
+/// Every other bound on this door limits how many *rows* a caller may pull
+/// out of a store it is querying. This one limits a buffer nobody queried:
+/// a session's scrollback is `session::runtime::DEFAULT_SCROLLBACK_BYTES`
+/// wide, filled by whatever the harness happened to print, and a caller
+/// asking for `usize::MAX` would otherwise receive the whole of it —
+/// JSON-escaped, on one line, over a socket — with the size decided by how
+/// long the worker had been talking rather than by anything either end
+/// chose.
+///
+/// Sixty-four kibibytes is many screenfuls of a worker's terminal and a
+/// quarter of what the scrollback holds: enough to see what a worker is
+/// doing, and far short of "send me everything you have". A caller that
+/// wants a specific earlier moment is asking for history, which this door
+/// does not have — see [`Request::RecentOutput`]'s own doc comment for why
+/// there is none to give.
+
+### `crates/glasshouse/src/api/unix/mod.rs` — `ServerContext`
+
+/// Everything a request handler needs, owned once per server process and
+/// shared by every transport that answers a [`Request`].
+///
+/// # One context, two doors
+///
+/// [`dispatch`] needs six things — the project's [`Runtime`], its open
+/// session store, the [`SessionRuntime`] this process holds pseudo-terminals
+/// in, the registry of orchestrator watches, the event recorder, and the
+/// memory-injection ledger. Until this type existed [`serve`] built all six
+/// on its own stack and threaded them through every call, which was fine
+/// while the Unix socket was the only transport. The MCP door (`super::mcp`,
+/// Phase 43) is a second transport onto the same handlers, and the design
+/// ruling behind it is that no tool may perform an operation this door does
+/// not already perform, nor reach a store except through the same
+/// `dispatch`. The cheapest way to make that structural is for there to be
+/// exactly one thing a transport can hold, and for its only verb to be
+/// [`ServerContext::handle`].
+///
+/// # The tick comes with it
+///
+/// The background tick — reaping exited sessions, answering terminal
+/// queries, pumping orchestrator watches — is started by
+/// [`ServerContext::open`], not by the transport, because a session spawned
+/// through either door needs its exit reaped by *somebody*, and the process
+/// that spawned it is the only one that can. A transport that forgot to tick
+/// would leave every one of its sessions `running` forever; a transport that
+/// cannot forget is better.
+///
+/// # Scope
+///
+/// Opened for one already-resolved [`Runtime`] and answering only against
+/// it — see `super`'s module doc. There is no way to construct one for a
+/// project the process was not started in, and nothing in it names a
+/// project, a path, or a database that a request could override.
+
+### `crates/glasshouse/src/api/unix/mod.rs` — `EventRecorder`
+
+/// This door's durable recording of what happens to the sessions it owns.
+///
+/// # The hole this fills
+///
+/// `shell::run` builds an [`EventBus`], attaches an [`EventLogSink`] to it,
+/// and hands the bus to its [`SessionRuntime`]. This door built its runtime
+/// with `SessionRuntime::new()` — a bus with no sink and no subscriber — so
+/// every lifecycle event of every orchestrated worker was published into
+/// nothing. Not only the interventions of map line 748: `session_started`
+/// and `process_exited` too. A worker's whole life left no durable trace
+/// unless a `glasshouse hook` process happened to write a row from outside.
+///
+/// # Why the log is opened on the writer thread, and not before there is
+/// something to write
+///
+/// `EventLog::open` goes through `database::open`, which takes a
+/// `BEGIN IMMEDIATE` **write** transaction and runs the migration ladder,
+/// under a five-second busy timeout. It is not a cheap handle to acquire and
+/// it can genuinely wait — on the very `glasshouse hook` processes that run
+/// inside a user's own session, which [`WatchState`]'s doc explains must
+/// never be made to queue behind this door's bookkeeping.
+///
+/// So neither the accept thread nor a pseudo-terminal's thread ever performs
+/// that open. The sink's writer thread does, on the first event it is handed,
+/// which has three consequences worth stating separately:
+///
+/// - **A door that records nothing opens nothing.** `serve` attaches this
+///   unconditionally, but a process that never starts a session publishes no
+///   event, so the connection is never created. That is [`WatchState`]'s
+///   pattern and it is here for §65's reason: a resource acquired on a path
+///   nobody exercises is invisible to every test and still charged for at
+///   runtime, on the platform where SQLite's locks are mandatory rather than
+///   advisory.
+/// - **The five-second wait, if it ever happens, is paid by a thread nobody
+///   is waiting on.** No request is delayed, no pty is stalled, and
+///   [`project_events`]'s flush is separately bounded, so even a caller that
+///   asks for history while the open is in flight gets an answer.
+/// - **A failure to open is not a failure to serve.** It is warned about once
+///   and the door keeps working — the same direction `shell::attach_event_log`
+///   trades in, for the same reason: a project whose database cannot be
+///   opened should lose event history and keep its sessions.
+///
+/// # On holding the handle afterwards
+///
+/// Once open it is kept, because the alternative is re-running that
+/// transaction and that ladder per event. It costs one connection, which is
+/// not a new class of thing for this process: `serve` already opens
+/// [`ProjectSessions`] unconditionally and holds it for the door's whole
+/// life. In SQLite's rollback-journal mode an idle connection holds no lock
+/// on any platform; what costs is the open, and this design performs at most
+/// one of those.
+
+### `crates/glasshouse/src/api/unix/mod.rs` — mute check before `select_memory`
+
+            // Line 1717's mute, answered **before** this door opens the
+            // project's memory store below — the one control that lives here
+            // rather than at the seam.
+            //
+            // Here because a mute is this door's own state and this door's
+            // own policy: it is about *requests an orchestrator makes*, not
+            // about every write into a pseudo-terminal, and the answer has to
+            // be a `Response::Error` naming the remaining time. Early because
+            // `select_memory` opens the memory database behind SQLite's busy
+            // timeout, and paying that for a request already decided against
+            // is the acquisition-on-an-unwatched-path practice §65 records
+            // the cost of.
+            //
+            // **Line 1719 is deliberately not checked here.** It is taken at
+            // `SessionApi::send_text`, the one seam every machine write in
+            // this process passes through, and a second copy of it on this
+            // path would be a rule with two enforcement points that can
+            // drift — and, measured: the mutation
+            // `1719-the-seam-admits-everything` SURVIVED while this check
+            // existed, because the door answered first and nothing in the
+            // suite ever reached the seam. One rule, one place.
+            //
+            // Only machine-originated messages are checked. A mute exists to
+            // stop a person being talked over and has nothing to say about
+            // the person themselves.
+
+### `crates/glasshouse/src/api/unix/routing.rs` — `recommend_route`
+
+/// Where this project's work would be routed, and why — capability map line
+/// 1681.
+///
+/// # One ranking, not two
+///
+/// The decision is `crate::commands::route::route_recommendation`, which is the whole of
+/// `glasshouse route` as well (see its own doc comment). This handler
+/// classifies nothing, scores nothing and orders nothing; it turns the
+/// answer into JSON. Ruling 2 of this verb's packet: if the command and the
+/// door could rank separately they could disagree about where work should
+/// go, and nothing would fail while they did.
+///
+/// # "Without executing it", and how that is enforced rather than intended
+///
+/// Nothing on this path writes. It never takes the [`SessionRuntime`] lock —
+/// it has no session to reach — never touches `SessionApi`, never records an
+/// event, and never opens the evidence ledger. What it does open, it opens
+/// to read: the session store and the checkpoint store, for the candidate
+/// set. `tests/routing_api.rs` asserts the negative over the shipped binary
+/// rather than leaving it to this comment: the session list, the event log
+/// and `routing_observations` are all unchanged across a call, and the
+/// harness the project is configured with is never invoked.
+///
+/// # Bounds
+///
+/// `alternatives` is capped at [`MAX_ROUTE_ALTERNATIVES`] here rather than
+/// left to the caller, and it is a `min` rather than a rejection — the same
+/// shape [`project_events`] and [`query_memory`] use. The rest of the
+/// response is bounded by construction: one destination, one contribution
+/// per scoring term, and at most five lines of caveat.
+///
+/// # Errors
+///
+/// A malformed config is reported as it is by [`routing_model_status`], the
+/// verb next door — those two errors name a config file the caller can
+/// actually act on. Everything after that is refused with a fixed sentence,
+/// for [`memory_error_message`]'s reason: `routing_destinations` opens the
+/// project's database, and **every** `database::DatabaseError` variant names
+/// that file's absolute path, which lies outside what this door is scoped to
+/// and is not something a caller on the far end of a socket could repair.
+
+### `crates/glasshouse/src/api/unix/sessions.rs` — `deliver_policy`
+
+/// Deliver Glasshouse's own implementation policy to `session`, once —
+/// capability map lines 955-990.
+///
+/// # Why this is a separate function and not a second `Injection`
+///
+/// [`deliver_memory`] carries text Glasshouse *quoted*; this carries text
+/// Glasshouse *wrote*. `memory::inject`'s whole module exists to keep an
+/// untrusted body from forging a label, and there is no untrusted body here —
+/// every byte is a literal in `glasshouse::policy`. Routing this through
+/// `Injection` would mean either widening a type whose single constructor is
+/// the containment argument, or pretending a constant is a memory. So it gets
+/// its own marker pair, distinct from `MEMORY_MARKER`, and a reader can tell
+/// the two apart because they *are* two things.
+///
+/// # Once per session, several lines
+///
+/// The policy does not change and a session that has it does not need it
+/// again; `policied` is the record, and it is checked before the first line
+/// goes out so a session is never given half of a second copy. It is written
+/// only after every line has actually been sent, for the reason
+/// [`deliver_memory`] writes its own ledger late: a policy that did not
+/// arrive must not be recorded as one the session already has.
+///
+/// Several lines because thirty rules do not fit in one — a delivery longer
+/// than a terminal's canonical line limit is discarded *and* wedges that
+/// session's input permanently, which is why `policy::deliveries` bounds
+/// every element and this function sends them one at a time. See
+/// `glasshouse::policy`'s own header for the measurement.
+///
+/// # Failure is never a delivery failure
+///
+/// As [`deliver_memory`]: a send that fails is logged and swallowed, and the
+/// task still goes. A worker that starts without the policy is better than a
+/// worker that does not start.
+
+### `crates/glasshouse/src/events/bus.rs` — module doc
+
+//! Getting a lifecycle event to everyone who needs it, without ever making
+//! the harness wait.
+//!
+//! # The property this file exists for
+//!
+//! A harness writes into a pseudo-terminal. If the thread draining that
+//! terminal ever waits on a Glasshouse consumer, the terminal's buffer fills
+//! and the harness itself blocks on `write` — Glasshouse would have stopped
+//! the product it exists to host, and it would look like the harness hanging.
+//!
+//! So publishing is bounded work with no waiting on a consumer at all. Each
+//! subscriber owns a fixed-size queue; when it is full the **oldest** event
+//! goes and a counter records that it did. A TUI that stops draining loses
+//! history and can never apply backpressure. That is the right trade in both
+//! directions: recent events are the useful ones, and a consumer that has
+//! stopped consuming has stopped mattering.
+//!
+//! `a_subscriber_that_never_drains_cannot_stall_the_publisher` is the proof,
+//! and `a_stalled_subscriber_does_not_stall_a_live_harness` in
+//! `tests/events_bus.rs` is the same property against a real child process.
+//!
+//! # Why the bus keeps its own history as well
+//!
+//! Phase 45 requires a crashed worker's event history to survive the crash.
+//! A subscriber's queue cannot serve that — it is drained, bounded to
+//! whatever a viewport needs, and belongs to whoever subscribed. The bus
+//! therefore holds its own bounded history, which is what a crash report and
+//! [`crate::events::task_outcome`] read.
+//!
+//! # Poisoning is ownership, not a reason to give up
+//!
+//! Every lock here is taken through `own`, a private helper. A thread that panicked while
+//! holding one leaves the data intact and the lock poisoned; refusing to
+//! publish from then on would turn one panic into a permanently deaf event
+//! stream. The data is taken and used.
+
+### `crates/glasshouse/src/events/log.rs` — module doc
+
+//! The append-only project event log.
+//!
+//! [`crate::events::bus`] gets an event to everyone who needs it *now*, in
+//! memory, bounded. This is where the same events go to outlive the process:
+//! one row per event in the project's own SQLite database, appended and never
+//! rewritten.
+//!
+//! # Append-only is enforced by the database, not by discipline
+//!
+//! Phase 18's fixed architectural requirement is that *derived interpretation
+//! must not overwrite or masquerade as the original event*. Two triggers
+//! created by migration 5 abort every `UPDATE` and every `DELETE` on
+//! `lifecycle_events`, so that property holds against any code that opens the
+//! file — this crate's, a later phase's, or a hand-typed `sqlite3` session.
+//! A rule a future query could forget is not the same kind of thing as a rule
+//! the file itself refuses to break; the project database already draws that
+//! distinction for project isolation, and this is the same argument.
+//!
+//! The cost is stated rather than hidden: **nothing can prune this table.**
+//! Retention, if it is ever wanted, is a migration and a decision, not a
+//! `DELETE` somebody adds one afternoon.
+//!
+//! # The raw observation is kept beside the normalized event, not inside it
+//!
+//! The same requirement asks that raw observations stay available as
+//! diagnostic source evidence *while normalized and derived records remain
+//! distinguishable from them*. So a row carries both: `kind` and its variant
+//! payload are Glasshouse's normalized reading, and `observed_harness` /
+//! `observed_event` are the harness's own two words, exactly as it spelled
+//! them, in their own columns. Neither can be mistaken for the other, and a
+//! row that was never translated from a harness report simply has NULL there.
+//!
+//! **There is no column that could hold a conversation.** A hook payload
+//! carries the user's prompt and the model's last message; the handler drains
+//! that stream unread, and what reaches this module is
+//! [`crate::events::RawObservation`]'s `harness` and `event` and nothing else
+//! — `detail`, the one field an adapter could fill from a payload, is not
+//! stored. That is a property of the schema, so no future writer can change
+//! it without a migration.
+//!
+//! # Why the sink does not write from the publishing thread
+//!
+//! [`crate::events::EventSink::record`] is called on the publishing thread,
+//! and that thread is sometimes the one draining a pseudo-terminal. A
+//! terminal that stops being drained fills, and then the harness itself
+//! blocks on `write` — Glasshouse would have stopped the product it exists to
+//! host. A SQLite insert is not a long wait, but it is not a bounded one
+//! either: the connection carries a five-second busy timeout, and one other
+//! process holding the write lock is all it takes.
+//!
+//! So [`EventLogSink`] is a bounded queue with a writer thread behind it, and
+//! `record` is a `try_send` that drops the event and counts the drop rather
+//! than ever waiting. That is exactly the trade the bus already makes for a
+//! subscriber that stops draining, and for the same reason.
+//!
+//! A short-lived process that is *not* draining a terminal — the hook
+//! handler, which exists for a few milliseconds and then exits — uses
+//! [`EventLog`] directly and writes synchronously, because queueing behind a
+//! thread it is about to drop would lose the event it was run to record.
+
+### `crates/glasshouse/src/events/log.rs` — `EventLog::since`
+
+    /// Every event after position `after`, oldest first.
+    ///
+    /// # Why this exists beside [`EventLog::observed_since`]
+    ///
+    /// `observed_since`'s filter is a **de-duplication** rule, not a
+    /// relevance one. Its own doc gives the reason: a consumer that is
+    /// already subscribed to this process's [`crate::events::EventBus`]
+    /// receives everything this process published, so reading the whole log
+    /// would show each of those events twice. That premise is true of
+    /// `shell::run`, which holds both a subscription and a log tail, and it
+    /// is the query that belongs there.
+    ///
+    /// **A reader in another process holds no such subscription.** For it
+    /// there is nothing to double, and the filter stops being
+    /// de-duplication and becomes loss: it hides precisely the events the
+    /// logging process produced itself. For `glasshouse api serve` — which
+    /// owns the pseudo-terminal of every orchestrated worker — that is every
+    /// spawn, every intervention and every exit, which is to say the whole
+    /// history the orchestrator on the far end of the socket is asking for.
+    ///
+    /// So the choice between the two is a question about **where the reader
+    /// is**, not about which events matter. This one is for a reader that is
+    /// somewhere else.
+    ///
+    /// It is also the query [`EventLog::head`] already agrees with: `head`
+    /// is `MAX(seq)` over the whole table and never was filtered, so a
+    /// caller paging with `after`/`head` against `observed_since` was
+    /// carrying a cursor that counted rows it could not be shown.
+
+### `crates/glasshouse/src/events/mod.rs` — module doc
+
+//! The normalized Glasshouse lifecycle-event stream.
+//!
+//! One stream, shared by the TUI, the router, memory, the API and the MCP
+//! surface. Adapters translate a harness's own vocabulary into
+//! [`LifecycleEvent`]; nothing downstream ever learns which harness produced
+//! one. That is the whole architectural requirement of the capability map's
+//! Phase 12, and it is why this module names no harness at all —
+//! `no_harness_is_named_in_the_core_event_stream` keeps it that way, and
+//! [`crate::session::lifecycle`] is the single place allowed to know either
+//! harness's spelling.
+//!
+//! # The two distinctions this module exists to preserve
+//!
+//! Both have already produced defects in products of this shape, so both are
+//! expressed in the types rather than left to a reader's discipline.
+//!
+//! **A process exiting is not a turn completing.** A harness exits zero when
+//! the user types `/quit` halfway through a task and exits zero when it has
+//! finished; the exit status cannot tell those apart, because the information
+//! is not in it. So [`ProcessExit`] has no `success()`, there is no
+//! conversion from it to [`TurnOutcome`], and [`task_outcome`] — the one
+//! function a consumer calls to ask "did the work finish?" — answers `None`
+//! for a session that only ever exited.
+//!
+//! **Waiting for the user is not idle.** [`LifecycleEvent::WaitingForUser`]
+//! is recorded only when a harness says so. Silence is never promoted to it,
+//! and never demoted from it either.
+//!
+//! # Why quiet can never become completion by accident
+//!
+//! The map carries a standing rule: *do not infer successful task completion
+//! solely because a child process became quiet.* Being careful is not a
+//! mechanism, so two independent ones enforce it:
+//!
+//! 1. [`LifecycleEvent::TurnEnded`] is constructed in exactly **one**
+//!    production function in this crate — the harness translator in
+//!    [`crate::session::lifecycle`], whose only input is an event name a
+//!    harness reported. `turn_completion_is_minted_in_exactly_one_place`
+//!    scans the source and fails if a second site appears.
+//! 2. [`task_outcome`] reads `TurnEnded` records and nothing else, so a
+//!    history full of clean exits and ended output still answers "unknown".
+//!
+//! # What is *not* here
+//!
+//! Durable storage. The map splits raw event recording into its own phase,
+//! and this module offers [`EventSink`] as the seam it will attach to: the
+//! bus hands every recorded event to a sink if one is installed, and holds a
+//! bounded in-memory history either way.
+
+### `crates/glasshouse/src/events/mod.rs` — `LifecycleEvent::FileTouched`
+
+    /// A session **changed** a file, as the context firewall's `PostToolUse`
+    /// hook saw it — one event per distinct path an `Edit`, `Write`,
+    /// `MultiEdit` or `NotebookEdit` named.
+    ///
+    /// # Touched means changed, and read-shaped tools are deliberately absent
+    ///
+    /// `Read`, `Grep` and `Glob` carry paths too and none of them is recorded.
+    /// A memory can honestly reference a file the session *changed*; that the
+    /// session looked at a file is a much weaker fact wearing the same shape,
+    /// and admitting it here would let map line 1139's `referenced`
+    /// association be earned by a glance.
+    ///
+    /// # The path, and what it is not
+    ///
+    /// Repo-relative and `/`-separated —
+    /// [`crate::memory::normalize_observed_path`]'s spelling, applied
+    /// by the writer, so a path outside the project root is dropped before it
+    /// ever reaches an event rather than stored and filtered later. It is the
+    /// user's own file name and nothing else: no content, no diff, no tool
+    /// output.
+    ///
+    /// # Not a state transition
+    ///
+    /// [`LifecycleEvent::implied_state`] answers `None`. A session editing a
+    /// file says nothing about whether it is running, idle or waiting — the
+    /// hook that records this fires while the harness is mid-turn, and
+    /// promoting that to `Running` would let a `PostToolUse` payload reach the
+    /// session state machine, which is exactly what `REPORTED_EVENTS` keeps
+    /// out.
+
+### `crates/glasshouse/src/events/mod.rs` — `degrade_resource`
+
+/// Degrade one unhealthy backend resource, and publish the fact against every
+/// session that was running on it.
+///
+/// # Why this takes records rather than guessing
+///
+/// A session is affected if, and only if, its own record says it resolved to
+/// this backend resource. Nothing is inferred from the harness, from the
+/// launch profile, or from the session being live.
+///
+/// The consequence is the capability line: **a session with no recorded
+/// backend resource is never affected.** That is a native subscription — a
+/// harness talking to its own vendor on the user's own account, which a
+/// Glasshouse gateway is not in the path of — or a session recorded before
+/// the column existed. Either way, a gateway that stopped answering has
+/// nothing to do with it, and degrading it would take away a session that is
+/// working perfectly.
+///
+/// # Why no session's lifecycle moves
+///
+/// A gateway failing is not a harness process failing, and the two need
+/// opposite responses. This publishes [`LifecycleEvent::GatewayUnhealthy`],
+/// which [`LifecycleEvent::implied_state`] deliberately maps to `None`: the
+/// harness is still running, still on screen, and still steerable by the user
+/// even while its backend is unreachable. Marking it failed would be a lie
+/// about a live process.
+
+### `crates/glasshouse/src/harness/antigravity.rs` — module doc
+
+//! Antigravity.
+//!
+//! Read from Antigravity CLI 1.1.20 as installed on the development machine on
+//! 2026-08-25 — `agy --help` and the package that installed it.
+//!
+//! # The name
+//!
+//! Until this install existed, Glasshouse searched `PATH` for `antigravity`
+//! and would never have found a real one: the published package ships a
+//! binary called `antigravity` but puts it on `PATH` as **`agy`**. Both names
+//! are searched now, `agy` first, because that is what an install actually
+//! produces. This is the whole argument for deriving adapter declarations
+//! from real binaries rather than from plausible-sounding recollection — the
+//! previous single-name guess was carefully reasoned and simply wrong.
+//!
+//! # The state root
+//!
+//! Conversations live under `~/.gemini/antigravity-cli/`, not
+//! `~/.gemini/antigravity/`. An earlier revision of this file, and the
+//! evidence ledger it was read from, named the latter — that directory
+//! belongs to the *desktop app*, its `conversations/` is permanently empty,
+//! and nothing had ever been run against it to say otherwise. The CLI's own
+//! root, confirmed against a signed-in install on 2026-08-25, is
+//! `antigravity-cli`. This is the fourth declaration in this project derived
+//! from an artifact that did not serve the purpose it was cited for.
+//!
+//! Inside that root, `cache/last_conversations.json` maps each project's
+//! absolute path to the conversation UUID Antigravity last opened there —
+//! see [`Antigravity::read_last_conversation`].
+//!
+//! # Why this harness declares a different *shape* of source
+//!
+//! An earlier revision of this file left
+//! [`super::HarnessAdapter::session_id_source`] undeclared, and was right to:
+//! the only shape it could describe at the time was "a directory of session
+//! records, each self-describing in its own first line", which
+//! `session::native_id::discover` walks and **opens**. Antigravity's records
+//! are `conversations/<uuid>.db` — SQLite databases holding the user's
+//! private conversations — so declaring that shape here would have sent
+//! discovery to open every one of them on the box the moment a session
+//! ended. A worker asked to do exactly that refused and cited the code.
+//!
+//! [`super::NativeSessionSource`] is now an enum over the two shapes, so this
+//! adapter declares the one it actually has:
+//! [`super::NativeSessionSource::SharedIndex`], which names one file and
+//! carries no notion of a record directory at all. Discovery reads that one
+//! file and hands its text to [`super::HarnessAdapter::read_index_entry`];
+//! the conversation databases are unreachable from that code path rather than
+//! merely forbidden to it.
+//!
+//! Note the absent `home_env`. Codex honours `CODEX_HOME`, so Glasshouse
+//! follows the harness wherever the user has moved it. Antigravity CLI 1.1.20
+//! honours no such variable — its binary was searched on 2026-08-26 for
+//! `GEMINI_DIR`, `GEMINI_HOME`, `ANTIGRAVITY_HOME`, `AGY_HOME`, `XDG_*` and
+//! every `*_HOME`/`*_DIR` symbol it contains, and none of them relocates
+//! `~/.gemini/antigravity-cli`. Declaring a plausible-sounding one would be
+//! the same mistake this module already records twice: an invented name that
+//! compiles and is simply not what the binary does.
+
+### `crates/glasshouse/src/harness/claude_code.rs` — `REPORTED_EVENTS`
+
+/// The events Glasshouse asks Claude Code to report.
+///
+/// A subset of [`HOOK_EVENTS`], and deliberately so: these are the ones that
+/// say something about the *session's* state. `PreToolUse` and `PostToolUse`
+/// fire many times per turn and would be noise for a lifecycle that only
+/// distinguishes running from waiting.
+///
+/// `SessionStart` is **not** here, and not by oversight: Claude Code 2.1.245
+/// does not fire it. A settings document declaring one was installed and the
+/// hook never ran, while `UserPromptSubmit` from the same document did.
+///
+/// `PreCompact` **is** here, added 2026-09-01, map line 310. Until then this
+/// build asked Claude Code for nothing about its own compaction — not because
+/// the harness had no such event, but because nobody had looked past
+/// `claude --help` for one. **Run and observed** against Claude Code 2.1.257:
+/// a headless session (`--print --input-format=stream-json
+/// --output-format=stream-json --settings <a document declaring a
+/// `PreCompact` command>`) sent a manual `/compact`; the installed hook ran,
+/// its stdin payload read
+/// `{"session_id":"<the --session-id given>",...,"hook_event_name":"PreCompact","trigger":"manual",...}`,
+/// and the stream's own `system status` event carried a `compact_result`.
+/// `session::lifecycle::precedes_native_compaction` already matched the
+/// string `"PreCompact"` before this change — Codex sends exactly that
+/// spelling and has since Phase 8 — so subscribing to it here is what closes
+/// map line 310, not a change to the translation.
+
+### `crates/glasshouse/src/harness/claude_code.rs` — `closest_output_style`
+
+/// The built-in output style closest to `profile`, or `None`.
+///
+/// `None` is not a shortcoming: it means no built-in style Glasshouse may
+/// safely select expresses that combination of axes, and the additive
+/// mechanism covers it instead. Only styles that both keep Claude Code's
+/// coding instructions and govern communication only are ever candidates —
+/// see [`BUILT_IN_OUTPUT_STYLES`].
+///
+/// The match reads the harness's own descriptions rather than inventing a
+/// correspondence:
+///
+/// - `Concise` says "responds tersely, leading with results and skipping
+///   preamble and narration", which is a terse-or-concise verbosity *and*
+///   silent narration. Both, because the description claims both, and a style
+///   selected on half of what it says would be applying more than was asked
+///   for.
+/// - `Explanatory` says "explains its implementation choices", which is
+///   `Verbosity::Elaborate`.
+///
+/// Audience, evidence presentation and answer format are not matched on at
+/// all: no built-in style speaks about them, and reading one into a style
+/// would be exactly the invention the rest of this file refuses.
+
+### `crates/glasshouse/src/harness/claude_code.rs` — context-firewall hook command builder
+
+/// The shell command line `context-firewall hook` runs as this session's
+/// `PostToolUse` hook — the session's mode and thresholds baked in as flags
+/// on the registered command, per map line 1991's own requirement, and
+/// carrying no reducer name because no flag here could name one (map line
+/// 1992).
+///
+/// `session` is the **Glasshouse** session identifier, baked in exactly as
+/// the lifecycle hook's own `--session` is
+/// ([`crate::harness::HookCommand::shell_command`]) and for the same reason:
+/// a hook runs as a fresh process with whatever environment the harness gives
+/// it, and the `session_id` in a `PostToolUse` payload is *Claude Code's*
+/// identifier, not one this project's tables know. Migration 26's
+/// `file_touched` rows have to name a Glasshouse session, so the id is
+/// carried on the command line at registration or it is not available at all.
+/// It is hexadecimal and cannot carry a space, so it is not quoted — the same
+/// judgement [`crate::harness::HookCommand::shell_command`] states for its
+/// own.
+///
+/// `min_semantic_tokens` is `None` for a session no layer of map lines
+/// 2023/2024's policy resolution set one for — the flag is then omitted
+/// entirely, matching this builder's behaviour before that resolver existed,
+/// rather than spelling out the hook subcommand's own CLI default for the
+/// first time.
+///
+/// Quoted the same way [`HookCommand::shell_command`] quotes its own
+/// program path, for the same reason: a Windows path is full of backslashes
+/// and an unquoted one would not survive a POSIX shell either.
+
+### `crates/glasshouse/src/harness/hermes.rs` — `COMMUNICATION_STYLE`
+
+/// Hermes's own personality overlay, and the one declaration in this crate
+/// whose change cost is `InPlace`.
+///
+/// The earlier reading of this line was `Unverified` on the grounds that
+/// `hermes --help` documents no output-style mechanism. That is true and it
+/// was the wrong place to look: Hermes keeps this one in its configuration
+/// and its slash-command table, neither of which `--help` prints. `--tui`
+/// and `--cli` remain what that reading said they were — terminal
+/// presentation, not how the agent communicates.
+///
+/// **Why it qualifies.** `CommunicationStyle` is communication policy only.
+/// `cli.py`'s `_resolve_personality_prompt` builds the overlay from a
+/// `system_prompt`, a `tone` and a `style`, and the `/personality` handler
+/// assigns `self.system_prompt` and nothing else — no toolset, no approval
+/// setting, no reasoning parameter. So it is not the disqualified shape that
+/// OpenCode's and Antigravity's `--agent` turned out to be.
+///
+/// **Why `InPlace` rather than `NewSession`.** Two independent readings, and
+/// they agree. In the interactive session Glasshouse embeds, `/personality`
+/// sets the overlay and clears the cached agent so the next turn rebuilds
+/// with it — while the conversation itself lives on the REPL object's own
+/// `conversation_history`, which that rebuild never touches. In the gateway
+/// path, `_apply_personality_to_session` says the same thing in its own
+/// docstring: it "appl[ies] a personality change to an existing session
+/// without resetting history", takes effect "on the next turn", and returns
+/// `history_reset` false always. Neither path gives up a warm session.
+
+### `crates/glasshouse/src/harness/mod.rs` — module doc
+
+//! The contract every supported harness is reached through.
+//!
+//! Glasshouse core knows how to start a process in a pseudo-terminal, draw it,
+//! and record it. It does not know that Claude Code resumes with `--resume`
+//! while Codex resumes with a `resume` subcommand, that Codex reads hooks from
+//! a file inside the project while Claude Code reads them from a settings
+//! document, or that the Antigravity CLI is installed under the name `agy`.
+//! All of that lives here, behind [`HarnessAdapter`], and nowhere else.
+//!
+//! # Declarations are evidence, not recollection
+//!
+//! Every fact an adapter states about its harness is a [`Declared`] value: it
+//! is either `Verified`, carrying the exact place the fact came from — a line
+//! of the installed binary's `--help`, one of its own configuration files, a
+//! session record it wrote — or it is `Unverified`, which is what an
+//! unavailable fact looks like. There is deliberately no third state that
+//! means "probably".
+//!
+//! This is not ceremony. An adapter is the one place in Glasshouse where a
+//! confidently wrong sentence launches the wrong program, resumes the wrong
+//! conversation, or tells a user a capability exists that does not. A missing
+//! declaration costs a feature; an invented one costs trust, and quietly.
+//!
+//! The declarations here were derived on 2026-08-25 from Claude Code 2.1.245,
+//! Codex 0.149.0, Antigravity CLI 1.1.20, OpenCode 1.18.22, Cursor CLI
+//! 2026.08.11, Pi 0.73.1, and Hermes Agent 0.15.1, every one of them installed
+//! on the development machine and interrogated there. Each adapter module
+//! records what it read, and a declaration nobody could read is `Unverified`
+//! rather than filled in from the obvious answer.
+//!
+//! # What core may and may not do with an adapter
+//!
+//! An adapter produces *descriptions*: the executable names to look for, the
+//! arguments that start or resume a session, the bytes that deliver a message
+//! or an interrupt. It never spawns anything, never touches a
+//! [`crate::session::runtime::SessionRuntime`], and never parses terminal
+//! output. That direction is the architecture: the generic runtime stays
+//! usable for any process, and adapters stay small enough to be read in one
+//! sitting and checked against a real install.
+
+### `crates/glasshouse/src/harness/mod.rs` — `HarnessAdapter::direct_provider_requires_model`
+
+    /// Whether this harness's direct-provider mechanism is unusable without a
+    /// model named for it.
+    ///
+    /// Default `false`, which is what every harness answered before this
+    /// existed: pointing it at a provider is enough and the harness picks a
+    /// model itself.
+    ///
+    /// `true` is for a harness that selects the *provider* through the
+    /// model. OpenCode's `--model <provider>/<model>` is the case this
+    /// exists for: a profile that configures a provider and names no model
+    /// leaves the harness configured and unused, starting on whatever
+    /// backend it defaulted to. For a user who asked to be pointed somewhere
+    /// else that is the silent, billable failure
+    /// [`crate::profile::resolve`]'s credential step already refuses, so it
+    /// is refused too — and never guessed at, because a model identifier
+    /// invented by Glasshouse is exactly the invention that module exists to
+    /// refuse.
+    ///
+    /// Read **before** [`HarnessAdapter::direct_provider_launch`] is called,
+    /// so a missing model is a refusal that says so rather than a `None`
+    /// that reads as "this harness declares no mechanism".
+
+### `crates/glasshouse/src/harness/mod.rs` — `ExecutablePresence`
+
+/// Whether a harness's declared executable candidates resolve to something
+/// installed and directly usable on this machine.
+///
+/// This answers Phase 9F line 466's precondition — "require the selected
+/// coding harness executable to be installed and usable before offering an
+/// interactive direct-provider or gateway-backed launch profile" — as a
+/// value, so [`crate::profile::resolve_checked`] can refuse on it without
+/// this crate's `profile` module having to search `PATH` itself.
+/// [`ExecutablePresence::detect`] performs the same search
+/// [`mod@crate::session::select`] and `glasshouse doctor` already do: every
+/// declared candidate name in turn, first usable one wins — see
+/// `integrations::resolve_first_usable_with`, which this mirrors.
+///
+/// **This is `PATH` discovery only.** It does not know about an explicitly
+/// configured executable path — that lookup belongs to
+/// [`mod@crate::session::select`], which reads configuration this crate's
+/// `harness` and `profile` modules deliberately do not import (see
+/// `profile`'s own module documentation). A caller that has already resolved
+/// a harness through `session::select` knows more than a fresh
+/// [`ExecutablePresence::detect`] call can, and should hand
+/// [`crate::profile::resolve_checked`] the [`ExecutablePresence::Usable`] it
+/// already established instead of asking this type to search `PATH` again.
+
+### `crates/glasshouse/src/harness/opencode.rs` — `PROTOCOLS`
+
+/// The protocol an OpenCode provider entry built on `@ai-sdk/openai-compatible`
+/// speaks.
+///
+/// **Read off a real request line**, the same standard
+/// [`crate::profile::ingress_targets`] holds itself to. OpenCode 1.18.22 was
+/// launched against a listener on `127.0.0.1:8731` with a generated
+/// configuration declaring exactly the provider entry
+/// [`OpenCode::direct_provider_launch`] composes, and the listener recorded:
+///
+/// ```text
+/// POST /v1/chat/completions HTTP/1.1
+/// Authorization: Bearer <the value of the named environment variable>
+/// User-Agent: opencode/1.18.22 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14
+/// ```
+///
+/// Two things follow beyond the protocol itself, and both are relied on
+/// below. The base URL goes through **verbatim** — `/v1` came from the
+/// provider's own declared URL and `/chat/completions` was appended by the
+/// harness, so this adapter neither adds nor strips a path segment, exactly
+/// as Codex's does. And the credential arrived as `Authorization: Bearer`
+/// having been named in the document as `{env:NAME}` rather than written
+/// into it.
+
+### `crates/glasshouse/src/harness/opencode.rs` — `OpenCode::direct_provider_launch`
+
+    /// OpenCode is the first harness Glasshouse launches whose provider
+    /// configuration is **document-shaped**, and this is the whole of line
+    /// 362: an isolated generated configuration file, written where
+    /// Glasshouse owns it, for one child process.
+    ///
+    /// # Why a document at all
+    ///
+    /// `opencode --help` on 1.18.22 lists every option the binary takes, and
+    /// none of them names a base URL, an API key or a provider definition.
+    /// `--model <provider>/<model>` *selects* among providers that already
+    /// exist; `opencode providers` walks a person through authenticating one
+    /// interactively. A provider that is not already configured can only be
+    /// brought into existence by a configuration document. That is what
+    /// "requires file-based provider configuration" means here, and it was
+    /// established from the installed binary rather than assumed.
+    ///
+    /// # Why the credential is not in the document
+    ///
+    /// OpenCode substitutes `{env:NAME}` anywhere in a configuration
+    /// document's text before parsing it — the bundle's own
+    /// `ConfigVariable.substitute` does the replacement out of the child's
+    /// environment. So the document names the provider's own credential
+    /// variable and the *value* travels the way every other harness's
+    /// credential already does, in the child's environment, placed by
+    /// [`crate::profile::resolve`]. Probed end to end: a document containing
+    /// `"apiKey": "{env:NAME}"` produced `Authorization: Bearer <value>` on
+    /// the wire.
+    ///
+    /// The consequence worth stating plainly: **a generated configuration
+    /// file here never contains a secret**, and it cannot start to without
+    /// this method being handed one, which [`DirectProviderRequest`] makes
+    /// impossible.
+    ///
+    /// # Three refusals, none of them a substitution
+    ///
+    /// `None` here means "this harness cannot be launched that way", as
+    /// everywhere else, and it is answered when the protocol is not
+    /// OpenAI-chat: nothing is translated. A missing **model** is refused one
+    /// level up with its own message — see
+    /// [`OpenCode::direct_provider_requires_model`] — and so is a file name
+    /// that could leave the directory Glasshouse owns, which this adapter
+    /// cannot produce because it never names a path at all.
+
+### `crates/glasshouse/src/harness/pairing/mod.rs` — module doc
+
+//! Phase 9J — what the pairing between a harness and a model actually *is*.
+//!
+//! # Six things, stored six ways
+//!
+//! [`super::Vendor`] already means **who publishes the harness executable**,
+//! and its own documentation explains why collapsing that with who made the
+//! model and who serves it produces a router that "ends up believing a
+//! harness and a model are first-party partners because their names rhyme".
+//! This module is the other half of that sentence: the model side, and the
+//! relationship between the two.
+//!
+//! Line 554 of the capability map asks for six independent facts — harness
+//! vendor, model developer, model family, serving provider, gateway, wire
+//! protocol. They are six separate fields of [`Pairing`] and no one of them
+//! is ever derived from another. In particular [`ServingRoute::provider`] is
+//! never consulted to answer [`Pairing::developer`]: a reseller is not an
+//! author, and OpenRouter serving `claude-opus-5` makes OpenRouter neither
+//! Anthropic nor the model's developer.
+//!
+//! # `Unknown` is an answer, not a fallback
+//!
+//! [`ModelDeveloper::Unknown`] and [`PairingClass::Unknown`] are what
+//! Glasshouse says about a stealth or insufficiently attributed model, and
+//! they are deliberately reachable from the *front* of the ladder rather than
+//! the end of it. A model named after a company is not evidence it was made
+//! there — that is the same failure [`super::Vendor`] describes, one level
+//! down — so nothing here reads a developer out of a model's name, a
+//! provider's name, or a harness's branding. An id nothing attributes stays
+//! unattributed until a person says otherwise.
+//!
+//! # Three axes, because the map says three
+//!
+//! Line 559 requires protocol compatibility to be treated separately from
+//! model-behaviour compatibility and tool-semantic compatibility, and a
+//! single "compatible" verdict would be exactly the thing it forbids. So
+//! [`Pairing`] answers three questions with three types that cannot stand in
+//! for one another: [`ProtocolFit`], [`ModelBehaviourFit`], and
+//! [`crate::routing::ToolSemantics`]. They disagree in practice — a provider
+//! can serve a harness's own wire protocol (`ProtocolFit::Native`) while
+//! declaring nothing whatever about tool calls on it
+//! (`ToolSemantics::Unverified`), which is the state of every built-in
+//! provider template today.
+//!
+//! **`ModelBehaviourFit` is `Unverified` for every catalogued model**, and
+//! that is not an oversight: nothing in Glasshouse observes whether a model
+//! behaves the way a harness needs. Phase 33A's routing evidence ledger is
+//! what would feed it. Until then the only thing that can move it is a
+//! person who has run the pairing and found out — see
+//! [`ModelCorrection::behaviour`].
+//!
+//! # Declarative, and correctable without touching a router
+//!
+//! Two data structures decide everything here, and neither is code a router
+//! reads:
+//!
+//! - [`OfficialModelSupport`], declared by each adapter beside its other
+//!   [`Declared`] facts. A harness that adds official support for a model is
+//!   one string in one array — lines 558 and 562.
+//! - [`PairingOverrides`], built by `crate::config::pairing` out of the
+//!   user's own configuration file. Line 561: a correction is a
+//!   configuration edit, and `classify` is the only thing that reads it.
+//!
+//! # This module imports no configuration
+//!
+//! Same rule, and the same reason, as [`mod@crate::profile`]: the caller
+//! looks configuration up and hands the resolved values in. That keeps
+//! [`classify`] a pure function of its arguments — no file, no environment,
+//! no ambient lookup — and it is why [`PairingOverrides`] is a plain map this
+//! module defines and `crate::config` fills in.
+
+### `crates/glasshouse/src/harness/pairing/mod.rs` — `classify`
+
+/// Ask what the pairing between a harness and a model is.
+///
+/// The one function that answers it. Every rung of the ladder is a statement
+/// somebody declared — an adapter's [`OfficialModelSupport`], the
+/// [`catalogue`], a user's [`PairingOverrides`], a provider's protocol list —
+/// and none of it is read out of a name.
+///
+/// The order matters and is the map's, not this module's:
+///
+/// 1. **vendor-native** needs both halves of line 557 — the vendor declares
+///    the family as one of its own *and* the developer is that vendor's
+///    organisation. Either half alone is not enough, and the second half is
+///    what stops a reseller's model line being mistaken for a first-party one.
+/// 2. **vendor-supported** needs only the vendor's own list, because line 558
+///    is a claim by the harness vendor and stands whether or not the model's
+///    developer is known.
+/// 3. **unknown** for an unattributed model — line 560, and it comes *before*
+///    the protocol rungs on purpose. The wire is still described, separately,
+///    in [`Pairing::protocol_fit`]; what cannot be described is the
+///    relationship between a harness and a model nobody can name the author
+///    of.
+/// 4. the protocol rungs, for an attributed model with no vendor
+///    relationship.
+
+### `crates/glasshouse/src/harness/response.rs` — module doc
+
+//! Phase 9K's harness half: turning a Glasshouse response profile into the
+//! closest safe thing one harness actually has, and recording which one that
+//! was.
+//!
+//! [`mod@crate::profile::response`] is the domain model — five independent
+//! axes, presets, roles and a six-layer precedence chain, and it knows nothing
+//! about any harness. This module is the other side of line 602: *"Let the
+//! HarnessAdapter translate a Glasshouse response profile into the closest
+//! safe native harness configuration."*
+//!
+//! # The vocabulary stays inside the adapter
+//!
+//! Line 603 asks for Claude Code output styles and Codex personalities to be
+//! treated as *adapter examples* rather than universal Glasshouse concepts, so
+//! there is no `OutputStyle` type here and no enum of style names. What
+//! crosses the seam is a [`NativeStyle`], whose `selection` is a plain string
+//! in the harness's own words, carrying the evidence it was read from —
+//! exactly the shape [`Declared`](super::Declared) already uses for every
+//! other adapter fact.
+//!
+//! # What may never happen, expressed as a type that cannot say it
+//!
+//! Line 607: *"Never replace the complete native harness system prompt merely
+//! to control verbosity, tone, or answer structure."* [`AppliedMechanism`] has
+//! three variants — a native mechanism, an additive instruction, and nothing —
+//! and **no variant that means "replaced"**. Nothing downstream can record a
+//! replacement because nothing upstream can perform one: the only things
+//! [`apply`] produces are a settings key the harness itself documents and
+//! arguments an adapter declared as *additive*.
+//!
+//! Claude Code makes the distinction concrete and dangerous enough to be worth
+//! stating: `claude --help` on 2.1.247 documents both `--system-prompt
+//! <prompt>` ("System prompt to use for the session") and
+//! `--append-system-prompt <prompt>` ("Append a system prompt to the default
+//! system prompt"). The first is the line-607 violation; only the second is
+//! declared by the adapter, and
+//! `the_launch_never_replaces_a_native_system_prompt` fails on a build where
+//! the first appears in a launch.
+//!
+//! # The gateway is not in this file
+//!
+//! Line 608: *"Do not make gateway-side system-prompt rewriting the default
+//! way Glasshouse applies a response profile."* This module imports nothing
+//! from [`mod@crate::gateway`] and has no path into it. The only two
+//! mechanisms [`apply`] can choose are the harness's own; a gateway-side
+//! transformation is a thing a **user configures on a provider** and
+//! [`crate::config::response`] surfaces as backend metadata — line 609 — never
+//! something Glasshouse reaches for on its own.
+
+### `crates/glasshouse/src/harness/response.rs` — `apply`
+
+/// Apply `resolved` to `adapter`, preferring the harness's own mechanism.
+///
+/// This is line 601 as a function. The order is fixed and each step has a
+/// reason:
+///
+/// 1. **Nothing above the harness default asked for anything** — apply
+///    nothing. An unconfigured Glasshouse must leave a harness exactly as it
+///    found it, and [`ResolvedProfile::is_harness_default`] is what makes
+///    "nobody asked" distinguishable from "somebody asked for the defaults".
+/// 2. **A native mechanism that can represent this profile** — take it. The
+///    adapter decides whether it can; a harness whose only styles would weaken
+///    its coding instructions declares none for that profile and falls
+///    through, which is the *"without weakening coding instructions"* half of
+///    line 601 and is enforced inside the adapter that knows its own styles.
+/// 3. **An additive instruction** — the profile's own sentences, appended
+///    beside the harness's system prompt, never replacing it.
+/// 4. **Nothing, and say why.**
+///
+/// # The floor rides along with whatever wins
+///
+/// A native style is the harness vendor's own wording and Glasshouse does not
+/// get to edit it, so when an additive mechanism also exists the floor
+/// sentence — [`floor_directive`] — is appended beside the native selection.
+/// That is not belt-and-braces: the native selection expresses the five axes,
+/// and [`crate::profile::response::REQUIRED_REPORTS`] is not one of the axes.
+/// It is the thing no axis may reduce.
+
+### `crates/glasshouse/src/integrations/cmux.rs` — module doc
+
+//! cmux as an *optional* presentation backend — Phase 17, capability map
+//! lines 754–763, and Phase 54, lines 1892–1895.
+//!
+//! # What this module is, and what it is not
+//!
+//! cmux is a terminal multiplexer with a documented command-line surface.
+//! When Glasshouse is running inside it, a person can ask for a session to
+//! be *presented externally*: Glasshouse opens a new cmux workspace in the
+//! project root, runs an ordinary Glasshouse launch in that pane, and
+//! remembers the pane as the session's presentation metadata. Afterwards the
+//! pane can be brought to the front (`glasshouse sessions focus`) and text
+//! can reach it through cmux when Glasshouse's own door cannot.
+//!
+//! That is the whole of it. cmux is a **workspace and presentation backend**
+//! (line 763), never the orchestration core: nothing in `session/**` or
+//! `shell/**` names it, the session abstraction learns one nullable string
+//! (line 762 — see [`crate::session::SessionRecord::presentation_ref`]), and
+//! every core function works identically when cmux is absent, changes, or
+//! disappears (lines 755, 1894). A tripwire test in
+//! `tests/cmux_presentation.rs` scans those layers' sources for the word
+//! and fails the moment one of them learns it.
+//!
+//! # Only the documented surface (line 1893)
+//!
+//! Every cmux invocation goes through [`Subcommand`], whose variants are the
+//! complete list of what this module may run: `ping`, `identify --json`,
+//! `workspace create`, `workspace select`, and `send`. All five are named in
+//! `cmux --help` and `cmux docs api`; none of them is the socket protocol, an
+//! `rpc` call, or a JSON schema copied out of cmux's internals. The same
+//! tripwire test checks that no other cmux verb appears in this file's
+//! production code, so widening the surface is a deliberate, visible act.
+//!
+//! # Basic expose-and-focus, and why it stops there (lines 1892, 1895)
+//!
+//! "Basic expose-and-focus" is exactly three verbs: **open** a pane for a
+//! session, **focus** it, and **send** a line to it when the door is not an
+//! option. It does not lay panes out, split them, rename them, close them,
+//! read their screens, watch their events, or drive cmux's browser. Richer
+//! automation is deferred on purpose: line 1892 keeps cmux optional until
+//! repeated use proves external-pane workflows essential, and line 1895 says
+//! richer automation waits until the basic workflow has proved useful. The
+//! evidence that would unlock it is usage, not a design — and until then the
+//! allow-list above is the boundary.
+//!
+//! # Detection is presence *and* an answer (line 754)
+//!
+//! [`detect`] says cmux is available only when both halves hold: the
+//! process is inside a cmux surface (the same `CMUX_SOCKET_PATH` evidence
+//! [`super::Discovery`] already reports, corroborated by the surface and
+//! workspace variables), *and* `cmux ping` answers. A variable left set in
+//! a dead environment — a shell whose cmux has since quit, a copied
+//! environment — reads as **absent**, because a backend that cannot answer
+//! is not one Glasshouse may hand a session to.
+//!
+//! # Security
+//!
+//! - The pane's command names the project root and Glasshouse's own
+//!   resolved directories and flags; no credential, token, or provider
+//!   value is ever placed in a `cmux` argument. `CMUX_SOCKET_CAPABILITY` is
+//!   never read.
+//! - A stored presentation reference is an opaque string until it is about
+//!   to be handed back to cmux, at which point [`PaneRef::parse`] admits only
+//!   the `workspace:N` / `surface:N` shape. A row carrying anything else is
+//!   refused by name rather than passed through.
+//! - The pane's command is quoted for the login shell cmux runs it under
+//!   ([`shell_command`]), so a project root containing a space or a quote
+//!   cannot become two words or an injected command.
+
+### `crates/glasshouse/src/config/capability.rs` — module doc
+
+//! Phase 34F — a model's capability as configurable data, not router logic.
+//!
+//! # What this widens, and what it does not duplicate
+//!
+//! [`super::ProviderConfig::model_ceilings`] already lets a user state the
+//! highest workload tier a model may serve — capability map line 1796, one
+//! axis. This module is the same idea widened to the rest of line 1796's
+//! neighbourhood (lines 1475–1479, 1482–1485): structured-output
+//! suitability, task-kind suitability, the harness-model pairing class, and
+//! how much evidence backs the calibration — stored beside `model_ceilings`
+//! on the same [`super::ProviderConfig`], keyed by the same model
+//! identifier. [`ModelCapabilityRecord`] deliberately does **not** carry its
+//! own ceiling concept separate from the existing one: [`resolve_ceiling`]
+//! is the one function that reads both and states which wins.
+//!
+//! # `backend` and `model` are not fields here
+//!
+//! Line 1482 asks calibration to stay local to harness, launch profile,
+//! model, backend, and protocol. Two of those five are already structural
+//! by the time a [`ModelCapabilityRecord`] exists: `model` is the map key
+//! [`super::ProviderConfig::model_capabilities`] stores it under (exactly
+//! [`super::ProviderConfig::model_ceilings`]'s own shape), and `backend` is
+//! *which* `[providers.<name>]` table the record lives in — a local
+//! quantized model and a hosted model of the same name are configured under
+//! two different provider entries, so they are already two different
+//! records before this module adds anything (line 1485,
+//! `two_providers_with_the_same_model_name_resolve_independently`). What
+//! this module adds is the other two axes, `harness` and `launch_profile`,
+//! plus `protocol` — narrowing fields on the record itself, checked by
+//! [`ModelCapabilityRecord::applies_to`].
+//!
+//! # User assignment outranks a benchmark seed, and a seed never refuses
+//!
+//! The user's 56A ruling (`docs/product/design-decisions.md`, "Step 4's
+//! fallback order") is explicit: public benchmark data is *"a baseline"*,
+//! never an authority, and a wrong tier here does not misdescribe — it
+//! misroutes work. [`CeilingResolution::hard_ceiling`] is where that ruling
+//! becomes code: a [`CapabilityProvenance::Benchmark`] record's ceiling
+//! never reaches a hard routing constraint, because line 1484 requires a
+//! prior to be usable for ranking and never for refusing something the user
+//! never restricted. Only [`CapabilityProvenance::User`] — the user's own
+//! assignment, whether written as a `model_ceilings` override or as a
+//! capability record — may reject a candidate.
+
+### `crates/glasshouse/src/config/mod.rs` — module doc
+
+//! User-level and optional project-level Glasshouse configuration.
+//!
+//! Two files, same small shape:
+//!
+//! - `<config_dir>/config.toml` — user-level. Onboarding decisions and
+//!   per-integration enable/executable overrides. Loaded by every run;
+//!   never created automatically for you to lose data to — a missing file
+//!   just means the defaults apply (see [`UserConfig::load`]).
+//! - `<project root>/.glasshouse/config.toml` — project-level, optional,
+//!   and layered *over* the user file (see [`EffectiveConfig`]). It is
+//!   never written except in response to an explicit user decision — see
+//!   [`write_project_config_with_consent`].
+//!
+//! The schema is deliberately tiny. The capability map is explicit that
+//! configuration should stay small until real usage demonstrates a need for
+//! more (Phase 49): a field belongs here once a user can actually make the
+//! decision it records, and not before. [`RoutingConfig`] is the newest such
+//! addition and shows where the line is — it stores *which* routing model
+//! the user picked in the first-run wizard, plus the bounded routing-policy
+//! preferences the Phase 2D settings view lets them change. It deliberately
+//! stores no health observations, live prices, or fallback decisions: those
+//! belong to the later router that consumes these preferences. Phase 9A's launch
+//! profiles are the same shape: [`ProfileTable`] holds
+//! *inert* profile configuration (which harness, which backend resource,
+//! which approval mode) — never a resolved overlay, never a credential, and
+//! never the project's own memory. Resolving a stored profile into something
+//! that can actually launch a harness happens in [`crate::profile`], not
+//! here.
+//!
+//! ## No secrets here — structurally, not just by convention
+//!
+//! [`IntegrationConfig`], [`ProfileConfig`] and [`ProviderConfig`], the
+//! per-item shapes either file stores, hold onboarding decisions, executable
+//! overrides, inert profile selections and *names* — never an API key,
+//! token, or any other credential. That is Phase 9E's rule applied here:
+//! "Never write API keys into tracked `.glasshouse` project files" and
+//! "Store only secret references in provider configuration whenever
+//! possible." A [`ProfileConfig::backend`] naming
+//! [`ProfileBackend::DirectProvider`] carries only the provider's own
+//! *name*; a [`ProviderConfig::credential_store`] carries a
+//! [`StoredCredentialRef`], which is two names. Resolving any of them to a
+//! credential is the separate `SecretStore` abstraction's job (not built by
+//! this module), never this one's. See
+//! `tests::serialized_form_has_no_secret_capable_field` for a structural
+//! guard, not just a string search.
+//!
+//! Phase 59 split this directory by concern: [`hooks`] (per-integration
+//! enable/hooks-consent), [`profile`] (launch profiles), [`provider`]
+//! (provider config, quota, model facts), [`entitlement`] (entitlement
+//! resolution), [`routing_policy`] (routing/score/reserve policy types),
+//! [`loading`] (`UserConfig`/`ProjectConfig` and the TOML I/O they share) and
+//! [`effective`] (the `EffectiveConfig` layering reader). This file keeps
+//! only the module wiring, [`ConfigError`] and re-exports.
+
+### `crates/glasshouse/src/config/pairing.rs` — module doc
+
+//! Phase 9J's configuration half: how a person corrects pairing metadata,
+//! and what `glasshouse pairing` prints.
+//!
+//! [`mod@crate::harness::pairing`] is a pure domain model that imports no
+//! configuration — the same rule, and the same reason, as
+//! [`mod@crate::profile`]. This module is the caller that rule assumes: it
+//! reads the layered configuration, resolves providers and launch profiles
+//! into [`crate::harness::pairing::PairingQuery`] values, asks
+//! [`crate::harness::pairing::classify`], and renders the answers.
+//!
+//! # Why the report lives here and not in `main.rs`
+//!
+//! Because a caller only the binary can reach is a caller no test enters
+//! through, and a capability proven by tests that all set the world up
+//! themselves is proven against a build whose production path could be
+//! deleted. [`report`] is what `main.rs`'s `pairing` arm calls, in one line,
+//! and it is what `tests/pairing.rs` calls too — so a mutation to the
+//! resolution below is a mutation to the path the shipped binary runs.
+//!
+//! # What a correction may and may not do
+//!
+//! A correction sets *metadata*: who developed a model, what family it
+//! belongs to, what a harness vendor officially supports, and what a person
+//! has actually observed about a model's behaviour. It cannot set the pairing
+//! **class** directly. The class is always derived, so that "why does this
+//! say vendor-native" always has an answer made of things somebody declared —
+//! which is the whole point of a taxonomy whose top rung is a claim about a
+//! first-party relationship.
+
+### `crates/glasshouse/src/config/pairing.rs` — `WARM_SESSION_RELEVANCE_WINDOW_SECONDS`
+
+/// How long after its last activity a warm session is worth exactly nothing.
+///
+/// One working day, decayed linearly to **exactly** zero rather than to a
+/// floor — the same shape, and the same reason, as
+/// [`FULL_DECAY_OBSERVATIONS`]: a test can assert `0.0` instead of "smaller
+/// than before".
+///
+/// **Provisional, and the reasoning rather than a measurement.** What is
+/// being valued is the *conversation* a person could pick back up, not a
+/// provider-side prompt cache (those expire in minutes, and Glasshouse
+/// observes neither their presence nor their TTL). A thread abandoned before
+/// lunch is plausibly resumed after it; one abandoned last Tuesday is a new
+/// task wearing an old session's name. Deliberately **much shorter** than
+/// `crate::routing::interactive::FAILOVER_EVIDENCE_WINDOW_SECONDS` (7 days),
+/// because that window asks "has this backend behaved well lately", which
+/// stays true across days, and this one asks "is this thread still live in
+/// someone's head", which does not.
+///
+/// The measurement that would change it: the distribution of
+/// `last_activity_at`-to-resume gaps in the session store. If half of real
+/// resumes happen after this window, it is too short.
+
+### `crates/glasshouse/src/config/pairing.rs` — `native_pairing_prior_contribution`
+
+/// Line 566 through 575, as one function: what the native-pairing prior and
+/// the local evidence for `key` contribute to routing `candidate`.
+///
+/// `candidate` must already have survived every hard protocol, tool,
+/// capability, privacy and user constraint — [`crate::routing::EligibleCandidate`]
+/// is what makes that structural (design decision 2) rather than a comment
+/// asking a future caller to remember the order.
+///
+/// The explanation always carries the pairing class and the evidence count
+/// (line 575's first two terms, magnitude `0.0`, informational), then either:
+/// - a `pinned` line, when `preference` is [`PairingPreference::Pin`] — the
+///   prior is not scored at all, because a pin is a hard rule; or
+/// - a `native-pairing prior` contribution (line 575's third term), zero
+///   unless the pairing is vendor-native, decayed toward zero as reliable
+///   observations accumulate; plus
+/// - a `local observed evidence` contribution, present only when at least one
+///   reliable observation exists, and unbounded — so a strong enough
+///   observation can always outrank the prior (design decision 1), and enough
+///   bad observations against a vendor-native pairing can make its total
+///   lower than a neutral candidate's (line 574).
+///
+/// **The production caller is `InteractiveRouting::on_provider_failure`**,
+/// by way of its own `score_candidate` helper, reached from
+/// `crate::gateway::session::SessionRouting::observe_exchange`. `preference`
+/// and `evidence` both come from that caller now — see
+/// `SessionRouting::set_pairing_preference`, called beside `Self::bind` by
+/// `crate::profile`'s gateway path, for where `preference` is actually
+/// resolved from configuration. `DisposableRouting` still does not rank
+/// candidates at all (Phase 9J line 566 needs a different caller for that,
+/// per this package's report).
+
+### `crates/glasshouse/src/config/provider.rs` — `ConfiguredWorkloadTier`
+
+/// A [`crate::routing::classify::WorkloadTier`] as it is written in a
+/// configuration file, and the only place this crate turns a spelling back
+/// into that type.
+///
+/// # Why a newtype rather than `serde` on `WorkloadTier` itself
+///
+/// `WorkloadTier` is a routing type with no serialised form of its own —
+/// `routing::request` parses one out of a routing model's JSON answer, and
+/// giving the enum a `Deserialize` impl would make that answer and a user's
+/// config file the same surface. They are not: one is untrusted output from a
+/// model, the other is a file the user wrote. This newtype is the config
+/// file's side of that boundary and nothing else reads it.
+///
+/// # Why the spellings come from `as_str` rather than a second list
+///
+/// `WORKLOAD_TIER_SPELLINGS` holds every variant, and
+/// `workload_tier_ordinal`'s exhaustive `match` is what makes adding a
+/// sixth variant a **compile error** here rather than a spelling that
+/// silently fails to parse. The strings themselves are always
+/// `WorkloadTier::as_str`'s, so a renamed tier renames its config spelling
+/// with it and cannot drift.
+
+### `crates/glasshouse/src/config/provider.rs` — `ProviderConfig::credential_store` (`SecretRef::OsCredential` doc)
+
+    /// Where this provider's credential is kept, when the user has put it in
+    /// the operating system's own secure store. **A reference — a service
+    /// and an account name — never a value.**
+    ///
+    /// This is the serialised shape of
+    /// [`crate::secret::SecretRef::OsCredential`], and it is exactly what
+    /// Phase 9E's "store only secret references in provider configuration"
+    /// means: the two names here are as safe to write into a tracked project
+    /// file as [`ProviderConfig::credential_env`]'s variable names already
+    /// are.
+    ///
+    /// # It records intent; it is not what makes resolution work
+    ///
+    /// [`crate::secret::native::PreferNativeSecretStore`] finds a stored
+    /// credential by the variable name a harness expects it in, whether or
+    /// not this field was ever saved. So a configuration file that has
+    /// drifted out of step with the keychain — a credential deleted with
+    /// this field still written, or the reverse — cannot cause a wrong
+    /// launch; the store is asked at the moment of use either way. What this
+    /// field is for is telling the *user* where their key is, and giving
+    /// deletion something to remove.
+
+### `crates/glasshouse/src/config/provider.rs` — `ProviderConfig::resolved_ceiling`
+
+    /// The one lookup capability map lines 1476, 1478, 1479, and 1484 share:
+    /// [`ProviderConfig::ceiling_of`]'s own override always wins; failing
+    /// that, `model`'s capability record contributes its initial ceiling
+    /// (capped by its task-kind suitability) when the user assigned it
+    /// themselves, or only a non-binding prior when a benchmark seeded it.
+    /// See [`capability::resolve_ceiling`] for why a benchmark-derived
+    /// record can rank but never refuse.
+    ///
+    /// **This lookup is context-blind** — it knows only `model` and the
+    /// provider `self` is — and only a record that states no
+    /// harness/launch-profile/protocol narrowing at all
+    /// (`ModelCapabilityRecord::is_context_general`, which is deliberately
+    /// not public — this module is its only honest caller) is
+    /// eligible here. A record that narrows to even one of those axes is
+    /// filtered out rather than applied without checking them: this path
+    /// has no harness, launch profile, or protocol in hand to check a
+    /// narrowed record's [`capability::ModelCapabilityRecord::applies_to`]
+    /// against — that context exists only in `main.rs`'s destination
+    /// construction — so honouring a narrowed record here would leak its
+    /// calibration onto every destination sharing this provider and model,
+    /// including ones on a harness the record was never calibrated for.
+    /// Capability map line 1482.
+
+### `crates/glasshouse/src/config/response.rs` — module doc
+
+//! Phase 9K's configuration half: how a person records a response profile,
+//! and what `glasshouse response` prints.
+//!
+//! [`mod@crate::profile::response`] is a pure domain model that imports no
+//! configuration, and [`mod@crate::harness::response`] is the adapter-side
+//! translation. This module is the caller both of those assume: it reads the
+//! layered configuration, builds the six-layer
+//! [`crate::profile::response::PrecedenceStack`] line 596
+//! describes, asks [`crate::profile::response::resolve`], asks each
+//! adapter what it would apply, and renders the answers.
+//!
+//! # Why the report lives here and not in `main.rs`
+//!
+//! The same reason [`mod@super::pairing`] gives, and it is §35: a caller only
+//! the binary can reach is a caller no test enters through, and a capability
+//! proven by tests that all set the world up themselves is proven against a
+//! build whose production path could be deleted. [`report`] is what
+//! `main.rs`'s `response` arm calls, in one line, and it is what
+//! `tests/response_profiles.rs` calls too — so a mutation to the layering
+//! below is a mutation to the path the shipped binary runs.
+//!
+//! # Project scope
+//!
+//! Line 597 requires a project's response-profile configuration to stay inside
+//! that project. It does, structurally and for free:
+//! [`ProjectConfig`](super::ProjectConfig) is read from
+//! `<project root>/.glasshouse/config.toml` by
+//! [`load_project_config`](super::load_project_config), which takes the
+//! [`Project`](crate::Project) whose root Glasshouse resolved, and
+//! [`EffectiveConfig`] holds exactly one of them. There is no path by which a
+//! second project's file is opened, and
+//! `a_projects_response_profile_does_not_reach_another_project` runs the
+//! binary's own resolution in two project roots to show it.
+
+### `crates/glasshouse/src/config/routing_policy.rs` — `RoutingModelChoice`
+
+/// Which routing model classifies a request, as recorded in configuration.
+///
+/// The routing model is the cheap, fast, replaceable component the capability
+/// map describes in its preamble: before spending premium agent capacity,
+/// Glasshouse may ask it to classify a request and estimate the capability
+/// tier the work needs. Phase 2C's job — and this type's — is only to record
+/// *which* of three answers the user gave. Actually asking a model anything
+/// is Phase 34B, and choosing one for [`RoutingModelChoice::Automatic`] is
+/// Phase 34C; neither is built here, and this type is deliberately shaped so
+/// neither has to be rewritten to read it.
+///
+/// # Why `Automatic` stores an intent and not a model
+///
+/// Phase 2C line 2 asks for a choice that "selects the cheapest sufficiently
+/// fast configured resource". That selection depends on provider health,
+/// rate-limit headroom, latency and price *at the moment of use* — every
+/// filter in Phase 34C is a live condition — so resolving it once during a
+/// first-run wizard and writing the winner down would freeze a decision the
+/// map explicitly wants re-evaluated ("Re-evaluate the automatic
+/// routing-model choice when its provider becomes degraded or
+/// rate-limited"). [`RoutingModelChoice::Automatic`] therefore carries no
+/// payload at all: it is the user saying "you pick", not a cached answer.
+///
+/// # This is a reference, never a credential
+///
+/// [`RoutingModelChoice::Pinned`] holds a provider *name* — a key into
+/// [`ProviderTable`] — and a model *name*. Both are as safe to write into a
+/// tracked project file as [`ProviderConfig::credential_env`]'s variable
+/// names already are, which is the same rule [`StoredCredentialRef`]
+/// follows. Resolving the named provider to an actual credential stays
+/// `SecretStore`'s job. See `tests::serialized_form_has_no_secret_capable_field`
+/// for the structural guard.
+
+### `crates/glasshouse/src/config/routing_policy.rs` — `RoutingModelChoice::resolve`
+
+    /// What this choice actually resolves to, given the provider names that
+    /// are configured right now.
+    ///
+    /// # A vanished provider is not a startup failure
+    ///
+    /// This is the one lookup in this module that refuses to return an
+    /// error. [`EffectiveConfig::configured_provider`] answers an unknown
+    /// name with [`ProviderLookupError::Unknown`], because a user who typed
+    /// `--provider nope` on the command line asked for something specific
+    /// and must be told it does not exist. A routing model is not that:
+    /// nobody asked for it this run, it is an optimisation over a system
+    /// that already works without it, and providers legitimately come and go
+    /// as keys are rotated and configuration is edited. So a
+    /// [`RoutingModelChoice::Pinned`] naming a provider that is no longer
+    /// configured degrades to [`RoutingModelResolution::Heuristics`] — with
+    /// a [`RoutingFallback`] that says which provider went missing, so the
+    /// degrade is visible rather than silent — instead of making Glasshouse
+    /// fail to start. Phase 34B's "Allow deterministic heuristics to remain
+    /// the final fallback when every routing model is unavailable" is the
+    /// same instinct one phase earlier.
+    ///
+    /// `configured` is provider *names* — [`EffectiveConfig::provider_names`]
+    /// in production. Whether a named provider is currently
+    /// [`ProviderConfig::enabled`] is deliberately not consulted: that field's
+    /// own documentation records that "deciding whether routing may actually
+    /// use a disabled provider is a later phase's job", and answering it here
+    /// would be that phase arriving early.
+
+### `crates/glasshouse/src/config/routing_policy.rs` — `RoutingConfig::automatic`
+
+    /// Whether the session router decides where a launch's work goes —
+    /// capability map line 1712, *"allow the user to disable automatic
+    /// routing for the current Glasshouse instance."*
+    ///
+    /// `None` means this layer never said, exactly like every other field
+    /// here; `Some(false)` is a person saying *stop deciding for me*, and
+    /// [`EffectiveConfig::automatic_routing`] resolves it project over user
+    /// over a default of `true`.
+    ///
+    /// # This is not [`RoutingModelChoice::Deterministic`]
+    ///
+    /// The two are easy to confuse and turn off different things.
+    /// [`RoutingConfig::model`] chooses **what classifies a request** — a
+    /// model, or deterministic heuristics — and a launch is ranked either
+    /// way. This field turns the **ranking on the launch path** off
+    /// altogether: `glasshouse launch` stops asking whether this project
+    /// already has a session worth continuing, and starts the session the
+    /// person's own flags describe.
+    ///
+    /// Off means off, including the *diagnosis*: see
+    /// `main.rs::launch_session` for why a launch with routing disabled does
+    /// not compute the ranking in order to report what it would have chosen.
+    /// `glasshouse route` still answers that question on demand, because
+    /// asking it is a thing a person does deliberately.

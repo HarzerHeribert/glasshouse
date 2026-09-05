@@ -1,62 +1,23 @@
 //! The append-only project event log.
-//!
-//! [`crate::events::bus`] gets an event to everyone who needs it *now*, in
-//! memory, bounded. This is where the same events go to outlive the process:
-//! one row per event in the project's own SQLite database, appended and never
-//! rewritten.
-//!
-//! # Append-only is enforced by the database, not by discipline
-//!
-//! Phase 18's fixed architectural requirement is that *derived interpretation
-//! must not overwrite or masquerade as the original event*. Two triggers
-//! created by migration 5 abort every `UPDATE` and every `DELETE` on
-//! `lifecycle_events`, so that property holds against any code that opens the
-//! file — this crate's, a later phase's, or a hand-typed `sqlite3` session.
-//! A rule a future query could forget is not the same kind of thing as a rule
-//! the file itself refuses to break; the project database already draws that
-//! distinction for project isolation, and this is the same argument.
-//!
-//! The cost is stated rather than hidden: **nothing can prune this table.**
-//! Retention, if it is ever wanted, is a migration and a decision, not a
-//! `DELETE` somebody adds one afternoon.
-//!
-//! # The raw observation is kept beside the normalized event, not inside it
-//!
-//! The same requirement asks that raw observations stay available as
-//! diagnostic source evidence *while normalized and derived records remain
-//! distinguishable from them*. So a row carries both: `kind` and its variant
-//! payload are Glasshouse's normalized reading, and `observed_harness` /
-//! `observed_event` are the harness's own two words, exactly as it spelled
-//! them, in their own columns. Neither can be mistaken for the other, and a
-//! row that was never translated from a harness report simply has NULL there.
-//!
-//! **There is no column that could hold a conversation.** A hook payload
-//! carries the user's prompt and the model's last message; the handler drains
-//! that stream unread, and what reaches this module is
-//! [`crate::events::RawObservation`]'s `harness` and `event` and nothing else
-//! — `detail`, the one field an adapter could fill from a payload, is not
-//! stored. That is a property of the schema, so no future writer can change
-//! it without a migration.
-//!
-//! # Why the sink does not write from the publishing thread
-//!
-//! [`crate::events::EventSink::record`] is called on the publishing thread,
-//! and that thread is sometimes the one draining a pseudo-terminal. A
-//! terminal that stops being drained fills, and then the harness itself
-//! blocks on `write` — Glasshouse would have stopped the product it exists to
-//! host. A SQLite insert is not a long wait, but it is not a bounded one
-//! either: the connection carries a five-second busy timeout, and one other
-//! process holding the write lock is all it takes.
-//!
-//! So [`EventLogSink`] is a bounded queue with a writer thread behind it, and
-//! `record` is a `try_send` that drops the event and counts the drop rather
-//! than ever waiting. That is exactly the trade the bus already makes for a
-//! subscriber that stops draining, and for the same reason.
-//!
-//! A short-lived process that is *not* draining a terminal — the hook
-//! handler, which exists for a few milliseconds and then exits — uses
-//! [`EventLog`] directly and writes synchronously, because queueing behind a
-//! thread it is about to drop would lose the event it was run to record.
+//! [`crate::events::bus`] delivers an event to everyone who needs it *now*,
+//! in memory, bounded; this is where events go to outlive the process: one
+//! row each, appended and never rewritten.
+//! Append-only is enforced by the database, not discipline: migration 5's
+//! triggers abort every `UPDATE`/`DELETE` on `lifecycle_events`, so the
+//! property holds against any code that opens the file. Nothing can prune
+//! this table; retention, if ever wanted, is a migration and a decision.
+//! The raw observation is kept beside the normalized event, not inside it:
+//! `observed_harness`/`observed_event` are the harness's own words
+//! verbatim, and there is no column that could hold a conversation — the
+//! hook handler drains a payload's prompt/message unread, and `detail` is
+//! never stored.
+//! The sink never writes from the publishing thread, which sometimes drains
+//! a pseudo-terminal and must never block on a SQLite insert:
+//! [`EventLogSink`] is a bounded queue with a writer thread behind it,
+//! dropping and counting rather than waiting — the hook handler writes
+//! synchronously through [`EventLog`] instead, since queueing behind a
+//! thread about to exit would lose the event.
+// History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/events/log.rs module doc.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -356,32 +317,17 @@ impl EventLog {
 
     /// Every event after position `after`, oldest first.
     ///
-    /// # Why this exists beside [`EventLog::observed_since`]
-    ///
-    /// `observed_since`'s filter is a **de-duplication** rule, not a
-    /// relevance one. Its own doc gives the reason: a consumer that is
-    /// already subscribed to this process's [`crate::events::EventBus`]
-    /// receives everything this process published, so reading the whole log
-    /// would show each of those events twice. That premise is true of
-    /// `shell::run`, which holds both a subscription and a log tail, and it
-    /// is the query that belongs there.
-    ///
-    /// **A reader in another process holds no such subscription.** For it
-    /// there is nothing to double, and the filter stops being
-    /// de-duplication and becomes loss: it hides precisely the events the
-    /// logging process produced itself. For `glasshouse api serve` — which
-    /// owns the pseudo-terminal of every orchestrated worker — that is every
-    /// spawn, every intervention and every exit, which is to say the whole
-    /// history the orchestrator on the far end of the socket is asking for.
-    ///
-    /// So the choice between the two is a question about **where the reader
-    /// is**, not about which events matter. This one is for a reader that is
-    /// somewhere else.
-    ///
-    /// It is also the query [`EventLog::head`] already agrees with: `head`
-    /// is `MAX(seq)` over the whole table and never was filtered, so a
-    /// caller paging with `after`/`head` against `observed_since` was
-    /// carrying a cursor that counted rows it could not be shown.
+    /// Exists beside [`EventLog::observed_since`] because that filter is a
+    /// de-duplication rule, not a relevance one: it is right for a consumer
+    /// already subscribed to this process's [`crate::events::EventBus`],
+    /// which would otherwise see each event twice (`shell::run`'s case), but
+    /// a reader in another process holds no such subscription — for it the
+    /// filter stops being de-duplication and becomes loss, hiding precisely
+    /// the events the logging process produced itself. For `glasshouse api
+    /// serve` that is every spawn, intervention and exit. It also agrees
+    /// with [`EventLog::head`] (`MAX(seq)`, never filtered), which
+    /// `observed_since` paging did not.
+    // History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/events/log.rs `EventLog::since`.
     pub fn since(&self, after: i64, limit: usize) -> Result<Vec<LoggedEvent>, EventLogError> {
         let limit = i64::try_from(limit).unwrap_or(i64::MAX);
         self.query(

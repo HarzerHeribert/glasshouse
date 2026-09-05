@@ -11,23 +11,18 @@ use super::*;
 /// configuration file, and the only place this crate turns a spelling back
 /// into that type.
 ///
-/// # Why a newtype rather than `serde` on `WorkloadTier` itself
+/// A newtype, not `serde` on `WorkloadTier` itself: that enum has no
+/// serialised form of its own — `routing::request` parses one out of a
+/// routing model's untrusted JSON answer, and giving it `Deserialize` would
+/// make that answer and a user's config file the same surface, which they
+/// are not.
 ///
-/// `WorkloadTier` is a routing type with no serialised form of its own —
-/// `routing::request` parses one out of a routing model's JSON answer, and
-/// giving the enum a `Deserialize` impl would make that answer and a user's
-/// config file the same surface. They are not: one is untrusted output from a
-/// model, the other is a file the user wrote. This newtype is the config
-/// file's side of that boundary and nothing else reads it.
-///
-/// # Why the spellings come from `as_str` rather than a second list
-///
-/// `WORKLOAD_TIER_SPELLINGS` holds every variant, and
-/// `workload_tier_ordinal`'s exhaustive `match` is what makes adding a
-/// sixth variant a **compile error** here rather than a spelling that
-/// silently fails to parse. The strings themselves are always
-/// `WorkloadTier::as_str`'s, so a renamed tier renames its config spelling
-/// with it and cannot drift.
+/// Spellings come from `as_str`, not a second list: `WORKLOAD_TIER_SPELLINGS`
+/// holds every variant, and `workload_tier_ordinal`'s exhaustive `match`
+/// makes adding a sixth variant a compile error rather than a silently
+/// unparseable spelling, so a renamed tier renames its config spelling with
+/// it and cannot drift.
+// History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/config/provider.rs `ConfiguredWorkloadTier`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ConfiguredWorkloadTier(crate::routing::classify::WorkloadTier);
 /// Every [`crate::routing::classify::WorkloadTier`], in the type's own order.
@@ -148,23 +143,18 @@ pub struct ProviderConfig {
     /// the operating system's own secure store. **A reference — a service
     /// and an account name — never a value.**
     ///
-    /// This is the serialised shape of
-    /// [`crate::secret::SecretRef::OsCredential`], and it is exactly what
-    /// Phase 9E's "store only secret references in provider configuration"
-    /// means: the two names here are as safe to write into a tracked project
-    /// file as [`ProviderConfig::credential_env`]'s variable names already
-    /// are.
+    /// The serialised shape of [`crate::secret::SecretRef::OsCredential`]:
+    /// the two names here are as safe to write into a tracked project file
+    /// as [`ProviderConfig::credential_env`]'s variable names already are.
     ///
-    /// # It records intent; it is not what makes resolution work
-    ///
+    /// Records intent; it is not what makes resolution work:
     /// [`crate::secret::native::PreferNativeSecretStore`] finds a stored
     /// credential by the variable name a harness expects it in, whether or
-    /// not this field was ever saved. So a configuration file that has
-    /// drifted out of step with the keychain — a credential deleted with
-    /// this field still written, or the reverse — cannot cause a wrong
-    /// launch; the store is asked at the moment of use either way. What this
-    /// field is for is telling the *user* where their key is, and giving
-    /// deletion something to remove.
+    /// not this field was ever saved, so a configuration file drifted out of
+    /// step with the keychain cannot cause a wrong launch — this field is
+    /// for telling the *user* where their key is, and giving deletion
+    /// something to remove.
+    // History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/config/provider.rs `ProviderConfig::credential_store` (`SecretRef::OsCredential` doc).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     credential_store: Option<StoredCredentialRef>,
     /// Extra HTTP headers this provider needs, as name/value pairs — see
@@ -962,20 +952,16 @@ impl ProviderConfig {
     /// See [`capability::resolve_ceiling`] for why a benchmark-derived
     /// record can rank but never refuse.
     ///
-    /// **This lookup is context-blind** — it knows only `model` and the
-    /// provider `self` is — and only a record that states no
-    /// harness/launch-profile/protocol narrowing at all
-    /// (`ModelCapabilityRecord::is_context_general`, which is deliberately
-    /// not public — this module is its only honest caller) is
-    /// eligible here. A record that narrows to even one of those axes is
-    /// filtered out rather than applied without checking them: this path
-    /// has no harness, launch profile, or protocol in hand to check a
-    /// narrowed record's [`capability::ModelCapabilityRecord::applies_to`]
-    /// against — that context exists only in `main.rs`'s destination
-    /// construction — so honouring a narrowed record here would leak its
-    /// calibration onto every destination sharing this provider and model,
-    /// including ones on a harness the record was never calibrated for.
-    /// Capability map line 1482.
+    /// Context-blind: it knows only `model` and the provider `self` is, so
+    /// only a record with no harness/launch-profile/protocol narrowing at
+    /// all (`ModelCapabilityRecord::is_context_general`) is eligible — a
+    /// narrowed record is filtered out rather than applied unchecked,
+    /// because this path has no harness/profile/protocol to check
+    /// [`capability::ModelCapabilityRecord::applies_to`] against (that
+    /// context exists only in `main.rs`'s destination construction), so
+    /// honouring it here would leak calibration onto every destination
+    /// sharing this provider and model. Capability map line 1482.
+    // History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/config/provider.rs `ProviderConfig::resolved_ceiling`.
     pub fn resolved_ceiling(&self, model: &str) -> capability::CeilingResolution {
         let record = self
             .model_capability(model)

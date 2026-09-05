@@ -1,24 +1,20 @@
 //! The request handlers every control-API transport shares, and the Unix
 //! domain socket transport that was the first of them.
 //!
-//! Two halves live here, and only one of them is Unix-specific. The handlers
-//! — [`dispatch`] and everything it calls — are plain functions over the
-//! project's stores and this process's [`SessionRuntime`], and they compile
-//! on every platform Glasshouse ships for, because the MCP door
-//! (`super::mcp`, Phase 43) reaches them over stdio on every one of those
-//! platforms. The socket transport — [`serve`], [`handle_connection`], and
-//! the peer-credential check behind them — is `#[cfg(unix)]`, item by item,
-//! for the same reason the module used to be gated as a whole: a Unix domain
-//! socket is a Unix thing. The module keeps its name because the handlers
-//! are the same handlers, the co-editing rounds in flight on this file are
-//! easier to reconcile against a file that stayed put, and a rename is a
-//! cheap follow-up once those have landed.
+//! The handlers — [`dispatch`] and everything it calls — are plain functions
+//! over the project's stores and this process's [`SessionRuntime`], and they
+//! compile on every platform Glasshouse ships for, because the MCP door
+//! (`super::mcp`) reaches them over stdio on every one of those platforms.
+//! The socket transport — [`serve`], [`handle_connection`], and the
+//! peer-credential check behind them — is `#[cfg(unix)]`, item by item: a
+//! Unix domain socket is a Unix thing.
 //!
 //! [`ServerContext`] is the seam between the halves: it owns what every
 //! handler needs and offers exactly one verb, `handle`. A transport holds a
 //! context and nothing else, which is how the rule that no door may reach a
 //! store except through `dispatch` is a property of the types rather than a
 //! matter of discipline.
+// History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/api/unix/mod.rs module doc.
 
 mod assumptions;
 mod checkpoints;
@@ -79,25 +75,21 @@ const MAX_SOCKET_PATH_BYTES: usize = 90;
 
 /// The hard ceiling on how much of a session's terminal output
 /// [`Request::RecentOutput`] returns in one call, regardless of the
-/// `max_bytes` a caller asks for — the same shape as [`MAX_MEMORY_LIMIT`] and
-/// [`MAX_SNAPSHOT_BODY_CHARS`] above, and load-bearing for a reason neither
-/// of those has.
+/// `max_bytes` a caller asks for.
 ///
 /// Every other bound on this door limits how many *rows* a caller may pull
-/// out of a store it is querying. This one limits a buffer nobody queried:
-/// a session's scrollback is `session::runtime::DEFAULT_SCROLLBACK_BYTES`
-/// wide, filled by whatever the harness happened to print, and a caller
-/// asking for `usize::MAX` would otherwise receive the whole of it —
-/// JSON-escaped, on one line, over a socket — with the size decided by how
-/// long the worker had been talking rather than by anything either end
-/// chose.
+/// out of a store it is querying. This one limits a buffer nobody queried: a
+/// session's scrollback is `session::runtime::DEFAULT_SCROLLBACK_BYTES` wide,
+/// filled by whatever the harness happened to print, so a caller asking for
+/// `usize::MAX` would otherwise receive the whole of it — JSON-escaped, on
+/// one line, over a socket.
 ///
 /// Sixty-four kibibytes is many screenfuls of a worker's terminal and a
-/// quarter of what the scrollback holds: enough to see what a worker is
-/// doing, and far short of "send me everything you have". A caller that
-/// wants a specific earlier moment is asking for history, which this door
-/// does not have — see [`Request::RecentOutput`]'s own doc comment for why
-/// there is none to give.
+/// quarter of what the scrollback holds. A caller that wants a specific
+/// earlier moment is asking for history, which this door does not have —
+/// see [`Request::RecentOutput`]'s own doc comment for why there is none to
+/// give.
+// History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/api/unix/mod.rs `MAX_RECENT_OUTPUT_BYTES`.
 const MAX_RECENT_OUTPUT_BYTES: usize = 64 * 1024;
 
 /// How often the background tick answers terminal queries and reaps exited
@@ -109,37 +101,23 @@ const TICK: Duration = Duration::from_millis(50);
 /// Everything a request handler needs, owned once per server process and
 /// shared by every transport that answers a [`Request`].
 ///
-/// # One context, two doors
-///
-/// [`dispatch`] needs six things — the project's [`Runtime`], its open
-/// session store, the [`SessionRuntime`] this process holds pseudo-terminals
-/// in, the registry of orchestrator watches, the event recorder, and the
-/// memory-injection ledger. Until this type existed [`serve`] built all six
-/// on its own stack and threaded them through every call, which was fine
-/// while the Unix socket was the only transport. The MCP door (`super::mcp`,
-/// Phase 43) is a second transport onto the same handlers, and the design
-/// ruling behind it is that no tool may perform an operation this door does
-/// not already perform, nor reach a store except through the same
-/// `dispatch`. The cheapest way to make that structural is for there to be
-/// exactly one thing a transport can hold, and for its only verb to be
-/// [`ServerContext::handle`].
-///
-/// # The tick comes with it
-///
+/// One context, two doors: [`dispatch`] needs six things — the project's
+/// [`Runtime`], its open session store, the [`SessionRuntime`] this process
+/// holds pseudo-terminals in, the registry of orchestrator watches, the
+/// event recorder, and the memory-injection ledger — and the MCP door
+/// (`super::mcp`) is a second transport onto the same handlers under the
+/// ruling that no tool may reach a store except through the same
+/// `dispatch`. Exactly one thing a transport can hold, with exactly one
+/// verb, [`ServerContext::handle`], makes that structural.
 /// The background tick — reaping exited sessions, answering terminal
 /// queries, pumping orchestrator watches — is started by
 /// [`ServerContext::open`], not by the transport, because a session spawned
-/// through either door needs its exit reaped by *somebody*, and the process
-/// that spawned it is the only one that can. A transport that forgot to tick
-/// would leave every one of its sessions `running` forever; a transport that
-/// cannot forget is better.
-///
-/// # Scope
+/// through either door needs its exit reaped by *somebody*.
 ///
 /// Opened for one already-resolved [`Runtime`] and answering only against
 /// it — see `super`'s module doc. There is no way to construct one for a
-/// project the process was not started in, and nothing in it names a
-/// project, a path, or a database that a request could override.
+/// project the process was not started in.
+// History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/api/unix/mod.rs `ServerContext`.
 pub(crate) struct ServerContext {
     runtime: Runtime,
     sessions: ProjectSessions,
@@ -443,56 +421,25 @@ pub(super) fn lock(live: &Mutex<SessionRuntime>) -> std::sync::MutexGuard<'_, Se
 const RECORDER_FLUSH: Duration = Duration::from_millis(500);
 
 /// This door's durable recording of what happens to the sessions it owns.
+/// Fills the hole left by opening `SessionRuntime::new()` with no
+/// [`EventBus`] sink: without this, every lifecycle event of every
+/// orchestrated worker (`session_started`, `process_exited`, interventions)
+/// published into nothing, leaving no durable trace unless a `glasshouse
+/// hook` process happened to write a row from outside.
 ///
-/// # The hole this fills
-///
-/// `shell::run` builds an [`EventBus`], attaches an [`EventLogSink`] to it,
-/// and hands the bus to its [`SessionRuntime`]. This door built its runtime
-/// with `SessionRuntime::new()` — a bus with no sink and no subscriber — so
-/// every lifecycle event of every orchestrated worker was published into
-/// nothing. Not only the interventions of map line 748: `session_started`
-/// and `process_exited` too. A worker's whole life left no durable trace
-/// unless a `glasshouse hook` process happened to write a row from outside.
-///
-/// # Why the log is opened on the writer thread, and not before there is
-/// something to write
-///
-/// `EventLog::open` goes through `database::open`, which takes a
-/// `BEGIN IMMEDIATE` **write** transaction and runs the migration ladder,
-/// under a five-second busy timeout. It is not a cheap handle to acquire and
-/// it can genuinely wait — on the very `glasshouse hook` processes that run
-/// inside a user's own session, which [`WatchState`]'s doc explains must
-/// never be made to queue behind this door's bookkeeping.
-///
-/// So neither the accept thread nor a pseudo-terminal's thread ever performs
-/// that open. The sink's writer thread does, on the first event it is handed,
-/// which has three consequences worth stating separately:
-///
-/// - **A door that records nothing opens nothing.** `serve` attaches this
-///   unconditionally, but a process that never starts a session publishes no
-///   event, so the connection is never created. That is [`WatchState`]'s
-///   pattern and it is here for §65's reason: a resource acquired on a path
-///   nobody exercises is invisible to every test and still charged for at
-///   runtime, on the platform where SQLite's locks are mandatory rather than
-///   advisory.
-/// - **The five-second wait, if it ever happens, is paid by a thread nobody
-///   is waiting on.** No request is delayed, no pty is stalled, and
-///   [`project_events`]'s flush is separately bounded, so even a caller that
-///   asks for history while the open is in flight gets an answer.
-/// - **A failure to open is not a failure to serve.** It is warned about once
-///   and the door keeps working — the same direction `shell::attach_event_log`
-///   trades in, for the same reason: a project whose database cannot be
-///   opened should lose event history and keep its sessions.
-///
-/// # On holding the handle afterwards
-///
-/// Once open it is kept, because the alternative is re-running that
-/// transaction and that ladder per event. It costs one connection, which is
-/// not a new class of thing for this process: `serve` already opens
-/// [`ProjectSessions`] unconditionally and holds it for the door's whole
-/// life. In SQLite's rollback-journal mode an idle connection holds no lock
-/// on any platform; what costs is the open, and this design performs at most
-/// one of those.
+/// The log is opened lazily, on the writer thread, at the first event —
+/// never on the accept thread or a pseudo-terminal's thread — because
+/// `EventLog::open` takes a write transaction and can genuinely wait behind
+/// a `glasshouse hook` process, which [`WatchState`]'s doc says must never
+/// be made to queue behind this door's bookkeeping. A door that records
+/// nothing therefore opens nothing, no request is delayed by the open, and
+/// a failure to open is warned about once and never stops the door from
+/// serving — the same fail-open direction `shell::attach_event_log` takes.
+/// Once open the handle is kept for the door's whole life, to avoid
+/// re-running the open transaction per event; this costs one connection,
+/// no new class of thing since `serve` already holds one for
+/// [`ProjectSessions`].
+// History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/api/unix/mod.rs `EventRecorder`.
 struct EventRecorder {
     sink: Arc<EventLogSink>,
 }
@@ -645,31 +592,19 @@ fn dispatch(
             origin,
         } => {
             let id = SessionId::new(session);
-            // Line 1717's mute, answered **before** this door opens the
-            // project's memory store below — the one control that lives here
-            // rather than at the seam.
+            // Line 1717's mute, answered before this door opens the project's
+            // memory store below — this door's own state and policy, about
+            // requests an orchestrator makes, checked early so a request
+            // already decided against never pays for opening the memory
+            // database behind SQLite's busy timeout.
             //
-            // Here because a mute is this door's own state and this door's
-            // own policy: it is about *requests an orchestrator makes*, not
-            // about every write into a pseudo-terminal, and the answer has to
-            // be a `Response::Error` naming the remaining time. Early because
-            // `select_memory` opens the memory database behind SQLite's busy
-            // timeout, and paying that for a request already decided against
-            // is the acquisition-on-an-unwatched-path practice §65 records
-            // the cost of.
-            //
-            // **Line 1719 is deliberately not checked here.** It is taken at
-            // `SessionApi::send_text`, the one seam every machine write in
-            // this process passes through, and a second copy of it on this
-            // path would be a rule with two enforcement points that can
-            // drift — and, measured: the mutation
-            // `1719-the-seam-admits-everything` SURVIVED while this check
-            // existed, because the door answered first and nothing in the
-            // suite ever reached the seam. One rule, one place.
-            //
-            // Only machine-originated messages are checked. A mute exists to
-            // stop a person being talked over and has nothing to say about
-            // the person themselves.
+            // Line 1719 is deliberately not checked here: it is enforced once,
+            // at `SessionApi::send_text`, the one seam every machine write
+            // passes through — a second copy here would be a rule with two
+            // enforcement points that can drift. Only machine-originated
+            // messages are checked; a mute exists to stop a person being
+            // talked over, not the person themselves.
+            // History: design-decisions.md, "Trims: api, events, harness and config module docs, second packet", crates/glasshouse/src/api/unix/mod.rs mute check before `select_memory`.
             if origin == RequestOrigin::Machine {
                 {
                     let mut guard = lock(live);
