@@ -6573,3 +6573,38 @@ Rule 3's "move history out, behind a one-line pointer" landed here for the four 
 /// that recorded a verdict without a kind — counted in the denominator so it
 /// is not silently absent, and never mistaken for served.
 ```
+
+## A fresh session over a cold and bloated one — designing line 1594, 2026-09-05
+
+**The refusal ended when its producers landed, and the numbers say why it still
+did not fire.** `tests/session_router.rs`'s tripwire refused 1594 because two of
+the line's three defects had no producer: nothing could say *bloated*, nothing
+could say *semantically poor*. Both exist now — 1534's `context quality` term
+reads the estimated context size, and Phase 36's 1584/1586 facets price a
+compacted or unrelated context. Yet a cold session at the bloat ceiling still
+wins against a fresh start from a good checkpoint, because 1534 capped its term
+at **0.1** and `BOOTSTRAP_COST_WITH_CHECKPOINT` is **−0.25**: the size penalty
+cannot reach the bootstrap it is meant to outweigh. That cap was set for a
+reason that is still right — *a size reading never outweighs a structural fact
+about the move in front of it* — but the fact it protects is a **warm**
+session's: a live prompt cache, an intact native context, a same-task affinity.
+
+**The decision.** The cap is a property of warmth. A session past the
+warm-session relevance window has no cache to lose (five minutes), no affinity
+to outrank, and nothing to resume but its size; for that session `context
+quality` may weigh what carrying 160,000 tokens actually costs. So the term has
+two ceilings: **0.1 while warm** (1534's, unchanged) and **0.4 once cold**.
+At the cold ceiling a fully bloated session totals −0.4: it loses to a fresh
+start from a good checkpoint (−0.25) and still beats a fresh start from nothing
+(−1.0) — which is exactly the line's *and a good checkpoint exists* clause. The
+crossover is at 62.5 % of the bloat span, about 112,000 tokens. The semantic
+clause needs no new weight: a cold session at 1586's compaction-noise floor
+(−0.6) already loses to the same fresh start. **Coldness alone stays inert** —
+the tripwire's argument that a merely idle session resumes for free is right and
+its test is kept; only its stale premise is rewritten.
+
+**What this does not do.** It does not touch a warm session's ranking (1593's
+test is the bound), does not fold compactions into the size term (1586 owns
+them), and does not read any new column. Package `GH-ROUTER-FRESH-OVER-BLOATED`
+(Amber); evidence in `phase-37.md`; the refusal-register row for 1594 closes
+with it.
