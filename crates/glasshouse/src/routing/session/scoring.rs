@@ -1017,6 +1017,23 @@ fn measured_cache_temperature(destination: &Destination) -> Contribution {
     )
 }
 
+/// Line 1594: whether this destination is cold in the exact sense
+/// [`super::discovery::session_affinity`] already uses to zero the warmth
+/// facet — idle past [`crate::config::pairing::WARM_SESSION_RELEVANCE_WINDOW_SECONDS`],
+/// the window a warm session stays relevant for. Reads that same constant
+/// rather than defining a second threshold for the same fact; a fresh
+/// destination is never cold in this sense (it has no idle time to have
+/// exceeded — [`prompt_cache_state`] and the bootstrap cost already price
+/// what starting from nothing costs).
+fn is_cold(destination: &Destination) -> bool {
+    match destination.continuation() {
+        Continuation::Existing(warm) => {
+            warm.idle_seconds >= crate::config::pairing::WARM_SESSION_RELEVANCE_WINDOW_SECONDS
+        }
+        Continuation::Fresh(_) => false,
+    }
+}
+
 /// Map line 1534: what a destination's estimated context size — Line 1158's
 /// reading, attached to [`SessionContextFacts`] — is worth. Bounded and
 /// negative only: size is never a reason to prefer a destination, only a
@@ -1026,6 +1043,10 @@ fn measured_cache_temperature(destination: &Destination) -> Contribution {
 /// `observed_compactions` is deliberately not read here — `discovery.rs`'s
 /// `native context` facet already scores it, and this term claims size and
 /// only size (line 1594).
+///
+/// Map line 1594: the ceiling this term caps at depends on [`is_cold`] — see
+/// `design-decisions.md`, *"A fresh session over a cold and bloated one"*, for
+/// why a cold session's size may weigh more than a warm one's.
 fn context_quality(destination: &Destination) -> Contribution {
     const TERM: &str = "context quality";
     let Some(tokens) = destination.session_context().estimated_context_tokens() else {
@@ -1045,15 +1066,26 @@ fn context_quality(destination: &Destination) -> Contribution {
             ),
         );
     }
+    let cold = is_cold(destination);
+    let ceiling = if cold {
+        CONTEXT_QUALITY_MAGNITUDE_CEILING_COLD
+    } else {
+        CONTEXT_QUALITY_MAGNITUDE_CEILING
+    };
     let fraction =
         ((tokens - CONTEXT_LEAN_TOKENS) as f64 / CONTEXT_BLOAT_SPAN_TOKENS as f64).clamp(0.0, 1.0);
-    let magnitude = -CONTEXT_QUALITY_MAGNITUDE_CEILING * fraction;
+    let magnitude = -ceiling * fraction;
     Contribution::new(
         TERM,
         magnitude,
         format!(
-            "an estimated {tokens} tokens of context, {:.1}% of the way from lean to bloated",
-            fraction * 100.0
+            "an estimated {tokens} tokens of context, {:.1}% of the way from lean to bloated, {}",
+            fraction * 100.0,
+            if cold {
+                "and cold: nothing warm left to resume"
+            } else {
+                "while warm"
+            }
         ),
     )
 }

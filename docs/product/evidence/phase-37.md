@@ -3,7 +3,7 @@
 ### Eight lines closed, two returned open with measurements, one refused (batch 51)
 
 State: **COMPLETE** for 1592, 1593, 1595, 1596, 1597, 1600, 1601, 1602.
-**Open:** 1598, 1599. **Refused:** 1594.
+**Open:** 1598, 1599. **Refused:** 1594 — until 2026-09-05; closed in the last section below, and Phase 37 is complete.
 
 Built in two packages, deliberately staged because `main.rs` was contended:
 `GH-ROUTER` built and mutation-killed the scoring on eleven axes and could not
@@ -30,7 +30,8 @@ say so — *"this is the assertion that fails when `launch_session` stops callin
 `SessionRouter::choose`"*.
 
 **1594 refused, premise-invalid**, with a tripwire test recording why; it would
-not close even with the caller.
+not close even with the caller. *(Superseded 2026-09-05: the producers landed — see the
+1594 section at the end of this file.)*
 
 **1598 and 1599 returned open with measurements rather than excuses**: their
 inputs have production callers, and neither input can take a non-empty value on
@@ -263,3 +264,17 @@ asserts the new behaviour.
   `tests/routing_api.rs` (an assertion pinning the old caveat wording, updated
   and kept rather than weakened).
 - macOS only; the cross-platform gate has not run since this landed.
+
+## 1594 — a fresh session over a cold, bloated or noisy one (2026-09-05)
+
+State: **COMPLETE** — `GH-ROUTER-FRESH-OVER-BLOATED` (Sonnet high, Amber), report **`.agent-runtime/report-router-fresh-over-bloated.md`**; design of record `design-decisions.md`, *A fresh session over a cold and bloated one — designing line 1594*. **Phase 37 is complete.**
+
+Contract: given a cold session (idle past the warm-session relevance window) that is bloated (estimated context at the bloat ceiling) or noisy (at 1586's compaction floor), and a fresh destination with a good checkpoint, the router prefers the fresh destination — while a merely cold session still wins, a cold bloated session still beats a fresh start from nothing, and a warm session's ranking is unchanged (1593's test is the bound).
+
+Why it closes now: batch 51 refused it because nothing could say *bloated* or *semantically poor*. 1534's `context quality` (the size reading) and Phase 36's 1584/1586 facets are those producers; what still kept the line from firing was 1534's own cap of 0.1 against a −0.25 checkpoint bootstrap. The cap is a property of warmth: 0.1 while warm (unchanged), **0.4 once cold** — a fully bloated cold session totals −0.4, loses to −0.25 and beats −1.0, which is the line's *and a good checkpoint exists* clause; the crossover is about 112,000 tokens. Production `routing/session/scoring.rs::{context_quality, is_cold}` (one definition of cold, `session_affinity`'s), `routing/session/mod.rs::CONTEXT_QUALITY_MAGNITUDE_CEILING_COLD`, and `config/pairing.rs::WARM_SESSION_RELEVANCE_WINDOW_SECONDS` widened to `pub(crate)` — the worker's one flagged scope overflow, accepted. Tests in `tests/session_router.rs`: `a_cold_bloated_session_loses_to_a_fresh_start_from_a_good_checkpoint`, `a_cold_bloated_session_still_beats_a_fresh_start_from_nothing`, `a_cold_noisy_session_loses_to_a_fresh_start_from_a_good_checkpoint` (no production change: 1586's floor already outweighs the checkpoint bootstrap), and the kept tripwire `a_merely_cold_session_still_beats_a_fresh_one_because_coldness_is_not_a_defect` with its stale premise rewritten. `--test session_router` 19 → 22, `--lib routing` 292 before and after, `--test routing_score` 16 unchanged (the warm path byte-for-byte).
+
+| mutation | change | result | killed by |
+|---|---|---|---|
+| cold-ceiling-is-the-warm-ceiling | `CONTEXT_QUALITY_MAGNITUDE_CEILING_COLD = 0.4` → `0.1` | KILLED | `session_router::a_cold_bloated_session_loses_to_a_fresh_start_from_a_good_checkpoint` — *a cold session at the bloat ceiling must lose to a fresh start from a good checkpoint* |
+
+Limits: both ceilings stand in for a per-model context window this build does not hold (1534's own limit); `is_cold` never reports a fresh destination as cold — inert today, since no fresh destination carries a token estimate.

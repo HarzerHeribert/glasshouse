@@ -54,12 +54,12 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`█████████████████████████████████████░░░` **1312 closed** · **86 active committed open** (93%)
+`█████████████████████████████████████░░░` **1313 closed** · **85 active committed open** (93%)
 
 Separately tracked, and not release-blocking: **7 deferred gate criteria** (Phase 52, Phase 53) awaiting a decision, and **229 parked experimental lines** under Maybe / Experimental.
 
 <details>
-<summary>Per-phase breakdown (87 of 109 active phases complete)</summary>
+<summary>Per-phase breakdown (88 of 109 active phases complete)</summary>
 
 | Phase | Done |
 |---|---|
@@ -147,7 +147,7 @@ Separately tracked, and not release-blocking: **7 deferred gate criteria** (Phas
 | Phase 35C — Capacity-aware tier escalation and downgrade | 9/9 ✅ |
 | Phase 35D — Routing under subscription pressure | 8/8 ✅ |
 | Phase 36 — Session affinity | 8/8 ✅ |
-| Phase 37 — Basic session-aware router | 10/11 |
+| Phase 37 — Basic session-aware router | 11/11 ✅ |
 | Phase 38 — Quota-preserving routing | 6/7 |
 | Phase 39 — Gateway-backed disposable jobs | 9/9 ✅ |
 | Phase 40 — Fresh-session handoff | 9/9 ✅ |

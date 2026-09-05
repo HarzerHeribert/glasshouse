@@ -1591,7 +1591,7 @@ Phase 37 — Basic session-aware router
 
 ☑ Route at task or session boundaries rather than switching providers blindly on every conversational turn.
 ☑ Prefer an existing relevant session when its affinity outweighs the benefit of starting a new session.
-☐ Prefer a fresh session when existing relevant sessions are cold, bloated, or semantically poor and a good checkpoint exists.
+☑ Prefer a fresh session when existing relevant sessions are cold, bloated, or semantically poor and a good checkpoint exists.
 ☑ Consider harness capability fit when choosing a destination.
 ☑ Consider session affinity when choosing a destination.
 ☑ Consider prompt-cache state when choosing a destination.

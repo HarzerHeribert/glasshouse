@@ -27,8 +27,8 @@ use glasshouse::provider::quota::{
 };
 use glasshouse::routing::free::{FreePool, FreeResource, WorkloadOutcome};
 use glasshouse::routing::session::{
-    CheckpointQuality, Destination, RouterInputs, RoutingMoment, RoutingOverride, SessionRouter,
-    TaskRequirements,
+    CheckpointQuality, Destination, RouterInputs, RoutingMoment, RoutingOverride,
+    SessionContextFacts, SessionRouter, TaskRequirements,
 };
 use glasshouse::routing::{
     AssignedModel, Backend, Contribution, Cost, CredentialId, HardConstraint, ToolSemantics,
@@ -253,25 +253,20 @@ fn a_warm_existing_session_outweighs_a_better_resourced_fresh_one() {
     );
 }
 
-/// **Line 1594 does not close, and this test is why.**
+/// Line 1594's *"cold, bloated, or semantically poor"* is a disjunction of
+/// three defects, and coldness **alone** is inert by design: a session idle
+/// for thirty hours still holds its entire transcript, and resuming it costs
+/// nothing, while a fresh session pays a bootstrap even from the best
+/// checkpoint there is. Pricing coldness as a defect would be inventing a
+/// signal Glasshouse does not have. See `design-decisions.md`, *"A fresh
+/// session over a cold and bloated one"*, for why the cap on the size term is
+/// a property of warmth rather than a universal one.
 ///
-/// The line is *"prefer a fresh session when existing relevant sessions are
-/// cold, bloated, or semantically poor **and** a good checkpoint exists"* —
-/// a disjunction of three defects. Two of the three have **no producer in
-/// this build**: `WarmSession` deliberately carries no accumulated-context
-/// figure (so nothing can say "bloated"), and Phase 36's semantic-quality
-/// lines 1584 and 1586 are at zero (so nothing can say "semantically poor").
-/// The one that does have a producer is "cold", and coldness **on its own
-/// does not justify preferring a fresh session**: a session idle for thirty
-/// hours still holds its entire transcript, and resuming it costs nothing,
-/// while a fresh session pays a bootstrap even from the best checkpoint
-/// there is. Pricing coldness as a defect would be inventing the very signal
-/// that is missing.
-///
-/// So this asserts what is actually true today, as an executable tripwire in
-/// the shape `phase-9j.md` established: the cold session still wins. **If
-/// anyone gives this router a bloat or semantic-quality signal, this test
-/// fails, and its failure means line 1594 has just become reachable.**
+/// The three tests below it are line 1594's proof now that bloat
+/// (`context_quality`'s cold ceiling) and noise (1586's compaction penalty,
+/// already at its floor by the time a session is this cold) both have
+/// producers: a cold session that is *also* bloated or noisy loses to a good
+/// checkpoint, while this merely-cold one — neither — still wins.
 #[test]
 fn a_merely_cold_session_still_beats_a_fresh_one_because_coldness_is_not_a_defect() {
     let fixture = Fixture::new();
@@ -306,6 +301,157 @@ fn a_merely_cold_session_still_beats_a_fresh_one_because_coldness_is_not_a_defec
         "a fresh session was preferred over a merely cold one: that is line 1594's conclusion \
          reached without line 1594's evidence — nothing in this build can say a session is \
          bloated or semantically poor"
+    );
+}
+
+/// Line 1594's bloat clause. `context_quality`'s cold ceiling means a cold
+/// session at the bloat ceiling now loses to a fresh start from a good
+/// checkpoint — 160,000 tokens is `CONTEXT_LEAN_TOKENS + CONTEXT_BLOAT_SPAN_TOKENS`
+/// (32,000 + 128,000), the token count the penalty caps at.
+#[test]
+fn a_cold_bloated_session_loses_to_a_fresh_start_from_a_good_checkpoint() {
+    let fixture = Fixture::new();
+    let cold_bloated = Destination::existing(
+        "cold-bloated",
+        IntegrationId::ClaudeCode,
+        "default",
+        backend("anthropic", "claude-opus-4", "ANTHROPIC_API_KEY"),
+        live(30 * 60 * 60),
+    )
+    .with_session_context(SessionContextFacts::UNREAD.with_estimated_context_tokens(Some(160_000)));
+    let fresh = Destination::fresh(
+        "fresh",
+        IntegrationId::ClaudeCode,
+        "default",
+        backend("anthropic", "claude-opus-4", "ANTHROPIC_API_KEY"),
+        Some(CheckpointQuality::new(true, true)),
+    );
+
+    let routed = SessionRouter::new()
+        .choose(
+            RoutingMoment::TaskBoundary,
+            None,
+            &[cold_bloated, fresh],
+            &fixture.inputs(),
+        )
+        .expect("destinations were offered");
+    assert_eq!(
+        routed.chosen().id(),
+        "fresh",
+        "line 1594's bloat clause: a cold session at the bloat ceiling must lose to a fresh \
+         start from a good checkpoint"
+    );
+
+    // And the margin is `context quality`'s cold-ceiling penalty, not a
+    // rounding accident: add the penalty back to the cold session's total —
+    // the way `a_warm_existing_session_outweighs_a_better_resourced_fresh_one`
+    // removes the winner's own affinity — and it would win instead.
+    let (_, cold_explanation) = routed
+        .considered()
+        .iter()
+        .find(|(destination, _)| destination.id() == "cold-bloated")
+        .expect("the cold destination was offered");
+    let fresh_total = routed
+        .considered()
+        .iter()
+        .find(|(destination, _)| destination.id() == "fresh")
+        .expect("the fresh destination was offered")
+        .1
+        .total();
+    let context_quality = cold_explanation
+        .contributions()
+        .iter()
+        .find(|c| c.name() == "context quality")
+        .expect("the cold session carries a size reading")
+        .magnitude();
+    let cold_total = cold_explanation.total();
+    assert!(
+        cold_total - context_quality > fresh_total,
+        "removing context quality's cold-ceiling penalty from the cold session (total \
+         {cold_total}, penalty {context_quality}) would still have it win against the fresh \
+         session (total {fresh_total}): this test proves something else, not line 1594's bloat \
+         clause"
+    );
+}
+
+/// Line 1594's own *"and a good checkpoint exists"* clause: the same cold,
+/// bloated session as above still beats a fresh start with no checkpoint to
+/// boot from at all — the cold ceiling raises the size penalty enough to lose
+/// to a *good* checkpoint (`BOOTSTRAP_COST_WITH_CHECKPOINT`, `-0.25`), not
+/// enough to lose to nothing (`BOOTSTRAP_COST`, `-1.0`).
+#[test]
+fn a_cold_bloated_session_still_beats_a_fresh_start_from_nothing() {
+    let fixture = Fixture::new();
+    let cold_bloated = Destination::existing(
+        "cold-bloated",
+        IntegrationId::ClaudeCode,
+        "default",
+        backend("anthropic", "claude-opus-4", "ANTHROPIC_API_KEY"),
+        live(30 * 60 * 60),
+    )
+    .with_session_context(SessionContextFacts::UNREAD.with_estimated_context_tokens(Some(160_000)));
+    let fresh_from_nothing = Destination::fresh(
+        "fresh-from-nothing",
+        IntegrationId::ClaudeCode,
+        "default",
+        backend("anthropic", "claude-opus-4", "ANTHROPIC_API_KEY"),
+        None,
+    );
+
+    let routed = SessionRouter::new()
+        .choose(
+            RoutingMoment::TaskBoundary,
+            None,
+            &[cold_bloated, fresh_from_nothing],
+            &fixture.inputs(),
+        )
+        .expect("destinations were offered");
+    assert_eq!(
+        routed.chosen().id(),
+        "cold-bloated",
+        "line 1594's own clause is 'and a good checkpoint exists' — against a fresh start with \
+         no checkpoint at all, even a cold bloated session must still win"
+    );
+}
+
+/// Line 1594's noise clause. This needed no new production code: 1586's own
+/// compaction-noise penalty already reaches its floor
+/// (`COMPACTION_NOISE_FLOOR`, `-0.6`) by `NOISY_COMPACTION_COUNT` (3)
+/// observed compactions, which already outweighs a good checkpoint's
+/// bootstrap cost (`-0.25`) — this test is the producer's proof, not a new
+/// mechanism.
+#[test]
+fn a_cold_noisy_session_loses_to_a_fresh_start_from_a_good_checkpoint() {
+    let fixture = Fixture::new();
+    let cold_noisy = Destination::existing(
+        "cold-noisy",
+        IntegrationId::ClaudeCode,
+        "default",
+        backend("anthropic", "claude-opus-4", "ANTHROPIC_API_KEY"),
+        live(30 * 60 * 60),
+    )
+    .with_session_context(SessionContextFacts::UNREAD.with_observed_compactions(Some(3)));
+    let fresh = Destination::fresh(
+        "fresh",
+        IntegrationId::ClaudeCode,
+        "default",
+        backend("anthropic", "claude-opus-4", "ANTHROPIC_API_KEY"),
+        Some(CheckpointQuality::new(true, true)),
+    );
+
+    let routed = SessionRouter::new()
+        .choose(
+            RoutingMoment::TaskBoundary,
+            None,
+            &[cold_noisy, fresh],
+            &fixture.inputs(),
+        )
+        .expect("destinations were offered");
+    assert_eq!(
+        routed.chosen().id(),
+        "fresh",
+        "line 1594's noise clause: a cold session at 1586's compaction-noise floor must lose to \
+         a fresh start from a good checkpoint"
     );
 }
 

@@ -1119,8 +1119,16 @@ const MEASURED_CACHE_TEMPERATURE_MAGNITUDE_CEILING: f64 = 0.1;
 /// below [`CACHE_LIKELY_LOST`] in `scoring.rs` — a size reading never
 /// outweighs a structural fact about the move in front of it. See
 /// `design-decisions.md`, *"Context size is read off the gateway's own
-/// exchange, never guessed"*, for the full reasoning.
+/// exchange, never guessed"*, for the full reasoning. This is the **warm**
+/// ceiling; see [`CONTEXT_QUALITY_MAGNITUDE_CEILING_COLD`] for the other one.
 const CONTEXT_QUALITY_MAGNITUDE_CEILING: f64 = 0.1;
+
+/// Map line 1594. A cold session has no cache left to lose, no affinity to
+/// outrank and nothing to resume but its size, so size may weigh what
+/// carrying it actually costs. See `design-decisions.md`, *"A fresh session
+/// over a cold and bloated one"*, for the crossover this produces against
+/// [`BOOTSTRAP_COST_WITH_CHECKPOINT`].
+const CONTEXT_QUALITY_MAGNITUDE_CEILING_COLD: f64 = 0.4;
 
 /// Map line 1534. The size a working context normally sits at — under this,
 /// [`crate::routing::session::scoring::context_quality`] contributes exactly

@@ -494,7 +494,7 @@ impl ContinuitySource for NoWarmSessions {
 /// The measurement that would change it: the distribution of
 /// `last_activity_at`-to-resume gaps in the session store. If half of real
 /// resumes happen after this window, it is too short.
-const WARM_SESSION_RELEVANCE_WINDOW_SECONDS: i64 = 8 * 60 * 60;
+pub(crate) const WARM_SESSION_RELEVANCE_WINDOW_SECONDS: i64 = 8 * 60 * 60;
 
 /// What a *live* warm session contributes at zero idle time.
 ///
