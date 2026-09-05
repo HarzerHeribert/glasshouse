@@ -119,7 +119,7 @@ Run Monitor(command: "${REPO}/scripts/continuity-watch.sh --role worker", persis
 
 Read ONLY the files the packet's 'READ ONLY THIS' section names -- reading more is the documented way workers waste context. Do not commit. Write your report to the path the packet's REPORT TO section gives.
 
-Two build facts: (1) if pty_smoke fails on 'overlay's own environment variable leaked', that is ANTHROPIC_BASE_URL inherited from this Claude Code pane, not your change - confirm once with 'env -u ANTHROPIC_BASE_URL cargo test --test pty_smoke', say so in the report, do not alter the test. (2) Never set RUSTFLAGS; warnings come from [workspace.lints.rust]. Use 'scripts/ci-local.sh --scoped' for the fast tier and 'scripts/blast-radius.sh' before reporting.
+Two build facts: (1) this pane exports ANTHROPIC_BASE_URL into every child, and pty_smoke's overlay-leak assertion fails on that alone - run your own 'cargo test' under 'env -u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_API_KEY' (ci-local.sh already does this for its own cargo steps), do not alter the test. (2) Never set RUSTFLAGS; warnings come from [workspace.lints.rust]. Use 'scripts/ci-local.sh --scoped' for the fast tier and 'scripts/blast-radius.sh' before reporting.
 NOTES
 PROMPT="${FIRST_SENTENCE} Read ${LAUNCH_NOTES} now for the rest of the arming instructions and build notes, then read ${PACKET} and follow it exactly."
 

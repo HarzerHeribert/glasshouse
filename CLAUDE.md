@@ -612,12 +612,17 @@ numbers and the findings are in `docs/process/handoff.md`, that date):**
    `ci-local.sh` uses it on every leg and warns by name when it is not
    installed; until this rule the macOS leg had never built with it. On the
    development machine Homebrew `rust` is unlinked and `rustup` owns `cargo`.
-3. **An inherited `ANTHROPIC_BASE_URL` is warned about, never scrubbed.**
-   Claude Code exports it into every child, and `tests/pty_smoke.rs:3526`
-   correctly refuses to certify overlay hygiene under it — so from any Claude
-   Code pane, workers included, that one test is red for a reason that is not
-   the tree. Confirm with `env -u ANTHROPIC_BASE_URL` on the target, say so in
-   the report, and do not "fix" the test.
+3. **An inherited `ANTHROPIC_BASE_URL` is warned about in the caller's own
+   shell, never scrubbed there — and every cargo child the gate spawns runs
+   under `env -u`** (user ruling 2026-09-05, `GH-ENV-SCRUB`). Claude Code
+   exports it into every child, and `tests/pty_smoke.rs:3526` correctly
+   refuses to certify overlay hygiene under it. `ci-local.sh` and
+   `blast-radius.sh` now unset the three provider variables for their own
+   cargo invocations, so a gate from any pane sees a clean environment; a
+   `cargo test` you run by hand still needs the `env -u` prefix
+   (`launch-notes.md` says so). The worker's own `claude` keeps its
+   environment — it needs the base URL to reach the API at all. Do not "fix"
+   the test.
 4. **macOS `cargo test` is fail-fast.** One red target hides every later one;
    the Codex catalogue drift sat behind `pty_smoke` for a whole run. Before
    attributing a red, enumerate with `--no-fail-fast` or read the GitHub sweep,
