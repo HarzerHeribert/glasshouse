@@ -42,6 +42,29 @@ const CANCEL_SETTLE: Duration = Duration::from_millis(50);
 /// keep [`shutdown`] waiting for the whole timeout.
 const DEADLINE_SLICE: Duration = Duration::from_millis(25);
 
+/// The slice [`cancel`]'s settle polls the job's own `finished` flag in.
+/// Finer than [`DEADLINE_SLICE`] because this one is on the exit path: a job
+/// that dies in 22 ms (`invoke`'s cancel poll is 20 ms) should cost 25 ms,
+/// not the whole of [`CANCEL_SETTLE`].
+const SETTLE_SLICE: Duration = Duration::from_millis(5);
+
+/// The fastest cadence `bg.watch` will accept, in milliseconds.
+///
+/// **A floor, not a default.** Every tick is a fresh confined `bash`, so the
+/// cadence is a resource bound on model-chosen work rather than a
+/// preference: measured on this machine, a watch runs 31 confined spawns a
+/// second when it is asked for `{every: 1}` and 7.5 at this floor, and the
+/// lifecycle verifier measured the unfloored version burning 13.20 s of CPU
+/// in a 24.5 s session against 1.03 s at a second — about 54% of a core to
+/// deliver, by §1's dedup, exactly the events a slow watch delivers. 100 ms
+/// holds a watch's own polling near an eighth of a core, which is the most a
+/// program should be able to spend on *looking* without asking for it.
+///
+/// It is enforced by refusing rather than by clamping, for the reason `cwd`
+/// and `env` are refused: a program told nothing, and silently slowed, would
+/// believe it had chosen a cadence it had not.
+const WATCH_FLOOR_MS: u64 = 100;
+
 /// How long [`shutdown`] waits for a cancelled job's thread to come back
 /// before it stops waiting for it.
 ///
@@ -170,6 +193,25 @@ fn honourable(options: &RunOptions) -> Result<(), PermissionDenied> {
     Ok(())
 }
 
+/// Refuses a watch cadence whose own polling would be the load.
+///
+/// [`WATCH_FLOOR_MS`] carries the measurement; this is where a program is
+/// told, and the message names the floor so a program can retry at it.
+fn fast_enough_to_be_free(every_ms: u64) -> Result<(), PermissionDenied> {
+    if every_ms >= WATCH_FLOOR_MS {
+        return Ok(());
+    }
+    Err(PermissionDenied {
+        tool: "bg.watch".to_string(),
+        path: "every".to_string(),
+        rule: format!(
+            "a watch runs a fresh confined shell every tick, so `every` has a floor of \
+             {WATCH_FLOOR_MS} ms and {every_ms} ms is under it; ask for {WATCH_FLOOR_MS} or more \
+             (events-contract.md §5)"
+        ),
+    })
+}
+
 /// §5's `bg.run(cmd, {cwd, env, timeout})` — answers with the job's handle
 /// **before the process has done anything**.
 ///
@@ -197,6 +239,9 @@ pub fn run(
 
 /// §5's `bg.watch(cmd, {every, until})`, built on [`run`]'s machinery rather
 /// than a second spawn path: the same thread, the same call, in a loop.
+///
+/// A cadence under [`WATCH_FLOOR_MS`] is refused here, before a handle
+/// exists, exactly as a command outside the grant is.
 pub fn watch(
     profile: &Profile,
     glasshouse: &Glasshouse,
@@ -204,6 +249,7 @@ pub fn watch(
     command: &str,
     options: &WatchOptions,
 ) -> Result<String, PermissionDenied> {
+    fast_enough_to_be_free(options.every_ms)?;
     profile.admits_command(command)?;
     Ok(start(
         profile,
@@ -357,7 +403,10 @@ impl JobThread {
     /// by the emission digest, without this loop knowing anything about
     /// windows.
     fn serve_watch(&self, options: &WatchOptions) {
-        let every = Duration::from_millis(options.every_ms.max(1));
+        // Unreachable by construction -- [`watch`] refuses anything under the
+        // floor before a job exists -- so this is what makes the floor a
+        // property of the loop rather than only of its one caller.
+        let every = Duration::from_millis(options.every_ms.max(WATCH_FLOOR_MS));
         loop {
             if self.token.is_cancelled() {
                 self.emit("cancelled", Err(cancelled()));
@@ -473,6 +522,22 @@ fn cancelled() -> ToolError {
 /// leaves nothing spinning, and a job that ignores a polite signal dies
 /// anyway.
 pub fn cancel(session: &SessionId, handle: &str) {
+    cancel_by(session, handle, Instant::now() + CANCEL_SETTLE);
+}
+
+/// [`cancel`], with the settle's own end named by the caller so a shutdown
+/// pays one grace for a whole board rather than one per job.
+///
+/// **The settle waits for the job rather than for the clock.** It is there so
+/// `invoke::spawn_confined`'s poll loop reaches its next tick, and a job that
+/// has already finished has no tick left to reach: sleeping through
+/// [`CANCEL_SETTLE`] for it charged every caller 50 ms for work that was over
+/// before it was asked for. `shutdown` calls this for every handle on the
+/// board, so the bill was 50 ms × every job the session ever started, paid at
+/// the end of every task with the user watching — 12.34 s for 200 short jobs,
+/// measured against the shipped binary. A model's own `bg.cancel` paid it
+/// too.
+fn cancel_by(session: &SessionId, handle: &str, deadline: Instant) {
     let token = with_board(session, |board| {
         let entry = board.jobs.get_mut(handle)?;
         if entry.cancelled {
@@ -483,10 +548,9 @@ pub fn cancel(session: &SessionId, handle: &str) {
     });
     let Some(token) = token else { return };
     token.cancel();
-    // Long enough for the poll loop to reach its next tick, short enough
-    // that a model's own program is not blocked on it. The job's `bg.done`
-    // arrives through the board either way, so nothing here waits for it.
-    std::thread::sleep(CANCEL_SETTLE);
+    while !finished(session, handle) && Instant::now() < deadline {
+        std::thread::sleep(SETTLE_SLICE);
+    }
 }
 
 /// Every event raised since the last drain, oldest first.
@@ -511,20 +575,37 @@ pub fn live(session: &SessionId) -> usize {
 /// the board.
 ///
 /// **A background job outlives no session.** This is called where
-/// `session::run_task` ends a task and again where `session::run` returns, so
-/// a `/exit`, an end of input, a `return` and the SIGINT path all reach it;
-/// every job dies through [`cancel`]'s ladder, which is `invoke`'s own group
-/// kill.
+/// `session::run_task` ends a task and again where `session::run` returns,
+/// and [`shutdown_within`] is called where `Interrupter::end_the_session`
+/// exits from the signal watcher — so an end of input, a task that returns,
+/// a task that failed mid-flight and the double Ctrl-C all reach it; every
+/// job dies through [`cancel`]'s ladder, which is `invoke`'s own group kill.
 pub fn shutdown(session: &SessionId) {
+    shutdown_within(session, SHUTDOWN_GRACE);
+}
+
+/// [`shutdown`], bounded by the caller's own grace.
+///
+/// **The whole shutdown is bounded by `grace`, not each job by its own.** The
+/// exit that needs this is the second Ctrl-C, which is a person asking the
+/// program to stop *now*: it passes its own reap grace, and a board of two
+/// hundred jobs must not turn that into two hundred settles. Cancelling is
+/// what kills a job — the token is set for every handle whatever the clock
+/// says — so the deadline only ever shortens the *waiting*.
+pub fn shutdown_within(session: &SessionId, grace: Duration) {
+    let deadline = Instant::now() + grace;
     let handles: Vec<String> = with_board(session, |board| board.jobs.keys().cloned().collect());
     for handle in &handles {
-        cancel(session, handle);
+        cancel_by(
+            session,
+            handle,
+            deadline.min(Instant::now() + CANCEL_SETTLE),
+        );
     }
     // Waited for by the flag rather than by the join, and bounded: a thread
     // sets `finished` as the last thing it does, so joining only the finished
     // ones is a join that returns, and a job the kill could not stop costs a
     // detached thread instead of a session that cannot exit.
-    let deadline = Instant::now() + SHUTDOWN_GRACE;
     while Instant::now() < deadline && live(session) > 0 {
         std::thread::sleep(DEADLINE_SLICE);
     }
@@ -577,6 +658,43 @@ mod tests {
             emission_of("still building\n")
         );
         assert_ne!(emission_of("still building\n"), emission_of("built\n"));
+    }
+
+    /// **A session must be able to end**, and this is the property in the
+    /// form the world cannot produce: a job whose thread never sets
+    /// `finished` at all.
+    ///
+    /// The lifecycle verifier could not build one — a confined `bash` cannot
+    /// `setsid` out of the group `cancel` kills, so every job a model can
+    /// write dies — and a bound nothing can exercise is a bound nobody has
+    /// checked. Reaching into the board is the only way to hold the exit the
+    /// way a bug in this module would: the thread outlives the shutdown,
+    /// which is the point, because [`shutdown_within`] joins only what has
+    /// finished and detaches the rest.
+    #[test]
+    fn shutdown_is_bounded_by_its_grace_when_a_job_never_finishes() {
+        let session = SessionId::new("bg-never-finishes");
+        let stuck = std::thread::spawn(|| std::thread::sleep(Duration::from_secs(3)));
+        with_board(&session, |board| {
+            board.jobs.insert(
+                "job1".to_string(),
+                JobEntry {
+                    token: CancellationToken::new(),
+                    cancelled: false,
+                    finished: false,
+                    thread: Some(stuck),
+                },
+            );
+        });
+
+        let started = Instant::now();
+        shutdown_within(&session, Duration::from_millis(200));
+        let elapsed = started.elapsed();
+
+        assert!(
+            elapsed < Duration::from_secs(1),
+            "a job that never finishes held the exit for {elapsed:?}; the grace is not a bound"
+        );
     }
 
     #[test]

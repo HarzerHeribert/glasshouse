@@ -153,6 +153,11 @@ fn install_interrupt_handler() {
 /// call actually ends `Cancelled`, which makes the *next* call the one it
 /// cancels.
 struct Interrupter {
+    /// The session whose background board [`end_the_session`](Self::end_the_session)
+    /// has to take with it -- a value `run` already holds when it builds this,
+    /// rather than a boxed shutdown callback, whose only effect would be to
+    /// hide one call to a module this file already imports.
+    session: SessionId,
     /// The token of the cell now running, replaced before every cell so one
     /// Ctrl-C cannot cancel every later call.
     token: Mutex<invoke::CancellationToken>,
@@ -180,8 +185,9 @@ fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 }
 
 impl Interrupter {
-    fn new() -> Self {
+    fn new(session: SessionId) -> Self {
         Self {
+            session,
             token: Mutex::new(invoke::CancellationToken::new()),
             pending: AtomicBool::new(false),
             ending: AtomicBool::new(false),
@@ -245,12 +251,26 @@ impl Interrupter {
     /// that when the grace was an unguarded sleep, spawning a *fresh*
     /// spinning child for the same exit to orphan.
     ///
+    /// **Then it takes the background board with it, which is the same
+    /// defect a second time**: `raise` cancels the foreground call's token
+    /// and nothing else, and a job runs on a thread of its own under a token
+    /// of its own. Measured before this call existed: a job's `bash` on
+    /// `ppid 1` at 99% of a core, twenty seconds after `pane` exited 130.
+    /// It goes *after* the lock, because holding it is what stops the loop
+    /// starting a fresh `bg.run` for the exit to orphan, and *before* the
+    /// sleep, because the grace is what the cancelled children are reaped
+    /// in. The grace it passes is [`REAP_GRACE`] rather than `bg`'s own ten
+    /// seconds, and `shutdown_within` detaches what has not stopped by then:
+    /// a Ctrl-C that waits for an unkillable job would be a worse defect
+    /// than the orphan this closes.
+    ///
     /// [`REAP_GRACE`] is bounded because a Ctrl-C that hangs is not a Ctrl-C:
     /// after it, the exit proceeds whatever the child is doing.
     fn end_the_session(&self) -> ! {
         self.ending.store(true, Ordering::SeqCst);
         self.raise();
         let _line = self.writing();
+        bg::shutdown_within(&self.session, REAP_GRACE);
         std::thread::sleep(REAP_GRACE);
         eprintln!("pane: interrupted twice; ending the session");
         std::process::exit(INTERRUPTED_EXIT);
@@ -564,7 +584,7 @@ fn run(args: SessionArgs) -> Result<(), String> {
 
     // Installed before the first task and never again: from here on a Ctrl-C
     // cancels the call in flight rather than killing the process mid-line.
-    let interrupt = Arc::new(Interrupter::new());
+    let interrupt = Arc::new(Interrupter::new(session_id.clone()));
     install_interrupt_handler();
     let watched = Arc::clone(&interrupt);
     std::thread::spawn(move || watch(&watched));

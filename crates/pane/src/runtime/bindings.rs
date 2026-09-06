@@ -1228,6 +1228,11 @@ fn bg_run_callback(
 /// §5's `bg.watch`. `every` defaults to a second, which is the smallest
 /// cadence a shell command can be run at without the polling itself being
 /// the load.
+///
+/// **The default is not the bound.** A program that names its own `every` is
+/// answered by `bg::watch`'s floor, which refuses a cadence under it rather
+/// than clamping silently — the enforcement is there and not here so that no
+/// caller of the module can get under it.
 fn bg_watch_callback(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
