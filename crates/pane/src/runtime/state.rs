@@ -18,6 +18,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use crate::contract::SessionId;
 use crate::glasshouse::Glasshouse;
 use crate::runtime::handles::{HandleMeta, HandleTable, Provenance};
+use crate::runtime::outcome::PlanItem;
 use crate::runtime::preview::{self, Value};
 use crate::sandbox::profile::Profile;
 use crate::tools::invoke::CancellationToken;
@@ -134,6 +135,12 @@ pub(crate) struct RuntimeState {
     /// lifetime `runtime-contract.md` §2 gives a handle.
     calls: RefCell<HashMap<u64, RecordedCall>>,
     next_call: std::cell::Cell<u64>,
+    /// The model's own plan, replaced whole by each `todo.write`.
+    ///
+    /// **Task-scoped, like [`calls`](Self::calls) and for the same reason**:
+    /// a plan is the shape of the task in hand, so it is cleared with the
+    /// task rather than carried into the next one.
+    plan: RefCell<Vec<PlanItem>>,
 }
 
 impl RuntimeState {
@@ -148,7 +155,18 @@ impl RuntimeState {
             token: RefCell::new(CancellationToken::new()),
             calls: RefCell::new(HashMap::new()),
             next_call: std::cell::Cell::new(0),
+            plan: RefCell::new(Vec::new()),
         }
+    }
+
+    /// Replaces the plan whole — `todo.write`'s only effect.
+    pub(crate) fn set_plan(&self, items: Vec<PlanItem>) {
+        *self.plan.borrow_mut() = items;
+    }
+
+    /// The plan as it stands, for `todo.read` and for the turn the cell ends.
+    pub(crate) fn plan(&self) -> Vec<PlanItem> {
+        self.plan.borrow().clone()
     }
 
     pub(crate) fn begin_cell(&self) -> u64 {
@@ -180,6 +198,10 @@ impl RuntimeState {
     pub(crate) fn forget_calls(&self) {
         self.calls.borrow_mut().clear();
         self.next_call.set(0);
+        // The plan is the shape of the task that just ended, so it goes with
+        // it: a next task inheriting the last one's checklist would be
+        // reporting work it never did.
+        self.plan.borrow_mut().clear();
     }
 
     /// A name is captured twice in the ordinary case — once where the

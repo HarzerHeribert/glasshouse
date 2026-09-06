@@ -1189,6 +1189,7 @@ fn act_on(
         handle_table: turn.table.clone(),
         stdout_tail: (!turn.stdout_tail.is_empty()).then(|| turn.stdout_tail.clone()),
         budget: budget.line(),
+        plan: turn.plan.clone(),
     };
 
     let mut response = None;

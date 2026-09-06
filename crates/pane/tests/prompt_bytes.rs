@@ -125,6 +125,7 @@ fn the_worked_turn_renders_byte_for_byte() {
             cells_used: 1,
             cells_cap: 40,
         },
+        plan: Vec::new(),
     };
 
     assert_eq!(prompt::render_result(&result), cell_1_result);
@@ -164,8 +165,17 @@ fn every_registered_tool_has_exactly_one_declaration_and_no_other_does() {
         },
     );
 
+    // Scoped to the `## Tools` section: the `## Runtime` block declares the
+    // host bindings that are not tools, and counting over the whole system
+    // block would read those as tool declarations.
+    let tools_start = system.find("## Tools\n\n").expect("a `## Tools` section") + "## Tools\n\n".len();
+    let tools_end = system[tools_start..]
+        .find("\n\n## Runtime\n\n")
+        .expect("a `## Runtime` section after the tools")
+        + tools_start;
+    let tools_section = &system[tools_start..tools_end];
     assert_eq!(
-        system.matches("declare function ").count(),
+        tools_section.matches("declare function ").count(),
         registry::ALL.len(),
         "one declaration per registered tool"
     );
@@ -199,6 +209,7 @@ fn a_result_block_omits_empty_sections_and_writes_none_for_an_empty_table() {
             cells_used: 0,
             cells_cap: 40,
         },
+        plan: Vec::new(),
     };
     let rendered = prompt::render_result(&empty);
     assert!(rendered.contains("## Handles\n(none)"));
@@ -220,6 +231,7 @@ fn a_result_block_omits_empty_sections_and_writes_none_for_an_empty_table() {
             cells_used: 1,
             cells_cap: 40,
         },
+        plan: Vec::new(),
     };
     let rendered = prompt::render_result(&with_stdout);
     assert!(rendered.contains("## stdout\nhello"));
@@ -244,6 +256,7 @@ fn a_result_block_omits_empty_sections_and_writes_none_for_an_empty_table() {
             cells_used: 1,
             cells_cap: 40,
         },
+        plan: Vec::new(),
     };
     let rendered = prompt::render_result(&with_error);
     assert!(rendered.starts_with("[cell 3 threw in 5 ms]"));
@@ -275,6 +288,7 @@ fn the_budget_line_warns_at_ninety_percent_and_the_exhausted_preamble_is_one_sen
             cells_used: 1,
             cells_cap: 40,
         },
+        plan: Vec::new(),
     };
     assert!(!prompt::render_result(&below).contains("finish or return"));
 
@@ -292,6 +306,7 @@ fn the_budget_line_warns_at_ninety_percent_and_the_exhausted_preamble_is_one_sen
             cells_used: 1,
             cells_cap: 40,
         },
+        plan: Vec::new(),
     };
     assert!(
         prompt::render_result(&at_ninety)
@@ -375,6 +390,7 @@ fn an_unattributed_throw_omits_the_position_line() {
             cells_used: 1,
             cells_cap: 40,
         },
+        plan: Vec::new(),
     };
 
     let unattributed = prompt::render_result(&result(None));
@@ -412,6 +428,7 @@ fn a_yield_reason_is_one_line_under_the_cell_line() {
             cells_used: 1,
             cells_cap: 40,
         },
+        plan: Vec::new(),
     };
 
     let yielded = prompt::render_result(&result(None));
@@ -482,6 +499,7 @@ fn a_stack_overflow_renders_no_position_line_and_no_zero_frames() {
             cells_used: 1,
             cells_cap: 40,
         },
+        plan: Vec::new(),
     };
 
     let rendered = prompt::render_result(&result);

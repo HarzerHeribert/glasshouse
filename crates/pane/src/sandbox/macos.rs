@@ -52,6 +52,20 @@ const EXECUTABLE_ROOTS: [&str; 6] = [
     "/opt/homebrew/bin",
 ];
 
+/// The package prefixes [`EXECUTABLE_ROOTS`] are symlinks *into*, granted for
+/// exec by [`ExecScope::RootsAndProject`] alone.
+///
+/// The invariant: **seatbelt matches the resolved path, so a root full of
+/// symlinks grants nothing on its own.** Homebrew puts `git` at
+/// `/opt/homebrew/bin/git` and the file at
+/// `/opt/homebrew/Cellar/git/2.55.0/bin/git`; a `(subpath "/opt/homebrew/bin")`
+/// term does not reach the second, which is why `git --version` exited 126
+/// under a profile that named every command line as admitted. Both are
+/// system-wide package prefixes, not user data — `$HOME` is never granted
+/// here, so a binary under `~/.local/bin` stays unrunnable (§4.3 rule 3, and
+/// the session says so).
+const PACKAGE_PREFIXES: [&str; 2] = ["/opt/homebrew", "/usr/local"];
+
 /// The loader's own reach. Read-only, and system-owned on every macOS
 /// install: dyld resolves the shared cache and the executable's libraries
 /// before the process gets to run a single instruction of its own.
@@ -129,6 +143,18 @@ pub enum ExecScope {
     /// The six [`EXECUTABLE_ROOTS`], because the name could not be resolved
     /// and `execvp` has to search for it. Wider, and reported as such.
     DeclaredRoots,
+    /// The [`EXECUTABLE_ROOTS`] **and the project root**, because the profile
+    /// admits every command line.
+    ///
+    /// The invariant: **a grant that admits every command line grants those
+    /// commands their binaries.** `bash` exists to exec other programs, so a
+    /// shell confined to exec'ing only `/bin/bash` runs builtins and nothing
+    /// else. Observed 2026-09-06 under `--yolo`: `ls /`, `git --version`,
+    /// `python3 -c ...` and a project script each exited 126 while the
+    /// startup line said every command line was admitted. It widens nothing
+    /// for a profile that names its commands: `Bash(git*)` still admits only
+    /// `git …`, and argv admission is untouched either way.
+    RootsAndProject,
 }
 
 /// Which of the two grants `binary` earns.
@@ -140,7 +166,10 @@ pub enum ExecScope {
 /// names it. A path that is absolute but does not exist gets the literal
 /// too, which is a refusal at exec time rather than a widening — the roots
 /// would not have contained it either.
-pub fn exec_scope(binary: &Path) -> ExecScope {
+pub fn exec_scope(profile: &Profile, binary: &Path) -> ExecScope {
+    if profile.admits_every_command() {
+        return ExecScope::RootsAndProject;
+    }
     if binary.is_absolute() {
         ExecScope::ResolvedBinary
     } else {
@@ -192,6 +221,9 @@ impl Regime {
                     ExecScope::DeclaredRoots =>
                         "The program name could not be resolved to a path, so execution fell back to the declared executable roots \
                          and is bounded by those directories rather than by one binary.",
+                    ExecScope::RootsAndProject =>
+                        "Every command line is admitted, so execution is granted on the declared executable roots and on the project \
+                         root — the commands this profile admits can reach their own binaries. Argv admission is unchanged.",
                 }
             ),
         }
@@ -208,7 +240,7 @@ impl fmt::Display for Regime {
 pub fn regime(profile: &Profile, binary: &Path) -> Regime {
     Regime::ProjectRootOnly {
         path_rules: profile.rule_count(),
-        exec: exec_scope(binary),
+        exec: exec_scope(profile, binary),
     }
 }
 
@@ -244,7 +276,7 @@ pub fn profile_text(profile: &Profile, binary: &Path) -> String {
     // declared roots when there is no path to name. `(literal …)` is a
     // single file and not a subtree, so a sibling in the same directory is
     // not reachable through this term.
-    let exec = exec_scope(binary);
+    let exec = exec_scope(profile, binary);
     out.push_str("(allow process-exec*");
     match exec {
         ExecScope::ResolvedBinary => {
@@ -254,6 +286,18 @@ pub fn profile_text(profile: &Profile, binary: &Path) -> String {
             for path in EXECUTABLE_ROOTS {
                 out.push_str(&format!(" (subpath {})", quote(path)));
             }
+        }
+        ExecScope::RootsAndProject => {
+            // A superset of the resolved arm, never a replacement: the shell
+            // pane resolved may itself live outside the roots — Homebrew's
+            // `bash` canonicalises into `/opt/homebrew/Cellar/...` — and
+            // dropping its literal refuses the exec of the very binary the
+            // grant is about.
+            out.push_str(&format!(" (literal {})", quote(&display(binary))));
+            for path in EXECUTABLE_ROOTS.iter().chain(PACKAGE_PREFIXES.iter()) {
+                out.push_str(&format!(" (subpath {})", quote(path)));
+            }
+            out.push_str(&format!(" (subpath {})", quote(&root)));
         }
     }
     out.push_str(")\n");
@@ -267,7 +311,10 @@ pub fn profile_text(profile: &Profile, binary: &Path) -> String {
     // on its directory: §4.3's `$HOME` rule survives only because the
     // binary's own bytes are granted and its neighbours are not. Emitted in
     // the resolved arm alone — the fallback's roots are read roots already.
-    if exec == ExecScope::ResolvedBinary {
+    if matches!(
+        exec,
+        ExecScope::ResolvedBinary | ExecScope::RootsAndProject
+    ) {
         out.push_str(&format!(
             "(allow file-read* (literal {}))\n",
             quote(&display(binary))

@@ -3006,3 +3006,237 @@ fn a_buffer_allocated_and_dropped_a_hundred_times_is_not_a_refusal() {
     );
     assert_eq!(threw(&caught).class, "RuntimeOutOfMemory", "{caught:?}");
 }
+
+// --- every binding the isolate installs is a binding the model is told about
+
+/// The defect this pins, observed 2026-09-06: `bg.run`, `bg.watch`,
+/// `bg.cancel`, `keep`, `free` and `handles` were bound in the isolate and
+/// shipped for a whole sub-phase while the system block declared only the
+/// four tools, so 61G's background jobs and monitors were unreachable by the
+/// only caller they have.
+///
+/// It enumerates the **real** globals out of a real isolate rather than
+/// trusting a list: a host binding is installed non-writable and
+/// non-configurable, which is exactly what distinguishes it from a language
+/// built-in, so a binding added without a declaration fails here.
+#[test]
+fn every_host_global_is_declared_to_the_model() {
+    let fixture = Fixture::new("declared");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("declared-session");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+
+    let outcome = runtime.run_cell(
+        "const names = Object.getOwnPropertyNames(globalThis).filter(n => {\n\
+         \x20 const d = Object.getOwnPropertyDescriptor(globalThis, n);\n\
+         \x20 return d && d.writable === false && d.configurable === false;\n\
+         });\n\
+         return names.join(\",\");\n",
+    );
+    let listed = returned_string(&outcome);
+    let installed: Vec<&str> = listed
+        .split(',')
+        .filter(|name| !name.is_empty())
+        .filter(|name| !pane::prompt::declarations::LANGUAGE_CONSTANTS.contains(name))
+        .collect();
+
+    assert!(
+        installed.contains(&"bg"),
+        "the enumeration found no host bindings at all, so it proves nothing: {listed:?}"
+    );
+    let undeclared: Vec<&&str> = installed
+        .iter()
+        .filter(|name| !pane::prompt::declarations::declares_global(name))
+        .collect();
+    assert!(
+        undeclared.is_empty(),
+        "these globals are bound in the isolate and declared nowhere in the system block, so \
+         the model cannot use them: {undeclared:?}"
+    );
+}
+
+/// The `Runtime` block names each of them, so the declaration table being
+/// complete is not the same claim as the prompt carrying it.
+#[test]
+fn the_runtime_block_carries_every_non_tool_binding() {
+    let block = pane::prompt::render_runtime();
+    for binding in pane::prompt::declarations::RUNTIME {
+        assert!(
+            block.contains(binding.declaration),
+            "`{}` is declared in the table but absent from the rendered block",
+            binding.global
+        );
+    }
+    // Each member by its rendered form, so a declaration that lost one --
+    // `bg` without `cancel` leaves a program unable to stop what it started --
+    // fails here rather than at the model.
+    for fragment in [
+        "declare const bg: {",
+        "run(command: string",
+        "watch(command: string",
+        "cancel(job: Job | string)",
+        "declare const batch: {",
+        "where(query: {kind?: string; source?: string})",
+        "ack(ids: number[])",
+        "rest(): Event[]",
+        "declare function handles(): string[];",
+        "declare function keep(",
+        "declare function free(",
+    ] {
+        assert!(
+            block.contains(fragment),
+            "the runtime block never declares `{fragment}`"
+        );
+    }
+}
+
+// --- todo: the model's own plan ----------------------------------------
+
+/// A plan is only worth writing if it is still there next cell, and only
+/// worth having if the person and the next turn can both see it.
+#[test]
+fn a_plan_written_in_one_cell_is_readable_in_the_next_and_rides_the_turn() {
+    let fixture = Fixture::new("plan");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("plan-session");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+
+    let first = runtime.run_cell(
+        "todo.write([\n\
+         \x20 {text: \"read the file\", status: \"done\"},\n\
+         \x20 {text: \"write the patch\", status: \"active\"},\n\
+         \x20 {text: \"run the tests\", status: \"pending\"},\n\
+         ]);\n",
+    );
+    let CellOutcome::Yielded { turn } = &first else {
+        panic!("expected a yield, got {first:?}");
+    };
+    assert_eq!(turn.plan.len(), 3, "the plan did not ride the turn");
+    assert_eq!(turn.plan[1].text, "write the patch");
+    assert_eq!(turn.plan[1].status.as_str(), "active");
+
+    let second = runtime.run_cell(
+        "const plan = todo.read();\nreturn plan.map(i => i.status + \":\" + i.text).join(\"|\");\n",
+    );
+    assert_eq!(
+        returned_string(&second),
+        "done:read the file|active:write the patch|pending:run the tests",
+        "the plan did not survive into the next cell"
+    );
+}
+
+/// A status outside the three is refused **and changes nothing**: a program
+/// that catches the throw still holds the plan it had, rather than a
+/// half-written one.
+#[test]
+fn an_unknown_status_is_refused_and_leaves_the_previous_plan_standing() {
+    let fixture = Fixture::new("plan-refuse");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("plan-refuse-session");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+
+    runtime.run_cell("todo.write([{text: \"the only step\", status: \"active\"}]);\n");
+    let outcome = runtime.run_cell(
+        "let refused = \"no\";\n\
+         try { todo.write([{text: \"a\", status: \"done\"}, {text: \"b\", status: \"blocked\"}]); }\n\
+         catch (e) { refused = String(e.message || e); }\n\
+         const plan = todo.read();\n\
+         return refused + \" // \" + plan.length + \" // \" + plan[0].text;\n",
+    );
+    let answer = returned_string(&outcome);
+    assert!(
+        answer.contains("blocked"),
+        "the refusal did not name the bad status: {answer}"
+    );
+    assert!(
+        answer.ends_with("// 1 // the only step"),
+        "a refused write changed the plan: {answer}"
+    );
+}
+
+/// The plan is the shape of the task in hand, so it goes when the task does —
+/// a next task inheriting the last one's checklist would report work it never
+/// did.
+#[test]
+fn the_plan_is_cleared_when_the_task_ends() {
+    let fixture = Fixture::new("plan-task");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("plan-task-session");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+
+    runtime.run_cell("todo.write([{text: \"first task step\", status: \"active\"}]);\n");
+    runtime.end_task();
+    let outcome = runtime.run_cell("return String(todo.read().length);\n");
+    assert_eq!(returned_string(&outcome), "0");
+}
+
+/// `## Plan` reaches the model's own result message, which is what keeps a
+/// long task on its checklist; an empty plan writes no section at all.
+#[test]
+fn the_result_message_carries_the_plan_and_omits_it_when_empty() {
+    use pane::prompt::{Budget, CellResult};
+    use pane::runtime::outcome::{PlanItem, PlanStatus};
+
+    let base = |plan: Vec<PlanItem>| CellResult {
+        cell: 1,
+        elapsed_ms: 1,
+        error: None,
+        yield_reason: None,
+        handle_table: String::new(),
+        stdout_tail: None,
+        budget: Budget {
+            turn_cap: 8_000,
+            task_used: 1,
+            task_cap: 400_000,
+            cells_used: 1,
+            cells_cap: 40,
+        },
+        plan,
+    };
+
+    let rendered = pane::prompt::render_result(&base(vec![
+        PlanItem {
+            text: "read the file".to_string(),
+            status: PlanStatus::Done,
+        },
+        PlanItem {
+            text: "write the patch".to_string(),
+            status: PlanStatus::Active,
+        },
+    ]));
+    assert!(rendered.contains("## Plan\n[x] read the file\n[~] write the patch"), "{rendered}");
+    assert!(!pane::prompt::render_result(&base(Vec::new())).contains("## Plan"));
+}
+
+/// The end of the chain, through the real sandbox: a script in the project
+/// actually runs. Before the exec grant followed the command grant this
+/// exited 126 — the shell was admitted and could exec nothing but itself.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn a_project_script_runs_when_every_command_line_is_admitted() {
+    let fixture = Fixture::new("script-exec");
+    let script = fixture.root.join("say.sh");
+    fixture.write(&script, "#!/bin/sh\necho ran-inside-the-sandbox\n");
+    std::fs::set_permissions(
+        &script,
+        <std::fs::Permissions as std::os::unix::fs::PermissionsExt>::from_mode(0o755),
+    )
+    .unwrap();
+
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("script-exec-session");
+    let root = fixture.root.to_string_lossy().replace('\\', "/");
+    let profile = fixture.profile_with(&format!(
+        r#"{{"permissions":{{"allow":["Read({root}/**)","Write({root}/**)","Bash"]}}}}"#
+    ));
+    let mut runtime = Runtime::new(&profile, &glasshouse, &session);
+
+    let outcome = runtime.run_cell(
+        "const r = await bash({command: \"./say.sh\"});\nreturn r.stdout.trim() + \" exit=\" + r.exit_code;\n",
+    );
+    assert_eq!(
+        returned_string(&outcome),
+        "ran-inside-the-sandbox exit=0",
+        "a project script could not be executed"
+    );
+}

@@ -12,6 +12,7 @@
 
 pub mod declarations;
 
+use crate::runtime::outcome::PlanItem;
 use crate::tools::registry::{Arg, Tool};
 
 /// `model-contract.md` §2, verbatim. Compared byte for byte by
@@ -107,10 +108,24 @@ pub fn render_session_facts(facts: &SessionFacts) -> String {
 pub fn render_system(instructions: &str, tools: &[&Tool], facts: &SessionFacts) -> String {
     let rendered: Vec<String> = tools.iter().map(|tool| render_declaration(tool)).collect();
     format!(
-        "{PREAMBLE}\n\n## Tools\n\n{}\n\n{}\n\n{instructions}",
+        "{PREAMBLE}\n\n## Tools\n\n{}\n\n## Runtime\n\n{}\n\n{}\n\n{instructions}",
         rendered.join("\n\n"),
+        render_runtime(),
         render_session_facts(facts)
     )
+}
+
+/// §1's *Runtime* block: every host global that is not a tool.
+///
+/// The invariant is [`declarations::Binding`]'s: a name the isolate binds is
+/// a name this block declares. It is rendered from the same table the
+/// enumeration test checks, so the two cannot drift.
+pub fn render_runtime() -> String {
+    declarations::RUNTIME
+        .iter()
+        .map(|binding| binding.declaration.to_string())
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 fn render_declaration(tool: &Tool) -> String {
@@ -154,6 +169,10 @@ pub struct CellResult {
     pub handle_table: String,
     pub stdout_tail: Option<String>,
     pub budget: Budget,
+    /// The model's own plan as the cell left it. Rendered as `## Plan` so a
+    /// task longer than one cell is re-shown its checklist every turn, which
+    /// is the whole reason a model keeps one.
+    pub plan: Vec<PlanItem>,
 }
 
 /// §6's `## Error` section: the class, the message, where in the model's own
@@ -227,6 +246,16 @@ pub fn render_result(result: &CellResult) -> String {
         for frame in error.frames.iter().take(3) {
             out.push_str(&format!("\n  at {frame}"));
         }
+    }
+
+    if !result.plan.is_empty() {
+        out.push_str("\n\n## Plan\n");
+        let rows: Vec<String> = result
+            .plan
+            .iter()
+            .map(|item| format!("{} {}", item.status.mark(), item.text))
+            .collect();
+        out.push_str(&rows.join("\n"));
     }
 
     if let Some(stdout) = &result.stdout_tail {

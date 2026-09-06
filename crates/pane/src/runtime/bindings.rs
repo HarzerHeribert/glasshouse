@@ -22,7 +22,7 @@ use crate::runtime::cell::{HOST_FUNCTIONS, RESERVED_PREFIX};
 use crate::runtime::handles::HandleMeta;
 use crate::runtime::isolate::DEFAULT_RESPONSE_BYTE_CAP;
 use crate::runtime::marshal;
-use crate::runtime::outcome::{CallRecord, Ended};
+use crate::runtime::outcome::{CallRecord, Ended, PlanItem, PlanStatus};
 use crate::runtime::preview::{
     ArrayValue, FileValue, PREVIEW_TOKEN_CAP, StringValue, Value, thousands,
 };
@@ -251,6 +251,18 @@ pub(crate) fn install(scope: &mut v8::PinScope) {
         set_fixed_key(scope, background, "cancel", function.into());
     }
     set_fixed_key(scope, global, "bg", background.into());
+
+    // The model's own plan. Fixed like every other host object: a program
+    // that replaced `todo` would leave the screen showing a checklist nothing
+    // could update.
+    let todo = v8::Object::new(scope);
+    if let Some(function) = v8::Function::builder(todo_write_callback).build(scope) {
+        set_fixed_key(scope, todo, "write", function.into());
+    }
+    if let Some(function) = v8::Function::builder(todo_read_callback).build(scope) {
+        set_fixed_key(scope, todo, "read", function.into());
+    }
+    set_fixed_key(scope, global, "todo", todo.into());
 
     let console = v8::Object::new(scope);
     for method in ["log", "info", "warn", "error", "debug", "trace"] {
@@ -1191,6 +1203,93 @@ fn stream(
     let id = args.data().to_rust_string_lossy(scope);
     let session = state(scope).session.clone();
     bg::payload(&session, &id).map(pick).unwrap_or_default()
+}
+
+// --- todo.write, todo.read ---------------------------------------------
+
+/// `todo.write(items)` — the model's own plan, replaced whole.
+///
+/// The invariant: **what this stores is renderable.** Every item has text and
+/// one of three statuses, checked here, because the plan is shown to the
+/// person and counted in the turn line; an item that is neither would be a
+/// row nothing can draw. A malformed write throws and changes nothing, so a
+/// program that catches it still holds the plan it had.
+fn todo_write_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    _retval: v8::ReturnValue,
+) {
+    let Ok(array) = v8::Local::<v8::Array>::try_from(args.get(0)) else {
+        throw_tool_error(scope, "todo.write takes an array of {text, status}");
+        return;
+    };
+    let mut items = Vec::with_capacity(array.length() as usize);
+    for index in 0..array.length() {
+        let Some(entry) = array.get_index(scope, index) else {
+            continue;
+        };
+        let Ok(object) = v8::Local::<v8::Object>::try_from(entry) else {
+            throw_tool_error(
+                scope,
+                &format!("todo.write item {index} is not an object with text and status"),
+            );
+            return;
+        };
+        let text = read_object_key(scope, object, "text").unwrap_or_default();
+        if text.trim().is_empty() {
+            throw_tool_error(scope, &format!("todo.write item {index} has no text"));
+            return;
+        }
+        let status_text = read_object_key(scope, object, "status")
+            .unwrap_or_else(|| PlanStatus::Pending.as_str().to_string());
+        let Some(status) = PlanStatus::parse(&status_text) else {
+            throw_tool_error(
+                scope,
+                &format!(
+                    "todo.write item {index}: status {status_text:?} is not one of pending, \
+                     active, done"
+                ),
+            );
+            return;
+        };
+        items.push(PlanItem { text, status });
+    }
+    state(scope).set_plan(items);
+}
+
+/// `todo.read()` — the plan as it stands, as plain objects.
+fn todo_read_callback(
+    scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    mut retval: v8::ReturnValue,
+) {
+    let plan = state(scope).plan();
+    let array = v8::Array::new(scope, plan.len() as i32);
+    for (index, item) in plan.iter().enumerate() {
+        let object = v8::Object::new(scope);
+        let text = js_string(scope, &item.text);
+        set_key(scope, object, "text", text);
+        let status = js_string(scope, item.status.as_str());
+        set_key(scope, object, "status", status);
+        array.set_index(scope, index as u32, object.into());
+    }
+    retval.set(array.into());
+}
+
+/// One string property of an object, or `None` when it is absent or is not a
+/// string. Distinct from [`read_option`], which reads a property off an
+/// options argument that may itself be absent.
+fn read_object_key(
+    scope: &mut v8::PinScope,
+    object: v8::Local<v8::Object>,
+    key: &str,
+) -> Option<String> {
+    let key = v8::String::new(scope, key)?;
+    let value = object.get(scope, key.into())?;
+    if value.is_null_or_undefined() {
+        return None;
+    }
+    Some(value.to_rust_string_lossy(scope))
 }
 
 // --- bg.run, bg.watch, bg.cancel ---------------------------------------

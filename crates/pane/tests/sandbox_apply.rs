@@ -1258,7 +1258,7 @@ fn the_seatbelt_profile_grants_exec_on_the_resolved_binary_only() {
     );
 
     assert_eq!(
-        macos::exec_scope(Path::new(RESOLVED)),
+        macos::exec_scope(&profile, Path::new(RESOLVED)),
         macos::ExecScope::ResolvedBinary
     );
 }
@@ -1275,7 +1275,7 @@ fn an_unresolvable_program_falls_back_to_the_roots_and_says_so() {
 
     // macOS: the six roots come back as subtrees, and the regime names why.
     assert_eq!(
-        macos::exec_scope(unresolved),
+        macos::exec_scope(&profile, unresolved),
         macos::ExecScope::DeclaredRoots
     );
     let text = macos::profile_text(&profile, unresolved);
@@ -1306,7 +1306,7 @@ fn an_unresolvable_program_falls_back_to_the_roots_and_says_so() {
 
     // Linux: the same fallback, as the paths the ruleset grants `EXECUTE`.
     assert_eq!(
-        linux::exec_scope(unresolved),
+        linux::exec_scope(&profile, unresolved),
         linux::ExecScope::DeclaredRoots
     );
     let rules = linux::landlock_rules(&profile, unresolved);
@@ -1702,4 +1702,93 @@ fn a_landlocked_process_cannot_exec_a_sibling_of_the_resolved_binary_but_can_exe
             }
         }
     }
+}
+
+// --- a grant that admits every command line grants its binaries ---------
+
+/// Every command line admitted and `bash` the only executable binary is a
+/// grant that says one thing and does another: measured 2026-09-06 under
+/// `--yolo`, `ls /`, `git --version`, `python3 -c ...` and a project script
+/// each exited 126 while the startup line said every command line was
+/// admitted. `bash` exists to exec other programs, so the shell's grant has
+/// to reach them.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_profile_admitting_every_command_grants_exec_on_the_roots_the_prefixes_and_the_project() {
+    let fixture = Fixture::new("yolo-exec");
+    let yolo = format!(
+        r#"{{"permissions":{{"allow":["Read({root}/**)","Write({root}/**)","Bash"]}}}}"#,
+        root = fixture.root.to_string_lossy().replace('\\', "/")
+    );
+    let profile = fixture.profile(Some(&yolo));
+    assert!(
+        profile.admits_every_command(),
+        "the fixture did not compile to a bare Bash grant"
+    );
+    assert_eq!(
+        macos::exec_scope(&profile, Path::new(RESOLVED)),
+        macos::ExecScope::RootsAndProject
+    );
+
+    let text = macos::profile_text(&profile, Path::new(RESOLVED));
+    let subpaths = sorted(
+        exec_filters(&text)
+            .iter()
+            .filter(|f| f.form == "subpath")
+            .map(|f| f.value.clone())
+            .collect(),
+    );
+    for granted in ["/usr/bin", "/bin", "/opt/homebrew", "/usr/local"] {
+        assert!(
+            subpaths.iter().any(|value| value == granted),
+            "`{granted}` is not an exec root: {subpaths:?}"
+        );
+    }
+    // The project's own scripts: `./slow.sh` is the case, and the project
+    // root is the one root every profile already grants.
+    // `profile.root()` and not the fixture's own path: the profile
+    // canonicalises, and on macOS `/var/...` is `/private/var/...`.
+    let root = profile.root().to_string_lossy().to_string();
+    assert!(
+        subpaths.iter().any(|value| value == &root),
+        "the project root is not an exec root: {subpaths:?} vs {root}"
+    );
+    // The shell pane resolved stays named: Homebrew's `bash` canonicalises
+    // outside every root above, so dropping its literal refuses the very
+    // exec the grant is about.
+    assert!(
+        exec_filters(&text)
+            .iter()
+            .any(|f| f.form == "literal" && f.value == RESOLVED),
+        "the resolved binary lost its literal: {text}"
+    );
+    // §4.3 rule 3 is untouched: `$HOME` is not an exec root either, so a
+    // binary under `~/.local/bin` stays unrunnable.
+    let home = std::env::var("HOME").unwrap_or_default();
+    if !home.is_empty() {
+        assert!(
+            !subpaths.iter().any(|value| value == &home),
+            "$HOME became an exec root: {subpaths:?}"
+        );
+    }
+}
+
+/// The other half, and the one that matters for safety: a profile that names
+/// its commands is **not** widened. `Bash(cargo test*)` still grants exec on
+/// the one resolved binary and on nothing else.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_profile_that_names_its_commands_is_not_widened_by_this() {
+    let fixture = Fixture::new("narrow-exec");
+    let profile = fixture.profile(Some(&settings_for(&fixture.root)));
+    assert!(!profile.admits_every_command());
+    assert_eq!(
+        macos::exec_scope(&profile, Path::new(RESOLVED)),
+        macos::ExecScope::ResolvedBinary
+    );
+    let text = macos::profile_text(&profile, Path::new(RESOLVED));
+    assert!(
+        exec_filters(&text).iter().all(|f| f.form == "literal"),
+        "a named-command profile gained an exec subtree: {text}"
+    );
 }

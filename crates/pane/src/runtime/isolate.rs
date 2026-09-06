@@ -1371,6 +1371,7 @@ impl Runtime {
             stdout_dropped_tokens,
             yield_reason,
             record,
+            plan: self.state.plan(),
         };
 
         match ending {

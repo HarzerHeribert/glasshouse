@@ -171,6 +171,15 @@ pub enum ExecScope {
     /// [`SYSTEM_READ_ROOTS`], because the name could not be resolved and
     /// `execvp` has to search for it. Wider, and reported as such.
     DeclaredRoots,
+    /// [`SYSTEM_READ_ROOTS`], the resolved binary **and the project root**,
+    /// because the profile admits every command line.
+    ///
+    /// The invariant is the macOS applier's: **a grant that admits every
+    /// command line grants those commands their binaries.** `bash` exists to
+    /// exec other programs, so a shell that may exec only itself runs
+    /// builtins and nothing else. It widens nothing for a profile that names
+    /// its commands.
+    RootsAndProject,
 }
 
 /// Which of the two grants `binary` earns.
@@ -178,7 +187,10 @@ pub enum ExecScope {
 /// An absolute path is one pane resolved — `tools::invoke::exec_grant`
 /// produces it with `canonicalize`, the only producer of the resolved case.
 /// Anything relative is a bare name no `PATH_BENEATH` rule can name.
-pub fn exec_scope(binary: &Path) -> ExecScope {
+pub fn exec_scope(profile: &Profile, binary: &Path) -> ExecScope {
+    if profile.admits_every_command() {
+        return ExecScope::RootsAndProject;
+    }
     if binary.is_absolute() {
         ExecScope::ResolvedBinary
     } else {
@@ -318,10 +330,19 @@ pub fn landlock_rules(profile: &Profile, binary: &Path) -> LandlockRules {
     } else if grants(profile, Access::Read, &root) {
         read_only.push(root);
     }
-    let exec = exec_scope(binary);
+    let exec = exec_scope(profile, binary);
     let mut executable: Vec<PathBuf> = match exec {
         ExecScope::ResolvedBinary => vec![binary.to_path_buf()],
         ExecScope::DeclaredRoots => SYSTEM_READ_ROOTS.iter().map(PathBuf::from).collect(),
+        // A superset of both, never a replacement: the shell pane resolved
+        // may live outside the system roots, and the project's own scripts
+        // are the case the widening exists for.
+        ExecScope::RootsAndProject => {
+            let mut paths: Vec<PathBuf> = SYSTEM_READ_ROOTS.iter().map(PathBuf::from).collect();
+            paths.push(binary.to_path_buf());
+            paths.push(profile.root().to_path_buf());
+            paths
+        }
     };
     executable.extend(LOADER_EXEC_ROOTS.iter().map(PathBuf::from));
     LandlockRules {
