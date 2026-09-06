@@ -1383,6 +1383,11 @@ fn credential_shaped_variable_names_are_recognised() {
     }
 }
 
+/// Gated like its only user. `a_confined_child_cannot_read_the_sessions_provider_key`
+/// is macOS/Linux-only — Windows has no applier that has ever executed — so on
+/// Windows this static is dead, and dead is an error under `-D warnings`. The
+/// fourth red of this exact shape this week.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 /// The wiring, through a real confined child: a provider key in the session's
