@@ -154,6 +154,43 @@ pub struct ExecGrant {
     pub fell_back_to_roots: bool,
 }
 
+/// Environment variables a confined child never sees.
+///
+/// The invariant: **a credential is withheld by the shape of its name, and
+/// the session says how many.** Two rules and no cleverness — the three
+/// variables pane itself reads, and any name that ends in a credential word.
+/// A name-shaped rule is predictable in a way an entropy test on values is
+/// not, and predictable is what a person needs when a build fails for it.
+///
+/// The cost is real and stated rather than hidden: a project whose build
+/// genuinely wants `GITHUB_TOKEN` cannot get it, because `bg::run` refuses
+/// `env` too. That is the safer default to be wrong in.
+pub fn is_credential_variable(name: &str) -> bool {
+    /// Names with no credential word in them that are still pane's own.
+    const PANE_OWN: [&str; 1] = ["ANTHROPIC_BASE_URL"];
+    /// A whole underscore-separated segment that makes a name a credential.
+    const CREDENTIAL_WORDS: [&str; 8] = [
+        "KEY",
+        "TOKEN",
+        "SECRET",
+        "PASSWORD",
+        "PASSWD",
+        "CREDENTIAL",
+        "CREDENTIALS",
+        "CREDS",
+    ];
+    let upper = name.to_ascii_uppercase();
+    if PANE_OWN.contains(&upper.as_str()) {
+        return true;
+    }
+    // **Whole segments, not substrings.** `AWS_SECRET_ACCESS_KEY` has to
+    // match on `SECRET` and `KEY` wherever they sit, so a suffix rule is too
+    // narrow; a substring rule is too wide and takes `TOKENIZER` with it.
+    upper
+        .split('_')
+        .any(|segment| CREDENTIAL_WORDS.contains(&segment))
+}
+
 /// Which mechanism confined the child. There is no `Unconfined` variant, and
 /// that is the module's first invariant expressed as a type: a platform with
 /// nothing to install returns [`PermissionDenied`] instead of a value of this
@@ -802,6 +839,27 @@ fn spawn_confined(
     let mut command = Command::new(&grant.binary);
     command.args(argv);
     command.current_dir(profile.root());
+    // **The child does not inherit this session's credentials.**
+    //
+    // `sandbox-grants.md` §4.2 makes the OS keyring never-grantable and §4.1
+    // denies the network; a provider key sitting in the environment is the
+    // same class of secret and was the one route left to it. Measured
+    // 2026-09-06: `printenv ANTHROPIC_API_KEY` from inside a cell returned
+    // the key, and a cell's output reaches the transcript, the rollout file
+    // on disk and every hook payload -- an exfiltration path that needs no
+    // network at all.
+    //
+    // Removed by name rather than by value: a value-matching scrub cannot
+    // see a credential this process never read, and `env_clear` would take
+    // `PATH` and `HOME` with it and break every tool.
+    for name in std::env::vars_os()
+        .map(|(name, _)| name)
+        .filter(|name| is_credential_variable(&name.to_string_lossy()))
+    {
+        command.env_remove(name);
+    }
+
+
     command.stdin(Stdio::null());
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());

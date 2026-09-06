@@ -44,7 +44,7 @@ v8 = "=152.2.0"
 # below, and it is the parser for BOTH jobs this crate has -- erasing the types
 # and naming the cell's top-level bindings -- so there is one grammar in the
 # process and not two.
-oxc = { version = "=0.148.0", default-features = false, features = ["ast_visit"] }
+oxc = { version = "=0.148.0", default-features = false, features = ["ast_visit", "codegen"] }
 
 [lints]
 workspace = true
@@ -69,3 +69,7 @@ windows-sys = { workspace = true, features = [
     "Win32_Security_Isolation",
     "Win32_System_Console",
 ] }
+
+[dev-dependencies]
+portable-pty.workspace = true
+vt100 = "0.16.2"

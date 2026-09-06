@@ -67,10 +67,14 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
         Some(Command::Status) => {
             print!("{}", crate::commands::status::status_report(&runtime)?);
         }
-        Some(Command::Entitlements) => {
+        Some(Command::Entitlements { json, refresh }) => {
             print!(
                 "{}",
-                crate::commands::entitlements::entitlements_report(&runtime)?
+                if *json {
+                    crate::commands::entitlements::entitlements_json(&runtime, *refresh)?
+                } else {
+                    crate::commands::entitlements::entitlements_report(&runtime)?
+                }
             );
         }
         Some(Command::Doctor) => {

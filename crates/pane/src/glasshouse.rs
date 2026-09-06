@@ -53,7 +53,7 @@ impl Glasshouse {
     /// `stdin`, when given, is written and then dropped -- closing that end
     /// of the pipe -- so a child reading until EOF gets exactly one message
     /// and returns; a child that ignores stdin is unaffected.
-    fn run(&self, args: &[&str], stdin: Option<&[u8]>) -> Option<Vec<u8>> {
+    pub(crate) fn run(&self, args: &[&str], stdin: Option<&[u8]>) -> Option<Vec<u8>> {
         let Glasshouse::Command { glasshouse } = self else {
             return None;
         };
@@ -310,7 +310,8 @@ struct ObservationRow {
 }
 
 /// Fills a [`ServedBy`] from `glasshouse routing-cost --json --since
-/// <since>`. **The row used is the last one printed**: rows arrive ascending
+/// <since>`. **The row used is the last model observation printed** (excluding local
+/// context-firewall bookkeeping): rows arrive ascending
 /// by `observed_at`, and the last row at or after `since` is the one closest
 /// to the request this call is answering for.
 ///
@@ -329,7 +330,11 @@ pub fn served_by(glasshouse: &Glasshouse, since: SystemTime) -> ServedBy {
     let row = text
         .lines()
         .filter_map(|line| serde_json::from_str::<ObservationRow>(line.trim()).ok())
-        .next_back();
+        // Tool/firewall bookkeeping is not a model request or an entitlement.
+        .rfind(|row| {
+            !(row.provider.as_deref() == Some("glasshouse")
+                && row.model.as_deref() == Some("context-firewall"))
+        });
 
     match row {
         Some(row) => ServedBy {

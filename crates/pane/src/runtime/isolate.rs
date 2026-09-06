@@ -692,6 +692,12 @@ impl Runtime {
         self.state.table.borrow().is_live(name)
     }
 
+    /// The model's own plan for this task, for the checkpoint a compaction
+    /// writes. Task-scoped like the handles beside it.
+    pub fn plan(&self) -> Vec<crate::runtime::outcome::PlanItem> {
+        self.state.plan()
+    }
+
     pub fn handle_names(&self) -> Vec<String> {
         self.state
             .table
@@ -797,6 +803,56 @@ impl Runtime {
         }
     }
 
+    /// Every name the global object carries: the host functions, the
+    /// JavaScript built-ins, and every live handle.
+    ///
+    /// Read from the isolate rather than kept as a list, because a list would
+    /// be a second answer to a question the isolate already answers exactly —
+    /// and a stale one would accuse a correct program.
+    fn global_names(&mut self) -> std::collections::BTreeSet<String> {
+        let mut names = std::collections::BTreeSet::new();
+        if self.poisoned() {
+            return names;
+        }
+        v8::scope!(let handle_scope, &mut self.isolate);
+        let context = v8::Local::new(handle_scope, &self.context);
+        let scope = &mut v8::ContextScope::new(handle_scope, context);
+        let global = context.global(scope);
+        // **`ALL_PROPERTIES`, not the default.** `GetPropertyNamesArgs`
+        // defaults to `ONLY_ENUMERABLE`, and every JavaScript built-in on
+        // `globalThis` -- `Set`, `JSON`, `Math`, `Promise` -- is
+        // non-enumerable by specification. With the default this set omits
+        // them and a correct `new Set(...)` is accused of using an undefined
+        // name; the pane test suite caught exactly that within a minute.
+        let args = v8::GetPropertyNamesArgsBuilder::new()
+            .mode(v8::KeyCollectionMode::OwnOnly)
+            .property_filter(v8::PropertyFilter::ALL_PROPERTIES | v8::PropertyFilter::SKIP_SYMBOLS)
+            .index_filter(v8::IndexFilter::SkipIndices)
+            .build();
+        if let Some(array) = global.get_own_property_names(scope, args) {
+            for index in 0..array.length() {
+                if let Some(value) = array.get_index(scope, index) {
+                    names.insert(value.to_rust_string_lossy(scope));
+                }
+            }
+        }
+        names
+    }
+
+    /// The first name the cell reads that nothing in the program binds and
+    /// the global object does not carry, or `None`.
+    fn first_undefined_name(&mut self, compiled: &cell::CompiledCell) -> Option<(String, u32)> {
+        if compiled.free_names.is_empty() {
+            return None;
+        }
+        let globals = self.global_names();
+        compiled
+            .free_names
+            .iter()
+            .find(|(name, _)| !globals.contains(name))
+            .cloned()
+    }
+
     /// Runs one cell and answers with what it produced.
     ///
     /// Never a `Result`: a throw is a result (§5), a refusal is a throw
@@ -844,6 +900,24 @@ impl Runtime {
                 );
             }
         };
+
+        // **Before anything runs.** A name the cell reads, binds nowhere and
+        // the global object does not carry is a `ReferenceError` waiting to
+        // happen -- and one that costs a whole turn to discover, since the
+        // model only sees it in the next result. Reported here instead, with
+        // the model's own line and column, in the turn that wrote it.
+        if let Some((name, offset)) = self.first_undefined_name(&compiled) {
+            let (line, column) = cell::line_and_column(source, offset);
+            let value = compile_error_value(&cell::CellError::UndefinedName { name, line, column });
+            return self.finish(
+                cell,
+                source,
+                started,
+                Ending::Threw(value),
+                Stopped::none(),
+                &EpilogueBudget::unwatched(),
+            );
+        }
 
         let watchdog = Watchdog::arm(
             self.heap.guard.isolate.get().cloned(),

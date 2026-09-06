@@ -592,3 +592,87 @@ fn status_spells_unknown_for_an_entitlement_nothing_measured() {
         "no percentage may appear for an entitlement nothing measured:\n{line_a}"
     );
 }
+
+#[test]
+fn entitlement_json_exposes_sorted_catalogues_without_credentials() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(tmp.path());
+    ModelCache::at(tmp.path().join("data/providers"))
+        .store(&ModelCatalogue::new(
+            "alpha-probe",
+            "https://alpha-probe.example/api/v1",
+            "https://alpha-probe.example/api/v1/models",
+            glasshouse::provider::cache::now_unix_seconds(),
+            vec![ModelEntry::new("z-model"), ModelEntry::new("a-model")],
+        ))
+        .unwrap();
+    let output = fixture.glasshouse(&["entitlements", "--json"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let body: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(body["version"], 1);
+    assert_eq!(body["accounts"][0]["account"], "claude-a");
+    assert_eq!(body["accounts"][1]["account"], "claude-b");
+    assert_eq!(
+        body["accounts"][0]["models"],
+        serde_json::json!(["a-model", "z-model"])
+    );
+    assert_eq!(body["accounts"][2]["scope"], "harness-decides");
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(!text.contains(VAR_A) && !text.contains(VAR_B) && !text.contains("credential"));
+}
+
+#[test]
+fn entitlement_refresh_populates_missing_catalogues_through_the_binary() {
+    use std::io::{BufRead, BufReader, Write};
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(tmp.path());
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap();
+    let config_path = fixture.base.join("config/config.toml");
+    let config = std::fs::read_to_string(&config_path).unwrap().replace(
+        "[providers.alpha-probe]",
+        &format!("[providers.alpha-probe]\nbase_url = \"http://{address}/v1\""),
+    );
+    std::fs::write(&config_path, config).unwrap();
+    let server = std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut line = String::new();
+        reader.read_line(&mut line).unwrap();
+        assert!(line.starts_with("GET /v1/models "));
+        loop {
+            line.clear();
+            reader.read_line(&mut line).unwrap();
+            if line == "\r\n" {
+                break;
+            }
+        }
+        let body = r#"{"data":[{"id":"fresh-model"}]}"#;
+        write!(
+            stream,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+    });
+    let output = fixture.glasshouse(&["entitlements", "--json", "--refresh"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    server.join().unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(
+        body["accounts"][0]["models"],
+        serde_json::json!(["fresh-model"])
+    );
+    assert_eq!(
+        body["accounts"][1]["models"],
+        serde_json::json!(["fresh-model"])
+    );
+}

@@ -45,7 +45,7 @@ fn rendered_with_handles(
     served_by: &ServedBy,
     handles: &HandleTable,
 ) -> Buffer {
-    rendered_notebook(conversation, served_by, handles, &Notebook::default(), 20)
+    rendered_notebook(conversation, served_by, handles, &Notebook::default(), 32)
 }
 
 /// Renders everything, into a buffer `height` rows tall -- a notebook with
@@ -57,7 +57,7 @@ fn rendered_notebook(
     notebook: &Notebook,
     height: u16,
 ) -> Buffer {
-    rendered_sized(conversation, served_by, handles, notebook, 80, height)
+    rendered_sized(conversation, served_by, handles, notebook, 120, height)
 }
 
 /// The same render into a `width`x20 buffer with no cell views, for a
@@ -76,7 +76,7 @@ fn rendered_at_width(
         handles,
         &Notebook::default(),
         width,
-        20,
+        40,
     )
 }
 
@@ -140,7 +140,9 @@ fn rows_after(buffer: &Buffer, marker: &str, count: usize) -> Vec<String> {
             lines
                 .get(marker_row + offset)
                 .map(|line| {
-                    line.trim_start_matches('│')
+                    line.strip_prefix(' ')
+                        .unwrap_or(line)
+                        .trim_start_matches('│')
                         .trim_end_matches(['│', ' '])
                         .to_string()
                 })
@@ -152,7 +154,7 @@ fn rows_after(buffer: &Buffer, marker: &str, count: usize) -> Vec<String> {
 /// The single row beneath the row containing `marker`, trimmed the same way
 /// as [`rows_after`] -- for an output region that is exactly one line.
 fn line_after(buffer: &Buffer, marker: &str) -> String {
-    rows_after(buffer, marker, 1).remove(0)
+    conversation_rows(buffer, marker, 1).remove(0)
 }
 
 /// The `count` rows beneath `marker`, cut to the **conversation column
@@ -171,7 +173,10 @@ fn conversation_rows(buffer: &Buffer, marker: &str, count: usize) -> Vec<String>
             lines
                 .get(marker_row + offset)
                 .map(|line| {
-                    let inner = line.trim_start_matches('\u{2502}');
+                    let inner = line
+                        .strip_prefix(' ')
+                        .unwrap_or(line)
+                        .trim_start_matches('\u{2502}');
                     let end = inner.find('\u{2502}').unwrap_or(inner.len());
                     inner[..end].trim_end().to_string()
                 })
@@ -189,13 +194,10 @@ fn conversation_row(buffer: &Buffer, marker: &str) -> String {
 /// top-left corner from the left, since the conversation column's own border
 /// occupies the first.
 fn sidebar_left_edge(buffer: &Buffer) -> usize {
-    row_symbols(buffer, 0)
+    row_symbols(buffer, 2)
         .iter()
-        .enumerate()
-        .filter(|(_, symbol)| symbol.as_str() == "┌")
-        .nth(1)
-        .map(|(x, _)| x)
-        .expect("both regions draw a bordered box on the top row")
+        .rposition(|symbol| symbol == "│")
+        .expect("wide telemetry has a left separator")
 }
 
 #[test]
@@ -243,19 +245,19 @@ fn the_sidebar_collapses_rather_than_showing_a_zero() {
 
 #[test]
 fn the_collapsed_sidebar_gives_its_width_to_the_conversation() {
-    let conversation = conversation(vec![Message::text(Role::User, "hi")]);
-
-    let known = rendered(&conversation, &known_served_by());
-    let collapsed = rendered(&conversation, &ServedBy::default());
-
-    let known_edge = sidebar_left_edge(&known);
-    let collapsed_edge = sidebar_left_edge(&collapsed);
-
-    assert!(
-        collapsed_edge > known_edge,
-        "the collapsed sidebar ({collapsed_edge}) must sit further right than \
-         the expanded one ({known_edge}), giving the conversation column the width back"
+    use pane::tui::{ScreenState, SidebarVisibility, screen_regions};
+    let area = ratatui::layout::Rect::new(0, 0, 120, 24);
+    let shown = screen_regions(area, &ScreenState::default());
+    let hidden = screen_regions(
+        area,
+        &ScreenState {
+            sidebar: SidebarVisibility::Hidden,
+            ..ScreenState::default()
+        },
     );
+    assert!(hidden.transcript.width > shown.transcript.width);
+    assert_eq!(hidden.details.width, 0);
+    assert_eq!(shown.details.width, 34);
 }
 
 #[test]
@@ -281,8 +283,8 @@ fn a_message_containing_terminal_escapes_cannot_repaint_the_screen() {
         "a message's escape sequences must not be able to blank or move the \
          sidebar drawn in the same frame:\n{text}"
     );
-    assert_eq!(buffer.area.width, 80);
-    assert_eq!(buffer.area.height, 20);
+    assert_eq!(buffer.area.width, 120);
+    assert_eq!(buffer.area.height, 32);
 }
 
 /// `is_known()` must be the predicate, not a stand-in for it.
@@ -504,6 +506,8 @@ fn a_cell_shows_its_program_as_the_input_region_and_a_return_as_the_last_cells_v
     notebook.set(
         1,
         CellView {
+            stdout: None,
+            execution: None,
             table: Some("n  number  1195".to_string()),
             error: None,
             returned: Some("\"total\": number".to_string()),
@@ -517,7 +521,7 @@ fn a_cell_shows_its_program_as_the_input_region_and_a_return_as_the_last_cells_v
         &known_served_by(),
         &HandleTable::new(),
         &notebook,
-        24,
+        32,
     );
     let text = buffer_text(&buffer);
 
@@ -530,8 +534,8 @@ fn a_cell_shows_its_program_as_the_input_region_and_a_return_as_the_last_cells_v
         "the input region must be the program the message carried:\n{text}"
     );
     assert!(
-        !text.contains("Counting them now"),
-        "the prose around the block is not what ran and must not be the input region:\n{text}"
+        text.contains("Counting them now"),
+        "existing narration must remain visible outside the exact program region:\n{text}"
     );
     assert_eq!(
         conversation_row(&buffer, "[1] out"),
@@ -559,6 +563,8 @@ fn a_throw_renders_as_the_cells_error_region() {
     notebook.set(
         1,
         CellView {
+            stdout: None,
+            execution: None,
             table: Some(String::new()),
             error: Some(CellError {
                 class: "ReferenceError".to_string(),
@@ -615,6 +621,8 @@ fn the_runtimes_answer_to_a_cell_is_not_drawn_as_a_person_typing() {
     notebook.set(
         1,
         CellView {
+            stdout: None,
+            execution: None,
             table: Some("n  number  1".to_string()),
             error: None,
             returned: None,
@@ -657,6 +665,8 @@ fn a_person_typing_after_a_task_ended_is_still_drawn() {
     notebook.set(
         1,
         CellView {
+            stdout: None,
+            execution: None,
             table: Some(String::new()),
             error: None,
             returned: Some("1".to_string()),
@@ -703,6 +713,8 @@ fn a_terminal_response_is_the_assistants_turn_and_a_yield_reason_sits_by_the_tab
     notebook.set(
         1,
         CellView {
+            stdout: None,
+            execution: None,
             table: Some("n  number  1".to_string()),
             error: None,
             returned: None,
@@ -713,6 +725,8 @@ fn a_terminal_response_is_the_assistants_turn_and_a_yield_reason_sits_by_the_tab
     notebook.set(
         2,
         CellView {
+            stdout: None,
+            execution: None,
             table: Some("n  number  1".to_string()),
             error: None,
             returned: Some("the answer".to_string()),
@@ -746,8 +760,8 @@ fn a_terminal_response_is_the_assistants_turn_and_a_yield_reason_sits_by_the_tab
         "{text}"
     );
     assert!(
-        text.contains("assistant: the answer"),
-        "the response is drawn as the assistant's turn:\n{text}"
+        !text.contains("assistant: the answer"),
+        "the return response must not be duplicated as another assistant turn:\n{text}"
     );
     assert!(!text.contains("[3] in"), "the reply is not a cell:\n{text}");
 }

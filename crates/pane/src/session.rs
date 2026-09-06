@@ -4,6 +4,9 @@
 //! see the packet's OBJECTIVE for why that gap, not missing code, is what
 //! this module exists to close.
 
+mod ui;
+
+use std::cell::{Cell, RefCell};
 use std::fs;
 use std::io::{self, BufRead, IsTerminal};
 use std::path::PathBuf;
@@ -13,10 +16,10 @@ use std::time::{Duration, Instant, SystemTime};
 
 use clap::Parser;
 use ratatui::Terminal;
-use ratatui::backend::{CrosstermBackend, TestBackend};
+use ratatui::backend::TestBackend;
 
 use crate::bg;
-use crate::commands::{self, CommandStatus};
+use crate::commands::{self, CommandSource, CommandStatus};
 use crate::config::PaneConfig;
 use crate::contract::{Block, Conversation, Message, ProjectConfig, Role, ServedBy, SessionId};
 use crate::events::batch::Batch;
@@ -41,6 +44,11 @@ use crate::wire;
 /// the loop ends after one more turn whatever the model does. A program or
 /// two blocks resets the count; the token budget stays the outer stop.
 const PROSE_TURN_CAP: u32 = 3;
+
+macro_rules! session_println {
+    ($($arg:tt)*) => { ui::output(format!($($arg)*)) };
+}
+mod controls;
 
 /// The longest a turn waits for an open event window to close before it is
 /// composed without one — `events-contract.md` §2's own 2,000 ms deadline
@@ -272,6 +280,7 @@ impl Interrupter {
         let _line = self.writing();
         bg::shutdown_within(&self.session, REAP_GRACE);
         std::thread::sleep(REAP_GRACE);
+        ui::restore_terminal();
         eprintln!("pane: interrupted twice; ending the session");
         std::process::exit(INTERRUPTED_EXIT);
     }
@@ -340,8 +349,8 @@ fn write_cell(
 /// tests drive (`env!("CARGO_BIN_EXE_pane")` subprocesses can pipe a task in
 /// as an argument far more simply than as timed stdin), and the same flag is
 /// what the ruler's future `pane` harness row will pass a statement through.
-/// Absent `--task`, `session` reads one input per line from stdin until EOF,
-/// so a person can drive it as a REPL.
+/// Absent `--task`, terminals use the live composer; piped input is read
+/// one input per line until EOF.
 #[derive(Parser, Debug)]
 #[command(name = "pane session")]
 pub struct SessionArgs {
@@ -350,10 +359,14 @@ pub struct SessionArgs {
     pub root: PathBuf,
 
     /// One scripted user input (a slash command or a task) run once, non-
-    /// interactively. Omitted means read stdin, one input per line, until
-    /// EOF.
+    /// interactively. Omitted opens the live composer on a terminal, or reads
+    /// piped inputs one per line until EOF.
     #[arg(long)]
     pub task: Option<String>,
+
+    /// Initial request model; can also be changed with /model.
+    #[arg(long)]
+    pub model: Option<String>,
 
     /// Where turns are appended and, on a later run, resumed from. Defaults
     /// to `<root>/.pane/rollout.jsonl` so two runs against the same project
@@ -491,34 +504,18 @@ fn empty_handles() -> HandleTable {
     HandleTable::new()
 }
 
-/// Draws the two-region screen where a user or a test can actually see it.
-/// A live interactive terminal (raw mode, an alternate screen, a
-/// resize-aware redraw loop) is out of scope for this package -- see the
-/// report's limits -- so this draws one frame per cell either way, through
-/// the same unmodified `tui::render`: to a real `CrosstermBackend` when
-/// stdout is a tty, and to stdout as plain lines otherwise, so a pipe never
-/// makes the session's output disappear the way it used to.
-fn render(transcript: &Transcript, served_by: &ServedBy) {
-    if io::stdout().is_terminal() {
-        render_to_terminal(transcript, served_by);
+/// Pipe output is static; the interactive terminal is owned by `ui::LiveUi`.
+fn render(
+    transcript: &Transcript,
+    served_by: &ServedBy,
+    session: &Session<'_>,
+    activity: tui::Activity,
+) {
+    if let Some(ui) = session.ui {
+        ui.publish(transcript, served_by, activity);
     } else {
         render_as_lines(transcript, served_by);
     }
-}
-
-fn render_to_terminal(transcript: &Transcript, served_by: &ServedBy) {
-    let Ok(mut terminal) = Terminal::new(CrosstermBackend::new(io::stdout())) else {
-        return;
-    };
-    let _ = terminal.draw(|frame| {
-        tui::render(
-            frame,
-            &transcript.conversation,
-            served_by,
-            &empty_handles(),
-            &transcript.notebook,
-        )
-    });
 }
 
 /// Every acceptance test below, and any real pipe, takes this path. Draws
@@ -569,7 +566,7 @@ fn run(args: SessionArgs) -> Result<(), String> {
     let project = project::load(&args.root);
     let config = PaneConfig::load(&args.root)?;
     if config.supervisor.model.is_none() {
-        println!("supervisor: off (no model)");
+        session_println!("supervisor: off (no model)");
     }
 
     // `sandbox-grants.md` §1.5: computed once, at session start, immutable
@@ -638,6 +635,43 @@ fn run(args: SessionArgs) -> Result<(), String> {
     let watched = Arc::clone(&interrupt);
     std::thread::spawn(move || watch(&watched));
 
+    let interactive =
+        if args.task.is_none() && io::stdin().is_terminal() && io::stdout().is_terminal() {
+            Some(ui::LiveUi::start(
+                tui::ScreenState {
+                    model: Some(args.model.clone().unwrap_or_else(|| wire::MODEL.into())),
+                    compact: true,
+                    pretty: true,
+                    project: Some(
+                        args.root
+                            .file_name()
+                            .unwrap_or(args.root.as_os_str())
+                            .to_string_lossy()
+                            .into_owned(),
+                    ),
+                    sandbox: Some(format!(
+                        "{}p/{}c{}",
+                        profile.rule_count(),
+                        profile.command_pattern_count(),
+                        if args.yolo { " YOLO" } else { "" }
+                    )),
+                    network: Some(
+                        if profile.grants_network() {
+                            "on"
+                        } else {
+                            "off"
+                        }
+                        .into(),
+                    ),
+                    ..tui::ScreenState::default()
+                },
+                transcript.conversation.clone(),
+                transcript.notebook.clone(),
+            )?)
+        } else {
+            None
+        };
+
     let session = Session {
         project: &project,
         config: &config,
@@ -646,6 +680,10 @@ fn run(args: SessionArgs) -> Result<(), String> {
         id: &session_id,
         memory: &memory,
         interrupt: &interrupt,
+        ui: interactive.as_ref(),
+        model: RefCell::new(args.model.clone().unwrap_or_else(|| wire::MODEL.into())),
+        mode: Cell::new(tui::Mode::Execute),
+        effort: Cell::new(wire::Effort::Auto),
     };
     let outcome = drive(&args, &session, &mut transcript, &mut rollout);
     // §5 again, and this one is the promise `session::run` itself makes: an
@@ -673,6 +711,10 @@ fn run(args: SessionArgs) -> Result<(), String> {
 /// `Profile` `run` compiled is the only one any input can be answered
 /// against; there is no owned field here that a later call could replace.
 struct Session<'a> {
+    ui: Option<&'a ui::LiveUi>,
+    model: RefCell<String>,
+    mode: Cell<tui::Mode>,
+    effort: Cell<wire::Effort>,
     project: &'a ProjectConfig,
     config: &'a PaneConfig,
     /// The keyboard's end of the cancellation facility: the SIGINT handler's
@@ -686,9 +728,8 @@ struct Session<'a> {
     memory: &'a LocalMemory,
 }
 
-/// Runs `args.task` once if given, else reads stdin one line at a time until
-/// EOF -- the REPL half of the same input source, so a slash command or a
-/// task is handled identically regardless of where it came from.
+/// Handles scripted, live-composer, and piped input through the same task
+/// and command dispatch.
 fn drive(
     args: &SessionArgs,
     session: &Session<'_>,
@@ -697,6 +738,25 @@ fn drive(
 ) -> Result<(), String> {
     if let Some(task) = &args.task {
         return process_input(task, session, transcript, rollout);
+    }
+
+    if let Some(ui) = session.ui {
+        while let Some(input) = ui.next()? {
+            let result = process_input(&input, session, transcript, rollout);
+            if let Err(message) = &result {
+                session_println!("ERROR: {message}");
+            }
+            ui.publish(
+                transcript,
+                &ServedBy::default(),
+                if result.is_err() {
+                    tui::Activity::Failed
+                } else {
+                    tui::Activity::Complete
+                },
+            );
+        }
+        return Ok(());
     }
 
     let stdin = io::stdin();
@@ -710,7 +770,7 @@ fn drive(
         // Observed 2026-09-06: one empty message made a gateway answer 400
         // and the session ended mid-task.
         if let Err(message) = process_input(&line, session, transcript, rollout) {
-            println!("{message}");
+            session_println!("{message}");
         }
     }
     Ok(())
@@ -740,8 +800,13 @@ fn process_input(
     }
     if let Some(rest) = input.strip_prefix('/') {
         let (name, argument) = split_command(rest);
-        answer_command(rest, name, argument, session);
-        render(transcript, &ServedBy::default());
+        answer_command(rest, name, argument, session, transcript);
+        render(
+            transcript,
+            &ServedBy::default(),
+            session,
+            tui::Activity::Idle,
+        );
         return Ok(());
     }
     run_task(input, session, transcript, rollout)
@@ -892,6 +957,37 @@ fn run_task(
     write_turn(session.interrupt, rollout, Role::User, task)
         .map_err(|e| format!("could not record the user turn: {e}"))?;
 
+    if session.mode.get() == tui::Mode::Plan {
+        let mut request = transcript.conversation.clone();
+        request.system.push_str("\nPlanning mode: respond naturally with a plan. No code or tool call will execute in this mode.");
+        if let Some(ui) = session.ui {
+            ui.publish(transcript, &ServedBy::default(), tui::Activity::Thinking);
+        }
+        let since = SystemTime::now();
+        let estimated = estimate_task_request_tokens(&request, &session.model.borrow(), task);
+        let turn =
+            send_task_turn(&request, session, task).map_err(|e| format!("request failed: {e}"))?;
+        let text = message_text(&turn.message);
+        if text.trim().is_empty() {
+            return Err("the model returned an empty reply".into());
+        }
+        write_turn(session.interrupt, rollout, Role::Assistant, &text)
+            .map_err(|e| e.to_string())?;
+        let served = glasshouse::served_by(session.glasshouse, since);
+        let mut budget = TaskBudget::new(
+            session.config.limits.task_tokens,
+            session.config.limits.cells,
+        );
+        budget.add(&served, turn.usage.as_ref(), estimated);
+        transcript.notebook.tokens = budget.tokens();
+        transcript.conversation.messages.push(turn.message);
+        transcript.notebook.cells.push(CellView {
+            table: Some("Planning mode · code was not executed".into()),
+            ..CellView::default()
+        });
+        render(transcript, &served, session, tui::Activity::Complete);
+        return Ok(());
+    }
     let mut runtime = Runtime::with_limits(
         session.profile,
         session.glasshouse,
@@ -918,9 +1014,12 @@ fn run_task(
 
     loop {
         let since = SystemTime::now();
-        let turn = wire::send_turn(&transcript.conversation)
-            .map_err(|e| format!("request failed: {e}"))?;
-        let estimate = estimate_request_tokens(&transcript.conversation);
+        if let Some(ui) = session.ui {
+            ui.publish(transcript, &ServedBy::default(), tui::Activity::Thinking);
+        }
+        let turn = send_task_turn_recovering(transcript, session, &runtime, task, rollout)?;
+        let estimate =
+            estimate_task_request_tokens(&transcript.conversation, &session.model.borrow(), task);
         let assistant_text = message_text(&turn.message);
         // **An empty reply is never appended.** A message with no content is
         // not a message, and appending one poisons the conversation for the
@@ -969,6 +1068,9 @@ fn run_task(
         }
 
         let ordinal = tui::cell_ordinal(&transcript.conversation, &transcript.notebook);
+        if let Some(ui) = session.ui {
+            ui.publish(transcript, &served, tui::Activity::Executing);
+        }
         let mut step = act_on(
             &assistant_text,
             &mut runtime,
@@ -1068,7 +1170,16 @@ fn run_task(
                 .map_err(|e| format!("could not record the runtime's answer: {e}"))?;
         }
 
-        render(transcript, &served);
+        render(
+            transcript,
+            &served,
+            session,
+            if stop {
+                tui::Activity::Complete
+            } else {
+                tui::Activity::Thinking
+            },
+        );
 
         if stop {
             break;
@@ -1178,7 +1289,52 @@ fn act_on(
         .map_err(|e| format!("could not record the cell: {e}"))?;
 
     let mut view = CellView {
+        execution: Some(if record.calls.is_empty() {
+            "No tool calls ran in this cell.".into()
+        } else {
+            record
+                .calls
+                .iter()
+                .enumerate()
+                .map(|(i, call)| {
+                    let status = match &call.ended {
+                        crate::runtime::outcome::Ended::Ok => "returned".to_string(),
+                        crate::runtime::outcome::Ended::Threw { class } => {
+                            format!("failed · {class}")
+                        }
+                        crate::runtime::outcome::Ended::Denied { rule } => {
+                            format!("denied · {rule}")
+                        }
+                    };
+                    format!(
+                        "{} {}{} · {status}",
+                        if i + 1 == record.calls.len() {
+                            "└─"
+                        } else {
+                            "├─"
+                        },
+                        call.tool,
+                        call.args
+                            .get("path")
+                            .map(|path| format!(
+                                " {}",
+                                std::path::Path::new(path)
+                                    .file_name()
+                                    .unwrap_or_default()
+                                    .to_string_lossy()
+                            ))
+                            .or_else(|| call
+                                .args
+                                .get("command")
+                                .map(|command| format!(" {command}")))
+                            .unwrap_or_default()
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        }),
         table: Some(turn.table.clone()),
+        stdout: (!turn.stdout_tail.is_empty()).then(|| turn.stdout_tail.clone()),
         ..CellView::default()
     };
     let mut result = CellResult {
@@ -1257,8 +1413,95 @@ fn unchanged_table(table: &str) -> String {
 ///
 /// It counts the request and not the reply, so it is a floor rather than a
 /// total -- the sidebar says `estimated` for exactly this reason.
-fn estimate_request_tokens(conversation: &Conversation) -> u64 {
-    let body = wire::request_body(conversation);
+/// [`send_task_turn`], recovering from a conversation that no longer fits.
+///
+/// **Two rungs, and only an overflow reaches either.** The first is lossless:
+/// drop from every older result the sections the newest one restates in full.
+/// The second is not: throw the conversation away and start from a
+/// checkpoint. Any other error is returned unchanged, so a malformed request
+/// is never retried as though it were too long.
+///
+/// The second rung is the one a text harness cannot take. Its tool results
+/// *are* its transcript, so dropping the transcript drops the work; pane's
+/// objects live in the isolate, so the handle table after the checkpoint is
+/// complete and every name in it still resolves. What is lost is the
+/// narration.
+fn send_task_turn_recovering(
+    transcript: &mut Transcript,
+    session: &Session<'_>,
+    runtime: &Runtime,
+    task: &str,
+    rollout: &mut Rollout,
+) -> Result<wire::Turn, String> {
+    let first = match send_task_turn(&transcript.conversation, session, task) {
+        Ok(turn) => return Ok(turn),
+        Err(error) if error.is_context_overflow() => error,
+        Err(error) => return Err(format!("request failed: {error}")),
+    };
+
+    let report = prompt::compact_conversation(&mut transcript.conversation);
+    if !report.is_empty() {
+        session_println!(
+            "context: the conversation did not fit; dropped {} redundant byte(s) from {} earlier              result(s) -- nothing was lost, each was restated in full by a later message",
+            report.bytes,
+            report.messages
+        );
+        match send_task_turn(&transcript.conversation, session, task) {
+            Ok(turn) => return Ok(turn),
+            Err(error) if error.is_context_overflow() => {}
+            Err(error) => return Err(format!("request failed: {error}")),
+        }
+    }
+
+    // Second rung. The notebook is indexed by the conversation, so the two
+    // are replaced together -- a notebook left behind would hang every
+    // earlier cell's view under the wrong cell.
+    let checkpoint = prompt::checkpoint(
+        task,
+        &runtime.plan(),
+        &runtime.handle_names(),
+        Some(&first.to_string()),
+    );
+    transcript.conversation.messages = vec![Message::text(Role::User, &checkpoint)];
+    transcript.notebook = Notebook::default();
+    write_turn(session.interrupt, rollout, Role::User, &checkpoint)
+        .map_err(|e| format!("could not record the checkpoint: {e}"))?;
+    session_println!(
+        "context: still did not fit, so the conversation was replaced by a checkpoint; {} handle(s) \
+         are still live and nothing was re-run",
+        runtime.handle_names().len()
+    );
+    send_task_turn(&transcript.conversation, session, task)
+        .map_err(|error| format!("request failed after a checkpoint: {error}"))
+}
+
+fn send_task_turn(
+    conversation: &Conversation,
+    session: &Session<'_>,
+    task: &str,
+) -> Result<wire::Turn, wire::WireError> {
+    let model = session.model.borrow();
+    let request = prompt::with_task_context(conversation, &model, task);
+    let conversation = &request;
+    if let Some(ui) = session.ui {
+        wire::send_turn_streaming_configured(
+            conversation,
+            &model,
+            session.effort.get(),
+            &mut |text| ui.append_delta(text),
+        )
+    } else {
+        wire::send_turn_configured(conversation, &model, session.effort.get())
+    }
+}
+
+fn estimate_request_tokens(conversation: &Conversation, model: &str) -> u64 {
+    estimate_task_request_tokens(conversation, model, "")
+}
+
+fn estimate_task_request_tokens(conversation: &Conversation, model: &str, task: &str) -> u64 {
+    let request = prompt::with_task_context(conversation, model, task);
+    let body = wire::request_body_on_model(&request, model);
     preview::estimate_tokens(&String::from_utf8_lossy(&body)) as u64
 }
 
@@ -1285,11 +1528,47 @@ fn split_command(rest: &str) -> (&str, Option<&str>) {
 /// nothing called them: `commands` was scoped to decide and never to act, and
 /// no package was given the acting half. A capability nothing invokes is not
 /// a capability, whatever its tests say.
-fn answer_command(rest: &str, name: &str, argument: Option<&str>, session: &Session<'_>) {
+fn answer_command(
+    rest: &str,
+    name: &str,
+    argument: Option<&str>,
+    session: &Session<'_>,
+    transcript: &Transcript,
+) {
+    if controls::command(name, argument, session, transcript) {
+        return;
+    }
     // A bare `/` or `/help` lists rather than resolves, so `commands::all`
     // has a caller and the binary actually *offers* what 2450 names.
+    if name == "model" {
+        if let Some(model) = argument.filter(|value| !value.is_empty()) {
+            if model.chars().any(char::is_whitespace) {
+                session_println!("/model expects one model name");
+                return;
+            }
+            *session.model.borrow_mut() = model.into();
+            if !model.contains("claude")
+                && matches!(
+                    session.effort.get(),
+                    wire::Effort::Xhigh | wire::Effort::Max
+                )
+            {
+                session.effort.set(wire::Effort::Auto);
+                if let Some(ui) = session.ui {
+                    ui.effort(wire::Effort::Auto);
+                }
+            }
+            if let Some(ui) = session.ui {
+                ui.model(model);
+            }
+            session_println!("model changed to {model}");
+        } else {
+            controls::models(session);
+        }
+        return;
+    }
     if name.is_empty() || name == "help" {
-        offer_commands(session.project);
+        offer_commands(session);
         return;
     }
 
@@ -1310,24 +1589,41 @@ fn answer_command(rest: &str, name: &str, argument: Option<&str>, session: &Sess
                 if name == "memory" {
                     answer_memory(session.glasshouse, session.memory, argument);
                 } else {
-                    println!("/{name} ({:?})", resolved.source);
+                    let description = match resolved.source {
+                        CommandSource::ProjectSkill => "project skill",
+                        CommandSource::ProjectCommand => "project command",
+                        CommandSource::BuiltIn(_) => "command",
+                    };
+                    session_println!(
+                        "/{name}: {description} found; running it is not supported yet"
+                    );
                 }
             }
             CommandStatus::NotBuilt { subphase } => {
-                println!("/{name} is not built yet -- that is sub-phase {subphase}");
+                session_println!("/{name} is not built yet -- that is sub-phase {subphase}");
             }
         },
-        None => println!("/{name}: unknown command"),
+        None => session_println!("/{name}: unknown command"),
     }
 }
 
 /// Prints every command `commands::all` names, in its own order -- the
 /// built-ins, then the project's own commands and skills. `all` had a
 /// production caller nowhere before this package; this is that caller.
-fn offer_commands(project: &ProjectConfig) {
-    for resolved in commands::all(project) {
-        println!("/{} ({:?})", resolved.name, resolved.source);
+fn offer_commands(session: &Session<'_>) {
+    let mut lines: Vec<String> = tui::slash_matches("/")
+        .into_iter()
+        .map(|(name, help)| format!("{name:<16} {help}"))
+        .collect();
+    for command in commands::all(session.project) {
+        if !lines
+            .iter()
+            .any(|line| line.starts_with(&format!("/{} ", command.name)))
+        {
+            lines.push(format!("/{}", command.name));
+        }
     }
+    controls::show(session, tui::Panel::text("Commands", lines.join("\n")));
 }
 
 /// Reads memory and the latest checkpoint through Glasshouse's MCP surface,
@@ -1344,23 +1640,23 @@ fn offer_commands(project: &ProjectConfig) {
 fn answer_memory(glasshouse: &Glasshouse, memory: &LocalMemory, argument: Option<&str>) {
     if let Some(text) = argument.filter(|text| !text.is_empty()) {
         match memory.add(text) {
-            Ok(()) => println!("/memory: saved"),
-            Err(e) => println!("/memory: could not save: {e}"),
+            Ok(()) => session_println!("/memory: saved"),
+            Err(e) => session_println!("/memory: could not save: {e}"),
         }
         return;
     }
 
     let notes = glasshouse::search_memory(glasshouse, memory, "");
     if notes.is_empty() {
-        println!("/memory: no notes");
+        session_println!("/memory: no notes");
     } else {
         for note in &notes {
-            println!("/memory: {note}");
+            session_println!("/memory: {note}");
         }
     }
     match glasshouse::checkpoint(glasshouse, memory) {
-        Some(checkpoint) => println!("/memory checkpoint: {checkpoint}"),
-        None => println!("/memory checkpoint: none"),
+        Some(checkpoint) => session_println!("/memory checkpoint: {checkpoint}"),
+        None => session_println!("/memory checkpoint: none"),
     }
 }
 
@@ -1375,7 +1671,7 @@ fn answer_memory(glasshouse: &Glasshouse, memory: &LocalMemory, argument: Option
 /// `tests/tools.rs::the_profile_is_built_once_per_session` counts them.
 fn compile_profile_once(project: &ProjectConfig, yolo: bool) -> Profile {
     let profile = if yolo {
-        println!(
+        session_println!(
             "sandbox: --yolo — the project root and every command line are granted; \
              .claude/settings.json is ignored and the never-grantable set still applies"
         );
@@ -1383,7 +1679,7 @@ fn compile_profile_once(project: &ProjectConfig, yolo: bool) -> Profile {
     } else {
         Profile::from_project(project)
     };
-    println!(
+    session_println!(
         "sandbox: profile compiled once for this session -- {} path rule(s), {} command \
          pattern(s), network: {}",
         profile.rule_count(),
@@ -1395,7 +1691,7 @@ fn compile_profile_once(project: &ProjectConfig, yolo: bool) -> Profile {
         },
     );
     for diagnostic in profile.diagnostics() {
-        println!("sandbox: {diagnostic}");
+        session_println!("sandbox: {diagnostic}");
     }
     profile
 }
@@ -1465,8 +1761,12 @@ fn parse_tool_line(rest: &str) -> Option<(String, Args)> {
 /// is that a refusal is a value, so nothing here prompts, escalates, retries
 /// or returns an error to the caller.
 fn answer_tool(rest: &str, session: &Session<'_>) {
+    if session.mode.get() == tui::Mode::Plan {
+        session_println!("Planning mode does not execute tools. Use /mode execute first.");
+        return;
+    }
     let Some((tool, args)) = parse_tool_line(rest) else {
-        println!(
+        session_println!(
             "/tool <name> [arg=value ...]; registered: {}",
             registry::names().join(", ")
         );
@@ -1479,11 +1779,8 @@ fn answer_tool(rest: &str, session: &Session<'_>) {
     };
     match invoke::run(&ctx, &tool, &args) {
         Ok(result) => {
-            print!("{}", result.stdout);
-            if !result.stderr.is_empty() {
-                eprint!("{}", result.stderr);
-            }
-            println!(
+            session_println!("{}{}", result.stdout, result.stderr);
+            session_println!(
                 "/tool {tool}: exit {} under {}",
                 result
                     .exit_code
@@ -1492,8 +1789,8 @@ fn answer_tool(rest: &str, session: &Session<'_>) {
                 result.confinement.as_str()
             );
         }
-        Err(ToolError::Denied(denied)) => println!("{denied}"),
-        Err(error) => println!("/tool {tool}: {error}"),
+        Err(ToolError::Denied(denied)) => session_println!("{denied}"),
+        Err(error) => session_println!("/tool {tool}: {error}"),
     }
 }
 

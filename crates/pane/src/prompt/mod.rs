@@ -12,12 +12,33 @@
 
 pub mod declarations;
 
+use crate::contract::{Block, Conversation};
 use crate::runtime::outcome::PlanItem;
 use crate::tools::registry::{Arg, Tool};
 
 /// `model-contract.md` §2, verbatim. Compared byte for byte by
 /// `prompt_bytes.rs::the_preamble_is_the_contracts_verbatim`.
-pub const PREAMBLE: &str = "You act by writing TypeScript. Each turn you emit exactly one code block\ntagged `pane`; pane runs it in a persistent V8 isolate and answers with\nwhat your program produced.\n\nTool results are live objects, not text. `await grep(...)` returns an\narray you can filter, index and count in the next line of the same\nprogram. You are shown each object's name and a short preview; you are\nnever shown its payload, and you never need it.\n\nBindings persist. A top-level `const` in one cell is in scope in the\nnext. Redeclaring a name replaces the object and frees the old one.\n\nA cell that runs off the end yields: you get the handle table and another\nturn. A top-level `return` ends the task with that value. Return when the\ntask is answered, not before.\n\nReturning a string answers the person directly — it is rendered and kept\nas your reply, and nothing is asked of you afterwards, so fill it from what\nthe run actually produced rather than from what you expected it to. Do not\nanswer from a call that threw, was refused, was cancelled, or whose guard\ndid not hold: yield instead and say what you found. Call `yieldNow(reason)`\nto hand back from inside a branch; it is a yield, not an error.\n\nA cell that throws is answered, not retried. You get the error, the line,\nand every binding that completed before the throw. Write the next cell.\n\nA call outside this session's sandbox grant throws PermissionDenied. It\nis catchable and it is final: nothing you write widens a grant.";
+pub const PREAMBLE: &str = "You are Pane, a coding assistant. Act by writing TypeScript in exactly one fenced `pane` block per turn:\n\n```pane\nconst file = await read({path: \"example.txt\"});\nconsole.log(file.text);\n```\n\nUse triple backticks, not XML tags. Only a `pane` fence executes.\nTool results are live objects. Use their declared fields in code; the\nhandle table shows bounded previews, not full payloads.\n\nTop-level bindings persist between cells of the same user request only;\nredeclaring replaces them. A new user request starts a fresh runtime.\nEarlier requests are history, not unfinished work. Answer the current\nrequest; for a conversational question, return the answer without tools.\nRunning off the end yields results and another turn. `yieldNow(reason)`\nalso yields. A top-level `return` ends the task; return a string to answer\nthe person, grounded in results you actually observed.\nTo interpret file contents, read and yield first, then answer from the\nnext turn's preview. You may return values computed directly from objects.\n\nA thrown error comes back with its source position and completed bindings.\nContinue from that state; failed or skipped calls did not succeed.\nPermissionDenied is final: code cannot widen the session's sandbox grant.";
+
+/// Request-only context; keeps user text and saved conversation unchanged.
+/// A new runtime is created per user request, not per inference turn.
+pub fn with_task_context(conversation: &Conversation, model: &str, task: &str) -> Conversation {
+    let mut request = conversation.clone();
+    request.system.push_str(&format!(
+        "\n\nConfigured request model: {}. This is the requested model, not independently verified backend identity. Do not infer a different identity from previous replies or project paths.",
+        serde_json::to_string(model).expect("model name serializes")
+    ));
+    if let Some(message) = request.messages.iter_mut().rev().find(|message| {
+        message.role == crate::contract::Role::User
+            && message.content.len() == 1
+            && matches!(&message.content[0], Block::Text(text) if text == task)
+    }) {
+        message.content.push(Block::Text(
+            "[Pane task boundary: this is the current user request. Its runtime started empty; variables, handles and jobs from earlier completed requests are not live. Bindings created while answering THIS request persist between its cells. A cell error does not reset completed bindings.]".into()
+        ));
+    }
+    request
+}
 
 /// Why the preamble is being replaced: §6's spent task budget, or three
 /// prose turns in a row (the primary's addendum of 2026-09-06 — a model that
@@ -84,10 +105,7 @@ pub fn render_session_facts(facts: &SessionFacts) -> String {
     } else if facts.command_patterns == 0 {
         "no command may be run at all".to_string()
     } else {
-        format!(
-            "{} command pattern(s) admitted",
-            facts.command_patterns
-        )
+        format!("{} command pattern(s) admitted", facts.command_patterns)
     };
     format!(
         "## This session\n\nThe project root is {root}. Relative paths resolve against it.\n\n\
@@ -343,4 +361,159 @@ pub fn extract_program(assistant_text: &str) -> Extracted {
         1 => Extracted::Program(programs.into_iter().next().expect("length checked above")),
         _ => Extracted::TwoBlocks,
     }
+}
+
+// --- compaction: what a past turn still has to say ---------------------
+
+/// What one pass of [`compact_conversation`] removed.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Compaction {
+    /// Messages this pass shortened.
+    pub messages: usize,
+    /// Bytes removed from them.
+    pub bytes: usize,
+}
+
+impl Compaction {
+    pub fn is_empty(&self) -> bool {
+        self.messages == 0
+    }
+}
+
+/// The sections of a cell result that the **newest** result restates in full,
+/// and which are therefore redundant in every older one.
+///
+/// The invariant: **a section listed here is rendered complete every turn, so
+/// an older copy tells the model nothing the latest message does not.**
+/// `## Handles` is the whole live table, `## Plan` the whole plan, `## Budget`
+/// the current figures — each is a snapshot of now, not a record of then.
+/// `## Error` and `## stdout` are the opposite: they belong to the cell that
+/// produced them and appear nowhere else, so they are never dropped.
+const SUPERSEDED_SECTIONS: [&str; 3] = ["## Handles", "## Plan", "## Budget"];
+
+/// Removes the superseded sections from one rendered cell result.
+///
+/// Pure over its input, so the claim "this is lossless" is checked by
+/// comparing against a freshly rendered result rather than by inspection.
+pub fn compact_result(rendered: &str) -> String {
+    let mut out = String::with_capacity(rendered.len());
+    // Everything before the first section header is the cell line and its
+    // yield reason, which name what happened and are kept.
+    let mut parts = rendered.split("\n\n## ");
+    if let Some(head) = parts.next() {
+        out.push_str(head);
+    }
+    for section in parts {
+        let name = section.split('\n').next().unwrap_or_default();
+        if SUPERSEDED_SECTIONS
+            .iter()
+            .any(|superseded| superseded.trim_start_matches("## ") == name)
+        {
+            continue;
+        }
+        out.push_str("\n\n## ");
+        out.push_str(section);
+    }
+    out
+}
+
+/// Whether `text` is a message pane rendered rather than one a person typed.
+///
+/// Only these are compacted: a person's own words are never edited, however
+/// long the conversation gets.
+pub fn is_rendered_result(text: &str) -> bool {
+    text.starts_with("[cell ") || text.starts_with("## Handles")
+}
+
+/// Drops every superseded section from every rendered result **except the
+/// most recent one**, which is the copy the others are redundant against.
+///
+/// Lossless by construction, and that is why it is the first thing tried: it
+/// removes only text the conversation still carries somewhere else. When it
+/// is not enough, [`checkpoint`] is the next rung and it is not lossless.
+pub fn compact_conversation(conversation: &mut Conversation) -> Compaction {
+    let last_rendered = conversation.messages.iter().rposition(|message| {
+        message.content.iter().any(|block| match block {
+            Block::Text(text) => is_rendered_result(text),
+        })
+    });
+    let Some(last_rendered) = last_rendered else {
+        return Compaction::default();
+    };
+
+    let mut report = Compaction::default();
+    for (index, message) in conversation.messages.iter_mut().enumerate() {
+        if index == last_rendered {
+            continue;
+        }
+        for block in message.content.iter_mut() {
+            let Block::Text(text) = block;
+            if !is_rendered_result(text) {
+                continue;
+            }
+            let compacted = compact_result(text);
+            if compacted.len() < text.len() {
+                report.messages += 1;
+                report.bytes += text.len() - compacted.len();
+                *text = compacted;
+            }
+        }
+    }
+    report
+}
+
+/// The second rung: what one task hands itself when its conversation has to
+/// be thrown away.
+///
+/// The invariant, and the reason pane can do this at all: **the working set
+/// survives the compaction.** A text harness's tool results *are* the
+/// transcript, so discarding the transcript discards them; pane's live
+/// objects are in the isolate and are re-listed in the next cell's handle
+/// table, so what is lost here is the narration and not the work. The
+/// checkpoint therefore names the handles rather than describing them — the
+/// table that follows it is authoritative and complete.
+///
+/// Its four parts are `docs/process/` checkpoints' own: what the task was,
+/// where it got to, what it ruled out, what to do next.
+pub fn checkpoint(
+    task: &str,
+    plan: &[PlanItem],
+    live_handles: &[String],
+    last_error: Option<&str>,
+) -> String {
+    let mut out = String::new();
+    out.push_str(
+        "The conversation before this point was dropped because it no longer fit. **Your \
+         objects are untouched** — every handle below is live, and the handle table in the \
+         next result is complete. Nothing needs re-reading or re-running.\n\n",
+    );
+    out.push_str("## The task\n");
+    out.push_str(task.trim());
+
+    if plan.is_empty() {
+        out.push_str(
+            "\n\n## Where you got to\nNo plan was written before the drop. Write one with \
+             `todo.write` before going further, so the next drop has something to carry.",
+        );
+    } else {
+        out.push_str("\n\n## Where you got to\n");
+        let rows: Vec<String> = plan
+            .iter()
+            .map(|item| format!("{} {}", item.status.mark(), item.text))
+            .collect();
+        out.push_str(&rows.join("\n"));
+    }
+
+    if let Some(error) = last_error {
+        out.push_str("\n\n## What went wrong last\n");
+        out.push_str(error.trim());
+    }
+
+    out.push_str("\n\n## What you still hold\n");
+    if live_handles.is_empty() {
+        out.push_str("Nothing yet.");
+    } else {
+        out.push_str(&live_handles.join(", "));
+    }
+    out
 }

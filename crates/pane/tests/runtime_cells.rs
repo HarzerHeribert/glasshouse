@@ -3240,3 +3240,58 @@ fn a_project_script_runs_when_every_command_line_is_admitted() {
         "a project script could not be executed"
     );
 }
+
+// --- a name that is not defined, caught before the cell runs ------------
+
+/// The turn this saves: a typo used to cost a whole round trip — the cell
+/// ran, V8 threw `ReferenceError`, and the model only read it in the next
+/// result. Now nothing runs and the answer names the line.
+#[test]
+fn an_undefined_name_is_reported_before_the_cell_runs() {
+    let fixture = Fixture::new("undefined-name");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("undefined-name-session");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+
+    let outcome = runtime.run_cell("const n = 1;\nreturn totl + n;\n");
+    let error = threw(&outcome);
+    assert_eq!(error.class, "ReferenceError");
+    assert!(error.message.contains("`totl` is not defined"), "{error:?}");
+    assert_eq!(error.line, Some(2), "the model's own line");
+    assert!(
+        outcome.turn().record.calls.is_empty(),
+        "the cell ran despite naming something undefined"
+    );
+}
+
+/// The three shapes that are legal and must never be accused, because a false
+/// positive has the model "fix" code that was right.
+#[test]
+fn legal_free_names_are_never_accused() {
+    let fixture = Fixture::new("free-names-ok");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("free-names-ok-session");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+
+    // A non-enumerable built-in. `Set`, `JSON` and `Math` are non-enumerable
+    // on `globalThis` by specification, and the first version of this check
+    // enumerated only enumerable properties and accused every one of them.
+    let built_ins = runtime.run_cell(
+        "const s = new Set([1, 2, 2]);\nreturn JSON.stringify([s.size, Math.max(1, 2)]);\n",
+    );
+    assert_eq!(returned_string(&built_ins), "[2,2]");
+
+    // A handle bound by an earlier cell.
+    runtime.run_cell("const kept = [1, 2, 3];\n");
+    let across = runtime.run_cell("return String(kept.length);\n");
+    assert_eq!(returned_string(&across), "3");
+
+    // `typeof x` is the one place an undefined name is legal, and it is how
+    // a cell asks whether a handle it freed is really gone.
+    let probe = runtime.run_cell("return typeof neverBoundAnywhere;\n");
+    assert_eq!(returned_string(&probe), "undefined");
+
+    // A host function, and a name declared later in the same cell.
+    let hoisted = runtime.run_cell("const r = later();\nfunction later() { return \"ok\"; }\nreturn r;\n");
+    assert_eq!(returned_string(&hoisted), "ok");
+}

@@ -373,3 +373,103 @@ pub(crate) fn headroom_replay_facet(
         )
     }
 }
+
+/// Versioned read-only catalogue for Pane. Provider declarations describe scope,
+/// not an assertion that every account currently has quota for every model.
+pub(crate) fn entitlements_json(runtime: &Runtime, refresh: bool) -> anyhow::Result<String> {
+    use glasshouse::config::{EntitlementBacking, EntitlementModels};
+    let user = UserConfig::load(runtime.paths())?;
+    let project = config::load_project_config(runtime.project())?;
+    let effective = EffectiveConfig::new(&user, project.as_ref());
+    if refresh {
+        refresh_missing_catalogues(runtime, &effective)?;
+    }
+    let entries = entitlement_pool_with_telemetry(runtime, &effective)?;
+    let mut accounts: Vec<_> = entries.iter().map(|entry| {
+        let provider = match entry.backing() {
+            EntitlementBacking::Provider(name) => Some(name.as_str()),
+            _ => None,
+        };
+        let (mut models, scope) = match entry.models() {
+            Some(EntitlementModels::Declared { models, .. }) => (models.clone(), "provider-declared"),
+            Some(EntitlementModels::HarnessDecided) => (vec![], "harness-decides"),
+            None => (vec![], "unknown"),
+        };
+        models.sort();
+        models.dedup();
+        serde_json::json!({"account":entry.name(),"provider":provider,"models":models,"scope":scope})
+    }).collect();
+    accounts.sort_by(|a, b| a["account"].as_str().cmp(&b["account"].as_str()));
+    Ok(serde_json::to_string(&serde_json::json!({"version":1,"accounts":accounts}))? + "\n")
+}
+
+/// Reuses the shell's bounded discovery and credential resolver. Invoked only
+/// by `entitlements --json --refresh`, never on startup or a timer.
+fn refresh_missing_catalogues(
+    runtime: &Runtime,
+    effective: &EffectiveConfig<'_>,
+) -> anyhow::Result<()> {
+    use glasshouse::config::EntitlementBacking;
+    use glasshouse::provider::cache::{ModelCache, ModelCatalogue};
+    use glasshouse::provider::discovery::{self, ModelFetch, ProbeRequest, ProbeTarget};
+    use glasshouse::secret::SecretStore;
+    let cache = ModelCache::new(runtime.paths());
+    let entries = entitlement_pool_with_telemetry(runtime, effective)?;
+    let mut providers = std::collections::BTreeMap::new();
+    for entry in entries {
+        let EntitlementBacking::Provider(name) = entry.backing() else {
+            continue;
+        };
+        if cache.load(name).is_some() {
+            continue;
+        }
+        let Ok(provider) = effective.configured_provider(name) else {
+            continue;
+        };
+        if !provider.value.model_list_endpoint.is_known_present() {
+            continue;
+        }
+        providers
+            .entry(name.clone())
+            .or_insert((provider.value, entry.credential().cloned()));
+    }
+    let jobs: Vec<_> = providers.into_values().collect();
+    for batch in jobs.chunks(4) {
+        std::thread::scope(|scope| {
+            for (provider, account_credential) in batch {
+                let cache_root = cache.root().to_path_buf();
+                scope.spawn(move || {
+                    let Some(protocol) = provider.protocols.first() else {
+                        return;
+                    };
+                    let store = glasshouse::secret::native::PreferNativeSecretStore::detect();
+                    let credential = account_credential
+                        .as_ref()
+                        .and_then(|r| store.resolve(r))
+                        .or_else(|| provider.secret_refs().iter().find_map(|r| store.resolve(r)));
+                    let request = ProbeRequest::new(
+                        &provider.name,
+                        protocol.protocol,
+                        &protocol.base_url,
+                        ProbeTarget::ModelList,
+                        provider.headers.clone(),
+                        credential,
+                    );
+                    if let ModelFetch::Catalogue(models) =
+                        discovery::model_catalogue(&request, discovery::ProbeTimeouts::default())
+                    {
+                        let catalogue = ModelCatalogue::new(
+                            &provider.name,
+                            &protocol.base_url,
+                            request.url(),
+                            glasshouse::provider::cache::now_unix_seconds(),
+                            models,
+                        );
+                        let _ = ModelCache::at(cache_root).store(&catalogue);
+                    }
+                });
+            }
+        });
+    }
+    Ok(())
+}

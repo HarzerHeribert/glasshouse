@@ -1343,3 +1343,85 @@ fn write_settings(root: &Path) -> String {
     let root = root.to_string_lossy().replace('\\', "/");
     format!(r#"{{"permissions":{{"allow":["Read({root}/**)","Write({root}/**)"]}}}}"#)
 }
+
+// --- the session's credentials are not the model's ---------------------
+
+/// The policy, as a pure function: pane's own three, and anything whose name
+/// ends in a credential word.
+#[test]
+fn credential_shaped_variable_names_are_recognised() {
+    for withheld in [
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "ANTHROPIC_BASE_URL",
+        "OPENAI_API_KEY",
+        "GITHUB_TOKEN",
+        "AWS_SECRET_ACCESS_KEY",
+        "SOME_VENDOR_CREDENTIALS",
+        "DB_PASSWORD",
+    ] {
+        assert!(
+            invoke::is_credential_variable(withheld),
+            "`{withheld}` is a credential and would reach the model"
+        );
+    }
+    // `TOKENIZER` is the one that makes the rule "a whole segment" rather
+    // than "a substring": it contains `TOKEN` and is not a credential.
+    for kept in [
+        "PATH", "HOME", "LANG", "TERM", "CARGO_TARGET_DIR", "TOKENIZER", "KEYBOARD_LAYOUT",
+    ] {
+        assert!(
+            !invoke::is_credential_variable(kept),
+            "`{kept}` is not a credential and withholding it breaks tools"
+        );
+    }
+}
+
+static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// The wiring, through a real confined child: a provider key in the session's
+/// environment is not in the child's.
+///
+/// Measured 2026-09-06, before this: `printenv ANTHROPIC_API_KEY` from inside
+/// a cell returned the key, and a cell's output reaches the transcript, the
+/// rollout file on disk and every hook payload — an exfiltration path that
+/// needs no network at all, which is why denying the network did not cover it.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn a_confined_child_cannot_read_the_sessions_provider_key() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let fixture = Fixture::new("env-scrub");
+    let root = fixture.root.to_string_lossy().replace('\\', "/");
+    let profile = Profile::compile(
+        &fixture.root,
+        Some(&format!(
+            r#"{{"permissions":{{"allow":["Read({root}/**)","Bash"]}}}}"#
+        )),
+    );
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("env-scrub");
+    let ctx = context(&profile, &glasshouse, &session);
+
+    // SAFETY: `_guard` holds `ENV_LOCK` for the whole test, so no other test
+    // in this binary mutates the environment while these are set.
+    unsafe {
+        std::env::set_var("ANTHROPIC_API_KEY", "pane-test-canary-key");
+        std::env::set_var("PANE_TEST_ORDINARY", "pane-test-ordinary-value");
+    }
+    let result = invoke::run(&ctx, "bash", &Args::new().with("command", "env"));
+    unsafe {
+        std::env::remove_var("ANTHROPIC_API_KEY");
+        std::env::remove_var("PANE_TEST_ORDINARY");
+    }
+
+    let out = result.expect("`env` should run").stdout;
+    assert!(
+        !out.contains("pane-test-canary-key"),
+        "the provider key reached the model's own command:\n{out}"
+    );
+    assert!(
+        out.contains("pane-test-ordinary-value"),
+        "an ordinary variable was withheld too, which breaks every build:\n{out}"
+    );
+    assert!(out.contains("PATH="), "PATH did not survive:\n{out}");
+}

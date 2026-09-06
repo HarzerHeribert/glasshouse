@@ -1,7 +1,7 @@
 //! Acceptance tests for GH-PANE-61E-PROMPT against
 //! `docs/product/pane/model-contract.md`.
 
-use pane::contract::SessionId;
+use pane::contract::{Block, Conversation, Message, Role, SessionId};
 use pane::glasshouse::Glasshouse;
 use pane::prompt::{self, Budget, CellResult, ErrorSection, ExhaustedReason, Extracted};
 use pane::runtime::handles::{HandleMeta, HandleTable, render_table};
@@ -135,7 +135,20 @@ fn the_worked_turn_renders_byte_for_byte() {
 /// without this test noticing.
 #[test]
 fn the_preamble_is_the_contracts_verbatim() {
-    let expected = "You act by writing TypeScript. Each turn you emit exactly one code block\ntagged `pane`; pane runs it in a persistent V8 isolate and answers with\nwhat your program produced.\n\nTool results are live objects, not text. `await grep(...)` returns an\narray you can filter, index and count in the next line of the same\nprogram. You are shown each object's name and a short preview; you are\nnever shown its payload, and you never need it.\n\nBindings persist. A top-level `const` in one cell is in scope in the\nnext. Redeclaring a name replaces the object and frees the old one.\n\nA cell that runs off the end yields: you get the handle table and another\nturn. A top-level `return` ends the task with that value. Return when the\ntask is answered, not before.\n\nReturning a string answers the person directly — it is rendered and kept\nas your reply, and nothing is asked of you afterwards, so fill it from what\nthe run actually produced rather than from what you expected it to. Do not\nanswer from a call that threw, was refused, was cancelled, or whose guard\ndid not hold: yield instead and say what you found. Call `yieldNow(reason)`\nto hand back from inside a branch; it is a yield, not an error.\n\nA cell that throws is answered, not retried. You get the error, the line,\nand every binding that completed before the throw. Write the next cell.\n\nA call outside this session's sandbox grant throws PermissionDenied. It\nis catchable and it is final: nothing you write widens a grant.";
+    let contract = include_str!("../../../docs/product/pane/model-contract.md");
+    let section = contract
+        .split("## 2. The system preamble, verbatim")
+        .nth(1)
+        .unwrap()
+        .split("## 3.")
+        .next()
+        .unwrap();
+    let expected = section
+        .trim_matches('\n')
+        .lines()
+        .map(|line| line.strip_prefix("    ").unwrap_or(line))
+        .collect::<Vec<_>>()
+        .join("\n");
     assert_eq!(prompt::PREAMBLE, expected);
 }
 
@@ -168,7 +181,8 @@ fn every_registered_tool_has_exactly_one_declaration_and_no_other_does() {
     // Scoped to the `## Tools` section: the `## Runtime` block declares the
     // host bindings that are not tools, and counting over the whole system
     // block would read those as tool declarations.
-    let tools_start = system.find("## Tools\n\n").expect("a `## Tools` section") + "## Tools\n\n".len();
+    let tools_start =
+        system.find("## Tools\n\n").expect("a `## Tools` section") + "## Tools\n\n".len();
     let tools_end = system[tools_start..]
         .find("\n\n## Runtime\n\n")
         .expect("a `## Runtime` section after the tools")
@@ -519,4 +533,161 @@ fn a_stack_overflow_renders_no_position_line_and_no_zero_frames() {
     assert_eq!(ErrorSection::position_of(Some(2), Some(4)), Some((2, 4)));
     assert_eq!(ErrorSection::position_of(Some(1), Some(0)), Some((1, 0)));
     assert_eq!(ErrorSection::position_of(None, Some(0)), None);
+}
+
+// --- compaction --------------------------------------------------------
+
+fn sample_result(cell: u64, plan: Vec<pane::runtime::outcome::PlanItem>) -> String {
+    prompt::render_result(&CellResult {
+        cell,
+        elapsed_ms: 12,
+        error: None,
+        yield_reason: None,
+        handle_table: "hits  Array  120 rows · preview 8 tok".to_string(),
+        stdout_tail: Some("the cell printed this".to_string()),
+        budget: Budget {
+            turn_cap: 8_000,
+            task_used: 3_412,
+            task_cap: 400_000,
+            cells_used: cell,
+            cells_cap: 40,
+        },
+        plan,
+    })
+}
+
+/// The lossless claim, checked rather than asserted: every section compaction
+/// removes is present, in full, in the newest result.
+#[test]
+fn compaction_removes_only_what_the_newest_result_restates() {
+    let plan = vec![pane::runtime::outcome::PlanItem {
+        text: "the one step".to_string(),
+        status: pane::runtime::outcome::PlanStatus::Active,
+    }];
+    let old = sample_result(1, plan.clone());
+    let newest = sample_result(2, plan);
+
+    let compacted = prompt::compact_result(&old);
+    assert!(compacted.len() < old.len(), "nothing was removed");
+
+    for section in ["## Handles", "## Plan", "## Budget"] {
+        assert!(
+            !compacted.contains(section),
+            "`{section}` survived compaction: {compacted}"
+        );
+        assert!(
+            newest.contains(section),
+            "`{section}` was dropped but the newest result does not carry it either"
+        );
+    }
+    // What belongs to that cell alone is kept.
+    assert!(compacted.starts_with("[cell 1 yielded"), "{compacted}");
+    assert!(
+        compacted.contains("## stdout\nthe cell printed this"),
+        "{compacted}"
+    );
+}
+
+/// An error belongs to the cell that threw and appears nowhere else, so it
+/// survives however old the turn is.
+#[test]
+fn compaction_never_drops_an_error() {
+    let rendered = prompt::render_result(&CellResult {
+        cell: 1,
+        elapsed_ms: 1,
+        error: Some(ErrorSection {
+            class: "TypeError".to_string(),
+            message: "hits.filter is not a function".to_string(),
+            position: Some((3, 11)),
+            frames: Vec::new(),
+        }),
+        yield_reason: None,
+        handle_table: "hits  Array".to_string(),
+        stdout_tail: None,
+        budget: Budget {
+            turn_cap: 8_000,
+            task_used: 1,
+            task_cap: 400_000,
+            cells_used: 1,
+            cells_cap: 40,
+        },
+        plan: Vec::new(),
+    });
+    let compacted = prompt::compact_result(&rendered);
+    assert!(
+        compacted.contains("TypeError: hits.filter is not a function"),
+        "{compacted}"
+    );
+    assert!(compacted.contains("line 3, column 11"), "{compacted}");
+    assert!(!compacted.contains("## Handles"), "{compacted}");
+}
+
+/// Two things are never touched: the newest rendered result, and anything a
+/// person typed.
+#[test]
+fn compaction_spares_the_newest_result_and_every_word_a_person_wrote() {
+    let person = "find every caller of IntegrationId and summarise them";
+    let mut conversation = Conversation {
+        system: "sys".to_string(),
+        messages: vec![
+            Message::text(Role::User, person),
+            Message::text(Role::Assistant, "```pane\nconst a = 1;\n```"),
+            Message::text(Role::User, sample_result(1, Vec::new())),
+            Message::text(Role::Assistant, "```pane\nconst b = 2;\n```"),
+            Message::text(Role::User, sample_result(2, Vec::new())),
+        ],
+    };
+    let report = prompt::compact_conversation(&mut conversation);
+    assert_eq!(
+        report.messages, 1,
+        "exactly the one older result was compacted"
+    );
+
+    let text = |index: usize| match &conversation.messages[index].content[0] {
+        Block::Text(text) => text.clone(),
+    };
+    assert_eq!(text(0), person, "a person's own words were edited");
+    assert!(
+        !text(2).contains("## Handles"),
+        "the older result kept its table"
+    );
+    assert!(
+        text(4).contains("## Handles"),
+        "the newest result was compacted"
+    );
+    assert!(
+        text(1).contains("const a = 1"),
+        "an assistant turn was edited"
+    );
+}
+
+/// The checkpoint's job is to say the objects survived; a model told only
+/// "the conversation was dropped" would re-run everything it still holds.
+#[test]
+fn the_checkpoint_names_the_live_handles_and_the_plan() {
+    let plan = vec![
+        pane::runtime::outcome::PlanItem {
+            text: "read the files".to_string(),
+            status: pane::runtime::outcome::PlanStatus::Done,
+        },
+        pane::runtime::outcome::PlanItem {
+            text: "summarise them".to_string(),
+            status: pane::runtime::outcome::PlanStatus::Active,
+        },
+    ];
+    let text = prompt::checkpoint(
+        "summarise every caller",
+        &plan,
+        &["hits".to_string(), "files".to_string()],
+        Some("http status: 400 — prompt is too long"),
+    );
+    assert!(text.contains("summarise every caller"), "{text}");
+    assert!(text.contains("[x] read the files"), "{text}");
+    assert!(text.contains("[~] summarise them"), "{text}");
+    assert!(text.contains("hits, files"), "{text}");
+    assert!(
+        text.contains("every handle below is live"),
+        "the checkpoint does not say the objects survived: {text}"
+    );
+    assert!(text.contains("prompt is too long"), "{text}");
 }

@@ -27,6 +27,41 @@ const MESSAGES_PATH: &str = "/v1/messages";
 /// literal, so both stay in one place.
 pub const ANTHROPIC_VERSION: &str = "2023-06-01";
 
+/// User-selected response effort. Auto leaves the existing wire body untouched.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Effort {
+    #[default]
+    Auto,
+    Low,
+    Medium,
+    High,
+    Xhigh,
+    Max,
+}
+impl Effort {
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "auto" => Some(Self::Auto),
+            "low" => Some(Self::Low),
+            "medium" => Some(Self::Medium),
+            "high" => Some(Self::High),
+            "xhigh" => Some(Self::Xhigh),
+            "max" => Some(Self::Max),
+            _ => None,
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Low => "low",
+            Self::Medium => "medium",
+            Self::High => "high",
+            Self::Xhigh => "xhigh",
+            Self::Max => "max",
+        }
+    }
+}
+
 /// The model pane asks for absent an explicit choice.
 pub const MODEL: &str = "claude-sonnet-5";
 
@@ -84,14 +119,45 @@ enum WireBlock {
 /// that is what makes the byte-identity in `the_gateway_hop_changes_no_byte`
 /// hold structurally rather than by care.
 pub fn request_body(conversation: &Conversation) -> Vec<u8> {
-    let body = RequestBody {
-        model: MODEL,
-        max_tokens: MAX_TOKENS,
-        system: &conversation.system,
-        messages: conversation.messages.iter().map(to_wire_message).collect(),
-        stream: None,
-    };
-    serde_json::to_vec(&body).expect("Conversation has no non-serialisable field")
+    request_body_on_model(conversation, MODEL)
+}
+
+/// The same request body used for sending and estimating an explicitly selected model.
+pub fn request_body_on_model(conversation: &Conversation, model: &str) -> Vec<u8> {
+    request_body_configured(conversation, model, Effort::Auto)
+}
+
+pub fn request_body_configured(
+    conversation: &Conversation,
+    model: &str,
+    effort: Effort,
+) -> Vec<u8> {
+    configure_effort(
+        build_request_body(model, MAX_TOKENS, conversation),
+        model,
+        effort,
+    )
+}
+
+fn configure_effort(body: Vec<u8>, model: &str, effort: Effort) -> Vec<u8> {
+    if effort == Effort::Auto {
+        return body;
+    }
+    let mut value: serde_json::Value = serde_json::from_slice(&body).expect("serialized request");
+    if model.contains("claude") {
+        value["output_config"] = serde_json::json!({"effort": effort.name()});
+    } else {
+        // Glasshouse's Anthropic-to-provider codec maps these budgets to low,
+        // medium and high; leave response space above the thinking allocation.
+        let budget = match effort {
+            Effort::Low => 4096,
+            Effort::Medium => 16384,
+            _ => 32769,
+        };
+        value["thinking"] = serde_json::json!({"type":"enabled", "budget_tokens":budget});
+        value["max_tokens"] = serde_json::json!(budget + MAX_TOKENS);
+    }
+    serde_json::to_vec(&value).expect("serialized request")
 }
 
 fn to_wire_message(message: &Message) -> WireMessage {
@@ -179,6 +245,42 @@ pub enum WireError {
     Stream(String),
 }
 
+impl WireError {
+    /// Whether this is the provider saying the conversation no longer fits.
+    ///
+    /// The invariant: **an overflow is a state to recover from, not a
+    /// failure to report.** Before this existed a conversation that outgrew
+    /// the window became `Status { 400 }`, the task ended, and the session
+    /// was over — the one failure a long task is guaranteed to reach.
+    ///
+    /// Matched on the message rather than a code because there is no
+    /// distinct code: every provider here answers 400, and only the body
+    /// separates "too long" from "malformed". The phrases are the ones
+    /// Anthropic and the OpenAI-compatible gateways actually send; an
+    /// unrecognised 400 stays an ordinary error rather than being retried
+    /// as an overflow, so a mis-match costs a report and never a loop.
+    pub fn is_context_overflow(&self) -> bool {
+        let WireError::Status { status, body_head } = self else {
+            return false;
+        };
+        if !matches!(status, 400 | 413) {
+            return false;
+        }
+        let body = body_head.to_ascii_lowercase();
+        [
+            "prompt is too long",
+            "context length",
+            "context_length_exceeded",
+            "maximum context",
+            "too many tokens",
+            "exceeds the maximum",
+            "input length and `max_tokens` exceed",
+        ]
+        .iter()
+        .any(|phrase| body.contains(phrase))
+    }
+}
+
 impl fmt::Display for WireError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -264,8 +366,20 @@ fn credential_header() -> Option<(&'static str, String)> {
 /// always be empty. With it off, `send` only errors on an actual transport
 /// failure, and status is read and handled here instead.
 pub fn send_turn(conversation: &Conversation) -> Result<Turn, WireError> {
+    send_turn_on_model(conversation, MODEL)
+}
+
+/// A task request with its active model, preserving provider usage accounting.
+pub fn send_turn_on_model(conversation: &Conversation, model: &str) -> Result<Turn, WireError> {
+    send_turn_configured(conversation, model, Effort::Auto)
+}
+pub fn send_turn_configured(
+    conversation: &Conversation,
+    model: &str,
+    effort: Effort,
+) -> Result<Turn, WireError> {
     let url = format!("{}{MESSAGES_PATH}", base_url());
-    let body = request_body(conversation);
+    let body = request_body_configured(conversation, model, effort);
 
     let mut request = ureq::post(&url)
         .config()
@@ -300,9 +414,8 @@ pub fn send_turn(conversation: &Conversation) -> Result<Turn, WireError> {
 /// one-line JSON answer, and a header the ledger can key on before the
 /// gateway reads it itself.
 ///
-/// [`request_body`] stays untouched: this builds its own body rather than
-/// share it, so nothing here can change a byte of an ordinary task turn's
-/// request or its pinned golden test -- `send_turn` still names [`MODEL`].
+/// The serializer is shared with task requests. This call supplies its own
+/// model and token limit; [`send_turn`] keeps the default [`MODEL`].
 pub fn send_turn_with(
     conversation: &Conversation,
     model: &str,
@@ -342,9 +455,7 @@ pub fn send_turn_with(
     parse_response(&text).map(|turn| turn.message)
 }
 
-/// [`send_turn_with`]'s own body, factored out so `model` can be asserted on
-/// without a socket -- [`request_body`] is a separate, untouched function and
-/// shares nothing with this one, so the pinned path never sees `model`.
+/// Shared serialization for default, selected-model, and supervisor requests.
 fn build_request_body(model: &str, max_tokens: u32, conversation: &Conversation) -> Vec<u8> {
     let body = RequestBody {
         model,
@@ -511,6 +622,14 @@ pub fn send_turn_streaming(
     model: &str,
     on_delta: &mut dyn FnMut(&str),
 ) -> Result<Turn, WireError> {
+    send_turn_streaming_configured(conversation, model, Effort::Auto, on_delta)
+}
+pub fn send_turn_streaming_configured(
+    conversation: &Conversation,
+    model: &str,
+    effort: Effort,
+    on_delta: &mut dyn FnMut(&str),
+) -> Result<Turn, WireError> {
     use std::io::{BufRead, BufReader};
 
     let url = format!("{}{MESSAGES_PATH}", base_url());
@@ -521,7 +640,11 @@ pub fn send_turn_streaming(
         messages: conversation.messages.iter().map(to_wire_message).collect(),
         stream: Some(true),
     };
-    let body = serde_json::to_vec(&body).expect("Conversation has no non-serialisable field");
+    let body = configure_effort(
+        serde_json::to_vec(&body).expect("Conversation has no non-serialisable field"),
+        model,
+        effort,
+    );
 
     let mut request = ureq::post(&url)
         .config()
@@ -637,11 +760,17 @@ mod tests {
                 seen.push_str(&text);
             }
         }
-        assert_eq!(seen, "1, 2, 3", "the deltas were not handed over as they arrived");
+        assert_eq!(
+            seen, "1, 2, 3",
+            "the deltas were not handed over as they arrived"
+        );
 
         let turn = acc.finish().unwrap();
         assert_eq!(turn.message.role, Role::Assistant);
-        assert_eq!(turn.message.content, vec![Block::Text("1, 2, 3".to_string())]);
+        assert_eq!(
+            turn.message.content,
+            vec![Block::Text("1, 2, 3".to_string())]
+        );
         let usage = turn.usage.expect("the stream reported usage");
         assert_eq!(usage.input_tokens, 13);
         assert_eq!(
@@ -736,5 +865,37 @@ mod tests {
         let body = r#"{"role":"user","content":[]}"#;
         let err = parse_response(body).unwrap_err();
         assert!(matches!(err, WireError::UnexpectedRole(role) if role == "user"));
+    }
+}
+
+#[cfg(test)]
+mod effort_tests {
+    use super::*;
+    #[test]
+    fn effort_preserves_auto_bytes_and_selects_the_supported_wire_form() {
+        let conversation = Conversation {
+            system: "system".into(),
+            messages: vec![],
+        };
+        assert_eq!(
+            request_body_configured(&conversation, MODEL, Effort::Auto),
+            request_body(&conversation)
+        );
+        let claude: serde_json::Value = serde_json::from_slice(&request_body_configured(
+            &conversation,
+            "claude-fable-5.1",
+            Effort::High,
+        ))
+        .unwrap();
+        assert_eq!(claude["output_config"]["effort"], "high");
+        assert!(claude.get("thinking").is_none());
+        let translated: serde_json::Value = serde_json::from_slice(&request_body_configured(
+            &conversation,
+            "deepseek-v4-flash",
+            Effort::Medium,
+        ))
+        .unwrap();
+        assert_eq!(translated["thinking"]["budget_tokens"], 16384);
+        assert!(translated["max_tokens"].as_u64().unwrap() > 16384);
     }
 }

@@ -160,3 +160,15 @@ fn the_entitlement_comes_from_quota_context() {
     assert_eq!(served.quota_context.as_deref(), Some("team-alpha"));
     assert!(served.is_known());
 }
+
+#[test]
+fn local_firewall_bookkeeping_does_not_become_the_serving_model() {
+    let dir = scratch_dir("ignore-firewall");
+    let script = write_glasshouse_script(
+        &dir,
+        "{\"provider\":\"real\",\"model\":\"deepseek-v4-flash\",\"quota_context\":\"account\",\"input_tokens\":5}\n{\"provider\":\"glasshouse\",\"model\":\"context-firewall\",\"quota_context\":\"bash\",\"route\":\"unconfirmed-exit\"}",
+    );
+    let served = served_by(&Glasshouse::Command { glasshouse: script }, UNIX_EPOCH);
+    assert_eq!(served.model.as_deref(), Some("deepseek-v4-flash"));
+    assert_eq!(served.quota_context.as_deref(), Some("account"));
+}

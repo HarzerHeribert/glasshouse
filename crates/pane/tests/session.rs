@@ -145,6 +145,80 @@ fn handle_one_request<F: Fn(&str) -> String>(
     let _ = stream.flush();
 }
 
+/// The same endpoint, answering with a **status** as well as a body.
+///
+/// A context overflow is a 400, not a reply, so a recovery test cannot be
+/// written against a provider that only ever answers 200.
+fn start_status_answering_provider<F>(turns: usize, answer: F) -> (String, Arc<Mutex<Vec<String>>>)
+where
+    F: Fn(&str) -> (u16, String) + Send + 'static,
+{
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let bodies = Arc::new(Mutex::new(Vec::new()));
+    let bodies_thread = Arc::clone(&bodies);
+
+    thread::spawn(move || {
+        for _ in 0..turns {
+            let Ok((stream, _)) = listener.accept() else {
+                return;
+            };
+            handle_one_request_with_status(stream, &answer, &bodies_thread);
+        }
+    });
+
+    (format!("http://127.0.0.1:{port}"), bodies)
+}
+
+fn handle_one_request_with_status<F: Fn(&str) -> (u16, String)>(
+    mut stream: TcpStream,
+    answer: &F,
+    bodies: &Mutex<Vec<String>>,
+) {
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    let mut content_length = 0usize;
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+            return;
+        }
+        if line == "\r\n" || line == "\n" {
+            break;
+        }
+        if let Some(rest) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+            content_length = rest.trim().parse().unwrap_or(0);
+        }
+    }
+    let mut body = vec![0u8; content_length];
+    if reader.read_exact(&mut body).is_err() {
+        return;
+    }
+    let body = String::from_utf8_lossy(&body).into_owned();
+    let (status, reply) = answer(&body);
+    bodies.lock().unwrap().push(body);
+
+    let response_body = reply.as_bytes();
+    let response = format!(
+        "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+        response_body.len()
+    );
+    let _ = stream.write_all(response.as_bytes());
+    let _ = stream.write_all(response_body);
+    let _ = stream.flush();
+}
+
+/// The body a provider sends when the conversation no longer fits.
+fn too_long_body() -> String {
+    serde_json::json!({
+        "type": "error",
+        "error": {
+            "type": "invalid_request_error",
+            "message": "prompt is too long: 250000 tokens > 200000 maximum"
+        }
+    })
+    .to_string()
+}
+
 /// Builds a Messages-shaped response through `serde_json` rather than a
 /// format string, so a reply carrying a quote or a newline (the shape
 /// `nothing_the_model_returns_is_executed` needs) still serialises to valid
@@ -428,7 +502,7 @@ fn a_slash_command_is_answered_without_a_request() {
 }
 
 #[test]
-fn an_unbuilt_slash_command_names_its_subphase() {
+fn handles_command_reports_the_recorded_preview() {
     let root = scratch_dir("unbuilt-root");
     let rollout = root.join("rollout.jsonl");
     let base_url = refused_base_url();
@@ -442,8 +516,8 @@ fn an_unbuilt_slash_command_names_its_subphase() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("61E"),
-        "an unbuilt built-in must name its own sub-phase: {stdout}"
+        stdout.contains("No handles recorded yet"),
+        "the command must report available recorded handles: {stdout}"
     );
 }
 
@@ -739,7 +813,7 @@ fn a_project_skill_resolves_by_name() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("ProjectSkill"),
+        stdout.contains("project skill"),
         "resolving a bare project skill by name never reached the binary's ProjectSkill branch:\n{stdout}"
     );
 }
@@ -967,11 +1041,11 @@ fn two_pane_blocks_run_neither() {
     // screen carries `undefined` as the assistant's reply, unquoted.
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("assistant: undefined"),
+        stdout.contains(" undefined"),
         "the first block's binding must not exist in the isolate:\n{stdout}"
     );
     assert!(
-        !stdout.contains("assistant: number"),
+        !stdout.contains(" number"),
         "the first block ran and bound `a`:\n{stdout}"
     );
 }
@@ -987,7 +1061,7 @@ fn a_cell_that_throws_is_answered_and_the_session_continues() {
     let absent = root.join("no-such-glasshouse");
 
     let (base_url, bodies) = start_fake_provider(vec![
-        assistant_reply("```pane\nconst before = 1;\nnosuch.field;\n```"),
+        assistant_reply("```pane\nconst before = 1;\nthrow new ReferenceError(\"fixture\");\n```"),
         ending_reply(),
     ]);
 
@@ -1026,7 +1100,7 @@ fn a_cell_that_throws_is_answered_and_the_session_continues() {
         "the binding made before the throw must still be in the table: {answer}"
     );
     assert_eq!(
-        bodies[1].matches("nosuch.field").count(),
+        bodies[1].matches("throw new ReferenceError").count(),
         1,
         "the turn is never retried: the throwing program appears once, as the \
          assistant message that sent it"
@@ -1086,7 +1160,15 @@ fn the_system_block_is_render_systems_own_bytes() {
 
     let bodies = bodies.lock().unwrap();
     let request: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
-    assert_eq!(request["system"].as_str().unwrap(), expected);
+    let expected = pane::prompt::with_task_context(
+        &pane::contract::Conversation {
+            system: expected,
+            messages: Vec::new(),
+        },
+        pane::wire::MODEL,
+        "hi",
+    );
+    assert_eq!(request["system"].as_str().unwrap(), expected.system);
 }
 
 /// §6's cell cap, and the one sentence that replaces the preamble when a
@@ -1316,7 +1398,7 @@ fn a_returned_string_is_the_assistants_turn_and_no_request_follows() {
 
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("assistant: Three files name it; two are tests."),
+        stdout.contains(" Three files name it; two are tests."),
         "the reply must be on the screen as the assistant's turn:\n{stdout}"
     );
 }
@@ -1333,7 +1415,7 @@ fn a_throw_never_becomes_a_terminal_response() {
 
     let (base_url, bodies) = start_fake_provider(vec![
         assistant_reply(
-            "```pane\nconst before = 1;\nnosuch.field;\nreturn \"CONFIDENT SENTENCE\";\n```",
+            "```pane\nconst before = 1;\nthrow new ReferenceError(\"fixture\");\nreturn \"CONFIDENT SENTENCE\";\n```",
         ),
         ending_reply(),
     ]);
@@ -1414,7 +1496,7 @@ fn a_returned_object_is_rendered_as_its_json_with_values() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains(r#"assistant: {"matches":3,"files":2"#),
+        stdout.contains(r#" {"matches":3,"files":2"#),
         "the values, not their types, reach the screen:\n{stdout}"
     );
 
@@ -2944,5 +3026,248 @@ fn without_a_grant_the_system_block_says_no_command_may_run() {
     assert!(
         system.contains("no command may be run at all"),
         "got:\n{system}"
+    );
+}
+
+// --- /model actually selects the model ---------------------------------
+
+/// The defect: `/model <slug>` resolved, printed `/model (BuiltIn(Model))`
+/// and changed nothing, so the request still named the compiled-in default.
+/// Observed 2026-09-06 while driving a real gateway — the run looked like it
+/// had switched model and had not.
+#[test]
+fn slash_model_changes_the_slug_the_next_request_carries() {
+    let root = scratch_dir("model-switch-root");
+    let rollout = root.join("rollout.jsonl");
+    let (base_url, bodies) = start_fake_provider(vec![ending_reply()]);
+
+    let output = run_session_stdin(
+        &root,
+        &rollout,
+        "sess-model-switch",
+        &["/model deepseek-v4-flash", "do the thing"],
+        &base_url,
+        None,
+        false,
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let bodies = bodies.lock().unwrap();
+    let request: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
+    assert_eq!(
+        request["model"].as_str().unwrap(),
+        "deepseek-v4-flash",
+        "the request carried the default rather than the slug `/model` was given"
+    );
+    assert_ne!(request["model"].as_str().unwrap(), pane::wire::MODEL);
+}
+
+/// A slash command answers between tasks, so `/model` alone must name what
+/// is active without sending anything at all.
+#[test]
+fn model_picker_names_the_active_slug_without_calling_the_provider() {
+    let root = scratch_dir("model-report-root");
+    let rollout = root.join("rollout.jsonl");
+    let (base_url, bodies) = start_fake_provider(vec![ending_reply()]);
+
+    let output = run_session_stdin(
+        &root,
+        &rollout,
+        "sess-model-report",
+        &["/model"],
+        &base_url,
+        None,
+        false,
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(&format!("Current: {}", pane::wire::MODEL)),
+        "`/model` did not name the active slug: {stdout}"
+    );
+    assert!(
+        bodies.lock().unwrap().is_empty(),
+        "`/model` reached the provider"
+    );
+}
+
+/// A slug carrying a space is a typo, not a model, and taking it would send
+/// a request that can only 404 — so it is refused and the active slug stands.
+#[test]
+fn a_model_slug_with_a_space_is_refused_and_the_active_slug_stands() {
+    let root = scratch_dir("model-refuse-root");
+    let rollout = root.join("rollout.jsonl");
+    let (base_url, bodies) = start_fake_provider(vec![ending_reply()]);
+
+    let output = run_session_stdin(
+        &root,
+        &rollout,
+        "sess-model-refuse",
+        &["/model claude sonnet 5", "do the thing"],
+        &base_url,
+        None,
+        false,
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("/model expects one model name"),
+        "no refusal printed: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    let bodies = bodies.lock().unwrap();
+    let request: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
+    assert_eq!(
+        request["model"].as_str().unwrap(),
+        pane::wire::MODEL,
+        "a refused slug still changed the model"
+    );
+}
+
+#[test]
+fn untaken_tool_branches_are_not_reported_as_executed_calls() {
+    let root = scratch_dir("untaken-branch");
+    let rollout = root.join("rollout.jsonl");
+    let (base, _) = start_fake_provider(vec![assistant_reply(
+        "```pane\nif (false) await bash({command: 'never-run'});\nreturn 'done';\n```",
+    )]);
+    let output = run_session(&root, &rollout, "untaken", "do it", &base, None);
+    assert!(
+        output.status.success(),
+        "stdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("No tool calls ran in this cell."));
+    assert!(!text.contains("└─ bash"));
+}
+
+// --- a conversation that no longer fits --------------------------------
+
+/// Rung one, and the whole point of it: the retry after an overflow carries a
+/// **smaller** request, and the task goes on. Before this, a conversation
+/// that outgrew the window ended the task -- the one failure every long task
+/// is guaranteed to reach.
+#[test]
+fn an_overflow_compacts_the_conversation_and_the_task_continues() {
+    let root = scratch_dir("overflow-compact-root");
+    let rollout = root.join("rollout.jsonl");
+    let turn = std::sync::atomic::AtomicUsize::new(0);
+    // Two cells first, so there is an older result for compaction to drop;
+    // the third request overflows, the fourth is the retry.
+    let (base_url, bodies) = start_status_answering_provider(4, move |_body| {
+        let n = turn.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        match n {
+            0 | 1 => (200, assistant_reply("```pane\nconst a = 1;\n```")),
+            2 => (400, too_long_body()),
+            _ => (200, ending_reply()),
+        }
+    });
+
+    let output = run_session(&root, &rollout, "sess-overflow", "do it", &base_url, None);
+    assert!(
+        output.status.success(),
+        "the task did not survive the overflow. stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 4, "expected a retry after the overflow");
+    assert!(
+        bodies[3].len() < bodies[2].len(),
+        "the retry was not smaller than the request that overflowed: {} vs {}",
+        bodies[3].len(),
+        bodies[2].len()
+    );
+    assert!(
+        String::from_utf8_lossy(&output.stdout).contains("nothing was lost"),
+        "the compaction was not reported: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+}
+
+/// Rung two: with nothing redundant to drop -- the very first request of a
+/// task -- the conversation is replaced by a checkpoint, and the retry says
+/// so. This is the rung a text harness cannot take, because its results are
+/// its transcript.
+#[test]
+fn an_overflow_with_nothing_to_compact_falls_back_to_a_checkpoint() {
+    let root = scratch_dir("overflow-checkpoint-root");
+    let rollout = root.join("rollout.jsonl");
+    let turn = std::sync::atomic::AtomicUsize::new(0);
+    let (base_url, bodies) = start_status_answering_provider(2, move |_body| {
+        let n = turn.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if n == 0 {
+            (400, too_long_body())
+        } else {
+            (200, ending_reply())
+        }
+    });
+
+    let output = run_session(
+        &root,
+        &rollout,
+        "sess-overflow-cp",
+        "summarise every caller",
+        &base_url,
+        None,
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 2, "expected one retry");
+    let retry: serde_json::Value = serde_json::from_str(&bodies[1]).unwrap();
+    let messages = retry["messages"].as_array().unwrap();
+    assert_eq!(
+        messages.len(),
+        1,
+        "the checkpoint did not replace the conversation"
+    );
+    let text = messages[0]["content"][0]["text"].as_str().unwrap();
+    assert!(
+        text.contains("every handle below is live"),
+        "the checkpoint does not tell the model its objects survived: {text}"
+    );
+    assert!(
+        text.contains("summarise every caller"),
+        "the checkpoint lost the task: {text}"
+    );
+}
+
+/// An ordinary 400 is not an overflow and must not be retried as one: a
+/// malformed request retried unchanged is a loop, and retried after a
+/// checkpoint has thrown away a conversation for nothing.
+#[test]
+fn a_plain_bad_request_is_reported_rather_than_compacted() {
+    let root = scratch_dir("plain-400-root");
+    let rollout = root.join("rollout.jsonl");
+    let (base_url, bodies) = start_status_answering_provider(1, move |_body| {
+        (
+            400,
+            serde_json::json!({"type":"error","error":{"message":"model: unknown field"}})
+                .to_string(),
+        )
+    });
+
+    let output = run_session(&root, &rollout, "sess-plain-400", "do it", &base_url, None);
+    assert_eq!(
+        bodies.lock().unwrap().len(),
+        1,
+        "a plain 400 was retried as though it were an overflow"
+    );
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        all.contains("unknown field"),
+        "the real error was not reported: {all}"
     );
 }

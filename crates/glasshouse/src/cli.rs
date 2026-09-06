@@ -146,7 +146,14 @@ pub enum Command {
     /// Accounts are named, never their credentials. An entitlement's
     /// authentication is a reference into the operating system's own secret
     /// storage, and nothing here resolves one.
-    Entitlements,
+    Entitlements {
+        /// Emit account/model metadata for clients; never resolves credentials.
+        #[arg(long)]
+        json: bool,
+        /// Refresh missing provider model catalogues on this explicit request.
+        #[arg(long, requires = "json")]
+        refresh: bool,
+    },
     /// Report detected harnesses, optional integrations, and setup problems.
     Doctor,
     /// File a provider credential in the operating system's own secure

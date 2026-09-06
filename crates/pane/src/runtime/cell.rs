@@ -34,7 +34,7 @@
 
 use oxc::allocator::Allocator;
 use oxc::ast::ast::{
-    AccessorProperty, AssignmentTarget, BindingPattern, Class, Expression, FormalParameter,
+    AccessorProperty, BindingIdentifier, IdentifierReference, UnaryExpression, AssignmentTarget, BindingPattern, Class, Expression, FormalParameter,
     Function, MethodDefinition, MethodDefinitionType, Program, PropertyDefinition,
     PropertyDefinitionType, Statement, TSAsExpression, TSEnumDeclaration,
     TSExternalModuleDeclaration, TSGlobalDeclaration, TSImportEqualsDeclaration,
@@ -52,6 +52,13 @@ use oxc::syntax::scope::ScopeFlags;
 /// model program that declares one is refused rather than silently losing
 /// its own bindings — see [`CellError::ReservedName`].
 pub const RESERVED_PREFIX: &str = "__pane_";
+
+/// Names JavaScript binds in every function body without anyone declaring
+/// them. **A cell is a function body** (the module header's second
+/// invariant), so these are always defined inside one and are on no global
+/// object — which is exactly the shape that looks like an undefined name to
+/// a scan that only knows declarations and globals.
+const IMPLICIT_FUNCTION_BINDINGS: [&str; 1] = ["arguments"];
 
 /// The names the isolate puts on the persistent scope: the four tools, the
 /// three handle functions and `yieldNow`. A top-level binding may not take
@@ -94,6 +101,21 @@ pub struct CompiledCell {
     /// The name V8 knows this script by, and the only script name whose
     /// stack frames reach the model (`runtime-contract.md` §5).
     pub script_name: String,
+    /// Every name the cell **reads** and never binds anywhere in itself, with
+    /// the byte offset of its first mention.
+    ///
+    /// Not yet an error: a free name is legal when the global object carries
+    /// it — a handle from an earlier cell, a host function, a JavaScript
+    /// built-in — and only the isolate knows that set. `Runtime::run_cell`
+    /// asks it, and reports what remains before running anything.
+    ///
+    /// **Over-approximates what is bound, so it can only miss.** A name bound
+    /// anywhere in the program counts as bound everywhere in it, which
+    /// ignores scoping; the cost is a use-before-declare this does not
+    /// notice, and the benefit is that no correct program is ever accused.
+    /// That direction is deliberate: a false positive would have the model
+    /// "fix" code that was right.
+    pub free_names: Vec<(String, u32)>,
 }
 
 /// Why a cell could not be turned into JavaScript.
@@ -102,6 +124,15 @@ pub struct CompiledCell {
 /// own turn slot; none of them is an error the runtime reports upwards.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CellError {
+    /// The cell reads a name it binds nowhere and the global object does not
+    /// carry — a typo, or a handle that was freed or never existed. Caught
+    /// before the cell runs, so the model is told in the turn that wrote it
+    /// rather than in the next one.
+    UndefinedName {
+        name: String,
+        line: u32,
+        column: u32,
+    },
     /// The TypeScript did not parse. The position is the model's own.
     Parse {
         message: String,
@@ -140,6 +171,10 @@ pub enum CellError {
 impl CellError {
     pub fn class(&self) -> &'static str {
         match self {
+            // The class V8 would have used had the cell run, because that is
+            // what the model is being spared: `ReferenceError` naming a name
+            // that is not defined.
+            CellError::UndefinedName { .. } => "ReferenceError",
             CellError::Parse { .. } => "SyntaxError",
             CellError::NotErasable { .. } => "TypeScriptNotErasable",
             CellError::ReservedName { .. } => "ReservedName",
@@ -149,6 +184,10 @@ impl CellError {
 
     pub fn message(&self) -> String {
         match self {
+            CellError::UndefinedName { name, .. } => format!(
+                "`{name}` is not defined: the cell reads it, binds it nowhere, and no handle or \
+                 host function has that name. Nothing ran. `handles()` lists what you can address."
+            ),
             CellError::Parse { message, .. } => message.clone(),
             CellError::NotErasable { construct, .. } => format!(
                 "`{construct}` is TypeScript that has no JavaScript to erase to; pane strips \
@@ -167,7 +206,8 @@ impl CellError {
 
     pub fn position(&self) -> Option<(u32, u32)> {
         match self {
-            CellError::Parse { line, column, .. }
+            CellError::UndefinedName { line, column, .. }
+            | CellError::Parse { line, column, .. }
             | CellError::NotErasable { line, column, .. }
             | CellError::ReservedName { line, column, .. }
             | CellError::ShadowsHostFunction { line, column, .. } => Some((*line, *column)),
@@ -213,6 +253,13 @@ pub fn compile(source: &str, cell: u64) -> Result<CompiledCell, CellError> {
     }
     let blanks = eraser.blanks;
 
+    // Every name read but never bound. Collected here because the program is
+    // already parsed and walked; judged in the isolate, which is the only
+    // place that knows what the global object carries.
+    let mut names = FreeNames::default();
+    names.visit_program(&parsed.program);
+    let free_names = names.into_free();
+
     let scan = top_level(&parsed.program, source);
     let declared: Vec<String> = scan
         .captures
@@ -254,6 +301,7 @@ pub fn compile(source: &str, cell: u64) -> Result<CompiledCell, CellError> {
         javascript: wrap(&body, &late),
         declared,
         script_name: script_name(cell),
+        free_names,
     })
 }
 
@@ -596,7 +644,7 @@ fn render(
 
 /// The 1-based line and 0-based column of a byte offset, counting columns in
 /// characters so they agree with what V8 reports for the same position.
-fn line_and_column(source: &str, offset: u32) -> (u32, u32) {
+pub fn line_and_column(source: &str, offset: u32) -> (u32, u32) {
     let offset = offset as usize;
     let mut line = 1u32;
     let mut column = 0u32;
@@ -615,6 +663,75 @@ fn line_and_column(source: &str, offset: u32) -> (u32, u32) {
 }
 
 /// Collects the spans that are TypeScript and nothing else.
+/// Collects what a cell reads and what it binds, so the difference can be
+/// checked against the global object before the cell runs.
+///
+/// The invariant: **`referenced` holds only names used as variables.** oxc
+/// spells a member access's property, an object key and a label as their own
+/// node types, so `a.b`, `{b: 1}` and `outer:` never reach
+/// `visit_identifier_reference` and cannot be mistaken for a free variable.
+#[derive(Default)]
+struct FreeNames {
+    referenced: Vec<(String, u32)>,
+    bound: std::collections::BTreeSet<String>,
+    /// Where a `typeof` operand sits, by span start.
+    ///
+    /// **`typeof x` is the one place an undefined name is legal**, and it is
+    /// how JavaScript asks "does this name exist" — `return typeof temp` is
+    /// exactly what a cell writes to check whether a handle it freed is
+    /// gone. Recorded by span rather than by name so that a name used once
+    /// under `typeof` and once for real is still caught at the real use.
+    typeof_operands: std::collections::BTreeSet<u32>,
+}
+
+impl FreeNames {
+    /// The referenced names that are bound nowhere in the program, first
+    /// mention only and in source order.
+    fn into_free(self) -> Vec<(String, u32)> {
+        let mut seen = std::collections::BTreeSet::new();
+        self.referenced
+            .iter()
+            .filter(|(_, offset)| !self.typeof_operands.contains(offset))
+            .filter(|(name, _)| !self.bound.contains(name))
+            // **The wrapper's own bindings are defined when the cell runs.**
+            // `__pane_cell` is the generated epilogue's handle, a local of the
+            // function this cell becomes, so it is on no global object and
+            // would look free here. Reaching for it is refused -- by
+            // `refuse_host_name` and the epilogue guard, at runtime, which is
+            // where two security tests check it. Refusing it here instead
+            // would report the right outcome for the wrong reason and stop
+            // those tests exercising the guard at all.
+            .filter(|(name, _)| !name.starts_with(RESERVED_PREFIX))
+            .filter(|(name, _)| !IMPLICIT_FUNCTION_BINDINGS.contains(&name.as_str()))
+            .filter(|(name, _)| seen.insert(name.clone()))
+            .cloned()
+            .collect()
+    }
+}
+
+impl<'a> Visit<'a> for FreeNames {
+    fn visit_identifier_reference(&mut self, it: &IdentifierReference<'a>) {
+        self.referenced
+            .push((it.name.to_string(), it.span.start));
+    }
+
+    /// Every binding form funnels through here — `var`/`let`/`const`, a
+    /// function or class name, a parameter, a catch parameter, a destructured
+    /// element — so one method covers what would otherwise be a dozen.
+    fn visit_binding_identifier(&mut self, it: &BindingIdentifier<'a>) {
+        self.bound.insert(it.name.to_string());
+    }
+
+    fn visit_unary_expression(&mut self, it: &UnaryExpression<'a>) {
+        if it.operator.is_typeof()
+            && let oxc::ast::ast::Expression::Identifier(name) = &it.argument
+        {
+            self.typeof_operands.insert(name.span.start);
+        }
+        walk::walk_unary_expression(self, it);
+    }
+}
+
 struct Eraser<'s> {
     source: &'s str,
     blanks: Vec<Span>,

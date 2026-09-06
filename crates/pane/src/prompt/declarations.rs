@@ -17,7 +17,7 @@ pub struct Entry {
 pub const ENTRIES: &[Entry] = &[
     Entry {
         name: "read",
-        return_type: "File",
+        return_type: "{path: string; text: string; lines: string[]; bytes: number; lineCount: number; mtime: string}",
         summary: "Read one file inside the project.",
     },
     Entry {
