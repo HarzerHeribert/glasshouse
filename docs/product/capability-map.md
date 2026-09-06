@@ -2516,3 +2516,22 @@ Recorded 2026-09-06 from the user's yes on fourteen of the fifteen parked lines 
 ☐ Allow the router to use task plans, touched-file history, Git diffs, and current claims as conflict-prediction inputs.
 ☐ Prefer allowing reads of the last committed or current filesystem state with an explicit stale-or-changing warning before implementing hard read blocking.
 ☐ Measure how often parallel sessions actually produce overlapping file edits before enabling automatic file coordination by default.
+
+
+Phase 63 — pane's terminal interface
+
+Recorded from the user's instruction of 2026-09-06, given while watching pane drive a
+real task in a cmux surface: *"pane needs to look as good as codex or claude code, with
+a block to type in, /commands autocomplete, a clear statusline and clear turn blocks"*,
+and *"das Auge isst mit"*. The session that prompted it rendered the transcript clipped
+at the left edge, the sidebar bleeding into the conversation column, and successive
+turns overprinting each other into unreadable text; the user's own pages
+(`harzerheribert.github.io/glasshouse`, the portfolio site) are the reference for the
+visual language. Getting pane to RUN and getting pane to LOOK RIGHT are separate lanes
+by the same instruction, worked in parallel.
+
+☐ Render each turn as its own visually bounded block, so where a turn begins and ends is never ambiguous.
+☐ Give the session a persistent input area, separated from the transcript, that shows the text being composed.
+☐ Complete slash commands as they are typed, listing the matches and naming what each one does.
+☐ Carry a status line stating at least the active model, the project, the sandbox posture and whether Glasshouse is connected.
+☐ Draw every region inside its own bounds at any terminal width, never clipping, overlapping or interleaving output.

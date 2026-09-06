@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1348 closed · 72 active committed open (95%)** — across 15 phases.
+**1348 closed · 77 active committed open (95%)** — across 16 phases.
 
 Not in the work queue: **0 deferred gate criteria** (Phase 52, Phase 53) awaiting a user decision, and **229 parked experimental lines**. They are visible in the map; they are not release-blocking work.
 
@@ -34,6 +34,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 33 | Resource health | **2** | 13 | `1309` |
 | Phase 33B | Reliability-adjusted agent performance | **3** | 11 | `1345` |
 | Phase 21E | Decision ladder and conflict handling | **4** | 8 | `907` |
+| Phase 63 | pane's terminal interface | **5** | 0 | `2521` |
 | Phase 21G | Memory revalidation | **6** | 3 | `941` |
 | Phase 9K | Harness-aware response profiles | **8** | 29 | `578` |
 | Phase 51 | Evaluation hooks | **13** | 24 | `1818` |
@@ -46,7 +47,7 @@ closures are usually at the top. Open the map at the line number given.
 
 Every phase with **three or fewer** open lines, quoted verbatim. These are
 where a single package finishes a phase, so they are listed here and the
-other ~60 open lines are not.
+other ~65 open lines are not.
 
 For any other phase: `scripts/discover.py --phase <id>` prints its open
 lines and evidence together. **Do not open the 178 KB map to read them.**
