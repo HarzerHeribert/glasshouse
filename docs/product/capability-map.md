@@ -485,7 +485,7 @@ Fixed architectural requirements
 ☑ Use an ephemeral local port by default so multiple Glasshouse instances can coexist.
 ☑ Generate an ephemeral per-instance gateway authentication token for child harnesses.
 ☑ Never expose provider API keys to a child harness when the local gateway can hold the credential itself.
-☑ Keep provider credentials inside the Glasshouse process or secure secret-store boundary.
+☐ Keep provider credentials inside the Glasshouse process or secure secret-store boundary.
 ☑ Expose an Anthropic Messages-compatible ingress for gateway-backed Claude Code profiles when implemented.
 ☑ Expose an OpenAI Responses-compatible ingress for gateway-backed Codex profiles when implemented.
 ☑ Expose an OpenAI Chat-compatible ingress for compatible disposable jobs and harnesses when implemented.

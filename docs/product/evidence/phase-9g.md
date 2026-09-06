@@ -334,3 +334,9 @@ MSRV with no headroom, so a future `cargo update` into a 0.4.x that bumps to
 1.86 would break the MSRV gate; `--locked` in CI holds that off until the lock
 is deliberately refreshed. It moves from dev-only into the shipped binary; its
 only non-dev dependency is `libc`, already present.
+
+## 488 — UN-TICKED 2026-09-06: a dogfooding session showed Glasshouse's own provider credential reaching the harness child
+
+Dogfooding session 586a0338b1a0 (2026-09-06, `docs/process/dogfooding.md`): with the machine's one support-work provider configured as `[providers.groq] credential_env = ["GROQ_API_KEY"]` and that variable exported in the launching shell (the way `credential_env` is meant to be supplied), a real Claude Code session launched by `glasshouse launch` ran `env | grep -c GROQ_API_KEY` and answered **1**. The harness child inherits every provider credential the launching shell holds; `launch.rs :: HarnessLaunch::build_command` replays only the overlay's own `EnvChange`s and nothing adds an `EnvChange::Remove` for a configured `credential_env` name. Line 488 says the credential stays inside the Glasshouse process or the secret store; it does not, so the box comes off until the fix lands.
+
+Successor: `GH-LAUNCH-STRIPS-PROVIDER-CREDENTIALS` (Red — secrets): every configured provider's `credential_env` names are removed from the child's environment at launch, proven by a pty-fixture launch whose fake harness prints its environment, with an independent verifier. Re-tick 488 on that demonstration.

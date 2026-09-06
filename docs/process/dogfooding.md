@@ -164,3 +164,13 @@ hook`), merged with cmux's own hooks, both active.
 
 **No defect found in the product path exercised.** The two test defects the
 session fixed were the sweep's, found by CI and closed here in one session.
+
+### 2026-09-06 — `221e355`→`4b70d72`, claude-code 2.1.261 (Fable 5.1), a real task with edits and a test run
+
+Scratch project: `.worktrees/dogfood-20260906`, a detached worktree of this repository at `221e355`. Binary built from `main`, run by path (the dev shim resolves by the checkout you stand in and wanted a build in the worktree — a shim fact, not a product one), launched as `glasshouse launch claude-code --response-role interactive` in cmux workspace 122, driven from the orchestrator's pane over `cmux send`. Under decision 8 the machine's config gained its first support-work provider (`[providers.groq]`, `credential_env = ["GROQ_API_KEY"]`) so memory extraction has a model to call. `sessions` showed the session `active`, `claude-code`, profile `native`, presented `embedded` within seconds.
+
+**Tasks.** Task 1: `env | grep -c GROQ_API_KEY` from inside the session. Task 2: make `tests/gateway_failure_taxonomy.rs`'s `each_failure_class_is_recorded_from_status_headers_and_framing_alone` match ledger rows to cases by content rather than position (the Windows ordering flake of sweep `33995530968`).
+
+**Surprises, each with the exact reading:**
+
+- **The harness child inherits Glasshouse's own provider credential.** Task 1 answered **1**: `GROQ_API_KEY`, exported in the launching shell because `credential_env` names it as the credential source, is present in the Claude Code session's environment. `launch.rs :: HarnessLaunch::build_command` replays the overlay's `EnvChange`s only; nothing removes a configured `credential_env` name. **Defect against map line 488** — un-ticked, successor `GH-LAUNCH-STRIPS-PROVIDER-CREDENTIALS` (Red).
