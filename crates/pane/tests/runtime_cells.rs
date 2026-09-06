@@ -2573,3 +2573,175 @@ fn a_stack_overflow_names_no_position_and_no_zero_frame() {
     let after = runtime.run_cell("return 7;\n");
     assert_eq!(returned(&after), &Value::Number(7.0), "{after:?}");
 }
+
+// --- GH-PANE-61G-DELIVERY-AND-BG: §4's delivery into the model's scope ---
+
+use pane::events::batch::Batch;
+use pane::events::window::{Window, WindowConfig};
+use pane::events::{Event, Kind, PayloadRef, Priority, Stamp};
+
+/// One closed batch carrying `n` `bg.done` events, built through a window so
+/// what the runtime is handed is what a session would hand it.
+fn closed_batch(n: u64) -> Batch {
+    let mut window = Window::new(WindowConfig::default());
+    for i in 0..n {
+        window.accept(
+            Event::pending(
+                Kind::BgDone {
+                    emission: format!("exit-{i}"),
+                },
+                format!("bg/job{i}"),
+                Stamp::from_millis(0),
+                PayloadRef::new(format!("job{i}#exit")),
+                Priority::Batch,
+                format!("job{i} finished"),
+            ),
+            Stamp::from_millis(0),
+        );
+    }
+    window
+        .close_if_due(Stamp::from_millis(3_000))
+        .expect("a window whose deadline has passed closes")
+}
+
+/// `events-contract.md` §4: the batch extends the handle table with exactly
+/// one row, named `batch`, **always last** — after three names the model
+/// itself bound — and a second delivery replaces and frees the first.
+#[test]
+fn a_delivered_batch_is_the_tables_last_row_and_the_next_one_replaces_it() {
+    let fixture = Fixture::new("delivery");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("delivery-session");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+
+    let cell = runtime.run_cell("const one = 1;\nconst two = 2;\nconst three = 3;\n");
+    assert!(matches!(cell, CellOutcome::Yielded { .. }), "{cell:?}");
+    assert_eq!(runtime.handle_names(), vec!["one", "two", "three"]);
+
+    assert!(
+        runtime.deliver_batch(closed_batch(2)).is_none(),
+        "the first delivery replaced a batch that never existed"
+    );
+    assert_eq!(
+        runtime.handle_names(),
+        vec!["one", "two", "three", "batch"],
+        "the batch row is not last, so the model's own bindings lost the order it made them in"
+    );
+
+    // A second delivery frees the first and says where.
+    let previous = runtime
+        .deliver_batch(closed_batch(1))
+        .expect("the second delivery hands back the batch it replaced");
+    assert_eq!(
+        previous.n, 2,
+        "the wrong batch was handed back to be rolled"
+    );
+    assert_eq!(runtime.handle_names(), vec!["one", "two", "three", "batch"]);
+    let rendered = runtime.render_handles();
+    assert_eq!(
+        rendered.matches("Events.Batch").count(),
+        1,
+        "two batch rows are live:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("(replaced at cell 1)"),
+        "the replacement was not announced:\n{rendered}"
+    );
+}
+
+/// §4's three methods, called from the model's own program: `batch.where`,
+/// `batch.ack` and `batch.rest` are `Batch::where_`, `ack` and `rest` behind
+/// a binding, and the batch is the one name the runtime declares in a scope
+/// the model otherwise owns entirely.
+#[test]
+fn the_model_calls_where_ack_and_rest_on_the_batch_it_was_given() {
+    let fixture = Fixture::new("batch-api");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("batch-api-session");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+    runtime.deliver_batch(closed_batch(3));
+
+    let seen = runtime.run_cell(
+        "const all = batch.where({});\n\
+         const mine = batch.where({source: \"bg/job1\"});\n\
+         return `${batch.n}/${all.length}/${mine.length}/${all[0].kind}`;\n",
+    );
+    assert_eq!(returned_string(&seen), "3/3/1/bg.done");
+
+    // `ack` takes the ids the model itself read off the events, and `rest` is
+    // what it did not ack. An id no batch holds comes back as unknown rather
+    // than being silently dropped.
+    let acked = runtime.run_cell(
+        "const answer = batch.ack([batch.where({})[0].id, 9999]);\n\
+         return `${answer.acked.length}/${answer.unknown[0]}/${batch.rest().length}`;\n",
+    );
+    assert_eq!(returned_string(&acked), "1/9999/2");
+}
+
+/// §5's refusal, seen from inside the model's own program: a `bg.run` outside
+/// the grant is a `PermissionDenied` **at the call**, and the handle table
+/// has no new row afterwards.
+#[test]
+fn a_bg_run_outside_the_grant_throws_before_any_handle_exists() {
+    let fixture = Fixture::new("bg-denied");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("bg-denied-session");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+
+    let before = runtime.handle_names();
+    let outcome = runtime.run_cell("const job = bg.run(\"curl https://example.com\");\n");
+    let error = threw(&outcome);
+    assert_eq!(error.class, "PermissionDenied", "{error:?}");
+    assert_eq!(
+        runtime.handle_names(),
+        before,
+        "a refused bg.run left a handle behind"
+    );
+    assert!(!runtime.is_live("job"), "the refusal minted a job handle");
+}
+
+/// `bg` is the isolate's own, like every other host function: a program
+/// cannot replace it and so cannot lose the only way it has to stop what it
+/// started.
+#[test]
+fn bg_is_a_host_object_a_program_cannot_replace() {
+    let fixture = Fixture::new("bg-fixed");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("bg-fixed-session");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+
+    let shape =
+        runtime.run_cell("return `${typeof bg.run}/${typeof bg.watch}/${typeof bg.cancel}`;\n");
+    assert_eq!(returned_string(&shape), "function/function/function");
+
+    // A sloppy-mode store on a non-writable property does nothing, and
+    // `delete` of a non-deletable one answers false; either way `bg` is still
+    // the host's.
+    let kept = runtime.run_cell(
+        "try { globalThis.bg = 1; } catch (e) {}\n\
+         const gone = delete globalThis.bg;\n\
+         return `${gone}/${typeof bg.run}`;\n",
+    );
+    assert_eq!(returned_string(&kept), "false/function");
+}
+
+/// `runtime-contract.md` §2's third lifetime event reaches the batch too: the
+/// task ending frees it with every other handle.
+#[test]
+fn ending_the_task_frees_the_batch_with_the_rest() {
+    let fixture = Fixture::new("batch-end");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("batch-end-session");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+    runtime.run_cell("const kept = 1;\n");
+    runtime.deliver_batch(closed_batch(1));
+    assert!(runtime.is_live("batch"));
+
+    runtime.end_task();
+    assert!(
+        runtime.handle_names().is_empty(),
+        "{:?}",
+        runtime.handle_names()
+    );
+    assert!(!runtime.is_live("batch"));
+}

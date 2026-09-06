@@ -26,6 +26,8 @@ use std::sync::{Arc, Condvar, Mutex, Once, PoisonError};
 use std::time::{Duration, Instant};
 
 use crate::contract::SessionId;
+use crate::events::BatchStore;
+use crate::events::batch::Batch;
 use crate::glasshouse::Glasshouse;
 use crate::runtime::bindings::{self, CellTrace};
 use crate::runtime::cell::{self, CellError, CompiledCell, LINE_OFFSET};
@@ -621,6 +623,63 @@ impl Runtime {
         )
     }
 
+    /// `events-contract.md` §4's delivery: the closed window's batch becomes
+    /// the handle table's **last** row, named `batch`, and the one name this
+    /// runtime declares in the model's own scope.
+    ///
+    /// Last is not a rule applied here — [`handles::HandleTable::declare_with`]
+    /// appends, and every name the model bound was appended before this call,
+    /// so the model's own bindings keep the order it made them in. §2's
+    /// replacement rule is likewise the table's own: a second delivery frees
+    /// the first and renders `batch  (replaced at cell N)`.
+    ///
+    /// Answers with the batch this delivery replaced, so the **session** can
+    /// roll its unacked events into the next window (§3). The runtime owns no
+    /// window and decides nothing about what carries forward; handing the old
+    /// batch back rather than rolling it here is what keeps that true.
+    pub fn deliver_batch(&mut self, batch: Batch) -> Option<Batch> {
+        let entry = batch.preview(PREVIEW_TOKEN_CAP);
+        let cell = self.state.cell.get();
+        let store = self.batch_store();
+        let previous = store.replace(batch);
+
+        // A poisoned isolate is never re-entered (see [`Runtime::poisoned`]),
+        // so the name is not bound there. The table row still stands: it is
+        // the host's own record, and the model is owed the batch's preview
+        // whether or not its scope survived.
+        if !self.poisoned() {
+            v8::scope!(let handle_scope, &mut self.isolate);
+            let context = v8::Local::new(handle_scope, &self.context);
+            let scope = &mut v8::ContextScope::new(handle_scope, context);
+            bindings::install_batch(scope);
+        }
+
+        self.state.table.borrow_mut().declare_rendered(
+            "batch",
+            Value::string(&entry),
+            cell,
+            HandleMeta {
+                type_label: Some("Events.Batch".to_string()),
+                size_estimate: entry.len() as u64,
+                provenance: None,
+            },
+            entry,
+        );
+        previous
+    }
+
+    /// The live batch's Rust side, in the isolate's third slot — installed on
+    /// first delivery, so a session that raises no event never allocates one
+    /// and the constructor is unchanged.
+    fn batch_store(&mut self) -> Rc<BatchStore> {
+        if let Some(store) = self.isolate.get_slot::<Rc<BatchStore>>() {
+            return store.clone();
+        }
+        let store = BatchStore::new();
+        self.isolate.set_slot(store.clone());
+        store
+    }
+
     /// The task ending — `runtime-contract.md` §2's third and last lifetime
     /// event, and the only one this type performs itself.
     pub fn end_task(&mut self) {
@@ -642,6 +701,12 @@ impl Runtime {
         }
         self.state.table.borrow_mut().end_task();
         self.state.forget_calls();
+        // The batch is a handle, so the task ending frees it with the rest --
+        // §2's third lifetime event applies to the one handle the runtime
+        // declared exactly as it does to the ones the model did.
+        if let Some(store) = self.isolate.get_slot::<Rc<BatchStore>>() {
+            store.clear();
+        }
     }
 
     /// Runs one cell and answers with what it produced.

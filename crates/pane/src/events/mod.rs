@@ -8,6 +8,62 @@
 pub mod batch;
 pub mod window;
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
+/// The Rust side of the one `batch` handle §4 declares, held for the life of
+/// a [`crate::runtime::isolate::Runtime`] so the model's own
+/// `batch.where(...)`, `batch.ack(...)` and `batch.rest()` have something to
+/// call.
+///
+/// One slot, not a map: §4 gives the model exactly one `batch` at a time and
+/// makes each delivery **replace** the previous one, so a second live batch
+/// would be a name the model never wrote.
+#[derive(Default)]
+pub struct BatchStore {
+    live: RefCell<Option<batch::Batch>>,
+}
+
+impl BatchStore {
+    pub fn new() -> Rc<Self> {
+        Rc::new(Self::default())
+    }
+
+    /// Installs `batch` as the live one and answers with the one it
+    /// replaced — which the session rolls into the next window (§3), because
+    /// nothing here knows what a window is.
+    pub fn replace(&self, batch: batch::Batch) -> Option<batch::Batch> {
+        self.live.borrow_mut().replace(batch)
+    }
+
+    /// Reads the live batch, if there is one. `None` before the first
+    /// delivery and after [`BatchStore::clear`].
+    pub fn with<T>(&self, f: impl FnOnce(&mut batch::Batch) -> T) -> Option<T> {
+        self.live.borrow_mut().as_mut().map(f)
+    }
+
+    /// Frees the live batch — the task ending, which is one of
+    /// `runtime-contract.md` §2's three lifetime events.
+    pub fn clear(&self) {
+        self.live.borrow_mut().take();
+    }
+}
+
+/// The wall clock as a [`Stamp`], and the only reading of it this crate
+/// makes for an event.
+///
+/// §1 makes `at` "when the runtime **accepted** it, never when the source
+/// claims it happened", so producer and window must read one clock; this is
+/// it. [`window::Window`] itself still takes every `now` as a parameter and
+/// reads nothing.
+pub fn now() -> Stamp {
+    let millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|since| since.as_millis() as i64)
+        .unwrap_or(0);
+    Stamp::from_millis(millis)
+}
+
 /// Monotonic per [`window::Window`], starting at 1. Assigned by
 /// [`window::Window::accept`], never by the event's own producer — a caller
 /// building an [`Event`] before it is accepted has no id to give it yet.

@@ -112,6 +112,14 @@ impl Window {
         self.closed_on.is_some()
     }
 
+    /// Whether this window is holding nothing at all — neither an arrival of
+    /// its own nor a roll from the batch just delivered. A caller waiting for
+    /// a window to close asks this first: an empty window has no deadline and
+    /// can never close, so waiting on one would wait forever.
+    pub fn is_empty(&self) -> bool {
+        self.events.is_empty() && self.rolled_in.is_empty()
+    }
+
     pub fn arrivals(&self) -> &[Arrival] {
         &self.arrivals
     }

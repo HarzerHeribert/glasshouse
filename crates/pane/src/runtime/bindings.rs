@@ -15,6 +15,9 @@
 use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
+use crate::bg::{self, RunOptions, WatchOptions};
+use crate::events::batch::Batch;
+use crate::events::{BatchStore, Event, EventId};
 use crate::runtime::cell::{HOST_FUNCTIONS, RESERVED_PREFIX};
 use crate::runtime::handles::HandleMeta;
 use crate::runtime::isolate::DEFAULT_RESPONSE_BYTE_CAP;
@@ -232,6 +235,22 @@ pub(crate) fn install(scope: &mut v8::PinScope) {
     if let Some(function) = v8::Function::builder(yield_now_callback).build(scope) {
         set_fixed_key(scope, global, "yieldNow", function.into());
     }
+
+    // `events-contract.md` §5's three background-job entry points, on one
+    // fixed object for the same reason every host function above is fixed: a
+    // program that replaced `bg` would lose the only way it has to stop what
+    // it started, and nothing could put it back.
+    let background = v8::Object::new(scope);
+    if let Some(function) = v8::Function::builder(bg_run_callback).build(scope) {
+        set_fixed_key(scope, background, "run", function.into());
+    }
+    if let Some(function) = v8::Function::builder(bg_watch_callback).build(scope) {
+        set_fixed_key(scope, background, "watch", function.into());
+    }
+    if let Some(function) = v8::Function::builder(bg_cancel_callback).build(scope) {
+        set_fixed_key(scope, background, "cancel", function.into());
+    }
+    set_fixed_key(scope, global, "bg", background.into());
 
     let console = v8::Object::new(scope);
     for method in ["log", "info", "warn", "error", "debug", "trace"] {
@@ -959,6 +978,400 @@ fn is_identifier(name: &str) -> bool {
         .next()
         .is_some_and(|first| first.is_alphabetic() || first == '_' || first == '$')
         && chars.all(|c| c.is_alphanumeric() || c == '_' || c == '$')
+}
+
+// --- the batch, and the background jobs that fill it --------------------
+
+fn batch_store(scope: &v8::PinScope) -> Option<Rc<BatchStore>> {
+    scope.get_slot::<Rc<BatchStore>>().cloned()
+}
+
+/// One event of the live batch, copied out of the `RefCell` before anything
+/// re-enters V8.
+///
+/// Owned rather than borrowed on purpose: building a JS object calls back
+/// into the isolate, and a `RefCell` borrow of the batch held across that
+/// call would be a borrow live while a callback that also reads the batch
+/// could run.
+struct EventRow {
+    id: EventId,
+    kind: String,
+    source: String,
+    at: String,
+    summary: String,
+    age: u32,
+    payload: String,
+}
+
+fn row(event: &Event, age: u32) -> EventRow {
+    EventRow {
+        id: event.id,
+        kind: event.kind.as_str(),
+        source: event.source.clone(),
+        at: event.at.to_string(),
+        summary: event.summary.clone(),
+        age,
+        payload: event.payload.as_str().to_string(),
+    }
+}
+
+/// Every event of the live batch that `pick` selects, with its age.
+fn selected(scope: &v8::PinScope, pick: impl FnOnce(&Batch) -> Vec<&Event>) -> Vec<EventRow> {
+    let Some(store) = batch_store(scope) else {
+        return Vec::new();
+    };
+    store
+        .with(|batch| {
+            let ages: std::collections::HashMap<EventId, u32> = batch
+                .events()
+                .into_iter()
+                .map(|(event, age)| (event.id, age))
+                .collect();
+            pick(&*batch)
+                .into_iter()
+                .map(|event| row(event, ages.get(&event.id).copied().unwrap_or(0)))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn events_array<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    rows: &[EventRow],
+) -> v8::Local<'s, v8::Value> {
+    let array = v8::Array::new(scope, rows.len() as i32);
+    for (index, row) in rows.iter().enumerate() {
+        let object = v8::Object::new(scope);
+        let id = v8::Number::new(scope, row.id as f64);
+        set_fixed_key(scope, object, "id", id.into());
+        for (key, text) in [
+            ("kind", &row.kind),
+            ("source", &row.source),
+            ("at", &row.at),
+            ("summary", &row.summary),
+        ] {
+            let value = js_string(scope, text);
+            set_fixed_key(scope, object, key, value);
+        }
+        let age = v8::Number::new(scope, f64::from(row.age));
+        set_fixed_key(scope, object, "age", age.into());
+        // §1: a payload is materialised on first access, and §3 never
+        // previews one. A method rather than a property is what makes that
+        // true of this object too -- reading the event costs nothing until
+        // the program asks.
+        let data = js_string(scope, &row.payload);
+        if let Some(function) = v8::Function::builder(payload_callback)
+            .data(data)
+            .build(scope)
+        {
+            set_fixed_key(scope, object, "payload", function.into());
+        }
+        array.set_index(scope, index as u32, object.into());
+    }
+    array.into()
+}
+
+/// `batch.where({kind, source})` -- both optional, `hook.*` matched by
+/// prefix, exactly as `Batch::where_` decides.
+fn batch_where_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut retval: v8::ReturnValue,
+) {
+    let (kind, source) = read_filter(scope, args.get(0));
+    let rows = selected(scope, |batch| {
+        batch.where_(kind.as_deref(), source.as_deref())
+    });
+    let array = events_array(scope, &rows);
+    retval.set(array);
+}
+
+/// `batch.rest()` -- this batch's events not yet acked.
+fn batch_rest_callback(
+    scope: &mut v8::PinScope,
+    _args: v8::FunctionCallbackArguments,
+    mut retval: v8::ReturnValue,
+) {
+    let rows = selected(scope, Batch::rest);
+    let array = events_array(scope, &rows);
+    retval.set(array);
+}
+
+/// `batch.ack(ids)` -- an id this batch does not hold comes back in
+/// `unknown` rather than being silently dropped, which is `Batch::ack`'s own
+/// decision and not a second one here.
+fn batch_ack_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut retval: v8::ReturnValue,
+) {
+    let ids = read_ids(scope, args.get(0));
+    let Some(store) = batch_store(scope) else {
+        return;
+    };
+    let Some(acked) = store.with(|batch| batch.ack(&ids)) else {
+        return;
+    };
+    let object = v8::Object::new(scope);
+    for (key, list) in [("acked", &acked.acked), ("unknown", &acked.unknown)] {
+        let array = v8::Array::new(scope, list.len() as i32);
+        for (index, id) in list.iter().enumerate() {
+            let value = v8::Number::new(scope, *id as f64);
+            array.set_index(scope, index as u32, value.into());
+        }
+        set_fixed_key(scope, object, key, array.into());
+    }
+    retval.set(object.into());
+}
+
+/// An event's payload, materialised now: the status verbatim, and `stdout`
+/// and `stderr` as methods, so §5's "a job that printed 40 MB costs a status
+/// line" is true of the object and not only of the preview.
+fn payload_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut retval: v8::ReturnValue,
+) {
+    let id = args.data().to_rust_string_lossy(scope);
+    let session = state(scope).session.clone();
+    let Some(result) = bg::payload(&session, &id) else {
+        let null = v8::null(scope);
+        retval.set(null.into());
+        return;
+    };
+    let object = v8::Object::new(scope);
+    let status = js_string(scope, &result.status);
+    set_fixed_key(scope, object, "status", status);
+    // Built one at a time rather than over an array of callbacks: rusty_v8
+    // takes a zero-sized *fn item*, and an array coerces both arms to a fn
+    // pointer, which fails a `const` size check inside the binding rather
+    // than at this line.
+    let data = js_string(scope, &id);
+    if let Some(function) = v8::Function::builder(stdout_callback)
+        .data(data)
+        .build(scope)
+    {
+        set_fixed_key(scope, object, "stdout", function.into());
+    }
+    let data = js_string(scope, &id);
+    if let Some(function) = v8::Function::builder(stderr_callback)
+        .data(data)
+        .build(scope)
+    {
+        set_fixed_key(scope, object, "stderr", function.into());
+    }
+    retval.set(object.into());
+}
+
+fn stdout_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut retval: v8::ReturnValue,
+) {
+    let text = stream(scope, &args, |result| result.stdout);
+    let value = js_string(scope, &text);
+    retval.set(value);
+}
+
+fn stderr_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut retval: v8::ReturnValue,
+) {
+    let text = stream(scope, &args, |result| result.stderr);
+    let value = js_string(scope, &text);
+    retval.set(value);
+}
+
+fn stream(
+    scope: &mut v8::PinScope,
+    args: &v8::FunctionCallbackArguments,
+    pick: impl FnOnce(bg::JobResult) -> String,
+) -> String {
+    let id = args.data().to_rust_string_lossy(scope);
+    let session = state(scope).session.clone();
+    bg::payload(&session, &id).map(pick).unwrap_or_default()
+}
+
+// --- bg.run, bg.watch, bg.cancel ---------------------------------------
+
+/// §5's `bg.run`. The refusal is `Profile::admits_command`'s own and it
+/// happens inside [`bg::run`] **before** a handle exists, so a program that
+/// catches this exception is holding nothing.
+fn bg_run_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut retval: v8::ReturnValue,
+) {
+    let command = args.get(0).to_rust_string_lossy(scope);
+    let options = RunOptions {
+        cwd: read_option(scope, args.get(1), "cwd"),
+        env: read_option(scope, args.get(1), "env"),
+        timeout_ms: read_millis(scope, args.get(1), "timeout"),
+    };
+    let state = state(scope);
+    match bg::run(
+        &state.profile,
+        &state.glasshouse,
+        &state.session,
+        &command,
+        &options,
+    ) {
+        Ok(handle) => {
+            let object = job_object(scope, &handle);
+            retval.set(object);
+        }
+        Err(denied) => throw_denied(scope, &denied),
+    }
+}
+
+/// §5's `bg.watch`. `every` defaults to a second, which is the smallest
+/// cadence a shell command can be run at without the polling itself being
+/// the load.
+fn bg_watch_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut retval: v8::ReturnValue,
+) {
+    let command = args.get(0).to_rust_string_lossy(scope);
+    let options = WatchOptions {
+        every_ms: read_millis(scope, args.get(1), "every").unwrap_or(DEFAULT_WATCH_EVERY_MS),
+        until: read_option(scope, args.get(1), "until"),
+        timeout_ms: read_millis(scope, args.get(1), "timeout"),
+    };
+    let state = state(scope);
+    match bg::watch(
+        &state.profile,
+        &state.glasshouse,
+        &state.session,
+        &command,
+        &options,
+    ) {
+        Ok(handle) => {
+            let object = job_object(scope, &handle);
+            retval.set(object);
+        }
+        Err(denied) => throw_denied(scope, &denied),
+    }
+}
+
+/// How often `bg.watch` runs its command when the model named no cadence.
+const DEFAULT_WATCH_EVERY_MS: u64 = 1_000;
+
+/// §5's `bg.cancel(handle)`: idempotent, and it takes either the object
+/// `bg.run` answered with or the bare id off it, because a model that kept
+/// only `job.id` should not have to reconstruct the object.
+fn bg_cancel_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    _retval: v8::ReturnValue,
+) {
+    let given = args.get(0);
+    let id = match v8::Local::<v8::Object>::try_from(given) {
+        Ok(object) => v8::String::new(scope, "id")
+            .and_then(|key| object.get(scope, key.into()))
+            .map(|value| value.to_rust_string_lossy(scope))
+            .unwrap_or_default(),
+        Err(_) => given.to_rust_string_lossy(scope),
+    };
+    if id.is_empty() {
+        return;
+    }
+    let session = state(scope).session.clone();
+    bg::cancel(&session, &id);
+}
+
+fn job_object<'s>(scope: &mut v8::PinScope<'s, '_>, handle: &str) -> v8::Local<'s, v8::Value> {
+    let object = v8::Object::new(scope);
+    let id = js_string(scope, handle);
+    set_fixed_key(scope, object, "id", id);
+    let source = js_string(scope, &format!("bg/{handle}"));
+    set_fixed_key(scope, object, "source", source);
+    object.into()
+}
+
+/// One string property of an options object, or `None` when the object, the
+/// property or its value is absent.
+fn read_option(scope: &mut v8::PinScope, value: v8::Local<v8::Value>, key: &str) -> Option<String> {
+    let object = v8::Local::<v8::Object>::try_from(value).ok()?;
+    let key = v8::String::new(scope, key)?;
+    let given = object.get(scope, key.into())?;
+    if given.is_undefined() || given.is_null() {
+        return None;
+    }
+    Some(given.to_rust_string_lossy(scope))
+}
+
+/// One millisecond count off an options object. A value that is not a finite
+/// non-negative number is `None` rather than zero: a zero deadline would
+/// cancel the job it was meant to bound.
+fn read_millis(scope: &mut v8::PinScope, value: v8::Local<v8::Value>, key: &str) -> Option<u64> {
+    let object = v8::Local::<v8::Object>::try_from(value).ok()?;
+    let key = v8::String::new(scope, key)?;
+    let given = object.get(scope, key.into())?;
+    let number = given.number_value(scope)?;
+    (number.is_finite() && number >= 1.0).then_some(number as u64)
+}
+
+/// `{kind, source}`, both optional.
+fn read_filter(
+    scope: &mut v8::PinScope,
+    value: v8::Local<v8::Value>,
+) -> (Option<String>, Option<String>) {
+    (
+        read_option(scope, value, "kind"),
+        read_option(scope, value, "source"),
+    )
+}
+
+/// An array of event ids. A value that is not a finite id is skipped here
+/// rather than becoming `0`, which is not an id any window ever assigns.
+fn read_ids(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> Vec<EventId> {
+    let Ok(array) = v8::Local::<v8::Array>::try_from(value) else {
+        return Vec::new();
+    };
+    let mut ids = Vec::with_capacity(array.length() as usize);
+    for index in 0..array.length() {
+        if let Some(item) = array.get_index(scope, index)
+            && let Some(number) = item.number_value(scope)
+            && number.is_finite()
+            && number >= 1.0
+        {
+            ids.push(number as EventId);
+        }
+    }
+    ids
+}
+
+/// §4's delivery, in the isolate: the `batch` name, and the three methods
+/// §3 gives it.
+///
+/// Bound with an ordinary write rather than [`set_fixed_key`], because §2's
+/// replacement rule applies to this handle exactly as it does to one the
+/// model bound itself -- each delivery replaces the last.
+pub(crate) fn install_batch(scope: &mut v8::PinScope) {
+    let context = scope.get_current_context();
+    let global = context.global(scope);
+    let object = v8::Object::new(scope);
+    let n = batch_store(scope)
+        .and_then(|store| store.with(|batch| batch.n))
+        .unwrap_or(0);
+    let count = v8::Number::new(scope, n as f64);
+    set_fixed_key(scope, object, "n", count.into());
+    if let Some(function) = v8::Function::builder(batch_where_callback).build(scope) {
+        // `where` is a reserved word in JavaScript nowhere -- it is not a
+        // keyword at all -- and a property name could carry it even if it
+        // were, so the model writes `batch.where(...)` and the Rust name
+        // stays `where_`.
+        set_fixed_key(scope, object, "where", function.into());
+    }
+    if let Some(function) = v8::Function::builder(batch_ack_callback).build(scope) {
+        set_fixed_key(scope, object, "ack", function.into());
+    }
+    if let Some(function) = v8::Function::builder(batch_rest_callback).build(scope) {
+        set_fixed_key(scope, object, "rest", function.into());
+    }
+    set_key(scope, global, "batch", object.into());
 }
 
 // --- console -----------------------------------------------------------

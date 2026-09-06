@@ -58,6 +58,18 @@ struct HandleEntry {
     /// carries the cell the replacement happened in, for `render_table`'s
     /// `(replaced at cell N)` annotation — `runtime-contract.md` §2.
     replaced_at_cell: Option<u64>,
+    /// The whole entry, already rendered by its own producer, for a value
+    /// whose preview `runtime-contract.md` §3's type rules do not describe.
+    ///
+    /// There is exactly one such value and it is the reason this field
+    /// exists: `events-contract.md` §3 fixes the batch's preview — every
+    /// interrupt in full, then counts by kind, then samples rarest-kind-first
+    /// — which is not any of §3's types and would come out of the `string`
+    /// rule as `len=…` and its first 200 characters. `Events.Batch` renders
+    /// itself, already capped by the same estimator, and this carries it
+    /// through unchanged. `None` for every other handle, which is every
+    /// handle a model's own program ever binds.
+    rendered: Option<String>,
 }
 
 /// A task's live handles, in declaration order. Redeclaring a name removes
@@ -103,7 +115,34 @@ impl HandleTable {
             value,
             meta,
             replaced_at_cell,
+            rendered: None,
         });
+    }
+
+    /// [`HandleTable::declare_with`] for a producer that rendered its own
+    /// entry — today only the `batch` handle `events-contract.md` §4
+    /// declares, whose preview is that document's §3 rather than
+    /// `runtime-contract.md` §3's type rules.
+    ///
+    /// It is [`HandleTable::declare_with`] in every other respect, and
+    /// deliberately so: the batch is a handle, so it is replaced, freed,
+    /// counted and ordered exactly as one, and being **last** in the table is
+    /// a consequence of `declare` appending rather than of a rule about
+    /// batches.
+    pub fn declare_rendered(
+        &mut self,
+        name: impl Into<String>,
+        value: Value,
+        cell: u64,
+        meta: HandleMeta,
+        entry: String,
+    ) {
+        let name = name.into();
+        self.declare_with(name.clone(), value, cell, meta);
+        if let Some(last) = self.entries.last_mut() {
+            debug_assert_eq!(last.name, name);
+            last.rendered = Some(entry);
+        }
     }
 
     /// Takes a live handle's preview and size again, in place —
@@ -195,7 +234,10 @@ impl HandleTable {
                 (
                     entry.name.clone(),
                     type_label(entry).to_string(),
-                    preview::render_preview(&entry.value, entry_cap),
+                    entry
+                        .rendered
+                        .clone()
+                        .unwrap_or_else(|| preview::render_preview(&entry.value, entry_cap)),
                     entry.meta.provenance.clone(),
                 )
             })
@@ -246,6 +288,15 @@ fn with_drop_note(dropped: usize, visible: &str) -> String {
     }
 }
 
+/// Appends `annotation` to the first line of `text`, leaving every later
+/// line alone — a pre-rendered entry's header is its first line.
+fn annotate_first_line(text: &str, annotation: &str) -> String {
+    match text.split_once('\n') {
+        Some((head, rest)) => format!("{head}{annotation}\n{rest}"),
+        None => format!("{text}{annotation}"),
+    }
+}
+
 fn type_label(entry: &HandleEntry) -> &str {
     entry
         .meta
@@ -287,6 +338,16 @@ const HEADER_FIELD_GAP: usize = 3;
 /// rendered preview body itself, computed after rendering so it reflects
 /// whatever cap-driven shrinking already happened.
 fn render_entry(entry: &HandleEntry, cap: usize, name_width: usize) -> String {
+    // A producer that rendered its own entry has already produced the whole
+    // shape -- header line included -- so nothing is built around it here;
+    // the replacement annotation is the one thing this table knows and the
+    // producer cannot (`runtime-contract.md` §2).
+    if let Some(rendered) = &entry.rendered {
+        return match entry.replaced_at_cell {
+            Some(cell) => annotate_first_line(rendered, &format!("  (replaced at cell {cell})")),
+            None => rendered.clone(),
+        };
+    }
     let name = preview::escape_line(&entry.name);
     let type_name = preview::escape_line(type_label(entry));
     let gap = " ".repeat(HEADER_FIELD_GAP);

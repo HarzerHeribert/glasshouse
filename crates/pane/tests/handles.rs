@@ -418,3 +418,130 @@ fn a_grep_of_122kb_costs_under_300_tokens_and_survives_one_yield() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+// --- GH-PANE-61G-DELIVERY-AND-BG: §4's batch row ------------------------
+
+use pane::events::batch::Batch;
+use pane::events::window::{Window, WindowConfig};
+use pane::events::{Event, Kind, PayloadRef, Priority, Stamp};
+use pane::runtime::handles::HandleMeta;
+
+/// One closed batch, built the way the session builds one — through a window
+/// — so the entry this table renders is the batch's own
+/// `events-contract.md` §3 preview and not a string a test wrote.
+fn closed_batch(source: &str) -> Batch {
+    let mut window = Window::new(WindowConfig::default());
+    window.accept(
+        Event::pending(
+            Kind::BgDone {
+                emission: "exit".into(),
+            },
+            format!("bg/{source}"),
+            Stamp::from_millis(0),
+            PayloadRef::new(format!("{source}#exit")),
+            Priority::Batch,
+            "the build finished",
+        ),
+        Stamp::from_millis(0),
+    );
+    window
+        .close_if_due(Stamp::from_millis(3_000))
+        .expect("a window whose deadline has passed closes")
+}
+
+fn batch_meta(entry: &str) -> HandleMeta {
+    HandleMeta {
+        type_label: Some("Events.Batch".to_string()),
+        size_estimate: entry.len() as u64,
+        provenance: None,
+    }
+}
+
+/// `events-contract.md` §4: "exactly one row, named `batch`, **always
+/// last**, so the model's own bindings keep the order it made them in" — and
+/// the row is the batch's §3 preview, not §3-of-`runtime-contract`'s `string`
+/// rule applied to it.
+#[test]
+fn the_batch_row_is_the_tables_last_and_carries_its_own_preview() {
+    let mut table = HandleTable::new();
+    table.declare("hits", Value::array(vec![Value::Number(1.0)]), 1);
+    table.declare("adapter", Value::string("codex"), 1);
+    table.declare("report", Value::Number(3.0), 1);
+
+    let batch = closed_batch("job1");
+    let entry = batch.preview(PREVIEW_TOKEN_CAP);
+    table.declare_rendered(
+        "batch",
+        Value::string(&entry),
+        1,
+        batch_meta(&entry),
+        entry.clone(),
+    );
+
+    assert_eq!(table.names(), vec!["hits", "adapter", "report", "batch"]);
+    let rendered = render_table(&table, PREVIEW_TOKEN_CAP, TABLE_TOKEN_CAP);
+    let batch_at = rendered
+        .find("Events.Batch")
+        .expect("the batch row is in the table");
+    for name in ["hits", "adapter", "report"] {
+        let at = rendered
+            .find(name)
+            .unwrap_or_else(|| panic!("`{name}` is not in the table: {rendered}"));
+        assert!(
+            at < batch_at,
+            "`{name}` was rendered after the batch row, so the batch is not last:\n{rendered}"
+        );
+    }
+    assert!(
+        rendered.trim_end().ends_with(entry.trim_end()),
+        "the table does not end with the batch's own preview:\n{rendered}"
+    );
+    // Its own §3 preview, verbatim -- not `len=` and the first 200 characters
+    // of it, which is what `runtime-contract.md` §3's `string` rule would
+    // have produced. (The `adapter` row above *is* a string and does carry
+    // `len=`, which is why this asks the batch's own entry and not the whole
+    // table.)
+    let batch_entry = &rendered[batch_at..];
+    assert!(batch_entry.contains("the build finished"), "{batch_entry}");
+    assert!(batch_entry.contains("bg.done"), "{batch_entry}");
+    assert!(
+        !batch_entry.contains("len="),
+        "the batch was rendered by the `string` type rule rather than by its own \
+         events-contract.md §3 preview:\n{batch_entry}"
+    );
+}
+
+/// `runtime-contract.md` §2 through §4's "each delivery replaces and frees
+/// the previous batch, rendered `batch  (replaced at cell 5)`".
+#[test]
+fn a_second_batch_replaces_and_frees_the_first() {
+    let mut table = HandleTable::new();
+    let first = closed_batch("job1").preview(PREVIEW_TOKEN_CAP);
+    table.declare_rendered("batch", Value::string(&first), 1, batch_meta(&first), first);
+    let second = closed_batch("job2").preview(PREVIEW_TOKEN_CAP);
+    table.declare_rendered(
+        "batch",
+        Value::string(&second),
+        5,
+        batch_meta(&second),
+        second,
+    );
+
+    assert_eq!(
+        table.names(),
+        vec!["batch"],
+        "the first batch was not freed; two live handles now answer to one name"
+    );
+    let rendered = render_table(&table, PREVIEW_TOKEN_CAP, TABLE_TOKEN_CAP);
+    assert_eq!(
+        rendered.matches("Events.Batch").count(),
+        1,
+        "two batch rows were rendered:\n{rendered}"
+    );
+    assert!(
+        rendered.contains("(replaced at cell 5)"),
+        "the replacement was not announced:\n{rendered}"
+    );
+    assert!(rendered.contains("bg/job2"), "{rendered}");
+    assert!(!rendered.contains("bg/job1"), "{rendered}");
+}
