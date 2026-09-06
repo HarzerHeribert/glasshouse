@@ -638,3 +638,384 @@ fn the_preview_shrinks_its_samples_before_cutting_anything_above_them() {
         "the counts line is never cut: {tight}"
     );
 }
+
+// --- GH-PANE-61G-DELIVERY-AND-BG: §5's background jobs -------------------
+//
+// Every test below drives `pane::bg` directly, which is the module a cell's
+// `bg.run` reaches through one callback. The cell-level half — the binding,
+// the refusal a program catches, and the `batch` row the delivery leaves —
+// is `tests/runtime_cells.rs`, where a `Runtime` is already in hand.
+
+use pane::bg::{self, RunOptions, WatchOptions};
+use pane::contract::SessionId;
+use pane::glasshouse::Glasshouse;
+use pane::sandbox::profile::Profile;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
+
+static JOBS: AtomicU64 = AtomicU64::new(0);
+
+/// A throwaway project root and a session id nothing else in this binary
+/// shares — `bg`'s board is keyed by session id and process-wide, so two
+/// tests running on two threads must not name one board.
+struct JobFixture {
+    root: std::path::PathBuf,
+    session: SessionId,
+}
+
+impl JobFixture {
+    fn new(label: &str) -> Self {
+        let n = JOBS.fetch_add(1, Ordering::Relaxed);
+        let stem = format!("pane-bg-{}-{label}-{n}", std::process::id());
+        let root = std::env::temp_dir().join(&stem);
+        std::fs::create_dir_all(root.join(".claude")).unwrap();
+        Self {
+            root,
+            session: SessionId::new(stem),
+        }
+    }
+
+    /// `Bash(...)` patterns are argv admission and grant no file access at
+    /// all (`sandbox-grants.md` §2), which is why they are safe in a fixture.
+    fn profile(&self) -> Profile {
+        Profile::compile(
+            &self.root,
+            Some(
+                r#"{"permissions":{"allow":["Bash(echo*)","Bash(while*)","Bash(do*)","Bash(trap*)"]}}"#,
+            ),
+        )
+    }
+}
+
+impl Drop for JobFixture {
+    fn drop(&mut self) {
+        bg::shutdown(&self.session);
+        let _ = std::fs::remove_dir_all(&self.root);
+    }
+}
+
+/// Whether any process on this machine is running a command line containing
+/// `marker` — how `tests/tools.rs` proves a cancelled call left nothing
+/// spinning, asked here of a job.
+///
+/// `-ww` because macOS `ps` otherwise cuts a command line at the terminal
+/// width, and the marker of a job started with a long command line then never
+/// appears — which reads exactly like "the job never started".
+#[cfg(unix)]
+fn running(marker: &str) -> bool {
+    let output = std::process::Command::new("ps")
+        .args(["-A", "-ww", "-o", "command"])
+        .output()
+        .expect("ps is on every unix pane builds for");
+    String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .any(|line| line.contains(marker) && !line.contains("ps -A"))
+}
+
+/// A command that runs until something stops it, carrying `marker` in its own
+/// command line so [`running`] can find the process.
+///
+/// A **busy loop rather than `sleep`**, for the reason `tests/tools.rs`
+/// records at its own fixture: `process-exec*` names the resolved binary and
+/// nothing else (the 61D exec-roots ruling), so a confined `bash` cannot exec
+/// `/bin/sleep` — it answers exit 126 in milliseconds, which reads exactly
+/// like a job that never started. `while`, `do` and `:` are builtins and need
+/// no exec at all. The marker rides in the loop body for the same reason it
+/// is not a redirect: `bash` never execs a compound command, so the process
+/// keeps the command line the marker is written into.
+///
+/// **Every caller kills it within seconds** and then asserts through `ps`
+/// that it is gone, which is the whole point of the test that starts one.
+#[cfg(unix)]
+fn spinner(marker: &str) -> String {
+    format!("while :; do : {marker}; done")
+}
+
+/// Waits until `predicate` holds or `budget` runs out, and answers whether it
+/// held. **Every wait in this file is bounded**: a job that never finishes
+/// must fail a test rather than hang one.
+fn settles(budget: Duration, mut predicate: impl FnMut() -> bool) -> bool {
+    let deadline = Instant::now() + budget;
+    while Instant::now() < deadline {
+        if predicate() {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    predicate()
+}
+
+/// §5: "`bg.run` returns before the process has done anything: the model
+/// never blocks on output and never polls."
+///
+/// Measured, not argued: the command sleeps for seconds and the call is
+/// expected back in a fraction of one.
+#[cfg(unix)]
+#[test]
+fn bg_run_returns_a_handle_before_the_process_has_done_anything() {
+    let fixture = JobFixture::new("immediate");
+    let command = spinner("pane-immediate-marker");
+    let started = Instant::now();
+    let handle = bg::run(
+        &fixture.profile(),
+        &Glasshouse::None,
+        &fixture.session,
+        &command,
+        &RunOptions::default(),
+    )
+    .expect("`while`, `do` and `:` are admitted by this fixture's profile");
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < Duration::from_millis(500),
+        "bg.run blocked for {elapsed:?}; §5 says it returns before the process has done anything"
+    );
+    assert!(!handle.is_empty());
+    assert_eq!(bg::live(&fixture.session), 1);
+    // Nothing has been delivered yet either -- the completion is an event,
+    // not this call's return value.
+    assert!(bg::drain(&fixture.session).is_empty());
+}
+
+/// §5: "a `bg.run` outside the grant throws `PermissionDenied` **at the
+/// call, before any handle exists**."
+///
+/// Both halves are asserted: the refusal, and that nothing was left behind
+/// for the model to hold or for the session to drain.
+#[test]
+fn a_command_outside_the_grant_is_refused_before_any_handle_exists() {
+    let fixture = JobFixture::new("denied");
+    let denied = bg::run(
+        &fixture.profile(),
+        &Glasshouse::None,
+        &fixture.session,
+        "curl https://example.com",
+        &RunOptions::default(),
+    )
+    .expect_err("`curl` is admitted by no rule in this fixture's profile");
+    assert!(!denied.rule.is_empty(), "a refusal names its deciding rule");
+    assert_eq!(
+        bg::live(&fixture.session),
+        0,
+        "a refused bg.run left a job on the board"
+    );
+    assert!(
+        bg::drain(&fixture.session).is_empty(),
+        "a refused bg.run raised an event"
+    );
+}
+
+/// `cwd` and `env` are refused rather than silently ignored, and the refusal
+/// is likewise before any handle exists.
+#[test]
+fn an_option_this_runtime_cannot_honour_is_refused_not_ignored() {
+    let fixture = JobFixture::new("options");
+    let denied = bg::run(
+        &fixture.profile(),
+        &Glasshouse::None,
+        &fixture.session,
+        "echo hello",
+        &RunOptions {
+            cwd: Some("/".to_string()),
+            ..RunOptions::default()
+        },
+    )
+    .expect_err("cwd is not honourable through one confinement");
+    assert_eq!(denied.path, "cwd");
+    assert_eq!(bg::live(&fixture.session), 0);
+}
+
+/// §5: "`bg.cancel` … a cancelled or timed-out job **still emits `bg.done`
+/// with `status: "cancelled"`**, so nothing waits for a dead result" — and
+/// the job it cancelled ignores the polite signal, so the ladder's second
+/// rung is what stops it.
+#[cfg(unix)]
+#[test]
+fn cancelling_a_job_that_ignores_sigterm_still_stops_it_and_reports() {
+    let fixture = JobFixture::new("cancel");
+    let marker = "pane-cancel-marker";
+    let handle = bg::run(
+        &fixture.profile(),
+        &Glasshouse::None,
+        &fixture.session,
+        &format!("trap '' TERM; {}", spinner(marker)),
+        &RunOptions::default(),
+    )
+    .expect("`trap`, `while`, `do` and `:` are admitted by this fixture's profile");
+    assert!(
+        settles(Duration::from_secs(10), || running(marker)),
+        "the job never started; it raised {:?}",
+        bg::drain(&fixture.session)
+            .iter()
+            .map(|event| event.summary.clone())
+            .collect::<Vec<_>>()
+    );
+
+    bg::cancel(&fixture.session, &handle);
+    // Idempotent: a second cancel is not a second kill and not a panic.
+    bg::cancel(&fixture.session, &handle);
+
+    assert!(
+        settles(Duration::from_secs(10), || !running(marker)),
+        "a cancelled job that ignores SIGTERM was still running; the ladder stopped at the polite \
+         rung"
+    );
+    let events = settles(Duration::from_secs(10), || bg::live(&fixture.session) == 0)
+        .then(|| bg::drain(&fixture.session))
+        .expect("the cancelled job's thread never finished");
+    let done = events
+        .iter()
+        .find(|event| event.kind.as_str() == "bg.done")
+        .expect("a cancelled job still emits bg.done");
+    assert_eq!(done.source, format!("bg/{handle}"));
+    assert!(
+        done.summary.contains("cancelled"),
+        "bg.done did not report the cancellation: {}",
+        done.summary
+    );
+}
+
+/// A job's completion arrives as an event whose payload is fetched by id —
+/// §5's "its result is a handle, never blocking output".
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn a_finished_job_reports_through_an_event_whose_payload_is_fetched_by_id() {
+    let fixture = JobFixture::new("payload");
+    bg::run(
+        &fixture.profile(),
+        &Glasshouse::None,
+        &fixture.session,
+        "echo forty-megabytes-worth",
+        &RunOptions::default(),
+    )
+    .unwrap();
+    assert!(
+        settles(Duration::from_secs(20), || bg::live(&fixture.session) == 0),
+        "the job never finished"
+    );
+    let events = bg::drain(&fixture.session);
+    let done = events
+        .iter()
+        .find(|event| event.kind.as_str() == "bg.done")
+        .expect("a finished job emits bg.done");
+    let payload = bg::payload(&fixture.session, done.payload.as_str())
+        .expect("the payload the event names is materialisable");
+    assert_eq!(payload.status, "0");
+    assert!(payload.stdout.contains("forty-megabytes-worth"));
+}
+
+/// §5's watch, and §1's `bg.done` key (`bg/<handle> + emission`): two runs
+/// that printed the same thing are one event, and the `until` match ends the
+/// watch.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn a_watch_emits_per_match_and_stops_when_until_matches() {
+    let fixture = JobFixture::new("watch");
+    let handle = bg::watch(
+        &fixture.profile(),
+        &Glasshouse::None,
+        &fixture.session,
+        "echo still-building",
+        &WatchOptions {
+            every_ms: 20,
+            until: Some("still-building".to_string()),
+            timeout_ms: Some(10_000),
+        },
+    )
+    .unwrap();
+    assert!(
+        settles(Duration::from_secs(20), || bg::live(&fixture.session) == 0),
+        "the watch never stopped, so `until` never ended it"
+    );
+    let events = bg::drain(&fixture.session);
+    let done: Vec<_> = events
+        .iter()
+        .filter(|event| event.kind.as_str() == "bg.done")
+        .collect();
+    assert_eq!(done.len(), 1, "the first match should have ended the watch");
+    assert_eq!(done[0].source, format!("bg/{handle}"));
+    // Two arrivals of the same output share a dedup key, which is what makes
+    // §1's "identical output inside one window is one event" true of a watch
+    // without the watch knowing what a window is.
+    let mut window = Window::new(WindowConfig::default());
+    let first = done[0].clone();
+    let second = first.clone();
+    assert_eq!(window.accept(first, Stamp::from_millis(0)), Accepted::Kept);
+    assert_eq!(
+        window.accept(second, Stamp::from_millis(1)),
+        Accepted::Dropped(DropReason::Dedup)
+    );
+}
+
+/// **A background job outlives no session.** `shutdown` is what `run_task`
+/// and `run` both call; after it, nothing this session started is running.
+#[cfg(unix)]
+#[test]
+fn shutdown_leaves_no_job_of_this_session_running() {
+    let marker = "pane-shutdown-marker";
+    let session = {
+        let fixture = JobFixture::new("shutdown");
+        bg::run(
+            &fixture.profile(),
+            &Glasshouse::None,
+            &fixture.session,
+            &spinner(marker),
+            &RunOptions::default(),
+        )
+        .unwrap();
+        assert!(
+            settles(Duration::from_secs(10), || running(marker)),
+            "the job never started"
+        );
+        let session = fixture.session.clone();
+        bg::shutdown(&session);
+        session
+    };
+    assert_eq!(
+        bg::live(&session),
+        0,
+        "a job survived the session that started it"
+    );
+    assert!(
+        settles(Duration::from_secs(10), || !running(marker)),
+        "a job's process survived `bg::shutdown`"
+    );
+}
+
+/// `sandbox-grants.md` §3 and this crate's cross-platform rule: where no
+/// applier has ever executed, `tools::invoke::confine` refuses before
+/// spawning — so a background job refuses there too, **by the same call**,
+/// rather than the feature being compiled away.
+///
+/// The refusal reaches the model as the job's own `bg.done`, because it
+/// happens where the child would have been spawned rather than at the call:
+/// the *grant* is checked at the call on every platform (the test above),
+/// and the *confinement* is checked where `invoke` checks it.
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+#[test]
+fn a_background_job_refuses_where_nothing_can_confine_it() {
+    let fixture = JobFixture::new("unconfinable");
+    bg::run(
+        &fixture.profile(),
+        &Glasshouse::None,
+        &fixture.session,
+        "echo hello",
+        &RunOptions::default(),
+    )
+    .expect("the grant admits this command; the platform is what cannot confine it");
+    assert!(
+        settles(Duration::from_secs(20), || bg::live(&fixture.session) == 0),
+        "the job never finished"
+    );
+    let events = bg::drain(&fixture.session);
+    let done = events
+        .iter()
+        .find(|event| event.kind.as_str() == "bg.done")
+        .expect("a refused job still emits bg.done");
+    let payload = bg::payload(&fixture.session, done.payload.as_str()).unwrap();
+    assert_eq!(payload.status, "failed");
+    assert!(
+        payload.stderr.contains("unconfined"),
+        "the refusal did not name the confinement: {}",
+        payload.stderr
+    );
+}

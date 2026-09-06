@@ -158,6 +158,17 @@ impl Batch {
         result
     }
 
+    /// Every event this batch carries, with the number of batches it has
+    /// appeared in unacked — what the runtime marshals into the `batch`
+    /// handle §4 binds. `where_` and `rest` answer the model's own questions
+    /// and drop the age; this is the whole batch, in order.
+    pub fn events(&self) -> Vec<(&Event, u32)> {
+        self.entries
+            .iter()
+            .map(|entry| (&entry.event, entry.age))
+            .collect()
+    }
+
     /// This batch's events not yet acked.
     pub fn rest(&self) -> Vec<&Event> {
         self.entries

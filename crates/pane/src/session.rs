@@ -15,9 +15,12 @@ use clap::Parser;
 use ratatui::Terminal;
 use ratatui::backend::{CrosstermBackend, TestBackend};
 
+use crate::bg;
 use crate::commands::{self, CommandStatus};
 use crate::config::PaneConfig;
 use crate::contract::{Block, Conversation, Message, ProjectConfig, Role, ServedBy, SessionId};
+use crate::events::batch::Batch;
+use crate::events::window::{Window, WindowConfig};
 use crate::glasshouse::{self, Glasshouse, LifecycleEvent, LocalMemory};
 use crate::project;
 use crate::prompt::{self, Budget, CellResult, ErrorSection, ExhaustedReason, Extracted};
@@ -38,6 +41,20 @@ use crate::wire;
 /// the loop ends after one more turn whatever the model does. A program or
 /// two blocks resets the count; the token budget stays the outer stop.
 const PROSE_TURN_CAP: u32 = 3;
+
+/// The longest a turn waits for an open event window to close before it is
+/// composed without one — `events-contract.md` §2's own 2,000 ms deadline
+/// plus room for the drain that follows it.
+///
+/// It is a ceiling, not a delay: an **empty** window can never close and is
+/// answered at once, which is every turn of every session that raised no
+/// event. Only a window already holding an event is waited on, and only until
+/// §2's deadline closes it.
+const EVENT_WAIT: Duration = Duration::from_millis(2_500);
+
+/// How often that wait looks again. Short enough that a window closes within
+/// a frame of its deadline, long enough that waiting costs nothing.
+const EVENT_POLL: Duration = Duration::from_millis(25);
 
 /// §5's answer to a message that carried no program.
 const NO_PROGRAM: &str = "no program ran; send one pane block";
@@ -562,6 +579,11 @@ fn run(args: SessionArgs) -> Result<(), String> {
         interrupt: &interrupt,
     };
     let outcome = drive(&args, &session, &mut transcript, &mut rollout);
+    // §5 again, and this one is the promise `session::run` itself makes: an
+    // input that failed mid-task left `run_task` by `?` without reaching its
+    // own shutdown, and a job of that task must not outlive the session
+    // either.
+    bg::shutdown(&session_id);
 
     glasshouse::emit_lifecycle(
         &glasshouse,
@@ -795,6 +817,11 @@ fn run_task(
         session.config.limits.task_tokens,
         session.config.limits.cells,
     );
+    // `events-contract.md` §2: one window is always open, from session start
+    // or from the moment the previous batch was delivered. It is per task
+    // because the isolate the batch is bound in is, and §5's jobs are
+    // cancelled with it below.
+    let mut window = Window::new(WindowConfig::default());
     let mut final_turn = false;
     let mut prose_turns = 0u32;
     let supervisor = Supervisor::new();
@@ -823,6 +850,22 @@ fn run_task(
         let cell_token = invoke::CancellationToken::new();
         session.interrupt.arm(cell_token.clone());
         runtime.set_token(cell_token);
+
+        // `events-contract.md` §4: the window that was open while this turn
+        // was being answered closes here and its batch is bound into the
+        // model's scope -- before the cell runs, so the handle table this
+        // cell's own result carries has the `batch` row last and the model
+        // sees the events on the very next turn. **No event ever gets a turn
+        // of its own** (line 2481): a turn is composed for a user message,
+        // and a batch rides the one that was already going to happen.
+        if let Some(batch) = next_batch(&mut window, session.id, EVENT_WAIT)
+            && let Some(previous) = runtime.deliver_batch(batch)
+        {
+            // §3: the previous batch's unacked events roll into the window
+            // that just opened. The runtime hands the batch back rather than
+            // rolling it itself -- it owns no window.
+            window.carry_forward(previous.roll());
+        }
 
         let ordinal = tui::cell_ordinal(&transcript.conversation, &transcript.notebook);
         let mut step = act_on(
@@ -932,7 +975,50 @@ fn run_task(
     }
 
     runtime.end_task();
+    // §5: a background job outlives no task. Every live job is cancelled
+    // through `bg::cancel`'s ladder -- `invoke`'s own group kill -- and its
+    // thread is joined, so nothing this task started is still running when
+    // the isolate that could have read its result is gone.
+    bg::shutdown(session.id);
     Ok(())
+}
+
+/// §4's delivery decision for one turn: the batch this turn carries, or
+/// `None`.
+///
+/// Three states, and the third is the whole of §4's *"a turn with an empty
+/// batch and no user input does not happen: the runtime waits"*:
+///
+/// - the window is **closed** (an interrupt, or its deadline has passed):
+///   its batch is delivered now;
+/// - the window is **open with events in it**: this waits, because
+///   delivering now would give the events that arrived first a turn of their
+///   own and leave the rest for the next one — which is exactly what line
+///   2481 forbids. It waits only until §2's deadline closes the window, and
+///   never past `budget`;
+/// - the window is **empty**: there is nothing to deliver and nothing to wait
+///   for — an empty window has no deadline and can never close — so this
+///   answers `None` at once and the turn happens because a user message asked
+///   for it. **A batch never composes a turn**; that is why an empty one
+///   cannot.
+///
+/// `budget` is a ceiling on the second state, so a clock that jumps backwards
+/// or a window whose deadline is misconfigured costs a bounded wait rather
+/// than a session that never sends another turn.
+fn next_batch(window: &mut Window, session: &SessionId, budget: Duration) -> Option<Batch> {
+    let started = Instant::now();
+    loop {
+        for event in bg::drain(session) {
+            window.accept(event, crate::events::now());
+        }
+        if let Some(batch) = window.close_if_due(crate::events::now()) {
+            return Some(batch);
+        }
+        if window.is_empty() || started.elapsed() >= budget {
+            return None;
+        }
+        std::thread::sleep(EVENT_POLL);
+    }
 }
 
 /// `model-contract.md` §5 applied to one assistant message: one `pane` block
@@ -1304,6 +1390,90 @@ mod tests {
         let (tool, args) = parse_tool_line("bash command=echo hello world").unwrap();
         assert_eq!(tool, "bash");
         assert_eq!(args.get("command"), Some("echo hello world"));
+    }
+
+    /// One `bg.done`, the only kind §5 produces.
+    fn bg_done(source: &str) -> crate::events::Event {
+        use crate::events::{Event, Kind, PayloadRef, Priority};
+        Event::pending(
+            Kind::BgDone {
+                emission: source.to_string(),
+            },
+            source,
+            crate::events::now(),
+            PayloadRef::new(format!("{source}#exit")),
+            Priority::Batch,
+            "a job finished",
+        )
+    }
+
+    /// `events-contract.md` §4: **"a turn with an empty batch and no user
+    /// input does not happen: the runtime waits."**
+    ///
+    /// An empty window is the case where there is nothing to wait *for*: it
+    /// has no deadline and can never close, so no batch is ever delivered and
+    /// the turn that follows happens because a user message asked for it. A
+    /// batch never composes a turn, which is why an empty one cannot.
+    ///
+    /// **This is also what keeps the test from hanging**, and it is the
+    /// property being asserted rather than a convenience: the budget is
+    /// thirty seconds and is never reached, because an empty window is
+    /// answered on the first pass. A `next_batch` that waited out its budget
+    /// here would fail this test rather than slow it down.
+    #[test]
+    fn an_empty_window_delivers_nothing_and_waits_for_nothing() {
+        let session = SessionId::new("next-batch-empty");
+        let mut window = Window::new(WindowConfig::default());
+        let started = Instant::now();
+        assert!(
+            next_batch(&mut window, &session, Duration::from_secs(30)).is_none(),
+            "an empty window produced a batch"
+        );
+        assert!(
+            started.elapsed() < Duration::from_millis(200),
+            "an empty window was waited on for {:?}; it can never close",
+            started.elapsed()
+        );
+        bg::shutdown(&session);
+    }
+
+    /// Line 2481's first clause: **an event does not get a turn of its own
+    /// while a batch window is open.** A window holding an event that has not
+    /// reached §2's deadline is waited on, not delivered — and the wait is
+    /// bounded by the budget, which is the only reason this test terminates
+    /// if the deadline logic is ever wrong.
+    #[test]
+    fn an_open_window_is_waited_on_rather_than_delivered_in_pieces() {
+        let session = SessionId::new("next-batch-open");
+        let mut window = Window::new(WindowConfig::default());
+        window.accept(bg_done("bg/job1"), crate::events::now());
+        let started = Instant::now();
+        assert!(
+            next_batch(&mut window, &session, Duration::from_millis(200)).is_none(),
+            "an open window was delivered before §2's deadline closed it"
+        );
+        assert!(
+            started.elapsed() >= Duration::from_millis(200),
+            "the open window was not waited on at all: {:?}",
+            started.elapsed()
+        );
+        bg::shutdown(&session);
+    }
+
+    /// And the other side of it: once the window is due, **both** events
+    /// arrive as one batch — the second never became a turn of its own.
+    #[test]
+    fn a_due_window_delivers_every_event_it_holds_as_one_batch() {
+        use crate::events::Stamp;
+        let session = SessionId::new("next-batch-due");
+        let mut window = Window::new(WindowConfig::default());
+        let long_ago = Stamp::from_millis(crate::events::now().as_millis() - 3_000);
+        window.accept(bg_done("bg/job1"), long_ago);
+        window.accept(bg_done("bg/job2"), long_ago);
+        let batch = next_batch(&mut window, &session, Duration::from_millis(200))
+            .expect("a window past its deadline closes");
+        assert_eq!(batch.n, 2, "the events were split across two deliveries");
+        bg::shutdown(&session);
     }
 
     #[test]
