@@ -40,6 +40,9 @@ scan() {
     case "$name" in *[Oo]rchestrator*) continue ;; esac
     case "$name" in *' '*) continue ;; esac
     [ -d "$REPO/.worktrees/$name" ] && continue
+    # A team lead's subs live one level deeper (`.worktrees/<lead>/.worktrees/<name>`);
+    # without this line every live sub of a lead was named STALE with a close command.
+    if compgen -G "$REPO/.worktrees/*/.worktrees/$name" >/dev/null; then continue; fi
     if printf '%s\n' "$PENDING" | grep -qx -- "$name"; then continue; fi
     echo "STALE $ref $name — close it: scripts/close-worker.sh $ref $name"
   done
