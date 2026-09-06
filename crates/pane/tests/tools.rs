@@ -658,9 +658,12 @@ fn an_unregistered_name_is_a_refusal_and_fires_no_hook() {
 /// the confinement these tests are supposed to be running inside.
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 fn cancellable_settings() -> String {
-    // `Bash(do*)` admits `do` and `done`; every pattern here is argv
-    // admission and grants no file access whatsoever (§2).
-    r#"{"permissions":{"allow":["Bash(echo*)","Bash(while*)","Bash(do*)"]}}"#.to_string()
+    // `Bash(do*)` admits `do`, `done` and the `done &` that backgrounds the
+    // loop; `Bash(wait*)` admits the builtin the grandchild fixture waits
+    // on. Every pattern here is argv admission and grants no file access
+    // whatsoever (§2).
+    r#"{"permissions":{"allow":["Bash(echo*)","Bash(while*)","Bash(do*)","Bash(wait*)"]}}"#
+        .to_string()
 }
 
 /// The command line the two cancellation tests share: write one file, then
@@ -698,8 +701,14 @@ fn a_running_call_is_killed_reaped_and_returned_as_a_throw() {
 
     let token = invoke::CancellationToken::new();
     let setter = token.clone();
+    let watched = pid_file.clone();
     let canceller = std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        // Cancel once the child has recorded its pid, not after a fixed
+        // sleep. The fixed sleep was a race: on a loaded machine the child
+        // had not reached its `echo` after 100 ms, the call was cancelled
+        // before it, and the assertion below failed with `NotFound` on a pid
+        // file that was never written.
+        let _ = wait_for_pid_file(&watched, std::time::Duration::from_secs(10));
         setter.cancel();
     });
 
@@ -734,14 +743,16 @@ fn a_running_call_is_killed_reaped_and_returned_as_a_throw() {
         .trim()
         .to_string();
     assert!(pid.parse::<u32>().is_ok(), "not a pid: {pid:?}");
-    let alive = std::process::Command::new("kill")
-        .arg("-0")
-        .arg(&pid)
-        .output()
-        .expect("`kill` runs");
     assert!(
-        !alive.status.success(),
-        "pid {pid} is still addressable after the call returned: {alive:?}"
+        !alive(&pid),
+        "pid {pid} is still addressable after the call returned"
+    );
+    // And the doc comment's actual promise, which the pid alone does not
+    // carry: *no* process behind, not just this one.
+    let survivors = reap_survivors(&fixture.root.display().to_string());
+    assert!(
+        survivors.is_empty(),
+        "the cancelled call left processes behind: {survivors:?}"
     );
 }
 
@@ -817,6 +828,289 @@ fn a_token_set_before_the_call_spawns_nothing() {
         "{recorded}"
     );
     assert!(recorded.contains("Cancelled"), "{recorded}");
+}
+
+/// Whether `pid` is still addressable. A zombie answers yes, which is the
+/// point: it distinguishes `kill` alone from `kill` then `wait`.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn alive(pid: &str) -> bool {
+    std::process::Command::new("kill")
+        .arg("-0")
+        .arg(pid)
+        .output()
+        .expect("`kill` runs")
+        .status
+        .success()
+}
+
+/// Polls until `pid` is gone, up to `limit`. Answers whether it went.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn gone_within(pid: &str, limit: std::time::Duration) -> bool {
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        if !alive(pid) {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// Waits for a file the child writes, and answers its trimmed contents.
+///
+/// The cancellation tests cancel on *this* rather than on a fixed sleep, and
+/// that is not a style choice: a fixed 100 ms raced the child on a loaded
+/// machine and made
+/// `a_running_call_is_killed_reaped_and_returned_as_a_throw` red with
+/// `NotFound` on the pid file — a red whose own leaked children then made an
+/// unrelated target red. Cancelling once the child has said it is running
+/// removes the race and makes the test assert the case it names.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn wait_for_pid_file(path: &Path, limit: std::time::Duration) -> Option<String> {
+    let deadline = std::time::Instant::now() + limit;
+    loop {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            let text = text.trim().to_string();
+            if !text.is_empty() {
+                return Some(text);
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return None;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+}
+
+/// Every process whose command line still names `needle`, killed, and their
+/// pids answered.
+///
+/// It kills before the caller asserts on purpose. A fixture here is a busy
+/// loop, so a test that asserted first and left the survivors running would
+/// saturate the machine it just failed on — which is the exact way one red
+/// manufactured the next one.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn reap_survivors(needle: &str) -> Vec<String> {
+    let listing = std::process::Command::new("ps")
+        .args(["-axo", "pid=,command="])
+        .output()
+        .expect("`ps` runs");
+    let listing = String::from_utf8_lossy(&listing.stdout).into_owned();
+    let mut found = Vec::new();
+    for line in listing.lines() {
+        let line = line.trim_start();
+        let Some((pid, command)) = line.split_once(char::is_whitespace) else {
+            continue;
+        };
+        // `ps` lists this test's own `ps` invocation too on some hosts; a
+        // command line that merely *searches* for the needle is not a
+        // survivor of the call.
+        if !command.contains(needle) || command.starts_with("ps ") {
+            continue;
+        }
+        let _ = std::process::Command::new("kill")
+            .arg("-9")
+            .arg(pid)
+            .output();
+        found.push(format!("{pid} {command}"));
+    }
+    found
+}
+
+/// The command line the grandchild test needs: put the busy loop in a
+/// **background job**, record that job's pid, record the shell's own, and
+/// wait.
+///
+/// `$!` is the grandchild — bash forks a subshell for a background job, and
+/// its pid is one pane never held a handle to, because `Command::spawn`
+/// returns a handle to the shell and to nothing the shell starts. `$$` is
+/// the direct child, so one fixture yields both halves of "no process
+/// behind".
+///
+/// The loop is backgrounded with a bare `done &` rather than a `(…) &`
+/// subshell for one reason: the profile admits this command line segment by
+/// segment, and `(while :` is a segment no `Bash(…)` pattern here matches.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn starts_a_grandchild_then_waits(child_pid: &Path, grandchild_pid: &Path) -> String {
+    format!(
+        "while :; do :; done & echo $! > {}; echo $$ > {}; wait",
+        grandchild_pid.display(),
+        child_pid.display()
+    )
+}
+
+/// Stopping a call leaves **no** process behind — not the child, and not a
+/// process the child started.
+///
+/// [`a_running_call_is_killed_reaped_and_returned_as_a_throw`] proves the
+/// direct child dies, and the direct child is the only thing a [`Child`]
+/// handle can name. This one runs the loop in a background job of the
+/// child's, so its pid is a grandchild no handle reaches: killing the handle
+/// alone leaves it spinning at 100% forever, and killing the child's
+/// **process group** is what reaches it. A model's `bash` call that starts a
+/// server and is then cancelled is exactly this shape, which is why the
+/// grandchild is the case that matters rather than an exotic one.
+///
+/// [`Child`]: std::process::Child
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn a_cancelled_call_leaves_no_process_behind_not_even_a_grandchild() {
+    let fixture = Fixture::new("cancel-grandchild");
+    let child_pid = fixture.root.join("child.pid");
+    let grandchild_pid = fixture.root.join("grandchild.pid");
+    let profile = Profile::compile(&fixture.root, Some(&cancellable_settings()));
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("cancel-grandchild");
+    let ctx = context(&profile, &glasshouse, &session);
+
+    let token = invoke::CancellationToken::new();
+    let setter = token.clone();
+    let watched = grandchild_pid.clone();
+    let canceller = std::thread::spawn(move || {
+        // Cancel once the grandchild exists, so the call being cancelled is
+        // certainly one with a grandchild running. The bound is a
+        // liveness guard, not the assertion: the pid files below say
+        // whether anything ran.
+        let _ = wait_for_pid_file(&watched, std::time::Duration::from_secs(10));
+        setter.cancel();
+    });
+
+    let error = invoke::run_cancellable(
+        &ctx,
+        &token,
+        "bash",
+        &Args::new().with(
+            "command",
+            starts_a_grandchild_then_waits(&child_pid, &grandchild_pid),
+        ),
+    )
+    .expect_err("a cancelled call is not a result");
+    canceller.join().unwrap();
+
+    assert!(
+        matches!(&error, invoke::ToolError::Cancelled { tool } if tool == "bash"),
+        "{error:?}"
+    );
+
+    let child = std::fs::read_to_string(&child_pid)
+        .expect("the child ran and recorded its pid")
+        .trim()
+        .to_string();
+    let grandchild = std::fs::read_to_string(&grandchild_pid)
+        .expect("the grandchild ran and recorded its pid")
+        .trim()
+        .to_string();
+    assert!(child.parse::<u32>().is_ok(), "not a pid: {child:?}");
+    assert!(
+        grandchild.parse::<u32>().is_ok(),
+        "not a pid: {grandchild:?}"
+    );
+    assert_ne!(child, grandchild, "the fixture started no grandchild");
+
+    // Both, within one second, and killed before the assertion so a failure
+    // does not leave a busy loop running on the machine.
+    let child_gone = gone_within(&child, std::time::Duration::from_secs(1));
+    let grandchild_gone = gone_within(&grandchild, std::time::Duration::from_secs(1));
+    let survivors = reap_survivors(&fixture.root.display().to_string());
+    assert!(child_gone, "the child {child} outlived the cancelled call");
+    assert!(
+        grandchild_gone,
+        "the grandchild {grandchild} outlived the cancelled call; survivors: {survivors:?}"
+    );
+    assert!(
+        survivors.is_empty(),
+        "the cancelled call left processes behind: {survivors:?}"
+    );
+}
+
+/// A cancellation that lands in the window between the pre-spawn check and
+/// the first poll still kills.
+///
+/// The pre-spawn check makes "never created" a property of the control flow,
+/// and the poll loop covers a child that has been running for a while. The
+/// gap between them is the one a real cancellation is most likely to land
+/// in, because a caller that cancels at all usually cancels early.
+///
+/// The delay is **swept** across the rounds rather than fixed, and the sweep
+/// is the whole design: a fixed one millisecond loses every race to the
+/// pre-spawn check — measured, 50 rounds, not one of them reached a child —
+/// so it asserts nothing while looking like it asserts everything. Nought to
+/// forty-nine milliseconds brackets a confined spawn on this host (a
+/// freshly written fixture is Gatekeeper-scanned before `execve`, so the
+/// spawn is milliseconds, not microseconds). The assertion is not *which*
+/// side a round fell on, but that no round left anything running — and
+/// `ran` is what refuses to let the test pass vacuously if the sweep ever
+/// stops bracketing it.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn a_cancel_that_races_the_spawn_still_kills() {
+    let fixture = Fixture::new("cancel-race");
+    let profile = Profile::compile(&fixture.root, Some(&cancellable_settings()));
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("cancel-race");
+    let ctx = context(&profile, &glasshouse, &session);
+    let needle = fixture.root.display().to_string();
+
+    let mut ran = 0_u32;
+    for round in 0..50_u64 {
+        let child_pid = fixture.root.join(format!("child-{round}.pid"));
+        let grandchild_pid = fixture.root.join(format!("grandchild-{round}.pid"));
+
+        let token = invoke::CancellationToken::new();
+        let setter = token.clone();
+        let canceller = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(round));
+            setter.cancel();
+        });
+
+        let error = invoke::run_cancellable(
+            &ctx,
+            &token,
+            "bash",
+            &Args::new().with(
+                "command",
+                starts_a_grandchild_then_waits(&child_pid, &grandchild_pid),
+            ),
+        )
+        .expect_err("a cancelled call is not a result");
+        canceller.join().unwrap();
+        assert!(
+            matches!(&error, invoke::ToolError::Cancelled { tool } if tool == "bash"),
+            "round {round}: {error:?}"
+        );
+
+        // Whichever side of the window this round fell on, anything it did
+        // start must be gone. A round that spawned nothing writes no pid
+        // file and asserts nothing here; `ran` is what says the fifty rounds
+        // were not all vacuous.
+        for recorded in [&child_pid, &grandchild_pid] {
+            if let Some(pid) = wait_for_pid_file(recorded, std::time::Duration::ZERO) {
+                ran += 1;
+                let gone = gone_within(&pid, std::time::Duration::from_secs(1));
+                let survivors = reap_survivors(&needle);
+                assert!(
+                    gone,
+                    "round {round}: pid {pid} outlived the cancelled call; survivors: \
+                     {survivors:?}"
+                );
+            }
+        }
+    }
+
+    let survivors = reap_survivors(&needle);
+    assert!(
+        survivors.is_empty(),
+        "fifty racing cancellations left processes behind: {survivors:?}"
+    );
+    // Non-vacuity: if a one-millisecond cancel always beat the spawn, this
+    // test would pass without ever having killed anything.
+    assert!(
+        ran > 0,
+        "no round of the sweep got far enough to start a child, so nothing was proved about \
+         killing one; the delays no longer bracket a spawn on this host"
+    );
 }
 
 /// The token changes nothing about a call that finishes: `run` and
