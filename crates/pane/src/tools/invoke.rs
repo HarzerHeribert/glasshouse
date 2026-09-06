@@ -709,6 +709,15 @@ fn spawn_confined(
     command.stdin(Stdio::null());
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
+    // The child leads a process group of its own, so a cancellation can name
+    // everything the call started and not only the handle it holds. See
+    // [`kill_and_reap`] for why that is the difference between stopping a
+    // call and stopping a process.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
 
     let confinement = confine(profile, &grant.binary, tool.name(), &mut command)?;
 
@@ -722,6 +731,17 @@ fn spawn_confined(
         error: error.to_string(),
     };
     let mut child = command.spawn().map_err(spawn_failed)?;
+
+    // A cancellation that landed in the window between the check above and
+    // this line now has something to stop, and the poll loop below would not
+    // ask the token again for a whole `CANCEL_POLL`. Killing here rather
+    // than a tick later is not about the latency: it is that this is the
+    // window a caller is *most* likely to cancel in, because a caller that
+    // cancels at all usually cancels early.
+    if token.is_cancelled() {
+        kill_and_reap(&mut child);
+        return Err(cancelled());
+    }
 
     let stdout = drain(child.stdout.take());
     let stderr = drain(child.stderr.take());
@@ -778,23 +798,66 @@ fn collect(handle: JoinHandle<Vec<u8>>) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
-/// Kills the child and reaps it, in that order, so nothing is left for
-/// `init`.
+/// Kills everything the call started and reaps the child, in that order, so
+/// nothing is left for `init`.
 ///
-/// The handle is the only thing addressed: no pid parsed from a string, and
-/// no process group, because pane did not create one and killing a group it
-/// did not create is how a cancellation becomes an outage. Both results are
-/// discarded deliberately — a child that exited between the poll and the
-/// `kill` is not an error, it is the race this function exists to be
-/// indifferent to.
+/// **The group is killed first, and the group is the point.** A [`Child`]
+/// handle names the process pane spawned and nothing that process started,
+/// so killing the handle alone stops the shell and leaves its background
+/// jobs running — a `bash` call that started a server, cancelled, leaves the
+/// server spinning at 100% until the machine is rebooted. That is not
+/// hypothetical: `tests/tools.rs` reproduces it in one fixture.
+///
+/// Killing a group is safe here only because [`spawn_confined`] *created*
+/// this one: `process_group(0)` makes the child a group leader whose group
+/// id is its own pid, so the members are exactly the processes this call
+/// started. Killing a group pane did not create is how a cancellation
+/// becomes an outage, which is why the group is established at the spawn
+/// rather than guessed at the kill. The order matters for the same reason:
+/// once `wait` has reaped the child, its pid — and therefore the group id —
+/// may be reused, so the group must be signalled while the child is still
+/// unreaped.
+///
+/// Every result is discarded deliberately. A child that exited between the
+/// poll and the `kill` is not an error, it is the race this function exists
+/// to be indifferent to, and a group that no longer has members answers
+/// `ESRCH` for the same reason.
 ///
 /// The two drain threads are *not* joined here. Their output is discarded by
 /// a cancelled call, and joining them would make cancellation wait on a
 /// grandchild that inherited the pipe — the one thing a bounded cancellation
 /// must not do.
 fn kill_and_reap(child: &mut Child) {
+    #[cfg(unix)]
+    kill_group(child.id());
     let _ = child.kill();
     let _ = child.wait();
+}
+
+/// `SIGKILL`, which is 9 on every unix pane builds for.
+#[cfg(unix)]
+const SIGKILL: i32 = 9;
+
+#[cfg(unix)]
+unsafe extern "C" {
+    /// POSIX `killpg`. Declared rather than depended on: pane has no `libc`
+    /// in its tree, and this is the whole of what it would be used for.
+    fn killpg(pgrp: i32, sig: i32) -> i32;
+}
+
+/// `SIGKILL`s the process group led by `pid`.
+///
+/// `pid` is a child [`spawn_confined`] made a group leader, so the group id
+/// is the pid and its members are exactly what that call started.
+#[cfg(unix)]
+fn kill_group(pid: u32) {
+    // SAFETY: `killpg` is a POSIX libc call taking two integers and
+    // returning one. There is no pointer, no allocation and no state; the
+    // only failure it can report is `ESRCH` for a group whose members have
+    // all exited, which is the ordinary case and is discarded above.
+    unsafe {
+        killpg(pid as i32, SIGKILL);
+    }
 }
 
 /// Installs this platform's confinement on `command`, or refuses.
