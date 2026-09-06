@@ -102,10 +102,13 @@ pub struct RunOpts {
     /// Passed to the harness child as `ANTHROPIC_BASE_URL` when set.
     pub gateway: Option<String>,
     /// When set, launch the row through `<glasshouse> launch <row's own
-    /// slug> --profile <profile> -- <substituted argv>` instead of the
-    /// row's own `program` -- `cli::run` refuses this without `meter` set to
-    /// `Meter::Command` and refuses it together with `gateway`.
-    pub via_glasshouse: Option<String>,
+    /// slug> --profile <that row's profile> -- <substituted argv>` instead
+    /// of the row's own `program`, looking the profile up by
+    /// `harness.as_str()` -- `cli::run` refuses `--via-glasshouse` without
+    /// `meter` set to `Meter::Command`, refuses it together with `gateway`,
+    /// and guarantees a map entry for every selected row before any attempt
+    /// runs.
+    pub via_glasshouse: Option<HashMap<String, String>>,
     pub meter: Meter,
     pub harnesses: HashMap<String, HarnessCommand>,
 }
@@ -193,9 +196,12 @@ fn run_attempt_in(
     // included -- is unchanged on either path. Nothing in `command.program`
     // reaches this path: Glasshouse resolves the harness's own executable.
     let mut launch = match &opts.via_glasshouse {
-        Some(profile) => {
+        Some(profiles) => {
             let glasshouse = opts.meter.glasshouse_path().expect(
                 "cli::run refuses --via-glasshouse without --meter before any attempt runs",
+            );
+            let profile = profiles.get(harness.as_str()).expect(
+                "cli::run guarantees a profile for every selected row before any attempt runs",
             );
             let mut cmd = Command::new(glasshouse);
             // `--headless`: the harness runs in its own pty, captured, and

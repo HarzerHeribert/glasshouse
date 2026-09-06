@@ -17,8 +17,14 @@ use pane::runtime::isolate::{DEFAULT_HEAP_LIMIT_BYTES, Runtime};
 use pane::runtime::outcome::{CellOutcome, HandleRecord};
 use pane::runtime::preview::{self, ErrorValue, Value};
 use pane::sandbox::profile::Profile;
+// Gated like their only callers: the Windows cell compiles every target with
+// warnings denied, and a helper whose callers are all `unix` tests is dead
+// there (the cell's three reds on `a8766b2`).
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 use pane::tools::invoke::CancellationToken;
-use std::path::{Path, PathBuf};
+#[cfg(unix)]
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
@@ -45,6 +51,7 @@ impl Fixture {
         Profile::compile(&self.root, Some(&settings()))
     }
 
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     fn profile_with(&self, settings: &str) -> Profile {
         Profile::compile(&self.root, Some(settings))
     }
@@ -1363,9 +1370,19 @@ fn a_grep_line_that_is_not_a_match_has_no_line_number() {
          located.length, new Set(located.map(m => m.path)).size].join(\",\");\n",
         path = fixture.root.to_string_lossy()
     ));
+    // GNU grep 3.5 and later prints its `binary file matches` notice to
+    // stderr, so on the Linux cell no non-located line reaches stdout and
+    // `hits.length > located.length` is false there; BSD grep on macOS
+    // prints it to stdout and the strict form holds. Both cells check that
+    // the located match is exactly one, in exactly one file.
+    let expected = if cfg!(target_os = "macos") {
+        "true,1,1"
+    } else {
+        "false,1,1"
+    };
     assert_eq!(
         returned_string(&outcome),
-        "true,1,1",
+        expected,
         "a line grep printed that is not a located match must be filterable: {outcome:?}"
     );
 }

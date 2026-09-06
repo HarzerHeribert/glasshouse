@@ -63,14 +63,16 @@ pub struct RunArgs {
     #[arg(long)]
     pub meter: Option<PathBuf>,
     /// Launches each row through `<glasshouse> launch <row> --profile
-    /// <profile> -- <substituted argv>` in the attempt's own worktree,
-    /// instead of the row's own program, and reads the meter from that same
+    /// <profile> -- <substituted argv>` in the attempt's own worktree
+    /// instead of the row's own program, reading the meter from that same
     /// worktree -- `ruler.md` §3's "one meter" is the project ledger, not a
-    /// standing process. Requires `--meter` (the launch and the ledger are
-    /// one binary) and refuses `--gateway` (no standing gateway to point
-    /// at).
+    /// standing process. A bare value applies one profile to every selected
+    /// row; `<row>=<profile>`, repeated once per row, gives each row its own
+    /// and requires every selected row to have one. Requires `--meter` (the
+    /// launch and the ledger are one binary) and refuses `--gateway` (no
+    /// standing gateway to point at).
     #[arg(long)]
-    pub via_glasshouse: Option<String>,
+    pub via_glasshouse: Vec<String>,
     #[arg(long)]
     pub out: PathBuf,
 }
@@ -96,29 +98,31 @@ fn run(flags: &[String]) -> Result<(), String> {
             "--repeat must be at least {MIN_REPEAT}: a single attempt of an agent task measures the sample, not the harness"
         ));
     }
-    if args.via_glasshouse.is_some() && args.meter.is_none() {
+    if !args.via_glasshouse.is_empty() && args.meter.is_none() {
         return Err(
             "--via-glasshouse needs --meter <glasshouse>: the launch and the ledger are one binary"
                 .to_string(),
         );
     }
-    if args.via_glasshouse.is_some() && args.gateway.is_some() {
+    if !args.via_glasshouse.is_empty() && args.gateway.is_some() {
         return Err(
             "--via-glasshouse and --gateway cannot be combined: --gateway is for a standing gateway, and none exists today"
                 .to_string(),
         );
     }
 
+    let harnesses = resolve_harnesses(&args)?;
+    let via_glasshouse = resolve_via_glasshouse(&args.via_glasshouse, &harnesses)?;
+
     let tasks = resolve_tasks(&args)?;
     if tasks.is_empty() {
         return Err("no tasks selected: pass --task or --tier".to_string());
     }
-    let harnesses = resolve_harnesses(&args)?;
 
     let opts = RunOpts {
         scratch: std::env::temp_dir().join("pane-ruler"),
         gateway: args.gateway.clone(),
-        via_glasshouse: args.via_glasshouse.clone(),
+        via_glasshouse,
         meter: match &args.meter {
             Some(glasshouse) => Meter::Command {
                 glasshouse: glasshouse.clone(),
@@ -184,6 +188,72 @@ fn resolve_harnesses(args: &RunArgs) -> Result<Vec<String>, String> {
         return Err("no harness selected: pass at least one --harness".to_string());
     }
     Ok(args.harness.clone())
+}
+
+/// Parses `--via-glasshouse` into a row -> profile map, or `None` if the
+/// flag was not given at all. Refuses, before any attempt runs: a value list
+/// mixing the bare and `<row>=<profile>` forms, more than one bare value, a
+/// per-row value naming a row `harnesses` did not select, a row named twice,
+/// and a selected row left without a profile under the per-row form.
+fn resolve_via_glasshouse(
+    values: &[String],
+    harnesses: &[String],
+) -> Result<Option<HashMap<String, String>>, String> {
+    if values.is_empty() {
+        return Ok(None);
+    }
+
+    let per_row: Vec<(&str, &str)> = values.iter().filter_map(|v| v.split_once('=')).collect();
+    let bare: Vec<&str> = values
+        .iter()
+        .filter(|v| !v.contains('='))
+        .map(String::as_str)
+        .collect();
+
+    if !per_row.is_empty() && !bare.is_empty() {
+        return Err(
+            "--via-glasshouse cannot mix a bare profile with row=profile entries".to_string(),
+        );
+    }
+
+    if per_row.is_empty() {
+        let profile = match bare.as_slice() {
+            [profile] => *profile,
+            _ => {
+                return Err(
+                    "--via-glasshouse takes one bare profile, applied to every selected row"
+                        .to_string(),
+                );
+            }
+        };
+        return Ok(Some(
+            harnesses
+                .iter()
+                .map(|row| (row.clone(), profile.to_string()))
+                .collect(),
+        ));
+    }
+
+    let mut map = HashMap::new();
+    for &(row, profile) in &per_row {
+        if !harnesses.iter().any(|h| h == row) {
+            return Err(format!(
+                "--via-glasshouse names row {row}, which --harness did not select"
+            ));
+        }
+        if map.insert(row.to_string(), profile.to_string()).is_some() {
+            return Err(format!("--via-glasshouse names row {row} twice"));
+        }
+    }
+    for row in harnesses {
+        if !map.contains_key(row) {
+            return Err(format!(
+                "--via-glasshouse names no profile for row {row}; give {row}=<profile>"
+            ));
+        }
+    }
+
+    Ok(Some(map))
 }
 
 fn parse_tier(name: &str) -> Result<Tier, String> {

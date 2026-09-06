@@ -122,6 +122,34 @@ fn read_argv_cwd(record: &Path) -> PathBuf {
     )
 }
 
+/// Groups the NUL-separated tokens [`write_via_glasshouse_script`] recorded
+/// across possibly several `launch ...` invocations into one argv per row --
+/// each invocation starts with `"launch"`, and its second token is the row.
+fn group_launch_calls_by_row(record: &Path) -> HashMap<String, Vec<String>> {
+    let mut groups: HashMap<String, Vec<String>> = HashMap::new();
+    let mut current: Option<(String, Vec<String>)> = None;
+    for token in read_argv(record) {
+        if token == "launch" {
+            if let Some((row, argv)) = current.take() {
+                groups.insert(row, argv);
+            }
+            current = Some((String::new(), vec![token]));
+            continue;
+        }
+        let Some((row, argv)) = current.as_mut() else {
+            continue;
+        };
+        if row.is_empty() {
+            *row = token.clone();
+        }
+        argv.push(token);
+    }
+    if let Some((row, argv)) = current {
+        groups.insert(row, argv);
+    }
+    groups
+}
+
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
@@ -735,12 +763,12 @@ fn the_meter_parses_the_readouts_full_twenty_two_key_row() {
     );
 }
 
-/// Required behaviour 1 and 2 of `GH-PANE-RULER-VIA-GLASSHOUSE`: with
-/// `--via-glasshouse`, a row's argv is exactly `launch <row> --profile
-/// <profile> -- <the row's own substituted argv>` -- for both `pane` and
-/// `claude-code`.
+/// Required behaviour 3: the bare form (`--via-glasshouse <profile>`, no
+/// `=`) applies one profile to every selected row, and its argv is exactly
+/// `launch <row> --profile <profile> -- <the row's own substituted argv>` --
+/// pinned unchanged for both `pane` and `claude-code`.
 #[test]
-fn via_glasshouse_launches_the_row_through_glasshouse_launch_in_the_attempts_worktree() {
+fn a_bare_via_glasshouse_still_applies_one_profile_to_every_row() {
     let scratch = scratch_dir("via-glasshouse-pane");
     let launch_argv_record = scratch.join("launch_argv.txt");
     let fake_glasshouse =
@@ -753,7 +781,7 @@ fn via_glasshouse_launches_the_row_through_glasshouse_launch_in_the_attempts_wor
     let opts = RunOpts {
         scratch: scratch.clone(),
         gateway: None,
-        via_glasshouse: Some("bench".to_string()),
+        via_glasshouse: Some(HashMap::from([("pane".to_string(), "bench".to_string())])),
         meter: Meter::Command {
             glasshouse: fake_glasshouse,
         },
@@ -800,7 +828,10 @@ fn via_glasshouse_launches_the_row_through_glasshouse_launch_in_the_attempts_wor
     let opts2 = RunOpts {
         scratch: scratch2.clone(),
         gateway: None,
-        via_glasshouse: Some("bench".to_string()),
+        via_glasshouse: Some(HashMap::from([(
+            "claude-code".to_string(),
+            "bench".to_string(),
+        )])),
         meter: Meter::Command {
             glasshouse: fake_glasshouse2,
         },
@@ -828,6 +859,240 @@ fn via_glasshouse_launches_the_row_through_glasshouse_launch_in_the_attempts_wor
             "--dangerously-skip-permissions".to_string(),
             task2.statement.to_string(),
         ]
+    );
+}
+
+/// Required behaviour 1: two rows, two profiles, each launch's `--profile`
+/// is its own row's -- one shared argv recorder tells the two launches apart
+/// by the row key ([`group_launch_calls_by_row`]).
+#[test]
+fn via_glasshouse_takes_one_profile_per_row() {
+    let scratch = scratch_dir("via-glasshouse-per-row");
+    let launch_argv_record = scratch.join("launch_argv.txt");
+    let fake_glasshouse =
+        write_via_glasshouse_script(&scratch, "fake_glasshouse.sh", &launch_argv_record);
+
+    let mut profiles = HashMap::new();
+    profiles.insert("pane".to_string(), "bench-pane".to_string());
+    profiles.insert("claude-code".to_string(), "bench-claude".to_string());
+
+    let commit = leak(head_commit());
+    let pane_test = write_script(&scratch, "pane_test.sh", &scratch.join("pane_cwd.txt"), 0);
+    let pane_task = base_task(commit, single_command(&pane_test));
+    let pane_opts = RunOpts {
+        scratch: scratch.clone(),
+        gateway: None,
+        via_glasshouse: Some(profiles.clone()),
+        meter: Meter::Command {
+            glasshouse: fake_glasshouse.clone(),
+        },
+        harnesses: attempt::default_harnesses(),
+    };
+    let pane_harness = Harness::new("pane");
+    let pane_result = attempt::run_one(&pane_task, &pane_harness, 1, &pane_opts);
+    assert!(pane_result.outcome.completed(), "{:?}", pane_result.outcome);
+
+    let claude_test = write_script(
+        &scratch,
+        "claude_test.sh",
+        &scratch.join("claude_cwd.txt"),
+        0,
+    );
+    let claude_task = base_task(commit, single_command(&claude_test));
+    let claude_opts = RunOpts {
+        scratch: scratch.clone(),
+        gateway: None,
+        via_glasshouse: Some(profiles),
+        meter: Meter::Command {
+            glasshouse: fake_glasshouse,
+        },
+        harnesses: attempt::default_harnesses(),
+    };
+    let claude_harness = Harness::new("claude-code");
+    let claude_result = attempt::run_one(&claude_task, &claude_harness, 1, &claude_opts);
+    assert!(
+        claude_result.outcome.completed(),
+        "{:?}",
+        claude_result.outcome
+    );
+
+    let by_row = group_launch_calls_by_row(&launch_argv_record);
+
+    let pane_root = scratch.join(format!("{}-{}-{}", pane_task.id, pane_harness.as_str(), 1));
+    assert_eq!(
+        by_row.get("pane"),
+        Some(&vec![
+            "launch".to_string(),
+            "pane".to_string(),
+            "--profile".to_string(),
+            "bench-pane".to_string(),
+            "--headless".to_string(),
+            "--fresh".to_string(),
+            "--no-routing".to_string(),
+            "--no-memory".to_string(),
+            "--".to_string(),
+            "session".to_string(),
+            "--root".to_string(),
+            pane_root.to_string_lossy().into_owned(),
+            "--task".to_string(),
+            pane_task.statement.to_string(),
+        ])
+    );
+
+    assert_eq!(
+        by_row.get("claude-code"),
+        Some(&vec![
+            "launch".to_string(),
+            "claude-code".to_string(),
+            "--profile".to_string(),
+            "bench-claude".to_string(),
+            "--headless".to_string(),
+            "--fresh".to_string(),
+            "--no-routing".to_string(),
+            "--no-memory".to_string(),
+            "--".to_string(),
+            "--print".to_string(),
+            "--dangerously-skip-permissions".to_string(),
+            claude_task.statement.to_string(),
+        ])
+    );
+}
+
+/// Required behaviour 2: a selected row with no profile under the per-row
+/// form is refused, naming the row, before `resolve_tasks` runs or any
+/// attempt starts.
+#[test]
+fn a_per_row_via_glasshouse_refuses_a_row_with_no_profile_before_any_attempt() {
+    let out = scratch_dir("via-glasshouse-missing-row");
+
+    let result = cli::dispatch(&[
+        "run".to_string(),
+        "--task".to_string(),
+        "L1".to_string(),
+        "--harness".to_string(),
+        "claude-code".to_string(),
+        "--harness".to_string(),
+        "codex".to_string(),
+        "--meter".to_string(),
+        "/definitely/does/not/exist/glasshouse".to_string(),
+        "--via-glasshouse".to_string(),
+        "claude-code=bench".to_string(),
+        "--out".to_string(),
+        out.to_string_lossy().into_owned(),
+    ]);
+
+    let message = result.expect_err("a row left without a profile must be refused");
+    assert!(
+        message.contains("codex"),
+        "refusal message should name the row: {message}"
+    );
+    assert!(
+        !out.join("attempts.jsonl").exists(),
+        "no attempt may have run: attempts.jsonl must not have been written"
+    );
+}
+
+/// Required behaviour 2: mixing a bare profile with `row=profile` entries in
+/// one `--via-glasshouse` is refused before `resolve_tasks` runs or any
+/// attempt starts.
+#[test]
+fn a_mixed_bare_and_per_row_via_glasshouse_is_refused_before_any_attempt() {
+    let out = scratch_dir("via-glasshouse-mixed-forms");
+
+    let result = cli::dispatch(&[
+        "run".to_string(),
+        "--task".to_string(),
+        "L1".to_string(),
+        "--harness".to_string(),
+        "claude-code".to_string(),
+        "--harness".to_string(),
+        "codex".to_string(),
+        "--meter".to_string(),
+        "/definitely/does/not/exist/glasshouse".to_string(),
+        "--via-glasshouse".to_string(),
+        "bench".to_string(),
+        "--via-glasshouse".to_string(),
+        "codex=bench2".to_string(),
+        "--out".to_string(),
+        out.to_string_lossy().into_owned(),
+    ]);
+
+    let message = result.expect_err("mixing a bare profile with row=profile must be refused");
+    // The mix refusal's own sentence, not merely the flag's name: with the
+    // mix check gone, the per-row pass refuses `claude-code` for having no
+    // profile, and that message names the flag too (a SURVIVED mutation at
+    // integration, 2026-09-06).
+    assert!(
+        message.contains("cannot mix a bare profile with row=profile"),
+        "the mix refusal must be the one that fires: {message}"
+    );
+    assert!(
+        !out.join("attempts.jsonl").exists(),
+        "no attempt may have run: attempts.jsonl must not have been written"
+    );
+}
+
+/// Required behaviour 2: a row named twice in the per-row form is refused
+/// before `resolve_tasks` runs or any attempt starts.
+#[test]
+fn a_duplicate_row_in_via_glasshouse_is_refused_before_any_attempt() {
+    let out = scratch_dir("via-glasshouse-duplicate-row");
+
+    let result = cli::dispatch(&[
+        "run".to_string(),
+        "--task".to_string(),
+        "L1".to_string(),
+        "--harness".to_string(),
+        "claude-code".to_string(),
+        "--meter".to_string(),
+        "/definitely/does/not/exist/glasshouse".to_string(),
+        "--via-glasshouse".to_string(),
+        "claude-code=bench".to_string(),
+        "--via-glasshouse".to_string(),
+        "claude-code=other".to_string(),
+        "--out".to_string(),
+        out.to_string_lossy().into_owned(),
+    ]);
+
+    let message = result.expect_err("a row named twice must be refused");
+    assert!(
+        message.contains("claude-code"),
+        "refusal message should name the row: {message}"
+    );
+    assert!(
+        !out.join("attempts.jsonl").exists(),
+        "no attempt may have run: attempts.jsonl must not have been written"
+    );
+}
+
+/// Required behaviour 2: a `row=profile` value naming a row `--harness` did
+/// not select is refused before `resolve_tasks` runs or any attempt starts.
+#[test]
+fn a_row_via_glasshouse_did_not_select_is_refused_before_any_attempt() {
+    let out = scratch_dir("via-glasshouse-unselected-row");
+
+    let result = cli::dispatch(&[
+        "run".to_string(),
+        "--task".to_string(),
+        "L1".to_string(),
+        "--harness".to_string(),
+        "claude-code".to_string(),
+        "--meter".to_string(),
+        "/definitely/does/not/exist/glasshouse".to_string(),
+        "--via-glasshouse".to_string(),
+        "codex=bench".to_string(),
+        "--out".to_string(),
+        out.to_string_lossy().into_owned(),
+    ]);
+
+    let message = result.expect_err("a row --harness did not select must be refused");
+    assert!(
+        message.contains("codex"),
+        "refusal message should name the row: {message}"
+    );
+    assert!(
+        !out.join("attempts.jsonl").exists(),
+        "no attempt may have run: attempts.jsonl must not have been written"
     );
 }
 
@@ -877,7 +1142,7 @@ fn the_meter_reads_routing_cost_from_the_attempts_worktree() {
     let opts2 = RunOpts {
         scratch: scratch2.clone(),
         gateway: None,
-        via_glasshouse: Some("bench".to_string()),
+        via_glasshouse: Some(HashMap::from([("pane".to_string(), "bench".to_string())])),
         meter: Meter::Command {
             glasshouse: fake_glasshouse2,
         },
