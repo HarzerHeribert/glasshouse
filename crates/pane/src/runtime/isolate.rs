@@ -338,8 +338,27 @@ impl Runtime {
     /// returns before a child exists or kills one that does.
     #[must_use]
     pub fn with_token(self, token: CancellationToken) -> Self {
+        // `let mut runtime = self` rather than `mut self` in the signature,
+        // the same shape `with_response_byte_cap` above uses: it keeps this a
+        // builder over an already-built runtime, which is the property
+        // `runtime_cells::the_runtime_cannot_be_built_without_a_profile`
+        // reads off this line.
+        let mut runtime = self;
+        runtime.set_token(token);
+        runtime
+    }
+
+    /// The token the **next** cell's calls are cancellable through, replacing
+    /// whatever [`with_token`](Self::with_token) or an earlier call installed.
+    ///
+    /// **A cancelled token has no way back, so a task hands each cell a fresh
+    /// one.** [`CancellationToken::cancel`] is deliberately one-way — a token
+    /// is one call's decision, not a reusable switch — so a session that kept
+    /// one token for the whole task would answer every cell after the first
+    /// cancellation with an instant `Cancelled` throw. This is how one Ctrl-C
+    /// cancels one cell's calls; `session.rs` is its only caller.
+    pub fn set_token(&mut self, token: CancellationToken) {
         *self.state.token.borrow_mut() = token;
-        self
     }
 
     /// The number of the cell that ran last; 0 before the first.

@@ -2110,3 +2110,372 @@ where
 
     (format!("http://127.0.0.1:{port}"), captured)
 }
+
+// --- the keyboard's end of the cancellation facility (GH-PANE-SIGINT) ----
+
+/// SIGINT during a session, and the three things it must do: cancel the tool
+/// call in flight, leave a cell that is only computing alone, and end the
+/// session on a second Ctrl-C without cutting a rollout line in half.
+///
+/// Unix only, because the signal is: the Windows half is
+/// `SetConsoleCtrlHandler`, which cannot be raised from a test the way
+/// `kill -INT` can. Every helper below is inside the module so nothing here
+/// is dead code on the Windows cell.
+#[cfg(unix)]
+mod interrupts {
+    use super::*;
+    use std::process::{Child, Stdio};
+    use std::time::{Duration, Instant};
+
+    /// A command that never ends and writes a marker the moment it starts.
+    ///
+    /// **`bash` builtins only, on purpose.** The seatbelt names one resolved
+    /// binary in `process-exec*` (the 61D exec-roots ruling), so a confined
+    /// `bash` cannot exec `/bin/sleep` at all -- the same reason
+    /// `runtime_cells.rs`'s own cancellation test spins rather than sleeps.
+    /// The marker is what lets a test signal *after* the child exists rather
+    /// than after a guessed delay.
+    ///
+    /// **`label` makes the command line itself unique**, so
+    /// [`no_spinner_survives`] can look for one test's child in `ps` while the
+    /// other tests in this binary are running their own beside it.
+    fn spins_and_marks(label: &str) -> String {
+        format!("while :; do echo go > marker-{label}; done")
+    }
+
+    fn marker_of(root: &Path, label: &str) -> PathBuf {
+        root.join(format!("marker-{label}"))
+    }
+
+    /// A cell whose one statement is that call, so the cell's ending is the
+    /// call's ending.
+    fn spinning_cell(label: &str) -> String {
+        assistant_reply(&format!(
+            "```pane\nconst out = await bash({{ command: \"{}\" }});\nreturn out.stdout;\n```",
+            spins_and_marks(label)
+        ))
+    }
+
+    /// No confined child of this test is still running.
+    ///
+    /// `std::process::exit` does not touch a process's children, so the
+    /// second-Ctrl-C path is the one place `pane` could reparent a spinning
+    /// `bash` to `init` and leave it there. It did -- one child at 87% of a
+    /// core, for ever -- until `Interrupter::end_the_session` learned to
+    /// cancel and then hold the rollout's write lock across the reap grace.
+    /// This is a regression test, not a tidiness check.
+    fn no_spinner_survives(label: &str) {
+        let needle = spins_and_marks(label);
+        let listing = Command::new("ps")
+            .arg("ax")
+            .arg("-o")
+            .arg("command")
+            .output()
+            .expect("ps runs");
+        let listing = String::from_utf8_lossy(&listing.stdout);
+        let survivors: Vec<&str> = listing
+            .lines()
+            .filter(|line| line.contains(&needle))
+            .collect();
+        assert!(
+            survivors.is_empty(),
+            "the exit left a confined child running: {survivors:?}"
+        );
+    }
+
+    /// A cell that only computes: no call, no handle from a tool, and long
+    /// enough that a signal sent when the turn was answered lands inside it.
+    fn computing_cell() -> String {
+        assistant_reply(
+            "```pane\nlet n = 0;\nfor (let i = 0; i < 50000000; i++) { n = (n + i) % 1000003; \
+             }\nconst spun = n;\n```",
+        )
+    }
+
+    /// The grants [`spins_and_marks`] needs, and nothing else: three command
+    /// prefixes, no path rule of any kind (`sandbox-grants.md` §2 -- argv
+    /// admission grants no file access).
+    fn grant_the_spin(root: &Path) {
+        fs::create_dir_all(root.join(".claude")).unwrap();
+        fs::write(
+            root.join(".claude").join("settings.json"),
+            r#"{"permissions":{"allow":["Bash(while*)","Bash(do*)","Bash(echo*)"]}}"#,
+        )
+        .unwrap();
+    }
+
+    /// [`run_session`], but spawned rather than waited on, because these
+    /// tests need the pid while it runs.
+    ///
+    /// stdout is discarded rather than piped: the session redraws the whole
+    /// notebook every turn, and a pipe nobody drains while the test waits for
+    /// a marker would fill and stop the very process being signalled.
+    fn spawn_session(root: &Path, rollout: &Path, task: &str, base_url: &str) -> Child {
+        Command::new(env!("CARGO_BIN_EXE_pane"))
+            .arg("session")
+            .arg("--root")
+            .arg(root)
+            .arg("--rollout")
+            .arg(rollout)
+            .arg("--session")
+            .arg("sess-interrupt")
+            .arg("--task")
+            .arg(task)
+            .env("ANTHROPIC_BASE_URL", base_url)
+            .env_remove("ANTHROPIC_AUTH_TOKEN")
+            .env_remove("ANTHROPIC_API_KEY")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("pane starts")
+    }
+
+    fn wait_for_marker(marker: &Path, child: &mut Child) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            if marker.exists() {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!(
+            "the confined child never started: {} absent",
+            marker.display()
+        );
+    }
+
+    fn wait_for_turns(bodies: &Arc<Mutex<Vec<String>>>, count: usize, child: &mut Child) {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            if bodies.lock().unwrap().len() >= count {
+                return;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("the session never asked for turn {count}");
+    }
+
+    fn send_interrupt(child: &Child) {
+        let status = Command::new("kill")
+            .arg("-INT")
+            .arg(child.id().to_string())
+            .status()
+            .expect("kill runs");
+        assert!(status.success(), "kill -INT {} failed", child.id());
+    }
+
+    /// How one call of a cell's recorded trajectory ended -- `{"threw":
+    /// "Cancelled"}` on the line (`runtime-contract.md` §9.4).
+    fn call_endings(cell: &serde_json::Value) -> Vec<serde_json::Value> {
+        cell["calls"]
+            .as_array()
+            .expect("every cell line carries a trajectory")
+            .iter()
+            .map(|call| call["ended"].clone())
+            .collect()
+    }
+
+    fn outcomes(rollout: &Path) -> Vec<String> {
+        cell_lines(rollout)
+            .iter()
+            .map(|cell| cell["outcome"].as_str().unwrap().to_string())
+            .collect()
+    }
+
+    /// Ctrl-C with a call in flight: the call ends as §5's `Cancelled` throw,
+    /// the cell is answered, the model is asked for another turn, and the
+    /// session goes on to end normally -- against a child that would
+    /// otherwise never exit.
+    #[test]
+    fn a_sigint_during_a_tool_call_cancels_it_and_the_session_continues() {
+        let root = scratch_dir("sigint-call");
+        grant_the_spin(&root);
+        let rollout = root.join("rollout.jsonl");
+        let marker = marker_of(&root, "call");
+        let (base_url, bodies) = start_fake_provider(vec![
+            spinning_cell("call"),
+            assistant_reply("```pane\nreturn \"done\";\n```"),
+        ]);
+
+        let started = Instant::now();
+        let mut child = spawn_session(&root, &rollout, "spin for me", &base_url);
+        wait_for_marker(&marker, &mut child);
+        send_interrupt(&child);
+        let output = child.wait_with_output().unwrap();
+        let elapsed = started.elapsed();
+
+        assert!(
+            output.status.success(),
+            "status {:?}, stderr: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            elapsed < Duration::from_secs(25),
+            "the session ran for {elapsed:?} against a child that never exits"
+        );
+
+        let cells = cell_lines(&rollout);
+        assert_eq!(cells[0]["outcome"], "threw", "{cells:?}");
+        assert_eq!(
+            call_endings(&cells[0]),
+            vec![serde_json::json!({"threw": "Cancelled"})],
+            "{cells:?}"
+        );
+
+        // The second turn was requested, and what it carried is §5's error
+        // section naming the class -- so the model was told the call was
+        // cancelled rather than being asked to guess.
+        let bodies = bodies.lock().unwrap();
+        assert_eq!(bodies.len(), 2, "the session did not ask for another turn");
+        let answer = last_user_text(&bodies[1]);
+        assert!(answer.contains("## Error"), "{answer}");
+        assert!(answer.contains("Cancelled"), "{answer}");
+    }
+
+    /// A second Ctrl-C inside two seconds ends the session with the status a
+    /// shell reports for an interrupted process, and the rollout it leaves
+    /// behind is whole: every line parses, including the last.
+    #[test]
+    fn a_second_sigint_within_two_seconds_ends_the_session_with_exit_130() {
+        let root = scratch_dir("sigint-twice");
+        grant_the_spin(&root);
+        let rollout = root.join("rollout.jsonl");
+        let marker = marker_of(&root, "twice");
+        let (base_url, _bodies) = start_fake_provider(vec![
+            spinning_cell("twice"),
+            spinning_cell("twice"),
+            spinning_cell("twice"),
+        ]);
+
+        let mut child = spawn_session(&root, &rollout, "spin twice", &base_url);
+        wait_for_marker(&marker, &mut child);
+        send_interrupt(&child);
+        thread::sleep(Duration::from_millis(200));
+        send_interrupt(&child);
+        let output = child.wait_with_output().unwrap();
+
+        assert_eq!(
+            output.status.code(),
+            Some(130),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains("interrupted twice"),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        // The exit cancelled before it took the writing lock, so the call in
+        // flight killed and reaped its own child on the way out.
+        no_spinner_survives("twice");
+
+        // `rollout_lines` parses every line and panics on one that does not,
+        // so this is the whole-last-line assertion: an exit taken in the
+        // middle of a write would leave a fragment here.
+        let lines = rollout_lines(&rollout);
+        assert!(
+            lines.len() >= 2,
+            "the session exited before it recorded anything: {lines:?}"
+        );
+    }
+
+    /// Ctrl-C with no call in flight does not end the cell: JavaScript is
+    /// stopped by the wall-clock watchdog and never by the interrupt, so a
+    /// cell that is only computing runs to its own end. The interrupt is not
+    /// lost either -- the **next** cell's call is what it cancels.
+    #[test]
+    fn a_sigint_with_no_call_in_flight_does_not_end_the_cell() {
+        let root = scratch_dir("sigint-compute");
+        grant_the_spin(&root);
+        let rollout = root.join("rollout.jsonl");
+        let (base_url, bodies) = start_fake_provider(vec![
+            computing_cell(),
+            spinning_cell("compute"),
+            assistant_reply("```pane\nreturn \"done\";\n```"),
+        ]);
+
+        let mut child = spawn_session(&root, &rollout, "compute then spin", &base_url);
+        // The first turn has been answered, so the computing cell is running
+        // or about to.
+        wait_for_turns(&bodies, 1, &mut child);
+        send_interrupt(&child);
+        let output = child.wait_with_output().unwrap();
+
+        assert!(
+            output.status.success(),
+            "status {:?}, stderr: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+
+        let cells = cell_lines(&rollout);
+        assert_eq!(
+            outcomes(&rollout),
+            vec!["yielded", "threw", "returned"],
+            "the computing cell was ended by the signal: {cells:?}"
+        );
+        assert!(
+            call_endings(&cells[0]).is_empty(),
+            "the computing cell made a call: {cells:?}"
+        );
+        assert_eq!(
+            call_endings(&cells[1]),
+            vec![serde_json::json!({"threw": "Cancelled"})],
+            "the interrupt was dropped instead of spent on the next call: {cells:?}"
+        );
+    }
+
+    /// The other side of the window, and the reason "within two seconds" is a
+    /// claim rather than a decoration: two Ctrl-Cs **far enough apart** are
+    /// two first interrupts, each cancelling one call, and the session
+    /// survives both to end normally.
+    ///
+    /// Without this, widening [`DOUBLE_INTERRUPT_WINDOW`] to any larger value
+    /// changes no observable behaviour the test above watches -- it sends its
+    /// pair 200 ms apart, which is inside every window a mutation would
+    /// choose. The gap here is 3.5 s against a 2 s window, so the margin
+    /// absorbs a loaded machine's scheduling without reaching the boundary.
+    #[test]
+    fn two_sigints_more_than_two_seconds_apart_do_not_end_the_session() {
+        let root = scratch_dir("sigint-apart");
+        grant_the_spin(&root);
+        let rollout = root.join("rollout.jsonl");
+        let marker = marker_of(&root, "apart");
+        let (base_url, _bodies) = start_fake_provider(vec![
+            spinning_cell("apart"),
+            spinning_cell("apart"),
+            assistant_reply("```pane\nreturn \"done\";\n```"),
+        ]);
+
+        let mut child = spawn_session(&root, &rollout, "spin, wait, spin", &base_url);
+        wait_for_marker(&marker, &mut child);
+        send_interrupt(&child);
+        // The second cell is spinning by now, and stays so until this lands.
+        thread::sleep(Duration::from_millis(3500));
+        send_interrupt(&child);
+        let output = child.wait_with_output().unwrap();
+
+        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+        assert!(
+            output.status.success(),
+            "status {:?}, stderr: {stderr}",
+            output.status
+        );
+        assert!(
+            !stderr.contains("interrupted twice"),
+            "the second interrupt was paired with one 3.5 s older: {stderr}"
+        );
+        assert_eq!(
+            outcomes(&rollout),
+            vec!["threw", "threw", "returned"],
+            "each interrupt must have cancelled one call of its own"
+        );
+    }
+}
