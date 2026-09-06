@@ -18,14 +18,14 @@ use crate::tools::registry::{Arg, Tool};
 
 /// `model-contract.md` §2, verbatim. Compared byte for byte by
 /// `prompt_bytes.rs::the_preamble_is_the_contracts_verbatim`.
-pub const PREAMBLE: &str = "You are Pane, a coding assistant. Act by writing TypeScript in exactly one fenced `pane` block per turn:\n\n```pane\nconst file = await read({path: \"example.txt\"});\nconsole.log(file.text);\n```\n\nUse triple backticks, not XML tags. Only a `pane` fence executes.\nTool results are live objects. Use their declared fields in code; the\nhandle table shows bounded previews, not full payloads.\n\nTop-level bindings persist between cells of the same user request only;\nredeclaring replaces them. A new user request starts a fresh runtime.\nEarlier requests are history, not unfinished work. Answer the current\nrequest; for a conversational question, return the answer without tools.\nRunning off the end yields results and another turn. `yieldNow(reason)`\nalso yields. A top-level `return` ends the task; return a string to answer\nthe person, grounded in results you actually observed.\nTo interpret file contents, read and yield first, then answer from the\nnext turn's preview. You may return values computed directly from objects.\n\nA thrown error comes back with its source position and completed bindings.\nContinue from that state; failed or skipped calls did not succeed.\nPermissionDenied is final: code cannot widen the session's sandbox grant.";
+pub const PREAMBLE: &str = "You are Pane, a coding assistant. Answer conversational questions directly\nin prose. To act with tools, write TypeScript in exactly one fenced `pane`\nblock:\n\n```pane\nconst file = await read({path: \"example.txt\"});\nconsole.log(file.text);\n```\n\nUse triple backticks, not XML tags. Only `pane` code executes; a syntax\nerror may offer `pane-edit` to amend it.\nTool results are live objects. Use their declared fields in code; the\nhandle table shows bounded previews, not full payloads.\n\nTop-level bindings persist between cells of the same user request only;\nredeclaring replaces them. A new user request starts a fresh runtime.\nEarlier requests are history, not unfinished work. Answer the current\nrequest; a prose answer ends the request without running tools.\nRunning off the end yields results and another turn. `yieldNow(reason)`\nalso yields. A top-level `return` ends the task; return a string to answer\nthe person, grounded in results you actually observed.\nTo interpret file contents, read and yield first, then answer from the\nnext turn's preview. You may return values computed directly from objects.\n\nA thrown error comes back with its source position and completed bindings.\nContinue from that state; failed or skipped calls did not succeed.\nPermissionDenied is final: code cannot widen the session's sandbox grant.";
 
 /// Request-only context; keeps user text and saved conversation unchanged.
 /// A new runtime is created per user request, not per inference turn.
 pub fn with_task_context(conversation: &Conversation, model: &str, task: &str) -> Conversation {
     let mut request = conversation.clone();
     request.system.push_str(&format!(
-        "\n\nConfigured request model: {}. This is the requested model, not independently verified backend identity. Do not infer a different identity from previous replies or project paths.",
+        "\n\nYou are Pane, a coding assistant. Configured request model: {}. This is the requested model, not independently verified backend identity. Do not infer a different identity from previous replies or project paths.",
         serde_json::to_string(model).expect("model name serializes")
     ));
     if let Some(message) = request.messages.iter_mut().rev().find(|message| {
@@ -98,7 +98,10 @@ pub fn render_session_facts(facts: &SessionFacts) -> String {
     let writable = if facts.writable.is_empty() {
         "nothing is writable".to_string()
     } else {
-        format!("writable: {}", facts.writable.join(", "))
+        format!(
+            "write allow rules: {} (deny rules still apply)",
+            facts.writable.join(", ")
+        )
     };
     let commands = if facts.all_commands {
         "every command line is admitted".to_string()
@@ -325,6 +328,8 @@ fn thousands(n: u64) -> String {
 pub enum Extracted {
     /// Exactly one fenced block tagged `pane`; its source, unparsed.
     Program(String),
+    /// One complete `pane-edit` fence: JSON amending a parse-failed cell.
+    Edit(String),
     /// Two or more `pane` blocks in the same message. Neither runs.
     TwoBlocks,
     /// No `pane` block — including a message whose only fenced block is
@@ -349,7 +354,14 @@ pub fn extract_program(assistant_text: &str) -> Extracted {
                 j += 1;
             }
             if info == "pane" {
-                programs.push(body.join("\n"));
+                programs.push(Extracted::Program(body.join("\n")));
+            } else if info == "pane-edit" {
+                // An unfinished edit is invalid data, never an executable prefix.
+                programs.push(Extracted::Edit(if j < lines.len() {
+                    body.join("\n")
+                } else {
+                    String::new()
+                }));
             }
             i = j + 1;
         } else {
@@ -358,7 +370,7 @@ pub fn extract_program(assistant_text: &str) -> Extracted {
     }
     match programs.len() {
         0 => Extracted::Prose,
-        1 => Extracted::Program(programs.into_iter().next().expect("length checked above")),
+        1 => programs.into_iter().next().expect("length checked above"),
         _ => Extracted::TwoBlocks,
     }
 }

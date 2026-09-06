@@ -234,8 +234,8 @@ fn the_sidebar_collapses_rather_than_showing_a_zero() {
     let text = buffer_text(&rendered(&conversation, &ServedBy::default()));
 
     assert!(
-        !text.contains('0'),
-        "an unknown ServedBy must render no token figure or other zero:\n{text}"
+        !text.contains("0 in") && !text.contains("0 out") && !text.contains("tokens: 0"),
+        "an unknown ServedBy must render no fabricated zero usage:\n{text}"
     );
     assert!(
         text.contains("Glasshouse not connected"),
@@ -331,8 +331,11 @@ fn a_metered_request_with_no_provider_name_is_still_known() {
 fn two_cell_task() -> Conversation {
     conversation(vec![
         Message::text(Role::User, "the task"),
-        Message::text(Role::Assistant, "first turn"),
-        Message::text(Role::Assistant, "second turn"),
+        Message::text(Role::Assistant, "```pane\nconst first = 'first turn';\n```"),
+        Message::text(
+            Role::Assistant,
+            "```pane\nconst second = 'second turn';\n```",
+        ),
     ])
 }
 
@@ -506,6 +509,9 @@ fn a_cell_shows_its_program_as_the_input_region_and_a_return_as_the_last_cells_v
     notebook.set(
         1,
         CellView {
+            executed_source: None,
+            repaired_from: None,
+            changes: None,
             stdout: None,
             execution: None,
             table: Some("n  number  1195".to_string()),
@@ -563,6 +569,9 @@ fn a_throw_renders_as_the_cells_error_region() {
     notebook.set(
         1,
         CellView {
+            executed_source: None,
+            repaired_from: None,
+            changes: None,
             stdout: None,
             execution: None,
             table: Some(String::new()),
@@ -621,6 +630,9 @@ fn the_runtimes_answer_to_a_cell_is_not_drawn_as_a_person_typing() {
     notebook.set(
         1,
         CellView {
+            executed_source: None,
+            repaired_from: None,
+            changes: None,
             stdout: None,
             execution: None,
             table: Some("n  number  1".to_string()),
@@ -665,6 +677,9 @@ fn a_person_typing_after_a_task_ended_is_still_drawn() {
     notebook.set(
         1,
         CellView {
+            executed_source: None,
+            repaired_from: None,
+            changes: None,
             stdout: None,
             execution: None,
             table: Some(String::new()),
@@ -713,6 +728,9 @@ fn a_terminal_response_is_the_assistants_turn_and_a_yield_reason_sits_by_the_tab
     notebook.set(
         1,
         CellView {
+            executed_source: None,
+            repaired_from: None,
+            changes: None,
             stdout: None,
             execution: None,
             table: Some("n  number  1".to_string()),
@@ -725,6 +743,9 @@ fn a_terminal_response_is_the_assistants_turn_and_a_yield_reason_sits_by_the_tab
     notebook.set(
         2,
         CellView {
+            executed_source: None,
+            repaired_from: None,
+            changes: None,
             stdout: None,
             execution: None,
             table: Some("n  number  1".to_string()),

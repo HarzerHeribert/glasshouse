@@ -87,11 +87,20 @@ pub(super) fn render_panel(frame: &mut Frame, area: Rect, panel: &Panel) {
             );
             Line::styled(
                 super::abbreviate(&text, inner.width as usize),
-                Style::default().fg(if i == panel.selected {
-                    super::ACCENT
-                } else {
-                    Color::White
-                }),
+                Style::default().fg(
+                    if let Some(theme) = row
+                        .command
+                        .as_deref()
+                        .and_then(|command| command.strip_prefix("/theme "))
+                        .and_then(super::Theme::parse)
+                    {
+                        theme.accent()
+                    } else if i == panel.selected {
+                        super::ACCENT
+                    } else {
+                        Color::White
+                    },
+                ),
             )
         })
         .collect();

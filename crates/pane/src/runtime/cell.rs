@@ -34,13 +34,13 @@
 
 use oxc::allocator::Allocator;
 use oxc::ast::ast::{
-    AccessorProperty, BindingIdentifier, IdentifierReference, UnaryExpression, AssignmentTarget, BindingPattern, Class, Expression, FormalParameter,
-    Function, MethodDefinition, MethodDefinitionType, Program, PropertyDefinition,
-    PropertyDefinitionType, Statement, TSAsExpression, TSEnumDeclaration,
-    TSExternalModuleDeclaration, TSGlobalDeclaration, TSImportEqualsDeclaration,
+    AccessorProperty, AssignmentTarget, BindingIdentifier, BindingPattern, Class, Expression,
+    FormalParameter, Function, IdentifierReference, MethodDefinition, MethodDefinitionType,
+    Program, PropertyDefinition, PropertyDefinitionType, Statement, TSAsExpression,
+    TSEnumDeclaration, TSExternalModuleDeclaration, TSGlobalDeclaration, TSImportEqualsDeclaration,
     TSInstantiationExpression, TSInterfaceDeclaration, TSNamespaceDeclaration, TSNonNullExpression,
     TSSatisfiesExpression, TSTypeAliasDeclaration, TSTypeAnnotation, TSTypeAssertion,
-    TSTypeParameterDeclaration, TSTypeParameterInstantiation, VariableDeclaration,
+    TSTypeParameterDeclaration, TSTypeParameterInstantiation, UnaryExpression, VariableDeclaration,
     VariableDeclarationKind, VariableDeclarator,
 };
 use oxc::ast_visit::{Visit, walk};
@@ -711,8 +711,7 @@ impl FreeNames {
 
 impl<'a> Visit<'a> for FreeNames {
     fn visit_identifier_reference(&mut self, it: &IdentifierReference<'a>) {
-        self.referenced
-            .push((it.name.to_string(), it.span.start));
+        self.referenced.push((it.name.to_string(), it.span.start));
     }
 
     /// Every binding form funnels through here — `var`/`let`/`const`, a

@@ -65,13 +65,12 @@ fn contains(rect: Rect, x: u16, y: u16) -> bool {
 fn a_turn_block_has_a_visible_boundary_and_a_header() {
     let buffer = draw(80, 30, &state(), &conversation(), &Notebook::default());
     let rendered = text(&buffer);
-    for (header, body) in [
-        ("USER", "Inspect"),
-        ("PANE  [1]", "I found"),
-        ("TOOL / PREVIEW", "(no outputs)"),
-    ] {
+    for (header, body) in [("USER", "Inspect"), (" PANE", "I found")] {
         let lines: Vec<_> = rendered.lines().collect();
-        let at = lines.iter().position(|line| line.contains(header)).unwrap();
+        let at = lines
+            .iter()
+            .position(|line| line.contains(header) && !line.contains("PANE /"))
+            .unwrap();
         assert_eq!(buffer[(0, at as u16)].bg, ratatui::style::Color::Reset);
         assert!(lines[at + 1].contains(body));
         assert!(lines[at + 1].starts_with(' '));
@@ -198,17 +197,18 @@ fn the_input_area_shows_what_is_being_composed_and_is_separated_from_the_transcr
             .lines()
             .nth(usize::from(r.input.y))
             .unwrap()
-            .contains("compose")
+            .contains("───")
     );
     assert!(r.transcript.bottom() <= r.input.y && r.input.bottom() <= r.status.y);
 }
 #[test]
 fn slash_completion_uses_real_commands_and_filters_as_letters_arrive() {
-    assert_eq!(slash_matches("/").len(), 18);
+    assert_eq!(slash_matches("/").len(), 20);
     assert_eq!(
         slash_matches("/mo"),
         vec![
             ("/model".into(), "select the active model"),
+            ("/motion".into(), "on or off · reduce animation"),
             ("/mode".into(), "execute or plan without running code")
         ]
     );
@@ -594,7 +594,16 @@ fn transparent_themes_keep_blocks_separate_and_preserve_text() {
     state.theme = Theme::Amber;
     let amber = draw(120, 40, &state, &conversation(), &Notebook::default());
     assert!(amber.content.iter().any(|cell| cell.bg == Color::Reset));
-    assert!(amber.content.iter().all(|cell| cell.bg == Color::Reset));
+    let regions = screen_regions(amber.area, &state);
+    for y in regions.transcript.y..regions.transcript.bottom() {
+        for x in regions.transcript.x..regions.transcript.right() {
+            assert_eq!(amber[(x, y)].bg, Color::Reset);
+        }
+    }
+    assert_ne!(
+        amber[(regions.input.x, regions.input.y + 1)].bg,
+        Color::Reset
+    );
     assert!(
         amber
             .content
@@ -604,7 +613,12 @@ fn transparent_themes_keep_blocks_separate_and_preserve_text() {
     let rendered = text(&amber);
     assert!(rendered.contains("USER"));
     assert!(!rendered.contains("╭─") && !rendered.contains("╰─"));
-    assert!(rendered.lines().any(|line| line.trim().is_empty()));
+    assert!(
+        (regions.transcript.y..regions.transcript.bottom()).any(|y| {
+            (regions.transcript.x..regions.transcript.right())
+                .all(|x| amber[(x, y)].symbol().trim().is_empty())
+        })
+    );
     state.theme = Theme::Ice;
     let ice = draw(120, 40, &state, &conversation(), &Notebook::default());
     assert_eq!(text(&ice), rendered);
@@ -790,4 +804,207 @@ fn command_panels_erase_underlying_transcript_text() {
     let shown = text(&draw(200, 40, &state, &c, &Notebook::default()));
     assert!(shown.contains("Models"));
     assert!(!shown.contains("STALE_TRANSCRIPT"));
+}
+
+#[test]
+fn local_file_diffs_are_visible_in_compact_and_expanded_views() {
+    let c = Conversation {
+        system: String::new(),
+        messages: vec![
+            Message::text(Role::User, "Edit the file"),
+            Message::text(Role::Assistant, "```pane\nreturn 'done';\n```"),
+        ],
+    };
+    let n = Notebook {
+        cells: vec![CellView {
+            changes: Some(
+                "--- example.py\n+++ example.py\n@@ -1,1 +1,1 @@\n-old_value\n+new_value".into(),
+            ),
+            execution: Some("No tool calls ran in this cell.".into()),
+            returned: Some("done".into()),
+            ..CellView::default()
+        }],
+        ..Notebook::default()
+    };
+    for compact in [true, false] {
+        let mut state = state();
+        state.compact = compact;
+        let shown = text(&draw(120, 40, &state, &c, &n));
+        assert!(shown.contains("CHANGES OBSERVED"), "{shown}");
+        assert!(shown.contains("-old_value"), "{shown}");
+        assert!(shown.contains("+new_value"), "{shown}");
+    }
+}
+
+#[test]
+fn natural_answers_render_tables_and_never_invent_tool_sections() {
+    let conversation = Conversation {
+        system: String::new(),
+        messages: vec![
+            Message::text(Role::User, "Report your findings."),
+            Message::text(
+                Role::Assistant,
+                "## Findings\n**Verified:** reads work.\n\n| Feature | Result |\n|---|---|\n| Read | Correct |\n| Write | Nested files work |",
+            ),
+        ],
+    };
+    for width in [60, 80, 120, 200] {
+        for compact in [true, false] {
+            let mut state = state();
+            state.compact = compact;
+            let shown = text(&draw(
+                width,
+                30,
+                &state,
+                &conversation,
+                &Notebook::default(),
+            ));
+            assert!(shown.contains("Findings"));
+            assert!(shown.contains("Nested files work"));
+            assert!(!shown.contains("## Findings"));
+            assert!(!shown.contains("**Verified:**"));
+            assert!(!shown.contains("TOOL / PREVIEW"));
+            assert!(!shown.contains("(no outputs)"));
+        }
+    }
+}
+
+#[test]
+fn telemetry_distinguishes_proposals_measurements_and_actual_execution() {
+    use pane::telemetry::RequestMeasurement;
+    let c = Conversation {
+        system: String::new(),
+        messages: vec![
+            Message::text(Role::User, "Inspect one file"),
+            Message::text(
+                Role::Assistant,
+                "```pane\nawait read({path:'roman.py'}); if(false) await glob({pattern:'*'});\n```",
+            ),
+        ],
+    };
+    let n = Notebook {
+        requests: vec![RequestMeasurement::from_response(
+            1,
+            "deepseek-v4-flash".into(),
+            1200,
+            ServedBy::default(),
+            Some(&pane::wire::Usage {
+                input_tokens: 100,
+                output_tokens: 20,
+            }),
+        )],
+        cells: vec![CellView {
+            execution: Some("└─ read roman.py · returned".into()),
+            ..CellView::default()
+        }],
+        ..Notebook::default()
+    };
+    for width in [60, 80, 120, 200] {
+        let mut state = state();
+        state.telemetry_open = true;
+        let buffer = draw(width, 44, &state, &c, &n);
+        let shown = text(&buffer);
+        for expected in [
+            "TELEMETRY",
+            "REQUEST 01",
+            "read roman.py",
+            "cost unreported",
+            "proposed",
+            "observed",
+        ] {
+            assert!(shown.contains(expected), "{expected} at {width}: {shown}");
+        }
+        assert!(!shown.contains("glob · returned"));
+        assert!(!shown.contains("tokens saved"));
+        assert!(!shown.contains("$0"));
+        let regions = screen_regions(buffer.area, &state);
+        assert!(regions.transcript.bottom() <= regions.input.y);
+    }
+}
+
+#[test]
+fn telemetry_motion_is_local_and_reduced_motion_stays_still() {
+    let c = conversation();
+    let mut state = state();
+    state.telemetry_open = true;
+    state.activity = Activity::Thinking;
+    let first = draw(120, 44, &state, &c, &Notebook::default());
+    state.animation_frame = 14;
+    let moved = draw(120, 44, &state, &c, &Notebook::default());
+    assert_ne!(first, moved);
+    state.reduced_motion = true;
+    let reduced = draw(120, 44, &state, &c, &Notebook::default());
+    state.animation_frame = 24;
+    let later = draw(120, 44, &state, &c, &Notebook::default());
+    // The telemetry body is still. The legacy global activity indicator has
+    // its own clock, frozen by the live loop when reduced motion is selected.
+    let area = screen_regions(reduced.area, &state).transcript;
+    for y in area.y..area.bottom() {
+        for x in area.x..area.right() {
+            assert_eq!(reduced[(x, y)], later[(x, y)]);
+        }
+    }
+}
+
+#[test]
+fn delivery_trace_counts_real_bytes_and_has_bounded_history() {
+    let mut pulse = pane::tui::Pulse::default();
+    for _ in 0..50 {
+        pulse.receive(7);
+    }
+    assert_eq!(pulse.bytes, 350);
+    assert_eq!(pulse.deltas, 50);
+    assert_eq!(pulse.deliveries.len(), 32);
+}
+
+#[test]
+fn cell_repair_shows_the_amended_code_and_keeps_the_original_failure() {
+    let c = Conversation {
+        system: String::new(),
+        messages: vec![
+            Message::text(Role::User, "Answer briefly"),
+            Message::text(Role::Assistant, "```pane\nreturn 'ok;\n```"),
+            Message::text(Role::User, "SyntaxError; repair is available"),
+            Message::text(
+                Role::Assistant,
+                "```pane-edit\n{\"cell\":1,\"replace\":\"'ok;\",\"with\":\"'ok';\"}\n```",
+            ),
+        ],
+    };
+    let n = Notebook {
+        cells: vec![
+            CellView {
+                error: Some(CellError {
+                    class: "SyntaxError".into(),
+                    message: "Unterminated string".into(),
+                    line: Some(1),
+                    column: Some(7),
+                }),
+                answered: true,
+                execution: Some("No tool calls ran in this cell.".into()),
+                ..CellView::default()
+            },
+            CellView {
+                executed_source: Some("return 'ok';".into()),
+                repaired_from: Some(1),
+                returned: Some("ok".into()),
+                execution: Some("No tool calls ran in this cell.".into()),
+                ..CellView::default()
+            },
+        ],
+        ..Notebook::default()
+    };
+    for compact in [true, false] {
+        let mut state = state();
+        state.compact = compact;
+        let shown = text(&draw(100, 44, &state, &c, &n));
+        assert!(shown.contains("Unterminated string"), "{shown}");
+        assert!(shown.contains("Amends syntax-failed cell 1"), "{shown}");
+        assert!(!shown.contains("\"replace\""), "{shown}");
+        if compact {
+            assert!(shown.contains("Cell repaired"));
+        } else {
+            assert!(shown.contains("return 'ok';"));
+        }
+    }
 }

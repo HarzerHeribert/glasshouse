@@ -353,11 +353,8 @@ fn the_binary_runs_a_turn_and_writes_a_rollout() {
         "no assistant turn in {lines:?}"
     );
 
-    // Two, not one: the model's prose reply is answered with the handle
-    // table and one line (§5), and the task runs until the second reply
-    // returns. A run that stopped after one turn would be the old
-    // one-turn-per-input session, not a task.
-    assert_eq!(bodies.lock().unwrap().len(), 2);
+    // An ordinary answer ends naturally; it is not sent back for code conversion.
+    assert_eq!(bodies.lock().unwrap().len(), 1);
 }
 
 #[test]
@@ -398,7 +395,7 @@ fn the_binary_resumes_an_existing_rollout_instead_of_starting_over() {
     );
 
     let bodies = second_bodies.lock().unwrap();
-    assert_eq!(bodies.len(), 2);
+    assert_eq!(bodies.len(), 1);
     let request: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
     let messages = request["messages"].as_array().unwrap();
     let texts: Vec<&str> = messages
@@ -946,7 +943,7 @@ fn a_scripted_two_cell_task_runs_through_the_binary_and_returns() {
 /// outright: a model writing about TypeScript emits those constantly, and a
 /// parser that ran them would run the model's explanations.
 #[test]
-fn a_prose_reply_advances_no_cell_and_is_answered_with_the_table() {
+fn a_prose_answer_with_example_code_ends_without_running_a_cell() {
     let root = scratch_dir("prose-root");
     let rollout = root.join("rollout.jsonl");
     let absent = root.join("no-such-glasshouse");
@@ -970,24 +967,15 @@ fn a_prose_reply_advances_no_cell_and_is_answered_with_the_table() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let cells = cell_lines(&rollout);
-    assert_eq!(
-        cells.len(),
-        1,
-        "only the second reply ran a cell: {cells:?}"
+    assert!(
+        cell_lines(&rollout).is_empty(),
+        "explanatory code must never execute"
     );
-    assert_eq!(
-        cells[0]["cell"], 1,
-        "the prose turn must not have consumed cell 1: {cells:?}"
-    );
-
     let bodies = bodies.lock().unwrap();
-    assert_eq!(bodies.len(), 2);
-    assert_eq!(
-        last_user_text(&bodies[1]),
-        "## Handles\n(none)\n\nno program ran; send one pane block",
-        "prose is answered with the unchanged table and one line"
-    );
+    assert_eq!(bodies.len(), 1, "a prose answer needs no repair request");
+    let saved = std::fs::read_to_string(&rollout).unwrap();
+    assert!(!saved.contains("no program ran; send one pane block"));
+    assert!(saved.contains("Shall I?"));
 }
 
 /// §5: two `pane` blocks in one message are a protocol error and **neither
@@ -1542,8 +1530,8 @@ fn a_returned_object_is_rendered_as_its_json_with_values() {
 /// scripted so a loop that ran on would be served and counted. A program in
 /// between resets the count.
 #[test]
-fn three_prose_turns_end_the_task_and_two_do_not() {
-    let prose = || assistant_reply("I would grep for it, then count the files.");
+fn repeated_malformed_executable_replies_are_bounded() {
+    let prose = || assistant_reply("<php-pane>read({path: 'roman.py'});</php-pane>");
 
     let root = scratch_dir("prose-cap-root");
     let rollout = root.join("rollout.jsonl");
@@ -3270,4 +3258,272 @@ fn a_plain_bad_request_is_reported_rather_than_compacted() {
         all.contains("unknown field"),
         "the real error was not reported: {all}"
     );
+}
+
+#[test]
+fn new_user_requests_get_truthful_model_and_runtime_boundaries() {
+    let root = scratch_dir("task-boundary-root");
+    let rollout = root.join("rollout.jsonl");
+    let absent = root.join("no-glasshouse");
+    let (base_url, bodies) = start_fake_provider(vec![
+        assistant_reply("```pane\nconst previous = 42;\n```"),
+        assistant_reply("```pane\nreturn previous;\n```"),
+        assistant_reply(
+            "```pane\nreturn handles().includes('previous') ? 'leaked' : 'fresh runtime';\n```",
+        ),
+    ]);
+    let output = run_session_stdin(
+        &root,
+        &rollout,
+        "boundaries",
+        &[
+            "/model deepseek-v4-flash",
+            "remember a number",
+            "what are you?",
+        ],
+        &base_url,
+        Some(&absent),
+        false,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(String::from_utf8_lossy(&output.stdout).contains("fresh runtime"));
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 3);
+    for body in bodies.iter() {
+        let request: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert_eq!(request["model"], "deepseek-v4-flash");
+        let system = request["system"].as_str().unwrap();
+        assert!(system.contains("You are Pane"));
+        assert!(system.contains("Configured request model: \"deepseek-v4-flash\""));
+        assert_eq!(body.matches("Pane task boundary").count(), 1);
+    }
+    let last: serde_json::Value = serde_json::from_str(&bodies[2]).unwrap();
+    let current = last["messages"].as_array().unwrap().last().unwrap();
+    assert_eq!(current["content"][0]["text"], "what are you?");
+    assert!(
+        current["content"][1]["text"]
+            .as_str()
+            .unwrap()
+            .contains("earlier completed requests are not live")
+    );
+    let saved = std::fs::read_to_string(&rollout).unwrap();
+    assert!(
+        !saved.contains("Pane task boundary"),
+        "request metadata must not rewrite the user's saved text"
+    );
+}
+
+#[test]
+fn prompt_write_grants_do_not_include_denied_path_components() {
+    let root = scratch_dir("prompt-grants-root");
+    let profile = pane::sandbox::profile::Profile::compile(
+        &root,
+        Some(r#"{"permissions":{"allow":["Write(src/**)"],"deny":["Write(secrets/**)"]}}"#),
+    );
+    let facts = pane::session::session_facts(&profile);
+    assert_eq!(facts.writable, vec!["Write(src/**)"]);
+    let text = pane::prompt::render_session_facts(&facts);
+    assert!(text.contains("deny rules still apply"));
+    assert!(!text.contains("secrets"));
+}
+
+#[test]
+fn an_identity_answer_after_a_completed_task_does_not_trigger_more_execution() {
+    let root = scratch_dir("natural-followup-root");
+    let rollout = root.join("rollout.jsonl");
+    let absent = root.join("no-glasshouse");
+    let (base_url, bodies) = start_fake_provider(vec![
+        assistant_reply("```pane\nconst result = 42; return 'Task complete.';\n```"),
+        assistant_reply("I am Pane, a coding assistant. The requested model is deepseek-v4-flash."),
+        assistant_reply("```pane\nthrow new Error('unwanted extra execution');\n```"),
+    ]);
+    let output = run_session_stdin(
+        &root,
+        &rollout,
+        "natural-followup",
+        &[
+            "/model deepseek-v4-flash",
+            "finish the task",
+            "what are you?",
+        ],
+        &base_url,
+        Some(&absent),
+        false,
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(bodies.lock().unwrap().len(), 2);
+    assert_eq!(
+        cell_lines(&rollout).len(),
+        1,
+        "identity answer must not run another cell"
+    );
+    let saved = std::fs::read_to_string(&rollout).unwrap();
+    assert!(!saved.contains("unwanted extra execution"));
+    assert!(!saved.contains("no program ran"));
+}
+
+#[test]
+#[cfg(unix)]
+fn shell_changes_survive_a_cell_error_but_never_enter_model_context() {
+    let root = scratch_dir("local-diff");
+    fs::create_dir_all(root.join(".claude")).unwrap();
+    fs::write(
+        root.join(".claude/settings.json"),
+        r#"{"permissions":{"allow":["Read(**)","Write(**)","Bash(echo*)"]}}"#,
+    )
+    .unwrap();
+    fs::write(root.join("example.txt"), "LOCAL_DIFF_OLD_SENTINEL\n").unwrap();
+    let rollout = root.join("rollout.jsonl");
+    let absent = root.join("no-glasshouse");
+    let (base, bodies) = start_fake_provider(vec![
+        assistant_reply(
+            "```pane\nawait bash({command: 'echo replacement > example.txt'});\nthrow new Error('after write');\n```",
+        ),
+        assistant_reply("The script failed after writing."),
+    ]);
+    let output = run_session(
+        &root,
+        &rollout,
+        "diff",
+        "update the file",
+        &base,
+        Some(&absent),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let shown = String::from_utf8_lossy(&output.stdout);
+    assert!(shown.contains("CHANGES OBSERVED"), "{shown}");
+    assert!(shown.contains("-LOCAL_DIFF_OLD_SENTINEL"), "{shown}");
+    assert!(shown.contains("+replacement"), "{shown}");
+    for body in bodies.lock().unwrap().iter() {
+        assert!(!body.contains("LOCAL_DIFF_OLD_SENTINEL"));
+        assert!(!body.contains("CHANGES OBSERVED"));
+    }
+    assert!(
+        !fs::read_to_string(rollout)
+            .unwrap()
+            .contains("LOCAL_DIFF_OLD_SENTINEL")
+    );
+}
+
+#[test]
+fn syntax_failed_cell_can_be_repaired_without_repeating_the_program() {
+    let root = scratch_dir("cell-repair");
+    let rollout = root.join("rollout.jsonl");
+    let source = "const answer = 'REPAIRED;\nreturn answer;";
+    let edit =
+        serde_json::json!({"cell":1,"replace":"'REPAIRED;","with":"'REPAIRED';"}).to_string();
+    let (base, bodies) = start_fake_provider(vec![
+        assistant_reply(&format!("```pane\n{source}\n```")),
+        assistant_reply(&format!("```pane-edit\n{edit}\n```")),
+    ]);
+    let output = run_session(
+        &root,
+        &rollout,
+        "repair",
+        "answer",
+        &base,
+        Some(&root.join("absent")),
+    );
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let cells = cell_lines(&rollout);
+    assert_eq!(cells.len(), 2);
+    assert_eq!(cells[0]["source"], source);
+    assert_eq!(cells[0]["outcome"], "threw");
+    assert_eq!(
+        cells[1]["source"],
+        "const answer = 'REPAIRED';\nreturn answer;"
+    );
+    assert_eq!(cells[1]["outcome"], "returned");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("REPAIRED"));
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 2);
+    let feedback = last_user_text(&bodies[1]);
+    assert!(feedback.contains("pane-edit"), "{feedback}");
+    assert!(
+        !feedback.contains(source),
+        "repair feedback must not duplicate full source"
+    );
+}
+
+#[test]
+fn invalid_edits_keep_the_parse_target_and_do_not_create_cells() {
+    let root = scratch_dir("repair-reject");
+    let rollout = root.join("rollout.jsonl");
+    let reply = |cell| {
+        assistant_reply(&format!(
+            "```pane-edit\n{}\n```",
+            serde_json::json!({"cell":cell,"replace":"'done;","with":"'done';"})
+        ))
+    };
+    let (base, bodies) = start_fake_provider(vec![
+        assistant_reply("```pane\nreturn 'done;\n```"),
+        reply(99),
+        reply(1),
+    ]);
+    let output = run_session(
+        &root,
+        &rollout,
+        "repair-reject",
+        "answer",
+        &base,
+        Some(&root.join("absent")),
+    );
+    assert!(output.status.success());
+    let cells = cell_lines(&rollout);
+    assert_eq!(cells.len(), 2);
+    assert_eq!(cells[1]["cell"], 2);
+    assert_eq!(cells[1]["outcome"], "returned");
+    let bodies = bodies.lock().unwrap();
+    assert!(last_user_text(&bodies[2]).contains("CellEditError"));
+}
+
+#[test]
+fn runtime_syntax_error_never_offers_a_replay_and_invalid_edits_are_bounded() {
+    let root = scratch_dir("repair-runtime-error");
+    let rollout = root.join("rollout.jsonl");
+    let edit = assistant_reply(
+        "```pane-edit\n{\"cell\":1,\"replace\":\"throw\",\"with\":\"return\"}\n```",
+    );
+    let (base, bodies) = start_fake_provider(vec![
+        assistant_reply("```pane\nconst before = 1; throw new SyntaxError('runtime');\n```"),
+        edit.clone(),
+        edit.clone(),
+        edit.clone(),
+        edit.clone(),
+        edit,
+    ]);
+    let output = run_session(
+        &root,
+        &rollout,
+        "repair-runtime",
+        "answer",
+        &base,
+        Some(&root.join("absent")),
+    );
+    assert!(output.status.success());
+    assert_eq!(cell_lines(&rollout).len(), 1);
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(
+        bodies.len(),
+        5,
+        "invalid edits exhaust after three plus the final turn"
+    );
+    assert!(!last_user_text(&bodies[1]).contains("pane-edit"));
+    assert!(last_user_text(&bodies[2]).contains("No syntax-failed cell"));
 }

@@ -225,6 +225,8 @@ impl Confinement {
 /// What one call returned.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ToolResult {
+    /// Modification time observed on the admitted read path, after reading.
+    pub modified: Option<String>,
     pub tool: String,
     pub stdout: String,
     pub stderr: String,
@@ -521,16 +523,27 @@ fn checked_call(
     // a `Command`, an `exec_grant` or a sandbox applier, because the only
     // call site of all three is the other arm.
     if tool.argv() == Argv::InProcess {
-        return perform_in_process(tool, &checked);
+        return perform_in_process(ctx.profile, token, tool, &checked);
     }
     let argv = build_argv(tool, &checked)?;
-    spawn_confined(ctx.profile, token, tool, &argv)
+    let mut result = spawn_confined(ctx.profile, token, tool, &argv)?;
+    if tool.name() == "read" && result.exit_code == Some(0) {
+        result.modified = resolved_path(&checked, "path")
+            .and_then(|path| std::fs::metadata(path).ok())
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+            .and_then(|time| i64::try_from(time.as_millis()).ok())
+            .map(|millis| crate::events::Stamp::from_millis(millis).to_string());
+    }
+    Ok(result)
 }
 
 /// Performs a tool pane does itself. One tool today, and the match is
 /// exhaustive on name so a second in-process tool cannot be added without
 /// deciding what it does here.
 fn perform_in_process(
+    profile: &Profile,
+    token: &CancellationToken,
     tool: &Tool,
     checked: &[(&'static str, Checked)],
 ) -> Result<ToolResult, ToolError> {
@@ -542,6 +555,26 @@ fn perform_in_process(
         })
     };
     match tool.name() {
+        "glob" => {
+            let (Some(root), Some(pattern)) =
+                (resolved_path(checked, "path"), text(checked, "pattern"))
+            else {
+                return Err(refuse("glob needs a checked path and pattern".to_string()));
+            };
+            let stdout = glob_paths(profile, token, tool.name(), root, pattern)?;
+            Ok(ToolResult {
+                modified: None,
+                tool: tool.name().to_string(),
+                stdout,
+                stderr: String::new(),
+                exit_code: Some(0),
+                grant: ExecGrant {
+                    binary: PathBuf::new(),
+                    fell_back_to_roots: false,
+                },
+                confinement: Confinement::InProcess,
+            })
+        }
         "write" => {
             let (Some(path), Some(content)) =
                 (resolved_path(checked, "path"), text(checked, "content"))
@@ -563,6 +596,7 @@ fn perform_in_process(
             }
             match std::fs::write(path, content) {
                 Ok(()) => Ok(ToolResult {
+                    modified: None,
                     tool: tool.name().to_string(),
                     stdout: format!("wrote {} bytes to {}", content.len(), path.display()),
                     stderr: String::new(),
@@ -584,6 +618,129 @@ fn perform_in_process(
             "`{other}` is declared in-process and nothing here performs it"
         ))),
     }
+}
+
+/// Walks a checked root and matches slash-separated patterns against paths
+/// relative to it. A denied directory is pruned before `read_dir`, which
+/// keeps names beneath it from becoming an enumeration side channel.
+fn glob_paths(
+    profile: &Profile,
+    token: &CancellationToken,
+    tool: &str,
+    root: &Path,
+    pattern: &str,
+) -> Result<String, ToolError> {
+    const MAX_VISITED: usize = 100_000;
+
+    let normalized_pattern = pattern.replace('\\', "/");
+    let pattern: Vec<&str> = normalized_pattern
+        .split('/')
+        .filter(|part| !part.is_empty() && *part != ".")
+        .collect();
+    if pattern.is_empty() {
+        return Ok(String::new());
+    }
+
+    let mut pending = vec![root.to_path_buf()];
+    let mut matches = Vec::new();
+    let mut visited = 0usize;
+    while let Some(directory) = pending.pop() {
+        if token.is_cancelled() {
+            return Err(ToolError::Cancelled {
+                tool: tool.to_string(),
+            });
+        }
+        let entries = std::fs::read_dir(&directory).map_err(|error| ToolError::Spawn {
+            tool: tool.to_string(),
+            program: PathBuf::from("(in-process)"),
+            error: error.to_string(),
+        })?;
+        for entry in entries {
+            if token.is_cancelled() {
+                return Err(ToolError::Cancelled {
+                    tool: tool.to_string(),
+                });
+            }
+            visited += 1;
+            if visited > MAX_VISITED {
+                return Err(ToolError::Spawn {
+                    tool: tool.to_string(),
+                    program: PathBuf::from("(in-process)"),
+                    error: format!("glob stopped after {MAX_VISITED} directory entries"),
+                });
+            }
+            let entry = entry.map_err(|error| ToolError::Spawn {
+                tool: tool.to_string(),
+                program: PathBuf::from("(in-process)"),
+                error: error.to_string(),
+            })?;
+            let path = entry.path();
+            let Ok(checked) = profile.check(tool, Access::Read, &path) else {
+                continue;
+            };
+            let relative = checked.strip_prefix(root).unwrap_or(&checked);
+            let components: Vec<String> = relative
+                .components()
+                .map(|part| part.as_os_str().to_string_lossy().into_owned())
+                .collect();
+            if glob_components(&pattern, &components) {
+                matches.push(checked.clone());
+            }
+            if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
+                pending.push(checked);
+            }
+        }
+    }
+    matches.sort();
+    Ok(matches
+        .into_iter()
+        .map(|path| format!("{}\n", path.display()))
+        .collect())
+}
+
+fn glob_components(pattern: &[&str], path: &[String]) -> bool {
+    let mut matched = vec![vec![false; path.len() + 1]; pattern.len() + 1];
+    matched[0][0] = true;
+    for (index, part) in pattern.iter().enumerate() {
+        if *part == "**" {
+            for depth in 0..=path.len() {
+                matched[index + 1][depth] |= matched[index][depth];
+                if depth < path.len() && matched[index + 1][depth] {
+                    matched[index + 1][depth + 1] = true;
+                }
+            }
+        } else {
+            for depth in 0..path.len() {
+                if matched[index][depth] && glob_segment(part, &path[depth]) {
+                    matched[index + 1][depth + 1] = true;
+                }
+            }
+        }
+    }
+    matched[pattern.len()][path.len()]
+}
+
+fn glob_segment(pattern: &str, text: &str) -> bool {
+    let pattern: Vec<char> = pattern.chars().collect();
+    let text: Vec<char> = text.chars().collect();
+    let mut matched = vec![vec![false; text.len() + 1]; pattern.len() + 1];
+    matched[0][0] = true;
+    for (index, byte) in pattern.iter().enumerate() {
+        for offset in 0..=text.len() {
+            if *byte == '*' {
+                matched[index + 1][offset] |= matched[index][offset];
+                if offset < text.len() && matched[index + 1][offset] {
+                    matched[index + 1][offset + 1] = true;
+                }
+            } else if offset < text.len()
+                && matched[index][offset]
+                && (*byte == '?' || *byte == text[offset])
+            {
+                matched[index + 1][offset + 1] = true;
+            }
+        }
+    }
+    matched[pattern.len()][text.len()]
 }
 
 /// Admits one argument: onto the argv list, and into the trajectory's
@@ -731,13 +888,6 @@ fn build_argv(
             argv.push("--".into());
             argv.push(path.into());
         }
-        Argv::FindNamed => {
-            let pattern = text(checked, "pattern").ok_or_else(|| missing("pattern"))?;
-            let path = resolved_path(checked, "path").ok_or_else(|| missing("path"))?;
-            argv.push(path.into());
-            argv.push("-name".into());
-            argv.push(pattern.into());
-        }
         Argv::ShellCommand => {
             let command = text(checked, "command").ok_or_else(|| missing("command"))?;
             argv.push("-c".into());
@@ -859,7 +1009,6 @@ fn spawn_confined(
         command.env_remove(name);
     }
 
-
     command.stdin(Stdio::null());
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
@@ -920,6 +1069,7 @@ fn spawn_confined(
     };
 
     Ok(ToolResult {
+        modified: None,
         tool: tool.name().to_string(),
         stdout: collect(stdout),
         stderr: collect(stderr),

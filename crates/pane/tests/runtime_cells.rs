@@ -3204,7 +3204,10 @@ fn the_result_message_carries_the_plan_and_omits_it_when_empty() {
             status: PlanStatus::Active,
         },
     ]));
-    assert!(rendered.contains("## Plan\n[x] read the file\n[~] write the patch"), "{rendered}");
+    assert!(
+        rendered.contains("## Plan\n[x] read the file\n[~] write the patch"),
+        "{rendered}"
+    );
     assert!(!pane::prompt::render_result(&base(Vec::new())).contains("## Plan"));
 }
 
@@ -3292,7 +3295,8 @@ fn legal_free_names_are_never_accused() {
     assert_eq!(returned_string(&probe), "undefined");
 
     // A host function, and a name declared later in the same cell.
-    let hoisted = runtime.run_cell("const r = later();\nfunction later() { return \"ok\"; }\nreturn r;\n");
+    let hoisted =
+        runtime.run_cell("const r = later();\nfunction later() { return \"ok\"; }\nreturn r;\n");
     assert_eq!(returned_string(&hoisted), "ok");
 }
 
@@ -3309,11 +3313,15 @@ fn a_subagent_may_not_start_a_subagent() {
     let mut parent = runtime(&fixture, &glasshouse, &session);
 
     // The parent may ask: it gets a handle, and the handle names its source.
-    let started = parent.run_cell(
-        "const a = agent.run(\"count the files\");\nreturn a.id + \" \" + a.source;\n",
-    );
+    let started = parent
+        .run_cell("const a = agent.run(\"count the files\");\nreturn a.id + \" \" + a.source;\n");
     let answer = returned_string(&started);
-    assert!(answer.contains("agent/"), "no agent handle came back: {answer}");
+    assert!(
+        answer.contains("agent/"),
+        "no agent handle came back: {answer}"
+    );
+    assert_eq!(started.turn().record.calls[0].tool, "agent.run");
+    assert!(started.turn().record.calls[0].args["source"].starts_with("agent/"));
 
     // A subagent's own runtime may not.
     let mut child = Runtime::new(&fixture.profile(), &glasshouse, &session).as_subagent();
@@ -3363,5 +3371,5 @@ fn a_subagent_inherits_the_parents_model() {
         effort: pane::wire::Effort::default(),
     };
     assert_eq!(asked.turns.clamp(1, MAX_TURNS), MAX_TURNS);
-    assert!(DEFAULT_TURNS <= MAX_TURNS);
+    const { assert!(DEFAULT_TURNS <= MAX_TURNS) };
 }

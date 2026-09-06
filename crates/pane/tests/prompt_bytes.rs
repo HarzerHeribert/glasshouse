@@ -691,3 +691,32 @@ fn the_checkpoint_names_the_live_handles_and_the_plan() {
     );
     assert!(text.contains("prompt is too long"), "{text}");
 }
+
+#[test]
+fn repair_fences_are_data_and_cannot_mix_with_executable_code() {
+    let edit = r#"{"cell":1,"replace":"broken","with":"fixed"}"#;
+    assert_eq!(
+        prompt::extract_program(&format!("```pane-edit\n{edit}\n```")),
+        Extracted::Edit(edit.into())
+    );
+    assert_eq!(
+        prompt::extract_program(&format!(
+            "```pane-edit\n{edit}\n```\n```pane\nreturn 1;\n```"
+        )),
+        Extracted::TwoBlocks
+    );
+    assert_eq!(
+        prompt::extract_program(&format!(
+            "```pane-edit\n{edit}\n```\n```pane-edit\n{edit}\n```"
+        )),
+        Extracted::TwoBlocks
+    );
+    assert_eq!(
+        prompt::extract_program(&format!("```pane-edit\n{edit}")),
+        Extracted::Edit(String::new())
+    );
+    assert_eq!(
+        prompt::extract_program("```json\n{}\n```"),
+        Extracted::Prose
+    );
+}

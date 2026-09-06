@@ -13,4 +13,5 @@ pub mod isolate;
 pub mod marshal;
 pub mod outcome;
 pub mod preview;
+pub mod repair;
 pub mod state;

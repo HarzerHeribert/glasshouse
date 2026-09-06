@@ -326,6 +326,7 @@ fn run(
     state.activity = Activity::Starting;
     let mut dirty = true;
     let mut last_tick = Instant::now();
+    let mut task_started: Option<Instant> = None;
     loop {
         if !ACTIVE.load(Ordering::SeqCst) {
             break;
@@ -346,6 +347,7 @@ fn run(
                         .filter(|cell| cell.execution.is_some())
                         .count();
                     if completed > previous
+                        && !state.reduced_motion
                         && n.cells.last().is_some_and(|cell| {
                             cell.error.is_none()
                                 && cell.execution.as_deref().is_some_and(|calls| {
@@ -365,6 +367,16 @@ fn run(
                     if served.is_known() {
                         state.connected = Some(true);
                     }
+                    if matches!(
+                        activity,
+                        Activity::Idle | Activity::Complete | Activity::Failed
+                    ) {
+                        if let Some(start) = task_started.take() {
+                            state.pulse.elapsed_ms = start.elapsed().as_millis() as u64;
+                        }
+                    } else if task_started.is_none() {
+                        task_started = Some(Instant::now());
+                    }
                     busy = matches!(
                         activity,
                         Activity::Thinking
@@ -376,6 +388,7 @@ fn run(
                     );
                 }
                 Update::Delta(text) => {
+                    state.pulse.receive(text.len());
                     state
                         .streaming_text
                         .get_or_insert_with(String::new)
@@ -397,8 +410,16 @@ fn run(
         }
         let moving =
             busy || state.activity == Activity::Starting || state.completion_tick.is_some();
-        if moving && last_tick.elapsed() >= Duration::from_millis(120) {
-            state.animation_frame = state.animation_frame.wrapping_add(1);
+        if moving
+            && last_tick.elapsed()
+                >= Duration::from_millis(if state.reduced_motion { 1000 } else { 120 })
+        {
+            if !state.reduced_motion {
+                state.animation_frame = state.animation_frame.wrapping_add(1);
+            }
+            if let Some(start) = task_started {
+                state.pulse.elapsed_ms = start.elapsed().as_millis() as u64;
+            }
             state.completion_tick = state
                 .completion_tick
                 .and_then(|tick| (tick < 5).then_some(tick + 1));
@@ -439,6 +460,30 @@ fn run(
             }
             Event::Key(key) if key.kind != KeyEventKind::Release => {
                 dirty = true;
+                if state.telemetry_open && state.panel.is_none() {
+                    match key.code {
+                        KeyCode::Esc => {
+                            state.telemetry_open = false;
+                            continue;
+                        }
+                        KeyCode::Up => {
+                            state.telemetry_selected = Some(
+                                state
+                                    .telemetry_selected
+                                    .unwrap_or(notebook.requests.len().saturating_sub(1))
+                                    .saturating_sub(1),
+                            );
+                            continue;
+                        }
+                        KeyCode::Down => {
+                            state.telemetry_selected = state
+                                .telemetry_selected
+                                .and_then(|i| (i + 1 < notebook.requests.len()).then_some(i + 1));
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
                 if let Some(panel) = state.panel.as_mut() {
                     match key.code {
                         KeyCode::Esc => {
@@ -454,15 +499,23 @@ fn run(
                             panel.selected =
                                 (panel.selected + 10).min(panel.rows.len().saturating_sub(1))
                         }
-                        KeyCode::Enter if !busy => {
+                        KeyCode::Enter => {
                             if let Some(command) = panel
                                 .rows
                                 .get(panel.selected)
                                 .and_then(|r| r.command.clone())
                             {
-                                state.panel = None;
-                                busy = true;
-                                let _ = inputs.send(Input::Submit(command));
+                                if let Some(theme) =
+                                    command.strip_prefix("/theme ").and_then(tui::Theme::parse)
+                                {
+                                    state.theme = theme;
+                                    state.panel = None;
+                                    state.notice = Some(format!("Theme: {}", theme.name()));
+                                } else if !busy {
+                                    state.panel = None;
+                                    busy = true;
+                                    let _ = inputs.send(Input::Submit(command));
+                                }
                             }
                         }
                         _ => {}
@@ -490,6 +543,11 @@ fn run(
                             } else {
                                 super::INTERRUPT.store(true, Ordering::SeqCst);
                             }
+                            continue;
+                        }
+                        KeyCode::Char('t') => {
+                            state.telemetry_open = !state.telemetry_open;
+                            state.panel = None;
                             continue;
                         }
                         KeyCode::Char('o') => {
@@ -522,6 +580,69 @@ fn run(
                     _ => {}
                 }
                 if editor.key(key) && !editor.text.trim().is_empty() {
+                    if editor.text.trim() == "/telemetry" {
+                        editor.take();
+                        state.telemetry_open = !state.telemetry_open;
+                        state.panel = None;
+                        state.notice = None;
+                        continue;
+                    }
+                    if editor.text.split_whitespace().next() == Some("/motion") {
+                        let text = editor.take();
+                        match text.split_whitespace().nth(1) {
+                            Some("off" | "reduce") => state.reduced_motion = true,
+                            Some("on") => state.reduced_motion = false,
+                            _ => {
+                                state.notice = Some("Usage: /motion on | off".into());
+                                continue;
+                            }
+                        }
+                        state.completion_tick = None;
+                        state.notice = Some(
+                            if state.reduced_motion {
+                                "Motion reduced. /motion on restores animation."
+                            } else {
+                                "Motion on. /motion off reduces animation."
+                            }
+                            .into(),
+                        );
+                        continue;
+                    }
+                    if editor.text.split_whitespace().next() == Some("/theme") {
+                        let text = editor.take();
+                        match text.split_whitespace().nth(1) {
+                            Some(name) => {
+                                if let Some(theme) = tui::Theme::parse(name) {
+                                    state.theme = theme;
+                                    state.notice = Some(format!(
+                                        "Theme: {} · /theme opens the palette",
+                                        theme.name()
+                                    ));
+                                } else {
+                                    state.notice =
+                                        Some("Unknown theme. /theme opens the palette.".into());
+                                }
+                            }
+                            None => {
+                                state.notice = None;
+                                state.panel = Some(tui::Panel {
+                                    title: "Themes".into(),
+                                    selected: tui::Theme::ALL
+                                        .iter()
+                                        .position(|theme| *theme == state.theme)
+                                        .unwrap_or(0),
+                                    rows: tui::Theme::ALL
+                                        .iter()
+                                        .map(|theme| tui::PanelRow {
+                                            text: format!("██  {}", theme.name()),
+                                            command: Some(format!("/theme {}", theme.name())),
+                                        })
+                                        .collect(),
+                                });
+                            }
+                        }
+                        continue;
+                    }
                     if busy {
                         state.notice = Some(
                             "Working. Your draft is kept; Ctrl-C interrupts tools; twice exits."
@@ -548,18 +669,6 @@ fn run(
                         };
                         continue;
                     }
-                    if text.split_whitespace().next() == Some("/theme") {
-                        if let Some(theme) =
-                            text.split_whitespace().nth(1).and_then(tui::Theme::parse)
-                        {
-                            state.theme = theme;
-                        }
-                        state.notice = Some(format!(
-                            "Theme: {} · /theme neon|amber|ice|mono · terminal background",
-                            state.theme.name()
-                        ));
-                        continue;
-                    }
                     if text.split_whitespace().next() == Some("/sidebar") {
                         state.sidebar = match text.split_whitespace().nth(1) {
                             Some("hide") => SidebarVisibility::Hidden,
@@ -571,6 +680,8 @@ fn run(
                         continue;
                     }
                     busy = true;
+                    task_started = Some(Instant::now());
+                    state.pulse = tui::Pulse::default();
                     state.activity = Activity::Thinking;
                     if inputs.send(Input::Submit(text)).is_err() {
                         return Ok(());

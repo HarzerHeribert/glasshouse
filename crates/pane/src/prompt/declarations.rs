@@ -125,16 +125,17 @@ pub const RUNTIME: &[Binding] = &[
         declaration: "declare const batch: {\n  \
                       n: number;\n  \
                       where(query: {kind?: string; source?: string}): Event[];\n  \
-                      ack(ids: number[]): void;\n  \
+                      ack(ids: number[]): {acked: number[]; unknown: number[]};\n  \
                       rest(): Event[];\n\
                       };\n\
-                      type Event = {id: number; kind: string; source: string; result?: unknown};\n\
+                      type EventPayload = {status: string; stdout(): string; stderr(): string};\n\
+                      type Event = {id: number; kind: string; source: string; at: string; age: number; summary: string; payload(): EventPayload | null};\n\
                       // Everything that happened while you were not looking — finished\n\
                       // background jobs, hooks, CI, messages — delivered as one object per\n\
                       // turn rather than as an interruption each. `batch.where({kind: \"bg.done\"})`\n\
                       // selects; `kind` matches by prefix. Ack what you have dealt with, and\n\
-                      // anything you leave returns in the next batch. Absent when nothing\n\
-                      // happened.",
+                      // anything you leave returns in the next batch. Call `payload()` only\n\
+                      // when you need the full result; absent payloads return null.",
     },
     Binding {
         global: "agent",
@@ -143,7 +144,8 @@ pub const RUNTIME: &[Binding] = &[
                       };\n\
                       // Start a subagent on one self-contained question. It returns a handle\n\
                       // at once and never blocks; its answer arrives later as an `agent.done`\n\
-                      // event whose result is a handle, selected with\n\
+                      // event whose payload carries status and output. Launch, then yield;\n\
+                      // batch.n is zero until events arrive. Match source: job.source, not job.id.\n\
                       // `batch.where({kind: \"agent.done\"})`. It runs under this session's own\n\
                       // grant, spends this task's budget, and cannot start a subagent of its\n\
                       // own. Worth it when a question is separable and its working would\n\

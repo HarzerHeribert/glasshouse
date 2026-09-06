@@ -106,6 +106,26 @@ pub fn run(
 
         let program = match prompt::extract_program(&text) {
             Extracted::Program(source) => source,
+            Extracted::Edit(json) => {
+                match runtime
+                    .syntax_failure()
+                    .ok_or_else(|| "No syntax-failed cell is available in this task.".to_string())
+                    .and_then(|failed| failed.apply(&json))
+                {
+                    Ok(source) => source,
+                    Err(error) => {
+                        let hint = runtime
+                            .syntax_failure()
+                            .map(|failed| failed.hint())
+                            .unwrap_or_default();
+                        conversation.messages.push(Message::text(
+                            Role::User,
+                            format!("CellEditError: {error} Nothing ran.\n{hint}"),
+                        ));
+                        continue;
+                    }
+                }
+            }
             // Prose from a subagent is its answer: it has no person to talk
             // to and no next instruction coming, so waiting for a program it
             // has already decided not to write would spend the budget on
@@ -129,9 +149,14 @@ pub fn run(
             runtime.end_task();
             return finish(&answer, "returned", turn, tokens);
         }
+        let mut result = result_message(&outcome, turn);
+        if let Some(failed) = runtime.syntax_failure() {
+            result.push_str("\n\n");
+            result.push_str(&failed.hint());
+        }
         conversation
             .messages
-            .push(Message::text(Role::User, &result_message(&outcome, turn)));
+            .push(Message::text(Role::User, result));
     }
 
     runtime.end_task();

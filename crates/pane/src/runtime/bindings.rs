@@ -279,6 +279,9 @@ pub(crate) fn install(scope: &mut v8::PinScope) {
         }
     }
     set_key(scope, global, "console", console.into());
+    // The declared API is usable before the first event arrives. No handle
+    // preview or event store is allocated until an actual batch is delivered.
+    install_batch(scope);
 }
 
 /// The per-cell host object the generated wrapper takes as its parameter:
@@ -522,18 +525,16 @@ fn build_file<'s>(
         array.set_index(scope, index as u32, line);
     }
     set_key(scope, object, "lines", array.into());
-    // `mtime` is empty rather than guessed: the registry's `read` runs `cat`
-    // and a `cat` result carries no modification time, and stat-ing the path
-    // here would be a filesystem access from outside the sandbox that
-    // confined the read.
-    let mtime = js_string(scope, "");
-    set_key(scope, object, "mtime", mtime);
+    // Content and admitted metadata arrive together from the tool layer.
+    let mtime = result.modified.clone().unwrap_or_else(|| "unknown".into());
+    let mtime_value = js_string(scope, &mtime);
+    set_key(scope, object, "mtime", mtime_value);
 
     let preview = Value::File(FileValue {
         path,
         byte_len: result.stdout.len() as u64,
         line_count: lines.len() as u64,
-        mtime: "unknown".to_string(),
+        mtime,
         lines: lines.iter().take(2).map(|line| line.to_string()).collect(),
     });
     (object.into(), preview)
@@ -1126,12 +1127,12 @@ fn batch_ack_callback(
     mut retval: v8::ReturnValue,
 ) {
     let ids = read_ids(scope, args.get(0));
-    let Some(store) = batch_store(scope) else {
-        return;
-    };
-    let Some(acked) = store.with(|batch| batch.ack(&ids)) else {
-        return;
-    };
+    let acked = batch_store(scope)
+        .and_then(|store| store.with(|batch| batch.ack(&ids)))
+        .unwrap_or_else(|| crate::events::batch::Acked {
+            acked: Vec::new(),
+            unknown: ids,
+        });
     let object = v8::Object::new(scope);
     for (key, list) in [("acked", &acked.acked), ("unknown", &acked.unknown)] {
         let array = v8::Array::new(scope, list.len() as i32);
@@ -1285,6 +1286,13 @@ fn agent_run_callback(
         &task,
         &options,
     );
+    trace(scope).record(CallRecord {
+        tool: "agent.run".into(),
+        args: [("source".into(), format!("agent/{handle}"))]
+            .into_iter()
+            .collect(),
+        ended: Ended::Ok,
+    });
     let object = agent_object(scope, &handle);
     retval.set(object);
 }
@@ -1578,23 +1586,175 @@ pub(crate) fn install_batch(scope: &mut v8::PinScope) {
 
 // --- console -----------------------------------------------------------
 
+const CONSOLE_ARGUMENT_CHARS: usize = 4096;
+const CONSOLE_DEPTH: usize = 3;
+const CONSOLE_KEYS: usize = 12;
+
+fn console_string(scope: &mut v8::PinScope, text: v8::Local<v8::String>) -> String {
+    let mut buffer = [0u8; CONSOLE_ARGUMENT_CHARS];
+    let mut consumed = 0;
+    let written = text.write_utf8_v2(
+        scope,
+        &mut buffer,
+        v8::WriteFlags::kReplaceInvalidUtf8,
+        Some(&mut consumed),
+    );
+    let mut result = String::from_utf8_lossy(&buffer[..written]).into_owned();
+    if consumed < text.length() {
+        result.push('…');
+    }
+    result
+}
+
+/// A bounded inspection of one console argument. Objects are read through
+/// own property descriptors, so an accessor is named rather than invoked;
+/// proxies are not inspected because even asking for their keys runs a trap.
+fn inspect_console(
+    scope: &mut v8::PinScope,
+    value: v8::Local<v8::Value>,
+    depth: usize,
+    seen: &mut Vec<i32>,
+) -> String {
+    if value.is_string() {
+        let text = console_string(
+            scope,
+            v8::Local::<v8::String>::try_from(value).expect("string checked"),
+        );
+        return if depth == 0 {
+            text
+        } else {
+            serde_json::to_string(&text).unwrap_or_else(|_| "\"<unprintable>\"".into())
+        };
+    }
+    if value.is_null() {
+        return "null".into();
+    }
+    if value.is_undefined() {
+        return "undefined".into();
+    }
+    if value.is_function() {
+        return "[Function]".into();
+    }
+    if value.is_proxy() {
+        return "[Proxy]".into();
+    }
+    if !value.is_object() {
+        return value
+            .to_string(scope)
+            .map(|text| text.to_rust_string_lossy(scope))
+            .unwrap_or_else(|| "<unprintable>".into());
+    }
+    let object: v8::Local<v8::Object> = match value.try_into() {
+        Ok(object) => object,
+        Err(_) => return "<unprintable>".into(),
+    };
+    let identity = object.get_identity_hash().get();
+    if seen.contains(&identity) {
+        return "[Circular]".into();
+    }
+    let is_array = value.is_array();
+    if depth >= CONSOLE_DEPTH {
+        return if is_array { "[…]" } else { "{…}" }.into();
+    }
+    seen.push(identity);
+    let rendered = inspect_console_object(scope, object, is_array, depth, seen);
+    seen.pop();
+    rendered
+}
+
+fn inspect_console_object(
+    scope: &mut v8::PinScope,
+    object: v8::Local<v8::Object>,
+    is_array: bool,
+    depth: usize,
+    seen: &mut Vec<i32>,
+) -> String {
+    if is_array {
+        let Ok(array) = v8::Local::<v8::Array>::try_from(object) else {
+            return "<unprintable>".into();
+        };
+        let total = array.length() as usize;
+        let mut parts = Vec::new();
+        for index in 0..total.min(CONSOLE_KEYS) {
+            let Some(key) = v8::String::new(scope, &index.to_string()) else {
+                continue;
+            };
+            let shown = array
+                .get_own_property_descriptor(scope, key.into())
+                .and_then(|descriptor| v8::Local::<v8::Object>::try_from(descriptor).ok())
+                .and_then(|descriptor| {
+                    v8::String::new(scope, "value")
+                        .and_then(|name| descriptor.get(scope, name.into()))
+                })
+                .map(|value| inspect_console(scope, value, depth + 1, seen))
+                .unwrap_or_else(|| "<empty>".into());
+            parts.push(shown);
+        }
+        if total > CONSOLE_KEYS {
+            parts.push(format!("… {} more", total - CONSOLE_KEYS));
+        }
+        return format!("[{}]", parts.join(", "));
+    }
+    let Some(names) = object.get_own_property_names(scope, v8::GetPropertyNamesArgs::default())
+    else {
+        return "<unprintable>".into();
+    };
+    let total = names.length() as usize;
+    let mut parts = Vec::new();
+    for index in 0..total.min(CONSOLE_KEYS) {
+        let Some(key_value) = names.get_index(scope, index as u32) else {
+            continue;
+        };
+        let Ok(key) = v8::Local::<v8::Name>::try_from(key_value) else {
+            continue;
+        };
+        let key_text = key_value
+            .to_string(scope)
+            .map(|key| console_string(scope, key))
+            .unwrap_or_default();
+        let Some(descriptor_value) = object.get_own_property_descriptor(scope, key) else {
+            continue;
+        };
+        let Ok(descriptor) = v8::Local::<v8::Object>::try_from(descriptor_value) else {
+            continue;
+        };
+        let getter = v8::String::new(scope, "get")
+            .and_then(|name| descriptor.get(scope, name.into()))
+            .is_some_and(|value| !value.is_undefined());
+        let shown = if getter {
+            "[Getter]".into()
+        } else {
+            v8::String::new(scope, "value")
+                .and_then(|name| descriptor.get(scope, name.into()))
+                .map(|value| inspect_console(scope, value, depth + 1, seen))
+                .unwrap_or_else(|| "undefined".into())
+        };
+        let key = serde_json::to_string(&key_text).unwrap_or_else(|_| "\"?\"".into());
+        parts.push(format!("{key}: {shown}"));
+    }
+    if total > CONSOLE_KEYS {
+        parts.push(format!("… {} more", total - CONSOLE_KEYS));
+    }
+    format!("{{{}}}", parts.join(", "))
+}
+
 fn console_callback(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
     _retval: v8::ReturnValue,
 ) {
-    let mut parts: Vec<String> = Vec::with_capacity(args.length() as usize);
-    for index in 0..args.length() {
+    let mut parts: Vec<String> = Vec::new();
+    for index in 0..args.length().min(CONSOLE_KEYS as i32) {
         let value = args.get(index);
-        parts.push(match value.to_string(scope) {
-            // Bounded per argument: `console.log` of a megabyte is a
-            // megabyte of copying for output that is capped anyway.
-            Some(string) => {
-                let text = string.to_rust_string_lossy(scope);
-                text.chars().take(4096).collect()
-            }
-            None => "<unprintable>".to_string(),
-        });
+        parts.push(
+            inspect_console(scope, value, 0, &mut Vec::new())
+                .chars()
+                .take(CONSOLE_ARGUMENT_CHARS)
+                .collect(),
+        );
+    }
+    if args.length() > CONSOLE_KEYS as i32 {
+        parts.push("… more arguments".into());
     }
     state(scope)
         .current

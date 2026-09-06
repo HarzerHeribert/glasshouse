@@ -1368,7 +1368,13 @@ fn credential_shaped_variable_names_are_recognised() {
     // `TOKENIZER` is the one that makes the rule "a whole segment" rather
     // than "a substring": it contains `TOKEN` and is not a credential.
     for kept in [
-        "PATH", "HOME", "LANG", "TERM", "CARGO_TARGET_DIR", "TOKENIZER", "KEYBOARD_LAYOUT",
+        "PATH",
+        "HOME",
+        "LANG",
+        "TERM",
+        "CARGO_TARGET_DIR",
+        "TOKENIZER",
+        "KEYBOARD_LAYOUT",
     ] {
         assert!(
             !invoke::is_credential_variable(kept),

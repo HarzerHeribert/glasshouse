@@ -311,10 +311,7 @@ pub fn profile_text(profile: &Profile, binary: &Path) -> String {
     // on its directory: §4.3's `$HOME` rule survives only because the
     // binary's own bytes are granted and its neighbours are not. Emitted in
     // the resolved arm alone — the fallback's roots are read roots already.
-    if matches!(
-        exec,
-        ExecScope::ResolvedBinary | ExecScope::RootsAndProject
-    ) {
+    if matches!(exec, ExecScope::ResolvedBinary | ExecScope::RootsAndProject) {
         out.push_str(&format!(
             "(allow file-read* (literal {}))\n",
             quote(&display(binary))

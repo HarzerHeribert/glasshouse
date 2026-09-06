@@ -345,3 +345,65 @@ fn model_picker_sorts_accounts_and_selects_a_real_request_model() {
     app.send(b"/exit\r");
     assert_eq!(app.exited(), 0);
 }
+
+#[test]
+fn telemetry_and_motion_are_local_controls_with_real_response_usage() {
+    let (base, requests) = provider();
+    let mut app = App::start(&base);
+    app.contains("fixture-model");
+    app.send(b"/motion off\r");
+    app.contains("Motion reduced");
+    app.send(b"/telemetry\r");
+    app.contains("LIVE INSTRUMENTS");
+    assert!(requests.try_recv().is_err());
+    app.send(b"answer this\r");
+    let request = requests.recv_timeout(Duration::from_secs(5)).unwrap();
+    assert_eq!(request["model"], "fixture-model");
+    app.contains("REQUEST 01");
+    app.contains("input 123");
+    app.contains("output 12");
+    app.contains("cost unreported");
+    app.contains("1 deliveries");
+    app.send(b"\x14");
+    app.contains("LIVE RESULT INTACT");
+    app.send(b"\x14");
+    app.contains("LIVE INSTRUMENTS");
+    app.send(b"next draft");
+    for width in [60, 80, 120, 200] {
+        app.resize(width);
+        app.wait("redraw after resize", |screen| {
+            // The mode moves to the new right edge only after a real redraw.
+            (25..30).any(|row| {
+                screen
+                    .contents_between(row, width - 14, row, width)
+                    .contains("effort auto")
+            })
+        });
+        app.contains("REQUEST 01");
+        app.contains("next draft");
+    }
+    app.send(b"\x1b");
+    app.contains("LIVE RESULT INTACT");
+    app.contains("next draft");
+    app.send(b"\x15/exit\r");
+    assert_eq!(app.exited(), 0);
+}
+
+#[test]
+fn theme_picker_applies_local_palettes_without_a_request() {
+    let mut app = App::start("http://127.0.0.1:1");
+    app.contains("fixture-model");
+    app.send(b"/theme\r");
+    app.contains("Themes");
+    app.contains("violet");
+    app.send(b"\x1b[B\x1b[B\x1b[B\x1b[B\r");
+    app.contains("Theme: violet");
+    app.send(b"/theme cobalt\r");
+    app.contains("Theme: cobalt");
+    app.send(b"/theme mint\r");
+    app.contains("Theme: mint");
+    app.send(b"/theme rose\r");
+    app.contains("Theme: rose");
+    app.send(b"/exit\r");
+    assert_eq!(app.exited(), 0);
+}

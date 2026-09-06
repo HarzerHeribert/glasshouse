@@ -1,7 +1,10 @@
 //! Fullscreen presentation. The caller owns terminal lifecycle, input and ticks.
 
 mod controls;
+mod markdown;
+mod telemetry;
 pub use controls::{Mode, Panel, PanelRow, StatusLine};
+pub use telemetry::Pulse;
 
 use crate::commands::{BUILT_INS, BuiltIn};
 use ratatui::Frame;
@@ -52,6 +55,10 @@ pub struct ScreenState {
     pub effort: crate::wire::Effort,
     pub status_line: StatusLine,
     pub panel: Option<Panel>,
+    pub telemetry_open: bool,
+    pub telemetry_selected: Option<usize>,
+    pub reduced_motion: bool,
+    pub pulse: Pulse,
 }
 
 /// Accent-only themes inherit the terminal background and its transparency.
@@ -62,14 +69,32 @@ pub enum Theme {
     Amber,
     Ice,
     Mono,
+    Violet,
+    Cobalt,
+    Mint,
+    Rose,
 }
 impl Theme {
+    pub const ALL: [Self; 8] = [
+        Self::Neon,
+        Self::Amber,
+        Self::Ice,
+        Self::Mono,
+        Self::Violet,
+        Self::Cobalt,
+        Self::Mint,
+        Self::Rose,
+    ];
     pub fn parse(name: &str) -> Option<Self> {
         match name {
             "neon" => Some(Self::Neon),
             "amber" => Some(Self::Amber),
             "ice" => Some(Self::Ice),
             "mono" => Some(Self::Mono),
+            "violet" => Some(Self::Violet),
+            "cobalt" => Some(Self::Cobalt),
+            "mint" => Some(Self::Mint),
+            "rose" => Some(Self::Rose),
             _ => None,
         }
     }
@@ -79,17 +104,37 @@ impl Theme {
             Self::Amber => "amber",
             Self::Ice => "ice",
             Self::Mono => "mono",
+            Self::Violet => "violet",
+            Self::Cobalt => "cobalt",
+            Self::Mint => "mint",
+            Self::Rose => "rose",
         }
     }
     fn backlight(self) -> Color {
         Color::Reset
     }
+    fn dock(self) -> Color {
+        match self {
+            Self::Neon => Color::Rgb(20, 32, 26),
+            Self::Amber => Color::Rgb(38, 29, 19),
+            Self::Ice => Color::Rgb(17, 30, 39),
+            Self::Mono => Color::Rgb(27, 29, 30),
+            Self::Violet => Color::Rgb(30, 23, 43),
+            Self::Cobalt => Color::Rgb(18, 26, 44),
+            Self::Mint => Color::Rgb(16, 34, 30),
+            Self::Rose => Color::Rgb(38, 22, 34),
+        }
+    }
     fn accent(self) -> Color {
         match self {
-            Self::Neon => Color::LightGreen,
+            Self::Neon => Color::Rgb(223, 255, 0),
             Self::Amber => Color::LightYellow,
             Self::Ice => Color::LightCyan,
             Self::Mono => Color::White,
+            Self::Violet => Color::Rgb(191, 154, 255),
+            Self::Cobalt => Color::Rgb(114, 155, 255),
+            Self::Mint => Color::Rgb(100, 231, 187),
+            Self::Rose => Color::Rgb(242, 156, 218),
         }
     }
 }
@@ -168,7 +213,7 @@ pub struct ScreenRegions {
 pub fn screen_regions(area: Rect, state: &ScreenState) -> ScreenRegions {
     let status_h = area.height.min(match state.status_line {
         StatusLine::Full => {
-            if area.width < 100 {
+            if area.width < 140 {
                 3
             } else {
                 2
@@ -262,7 +307,12 @@ pub fn slash_matches(input: &str) -> Vec<(String, &'static str)> {
                 ("/help".to_string(), "show available commands"),
                 ("/exit".to_string(), "leave Pane"),
                 ("/sidebar".to_string(), "auto, show or hide telemetry"),
-                ("/theme".to_string(), "neon, amber, ice or mono accents"),
+                ("/theme".to_string(), "choose a palette · eight themes"),
+                (
+                    "/telemetry".to_string(),
+                    "live activity, requests and execution · Ctrl-T",
+                ),
+                ("/motion".to_string(), "on or off · reduce animation"),
                 ("/effort".to_string(), "configure response reasoning effort"),
                 (
                     "/context".to_string(),
@@ -296,6 +346,11 @@ pub fn slash_matches(input: &str) -> Vec<(String, &'static str)> {
 /// scans this file for.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct CellView {
+    /// Corrected source for an executed pane-edit; display only, never another model message.
+    pub executed_source: Option<String>,
+    pub repaired_from: Option<u64>,
+    /// Local before/after file diff. Never included in model context.
+    pub changes: Option<String>,
     /// The handle table as this cell ended, already rendered by the one
     /// renderer. `None` for a cell the notebook never saw run -- a resumed
     /// session's earlier cells came from the rollout file.
@@ -384,6 +439,7 @@ pub enum SupervisorStatus {
 /// total, and the supervisor's latest status.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Notebook {
+    pub requests: Vec<crate::telemetry::RequestMeasurement>,
     pub cells: Vec<CellView>,
     pub tokens: Option<TaskTokens>,
     pub supervisor: Option<SupervisorStatus>,
@@ -508,7 +564,22 @@ pub fn render_screen(
         );
     }
     if regions.details.width > 0 {
-        render_sidebar(frame, regions.details, served_by, notebook);
+        telemetry::rail(frame, regions.details, served_by, notebook, state);
+    }
+    if state.telemetry_open {
+        let area = Rect::new(
+            regions.transcript.x,
+            regions.transcript.y,
+            regions.transcript.width
+                + if regions.details.width > 0 {
+                    regions.details.width + 2
+                } else {
+                    0
+                },
+            regions.transcript.height,
+        );
+        frame.render_widget(Clear, area);
+        telemetry::expanded(frame, area, conversation, served_by, notebook, state);
     }
     if let Some(panel) = &state.panel {
         frame.render_widget(Clear, regions.transcript);
@@ -565,24 +636,22 @@ pub fn render_screen(
         .map(|(row, _)| row.saturating_sub(visible.saturating_sub(1)))
         .unwrap_or_else(|| input_lines.len().saturating_sub(visible));
     frame.render_widget(
-        Block::default().style(Style::default().bg(state.theme.backlight())),
+        Block::default().style(Style::default().bg(state.theme.dock())),
         regions.input,
     );
     if regions.input.height > 0 {
-        frame.render_widget(
-            Paragraph::new(format!(
-                " compose · {} · effort {} · Shift-Tab mode ",
-                state.mode.name(),
-                state.effort.name()
-            ))
-            .style(Style::default().fg(ACCENT).bg(state.theme.backlight())),
-            Rect::new(regions.input.x, regions.input.y, regions.input.width, 1),
-        );
+        for y in [regions.input.y, regions.input.bottom() - 1] {
+            frame.render_widget(
+                Paragraph::new("─".repeat(usize::from(regions.input.width)))
+                    .style(Style::default().fg(ACCENT).bg(state.theme.dock())),
+                Rect::new(regions.input.x, y, regions.input.width, 1),
+            );
+        }
     }
     if regions.input.height > 2 {
         frame.render_widget(
             Paragraph::new(input_lines.into_iter().skip(skip).collect::<Vec<_>>())
-                .style(Style::default().bg(state.theme.backlight())),
+                .style(Style::default().bg(state.theme.dock())),
             Rect::new(
                 regions.input.x,
                 regions.input.y + 1,
@@ -615,55 +684,61 @@ pub fn render_screen(
         None => NOT_CONNECTED,
     };
     let width = usize::from(regions.status.width);
-    let budget = notebook
-        .tokens
-        .filter(|_| width >= 100)
-        .map(|tokens| {
-            format!(
-                " · budget: {}/{} tok · counted: {}",
-                tokens.used,
-                tokens.cap,
-                tokens.counted.as_str()
-            )
-        })
-        .unwrap_or_default();
-    let mut status = vec![
-        Line::from(format!(
-            "model {} · project {}",
-            abbreviate(model, width.saturating_sub(18) / 2),
-            abbreviate(project, width.saturating_sub(18) / 2)
-        )),
-        Line::from(format!(
-            "sandbox {} · net:{}{}",
-            abbreviate(
-                sandbox,
-                width.saturating_sub(24 + Line::from(budget.as_str()).width())
+    let mode = format!("{} · effort {}", state.mode.name(), state.effort.name());
+    let identity = format!(" {} · {}", abbreviate(model, 28), abbreviate(project, 24));
+    let posture = format!(
+        " sandbox {} · net:{}",
+        abbreviate(sandbox, 16),
+        abbreviate(network, 8)
+    );
+    let budget = notebook.tokens.filter(|_| width >= 100).map(|tokens| {
+        format!(
+            "budget: {}/{} tok · counted: {}",
+            tokens.used,
+            tokens.cap,
+            tokens.counted.as_str()
+        )
+    });
+    let status = if state.status_line == StatusLine::Compact {
+        vec![footer_row(identity, mode, width, ACCENT)]
+    } else if width < 140 {
+        vec![
+            footer_row(
+                identity,
+                if width >= 100 {
+                    mode.clone()
+                } else {
+                    String::new()
+                },
+                width,
+                ACCENT,
             ),
-            abbreviate(network, 12),
-            budget
-        )),
-        Line::from(connection),
-    ];
-    if regions.status.height < 3 {
-        status = vec![
-            Line::from(format!(
-                "model {} · project {} · {}",
-                abbreviate(model, 28),
-                abbreviate(project, 22),
-                connection
-            )),
-            status.remove(1),
-        ];
-    }
-    if state.status_line == StatusLine::Compact {
-        status = vec![Line::from(format!(
-            "{} · {} · {} · {}",
-            abbreviate(model, 24),
-            state.mode.name(),
-            sandbox,
-            connection
-        ))];
-    }
+            footer_row(
+                posture,
+                budget
+                    .clone()
+                    .unwrap_or_else(|| if width < 100 { mode } else { String::new() }),
+                width,
+                MUTED,
+            ),
+            footer_row(
+                format!(" {connection}"),
+                "Shift-Tab mode · / commands".into(),
+                width,
+                MUTED,
+            ),
+        ]
+    } else {
+        vec![
+            footer_row(identity, mode, width, ACCENT),
+            footer_row(
+                format!("{posture} · {connection}"),
+                budget.unwrap_or_else(|| "Shift-Tab mode   / commands".into()),
+                width,
+                MUTED,
+            ),
+        ]
+    };
     frame.render_widget(
         Paragraph::new(status).style(Style::default().fg(MUTED)),
         regions.status,
@@ -676,7 +751,24 @@ pub fn render_screen(
         if cell.bg == ACCENT {
             cell.set_bg(state.theme.accent());
         }
+        if cell.bg == ACCENT {
+            cell.set_bg(state.theme.accent());
+        }
     }
+}
+
+/// Keep controls at the edge; omit optional hints when metadata fills the row.
+fn footer_row(left: String, right: String, width: usize, right_color: Color) -> Line<'static> {
+    let occupied = Line::from(left.as_str()).width() + Line::from(right.as_str()).width() + 2;
+    if right.is_empty() || occupied > width {
+        return Line::styled(abbreviate(&left, width), Style::default().fg(MUTED));
+    }
+    Line::from(vec![
+        Span::styled(left, Style::default().fg(MUTED)),
+        Span::raw(" ".repeat(width - occupied + 1)),
+        Span::styled(right, Style::default().fg(right_color)),
+        Span::raw(" "),
+    ])
 }
 
 /// Startup is caller-driven and immediately replaced by any real transcript.
@@ -804,7 +896,7 @@ pub fn notebook_height(
     handles: &HandleTable,
     notebook: &Notebook,
 ) -> usize {
-    notebook_lines(conversation, handles, notebook, false, false).len()
+    notebook_lines(conversation, handles, notebook, false, false, 98).len()
 }
 
 /// One line with nothing to show. Never collapses to no line at all -- the
@@ -844,7 +936,14 @@ fn render_conversation(
     notebook: &Notebook,
     state: &ScreenState,
 ) {
-    let mut content = notebook_lines(conversation, handles, notebook, state.compact, state.pretty);
+    let mut content = notebook_lines(
+        conversation,
+        handles,
+        notebook,
+        state.compact,
+        state.pretty,
+        usize::from(area.width.saturating_sub(1)),
+    );
     if let Some(partial) = state.streaming_text.as_deref() {
         turn_header(
             &mut content,
@@ -870,8 +969,13 @@ fn render_conversation(
                 &mut content,
                 "Preparing actions · Ctrl-O shows incoming code",
             );
-        } else {
+        } else if partial.contains("```") {
             push_text_region(&mut content, partial);
+        } else {
+            content.extend(markdown::render(
+                partial,
+                usize::from(area.width.saturating_sub(1)),
+            ));
         }
     }
     let mut active = false;
@@ -941,6 +1045,7 @@ fn notebook_lines(
     notebook: &Notebook,
     compact: bool,
     pretty: bool,
+    width: usize,
 ) -> Vec<Line<'static>> {
     let mut lines = Vec::new();
     let mut messages = conversation.messages.iter();
@@ -970,17 +1075,38 @@ fn notebook_lines(
                 answered = view.is_some_and(|view| view.answered);
                 after_return = view.is_some_and(|view| view.returned.is_some());
 
+                let original = message_text(message);
+                if matches!(extract_program(&original), Extracted::Prose)
+                    && view.is_none_or(|v| {
+                        v.table.is_none()
+                            && v.execution.is_none()
+                            && v.error.is_none()
+                            && v.returned.is_none()
+                    })
+                    && !original.contains("<php-pane>")
+                    && !original.contains("```pane")
+                {
+                    turn_header(&mut lines, "PANE".into(), Color::White);
+                    lines.extend(markdown::render(&original, width));
+                    continue;
+                }
                 let (before, after) = natural_message(message);
                 if !before.trim().is_empty() {
                     turn_header(&mut lines, "PANE".into(), ACCENT);
-                    push_text_region(&mut lines, before.trim());
+                    lines.extend(markdown::render(before.trim(), width));
                 }
                 if compact {
                     let original = message_text(message);
                     match extract_program(&original) {
-                        Extracted::Program(source) => {
-                            let possible = possible_tool_calls(&source);
-                            let only_answer = possible.is_empty()
+                        Extracted::Program(source) | Extracted::Edit(source) => {
+                            let repairing =
+                                matches!(extract_program(&original), Extracted::Edit(_));
+                            let source = view
+                                .and_then(|v| v.executed_source.as_ref())
+                                .unwrap_or(&source);
+                            let possible = possible_tool_calls(source);
+                            let only_answer = !repairing
+                                && possible.is_empty()
                                 && view.is_some_and(|v| {
                                     v.returned.is_some()
                                         && v.execution
@@ -990,7 +1116,13 @@ fn notebook_lines(
                             if !only_answer {
                                 let failed = view.is_some_and(|v| v.error.is_some());
                                 let evaluated = view.is_some_and(|v| v.execution.is_some());
-                                let label = if failed {
+                                let label = if repairing && failed {
+                                    "× Cell repair failed"
+                                } else if repairing && evaluated {
+                                    "◆ Cell repaired"
+                                } else if repairing {
+                                    "◇ Preparing cell repair"
+                                } else if failed {
                                     "× Action failed"
                                 } else if evaluated {
                                     "◆ Tool results"
@@ -1005,6 +1137,12 @@ fn notebook_lines(
                                 let none_ran = view
                                     .and_then(|v| v.execution.as_deref())
                                     .is_some_and(|calls| calls.starts_with("No tool"));
+                                if let Some(target) = view.and_then(|v| v.repaired_from) {
+                                    lines.push(Line::styled(
+                                        format!("Amends syntax-failed cell {target}"),
+                                        Style::default().fg(MUTED),
+                                    ));
+                                }
                                 if !possible.is_empty()
                                     && (possible.len() > 1 || !evaluated || none_ran)
                                 {
@@ -1052,7 +1190,7 @@ fn notebook_lines(
                             );
                         }
                         Extracted::Prose
-                            if original.contains("<php-pane>") || original.contains("```") =>
+                            if original.contains("<php-pane>") || original.contains("```pane") =>
                         {
                             turn_header(
                                 &mut lines,
@@ -1091,18 +1229,21 @@ fn notebook_lines(
                     {
                         push_folded_region(&mut lines, stdout, 6, true);
                     }
+                    if let Some(changes) = view.and_then(|v| v.changes.as_deref()) {
+                        push_changes(&mut lines, changes, true);
+                    }
                     if let Some(returned) = view.and_then(|v| v.returned.as_deref()) {
                         turn_header(&mut lines, "PANE".into(), ACCENT);
-                        push_text_region(&mut lines, &pretty_json(returned));
+                        lines.extend(markdown::render(&pretty_json(returned), width));
                     }
                     if !after.trim().is_empty() {
-                        push_text_region(&mut lines, after.trim());
+                        lines.extend(markdown::render(after.trim(), width));
                     }
                     continue;
                 }
                 let role = if matches!(
                     extract_program(&message_text(message)),
-                    Extracted::Program(_)
+                    Extracted::Program(_) | Extracted::Edit(_)
                 ) {
                     "PANE / CODE"
                 } else if matches!(
@@ -1131,18 +1272,42 @@ fn notebook_lines(
                     format!("{role}  [{cell}] in{execution}"),
                     ACCENT,
                 );
-                let source = input_region(message);
+                if let Some(target) = view.and_then(|v| v.repaired_from) {
+                    lines.push(Line::styled(
+                        format!("Amends syntax-failed cell {target}"),
+                        Style::default().fg(MUTED),
+                    ));
+                }
+                let source = view
+                    .and_then(|v| v.executed_source.clone())
+                    .unwrap_or_else(|| input_region(message));
                 let display = if pretty && view.is_none_or(|v| v.error.is_none()) {
                     match extract_program(&message_text(message)) {
-                        Extracted::Program(_) => pretty_code(&source),
+                        Extracted::Program(_) | Extracted::Edit(_) => pretty_code(&source),
                         _ => source,
                     }
                 } else {
                     source
                 };
-                push_folded_region(&mut lines, &display, 10, compact);
                 if role == "PANE / CODE" {
-                    let candidates = possible_tool_calls(&input_region(message));
+                    let code = markdown::code(&display);
+                    let limit = if compact { 10 } else { usize::MAX };
+                    let remaining = code.len().saturating_sub(limit);
+                    lines.extend(code.into_iter().take(limit));
+                    if remaining > 0 {
+                        lines.push(Line::styled(
+                            format!("… {remaining} more lines · Ctrl-O expands"),
+                            Style::default().fg(MUTED),
+                        ));
+                    }
+                } else {
+                    push_folded_region(&mut lines, &display, 10, compact);
+                }
+                if role == "PANE / CODE" {
+                    let candidates = possible_tool_calls(
+                        view.and_then(|v| v.executed_source.as_deref())
+                            .unwrap_or(&input_region(message)),
+                    );
                     if !candidates.is_empty() {
                         lines.push(Line::styled(
                             format!("◇ possible: {} · branches may skip", candidates.join(" → ")),
@@ -1177,6 +1342,9 @@ fn notebook_lines(
                     turn_header(&mut lines, "OUTPUT".into(), MUTED);
                     push_folded_region(&mut lines, stdout, 6, compact);
                 }
+                if let Some(changes) = view.and_then(|v| v.changes.as_deref()) {
+                    push_changes(&mut lines, changes, compact);
+                }
                 if let Some(reason) = view.and_then(|view| view.yield_reason.as_deref()) {
                     lines.push(Line::from(format!("yielded: {reason}")));
                 }
@@ -1196,11 +1364,11 @@ fn notebook_lines(
                     } else {
                         returned.to_string()
                     };
-                    push_text_region(&mut lines, &display);
+                    lines.extend(markdown::render(&display, width));
                 }
                 if !after.trim().is_empty() {
                     turn_header(&mut lines, "PANE".into(), ACCENT);
-                    push_text_region(&mut lines, after.trim());
+                    lines.extend(markdown::render(after.trim(), width));
                 }
             }
             Role::User => {
@@ -1230,7 +1398,10 @@ fn notebook_lines(
 /// the model for any narration or changing its program/source positions.
 fn natural_message(message: &Message) -> (String, String) {
     let text = message_text(message);
-    if !matches!(extract_program(&text), Extracted::Program(_)) {
+    if !matches!(
+        extract_program(&text),
+        Extracted::Program(_) | Extracted::Edit(_)
+    ) {
         return (String::new(), String::new());
     }
     let lines: Vec<_> = text.lines().collect();
@@ -1241,7 +1412,7 @@ fn natural_message(message: &Message) -> (String, String) {
             while end < lines.len() && lines[end] != "```" {
                 end += 1;
             }
-            if info.trim() == "pane" {
+            if matches!(info.trim(), "pane" | "pane-edit") {
                 return (
                     lines[..i].join("\n"),
                     lines[(end + 1).min(lines.len())..].join("\n"),
@@ -1272,6 +1443,16 @@ fn possible_tool_calls(source: &str) -> Vec<String> {
             {
                 self.0.push(name.name.to_string());
             }
+            if let Expression::StaticMemberExpression(member) = &call.callee
+                && let Expression::Identifier(owner) = &member.object
+                && matches!(
+                    (owner.name.as_str(), member.property.name.as_str()),
+                    ("agent", "run") | ("bg", "run" | "watch" | "cancel")
+                )
+            {
+                self.0
+                    .push(format!("{}.{}", owner.name, member.property.name));
+            }
             walk::walk_call_expression(self, call);
         }
     }
@@ -1292,6 +1473,35 @@ fn possible_tool_calls(source: &str) -> Vec<String> {
 
 /// Display only. The conversation and executable source remain byte-for-byte intact.
 /// Expanded view (Ctrl-O) shows original code, as do cells with source-position errors.
+fn push_changes(lines: &mut Vec<Line<'static>>, changes: &str, compact: bool) {
+    turn_header(lines, "CHANGES OBSERVED".into(), Color::LightCyan);
+    let limit = if compact { 18 } else { usize::MAX };
+    for line in changes.lines().take(limit) {
+        let color = if line.starts_with("+++") || line.starts_with("---") {
+            Color::LightCyan
+        } else if line.starts_with('+') {
+            Color::LightGreen
+        } else if line.starts_with('-') {
+            Color::LightRed
+        } else {
+            MUTED
+        };
+        // A diff is data: terminal controls must never affect rendering.
+        let text: String = line
+            .chars()
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect();
+        lines.push(Line::styled(text, Style::default().fg(color)));
+    }
+    let remaining = changes.lines().count().saturating_sub(limit);
+    if remaining > 0 {
+        lines.push(Line::styled(
+            format!("… {remaining} more diff lines · Ctrl-O expands"),
+            Style::default().fg(MUTED),
+        ));
+    }
+}
+
 fn pretty_code(source: &str) -> String {
     use oxc::{
         allocator::Allocator,
@@ -1333,7 +1543,7 @@ fn pretty_json(text: &str) -> String {
 fn input_region(message: &Message) -> String {
     let text = message_text(message);
     match extract_program(&text) {
-        Extracted::Program(source) => source,
+        Extracted::Program(source) | Extracted::Edit(source) => source,
         Extracted::Prose | Extracted::TwoBlocks => text,
     }
 }
@@ -1396,36 +1606,6 @@ fn message_text(message: &Message) -> String {
         .map(|block| block.text())
         .collect::<Vec<_>>()
         .join("")
-}
-
-fn render_sidebar(frame: &mut Frame, area: Rect, served_by: &ServedBy, notebook: &Notebook) {
-    let mut lines: Vec<Line> = if served_by.is_known() {
-        known_sidebar_lines(served_by)
-    } else {
-        vec![Line::from("No request telemetry yet.")]
-    };
-    if let Some(tokens) = notebook.tokens {
-        lines.push(Line::from(format!(
-            "budget: {}/{} tok",
-            tokens.used, tokens.cap
-        )));
-        lines.push(Line::from(format!("counted: {}", tokens.counted.as_str())));
-    }
-    if let Some(status) = &notebook.supervisor {
-        lines.push(Line::from(supervisor_line(status)));
-    }
-
-    let lines = wrap_lines(lines, area.width.saturating_sub(1));
-    let height = (lines.len().min(usize::from(area.height)) as u16)
-        .saturating_add(1)
-        .min(area.height);
-    let paragraph = Paragraph::new(lines).block(
-        Block::default()
-            .borders(Borders::LEFT)
-            .title(" telemetry ")
-            .border_style(Style::default().fg(MUTED)),
-    );
-    frame.render_widget(paragraph, Rect::new(area.x, area.y, area.width, height));
 }
 
 /// Only the fields Glasshouse actually reported become a line. A field it

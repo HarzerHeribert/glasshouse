@@ -74,19 +74,37 @@ pub type EventId = u64;
 /// `hook.PostToolUse` — because [`Kind::as_str`] builds the `hook.` prefix.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Kind {
-    WorkerReport { path: String, mtime: String },
-    WorkerQuiet { quiet_since: String },
+    WorkerReport {
+        path: String,
+        mtime: String,
+    },
+    WorkerQuiet {
+        quiet_since: String,
+    },
     Prompt,
-    CiRun { conclusion: String },
-    CiCell { cell: String, conclusion: String },
-    BgDone { emission: String },
+    CiRun {
+        conclusion: String,
+    },
+    CiCell {
+        cell: String,
+        conclusion: String,
+    },
+    BgDone {
+        emission: String,
+    },
     /// A subagent finished — Phase 64. Its own kind and not a `bg.done`,
     /// because a program that selects finished shell jobs must not be handed
     /// an answer to a question it asked, and the reverse.
-    AgentDone { emission: String },
+    AgentDone {
+        emission: String,
+    },
     Hook(String),
-    Message { message_id: String },
-    Timer { deadline: String },
+    Message {
+        message_id: String,
+    },
+    Timer {
+        deadline: String,
+    },
 }
 
 impl Kind {

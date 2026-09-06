@@ -146,8 +146,6 @@ pub enum Argv {
     ReadPath,
     /// `<exe> -r -n -e <pattern> -- <path>`.
     GrepIn,
-    /// `<exe> <path> -name <pattern>`.
-    FindNamed,
     /// `<exe> -c <command line>`. The one variant whose argument was
     /// admitted by `Profile::admits_command` rather than by `Profile::check`.
     ShellCommand,
@@ -281,15 +279,15 @@ const READ: Tool = Tool::declare(
 /// `glob({ pattern, path? })` — names matching `pattern` beneath `path`,
 /// which defaults to the project root.
 ///
-/// Pure: `find -name` reads directory entries and writes nothing.
-const GLOB: Tool = Tool::declare(
+/// Pure: pane walks the checked tree, reads directory entries and writes
+/// nothing. Each entry is checked before it is returned or traversed, so an
+/// in-root deny cannot leak a name through directory enumeration.
+const GLOB: Tool = Tool::declare_in_process(
     "glob",
-    "find",
     &[
         Arg::required("pattern", ArgKind::Pattern),
         Arg::rooted("path"),
     ],
-    Argv::FindNamed,
     Purity::Pure,
 );
 
@@ -425,15 +423,15 @@ mod tests {
 
     /// The companion claim, and the one that matters for the sandbox: a tool
     /// either names a binary to exec or is performed in this process, and
-    /// only `write` is the second.
+    /// `glob` and `write` are the second.
     #[test]
-    fn write_is_the_only_tool_that_spawns_nothing() {
+    fn glob_and_write_are_the_only_tools_that_spawn_nothing() {
         let in_process: Vec<_> = ALL
             .iter()
             .filter(|tool| tool.executable().is_none())
             .map(Tool::name)
             .collect();
-        assert_eq!(in_process, vec!["write"]);
+        assert_eq!(in_process, vec!["glob", "write"]);
         for tool in ALL.iter().filter(|tool| tool.executable().is_none()) {
             assert_eq!(
                 tool.argv(),

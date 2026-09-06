@@ -5,8 +5,8 @@
 
 pub mod agent;
 pub mod bg;
-pub mod commands;
 mod changes;
+pub mod commands;
 pub mod config;
 pub mod contract;
 pub mod events;
@@ -19,6 +19,7 @@ pub mod runtime;
 pub mod sandbox;
 pub mod session;
 pub mod supervisor;
+pub mod telemetry;
 pub mod tools;
 pub mod tui;
 pub mod wire;

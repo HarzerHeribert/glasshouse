@@ -480,6 +480,7 @@ pub struct Runtime {
     /// it is set nothing in this type enters the isolate again — see
     /// [`Runtime::poisoned`].
     poisoned_by: Option<Poisoned>,
+    syntax_failure: Option<crate::runtime::repair::SyntaxFailure>,
 }
 
 impl Runtime {
@@ -604,6 +605,7 @@ impl Runtime {
             wall_clock_limit,
             heap_over_ceiling: false,
             poisoned_by: None,
+            syntax_failure: None,
         }
     }
 
@@ -777,6 +779,7 @@ impl Runtime {
     /// The task ending — `runtime-contract.md` §2's third and last lifetime
     /// event, and the only one this type performs itself.
     pub fn end_task(&mut self) {
+        self.syntax_failure = None;
         // A poisoned runtime's isolate ignored every termination the watchdog
         // issued, and [`Runtime::poisoned`] promises nothing re-enters it.
         // The handles go with the task either way: the table below is the
@@ -801,6 +804,11 @@ impl Runtime {
         if let Some(store) = self.isolate.get_slot::<Rc<BatchStore>>() {
             store.clear();
         }
+    }
+
+    /// The most recent parse failure, until another cell attempt or task end.
+    pub fn syntax_failure(&self) -> Option<&crate::runtime::repair::SyntaxFailure> {
+        self.syntax_failure.as_ref()
     }
 
     /// What the task around this runtime is spending and on which model, so a
@@ -880,6 +888,7 @@ impl Runtime {
     /// throw in the same turn slot. Nothing about a cell is an error of the
     /// runtime's.
     pub fn run_cell(&mut self, source: &str) -> CellOutcome {
+        self.syntax_failure = None;
         let started = Instant::now();
         let cell = self.state.begin_cell();
         self.trace().begin_cell();
@@ -909,6 +918,9 @@ impl Runtime {
         let compiled = match cell::compile(source, cell) {
             Ok(compiled) => compiled,
             Err(error) => {
+                if matches!(error, cell::CellError::Parse { .. }) {
+                    self.syntax_failure = crate::runtime::repair::SyntaxFailure::new(cell, source);
+                }
                 let value = compile_error_value(&error);
                 return self.finish(
                     cell,

@@ -38,7 +38,10 @@ impl Fixture {
     }
 
     fn profile(&self) -> Profile {
-        Profile::compile(&self.root, Some(r#"{"permissions":{"allow":["Bash(echo*)"]}}"#))
+        Profile::compile(
+            &self.root,
+            Some(r#"{"permissions":{"allow":["Bash(echo*)"]}}"#),
+        )
     }
 }
 
@@ -51,10 +54,14 @@ impl Drop for Fixture {
 
 /// A provider that answers every request with the same assistant message.
 fn start_provider(reply: &'static str, turns: usize) -> String {
+    start_provider_sequence(vec![reply; turns])
+}
+
+fn start_provider_sequence(replies: Vec<&'static str>) -> String {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     std::thread::spawn(move || {
-        for _ in 0..turns {
+        for reply in replies {
             let Ok((mut stream, _)) = listener.accept() else {
                 return;
             };
@@ -198,4 +205,36 @@ fn a_subagent_that_never_returns_stops_at_its_turn_cap() {
     let result = bg::payload(&fixture.session, done.payload.as_str()).expect("resolves");
     assert_eq!(result.status, "turns", "{result:?}");
     assert!(result.stdout.contains("without returning"), "{result:?}");
+}
+
+#[test]
+fn a_subagent_can_amend_its_parse_failed_cell() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let fixture = Fixture::new("repair");
+    let base = start_provider_sequence(vec![
+        "```pane\nreturn 'repaired;\n```",
+        "```pane-edit\n{\"cell\":1,\"replace\":\"'repaired;\",\"with\":\"'repaired';\"}\n```",
+    ]);
+    // SAFETY: the environment lock is held until the child has finished.
+    unsafe {
+        std::env::set_var("ANTHROPIC_BASE_URL", base);
+    }
+    let result = pane::agent::run(
+        &fixture.profile(),
+        &Glasshouse::None,
+        &fixture.session,
+        "answer",
+        &AgentOptions {
+            turns: 2,
+            model: "test-model".into(),
+            effort: pane::wire::Effort::default(),
+        },
+        &pane::tools::invoke::CancellationToken::new(),
+    );
+    unsafe {
+        std::env::remove_var("ANTHROPIC_BASE_URL");
+    }
+    assert_eq!(result.status, "returned");
+    assert_eq!(result.answer, "repaired");
+    assert_eq!(result.turns, 2);
 }

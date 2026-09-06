@@ -34,6 +34,7 @@ use crate::runtime::outcome::{CellOutcome, CellRecord, Ended};
 use crate::runtime::preview;
 use crate::sandbox::profile::Profile;
 use crate::supervisor::Supervisor;
+use crate::telemetry::RequestMeasurement;
 use crate::tools::invoke::{self, Args, ToolContext, ToolError};
 use crate::tools::registry;
 use crate::tui::{self, CellError, CellView, Counted, Notebook, SupervisorStatus, TaskTokens};
@@ -44,9 +45,18 @@ use crate::wire;
 /// the loop ends after one more turn whatever the model does. A program or
 /// two blocks resets the count; the token budget stays the outer stop.
 const PROSE_TURN_CAP: u32 = 3;
+const REQUEST_MEASUREMENT_CAP: usize = 64;
 
 macro_rules! session_println {
     ($($arg:tt)*) => { ui::output(format!($($arg)*)) };
+}
+
+fn record_request(notebook: &mut Notebook, measurement: RequestMeasurement) {
+    if notebook.requests.len() >= REQUEST_MEASUREMENT_CAP {
+        let remove = notebook.requests.len() + 1 - REQUEST_MEASUREMENT_CAP;
+        notebook.requests.drain(..remove);
+    }
+    notebook.requests.push(measurement);
 }
 mod controls;
 
@@ -964,16 +974,29 @@ fn run_task(
             ui.publish(transcript, &ServedBy::default(), tui::Activity::Thinking);
         }
         let since = SystemTime::now();
+        let requested_model = session.model.borrow().clone();
+        let request_cell = tui::cell_ordinal(&transcript.conversation, &transcript.notebook) + 1;
         let estimated = estimate_task_request_tokens(&request, &session.model.borrow(), task);
-        let turn =
-            send_task_turn(&request, session, task).map_err(|e| format!("request failed: {e}"))?;
+        let (turn, elapsed_ms) = timed_send_task_turn(&request, session, task)
+            .map_err(|e| format!("request failed: {e}"))?;
+        let served = glasshouse::served_by(session.glasshouse, since);
+        record_request(
+            &mut transcript.notebook,
+            RequestMeasurement::from_response(
+                request_cell,
+                requested_model,
+                elapsed_ms,
+                // Project routing rows are not correlated to this request.
+                ServedBy::default(),
+                turn.usage.as_ref(),
+            ),
+        );
         let text = message_text(&turn.message);
         if text.trim().is_empty() {
             return Err("the model returned an empty reply".into());
         }
         write_turn(session.interrupt, rollout, Role::Assistant, &text)
             .map_err(|e| e.to_string())?;
-        let served = glasshouse::served_by(session.glasshouse, since);
         let mut budget = TaskBudget::new(
             session.config.limits.task_tokens,
             session.config.limits.cells,
@@ -1014,12 +1037,27 @@ fn run_task(
 
     loop {
         let since = SystemTime::now();
+        let requested_model = session.model.borrow().clone();
         if let Some(ui) = session.ui {
             ui.publish(transcript, &ServedBy::default(), tui::Activity::Thinking);
         }
-        let turn = send_task_turn_recovering(transcript, session, &runtime, task, rollout)?;
+        let (turn, elapsed_ms) =
+            send_task_turn_recovering(transcript, session, &runtime, task, rollout)?;
+        let request_cell = tui::cell_ordinal(&transcript.conversation, &transcript.notebook) + 1;
         let estimate =
             estimate_task_request_tokens(&transcript.conversation, &session.model.borrow(), task);
+        let served = glasshouse::served_by(session.glasshouse, since);
+        record_request(
+            &mut transcript.notebook,
+            RequestMeasurement::from_response(
+                request_cell,
+                requested_model,
+                elapsed_ms,
+                // Project routing rows are not correlated to this request.
+                ServedBy::default(),
+                turn.usage.as_ref(),
+            ),
+        );
         let assistant_text = message_text(&turn.message);
         // **An empty reply is never appended.** A message with no content is
         // not a message, and appending one poisons the conversation for the
@@ -1039,7 +1077,6 @@ fn run_task(
         write_turn(session.interrupt, rollout, Role::Assistant, &assistant_text)
             .map_err(|e| format!("could not record the assistant turn: {e}"))?;
 
-        let served = glasshouse::served_by(session.glasshouse, since);
         budget.add(&served, turn.usage.as_ref(), estimate);
 
         // A fresh token for this cell, published to the watcher before the
@@ -1255,8 +1292,42 @@ fn act_on(
     interrupt: &Interrupter,
     profile: &Profile,
 ) -> Result<Step, String> {
-    let source = match prompt::extract_program(assistant_text) {
-        Extracted::Program(source) => source,
+    let (source, repaired_from) = match prompt::extract_program(assistant_text) {
+        Extracted::Program(source) => (source, None),
+        Extracted::Edit(json) => {
+            let patched = runtime
+                .syntax_failure()
+                .ok_or_else(|| "No syntax-failed cell is available in this task.".to_string())
+                .and_then(|failed| {
+                    failed
+                        .apply(&json)
+                        .map(|source| (source, Some(failed.cell)))
+                });
+            match patched {
+                Ok(patched) => patched,
+                Err(error) => {
+                    let hint = runtime
+                        .syntax_failure()
+                        .map(|failed| failed.hint())
+                        .unwrap_or_default();
+                    return Ok(Step {
+                        answer: Some(format!("CellEditError: {error} Nothing ran.\n{hint}")),
+                        response: None,
+                        prose: true,
+                        record: None,
+                        view: CellView {
+                            error: Some(CellError {
+                                class: "CellEditError".into(),
+                                message: error,
+                                line: None,
+                                column: None,
+                            }),
+                            ..CellView::default()
+                        },
+                    });
+                }
+            }
+        }
         // §5: the task does not advance and the cell counter does not move.
         // The screen still shows the table, because it is still what the
         // isolate holds -- an output region saying `(no outputs)` beside live
@@ -1290,7 +1361,7 @@ fn act_on(
             return Ok(Step {
                 answer: Some(TWO_BLOCKS.to_string()),
                 response: None,
-                prose: false,
+                prose: assistant_text.contains("```pane-edit"),
                 record: None,
                 view: CellView {
                     table: Some(runtime.render_handles()),
@@ -1310,6 +1381,8 @@ fn act_on(
         .map_err(|e| format!("could not record the cell: {e}"))?;
 
     let mut view = CellView {
+        executed_source: repaired_from.map(|_| source.clone()),
+        repaired_from,
         changes,
         execution: Some(if record.calls.is_empty() {
             "No tool calls ran in this cell.".into()
@@ -1320,6 +1393,9 @@ fn act_on(
                 .enumerate()
                 .map(|(i, call)| {
                     let status = match &call.ended {
+                        crate::runtime::outcome::Ended::Ok if call.tool == "agent.run" => {
+                            "started".to_string()
+                        }
                         crate::runtime::outcome::Ended::Ok => "returned".to_string(),
                         crate::runtime::outcome::Ended::Threw { class } => {
                             format!("failed · {class}")
@@ -1349,6 +1425,7 @@ fn act_on(
                                 .args
                                 .get("command")
                                 .map(|command| format!(" {command}")))
+                            .or_else(|| call.args.get("source").map(|source| format!(" {source}")))
                             .unwrap_or_default()
                     )
                 })
@@ -1411,7 +1488,14 @@ fn act_on(
     // §1: the task ends with a `return` and nothing further is asked of the
     // model; a yield and a throw are answered. The outcome's own predicate
     // decides, so there is no second reading of §1 here to drift from it.
-    let answer = (!outcome.ends_the_task()).then(|| prompt::render_result(&result));
+    let answer = (!outcome.ends_the_task()).then(|| {
+        let mut answer = prompt::render_result(&result);
+        if let Some(failed) = runtime.syntax_failure() {
+            answer.push_str("\n\n");
+            answer.push_str(&failed.hint());
+        }
+        answer
+    });
 
     Ok(Step {
         answer,
@@ -1454,8 +1538,8 @@ fn send_task_turn_recovering(
     runtime: &Runtime,
     task: &str,
     rollout: &mut Rollout,
-) -> Result<wire::Turn, String> {
-    let first = match send_task_turn(&transcript.conversation, session, task) {
+) -> Result<(wire::Turn, u64), String> {
+    let first = match timed_send_task_turn(&transcript.conversation, session, task) {
         Ok(turn) => return Ok(turn),
         Err(error) if error.is_context_overflow() => error,
         Err(error) => return Err(format!("request failed: {error}")),
@@ -1468,7 +1552,7 @@ fn send_task_turn_recovering(
             report.bytes,
             report.messages
         );
-        match send_task_turn(&transcript.conversation, session, task) {
+        match timed_send_task_turn(&transcript.conversation, session, task) {
             Ok(turn) => return Ok(turn),
             Err(error) if error.is_context_overflow() => {}
             Err(error) => return Err(format!("request failed: {error}")),
@@ -1493,8 +1577,20 @@ fn send_task_turn_recovering(
          are still live and nothing was re-run",
         runtime.handle_names().len()
     );
-    send_task_turn(&transcript.conversation, session, task)
+    timed_send_task_turn(&transcript.conversation, session, task)
         .map_err(|error| format!("request failed after a checkpoint: {error}"))
+}
+
+// Measure only the successful request, excluding context recovery and UI work.
+fn timed_send_task_turn(
+    conversation: &Conversation,
+    session: &Session<'_>,
+    task: &str,
+) -> Result<(wire::Turn, u64), wire::WireError> {
+    let start = Instant::now();
+    let turn = send_task_turn(conversation, session, task)?;
+    let elapsed = start.elapsed().as_millis().min(u128::from(u64::MAX)) as u64;
+    Ok((turn, elapsed))
 }
 
 fn send_task_turn(
