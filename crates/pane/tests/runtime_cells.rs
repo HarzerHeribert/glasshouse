@@ -1900,6 +1900,18 @@ fn a_runtime_that_could_not_stop_a_cell_is_poisoned_and_says_so() {
     let refusal = threw(&refused);
     assert_eq!(refusal.class, "RuntimePoisoned", "{refusal:?}");
     assert!(refusal.message.contains("cell 1"), "{}", refusal.message);
+    // And it names what did not stop. This cell's own program did not, and
+    // the message says so; the epilogue's poisoning is a different sentence
+    // (`isolate::tests::the_epilogue_and_the_cell_are_not_the_same_poisoning`)
+    // because telling the model its program did not stop when what ran on is
+    // pane's own handle-table read is a false statement about its program.
+    assert!(
+        refusal
+            .message
+            .contains("cell 1 did not stop when pane terminated it"),
+        "{}",
+        refusal.message
+    );
     assert_eq!(refused.turn().record.cell, 2, "{refused:?}");
 
     // And ending the task does not enter it either.
@@ -2744,4 +2756,253 @@ fn ending_the_task_frees_the_batch_with_the_rest() {
         runtime.handle_names()
     );
     assert!(!runtime.is_live("batch"));
+}
+
+// --- the epilogue's budget is the epilogue's, not each handle's --------
+
+/// Thirty handles, each an ordinary lazy accessor doing 100 ms of honest
+/// work and returning a number — a program with no loop in it — at the
+/// **shipped** `DEFAULT_CELL_WALL_CLOCK_LIMIT`, and the next cell runs.
+///
+/// `Runtime::refresh_previews` enters V8 once per name, so a read the
+/// epilogue watchdog stopped cost about one `TERMINATE_RETRY_INTERVAL` and
+/// the next name started the clock again: the epilogue's cost was linear in
+/// the number of live handles while its budget was a constant. Measured at
+/// `a0186fa` through this shape and through the shipped binary: cell 1 was
+/// reported to the model as `yielded in 7881 ms`, and cell 2 and every cell
+/// after it threw `RuntimePoisoned` — the task over, for a program that had
+/// finished, with a diagnostic blaming the program for pane's own epilogue.
+///
+/// The wall clock is the shipped one on purpose: a shortened limit is what
+/// let this through, because it makes the *cell* the thing that stops.
+#[test]
+fn thirty_lazy_accessors_do_not_cost_the_isolate_its_trust() {
+    let fixture = Fixture::new("thirty-accessors");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("thirty-accessors");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+
+    let mut source = String::new();
+    for index in 0..30 {
+        source.push_str(&format!(
+            "const h{index} = {{ get total() {{ const t = Date.now(); while (Date.now() - t < \
+             100) {{}} return {index}; }} }};\n"
+        ));
+    }
+    let first = runtime.run_cell(&source);
+    assert!(
+        matches!(first, CellOutcome::Yielded { .. }),
+        "the program finished; it must be answered as having finished: {first:?}"
+    );
+
+    // The whole of the claim: the epilogue is bounded by one budget, so the
+    // isolate is still one this runtime enters.
+    let second = runtime.run_cell("1 + 1;\n");
+    assert!(
+        matches!(second, CellOutcome::Yielded { .. }),
+        "the next cell must run: {second:?}"
+    );
+    assert!(
+        second.turn().elapsed_ms < 3_000,
+        "the epilogue's cost must be the epilogue's, not thirty handles': {} ms",
+        second.turn().elapsed_ms
+    );
+    let third = runtime.run_cell("return 7;\n");
+    assert_eq!(returned(&third), &Value::Number(7.0), "{third:?}");
+}
+
+// --- §2's ceiling, observed rather than reported -----------------------
+
+/// A crossing the near-heap-limit callback never reports is still a
+/// crossing, and it fails **that** cell.
+///
+/// V8 satisfies a large-object allocation without ever invoking the
+/// callback, so `finish`'s `stopped.heap_hit` — a crossing the callback
+/// *reported* — is false for it. Measured at `a0186fa`: `new
+/// Array(12000000).fill('y')`, a 96 MB array under a 32 MiB ceiling, yielded
+/// in 11 ms with `raises = 0`, the oversized handle live and nothing said,
+/// and two cells later an ordinary 4 MB allocation killed the process. §2
+/// says the cell fails.
+#[test]
+fn a_crossing_the_callback_never_reported_still_fails_that_cell() {
+    let fixture = Fixture::new("observed-crossing");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("observed-crossing");
+    let mut runtime = Runtime::with_limits(
+        &fixture.profile(),
+        &glasshouse,
+        &session,
+        32 * 1024 * 1024,
+        Duration::from_secs(30),
+    );
+
+    let outcome = runtime.run_cell("const big = new Array(12000000).fill('y');\n");
+    let error = threw(&outcome);
+    assert_eq!(error.class, "RuntimeOutOfMemory", "{outcome:?}");
+    assert_eq!(
+        runtime.heap_limit_raises(),
+        0,
+        "V8 never reported this crossing; the runtime observed it, and that is the whole point \
+         of the test"
+    );
+    assert!(
+        error.message.contains("big"),
+        "the model is told what to free: {}",
+        error.message
+    );
+    // Nothing is evicted (§2), and the ceiling fails the cell that crossed
+    // it rather than every cell after it — the model still has a task.
+    assert!(runtime.is_live("big"), "{}", runtime.render_handles());
+    let after = runtime.run_cell("return 7;\n");
+    assert_eq!(returned(&after), &Value::Number(7.0), "{after:?}");
+}
+
+/// The same crossing, one cell later: a heap left far above the ceiling used
+/// to kill the **process** on the next ordinary allocation.
+///
+/// Measured at `a0186fa`, deterministically: a 32 MiB ceiling,
+/// `new Array(20000000).fill('y')` yielding at 19 ms with `raises = 0`, then
+/// `11 + 11`, then a 4 MB allocation — two `Mark-Compact … last resort`
+/// collections at 152.8 MB and `Fatal JavaScript out of memory: Reached heap
+/// limit`, exit 133. The heap was at 4.8× the ceiling, *inside*
+/// `HEAP_RAISE_TOTAL_MULTIPLE`, because the raise the third cell asked for
+/// was granted in doublings from the configured ceiling and never reached
+/// the live heap.
+#[test]
+fn a_heap_over_the_ceiling_does_not_kill_the_process_on_a_later_cell() {
+    let fixture = Fixture::new("no-abort");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("no-abort");
+    let mut runtime = Runtime::with_limits(
+        &fixture.profile(),
+        &glasshouse,
+        &session,
+        32 * 1024 * 1024,
+        Duration::from_secs(30),
+    );
+
+    let first = runtime.run_cell("const big = new Array(20000000).fill('y');\n");
+    assert_eq!(threw(&first).class, "RuntimeOutOfMemory", "{first:?}");
+    let second = runtime.run_cell("11 + 11;\n");
+    assert!(matches!(second, CellOutcome::Yielded { .. }), "{second:?}");
+    // The cell that used to abort the process. Whatever it is answered with,
+    // it is answered.
+    let third = runtime.run_cell("const half = new Array(1048576).fill('z');\n");
+    assert!(
+        matches!(
+            third,
+            CellOutcome::Yielded { .. } | CellOutcome::Threw { .. }
+        ),
+        "{third:?}"
+    );
+    let fourth = runtime.run_cell("return 7;\n");
+    assert_eq!(returned(&fourth), &Value::Number(7.0), "{fourth:?}");
+
+    // The same shape where the live heap is past the raise bound itself: a
+    // 240 MB array under a 16 MiB ceiling is 15x `HEAP_RAISE_TOTAL_MULTIPLE`'s
+    // configured multiple, so the grant reaches the bound and the bound is
+    // still under the heap. `heap_grant` floors the bound at twice what
+    // `observe_heap_ceiling` last measured, and without that floor this cell
+    // takes the process with it.
+    let fixture = Fixture::new("no-abort-past-bound");
+    let session = SessionId::new("no-abort-past-bound");
+    let mut runtime = Runtime::with_limits(
+        &fixture.profile(),
+        &glasshouse,
+        &session,
+        16 * 1024 * 1024,
+        Duration::from_secs(30),
+    );
+    let first = runtime.run_cell("const big = new Array(30000000).fill('y');\n");
+    assert_eq!(threw(&first).class, "RuntimeOutOfMemory", "{first:?}");
+    let second = runtime.run_cell("11 + 11;\n");
+    assert!(matches!(second, CellOutcome::Yielded { .. }), "{second:?}");
+    let third = runtime.run_cell("const half = new Array(1048576).fill('z');\n");
+    assert!(
+        matches!(
+            third,
+            CellOutcome::Yielded { .. } | CellOutcome::Threw { .. }
+        ),
+        "{third:?}"
+    );
+}
+
+/// An over-ceiling allocation made by a **preview getter** is the model's
+/// own code and is answered in the cell whose table was being read.
+///
+/// Measured at `a0186fa`: `const o = { get big() { return new
+/// Array(20000000).fill('y'); } };` under an 8 MiB ceiling — a 160 MB
+/// allocation made by the runtime's own epilogue — yielded in 54 ms with
+/// nothing said, and re-allocated on every later cell's refresh.
+#[test]
+fn an_over_ceiling_allocation_inside_a_preview_getter_is_answered() {
+    let fixture = Fixture::new("getter-ceiling");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("getter-ceiling");
+    let mut runtime = Runtime::with_limits(
+        &fixture.profile(),
+        &glasshouse,
+        &session,
+        8 * 1024 * 1024,
+        Duration::from_secs(10),
+    );
+
+    let outcome =
+        runtime.run_cell("const o = { get big() { return new Array(20000000).fill('y'); } };\n");
+    assert_eq!(threw(&outcome).class, "RuntimeOutOfMemory", "{outcome:?}");
+    let after = runtime.run_cell("return 9;\n");
+    assert_eq!(returned(&after), &Value::Number(9.0), "{after:?}");
+}
+
+/// A hundred one-megabyte buffers allocated and dropped in one cell is a
+/// program that never holds more than a megabyte, and it is not a refusal.
+///
+/// `ExternalMemory::release` runs only when V8 frees a backing store, which
+/// needs a collection — and V8 asks for one itself, retrying the *same size*
+/// after collecting when the allocator answers null. Latching on that first
+/// null made an `ArrayBuffer` single-use up to the ceiling for the life of a
+/// task: measured at `a0186fa`, this cell answered `RuntimeOutOfMemory`, and
+/// so did four consecutive cells each allocating and dropping 24 MiB.
+///
+/// The second half is the other direction, and it is why the fix is a
+/// `settle` and not a deletion: a refusal nothing satisfied still fails the
+/// cell, whatever the program did with the `RangeError` afterwards.
+#[test]
+fn a_buffer_allocated_and_dropped_a_hundred_times_is_not_a_refusal() {
+    let fixture = Fixture::new("external-live");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("external-live");
+    let mut runtime = Runtime::with_limits(
+        &fixture.profile(),
+        &glasshouse,
+        &session,
+        32 * 1024 * 1024,
+        Duration::from_secs(30),
+    );
+
+    let outcome = runtime.run_cell(
+        "let n = 0;\nfor (let i = 0; i < 100; i++) { const b = new ArrayBuffer(1024 * 1024); n += \
+         b.byteLength; }\nn;\n",
+    );
+    assert!(
+        matches!(outcome, CellOutcome::Yielded { .. }),
+        "live external memory never exceeded 1 MiB under a 32 MiB ceiling: {outcome:?}"
+    );
+
+    let refused = runtime.run_cell("const huge = new ArrayBuffer(1024 * 1024 * 1024);\n");
+    let error = threw(&refused);
+    assert_eq!(error.class, "RuntimeOutOfMemory", "{refused:?}");
+    assert!(
+        error.message.contains("ArrayBuffer"),
+        "the model is told which ceiling: {}",
+        error.message
+    );
+
+    // And a refusal the cell caught is still the cell's, which is the
+    // property `settle` had to keep while it stopped latching on a retry.
+    let caught = runtime.run_cell(
+        "let caught = false;\ntry { const h = new ArrayBuffer(1024 * 1024 * 1024); } catch (e) { \
+         caught = true; }\nconst tiny = new ArrayBuffer(16);\n",
+    );
+    assert_eq!(threw(&caught).class, "RuntimeOutOfMemory", "{caught:?}");
 }
