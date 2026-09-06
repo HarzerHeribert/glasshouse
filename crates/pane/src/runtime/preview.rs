@@ -40,6 +40,10 @@ pub enum Value {
     /// the rendered output — [`render_object_body`] renders every pair it is
     /// given, in order.
     Object(ObjectValue),
+    /// A `Map` or a `Set`. Neither has an own enumerable property, so §3's
+    /// "unknown object" rule described both as an empty object however much
+    /// they held; this variant is the type's own row.
+    Collection(CollectionValue),
     Error(ErrorValue),
 }
 
@@ -163,6 +167,50 @@ impl ObjectValue {
     }
 }
 
+/// Which of the two collections a [`CollectionValue`] samples.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CollectionKind {
+    Map,
+    Set,
+}
+
+/// A `Map`'s or a `Set`'s own size and the entries a preview shows of it.
+///
+/// **The size is the collection's own `size`, never a walk.** V8 offers no
+/// bounded way to read a few entries — `Map::as_array` builds the whole
+/// collection as a flat array — so a collection too large to sample cheaply
+/// carries its size and an empty [`head`](Self::head), which is what §3's
+/// caps would have left of it anyway.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CollectionValue {
+    kind: CollectionKind,
+    size: usize,
+    head: Vec<(Value, Option<Value>)>,
+}
+
+/// How many entries of a collection a sample carries.
+pub const COLLECTION_ENTRY_SAMPLE: usize = 3;
+
+impl CollectionValue {
+    /// `head` holds `(element, None)` per sampled `Set` element and
+    /// `(key, Some(value))` per sampled `Map` entry.
+    pub fn sampled(kind: CollectionKind, size: usize, head: Vec<(Value, Option<Value>)>) -> Self {
+        Self { kind, size, head }
+    }
+
+    pub fn kind(&self) -> CollectionKind {
+        self.kind
+    }
+
+    pub fn size(&self) -> usize {
+        self.size
+    }
+
+    pub fn head(&self) -> &[(Value, Option<Value>)] {
+        &self.head
+    }
+}
+
 /// A string's length and the characters a preview can show.
 ///
 /// `char_len` is the length the value's own producer reports — for a value
@@ -261,6 +309,11 @@ pub const STDOUT_TOKEN_CAP: usize = 512;
 /// `runtime-contract.md` §3: "4 → 2 → 0".
 const ARRAY_ELEMENT_STEPS: [usize; 3] = [4, 2, 0];
 
+/// Entry counts a shrinking collection preview steps through, in order: the
+/// same shape as an array's, since a `Map` entry costs about what an array
+/// element does to render.
+const COLLECTION_ENTRY_STEPS: [usize; 3] = [COLLECTION_ENTRY_SAMPLE, 1, 0];
+
 /// Key counts a shrinking object preview steps through, in order —
 /// `runtime-contract.md` §3: "12 → 4 → 0".
 const OBJECT_KEY_STEPS: [usize; 3] = [OBJECT_KEY_SAMPLE, 4, 0];
@@ -320,6 +373,10 @@ pub fn type_name(value: &Value) -> &'static str {
         Value::Null => "null",
         Value::Undefined => "undefined",
         Value::Object(_) => "Object",
+        Value::Collection(collection) => match collection.kind() {
+            CollectionKind::Map => "Map",
+            CollectionKind::Set => "Set",
+        },
         Value::Error(_) => "Error",
     }
 }
@@ -382,6 +439,15 @@ pub fn render_preview(value: &Value, cap_tokens: usize) -> String {
             }
             render_object_body(object, 0)
         }
+        Value::Collection(collection) => {
+            for &n in &COLLECTION_ENTRY_STEPS {
+                let candidate = render_collection_body(collection, n);
+                if n == 0 || estimate_tokens(&candidate) <= cap_tokens {
+                    return candidate;
+                }
+            }
+            render_collection_body(collection, 0)
+        }
         other => render_fixed_body(other),
     }
 }
@@ -442,6 +508,27 @@ fn render_object_body(object: &ObjectValue, n: usize) -> String {
     lines.join("\n")
 }
 
+/// A collection's `size=` line and the first `n` of its sampled entries: a
+/// `Set`'s elements one per line, a `Map`'s as `key => value`.
+fn render_collection_body(collection: &CollectionValue, n: usize) -> String {
+    let mut out = format!("size={}", collection.size());
+    for (key, value) in collection.head().iter().take(n) {
+        match value {
+            Some(value) => out.push_str(&format!(
+                "\n  {} => {}",
+                render_inline(key),
+                render_inline(value)
+            )),
+            None => out.push_str(&format!("\n  {}", render_inline(key))),
+        }
+    }
+    let shown = n.min(collection.head().len());
+    if collection.size() > shown {
+        out.push_str(&format!("\n  …(+{} more)", collection.size() - shown));
+    }
+    out
+}
+
 /// An array element "rendered at depth 1 and cut at 120 characters" —
 /// `runtime-contract.md` §3. A nested `Array` or `Object` shows only its
 /// shape (length or key count), never its own elements: depth 1 stops here.
@@ -454,6 +541,9 @@ fn render_inline(value: &Value) -> String {
         Value::Undefined => "undefined".to_string(),
         Value::Array(array) => format!("Array n={}", array.len()),
         Value::Object(object) => format!("Object n_keys={}", object.key_count()),
+        Value::Collection(collection) => {
+            format!("{} size={}", type_name(value), collection.size())
+        }
         Value::File(file) => format!("File {}", quote(&file.path)),
         Value::TestReport(report) => format!(
             "TestReport passed={} failed={} skipped={}",
@@ -480,8 +570,8 @@ fn render_fixed_body(value: &Value) -> String {
         Value::File(file) => render_file_body(file),
         Value::TestReport(report) => render_test_report_body(report),
         Value::Error(error) => render_error_body(error),
-        Value::Array(_) | Value::Object(_) => {
-            unreachable!("render_preview handles Array and Object itself")
+        Value::Array(_) | Value::Object(_) | Value::Collection(_) => {
+            unreachable!("render_preview handles Array, Object and Collection itself")
         }
     }
 }

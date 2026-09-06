@@ -1,11 +1,16 @@
 //! Acceptance tests for GH-PANE-61E-PROMPT against
 //! `docs/product/pane/model-contract.md`.
 
+use pane::contract::SessionId;
+use pane::glasshouse::Glasshouse;
 use pane::prompt::{self, Budget, CellResult, ErrorSection, ExhaustedReason, Extracted};
 use pane::runtime::handles::{HandleMeta, HandleTable, render_table};
+use pane::runtime::isolate::Runtime;
+use pane::runtime::outcome::CellOutcome;
 use pane::runtime::preview::{
     ArrayValue, FileValue, PREVIEW_TOKEN_CAP, StringValue, TABLE_TOKEN_CAP, Value,
 };
+use pane::sandbox::profile::Profile;
 use pane::tools::registry::{self, Tool};
 
 /// §7's four messages, as a golden file. The handle table region is
@@ -419,4 +424,71 @@ fn a_yield_reason_is_one_line_under_the_cell_line() {
         "{threw}"
     );
     assert!(!threw.contains("the tests did not run"), "{threw}");
+}
+
+/// §6's position line, for the throw a model-written traversal produces most
+/// often — end to end, from the cell to the rendered block.
+///
+/// `ErrorSection::position`'s own doc comment says a position is *"never
+/// `line 0, column 0`, which names a place that does not exist"*, and the
+/// guard that was installed for it distinguished absent from present. V8
+/// reports a stack overflow as present-and-zero, so the model was handed
+/// `line 0, column 0` under the message and again on each of ten frames.
+#[test]
+fn a_stack_overflow_renders_no_position_line_and_no_zero_frames() {
+    let root = std::env::temp_dir().join(format!("pane-prompt-overflow-{}", std::process::id()));
+    std::fs::create_dir_all(root.join(".claude")).unwrap();
+    let profile = Profile::compile(&root, Some(r#"{"permissions":{"allow":[]}}"#));
+    let mut runtime = Runtime::new(&profile, &Glasshouse::None, &SessionId::new("overflow"));
+    let outcome = runtime.run_cell("function f(n) { return f(n + 1); }\nf(0);\n");
+    let _ = std::fs::remove_dir_all(&root);
+
+    let CellOutcome::Threw { error, turn } = &outcome else {
+        panic!("expected a throw, got {outcome:?}");
+    };
+    assert_eq!(error.class, "RangeError", "{error:?}");
+
+    // Assembled exactly as `session.rs` assembles it for the same throw.
+    let result = CellResult {
+        cell: turn.record.cell,
+        elapsed_ms: turn.elapsed_ms,
+        error: Some(ErrorSection {
+            class: error.class.clone(),
+            message: error.message.clone(),
+            position: ErrorSection::position_of(error.line, error.column),
+            frames: error
+                .stack
+                .iter()
+                .map(|frame| frame.description.clone())
+                .collect(),
+        }),
+        yield_reason: None,
+        handle_table: turn.table.clone(),
+        stdout_tail: None,
+        budget: Budget {
+            turn_cap: 4_000,
+            task_used: 1_000,
+            task_cap: 100_000,
+            cells_used: 1,
+            cells_cap: 40,
+        },
+    };
+
+    let rendered = prompt::render_result(&result);
+    assert!(
+        rendered.contains("RangeError: Maximum call stack size exceeded"),
+        "{rendered}"
+    );
+    assert!(!rendered.contains("line 0"), "{rendered}");
+    assert!(!rendered.contains("column 0"), "{rendered}");
+
+    // And the guard itself, because the isolate now drops a `(0, 0)` frame
+    // before the section is built: without this the rendering above passes
+    // whether or not `position_of` filters, and the section builder is the
+    // last line of defence for any *other* producer that reports a position
+    // present-and-zero (a compile error's own, for one).
+    assert_eq!(ErrorSection::position_of(Some(0), Some(0)), None);
+    assert_eq!(ErrorSection::position_of(Some(2), Some(4)), Some((2, 4)));
+    assert_eq!(ErrorSection::position_of(Some(1), Some(0)), Some((1, 0)));
+    assert_eq!(ErrorSection::position_of(None, Some(0)), None);
 }

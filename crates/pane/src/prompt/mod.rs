@@ -108,6 +108,22 @@ pub struct ErrorSection {
     pub frames: Vec<String>,
 }
 
+impl ErrorSection {
+    /// [`position`](Self::position) from a runtime error's own line and
+    /// column, which is where the doc comment above is enforced.
+    ///
+    /// `line.zip(column)` alone is not enough: it distinguishes *absent*
+    /// from *present*, and V8 reports a stack overflow as
+    /// present-and-**zero**, so `function f(n) { return f(n + 1); } f(0)` —
+    /// an ordinary bug in a model-written traversal — was rendered as
+    /// `line 0, column 0`. There is no line 0 in anyone's program.
+    pub fn position_of(line: Option<u32>, column: Option<u32>) -> Option<(u64, u64)> {
+        line.zip(column)
+            .filter(|&(line, column)| line != 0 || column != 0)
+            .map(|(line, column)| (u64::from(line), u64::from(column)))
+    }
+}
+
 /// The three figures §6's budget line reports.
 pub struct Budget {
     pub turn_cap: u64,

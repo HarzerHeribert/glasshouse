@@ -1027,10 +1027,7 @@ fn act_on(
             result.error = Some(ErrorSection {
                 class: error.class.clone(),
                 message: error.message.clone(),
-                position: error
-                    .line
-                    .zip(error.column)
-                    .map(|(line, column)| (u64::from(line), u64::from(column))),
+                position: ErrorSection::position_of(error.line, error.column),
                 frames: error
                     .stack
                     .iter()

@@ -16,13 +16,36 @@
 use std::mem::MaybeUninit;
 
 use crate::runtime::preview::{
-    ARRAY_HEAD_SAMPLE, ArrayValue, ErrorValue, OBJECT_KEY_SAMPLE, ObjectValue, STRING_HEAD_SAMPLE,
-    StringValue, Value,
+    ARRAY_HEAD_SAMPLE, ArrayValue, COLLECTION_ENTRY_SAMPLE, CollectionKind, CollectionValue,
+    ErrorValue, OBJECT_KEY_SAMPLE, ObjectValue, STRING_HEAD_SAMPLE, StringValue, Value,
 };
 
 /// The deepest a marshal goes: 0 is the handle itself, 1 is an element or a
 /// property that only ever renders as a shape.
 const MAX_DEPTH: u32 = 1;
+
+/// The largest `Map` or `Set` a **preview** reads entries out of.
+///
+/// `v8::Map::as_array` has no bounded form: it builds the whole collection as
+/// a flat `[k0, v0, k1, v1, …]` array, so sampling three entries of a large
+/// one would cost its length — the payload cost this module exists not to
+/// pay, on every cell, for every live handle. Over this a collection previews
+/// as its size alone, which is what §3's own caps leave of it anyway.
+const COLLECTION_PREVIEW_WALK_LIMIT: usize = 1024;
+
+/// The largest `Map` or `Set` [`size_estimate`] walks.
+///
+/// Higher than [`COLLECTION_PREVIEW_WALK_LIMIT`] because this walk happens
+/// once, on the out-of-memory path, where under-counting a collection is the
+/// defect being fixed: the flat array costs 16 bytes an entry against a
+/// collection whose own storage is at least 24, so it can never be a large
+/// fraction of the heap that just filled. The limit is the backstop for a
+/// collection of empty slots.
+pub(crate) const COLLECTION_MEASURE_WALK_LIMIT: usize = 1_000_000;
+
+/// What one unmeasured `Map` or `Set` entry is charged when the collection is
+/// too large to walk: a key, a value and the hash table's own slot.
+const COLLECTION_ENTRY_ESTIMATE: u64 = 64;
 
 /// Samples one live value.
 pub(crate) fn marshal(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> Value {
@@ -52,6 +75,16 @@ fn marshal_at(scope: &mut v8::PinScope, value: v8::Local<v8::Value>, depth: u32)
     if value.is_array() {
         let array: v8::Local<v8::Array> = value.try_into().expect("is_array");
         return Value::Array(sample_array(scope, array, depth));
+    }
+    // Before the object arm: a `Map` and a `Set` are objects with no own
+    // enumerable property at all, so that arm described both as `{}`.
+    if value.is_map() {
+        let map: v8::Local<v8::Map> = value.try_into().expect("is_map");
+        return Value::Collection(sample_map(scope, map, depth));
+    }
+    if value.is_set() {
+        let set: v8::Local<v8::Set> = value.try_into().expect("is_set");
+        return Value::Collection(sample_set(scope, set, depth));
     }
     if value.is_object() {
         let object: v8::Local<v8::Object> = value.try_into().expect("is_object");
@@ -101,6 +134,51 @@ fn sample_array(scope: &mut v8::PinScope, array: v8::Local<v8::Array>, depth: u3
         None
     };
     ArrayValue::sampled(len, head, last)
+}
+
+/// A `Map`'s size and, when it is small enough to be worth materialising,
+/// its first [`COLLECTION_ENTRY_SAMPLE`] entries.
+fn sample_map(scope: &mut v8::PinScope, map: v8::Local<v8::Map>, depth: u32) -> CollectionValue {
+    let size = map.size();
+    if depth >= MAX_DEPTH || size == 0 || size > COLLECTION_PREVIEW_WALK_LIMIT {
+        return CollectionValue::sampled(CollectionKind::Map, size, Vec::new());
+    }
+    // `as_array` is `[k0, v0, k1, v1, …]`.
+    let flat = map.as_array(scope);
+    let mut head = Vec::with_capacity(COLLECTION_ENTRY_SAMPLE.min(size));
+    for index in 0..COLLECTION_ENTRY_SAMPLE.min(size) {
+        let key = flat
+            .get_index(scope, (index * 2) as u32)
+            .map_or(Value::Undefined, |value| {
+                marshal_at(scope, value, depth + 1)
+            });
+        let entry = flat
+            .get_index(scope, (index * 2 + 1) as u32)
+            .map_or(Value::Undefined, |value| {
+                marshal_at(scope, value, depth + 1)
+            });
+        head.push((key, Some(entry)));
+    }
+    CollectionValue::sampled(CollectionKind::Map, size, head)
+}
+
+/// A `Set`'s size and, under the same limit, its first elements.
+fn sample_set(scope: &mut v8::PinScope, set: v8::Local<v8::Set>, depth: u32) -> CollectionValue {
+    let size = set.size();
+    if depth >= MAX_DEPTH || size == 0 || size > COLLECTION_PREVIEW_WALK_LIMIT {
+        return CollectionValue::sampled(CollectionKind::Set, size, Vec::new());
+    }
+    let flat = set.as_array(scope);
+    let mut head = Vec::with_capacity(COLLECTION_ENTRY_SAMPLE.min(size));
+    for index in 0..COLLECTION_ENTRY_SAMPLE.min(size) {
+        let element = flat
+            .get_index(scope, index as u32)
+            .map_or(Value::Undefined, |value| {
+                marshal_at(scope, value, depth + 1)
+            });
+        head.push((element, None));
+    }
+    CollectionValue::sampled(CollectionKind::Set, size, head)
 }
 
 fn sample_object(
@@ -179,6 +257,19 @@ pub(crate) fn size_estimate(scope: &mut v8::PinScope, value: v8::Local<v8::Value
             .map_or(64, |first| element_estimate(scope, first));
         return len.saturating_mul(per_element);
     }
+    // Before the object arm, and the reason §2's ranking put the `Map` that
+    // filled a 32 MiB heap at `~32 B`: a collection has no own property, so
+    // the key count below measured everything it held as nothing.
+    if value.is_map() {
+        let map: v8::Local<v8::Map> = value.try_into().expect("is_map");
+        let size = map.size();
+        return collection_estimate(scope, size, |scope| map.as_array(scope));
+    }
+    if value.is_set() {
+        let set: v8::Local<v8::Set> = value.try_into().expect("is_set");
+        let size = set.size();
+        return collection_estimate(scope, size, |scope| set.as_array(scope));
+    }
     if value.is_object() {
         let object: v8::Local<v8::Object> = value.try_into().expect("is_object");
         let keys = object
@@ -187,6 +278,30 @@ pub(crate) fn size_estimate(scope: &mut v8::PinScope, value: v8::Local<v8::Value
         return 32 + keys * 64;
     }
     16
+}
+
+/// A `Map`'s or a `Set`'s contribution: the hash table's own slots plus what
+/// its entries are, walked shallowly through the flat array V8 gives for
+/// them. A collection over [`COLLECTION_MEASURE_WALK_LIMIT`] is charged
+/// [`COLLECTION_ENTRY_ESTIMATE`] an entry without being materialised.
+fn collection_estimate<'s>(
+    scope: &mut v8::PinScope<'s, '_>,
+    size: usize,
+    as_array: impl FnOnce(&v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Array>,
+) -> u64 {
+    let slots = 32 + size as u64 * 32;
+    if size == 0 || size > COLLECTION_MEASURE_WALK_LIMIT {
+        return slots.saturating_add(size as u64 * COLLECTION_ENTRY_ESTIMATE);
+    }
+    let flat = as_array(scope);
+    let mut total = slots;
+    for index in 0..flat.length() {
+        let Some(element) = flat.get_index(scope, index) else {
+            continue;
+        };
+        total = total.saturating_add(element_estimate(scope, element));
+    }
+    total
 }
 
 /// One element's contribution, measured without recursing: an array of
