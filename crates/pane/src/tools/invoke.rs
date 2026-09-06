@@ -158,12 +158,21 @@ pub struct ExecGrant {
 /// that is the module's first invariant expressed as a type: a platform with
 /// nothing to install returns [`PermissionDenied`] instead of a value of this
 /// type.
+/// The in-process state is **not** a hole in the invariant above: a tool
+/// declared [`Argv::InProcess`] never becomes a child, so there is no process
+/// to confine. Its one argument that touches the filesystem went through
+/// `Profile::check` before anything happened, which is the same gate the
+/// spawning tools' paths pass and the only one that ever enforced a path
+/// rule — the OS layer is directory-granular and never saw them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Confinement {
     /// macOS seatbelt, entered between `fork` and `exec`.
     Seatbelt,
     /// Linux Landlock, installed on the forked child before `exec`.
     Landlock,
+    /// No child was created. The call ran inside pane, and its path was
+    /// checked by `Profile::check` before it did.
+    InProcess,
 }
 
 impl Confinement {
@@ -171,6 +180,7 @@ impl Confinement {
         match self {
             Confinement::Seatbelt => "seatbelt",
             Confinement::Landlock => "landlock",
+            Confinement::InProcess => "in-process (no child; the path was checked)",
         }
     }
 }
@@ -469,8 +479,74 @@ fn checked_call(
     trace: &mut CheckedArgs,
 ) -> Result<ToolResult, ToolError> {
     let checked = check_arguments(ctx.profile, tool, args, trace)?;
+    // Branching here and not inside `spawn_confined` is what makes
+    // `Argv::InProcess`'s claim structural: an in-process tool never reaches
+    // a `Command`, an `exec_grant` or a sandbox applier, because the only
+    // call site of all three is the other arm.
+    if tool.argv() == Argv::InProcess {
+        return perform_in_process(tool, &checked);
+    }
     let argv = build_argv(tool, &checked)?;
     spawn_confined(ctx.profile, token, tool, &argv)
+}
+
+/// Performs a tool pane does itself. One tool today, and the match is
+/// exhaustive on name so a second in-process tool cannot be added without
+/// deciding what it does here.
+fn perform_in_process(
+    tool: &Tool,
+    checked: &[(&'static str, Checked)],
+) -> Result<ToolResult, ToolError> {
+    let refuse = |rule: String| {
+        ToolError::Denied(PermissionDenied {
+            tool: tool.name().to_string(),
+            path: String::new(),
+            rule,
+        })
+    };
+    match tool.name() {
+        "write" => {
+            let (Some(path), Some(content)) =
+                (resolved_path(checked, "path"), text(checked, "content"))
+            else {
+                return Err(refuse("write needs a checked path and content".to_string()));
+            };
+            // The parent is created, because a model that has to `mkdir -p`
+            // through `bash` before every `write` gains nothing from having
+            // `write`. It is inside the checked path by construction, so it
+            // reaches nowhere the write itself could not.
+            if let Some(parent) = path.parent()
+                && let Err(error) = std::fs::create_dir_all(parent)
+            {
+                return Err(ToolError::Spawn {
+                    tool: tool.name().to_string(),
+                    program: PathBuf::from("(in-process)"),
+                    error: error.to_string(),
+                });
+            }
+            match std::fs::write(path, content) {
+                Ok(()) => Ok(ToolResult {
+                    tool: tool.name().to_string(),
+                    stdout: format!("wrote {} bytes to {}", content.len(), path.display()),
+                    stderr: String::new(),
+                    exit_code: Some(0),
+                    grant: ExecGrant {
+                        binary: PathBuf::new(),
+                        fell_back_to_roots: false,
+                    },
+                    confinement: Confinement::InProcess,
+                }),
+                Err(error) => Err(ToolError::Spawn {
+                    tool: tool.name().to_string(),
+                    program: PathBuf::from("(in-process)"),
+                    error: error.to_string(),
+                }),
+            }
+        }
+        other => Err(refuse(format!(
+            "`{other}` is declared in-process and nothing here performs it"
+        ))),
+    }
 }
 
 /// Admits one argument: onto the argv list, and into the trajectory's
@@ -512,6 +588,13 @@ fn check_arguments(
         match (arg.kind(), given) {
             (ArgKind::Path, Some(value)) => {
                 let resolved = profile.check(tool.name(), Access::Read, Path::new(value))?;
+                admit(&mut checked, trace, arg.name(), Checked::Path(resolved));
+            }
+            // The same check, asked with the other access. A path the profile
+            // grants for reading and not for writing is refused here, which
+            // is the whole difference between the two kinds.
+            (ArgKind::WritePath, Some(value)) => {
+                let resolved = profile.check(tool.name(), Access::Write, Path::new(value))?;
                 admit(&mut checked, trace, arg.name(), Checked::Path(resolved));
             }
             // The project root stands in for a missing path, and it is
@@ -592,6 +675,10 @@ fn build_argv(
     };
     let mut argv: Vec<std::ffi::OsString> = Vec::new();
     match tool.argv() {
+        // Unreachable through `checked_call`, which branches first; a direct
+        // caller gets an empty argv rather than a panic, and `spawn_confined`
+        // refuses it for having no binary.
+        Argv::InProcess => {}
         Argv::ReadPath => {
             let path = resolved_path(checked, "path").ok_or_else(|| missing("path"))?;
             argv.push("--".into());
@@ -702,7 +789,16 @@ fn spawn_confined(
     let cancelled = || ToolError::Cancelled {
         tool: tool.name().to_string(),
     };
-    let grant = exec_grant(tool.executable());
+    // `Some` by construction: `checked_call` sends every `Argv::InProcess`
+    // tool down the other arm, and those are the only ones without a binary.
+    let Some(executable) = tool.executable() else {
+        return Err(ToolError::Spawn {
+            tool: tool.name().to_string(),
+            program: PathBuf::new(),
+            error: "an in-process tool reached spawn_confined".to_string(),
+        });
+    };
+    let grant = exec_grant(executable);
     let mut command = Command::new(&grant.binary);
     command.args(argv);
     command.current_dir(profile.root());

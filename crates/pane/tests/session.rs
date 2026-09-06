@@ -2912,8 +2912,8 @@ fn yolo_grants_every_command_line_and_the_system_block_says_so() {
         "system block must state the yolo grant; got:\n{system}"
     );
     assert!(
-        system.contains("There is no write tool and no edit tool"),
-        "the model must be told the tool set has no writer; got:\n{system}"
+        system.contains("To change part of a file, `read` it, edit the"),
+        "the model must be told how a file is changed; got:\n{system}"
     );
 }
 

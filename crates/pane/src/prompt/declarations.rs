@@ -31,6 +31,13 @@ pub const ENTRIES: &[Entry] = &[
         summary: "Search the project for a regular expression.",
     },
     Entry {
+        name: "write",
+        return_type: "string",
+        summary: "Replace one file inside the project with `content`, creating parents. \
+                  To change part of a file: `read` it, edit the text in this cell, `write` it \
+                  back -- there is no separate edit tool because you already hold the file.",
+    },
+    Entry {
         name: "bash",
         return_type: "{stdout: string; stderr: string; exit_code: number | null}",
         summary: "Run a command line under the sandbox grant.",

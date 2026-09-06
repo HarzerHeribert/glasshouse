@@ -71,9 +71,16 @@ impl fmt::Display for Purity {
 /// one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ArgKind {
-    /// A filesystem path. Goes through `Profile::check`, and the **resolved**
-    /// path it returns is what reaches the child.
+    /// A filesystem path. Goes through `Profile::check` for `Access::Read`,
+    /// and the **resolved** path it returns is what reaches the child.
     Path,
+    /// A filesystem path the call will **write**. The same check, asked with
+    /// `Access::Write`.
+    ///
+    /// A separate kind rather than a flag, for §2's own reason: the kind is
+    /// the whole of the type system here, so a tool that writes cannot be
+    /// declared with a read-checked path by forgetting an argument.
+    WritePath,
     /// An opaque string handed to the child as one argv element. It is never
     /// parsed, never expanded, and never spliced into a command line, so
     /// there is nothing in it for a shell to interpret.
@@ -144,6 +151,18 @@ pub enum Argv {
     /// `<exe> -c <command line>`. The one variant whose argument was
     /// admitted by `Profile::admits_command` rather than by `Profile::check`.
     ShellCommand,
+    /// **Not an argv, and not a child.** The call is performed inside this
+    /// process, so no binary is resolved, nothing is exec'd and no shell
+    /// exists to quote for.
+    ///
+    /// The invariant this variant carries: **a tool is either a program to
+    /// exec or work pane does itself, and [`Tool::executable`] says which by
+    /// returning `None`.** There is no third state and no tool that spawns
+    /// without naming its binary. Reserved for work whose argument is
+    /// arbitrary bytes — a file's contents cannot cross an argv or a heredoc
+    /// intact, and the standard tools take content on stdin, which a confined
+    /// child is not given.
+    InProcess,
 }
 
 /// One tool: its name, its arguments, the executable it runs, how the two
@@ -156,7 +175,7 @@ pub enum Argv {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Tool {
     name: &'static str,
-    executable: &'static str,
+    executable: Option<&'static str>,
     args: &'static [Arg],
     argv: Argv,
     purity: Purity,
@@ -194,9 +213,27 @@ impl Tool {
     ) -> Self {
         Self {
             name,
-            executable,
+            executable: Some(executable),
             args,
             argv,
+            purity,
+        }
+    }
+
+    /// Declares a tool pane performs itself. `purity` stays positional for
+    /// the same reason it is in [`Tool::declare`], and the argv is
+    /// [`Argv::InProcess`] by construction rather than by choice, so there is
+    /// no way to declare an in-process tool that also names a binary.
+    pub const fn declare_in_process(
+        name: &'static str,
+        args: &'static [Arg],
+        purity: Purity,
+    ) -> Self {
+        Self {
+            name,
+            executable: None,
+            args,
+            argv: Argv::InProcess,
             purity,
         }
     }
@@ -205,11 +242,15 @@ impl Tool {
         self.name
     }
 
-    /// The program this tool runs, as a name to resolve rather than a path.
+    /// The program this tool runs, as a name to resolve rather than a path,
+    /// or `None` for one pane performs itself.
+    ///
     /// [`crate::tools::invoke`] resolves it and grants exec on the resolved
     /// binary — the 61D exec-roots ruling — so a hard-coded path here would
-    /// be a second, staler answer to a question that already has one.
-    pub fn executable(&self) -> &'static str {
+    /// be a second, staler answer to a question that already has one. `None`
+    /// is not "resolve later": it is a tool that never becomes a child, and
+    /// `spawn_confined` is unreachable for it.
+    pub fn executable(&self) -> Option<&'static str> {
         self.executable
     }
 
@@ -288,12 +329,39 @@ const BASH: Tool = Tool::declare(
     Purity::Effectful,
 );
 
+/// `write({ path, content })` — the bytes of one file inside the project,
+/// replaced whole.
+///
+/// **In-process, and that is forced rather than chosen.** A file's contents
+/// are arbitrary bytes: through `bash` they must survive a heredoc, which a
+/// line equal to the delimiter breaks and a `$` or a backtick corrupts, and
+/// no standard program takes a file's contents as an argv element — `tee`
+/// and `dd` read stdin, which `spawn_confined` gives a child as `/dev/null`.
+/// So this one is work pane does itself, checked by `Profile::check` for
+/// `Access::Write` exactly as `read`'s path is checked for `Access::Read`.
+///
+/// **There is deliberately no `edit`.** The model already holds the file as
+/// an object and writes TypeScript over it, so a replacement is
+/// `text.replace(a, b)` in the cell followed by one `write` — the harness's
+/// own thesis rather than a second tool with its own matching rules.
+///
+/// Effectful, obviously: it is the only tool here whose whole purpose is to
+/// change the world.
+const WRITE: Tool = Tool::declare_in_process(
+    "write",
+    &[
+        Arg::required("path", ArgKind::WritePath),
+        Arg::required("content", ArgKind::Pattern),
+    ],
+    Purity::Effectful,
+);
+
 /// Every registered tool.
 ///
 /// Small on purpose: each entry is a program that gets exec'd inside a
 /// sandbox, so the set is the attack surface and it grows by a package, not
 /// by a convenience.
-pub const ALL: [Tool; 4] = [READ, GLOB, GREP, BASH];
+pub const ALL: [Tool; 5] = [READ, GLOB, GREP, BASH, WRITE];
 
 /// Tools that are **absent**, by name, and why.
 ///
@@ -340,14 +408,40 @@ mod tests {
         }
     }
 
+    /// The effectful set is enumerated rather than counted: a resumed handle
+    /// re-materialises by re-running a recorded *pure* call, so a tool that
+    /// joins this list without the question being asked would be silently
+    /// re-run on resume. Two, and each earned it — `bash` runs a command
+    /// line, `write` replaces a file.
     #[test]
-    fn bash_is_the_only_effectful_tool() {
+    fn exactly_two_tools_are_effectful_and_they_are_named() {
         let effectful: Vec<_> = ALL
             .iter()
             .filter(|tool| tool.purity() == Purity::Effectful)
             .map(Tool::name)
             .collect();
-        assert_eq!(effectful, vec!["bash"]);
+        assert_eq!(effectful, vec!["bash", "write"]);
+    }
+
+    /// The companion claim, and the one that matters for the sandbox: a tool
+    /// either names a binary to exec or is performed in this process, and
+    /// only `write` is the second.
+    #[test]
+    fn write_is_the_only_tool_that_spawns_nothing() {
+        let in_process: Vec<_> = ALL
+            .iter()
+            .filter(|tool| tool.executable().is_none())
+            .map(Tool::name)
+            .collect();
+        assert_eq!(in_process, vec!["write"]);
+        for tool in ALL.iter().filter(|tool| tool.executable().is_none()) {
+            assert_eq!(
+                tool.argv(),
+                Argv::InProcess,
+                "{} names no binary and is not declared in-process",
+                tool.name()
+            );
+        }
     }
 
     #[test]

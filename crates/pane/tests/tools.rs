@@ -156,8 +156,11 @@ fn no_registered_tool_needs_the_network() {
             "`{absent}` is registered, and §4.1 says it must be absent"
         );
     }
-    for tool in registry::ALL {
-        let program = Path::new(tool.executable())
+    // `flatten` and not `unwrap`: a tool pane performs itself names no
+    // program at all, and "it runs no network binary" is trivially true of
+    // one that runs no binary.
+    for program in registry::ALL.iter().filter_map(|tool| tool.executable()) {
+        let program = Path::new(program)
             .file_name()
             .map(|name| name.to_string_lossy().to_lowercase())
             .unwrap_or_default();
@@ -165,11 +168,10 @@ fn no_registered_tool_needs_the_network() {
             !registry::NETWORK_PROGRAMS
                 .iter()
                 .any(|network| program == *network),
-            "{} runs `{program}`, which reaches a network",
-            tool.name()
+            "a tool runs `{program}`, which reaches a network"
         );
     }
-    assert_eq!(names, vec!["read", "glob", "grep", "bash"]);
+    assert_eq!(names, vec!["read", "glob", "grep", "bash", "write"]);
 
     // The profile half of the same clause: no `permissions` pattern can
     // produce a network grant, and the two named MCP network tools are not
@@ -198,7 +200,7 @@ fn exec_is_granted_on_the_resolved_binary() {
     // falls back there rather than exercising what this half is for.
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
-        let grant = invoke::exec_grant(registry::lookup("read").unwrap().executable());
+        let grant = invoke::exec_grant(registry::lookup("read").unwrap().executable().unwrap());
         assert!(!grant.fell_back_to_roots, "{grant:?}");
         assert!(grant.binary.is_absolute(), "{grant:?}");
         assert_eq!(
@@ -219,7 +221,7 @@ fn exec_is_granted_on_the_resolved_binary() {
 
     #[cfg(any(target_os = "macos", target_os = "linux"))]
     {
-        let shell = invoke::exec_grant(registry::lookup("bash").unwrap().executable());
+        let shell = invoke::exec_grant(registry::lookup("bash").unwrap().executable().unwrap());
         let fixture = Fixture::new("exec-grant");
         let profile = fixture.profile();
         let glasshouse = Glasshouse::None;
@@ -328,7 +330,7 @@ fn the_same_tool_reads_the_path_unconfined() {
     let fixture = Fixture::new("unconfined-control");
     let outside = fixture.write(&fixture.outside.join("secret.txt"), "outside-secret\n");
 
-    let grant = invoke::exec_grant(registry::lookup("read").unwrap().executable());
+    let grant = invoke::exec_grant(registry::lookup("read").unwrap().executable().unwrap());
     let output = std::process::Command::new(&grant.binary)
         .arg("--")
         .arg(&outside)
@@ -340,7 +342,7 @@ fn the_same_tool_reads_the_path_unconfined() {
     // And the same for the `bash` tool's command line, whose confined half is
     // the kernel assertion in `a_tool_runs_confined_and_a_refusal_is_a_value`.
     // Without this, a sandbox that refused every exec would pass that one.
-    let shell = invoke::exec_grant(registry::lookup("bash").unwrap().executable());
+    let shell = invoke::exec_grant(registry::lookup("bash").unwrap().executable().unwrap());
     let output = std::process::Command::new(&shell.binary)
         .arg("-c")
         .arg(format!("cat {}", outside.display()))
@@ -1204,7 +1206,11 @@ fn a_call_whose_stdout_exceeds_the_pipe_buffer_completes() {
 #[test]
 fn every_declared_executable_is_a_bare_name() {
     for tool in registry::ALL.iter() {
-        let executable = tool.executable();
+        // A tool with no executable has nothing to be a bare name; the
+        // precondition this pins is about resolution, and it never resolves.
+        let Some(executable) = tool.executable() else {
+            continue;
+        };
         assert!(
             !executable.contains('/')
                 && !executable.contains('\\')
@@ -1213,4 +1219,127 @@ fn every_declared_executable_is_a_bare_name() {
             tool.name()
         );
     }
+}
+
+// --- write: the one tool pane performs itself --------------------------
+
+/// The reason `write` exists rather than a `bash` heredoc: a file's contents
+/// are arbitrary bytes. This content contains the heredoc delimiter, a `$`, a
+/// backtick and a quote — through a shell it would be corrupted or would end
+/// the heredoc early; here it round-trips exactly.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn write_puts_arbitrary_bytes_on_disk_exactly() {
+    let fixture = Fixture::new("write-exact");
+    let profile = Profile::compile(&fixture.root, Some(&write_settings(&fixture.root)));
+    let target = fixture.root.join("nested").join("deep").join("out.txt");
+    let content = "EOF\n$HOME `whoami` \"quoted\" 'single'\nlast";
+
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("write-exact");
+    let ctx = context(&profile, &glasshouse, &session);
+    let result = invoke::run(
+        &ctx,
+        "write",
+        &Args::new()
+            .with("path", &*target.to_string_lossy())
+            .with("content", content),
+    )
+    .expect("write should be admitted inside the project");
+
+    assert_eq!(
+        std::fs::read_to_string(&target).unwrap(),
+        content,
+        "the bytes on disk are not the bytes asked for"
+    );
+    assert_eq!(
+        result.confinement,
+        invoke::Confinement::InProcess,
+        "write reported a child it never created"
+    );
+    assert!(result.stdout.contains("wrote"), "{}", result.stdout);
+}
+
+/// `WritePath` asks `Profile::check` the *write* question, and this is where
+/// the two kinds part company.
+///
+/// Inside the project root both are granted unconditionally — the root is the
+/// workspace (`sandbox-grants.md` §1.3), which is why a `Write(<root>/**)`
+/// pattern changes nothing there. **Outside** the root a grant is per-access,
+/// so a directory granted for reading alone is readable by `read` and refused
+/// to `write`. A `write` declared with `ArgKind::Path` would be allowed here.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn write_is_refused_outside_the_root_where_only_reading_is_granted() {
+    let fixture = Fixture::new("write-readonly");
+    let outside = fixture.outside.to_string_lossy().replace('\\', "/");
+    let profile = Profile::compile(
+        &fixture.root,
+        Some(&format!(
+            r#"{{"permissions":{{"allow":["Read({outside}/**)"]}}}}"#
+        )),
+    );
+    let readable = fixture.outside.join("readable.txt");
+    std::fs::write(&readable, "from outside\n").unwrap();
+
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("write-readonly");
+    let ctx = context(&profile, &glasshouse, &session);
+
+    // The grant is real: `read` reaches it.
+    invoke::run(
+        &ctx,
+        "read",
+        &Args::new().with("path", &*readable.to_string_lossy()),
+    )
+    .expect("the read grant should let `read` through");
+
+    // The same path, the other access, refused.
+    let error = invoke::run(
+        &ctx,
+        "write",
+        &Args::new()
+            .with("path", &*readable.to_string_lossy())
+            .with("content", "overwritten"),
+    )
+    .expect_err("a read-only grant must refuse a write");
+    assert!(
+        matches!(error, invoke::ToolError::Denied(_)),
+        "expected a refusal, got {error:?}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&readable).unwrap(),
+        "from outside\n",
+        "the refused write still changed the file"
+    );
+}
+
+/// Outside the project root is refused exactly as every other tool's path is.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn write_cannot_reach_outside_the_project() {
+    let fixture = Fixture::new("write-outside");
+    let profile = Profile::compile(&fixture.root, Some(&write_settings(&fixture.root)));
+    let target = fixture.outside.join("escaped.txt");
+
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("write-outside");
+    let ctx = context(&profile, &glasshouse, &session);
+    let error = invoke::run(
+        &ctx,
+        "write",
+        &Args::new()
+            .with("path", &*target.to_string_lossy())
+            .with("content", "x"),
+    )
+    .expect_err("a path outside the root must be refused");
+    assert!(matches!(error, invoke::ToolError::Denied(_)), "{error:?}");
+    assert!(!target.exists());
+}
+
+/// A grant that lets the model write the whole project root.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn write_settings(root: &Path) -> String {
+    let root = root.to_string_lossy().replace('\\', "/");
+    format!(r#"{{"permissions":{{"allow":["Read({root}/**)","Write({root}/**)"]}}}}"#)
 }

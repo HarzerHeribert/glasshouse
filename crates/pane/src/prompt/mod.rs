@@ -91,10 +91,11 @@ pub fn render_session_facts(facts: &SessionFacts) -> String {
     };
     format!(
         "## This session\n\nThe project root is {root}. Relative paths resolve against it.\n\n\
-         There is no write tool and no edit tool. The tools above are the whole set, so a\n\
-         file is changed by running a command through `bash` — `cat > f <<'EOF' … EOF` and\n\
-         `python3 - <<'EOF' … EOF` are the usual shapes. Check the command you intend is\n\
-         admitted before you build a plan on it.\n\n\
+         The tools above are the whole set. To change part of a file, `read` it, edit the\n\
+         text here in the cell, and `write` it back — you hold the file as an object, so a\n\
+         replacement is `text.replace(a, b)` and not a shell command. `write` replaces the\n\
+         whole file and creates parent directories. Check the command you intend is\n\
+         admitted before you build a plan on `bash`.\n\n\
          Sandbox: {writable}; {commands}; network: {network}. Anything outside that throws\n\
          PermissionDenied, which is final — no cell widens a grant, so a refusal means\n\
          choose another route or say plainly that the grant forbids it.",
