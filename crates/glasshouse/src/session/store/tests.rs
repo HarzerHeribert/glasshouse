@@ -2972,4 +2972,26 @@ mod display_tests {
         );
         assert_eq!(format!("[{:<6}]", SessionId::new("ab")), "[ab    ]");
     }
+
+    /// The count says "task boundaries completed", not "tasks completed" —
+    /// a dogfooding session read the old wording as a turn count and called
+    /// it wrong (finding 3, 2026-09-06). Both the singular and the plural go
+    /// through `Display`, so a rewording in either arm fails here.
+    #[test]
+    fn task_continuity_names_completed_task_boundaries_in_both_numbers() {
+        assert_eq!(
+            TaskContinuity::BoundariesCrossed(1).to_string(),
+            "1 task boundary completed"
+        );
+        assert_eq!(
+            TaskContinuity::BoundariesCrossed(2).to_string(),
+            "2 task boundaries completed"
+        );
+        assert_eq!(
+            TaskContinuity::BoundariesCrossed(17).to_string(),
+            "17 task boundaries completed"
+        );
+        assert_eq!(TaskContinuity::Unknown.to_string(), "unknown");
+        assert_eq!(TaskContinuity::OneTask.to_string(), "one task");
+    }
 }
