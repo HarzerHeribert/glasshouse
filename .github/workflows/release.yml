@@ -1,0 +1,192 @@
+name: Release
+
+# Builds glasshouse and pane in release profile for the five OS/arch targets
+# ci-extended.yml already exercises, and publishes them as a GitHub
+# pre-release with a SHA256SUMS file. This workflow never publishes to any
+# package registry -- see docs/product/design-decisions.md, "Steering
+# decisions of record -- 2026-09-06", decision 10 -- a tagged pre-release
+# (built binaries only) is cut from main once the pane Windows cell is green.
+#
+# A `v*` tag is the real trigger; workflow_dispatch exists to dry-run the
+# build (default) without publishing anything, so the pipeline can be proven
+# before the first real tag uses it.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: "Build and upload artifacts without publishing a release"
+        type: boolean
+        default: true
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # One matrix job per target, mirroring ci-extended.yml's five OS/arch cells.
+  # Every target here is the native default for its runner (no cross
+  # compilation), so `--target` only fixes the output path and the archive
+  # name -- it does not require `rustup target add`.
+  build:
+    name: build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: macos-latest
+            target: aarch64-apple-darwin
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.2.2
+
+      # Both versions are declared once, in Cargo.toml -- the same read
+      # ci-extended.yml and scripts/ci-local.sh use, so none of the three can
+      # drift from each other.
+      - name: Resolve the declared toolchain
+        id: tc
+        shell: bash
+        run: |
+          v="$(grep -m1 '^toolchain' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
+          test -n "$v"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@d1031067263f94b142dd6c0ce24c5eb9d02d52a0 # master, pinned 2026-09-06
+        with:
+          toolchain: ${{ steps.tc.outputs.version }}
+
+      # A tag push names the version; workflow_dispatch (always a dry run)
+      # cannot, so it gets a fixed placeholder version instead.
+      - name: Resolve the release version
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            v="${GITHUB_REF_NAME#v}"
+          else
+            v="0.1.0-dry"
+          fi
+          test -n "$v"
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+
+      - name: Build
+        run: cargo build --release --locked --target ${{ matrix.target }} -p glasshouse -p pane
+
+      # Proves the binary that will ship actually runs before it is packaged.
+      # pane's top-level command has no --version/--help output of its own
+      # (it falls through to its stdin-echo default when the first argument
+      # is neither `ruler` nor `session`) -- closed stdin makes that return
+      # immediately rather than hang, which is what this checks for.
+      - name: Verify binaries (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          BIN="target/${{ matrix.target }}/release"
+          "$BIN/glasshouse" --version
+          "$BIN/pane" --help < /dev/null
+      - name: Verify binaries (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $bin = "target/${{ matrix.target }}/release"
+          & "$bin/glasshouse.exe" --version
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "" | & "$bin/pane.exe" --help
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+          NAME="glasshouse-${{ steps.version.outputs.version }}-${{ matrix.target }}"
+          STAGE="$RUNNER_TEMP/$NAME"
+          BIN="target/${{ matrix.target }}/release"
+          mkdir -p "$STAGE"
+          cp "$BIN/glasshouse" "$BIN/pane" "$STAGE/"
+          cp README.md "$STAGE/"
+          cp LICENSE* "$STAGE/" 2>/dev/null || true
+          tar czf "$NAME.tar.gz" -C "$RUNNER_TEMP" "$NAME"
+          shasum -a 256 "$NAME.tar.gz" > "$NAME.tar.gz.sha256"
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $name = "glasshouse-${{ steps.version.outputs.version }}-${{ matrix.target }}"
+          $stage = Join-Path $env:RUNNER_TEMP $name
+          $bin = "target/${{ matrix.target }}/release"
+          New-Item -ItemType Directory -Path $stage | Out-Null
+          Copy-Item "$bin/glasshouse.exe" $stage
+          Copy-Item "$bin/pane.exe" $stage
+          Copy-Item README.md $stage
+          Get-ChildItem -Path . -Filter "LICENSE*" -File | ForEach-Object { Copy-Item $_.FullName $stage }
+          Compress-Archive -Path "$stage/*" -DestinationPath "$name.zip"
+          $hash = (Get-FileHash "$name.zip" -Algorithm SHA256).Hash.ToLower()
+          "$hash  $name.zip" | Set-Content -NoNewline:$false "$name.zip.sha256"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: glasshouse-${{ matrix.target }}
+          path: |
+            glasshouse-*.tar.gz
+            glasshouse-*.tar.gz.sha256
+            glasshouse-*.zip
+            glasshouse-*.zip.sha256
+          if-no-files-found: error
+
+  publish:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all archives
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Build SHA256SUMS
+        working-directory: dist
+        run: cat *.sha256 > SHA256SUMS
+
+      # Real publish only for a tag push that was not a dry run. `inputs` is
+      # empty for a `push` event, so `inputs.dry_run != true` is true there --
+      # a tag always publishes unless the ref check below fails. A
+      # workflow_dispatch run publishes only if someone explicitly set
+      # dry_run to false, and even then only on a tag ref.
+      - name: Publish pre-release
+        if: startsWith(github.ref, 'refs/tags/') && inputs.dry_run != true
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          prerelease: true
+          generate_release_notes: true
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/SHA256SUMS

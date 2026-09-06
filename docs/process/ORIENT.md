@@ -13,7 +13,7 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1338 closed · 82 active committed open (94%)** — across 16 phases.
+**1339 closed · 81 active committed open (94%)** — across 15 phases.
 
 Not in the work queue: **0 deferred gate criteria** (Phase 52, Phase 53) awaiting a user decision, and **229 parked experimental lines**. They are visible in the map; they are not release-blocking work.
 
@@ -26,7 +26,6 @@ closures are usually at the top. Open the map at the line number given.
 |---|---|---|---|---|
 | Phase 9H | Sticky gateway routing for harness-backed interactive sessions | **1** | 13 | `501` |
 | Phase 21F | Memory retrieval quality | **1** | 10 | `927` |
-| Phase 32A | Unified quota and capacity model | **1** | 20 | `1196` |
 | Phase 32C | Subscription capacity estimation | **1** | 11 | `1242` |
 | Phase 32D | Normalized remaining-capacity score | **1** | 11 | `1257` |
 | Phase 32G | Provider-aware request-cost estimation | **1** | 9 | `1296` |
@@ -41,7 +40,7 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 62 | Parallel-session coordination, second slice: queueing, co-editing, drift, in-turn diagnostics | **14** | 0 | `2487` |
 | Phase 61 | pane: the first-party harness | **24** | 11 | `2419` |
 
-**Fully closed (96):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 7, Phase 8, Phase 9, Phase 9A, Phase 9B, Phase 9C, Phase 9D, Phase 9E, Phase 9F, Phase 9G, Phase 9I, Phase 9J, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 15, Phase 16, Phase 17, Phase 18, Phase 19, Phase 20, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 21H, Phase 21I, Phase 21J, Phase 21K, Phase 22, Phase 23, Phase 24, Phase 25, Phase 26, Phase 27, Phase 28, Phase 29, Phase 30, Phase 31, Phase 32, Phase 32B, Phase 32E, Phase 32F, Phase 33A, Phase 33C, Phase 34, Phase 34A, Phase 34B, Phase 34D, Phase 34E, Phase 34F, Phase 35, Phase 35A, Phase 35B, Phase 35C, Phase 35D, Phase 36, Phase 37, Phase 39, Phase 40, Phase 41, Phase 42, Phase 43, Phase 44, Phase 45, Phase 46, Phase 47, Phase 48, Phase 49, Phase 50, Phase 52, Phase 53, Phase 54, Phase 54A, Phase 55, Phase 56, Phase 56A, Phase 57, Phase 58, Phase 59, Phase 60.
+**Fully closed (97):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 7, Phase 8, Phase 9, Phase 9A, Phase 9B, Phase 9C, Phase 9D, Phase 9E, Phase 9F, Phase 9G, Phase 9I, Phase 9J, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 15, Phase 16, Phase 17, Phase 18, Phase 19, Phase 20, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 21H, Phase 21I, Phase 21J, Phase 21K, Phase 22, Phase 23, Phase 24, Phase 25, Phase 26, Phase 27, Phase 28, Phase 29, Phase 30, Phase 31, Phase 32, Phase 32A, Phase 32B, Phase 32E, Phase 32F, Phase 33A, Phase 33C, Phase 34, Phase 34A, Phase 34B, Phase 34D, Phase 34E, Phase 34F, Phase 35, Phase 35A, Phase 35B, Phase 35C, Phase 35D, Phase 36, Phase 37, Phase 39, Phase 40, Phase 41, Phase 42, Phase 43, Phase 44, Phase 45, Phase 46, Phase 47, Phase 48, Phase 49, Phase 50, Phase 52, Phase 53, Phase 54, Phase 54A, Phase 55, Phase 56, Phase 56A, Phase 57, Phase 58, Phase 59, Phase 60.
 
 ## The nearly-finished phases, in full
 
@@ -63,10 +62,6 @@ these unwrapped.
 ### Phase 21F — Memory retrieval quality  (1 open, 10 closed)
 
 - **932** ☐ Penalize memories whose assumptions conflict with current repository state.
-
-### Phase 32A — Unified quota and capacity model  (1 open, 20 closed)
-
-- **1210** ☐ Track the current quota window start when known.
 
 ### Phase 32C — Subscription capacity estimation  (1 open, 11 closed)
 

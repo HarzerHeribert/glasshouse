@@ -734,6 +734,55 @@ fn a_reset_field_reaches_the_rolling_window_and_not_the_calendar_one() {
     assert!(!state.windows().calendar().resets_at_unix().is_measured());
 }
 
+// --- line 1210: the current quota window's start -----------------------
+
+#[test]
+fn a_reset_and_a_window_length_together_place_the_windows_start() {
+    let state = RateLimitHeaders::read(vec![
+        ("ratelimit-limit", "300"),
+        ("ratelimit-policy", "300;w=60"),
+        ("ratelimit-reset", "30"),
+    ])
+    .apply_to(
+        ResourceKind::from_direct_provider("anyrouter").capacity(),
+        OBSERVED,
+    );
+    assert_eq!(
+        state.windows().rolling().started_at_unix().value(),
+        Some(&(OBSERVED + 30 - 60))
+    );
+    // The reset reading itself, and the per-minute ceiling `window_seconds`
+    // also feeds, are untouched by deriving the start from them.
+    assert_eq!(
+        state.windows().rolling().resets_at_unix().value(),
+        Some(&(OBSERVED + 30))
+    );
+    let per_minute = state
+        .rate_ceilings()
+        .requests_per_minute()
+        .value()
+        .expect("a per-minute ceiling was read");
+    assert_eq!(per_minute.value(), 300);
+}
+
+#[test]
+fn a_reset_with_no_window_length_leaves_the_start_unknown() {
+    let state = RateLimitHeaders::read(vec![("ratelimit-reset", "30")]).apply_to(
+        ResourceKind::from_direct_provider("anyrouter").capacity(),
+        OBSERVED,
+    );
+    assert!(!state.windows().rolling().started_at_unix().is_measured());
+}
+
+#[test]
+fn a_window_length_with_no_reset_leaves_the_start_unknown() {
+    let state = RateLimitHeaders::read(vec![("ratelimit-policy", "300;w=60")]).apply_to(
+        ResourceKind::from_direct_provider("anyrouter").capacity(),
+        OBSERVED,
+    );
+    assert!(!state.windows().rolling().started_at_unix().is_measured());
+}
+
 // --- Groq's real inference-response headers, capability map lines
 // 1199, 1200, 1207, 1215, 1217 and 1218 -------------------------------
 

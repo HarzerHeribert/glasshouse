@@ -123,6 +123,27 @@ fn a_window_reset_a_reader_supplied_reaches_the_report() {
     assert!(row.contains("starts unmeasured (unknown)"), "{row}");
 }
 
+/// Capability map line 1210, closed: with both a reset and a window
+/// length the producer can place the window's start, and this is the
+/// report finally showing a measured one instead of "unmeasured".
+#[test]
+fn a_window_start_a_reader_can_derive_reaches_the_report() {
+    let user = UserConfig::default();
+    let effective = EffectiveConfig::new(&user, None);
+    let headers = RateLimitHeaders::read(vec![
+        ("ratelimit-reset", "30"),
+        ("ratelimit-policy", "300;w=60"),
+    ]);
+    let telemetry = GatheredTelemetry::new().with_provider_headers("anyrouter", headers, OBSERVED);
+    let row = anyrouter_row(&report(&effective, &telemetry, options()));
+
+    assert!(row.contains("rolling window"), "{row}");
+    assert!(
+        row.contains(&format!("starts unix {}", OBSERVED + 30 - 60)),
+        "{row}"
+    );
+}
+
 // --- BRIDGE-QUOTA: a gateway-captured reading, folded in ---------------
 
 /// Capability map lines 1217/1218's antecedent, reached at the actual

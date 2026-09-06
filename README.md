@@ -54,12 +54,12 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`█████████████████████████████████████░░░` **1338 closed** · **82 active committed open** (94%)
+`█████████████████████████████████████░░░` **1339 closed** · **81 active committed open** (94%)
 
 Separately tracked, and not release-blocking: **0 deferred gate criteria** (Phase 52, Phase 53) awaiting a decision, and **229 parked experimental lines** under Maybe / Experimental.
 
 <details>
-<summary>Per-phase breakdown (94 of 110 active phases complete)</summary>
+<summary>Per-phase breakdown (95 of 110 active phases complete)</summary>
 
 | Phase | Done |
 |---|---|
@@ -123,7 +123,7 @@ Separately tracked, and not release-blocking: **0 deferred gate criteria** (Phas
 | Phase 30 — Session context metadata | 8/8 ✅ |
 | Phase 31 — Compaction-aware behavior | 7/7 ✅ |
 | Phase 32 — Resource registry | 12/12 ✅ |
-| Phase 32A — Unified quota and capacity model | 20/21 |
+| Phase 32A — Unified quota and capacity model | 21/21 ✅ |
 | Phase 32B — Quota telemetry sources | 14/14 ✅ |
 | Phase 32C — Subscription capacity estimation | 11/12 |
 | Phase 32D — Normalized remaining-capacity score | 11/12 |

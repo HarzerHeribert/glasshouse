@@ -423,19 +423,31 @@ impl RateLimitHeaders {
         if windows.rolling().resets_at_unix().is_readable()
             && let Some(resets_at) = self.resets_at_unix(observed_at_unix)
         {
-            let rolling =
+            let reset_source = source(self.name_for(&[
+                "ratelimit-reset",
+                "x-ratelimit-reset",
+                "x-ratelimit-reset-requests",
+            ]));
+            let mut rolling =
                 windows
                     .rolling()
                     .clone()
                     .with_resets_at(Capacity::Measured(Reading::new(
                         resets_at,
                         observed_at_unix,
-                        source(self.name_for(&[
-                            "ratelimit-reset",
-                            "x-ratelimit-reset",
-                            "x-ratelimit-reset-requests",
-                        ])),
+                        reset_source.clone(),
                     )));
+            // Capability map line 1210: the window's start, derivable only
+            // when both the reset and the window length are known. With
+            // only one, the start stays whatever it already was
+            // (`Capacity::Unmeasured` by default) rather than a guess.
+            if let Some(window_seconds) = self.window_seconds {
+                rolling = rolling.with_started_at(Capacity::Measured(Reading::new(
+                    resets_at - window_seconds,
+                    observed_at_unix,
+                    reset_source,
+                )));
+            }
             windows = windows.with_rolling(rolling);
         }
 

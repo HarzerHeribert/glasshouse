@@ -1207,7 +1207,7 @@ Phase 32A — Unified quota and capacity model
 ☑ Track request count independently from token consumption when both can constrain a resource.
 ☑ Track provider credits independently from raw tokens when credits are the actual limiting unit.
 ☑ Track remaining monetary budget independently from provider quota when the user has configured a spending ceiling.
-☐ Track the current quota window start when known.
+☑ Track the current quota window start when known.
 ☑ Track the current quota reset time when known.
 ☑ Track rolling-window capacity separately from fixed calendar-window capacity.
 ☑ Track concurrent-request limits when they materially affect routability.

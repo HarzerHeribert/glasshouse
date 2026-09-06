@@ -249,8 +249,10 @@ constructs is recorded as open, with what is missing named.
   **OPEN — Phase 32B *and* line 1203's configuration field.** Two things are
   missing, not one: somewhere for the user to state a ceiling, and something
   that counts spend against it.
-- **1210 — current quota window start.** **OPEN — Phase 32B.**
-  `WindowCapacity::started_at_unix`, per window.
+- **1210 — track the current quota window start when known.**
+  **COMPLETE, 2026-09-06** (`GH-QUOTA-WINDOW-START`; the entry at the end of this
+  file): the rolling window's start is `reset instant − window length` when both
+  headers are read, unknown otherwise.
 - **1211 — current quota reset time.** **OPEN — Phase 32B.**
   `WindowCapacity::resets_at_unix`. Deliberately `Unmeasured` rather than
   `ProviderOpaque` even for a subscription: harnesses do print when a window
@@ -780,3 +782,14 @@ State: **COMPLETE** — `GH-PROVE-IT-BATCH-2` (Sonnet, Green; report `.agent-run
 Contract: given a provider response whose rate-limit policy states a window longer than 60 s, when the gateway reads it, Glasshouse tracks a long-window request pool carrying that limit and that period and the capacity model can read it back, while preserving that the per-minute reading is untouched.
 
 Production: `provider/telemetry :: RateLimitHeaders::read` → `apply_to` → `CapacityState::rate_ceilings().long_window_requests()` (`provider/quota/mod.rs :: LongWindowRequests { limit, window_seconds }`); rendered by `provider/resources/mod.rs :: render_rate_ceilings`. Test: `provider::telemetry::tests::a_ceiling_over_a_longer_window_becomes_a_long_window_pool_carrying_its_period` (existing; `ratelimit-policy: 300;w=3600` → limit 300, window 3600). Limits: no observed provider has ever sent a window longer than 60 s — the proof is a synthetic header; the `resources` render is exercised only with an unmeasured pool by the existing suite.
+
+
+---
+
+### Line 1210 — closed 2026-09-06: the rolling window's start is derived when both its reset and its length are read
+
+State: **COMPLETE** — `GH-QUOTA-WINDOW-START` (Sonnet, Amber; report `.agent-runtime/report-quota-window-start.md`). The census had found `WindowCapacity::with_started_at` with no caller (register Cluster C, *in-repo yes*); the reader in `provider/resources/mod.rs` already existed.
+
+Contract: given a provider response whose rate-limit headers state both a reset (seconds until the window resets) and the window's length, when the gateway applies the reading to the provider's capacity state, Glasshouse records the rolling window's start as `reset instant − window length` and `glasshouse resources` shows it, while preserving that with only one of the two headers the start stays unknown — never estimated — and that every existing reading is unchanged.
+
+Production: `provider/telemetry/mod.rs :: RateLimitHeaders::apply_to` — inside the existing branch that writes the rolling window's reset, when `window_seconds` is also known, `WindowCapacity::with_started_at(Capacity::measured(reset − window, <the reset reading's own source and observation time>))`; the calendar window is never written by this path. Consumer: `provider/resources/mod.rs :: render window lines` (`started_at_unix()`), `quota/mod.rs:1598`. Tests: `provider::telemetry::tests` (both headers → measured and equal to `observed_at + reset − window`; reset only → unknown; window only → unknown; existing readings unchanged) — `--lib provider::telemetry` 74 passed; `provider::resources::tests` (a measured start renders) — 45 passed. Mutation `window-start-sign-flipped` (`−` → `+`): KILLED by the both-headers test. Limits: only the rolling window carries a start (no header path writes the calendar window's timestamps today); the value is derived, not sent by any provider as such, and is measured only when both inputs are.
