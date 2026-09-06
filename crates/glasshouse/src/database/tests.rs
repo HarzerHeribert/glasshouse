@@ -3355,12 +3355,20 @@ fn symlinked_final_database_path_is_rejected() {
 /// What "immediately" means for the zero-byte refusal, with enough room
 /// that a loaded machine cannot make it flake.
 ///
-/// Two orders of magnitude below the 400 ms grace and the 500 ms timer
-/// that stood here before, because the refusal now does no I/O beyond the
-/// `stat` that found the file: no connection is opened, no lock is taken,
-/// nothing is slept on. If this ever fails, something started waiting
-/// again.
-const PROMPT_REFUSAL: std::time::Duration = std::time::Duration::from_millis(100);
+/// **The bound is set by what it has to discriminate against, not by how
+/// fast the refusal is.** The refusal does no I/O beyond the `stat` that
+/// found the file — no connection opened, no lock taken, nothing slept on —
+/// and the only waiting path this module has is `busy_timeout`, which is
+/// **five seconds**. So anything comfortably under that still proves nothing
+/// waited, and the previous 100 ms bought no extra discrimination while
+/// leaving no headroom at all: the `windows-latest` MSRV cell measured
+/// 110 ms on 2026-09-06 and failed, on a refusal that had waited for
+/// nothing.
+///
+/// One second is five times below the timeout it rules out and roughly nine
+/// times above the slowest refusal yet observed. If this ever fails,
+/// something started waiting again.
+const PROMPT_REFUSAL: std::time::Duration = std::time::Duration::from_secs(1);
 
 #[test]
 fn a_zero_byte_existing_database_is_refused_not_silently_reinitialized() {
