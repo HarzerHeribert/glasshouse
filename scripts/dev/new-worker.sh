@@ -112,10 +112,13 @@ PACKET="$(cd "$(dirname "$PACKET")" && pwd)/$(basename "$PACKET")"
 # $LAUNCH_NOTES, read from disk instead of typed), and what IS typed is sent
 # in <=400-byte chunks with a pause between them rather than one long call.
 FIRST_SENTENCE="FIRST, before reading anything: arm your continuity watch, or you will run out of context mid-package with nothing to show for it."
-LAUNCH_NOTES="${REPO}/.agent-runtime/launch-notes.md"
+# The MAIN checkout's, not $REPO's: a lead dispatching from a worktree has no
+# .agent-runtime/ of its own (2026-09-06, the lead's finding), and the worker
+# reads this file before anything else.
+LAUNCH_NOTES="${MAIN_CHECKOUT}/.agent-runtime/launch-notes.md"
 mkdir -p "$(dirname "$LAUNCH_NOTES")"
 cat > "$LAUNCH_NOTES" <<NOTES
-Run Monitor(command: "${REPO}/scripts/continuity-watch.sh --role worker", persistent: true). It finds your session itself; if it prints CONTINUITY NOT ARMED, pass --session with the last path component of your scratchpad directory and run it again. Never \`cd\` inside a shell command: use absolute paths and \`git -C\`. A \`cd\` followed by a read makes the permission classifier stop and ask, and nobody is watching your pane to answer (2026-09-03: three workers sat on that prompt for half an hour).
+Run Monitor(command: "${MAIN_CHECKOUT}/scripts/continuity-watch.sh --role worker", persistent: true). It finds your session itself; if it prints CONTINUITY NOT ARMED, pass --session with the last path component of your scratchpad directory and run it again. Never \`cd\` inside a shell command: use absolute paths and \`git -C\`. A \`cd\` followed by a read makes the permission classifier stop and ask, and nobody is watching your pane to answer (2026-09-03: three workers sat on that prompt for half an hour).
 
 Read ONLY the files the packet's 'READ ONLY THIS' section names -- reading more is the documented way workers waste context. Do not commit. Write your report to the path the packet's REPORT TO section gives.
 
@@ -239,7 +242,9 @@ for attempt in 1 2 3; do
   cmux send --surface "$surface" "$LAUNCH" >/dev/null
   sleep 1
   # Verify the command is on screen INTACT before executing it.
-  if cmux read-screen --surface "$surface" 2>/dev/null | grep -qF -- "$LAUNCH"; then
+  # Whitespace and newlines stripped on both sides: an 80-column pane wraps a
+  # long line, and a literal match then reads a wrap as garbling.
+  if cmux read-screen --surface "$surface" 2>/dev/null | tr -d ' \n' | grep -qF -- "$(printf '%s' "$LAUNCH" | tr -d ' ')"; then
     landed=1; break
   fi
   echo "new-worker: launch line garbled on attempt $attempt (send raced the shell); clearing and retrying"
@@ -321,7 +326,10 @@ prompt_landed=0
 for attempt in 1 2; do
   send_prompt_chunks "$PROMPT" "$surface"
   sleep 1
-  if cmux read-screen --surface "$surface" 2>/dev/null | grep -qF -- "$PACKET"; then
+  # Same wrap tolerance as the launch-line check above: on 2026-09-06 a packet
+  # path wrapped at "…/subpacket-pane-61e\n-terminal.md" and two launches were
+  # reported truncated when nothing was.
+  if cmux read-screen --surface "$surface" 2>/dev/null | tr -d ' \n' | grep -qF -- "$(printf '%s' "$PACKET" | tr -d ' ')"; then
     prompt_landed=1; break
   fi
   echo "new-worker: packet path missing from pane after send attempt $attempt (prompt truncated in transit); clearing and retrying"
