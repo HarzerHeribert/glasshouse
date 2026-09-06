@@ -59,6 +59,11 @@ it closed. There is no delivery path that is not a batch.
 The batch cap is **200**. A wider window fills the batch oldest-first to the cap and spills the rest
 into the next window, still oldest-first, so order survives a storm; an `interrupt` is exempt.
 
+**Unacked events beyond the cap are dropped, newest first**, into the same `dropped` bucket the
+age-4 rule uses and recorded as `event.dropped` — rolled events never take more than half the
+cap, and a backlog is never allowed to starve what the model is waiting for. Ruled 2026-09-06 from
+the module's own reading (`GH-PANE-61G-WINDOW`).
+
 ## 3. The batch is a handle
 
 The batch arrives as one handle named `batch`, type `Events.Batch`. Its preview, in this order and
@@ -189,7 +194,7 @@ batch  Events.Batch  n=40 · window closed on interrupt after 1,204 ms
   [3] message           session/glasshouse-9c  16:58:33.402Z  "61G drafted; the primary appends it"
   [4] hook.PostToolUse  worker/api-routing   16:58:31.006Z  "Edit routing/mod.rs"
   [5] worker.report     worker/board-watch   16:58:40.117Z  "report-board-watch.md"
-  … and 34 more                                                   preview 191 tok
+  … and 34 more                                                   preview 214 tok
 ```
 
 **View 2 — the bytes the model receives**, in `model-contract.md` §6's shape:
@@ -231,7 +236,7 @@ batch  Events.Batch  n=40 · 38 acked · 2 rolling
 batch  Events.Batch  n=7 · 2 rolled (age 1) · window closed after 2,000 ms
 ```
 
-One payload was read; forty events cost the model 191 tokens to know about.
+One payload was read; forty events cost the model 214 tokens to know about — the shared chars/4 estimator over the view's own bytes, the figure the golden carries (the 191 first written here was by hand).
 
 ## 11. What this contract does not decide
 
