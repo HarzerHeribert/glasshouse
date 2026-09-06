@@ -751,6 +751,109 @@ pub fn record_memory_revalidation(
 /// routing half of RC-B"*, 2026-09-05). This is the same lookup
 /// [`record_routing_outcome`] already uses to decide whether to write at
 /// all; here the answer decides whether to refuse the command outright.
+/// What a hook-triggered memory extraction did, for
+/// [`record_memory_extraction`] to describe.
+///
+/// Not `Option<&ExtractionOutcome>` alone: a run that never produced an
+/// outcome is one of two structurally distinct causes — `run_extraction`'s
+/// own preparation failure, or its bound expiring — and `ExtractionOutcome`
+/// has no field that could carry the difference for a run that never made
+/// one. The caller already knows which, from its own elapsed time against its
+/// own bound, so it states it here rather than this ledger guessing.
+#[derive(Debug)]
+pub enum ExtractionObservation<'a> {
+    /// Extraction produced an outcome — stored, rejected, or a named failure
+    /// all count as "ran" here; `outcome.failure` carries which.
+    Ran(&'a crate::memory::extract::ExtractionOutcome),
+    /// `run_extraction` answered [`None`]: preparation failed before a model
+    /// was ever asked, or the binary crate's hook-side bound expired while
+    /// waiting on one. `bound_expired` is `true` only for the second case.
+    NoOutcome { bound_expired: bool },
+}
+
+/// Record how one hook-triggered memory extraction ended — the producer for
+/// [`EvaluationKind::MemoryExtractionObserved`], dogfooding 2026-09-06 finding
+/// 4: extraction routed to a resource and then nothing durable said whether
+/// the model answered, timed out, or returned nothing worth storing.
+///
+/// **This never fails a turn**, exactly as [`record_disposable_route`]: its
+/// one caller is the binary crate's `commands::memory_extraction::hook_extraction`,
+/// on the harness's own gate, so every error here is a `tracing::warn!` and a
+/// return. `subject` is `trigger`, the [`crate::memory::extract::ExtractionTrigger::as_str`]
+/// word; `detail` is built here from [`ExtractionObservation`] and
+/// `elapsed_ms` — the model's own rendered description plus counts
+/// (`.len()`, never the items themselves) for a run with no failure, the
+/// model description plus [`crate::memory::extract::ExtractionFailure`]'s
+/// fixed `Display` phrase for one with a failure, or `"no outcome"` and which
+/// of preparation failing or the bound expiring it was, for a run that
+/// produced neither. **No memory body, activity line, provider response body
+/// or credential value ever reaches `detail`**: nothing here reads a memory's
+/// text, a rejection's rendered message, or an activity line — only lengths,
+/// a fixed phrase, a rendered model description and a duration.
+///
+/// One row per hook-triggered extraction, whatever it did — **including
+/// `NothingToExtract`**, which the hook's own stderr notice stays silent for
+/// on purpose (a warning on every empty compaction would teach people to
+/// ignore it) but which this ledger still records, so a reader can tell
+/// "nothing to extract" from "extraction never ran". Never called from
+/// `glasshouse memory commit` (`ExtractionTrigger::Manual` prints its own
+/// report in front of a person watching; this row is for the triggers
+/// nobody is watching).
+pub fn record_memory_extraction(
+    runtime: &Runtime,
+    session_id: &str,
+    trigger: &str,
+    observation: ExtractionObservation<'_>,
+    elapsed_ms: u128,
+    observed_at_unix: i64,
+) {
+    let detail = match observation {
+        ExtractionObservation::Ran(outcome) => match &outcome.failure {
+            None => format!(
+                "{}: recorded {}, lowered {}, speculative {}, duplicates {}, rejected {}; \
+                 {elapsed_ms} ms",
+                outcome.model,
+                outcome.stored(),
+                outcome.lowered.len(),
+                outcome.speculative,
+                outcome.duplicates,
+                outcome.rejected.len(),
+            ),
+            Some(failure) => format!("{}: {failure}; {elapsed_ms} ms", outcome.model),
+        },
+        ExtractionObservation::NoOutcome { bound_expired } => {
+            let reason = if bound_expired {
+                "the bound expired"
+            } else {
+                "preparation failed"
+            };
+            format!("no outcome ({reason}): {elapsed_ms} ms")
+        }
+    };
+
+    let observation = NewObservation::new(EvaluationKind::MemoryExtractionObserved)
+        .with_subject(trigger)
+        .with_session_id(session_id)
+        .with_detail(detail);
+
+    let ledger = match EvaluationObservations::open(runtime) {
+        Ok(ledger) => ledger,
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "could not open the evaluation ledger; this extraction's outcome was not counted"
+            );
+            return;
+        }
+    };
+    if let Err(err) = ledger.record(observation, observed_at_unix) {
+        tracing::warn!(
+            error = %err,
+            "could not record a memory extraction's outcome"
+        );
+    }
+}
+
 pub fn record_route_rating(
     runtime: &Runtime,
     session_id: &str,

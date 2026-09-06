@@ -266,7 +266,35 @@ pub(crate) fn hook_extraction(
 ) {
     // Read before the call, because `run_extraction` takes the trigger.
     let named = trigger.as_str();
+    let started = std::time::Instant::now();
     let outcome = run_extraction(runtime, id, model, trigger);
+    let elapsed = started.elapsed();
+
+    // Dogfooding 2026-09-06, finding 4: the hook's stderr notice below is
+    // silent for `NothingToExtract` and for every other rejection-only run,
+    // and stderr is not read by anything that spawns this process anyway
+    // (`hook_extraction`'s own doc comment). This is the durable trace —
+    // written whatever the outcome, so a reader can tell "nothing to
+    // extract" from "extraction never ran" at all. A run that never produced
+    // an outcome names which of preparation failing or the bound expiring it
+    // was, from this function's own elapsed time against the bound
+    // `run_extraction` waited on — the two are structurally exclusive, since
+    // a preparation failure returns before any thread is even spawned.
+    let observation = match &outcome {
+        Some(outcome) => glasshouse::evaluation::ExtractionObservation::Ran(outcome),
+        None => glasshouse::evaluation::ExtractionObservation::NoOutcome {
+            bound_expired: elapsed >= EXTRACTION_BOUND,
+        },
+    };
+    glasshouse::evaluation::record_memory_extraction(
+        runtime,
+        id.as_str(),
+        named,
+        observation,
+        elapsed.as_millis(),
+        glasshouse::evaluation::now_unix(),
+    );
+
     if let Some(notice) = lost_extraction_notice(named, outcome.as_ref()) {
         eprintln!("glasshouse: warning: {notice}");
         eprintln!(

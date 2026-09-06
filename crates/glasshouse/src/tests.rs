@@ -1270,6 +1270,138 @@ fn an_extraction_that_never_produced_an_outcome_is_reported_as_a_loss() {
     );
 }
 
+/// Dogfooding 2026-09-06, finding 4:
+/// [`glasshouse::evaluation::record_memory_extraction`]'s three shapes —
+/// ran with no failure, ran with a failure, and no outcome at all (both of
+/// its reasons) — with the counts and the failure phrase asserted.
+///
+/// `rejected` carries a planted credential-shaped value and planted
+/// memory-body text: the writer counts rejections (`.len()`), it never
+/// renders one, so neither string may reach the row it writes.
+#[test]
+fn the_extraction_observation_writer_counts_never_renders_a_rejection() {
+    use glasshouse::evaluation::{EvaluationKind, EvaluationObservations, ExtractionObservation};
+
+    const PLANTED_CREDENTIAL: &str = "sk-planted-test-credential-4e21";
+    const PLANTED_BODY: &str = "the staging database password is hunter2-not-real";
+
+    let fixture = CliFixture::new();
+
+    let mut ran = recorded_nothing();
+    ran.model = "test/writer".to_owned();
+    ran.recorded = vec![
+        glasshouse::memory::MemoryId::new("m1"),
+        glasshouse::memory::MemoryId::new("m2"),
+    ];
+    ran.duplicates = 3;
+    ran.speculative = 1;
+    ran.rejected = vec![glasshouse::memory::extract::Rejection::Store(format!(
+        "{PLANTED_BODY}: credential {PLANTED_CREDENTIAL}"
+    ))];
+    glasshouse::evaluation::record_memory_extraction(
+        &fixture.runtime,
+        "sess-ran",
+        "task_completed",
+        ExtractionObservation::Ran(&ran),
+        250,
+        glasshouse::evaluation::now_unix(),
+    );
+
+    let mut failed = recorded_nothing();
+    failed.model = "test/writer".to_owned();
+    failed.failure = Some(glasshouse::memory::extract::ExtractionFailure::NothingToExtract);
+    glasshouse::evaluation::record_memory_extraction(
+        &fixture.runtime,
+        "sess-failed",
+        "before_compaction",
+        ExtractionObservation::Ran(&failed),
+        5,
+        glasshouse::evaluation::now_unix(),
+    );
+
+    glasshouse::evaluation::record_memory_extraction(
+        &fixture.runtime,
+        "sess-none-bound",
+        "git_commit",
+        ExtractionObservation::NoOutcome {
+            bound_expired: true,
+        },
+        5000,
+        glasshouse::evaluation::now_unix(),
+    );
+    glasshouse::evaluation::record_memory_extraction(
+        &fixture.runtime,
+        "sess-none-prep",
+        "manual",
+        ExtractionObservation::NoOutcome {
+            bound_expired: false,
+        },
+        2,
+        glasshouse::evaluation::now_unix(),
+    );
+
+    let ledger = EvaluationObservations::open(&fixture.runtime).unwrap();
+    let rows = ledger.recent(10).unwrap();
+    let extraction_rows: Vec<_> = rows
+        .iter()
+        .filter(|row| row.kind == EvaluationKind::MemoryExtractionObserved)
+        .collect();
+    assert_eq!(extraction_rows.len(), 4, "{extraction_rows:?}");
+
+    let ran_row = extraction_rows
+        .iter()
+        .find(|row| row.session_id.as_deref() == Some("sess-ran"))
+        .expect("the ran case must record a row");
+    assert_eq!(ran_row.subject.as_deref(), Some("task_completed"));
+    let detail = ran_row.detail.as_deref().unwrap_or_default();
+    assert!(detail.contains("test/writer"), "{detail}");
+    assert!(
+        detail.contains("recorded 2, lowered 0, speculative 1, duplicates 3, rejected 1; 250 ms"),
+        "{detail}"
+    );
+    assert!(
+        !detail.contains(PLANTED_CREDENTIAL),
+        "a rejection's rendered message must never reach the ledger: {detail}"
+    );
+    assert!(
+        !detail.contains(PLANTED_BODY),
+        "a rejection's rendered message must never reach the ledger: {detail}"
+    );
+
+    let failed_row = extraction_rows
+        .iter()
+        .find(|row| row.session_id.as_deref() == Some("sess-failed"))
+        .expect("the failed case must record a row");
+    assert_eq!(failed_row.subject.as_deref(), Some("before_compaction"));
+    let detail = failed_row.detail.as_deref().unwrap_or_default();
+    assert!(detail.contains("test/writer"), "{detail}");
+    assert!(
+        detail.contains("no session activity to extract from"),
+        "{detail}"
+    );
+    assert!(detail.contains("5 ms"), "{detail}");
+
+    let none_bound_row = extraction_rows
+        .iter()
+        .find(|row| row.session_id.as_deref() == Some("sess-none-bound"))
+        .expect("the bound-expired case must record a row");
+    assert_eq!(none_bound_row.subject.as_deref(), Some("git_commit"));
+    let detail = none_bound_row.detail.as_deref().unwrap_or_default();
+    assert!(detail.contains("no outcome"), "{detail}");
+    assert!(detail.contains("the bound expired"), "{detail}");
+    assert!(detail.contains("5000 ms"), "{detail}");
+
+    let none_prep_row = extraction_rows
+        .iter()
+        .find(|row| row.session_id.as_deref() == Some("sess-none-prep"))
+        .expect("the preparation-failed case must record a row");
+    assert_eq!(none_prep_row.subject.as_deref(), Some("manual"));
+    let detail = none_prep_row.detail.as_deref().unwrap_or_default();
+    assert!(detail.contains("no outcome"), "{detail}");
+    assert!(detail.contains("preparation failed"), "{detail}");
+    assert!(detail.contains("2 ms"), "{detail}");
+}
+
 /// A run that stored something and rejected something else lost nothing a
 /// person needs to act on, and neither did one that found only
 /// duplicates.
@@ -2090,6 +2222,80 @@ fn a_completed_task_runs_extraction_and_the_memory_names_where_it_came_from() {
     assert_eq!(
         stored[0].provenance.project_phase,
         Some(glasshouse::memory::ProjectPhase::Alpha)
+    );
+}
+
+/// Dogfooding 2026-09-06, finding 4: `hook_extraction`'s durable trace of
+/// what a completed task's extraction did survives the process that ran it
+/// — a `MemoryExtractionObserved` row in the evaluation ledger, not only the
+/// stderr line nothing reads back. Through `report_hook_with`, the same
+/// production seam the test above uses.
+///
+/// The planted memory names a credential-shaped value on purpose: the
+/// existing extraction contract refuses to store it at all
+/// (`Refusal::Credential`), which is what turns this into a *rejected*
+/// count rather than a *recorded* one — and proves the row still never
+/// carries the value even when the memory it describes was refused for
+/// carrying one.
+///
+/// Deleting the `record_memory_extraction` call from `hook_extraction`
+/// kills this test.
+#[test]
+fn a_completed_task_running_through_the_hook_records_its_extraction_outcome() {
+    let fixture = CliFixture::new();
+    let id = recorded_session(&fixture.runtime);
+    let asked = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    const PLANTED_CREDENTIAL: &str = "sk-planted-hook-test-credential-7c2b";
+    let reply = format!(
+        r#"{{"memories":[{{"kind":"finding","authority":"constraint",
+     "disposition":"accepted","support":"established","confidence":"certain",
+     "rationale":"the hook process is the only thing that sees a turn end",
+     "project_phase":"alpha",
+     "body":"The deploy credential is {PLANTED_CREDENTIAL}."}}]}}"#
+    );
+
+    {
+        let asked = std::sync::Arc::clone(&asked);
+        crate::commands::hook::report_hook_with(&fixture.runtime, id.as_str(), "Stop", move |_| {
+            Box::new(Canned {
+                reply: reply.clone(),
+                asked: std::sync::Arc::clone(&asked),
+            })
+        });
+    }
+    assert_eq!(
+        asked.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "a completed task must ask the extraction model exactly once"
+    );
+    assert!(
+        stored_memories(&fixture.runtime).is_empty(),
+        "a credential-shaped body must be refused by the extraction contract, not stored"
+    );
+
+    let ledger = glasshouse::evaluation::EvaluationObservations::open(&fixture.runtime).unwrap();
+    let rows = ledger.recent(10).unwrap();
+    let row = rows
+        .iter()
+        .find(|row| row.kind == glasshouse::evaluation::EvaluationKind::MemoryExtractionObserved)
+        .expect("a completed task must record its extraction outcome in the evaluation ledger");
+    assert_eq!(row.subject.as_deref(), Some("task_completed"));
+    assert_eq!(row.session_id.as_deref(), Some(id.as_str()));
+    let detail = row.detail.as_deref().unwrap_or_default();
+    assert!(detail.contains("test/canned"), "{detail}");
+    assert!(
+        detail.contains("recorded 0, lowered 0, speculative 0, duplicates 0, rejected 1"),
+        "{detail}"
+    );
+    assert!(detail.contains(" ms"), "{detail}");
+    assert!(
+        !detail.contains(PLANTED_CREDENTIAL),
+        "a memory's own body must never reach the evaluation ledger, refused or not: {detail}"
+    );
+    assert!(
+        !detail.contains("deploy credential"),
+        "the memory's rationale/body text must never reach the ledger: {detail}"
     );
 }
 

@@ -276,6 +276,32 @@ pub enum EvaluationKind {
     /// verdict for that session instead, and prints the two counts apart. A
     /// session with two ratings takes the latest.
     RoutingRated,
+    /// How one hook-triggered memory extraction ended — dogfooding 2026-09-06
+    /// finding 4: extraction routed to a disposable resource and then nothing
+    /// durable said whether the model answered, timed out at its bound, or
+    /// returned nothing worth storing; the hook's one stderr line (the binary
+    /// crate's `commands::memory_extraction::lost_extraction_notice`) is the
+    /// only trace today and the harness swallows it. `subject` is the
+    /// [`crate::memory::extract::ExtractionTrigger::as_str`] word; `detail`
+    /// is one line built by [`crate::evaluation::record_memory_extraction`]
+    /// from the model description, the outcome's own counts or its failure's
+    /// fixed `Display` phrase, or — when extraction never produced an outcome
+    /// at all — which of preparation failing or the bound expiring it was,
+    /// plus the elapsed milliseconds.
+    ///
+    /// **One row per hook-triggered extraction, whatever it did — including a
+    /// `NothingToExtract` failure.** The hook's stderr notice stays silent
+    /// for that one case on purpose (a warning on every empty compaction
+    /// teaches people to ignore it), but this ledger is not the notice: a
+    /// reader here must be able to tell "nothing to extract" from "extraction
+    /// never ran". Never written for `glasshouse memory commit`
+    /// (`ExtractionTrigger::Manual` prints its own report in front of a
+    /// person watching; this row is for the triggers nobody is watching).
+    ///
+    /// **No memory body, activity line, provider response body or credential
+    /// value ever reaches `detail`.** Only counts (`.len()`), a fixed failure
+    /// phrase, the model's own rendered description, and a duration do.
+    MemoryExtractionObserved,
 }
 
 /// The `subject` this ledger writes for a destination whose cost class no
@@ -497,6 +523,7 @@ impl EvaluationKind {
             Self::RoutingConsumptionEstimated => "routing_consumption_estimated",
             Self::ReserveAvailabilityObserved => "reserve_availability_observed",
             Self::RoutingRated => "routing_rated",
+            Self::MemoryExtractionObserved => "memory_extraction_observed",
         }
     }
 
@@ -525,6 +552,7 @@ impl EvaluationKind {
             "routing_consumption_estimated" => Some(Self::RoutingConsumptionEstimated),
             "reserve_availability_observed" => Some(Self::ReserveAvailabilityObserved),
             "routing_rated" => Some(Self::RoutingRated),
+            "memory_extraction_observed" => Some(Self::MemoryExtractionObserved),
             _ => None,
         }
     }
