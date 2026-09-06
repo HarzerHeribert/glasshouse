@@ -227,8 +227,8 @@ impl fmt::Display for TaskContinuity {
         match self {
             Self::Unknown => f.pad("unknown"),
             Self::OneTask => f.pad("one task"),
-            Self::BoundariesCrossed(1) => f.pad("1 task completed"),
-            Self::BoundariesCrossed(n) => write!(f, "{n} tasks completed"),
+            Self::BoundariesCrossed(1) => f.pad("1 task boundary completed"),
+            Self::BoundariesCrossed(n) => write!(f, "{n} task boundaries completed"),
         }
     }
 }
