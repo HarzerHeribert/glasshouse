@@ -49,6 +49,11 @@ impl Fixture {
         Profile::compile(&self.root, Some(settings))
     }
 
+    /// Every caller is a test gated to a host that can spawn (`unix`), so
+    /// on Windows this helper is dead and `[workspace.lints.rust]` denies
+    /// it -- the pane Windows cell failed to compile this target at
+    /// `b169254` before running one test.
+    #[cfg(unix)]
     fn write(&self, path: &Path, contents: &str) -> PathBuf {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).unwrap();

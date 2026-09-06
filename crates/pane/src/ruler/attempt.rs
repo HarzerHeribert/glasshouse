@@ -4,7 +4,9 @@
 //!
 //! **The invariant that is not negotiable:** neither the harness nor the
 //! task's test command ever runs anywhere but the worktree cut for that
-//! attempt, and that worktree is always the one that gets removed.
+//! attempt -- whether the harness is launched directly or, with
+//! `--via-glasshouse`, through `<glasshouse> launch <row> --profile
+//! <profile> --` -- and that worktree is always the one that gets removed.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -99,6 +101,11 @@ pub struct RunOpts {
     pub scratch: PathBuf,
     /// Passed to the harness child as `ANTHROPIC_BASE_URL` when set.
     pub gateway: Option<String>,
+    /// When set, launch the row through `<glasshouse> launch <row's own
+    /// slug> --profile <profile> -- <substituted argv>` instead of the
+    /// row's own `program` -- `cli::run` refuses this without `meter` set to
+    /// `Meter::Command` and refuses it together with `gateway`.
+    pub via_glasshouse: Option<String>,
     pub meter: Meter,
     pub harnesses: HashMap<String, HarnessCommand>,
 }
@@ -181,7 +188,38 @@ fn run_attempt_in(
         );
     };
 
-    let mut launch = Command::new(&command.program);
+    // `--via-glasshouse` swaps the program the row's `command.args` template
+    // is fed to; the template itself -- `{root}`/`{statement}` substitution
+    // included -- is unchanged on either path. Nothing in `command.program`
+    // reaches this path: Glasshouse resolves the harness's own executable.
+    let mut launch = match &opts.via_glasshouse {
+        Some(profile) => {
+            let glasshouse = opts.meter.glasshouse_path().expect(
+                "cli::run refuses --via-glasshouse without --meter before any attempt runs",
+            );
+            let mut cmd = Command::new(glasshouse);
+            // `--headless`: the harness runs in its own pty, captured, and
+            // never takes the terminal -- `launch.status()` below is exactly
+            // the wait for that. `--fresh --no-routing`: without them a
+            // launch may continue a warm session this project already has,
+            // handing one attempt another attempt's context -- every
+            // attempt is its own fresh session. `--no-memory`: the
+            // benchmark measures the harness, not Glasshouse's
+            // project-memory briefing (lead's addendum, 03:25; the primary
+            // may overrule).
+            cmd.arg("launch")
+                .arg(harness.as_str())
+                .arg("--profile")
+                .arg(profile)
+                .arg("--headless")
+                .arg("--fresh")
+                .arg("--no-routing")
+                .arg("--no-memory")
+                .arg("--");
+            cmd
+        }
+        None => Command::new(&command.program),
+    };
     for arg in &command.args {
         match arg.as_str() {
             "{root}" => launch.arg(dir),
@@ -211,7 +249,7 @@ fn run_attempt_in(
 
     let end_time = SystemTime::now();
     let wall_clock = start_wall.elapsed();
-    let (tokens, turns) = opts.meter.read(start_time, end_time);
+    let (tokens, turns) = opts.meter.read(dir, start_time, end_time);
     let changed_lines = diff_shortstat(dir);
 
     let outcome = match test_result {

@@ -1613,12 +1613,25 @@ fn a_deny_inside_the_root_is_visible_to_a_platform_applier() {
 
     // The path the profile refuses is inside the root an applier would
     // otherwise grant wholesale, which is the whole point of enumerating.
+    //
+    // Compared in one spelling, and that is the point rather than a
+    // weakening. This module keeps two forms of every path on purpose: a
+    // refusal's `path` is the *shown* form (61D -- `\` folded, a verbatim
+    // `\\?\` prefix reduced, so a model reads the spelling its settings
+    // file would use), while `root()` is the OS path an applier hands
+    // straight to `SetNamedSecurityInfoW`, a Landlock rule or a bwrap bind.
+    // `Path::starts_with` on that pair compares a `Disk` prefix against a
+    // `VerbatimDisk` one, so on Windows it said no for a path plainly
+    // inside the root: `C:/Users/.../secrets/token.txt` against a root of
+    // `\\?\C:\Users\...`. Both forms are deliberate; asking the question
+    // across them was the defect.
     let secret = fixture.root.join("secrets/token.txt");
     let denied = refusal(profile.check("Read", Access::Read, &secret));
     assert!(
-        Path::new(&denied.path).starts_with(profile.root()),
-        "{:?} must be inside the root an applier grants wholesale",
-        denied.path
+        spelling_components(Path::new(&denied.path)).starts_with(&root_components),
+        "{:?} must be inside the root an applier grants wholesale, which is {:?}",
+        denied.path,
+        root_components
     );
 
     // §4's set is enumerable too -- an applier owes it the same subpath
@@ -1658,6 +1671,40 @@ fn a_deny_inside_the_root_is_visible_to_a_platform_applier() {
         profile.rules().count(),
         never.len() + deny.len() + allow.len(),
         "every rule is enumerated exactly once"
+    );
+}
+
+/// The falsifying half of the assertion above: the same comparison, in the
+/// same spelling, must still say *no* for a path outside the root.
+///
+/// Without it, folding both sides through [`spelling_components`] would be
+/// satisfied by a comparison that always holds, and the claim an applier
+/// leans on -- what the profile refuses in-root lies inside the subtree the
+/// applier grants wholesale -- would carry no information at all.
+#[test]
+fn a_refusal_outside_the_root_is_not_mistaken_for_one_inside_it() {
+    let fixture = Fixture::new("outside-the-root");
+    let root = fixture.pattern_root();
+    let settings = format!(
+        r#"{{"permissions":{{
+            "allow":["Read({root}/**)"],
+            "deny":["Read({root}/secrets/**)"]
+        }}}}"#
+    );
+    let profile = Profile::compile(&fixture.root, Some(&settings));
+    let root_components = spelling_components(profile.root());
+
+    // Outside the project *and* outside `$HOME`, so the refusal is about
+    // where the path is rather than about §4.3 -- and on Windows it is
+    // `C:\...`, whose drive component alone would satisfy a comparison that
+    // only looked at the prefix's first term.
+    let elsewhere = Elsewhere::new("outside-the-root").root.join("token.txt");
+    let denied = refusal(profile.check("Read", Access::Read, &elsewhere));
+    assert!(
+        !spelling_components(Path::new(&denied.path)).starts_with(&root_components),
+        "{:?} is outside {:?} and the comparison must say so",
+        denied.path,
+        root_components
     );
 }
 

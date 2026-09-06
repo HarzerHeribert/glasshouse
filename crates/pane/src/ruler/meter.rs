@@ -19,8 +19,15 @@
 //! `ATTEMPT_LOCK`: only one attempt's harness-launch-through-meter-read span
 //! may be open at a time, so every row observed inside `[from, to]` belongs
 //! to the attempt that opened that window.
+//!
+//! **`read` runs `routing-cost` with the attempt's own worktree as its
+//! current directory.** `glasshouse routing-cost` reads whichever project
+//! the caller's cwd belongs to (the primary's ANSWER §1,
+//! `.agent-runtime/pane/ask-primary-gateway-for-benchmark.md`) -- so `dir`
+//! is not incidental. Without it this module reads the ruler's own project,
+//! not the attempt's.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -69,7 +76,11 @@ impl Meter {
     /// `routing-cost` takes only `--since`, not an upper bound, so this asks
     /// for everything from `from` onward and lets [`Readout::for_window`]
     /// apply the `to` bound locally.
-    pub fn read(&self, from: SystemTime, to: SystemTime) -> (Tokens, Option<u32>) {
+    ///
+    /// `dir` becomes the command's current directory -- see the module doc
+    /// comment for why that, not a database path or a session filter, is
+    /// what makes this the attempt's own ledger.
+    pub fn read(&self, dir: &Path, from: SystemTime, to: SystemTime) -> (Tokens, Option<u32>) {
         match self {
             Meter::None => (Tokens::default(), None),
             Meter::Command { glasshouse } => {
@@ -78,6 +89,7 @@ impl Meter {
                     .arg("--json")
                     .arg("--since")
                     .arg(unix_secs(from).to_string())
+                    .current_dir(dir)
                     .output();
                 match output {
                     Ok(out) if out.status.success() => {
@@ -87,6 +99,16 @@ impl Meter {
                     _ => (Tokens::default(), None),
                 }
             }
+        }
+    }
+
+    /// The `glasshouse` executable this meter shells out to, if one is
+    /// configured. `--via-glasshouse` launches the harness through this same
+    /// binary -- the launch and the ledger are one binary.
+    pub fn glasshouse_path(&self) -> Option<&Path> {
+        match self {
+            Meter::None => None,
+            Meter::Command { glasshouse } => Some(glasshouse.as_path()),
         }
     }
 }
@@ -220,7 +242,7 @@ mod tests {
 
     #[test]
     fn no_meter_yields_absent_tokens_and_turns() {
-        let (tokens, turns) = Meter::None.read(secs(0), secs(200));
+        let (tokens, turns) = Meter::None.read(Path::new("."), secs(0), secs(200));
         assert_eq!(tokens.total(), None);
         assert_eq!(turns, None);
     }
@@ -230,7 +252,7 @@ mod tests {
         let meter = Meter::Command {
             glasshouse: PathBuf::from("/definitely/does/not/exist/glasshouse"),
         };
-        let (tokens, turns) = meter.read(secs(0), secs(200));
+        let (tokens, turns) = meter.read(Path::new("."), secs(0), secs(200));
         assert_eq!(tokens.total(), None);
         assert_eq!(turns, None);
     }
@@ -257,7 +279,7 @@ mod tests {
         let meter = Meter::Command {
             glasshouse: fake_glasshouse,
         };
-        let (tokens, turns) = meter.read(secs(0), secs(200));
+        let (tokens, turns) = meter.read(&dir, secs(0), secs(200));
         assert_eq!(tokens.total(), Some(10));
         assert_eq!(turns, Some(1));
     }
@@ -285,7 +307,7 @@ mod tests {
         let meter = Meter::Command {
             glasshouse: fake_glasshouse,
         };
-        let (tokens, turns) = meter.read(secs(0), secs(200));
+        let (tokens, turns) = meter.read(&dir, secs(0), secs(200));
         assert_eq!(tokens.total(), None);
         assert_eq!(
             turns,
