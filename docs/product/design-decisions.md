@@ -19952,3 +19952,47 @@ That is the Linux equivalent of macOS's `SecKeychainSetUserInteractionAllowed(0)
 ## Direct verified completion — decided directly, 2026-09-06
 
 The guarded-continuations handoff (2026-09-05) came out of a Codex discussion the user drove, and its plan (`.agent-runtime/report-guarded-continuations-plan.md`) waited on a Codex verification. On 2026-09-06 the user closed those sessions and ruled: *"yes do it directly … the codex inspiration was only so we wouldn't have to reinvent the wheel … we can implement directly and bypass codex completely."* So: guarded continuations need no new line (a guard is an expression in the model's own program, already what `runtime-contract.md` §1 and §5 give); **direct verified completion** is the one new capability — map line 2485, `runtime-contract.md` §9, `model-contract.md` §2 — and its eight open decisions are ruled in `phase-61.md` 61E. The same ruling settles the lane's two Codex-adjacent choices: pane embeds V8 through the `v8` crate directly rather than vendoring Codex's `deno_core` runtime, and nothing waits on Codex again. **Why:** the harness is not Codex; open-source concepts were to be borrowed, never depended on.
+
+## Seven experiment gates adopted as standing rules — the user, 2026-09-06
+
+Phases 52 and 53 carried seven criteria for features nobody has proposed — semantic retrieval with embeddings, and a graph database. They sat as *deferred gates awaiting a decision*. Put to the user as yes/no on 2026-09-06, the answer was yes to all seven; each is now a standing rule of this project and its map box is ticked **on that decision, not on a mechanism** — there is nothing in the build to mutate, because no embedding index and no graph store exist. The day a package proposes either, its Phase −1 cites this section and the phase entries, and the rule binds it:
+
+1. **1866** — before any embedding work starts, concrete retrieval cases that lexical (FTS5) search fails on are written down first (`phase-52.md` 1865 already records the miss on every production search door; those recorded misses are that list's source).
+2. **1867** — if semantic retrieval is added, it combines with lexical retrieval; it never replaces it.
+3. **1868** — embeddings stay physically project-isolated: one index per project, never a shared vector store, the same isolation the SQLite store keeps by trigger.
+4. **1869** — semantic retrieval respects memory lifecycle status: a superseded or retired memory never resurfaces as current truth through a vector match.
+5. **1870** — semantic retrieval is evaluated on real Glasshouse queries before it becomes any default path.
+6. **1879** — no graph database is ever added solely to visualize project memory (map line 1107's no-decorative-graph rule already guards the widget; this guards the store).
+7. **1882** — before any graph database, SQLite relations are shown insufficient for a real query; `phase-53.md`'s 1882 entry records today's evaluation — one relationship ever needed, built, and serving a real query — so the burden is on the proposal.
+
+**Why:** an open gate for a feature nobody wants counts as work pending and is not; a rule recorded and cited is the same protection at no upkeep. The Cluster Q refusals of 1867–1870, 1879 and 1882 are superseded by this decision.
+
+## Steering decisions of record — the user, 2026-09-06 (after midnight)
+
+Put as yes/no by the orchestrator and answered *"agree with all of the proposed decisions"*; each is a standing decision, not a preference to re-ask:
+
+1. **Pane's first live run** (61E-WIRE, line 2464) may use the user's Anthropic subscription through the Glasshouse gateway.
+2. **If the ruler shows no token win on any workload tier, pane still ships** as the first-party harness and the absence of a win is recorded (2464's *"or record why not"*).
+3. **The `v8` crate** — a large prebuilt binary — is an accepted dependency of pane's runtime.
+4. **Pane's Windows cell may lag** behind macOS and Linux: 61E-WIRE proceeds while the Windows cell is red, provided the red is named and packaged.
+5. **Refused lines whose producer is a vendor's that will never ship, or a concept the design dropped, may be closed as decided-out** with the register's reasoning recorded — listed before any is touched (`GH-REFUSED-LINES-CENSUS`).
+6. **The API-served topology is the intended one** for Phase 60's conflict notice: an orchestrator started by `glasshouse api serve` receives notices; a shell-launched one does not, and that is a stated limit, not a defect (line 2414).
+7. **Dogfooding runs daily without asking**: one real Claude Code session through the shipped binary, a few dollars each.
+8. **A support-work provider may be configured on this machine** from the local key file, a cheap model, so memory extraction runs during dogfooding.
+9. **`sites/` changes handed off by the user's other agents may be committed and pushed** without a fresh approval each time, restricted to `sites/**` and the Pages workflow.
+10. **A tagged pre-release** (a GitHub release with built binaries, no crates.io publish) is cut from `main` once the pane Windows cell is green.
+
+Also asked and answered the same night: the seven Phase 52/53 gates are standing rules (*Seven experiment gates adopted as standing rules*), and direct verified completion is implemented directly with no Codex step (*Direct verified completion — decided directly*). **Next question the user asked for:** which Maybe/Experimental lines are worth pulling into the committed map — to be put as a yes/no list from the census.
+
+### Two more, answered at 03:12 through the parked-question mailbox (in product terms, at the user's request)
+
+11. **The OS keychain is the supported place for provider keys.** A key exported in the launching shell serves the launching Glasshouse process only; once map line 488 holds, the harness and the helpers Glasshouse runs inside it (memory extraction, the context-firewall reducer) cannot see it, and the on-screen notice — the hook's stderr line and `glasshouse doctor` — tells the user to move it (`security add-generic-password -s glasshouse -a <VAR> -w`; the item is service `glasshouse`, account `<VAR>`, `secret::native::os_credential_for_variable`). Declined with it: an opt-in import of shell keys into the keychain, and a private credential channel from the launcher to its hooks — a channel would be no stronger than the environment against a same-user harness and is new machinery. **Why:** 488 says *inside the Glasshouse process or secure secret-store boundary*, and the keychain is that boundary; the verifier of `GH-LAUNCH-STRIPS-PROVIDER-CREDENTIALS` found the consequence for the hooks, and the fix is that the loss is loud, not that the boundary is weakened.
+12. **The pane benchmark runs only on the user's Anthropic subscription, and waits for the user** to be at the keyboard (the OAuth token comes out of Claude Code's keychain item behind an Allow dialog only they can click). No benchmark on a router key; a router key may still drive dry runs of the plumbing and the lead's direct probes, reported as findings and never as the benchmark.
+
+### Decision 5 applied — ten lines closed as decided-out, 2026-09-06 02:20
+
+`GH-REFUSED-LINES-CENSUS` (Sonnet, read-only) classified the 60 open mandatory lines outside Phase 61: **10 decided-out** (340, 341 — Antigravity ships no event surface; 1169, 1172, 1173 — Glasshouse never compacts a session itself, by design; 1205, 1206, 1208, 1213, 1215 — provider signals no observed provider sends), **34 keep-open** with a named producer, **16 disputed** (register and evidence disagree, or the row is stale) for the orchestrator to rule one by one, and **0 packageable now**. The ten are ticked on this decision with evidence entries naming what would reopen each; the register rows are retired. The 182 parked Maybe lines were ranked for the user's next yes/no list (Table 2 of the census).
+
+## Fourteen parked lines promoted — the user, 2026-09-06 02:35
+
+The census (`GH-REFUSED-LINES-CENSUS`, Table 2) ranked the fifteen parked Maybe lines most worth pulling into the committed map, by product value for someone running several harness sessions on real projects; the orchestrator put them to the user as yes/no with a recommendation each, and the user answered *"yes i agree with your 15 points"* — fourteen promoted, the fifteenth (read-intent, parked 2081) parked until queueing exists. They are **Phase 62** (map lines 2493–2518, appended so no id shifts), in five sub-phases: 62A queue/override/re-plan (from Maybe A/D/E/H), 62B convergent co-editing (Maybe L — the co-edit protocol this project already runs by hand), 62C session drift advisory (Maybe K), 62D in-turn diagnostics through `PostToolUse` (Maybe J), 62E prediction inputs, read visibility and the measurement gate (Maybe C/G/I). **Order:** after 61E-WIRE and the ruler's two-column run; the user's words — *"decide that before you have to build them"*. **Why:** each is the next step the map always intended past Phase 60's narrow detection, and this project is its own first user of every one.

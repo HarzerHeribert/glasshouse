@@ -126,11 +126,11 @@ whose consuming phases are still at zero. **It belongs in Cluster D.**
 
 | line | why it is not ours |
 |---|---|
-| 1205 | no header names an input-vs-output token split |
-| 1206 | no `RATE_LIMIT_HEADERS` entry contains "cache" |
-| 1208 | the one live account read answers `null` |
-| 1213 | no concurrency header exists |
-| 1215 | Groq's token ceiling arrives with **no window**; filing it per-minute would invent the period |
+| ~~1205~~ **CLOSED 2026-09-06 (decided-out, decision 5)** | no header names an input-vs-output token split |
+| ~~1206~~ **CLOSED 2026-09-06 (decided-out, decision 5)** | no `RATE_LIMIT_HEADERS` entry contains "cache" |
+| ~~1208~~ **CLOSED 2026-09-06 (decided-out, decision 5)** | the one live account read answers `null` |
+| ~~1213~~ **CLOSED 2026-09-06 (decided-out, decision 5)** | no concurrency header exists |
+| ~~1215~~ **CLOSED 2026-09-06 (decided-out, decision 5)** | Groq's token ceiling arrives with **no window**; filing it per-minute would invent the period |
 | 1216 | reader built and wired; no host has ever sent a window > 60s |
 | 1317 | nothing states whether a 429 is provider-, model-, account- or pool-scoped |
 
@@ -1354,13 +1354,13 @@ declared variant with no production caller.
 
 | line | why it cannot be packaged |
 |---|---|
-| **1867** *"If semantic retrieval is added, combine it with lexical retrieval…"* | Cluster Q: no second retrieval path exists to combine with the lexical one. |
-| **1868** *"Keep project isolation physically intact when adding embeddings."* | Cluster Q: no embeddings table or column exists to isolate. |
-| **1869** *"Ensure semantic retrieval respects memory lifecycle status…"* | Cluster Q: nothing can resurrect a superseded memory while one retrieval path exists; the lexical precedent to copy is `memory/search.rs:44-54`. |
-| **1870** *"Evaluate semantic retrieval on real Glasshouse queries before making it part of the default path."* | Cluster Q in an evaluation gate's clothing: the object of the evaluation does not exist. |
-| **1879** *"Do not add a graph database solely to visualize project memory."* | Cluster Q: no graph database exists; line 1107's tripwire guards the widget, not a database, and would not tick this regardless. |
-| **1882** *"Evaluate whether SQLite relations are insufficient before adopting a dedicated graph database."* | Cluster Q on the restraint reading; the evaluation itself is recorded in `phase-53.md` (one relationship ever needed, ever built) and closes the line the day a graph database is proposed. |
-| **1866** *"Define concrete retrieval cases that lexical search cannot solve…"* | **Not Cluster Q** — a reachable question with no material: no recorded lexical failure exists. Successor: revisit after `GH-RETRIEVAL-CRITERIA`'s miss rows accumulate. |
+| ~~1867~~ **CLOSED 2026-09-06 (adopted as a standing rule by the user)** *"If semantic retrieval is added, combine it with lexical retrieval…"* | Cluster Q: no second retrieval path exists to combine with the lexical one. |
+| ~~1868~~ **CLOSED 2026-09-06 (adopted as a standing rule by the user)** *"Keep project isolation physically intact when adding embeddings."* | Cluster Q: no embeddings table or column exists to isolate. |
+| ~~1869~~ **CLOSED 2026-09-06 (adopted as a standing rule by the user)** *"Ensure semantic retrieval respects memory lifecycle status…"* | Cluster Q: nothing can resurrect a superseded memory while one retrieval path exists; the lexical precedent to copy is `memory/search.rs:44-54`. |
+| ~~1870~~ **CLOSED 2026-09-06 (adopted as a standing rule by the user)** *"Evaluate semantic retrieval on real Glasshouse queries before making it part of the default path."* | Cluster Q in an evaluation gate's clothing: the object of the evaluation does not exist. |
+| ~~1879~~ **CLOSED 2026-09-06 (adopted as a standing rule by the user)** *"Do not add a graph database solely to visualize project memory."* | Cluster Q: no graph database exists; line 1107's tripwire guards the widget, not a database, and would not tick this regardless. |
+| ~~1882~~ **CLOSED 2026-09-06 (adopted as a standing rule by the user)** *"Evaluate whether SQLite relations are insufficient before adopting a dedicated graph database."* | Cluster Q on the restraint reading; the evaluation itself is recorded in `phase-53.md` (one relationship ever needed, ever built) and closes the line the day a graph database is proposed. |
+| ~~1866~~ **CLOSED 2026-09-06 (adopted as a standing rule by the user)** *"Define concrete retrieval cases that lexical search cannot solve…"* | **Not Cluster Q** — a reachable question with no material: no recorded lexical failure exists. Successor: revisit after `GH-RETRIEVAL-CRITERIA`'s miss rows accumulate. |
 
 Packaged: **1865** (`GH-RETRIEVAL-CRITERIA`, Amber) and **1880, 1881, 1883**
 (`GH-RELATIONSHIP-PROOFS`, Green, tests only).
@@ -1504,3 +1504,25 @@ The first `--windows-vm` run in a day found, in order: a `libc::mktime` that lib
 | 1757, 1766 | `GH-ROUTE-RATIONALE-SINK` (Amber) | the session router's explanation, in hand at both `record_routed_session` sites, is one `SessionRouteDecided` row on the 2026-08-30 sink; `sessions show` prints the block, `status` the strongest three (`phase-47.md`). 4/4 KILLED, one after the worker strengthened a test a reversed sort had passed. The evaluation module's own pinning test forbids serde — the JSON is hand-written; and `database.rs`'s kind list gained the variant at integration. |
 
 **Cluster H now holds 1760, 1767 and 1769 only** — a cache-temperature estimate that does not exist, a correlation nothing computes, a durable extraction record. The 2026-08-30 scoping (*0 WOULD CLOSE, 5 NEEDS MORE*) is discharged for the five it named except 1763's sibling 1769; the sink paid for three boxes and a fourth (1763) on an earlier package.
+
+## 1866–1870, 1879, 1882 CLOSED — 2026-09-06, the user's decision
+
+Seven experiment-gate criteria (Phases 52 and 53) were put to the user as yes/no and adopted as standing rules; their Cluster Q refusals are superseded and the boxes are ticked on the decision (`design-decisions.md`, *Seven experiment gates adopted as standing rules*; `phase-52.md`, `phase-53.md`). Do not package them; cite them.
+
+
+## 340, 341, 1169, 1172, 1173, 1205, 1206, 1208, 1213, 1215 CLOSED — 2026-09-06, decided-out under the user's decision 5
+
+The census (`.agent-runtime/report-refused-lines-census.md`) found ten open lines whose producer is a vendor's that will never ship (Antigravity's event surface; provider headers that no observed provider sends) or a concept the design refuses (Glasshouse never compacts a session itself). Closed on the decision, each with an evidence entry naming what would reopen it. The 34 keep-open lines name their producer package in the census; the 16 disputed rows are the orchestrator's to rule, one by one, and stay open meanwhile.
+## Rulings on the census's sixteen disputed rows — the primary, 2026-09-06 03:20
+
+`GH-REFUSED-LINES-CENSUS` (`.agent-runtime/report-refused-lines-census.md`, Table 1) marked sixteen rows *disputed*: the register and the evidence disagree, or the row is stale. Each ruled here against current code; the older row stays above as history and this section supersedes it.
+
+- **514** (9H) — keep-open, producer named: `GH-SESSION-MIGRATION`, a `glasshouse sessions migrate <id> --profile <name>` verb that ends a session's sticky assignment and records a new one at a task boundary. No callee exists (`grep -rn migrat crates/glasshouse/src/commands` is empty), so *missing caller* undersold it. Not packaged: not among the user's product-relevant lines.
+- **740** (15) — its blocker 745 closed with `GH-WORKER-READ`; prove-it dispatched (`GH-PROVE-IT-BATCH-2`): after the wake-up, the worker session stays `active` and `send_message` still delivers.
+- **932, 919, 920, 921, 923, 943** (Cluster F) — keep-open, and the producer the cluster was refused for lacking now has a name: **Phase 61's direct verified completion (map 2485)** — the first-party harness runs this repository's tests itself and knows their outcome, which is a source of repository truth. Re-derive the cluster after 2485 lands. Not decided-out: the concept was never dropped.
+- **828, 829** (20) — the heuristic refusal above stands; the mechanism is the extraction prompt's own rule (`memory/extract/schema.rs:659`, *could not cheaply rediscover by reading the code*). Prove-it dispatched to pin it, with the limit stated that compliance is the model's.
+- **1170, 1175** (31) — uncensused until now; producers found: `routing/session/reserve.rs:246` (*switching and bootstrap cost*) and `launch --from-checkpoint` (Phase 40). Prove-it dispatched.
+- **1216** (32A) — the reader is built (`LongWindowRequests`, `window_seconds`); prove-it dispatched with a synthetic 86 400 s window. Ticks on that demonstration with the limit that no observed provider sends such a window — distinct from the five Cluster E lines closed as decided-out under decision 5, whose readers do not exist.
+- **1323** (33) — untouched, by the user's own decision above.
+- **1356** (33B) — the row at *Cluster P/Q* rests on *nothing computes TTFC*, stale since 1347–1352 and 1355 built it (migration 25). Re-derived: keep-open, producer = a comparer that segments by the task's tool requirement; an Amber package `GH-TTFC-SEGMENTED` only if a cross-task TTFC comparison exists in `routing/domain.rs` (a reader checks before a packet is written). 1360 is unchanged.
+- **621** (9K) — the census's claim that folding logic lives in `shell/view.rs` and `shell/state/` is wrong: `fold` appears there only inside comments. Glasshouse offers no folding, so the line's antecedent is absent — Cluster Q, keep-open, no producer, do not package until a folding feature is proposed.

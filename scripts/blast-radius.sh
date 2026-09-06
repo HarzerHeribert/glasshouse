@@ -654,6 +654,19 @@ if [ "${#FILES[@]}" -gt 0 ]; then
     printf '  \033[33mThis script runs on THIS platform only. A green result here is\n'
     printf '  NOT evidence about the other two.\033[0m Run the full gate before\n'
     printf '  believing it:  scripts/ci-local.sh --macos --linux --windows-vm\n'
+    # A cheap half of that gate runs here when the cross target is installed:
+    # `cargo check` for Windows catches what the sweep otherwise finds twenty
+    # minutes later -- a `cfg(unix)`-only constructor leaving an enum variant
+    # `dead_code` under `warnings = "deny"` turned every Windows cell red on
+    # 2026-09-06 (`17599f3`). Two minutes here, or a red sweep and a fix-forward.
+    if [ "$DRY" -ne 1 ] && rustup target list --installed 2>/dev/null | grep -qx 'x86_64-pc-windows-gnu'; then
+      printf '\n\033[1m=== cargo check --tests --target x86_64-pc-windows-gnu (platform-conditional files changed) ===\033[0m\n'
+      if env -u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_API_KEY cargo check -p glasshouse --tests --target x86_64-pc-windows-gnu 2>&1 | grep -E '^(error|warning: unused)' ; then
+        printf '\033[31mblast-radius: the Windows target does not build -- fix before pushing\033[0m\n'
+        exit 1
+      fi
+      printf '  windows-gnu check: clean\n'
+    fi
   fi
 fi
 

@@ -135,3 +135,26 @@ Recorded scope limits — stated by the worker, not discovered later:
 #### Follow-up landed same day: the notice names the cause honestly
 
 Package `GH-EXTRACT-MODEL-ERROR-WORDING`, 2026-08-31, Sonnet at low (Green). `transport_error` gained one arm before the catch-all: a non-timeout `ureq::Error::Io(_)` — a refused, reset or dropped connection — answers `Failed { phrase: "the extraction model could not be reached" }` instead of falling through to `Unavailable`, so a person with a configured model on a closed port is no longer told *"no extraction model is available"*. Fixed phrase, nothing interpolated, per `transport_error`'s own rule. Mutation `drop-io-arm` KILLED by the closed-port test asserting the phrase present and the old phrase absent.
+
+## Closed as decided-out — 2026-09-06, the user's decision 5 (`GH-REFUSED-LINES-CENSUS`)
+
+The user authorised closing lines whose producer is a vendor's that will never ship or a concept the design dropped, with the register's reasoning recorded (`design-decisions.md`, *Steering decisions of record — 2026-09-06*, item 5). The census (`.agent-runtime/report-refused-lines-census.md`, Table 1) named these; each box is ticked on that decision, not on a mechanism.
+
+### Never compact a session solely because its prompt cache is estimated to be cold. (line 1169)
+
+State: **COMPLETE — decided-out**, ruled 2026-09-06 by the orchestrator under decision 5. Why the producer will not exist: Glasshouse never compacts anything itself (`shell/state.rs` only forwards keystrokes inside a test boundary), and the design decision to keep native compaction and project memory as separate concepts is recorded in the register (*Headroom concepts refused by name*) (phase-31.md:14-17; register:1393 (Cluster Q)).
+
+Limits: no behaviour is verified; the box records that the input the line depends on is not Glasshouse's to produce. It comes back off the day Glasshouse ever compacts a session itself, which the design refuses — that package cites this entry in its Phase −1.
+
+### Prefer compaction at semantic task boundaries over arbitrary elapsed-time boundaries. (line 1172)
+
+State: **COMPLETE — decided-out**, ruled 2026-09-06 by the orchestrator under decision 5. Why the producer will not exist: nothing in Glasshouse decides or schedules compaction, so there is no boundary choice to prefer (phase-31.md:14-17 (Cluster Q)).
+
+Limits: no behaviour is verified; the box records that the input the line depends on is not Glasshouse's to produce. It comes back off the day Glasshouse ever schedules compaction, which the design refuses — that package cites this entry in its Phase −1.
+
+### Allow the native harness to perform its own compaction mechanism rather than replacing it with a Glasshouse-specific history format. (line 1173)
+
+State: **COMPLETE — decided-out**, ruled 2026-09-06 by the orchestrator under decision 5. Why the producer will not exist: structurally immune twice over: no Glasshouse compaction exists, and `glasshouse hook` drains a hook's payload into `io::sink()` unread, so the binary never holds a session's conversation to replace (phase-31.md:14-17; register:917-921).
+
+Limits: no behaviour is verified; the box records that the input the line depends on is not Glasshouse's to produce. It comes back off the day Glasshouse ever holds or rewrites a session's history, which the design refuses — that package cites this entry in its Phase −1.
+

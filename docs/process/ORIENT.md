@@ -13,9 +13,9 @@ This exists because `CLAUDE.md`'s eleven-document reading list costs about
 derived from those same documents and points at the file and line to open
 next. **Read this first, then open only what you actually need.**
 
-**1312 closed · 87 active committed open (94%)** — across 20 phases.
+**1331 closed · 89 active committed open (94%)** — across 20 phases.
 
-Not in the work queue: **7 deferred gate criteria** (Phase 52, Phase 53) awaiting a user decision, and **229 parked experimental lines**. They are visible in the map; they are not release-blocking work.
+Not in the work queue: **0 deferred gate criteria** (Phase 52, Phase 53) awaiting a user decision, and **229 parked experimental lines**. They are visible in the map; they are not release-blocking work.
 
 ## Where the work is
 
@@ -24,6 +24,7 @@ closures are usually at the top. Open the map at the line number given.
 
 | phase | title | open | closed | map line |
 |---|---|---|---|---|
+| Phase 9G | Glasshouse local gateway process | **1** | 18 | `474` |
 | Phase 9H | Sticky gateway routing for harness-backed interactive sessions | **1** | 13 | `501` |
 | Phase 15 | Orchestrator wake-up flow | **1** | 7 | `731` |
 | Phase 21F | Memory retrieval quality | **1** | 10 | `927` |
@@ -32,26 +33,25 @@ closures are usually at the top. Open the map at the line number given.
 | Phase 32G | Provider-aware request-cost estimation | **1** | 9 | `1296` |
 | Phase 34C | Automatic routing-model selection | **1** | 12 | `1429` |
 | Phase 38 | Quota-preserving routing | **1** | 6 | `1604` |
-| Phase 9 | Antigravity adapter | **2** | 5 | `330` |
 | Phase 20 | Minimal durable project memory | **2** | 16 | `805` |
+| Phase 31 | Compaction-aware behavior | **2** | 5 | `1167` |
+| Phase 32A | Unified quota and capacity model | **2** | 19 | `1196` |
 | Phase 33 | Resource health | **2** | 13 | `1309` |
 | Phase 33B | Reliability-adjusted agent performance | **3** | 11 | `1345` |
-| Phase 60 | Parallel-session file coordination | **3** | 13 | `2374` |
 | Phase 21E | Decision ladder and conflict handling | **4** | 8 | `907` |
-| Phase 31 | Compaction-aware behavior | **5** | 2 | `1167` |
 | Phase 21G | Memory revalidation | **6** | 3 | `941` |
-| Phase 32A | Unified quota and capacity model | **7** | 14 | `1196` |
 | Phase 9K | Harness-aware response profiles | **8** | 29 | `578` |
 | Phase 51 | Evaluation hooks | **13** | 24 | `1818` |
+| Phase 62 | Parallel-session coordination, second slice: queueing, co-editing, drift, in-turn diagnostics | **14** | 0 | `2487` |
 | Phase 61 | pane: the first-party harness | **24** | 11 | `2419` |
 
-**Fully closed (89):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 7, Phase 8, Phase 9A, Phase 9B, Phase 9C, Phase 9D, Phase 9E, Phase 9F, Phase 9G, Phase 9I, Phase 9J, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 16, Phase 17, Phase 18, Phase 19, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 21H, Phase 21I, Phase 21J, Phase 21K, Phase 22, Phase 23, Phase 24, Phase 25, Phase 26, Phase 27, Phase 28, Phase 29, Phase 30, Phase 32, Phase 32B, Phase 32E, Phase 32F, Phase 33A, Phase 33C, Phase 34, Phase 34A, Phase 34B, Phase 34D, Phase 34E, Phase 34F, Phase 35, Phase 35A, Phase 35B, Phase 35C, Phase 35D, Phase 36, Phase 37, Phase 39, Phase 40, Phase 41, Phase 42, Phase 43, Phase 44, Phase 45, Phase 46, Phase 47, Phase 48, Phase 49, Phase 50, Phase 54, Phase 54A, Phase 55, Phase 56, Phase 56A, Phase 57, Phase 58, Phase 59.
+**Fully closed (92):** Phase 0, Phase 1, Phase 2A, Phase 2B, Phase 2C, Phase 2D, Phase 2, Phase 3, Phase 4, Phase 5, Phase 6, Phase 7, Phase 8, Phase 9, Phase 9A, Phase 9B, Phase 9C, Phase 9D, Phase 9E, Phase 9F, Phase 9I, Phase 9J, Phase 10, Phase 10A, Phase 11, Phase 12, Phase 13, Phase 14, Phase 16, Phase 17, Phase 18, Phase 19, Phase 21, Phase 21A, Phase 21B, Phase 21C, Phase 21D, Phase 21H, Phase 21I, Phase 21J, Phase 21K, Phase 22, Phase 23, Phase 24, Phase 25, Phase 26, Phase 27, Phase 28, Phase 29, Phase 30, Phase 32, Phase 32B, Phase 32E, Phase 32F, Phase 33A, Phase 33C, Phase 34, Phase 34A, Phase 34B, Phase 34D, Phase 34E, Phase 34F, Phase 35, Phase 35A, Phase 35B, Phase 35C, Phase 35D, Phase 36, Phase 37, Phase 39, Phase 40, Phase 41, Phase 42, Phase 43, Phase 44, Phase 45, Phase 46, Phase 47, Phase 48, Phase 49, Phase 50, Phase 52, Phase 53, Phase 54, Phase 54A, Phase 55, Phase 56, Phase 56A, Phase 57, Phase 58, Phase 59, Phase 60.
 
 ## The nearly-finished phases, in full
 
 Every phase with **three or fewer** open lines, quoted verbatim. These are
 where a single package finishes a phase, so they are listed here and the
-other ~72 open lines are not.
+other ~69 open lines are not.
 
 For any other phase: `scripts/discover.py --phase <id>` prints its open
 lines and evidence together. **Do not open the 178 KB map to read them.**
@@ -59,6 +59,10 @@ lines and evidence together. **Do not open the 178 KB map to read them.**
 The number is the map line number, which is also the capability's id.
 `validate_round.py` checks a packet's quotes against the map, so paste
 these unwrapped.
+
+### Phase 9G — Glasshouse local gateway process  (1 open, 18 closed)
+
+- **488** ☐ Keep provider credentials inside the Glasshouse process or secure secret-store boundary.
 
 ### Phase 9H — Sticky gateway routing for harness-backed interactive sessions  (1 open, 13 closed)
 
@@ -92,37 +96,31 @@ these unwrapped.
 
 - **1608** ☐ Prefer cheap resources for simple repository summarization when no valuable warm session already exists.
 
-### Phase 9 — Antigravity adapter  (2 open, 5 closed)
-
-- **340** ☐ Integrate structured Antigravity lifecycle events where the CLI exposes them.
-- **341** ☐ Translate supported Antigravity lifecycle state into Glasshouse lifecycle events.
-
 ### Phase 20 — Minimal durable project memory  (2 open, 16 closed)
 
 - **828** ☐ Do not store obvious source-code facts when rereading the source is cheaper and more reliable than maintaining the memory.
 - **829** ☐ Prefer storing information whose rediscovery would require significant exploration or reasoning.
+
+### Phase 31 — Compaction-aware behavior  (2 open, 5 closed)
+
+- **1170** ☐ Prefer continuing a relevant native session when its contextual value outweighs the cost of rehydrating it.
+- **1175** ☐ Allow a fresh session to bootstrap from a checkpoint when a huge cold native session is no longer economically or semantically attractive.
+
+### Phase 32A — Unified quota and capacity model  (2 open, 19 closed)
+
+- **1210** ☐ Track the current quota window start when known.
+- **1216** ☐ Track requests-per-day or equivalent long-window request pools when known.
 
 ### Phase 33 — Resource health  (2 open, 13 closed)
 
 - **1323** ☐ Avoid background probing at an aggressive rate that wastes free-request pools.
 - **1325** ☐ Record whether a health observation came from a real task, a retry, a repair attempt, or an explicit probe.
 
-### Phase 53 — Criteria before adding graph storage (deferred experiment gate)  (2 open, 3 closed)
-
-- **1879** ☐ Do not add a graph database solely to visualize project memory.
-- **1882** ☐ Evaluate whether SQLite relations are insufficient before adopting a dedicated graph database.
-
 ### Phase 33B — Reliability-adjusted agent performance  (3 open, 11 closed)
 
 - **1354** ☐ Count empty completions, unusable tool calls, stream aborts, and apparently successful but non-actionable turns as distinct unsuccessful outcomes.
 - **1356** ☐ Avoid comparing TTFC across tasks with materially different tool requirements unless the comparison is explicitly normalized or segmented.
 - **1360** ☐ Never infer precise TTFC or token timing from terminal text when the adapter cannot distinguish protocol events reliably.
-
-### Phase 60 — Parallel-session file coordination  (3 open, 13 closed)
-
-- **2414** ☐ Notify the orchestrator when two workers are likely to touch the same files.
-- **2415** ☐ Allow the orchestrator to serialize only the conflicting portion of otherwise parallel tasks.
-- **2416** ☐ Keep conflict handling transparent so the user can inspect why the orchestrator changed a worker's plan.
 
 ## Practice sections, by number
 
@@ -204,17 +202,17 @@ to do, and the orchestrator should follow its own rule.
 Newest first, from `docs/process/handoff.md`. Read the top one in full;
 the rest are context you probably do not need.
 
+- Checkpoint — 2026-09-06 (03:10), wave 142 in flight: 1331 / 1413 (94.2%) — the credential strip's verifier finds the hooks, the user asks for a key-leak guard, the benchmark's meter is the ledger
+- Checkpoint — 2026-09-06 (02:35), waves 140–141: 1331 / 1413 (94.2%) — Phase 60 complete, the census and the user's rulings move the map, two dogfooding defects, the site in the user's words
 - Checkpoint — 2026-09-06 (01:30), wave 139: 1312 / 1398 (93.8%) — Phase 59 complete, the product site live, the trailing sweep green on all sixteen glasshouse cells
 - Checkpoint — 2026-09-06 (after midnight), wave 138: 1311 / 1398 (93.8%) — the routing-2 trim lands, the pane lane hands to a Fable successor lead, and mutate.sh tells a compile error from a kill
-- Checkpoint — 2026-09-05 (night), waves 118–137: 1311 / 1398 (93.8%) — pane 61B, 61C and 61D merged, Phase 37 complete, 2054 closed, three 61C ticks taken back off on the lane's own audit, the served-by producers, twenty-nine files trimmed, the first fully green sixteen-cell sweep
-- Checkpoint — 2026-09-05 (evening), waves 116–117: 1295 / 1399 (92.6%) — pane stood up in its own lane, the dispatch defect fixed, 442 built and verified, seven lines closed
 
 ## Evidence ledger files
 
 `docs/product/evidence/` — open the one for the phase you are working,
 never the directory.
 
-    phase-0.md  phase-1.md  phase-10.md  phase-10a.md  phase-11.md  phase-12-13-and-45.md  phase-12-18-and-19.md  phase-14.md  phase-15.md  phase-16.md  phase-17.md  phase-2.md  phase-20-22-and-23.md  phase-21-credential-acceptance-condition.md  phase-21-extraction-contract.md  phase-21-manual-extraction.md  phase-21.md  phase-21a-authority-classes.md  phase-21b.md  phase-21c.md  phase-21d.md  phase-21e.md  phase-21f.md  phase-21g.md  phase-21h.md  phase-21i.md  phase-21j.md  phase-21k.md  phase-24.md  phase-25.md  phase-26.md  phase-27.md  phase-28.md  phase-29.md  phase-2a.md  phase-2b.md  phase-2c.md  phase-2d.md  phase-3.md  phase-30.md  phase-31.md  phase-32.md  phase-32a.md  phase-32b.md  phase-32c.md  phase-32d.md  phase-32e.md  phase-32f.md  phase-32g.md  phase-33.md  phase-33a.md  phase-33b.md  phase-33c.md  phase-34.md  phase-34a.md  phase-34b.md  phase-34c.md  phase-34d.md  phase-34e.md  phase-34f.md  phase-35.md  phase-35a.md  phase-35b.md  phase-35c.md  phase-35d.md  phase-36.md  phase-37.md  phase-38.md  phase-39.md  phase-4-unfocused-control.md  phase-4.md  phase-40.md  phase-41.md  phase-42.md  phase-43.md  phase-44.md  phase-45.md  phase-46.md  phase-47.md  phase-48.md  phase-49.md  phase-5-7.md  phase-5.md  phase-50.md  phase-51.md  phase-52.md  phase-53.md  phase-54.md  phase-54a.md  phase-55.md  phase-56.md  phase-57.md  phase-58.md  phase-59.md  phase-6.md  phase-60.md  phase-61.md  phase-7.md  phase-8.md  phase-9.md  phase-9a.md  phase-9b.md  phase-9c-9d.md  phase-9c.md  phase-9d-9a.md  phase-9d.md  phase-9e.md  phase-9f-preflight.md  phase-9f.md  phase-9g-refined.md  phase-9g.md  phase-9h.md  phase-9i.md  phase-9j.md  phase-9k.md  unfiled.md
+    phase-0.md  phase-1.md  phase-10.md  phase-10a.md  phase-11.md  phase-12-13-and-45.md  phase-12-18-and-19.md  phase-14.md  phase-15.md  phase-16.md  phase-17.md  phase-2.md  phase-20-22-and-23.md  phase-21-credential-acceptance-condition.md  phase-21-extraction-contract.md  phase-21-manual-extraction.md  phase-21.md  phase-21a-authority-classes.md  phase-21b.md  phase-21c.md  phase-21d.md  phase-21e.md  phase-21f.md  phase-21g.md  phase-21h.md  phase-21i.md  phase-21j.md  phase-21k.md  phase-24.md  phase-25.md  phase-26.md  phase-27.md  phase-28.md  phase-29.md  phase-2a.md  phase-2b.md  phase-2c.md  phase-2d.md  phase-3.md  phase-30.md  phase-31.md  phase-32.md  phase-32a.md  phase-32b.md  phase-32c.md  phase-32d.md  phase-32e.md  phase-32f.md  phase-32g.md  phase-33.md  phase-33a.md  phase-33b.md  phase-33c.md  phase-34.md  phase-34a.md  phase-34b.md  phase-34c.md  phase-34d.md  phase-34e.md  phase-34f.md  phase-35.md  phase-35a.md  phase-35b.md  phase-35c.md  phase-35d.md  phase-36.md  phase-37.md  phase-38.md  phase-39.md  phase-4-unfocused-control.md  phase-4.md  phase-40.md  phase-41.md  phase-42.md  phase-43.md  phase-44.md  phase-45.md  phase-46.md  phase-47.md  phase-48.md  phase-49.md  phase-5-7.md  phase-5.md  phase-50.md  phase-51.md  phase-52.md  phase-53.md  phase-54.md  phase-54a.md  phase-55.md  phase-56.md  phase-57.md  phase-58.md  phase-59.md  phase-6.md  phase-60.md  phase-61.md  phase-62.md  phase-7.md  phase-8.md  phase-9.md  phase-9a.md  phase-9b.md  phase-9c-9d.md  phase-9c.md  phase-9d-9a.md  phase-9d.md  phase-9e.md  phase-9f-preflight.md  phase-9f.md  phase-9g-refined.md  phase-9g.md  phase-9h.md  phase-9i.md  phase-9j.md  phase-9k.md  unfiled.md
 
 ## The three things that are always true here
 

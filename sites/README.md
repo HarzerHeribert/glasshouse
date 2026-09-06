@@ -1,5 +1,7 @@
 # Glasshouse + Pane product site
 
+A coding harness where tool results stay in the runtime and the model writes code over them.
+
 Static, independently built product pages. Everything for the website lives here;
 the Rust build and project-status documents are unaffected.
 

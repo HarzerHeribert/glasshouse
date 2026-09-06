@@ -337,8 +337,8 @@ Fixed architectural requirements
 ☑ Capture the native Antigravity conversation identifier when it can be obtained reliably.
 ☑ Support resuming a known Antigravity conversation through its native mechanism when available.
 ☑ Preserve the native Antigravity terminal experience inside the Glasshouse PTY.
-☐ Integrate structured Antigravity lifecycle events where the CLI exposes them.
-☐ Translate supported Antigravity lifecycle state into Glasshouse lifecycle events.
+☑ Integrate structured Antigravity lifecycle events where the CLI exposes them.
+☑ Translate supported Antigravity lifecycle state into Glasshouse lifecycle events.
 ☑ Treat unsupported lifecycle information as unknown instead of fabricating certainty from terminal text.
 
 Phase 9A — Harness launch profiles
@@ -485,7 +485,7 @@ Fixed architectural requirements
 ☑ Use an ephemeral local port by default so multiple Glasshouse instances can coexist.
 ☑ Generate an ephemeral per-instance gateway authentication token for child harnesses.
 ☑ Never expose provider API keys to a child harness when the local gateway can hold the credential itself.
-☑ Keep provider credentials inside the Glasshouse process or secure secret-store boundary.
+☐ Keep provider credentials inside the Glasshouse process or secure secret-store boundary.
 ☑ Expose an Anthropic Messages-compatible ingress for gateway-backed Claude Code profiles when implemented.
 ☑ Expose an OpenAI Responses-compatible ingress for gateway-backed Codex profiles when implemented.
 ☑ Expose an OpenAI Chat-compatible ingress for compatible disposable jobs and harnesses when implemented.
@@ -1166,11 +1166,11 @@ Phase 30 — Session context metadata
 
 Phase 31 — Compaction-aware behavior
 
-☐ Never compact a session solely because its prompt cache is estimated to be cold.
+☑ Never compact a session solely because its prompt cache is estimated to be cold.
 ☐ Prefer continuing a relevant native session when its contextual value outweighs the cost of rehydrating it.
 ☑ Prefer creating or refreshing a portable checkpoint before intentional compaction when practical.
-☐ Prefer compaction at semantic task boundaries over arbitrary elapsed-time boundaries.
-☐ Allow the native harness to perform its own compaction mechanism rather than replacing it with a Glasshouse-specific history format.
+☑ Prefer compaction at semantic task boundaries over arbitrary elapsed-time boundaries.
+☑ Allow the native harness to perform its own compaction mechanism rather than replacing it with a Glasshouse-specific history format.
 ☑ Record enough pre-compaction durable memory that important project decisions do not depend solely on a lossy native compact summary.
 ☐ Allow a fresh session to bootstrap from a checkpoint when a huge cold native session is no longer economically or semantically attractive.
 
@@ -1202,17 +1202,17 @@ Phase 32A — Unified quota and capacity model
 ☑ Allow CapacityState to represent subscription resources with opaque provider-defined limits.
 ☑ Allow CapacityState to represent user-defined monetary budgets for metered APIs.
 ☑ Allow CapacityState to represent effectively unlimited local inference separately from remote quota.
-☐ Track input-token budget independently from output-token budget when the provider exposes separate limits.
-☐ Track cached-input usage independently when the provider exposes cache telemetry.
+☑ Track input-token budget independently from output-token budget when the provider exposes separate limits.
+☑ Track cached-input usage independently when the provider exposes cache telemetry.
 ☑ Track request count independently from token consumption when both can constrain a resource.
-☐ Track provider credits independently from raw tokens when credits are the actual limiting unit.
+☑ Track provider credits independently from raw tokens when credits are the actual limiting unit.
 ☑ Track remaining monetary budget independently from provider quota when the user has configured a spending ceiling.
 ☐ Track the current quota window start when known.
 ☑ Track the current quota reset time when known.
 ☑ Track rolling-window capacity separately from fixed calendar-window capacity.
-☐ Track concurrent-request limits when they materially affect routability.
+☑ Track concurrent-request limits when they materially affect routability.
 ☑ Track requests-per-minute limits when known.
-☐ Track tokens-per-minute limits when known.
+☑ Track tokens-per-minute limits when known.
 ☐ Track requests-per-day or equivalent long-window request pools when known.
 ☑ Preserve the provider-native quota units alongside any normalized percentage.
 ☑ Never discard raw telemetry merely because Glasshouse also computes a normalized capacity score.
@@ -1863,11 +1863,11 @@ Fixed architectural requirements
 - It must not be added solely for hypothetical scale or architectural fashion.
 
 ☑ Do not add vector retrieval until FTS5 retrieval failures are observed and recorded in real projects.
-☐ Define concrete retrieval cases that lexical search cannot solve before selecting an embedding system.
-☐ If semantic retrieval is added, combine it with lexical retrieval rather than replacing lexical retrieval.
-☐ Keep project isolation physically intact when adding embeddings.
-☐ Ensure semantic retrieval respects memory lifecycle status and does not resurrect superseded knowledge as current truth.
-☐ Evaluate semantic retrieval on real Glasshouse queries before making it part of the default path.
+☑ Define concrete retrieval cases that lexical search cannot solve before selecting an embedding system.
+☑ If semantic retrieval is added, combine it with lexical retrieval rather than replacing lexical retrieval.
+☑ Keep project isolation physically intact when adding embeddings.
+☑ Ensure semantic retrieval respects memory lifecycle status and does not resurrect superseded knowledge as current truth.
+☑ Evaluate semantic retrieval on real Glasshouse queries before making it part of the default path.
 
 Phase 53 — Criteria before adding graph storage (deferred experiment gate)
 
@@ -1876,10 +1876,10 @@ Fixed architectural requirements
 - Graph storage is deferred until concrete multi-hop relationship queries cannot be served adequately by the existing relational model.
 - No graph database is introduced as speculative infrastructure.
 
-☐ Do not add a graph database solely to visualize project memory.
+☑ Do not add a graph database solely to visualize project memory.
 ☑ Add explicit typed relationships in SQLite first when relationships become useful.
 ☑ Introduce relationships such as supersedes, affects, and implemented_by only when they improve real queries.
-☐ Evaluate whether SQLite relations are insufficient before adopting a dedicated graph database.
+☑ Evaluate whether SQLite relations are insufficient before adopting a dedicated graph database.
 ☑ Keep the user-facing project-knowledge view useful even if no graph database is ever added.
 
 Phase 54 — Criteria before deeper cmux coupling
@@ -2411,9 +2411,9 @@ Conflict prediction (Maybe C)
 
 Orchestrator handling (Maybe H)
 
-☐ Notify the orchestrator when two workers are likely to touch the same files.
-☐ Allow the orchestrator to serialize only the conflicting portion of otherwise parallel tasks.
-☐ Keep conflict handling transparent so the user can inspect why the orchestrator changed a worker's plan.
+☑ Notify the orchestrator when two workers are likely to touch the same files.
+☑ Allow the orchestrator to serialize only the conflicting portion of otherwise parallel tasks.
+☑ Keep conflict handling transparent so the user can inspect why the orchestrator changed a worker's plan.
 
 
 Phase 61 — pane: the first-party harness
@@ -2483,3 +2483,36 @@ record: the session artifact *The Glasshouse Native Harness*.
 61E — Code over live objects, amended 2026-09-06 (direct verified completion — the user's decision to implement it directly; `runtime-contract.md` §9)
 
 ☐ End a task from within the program: a top-level `return` renders and persists the terminal response and sends no further request, and no execution that threw, was refused, was cancelled or whose guard was unmet becomes one.
+
+Phase 62 — Parallel-session coordination, second slice: queueing, co-editing, drift, in-turn diagnostics
+
+Recorded 2026-09-06 from the user's yes on fourteen of the fifteen parked lines the census ranked (`design-decisions.md`, *Fourteen parked lines promoted — the user, 2026-09-06*); each line's text is the parked line's own, and the parked original stays where it is. Packaged after 61E-WIRE and the ruler's two-column run, in this order.
+
+62A — Queue, override and re-plan around a claimed file
+
+☐ Consider allowing Glasshouse to queue a worker turn when it would edit a file actively claimed by another session.
+☐ Wake a queued worker automatically when the conflicting claim is released.
+☐ Allow the user to override a conflict warning and let both sessions continue.
+☐ Allow the user to assign reconciliation to a new worker session.
+☐ Allow the orchestrator to instruct one worker to work on tests, documentation, or analysis while another owns the conflicting implementation file.
+
+62B — Convergent co-editing of one contended file
+
+☐ Consider letting two sessions work on the same file concurrently in isolated buffers, rather than serializing them behind a claim, when both genuinely need it.
+☐ Escalate to the orchestrator or the user, with both versions visible, when reconciliation cannot preserve both intents.
+
+62C — Session drift and rework, advisory first
+
+☐ Experiment with detecting when an active agent session appears to be compounding an invalid premise, drifting from the requested task, or repeatedly repairing its own avoidable changes.
+☐ Start with a quiet session marker and concise evidence summary rather than interrupting the agent immediately.
+
+62D — In-turn repository diagnostics
+
+☐ Use deterministic repository diagnostics to catch newly introduced mechanical errors before they survive until a CI run.
+☐ Allow PostToolUse diagnostics to be returned as concise model-visible feedback so the same agent can repair newly introduced problems.
+
+62E — Prediction, read visibility and the measurement gate
+
+☐ Allow the router to use task plans, touched-file history, Git diffs, and current claims as conflict-prediction inputs.
+☐ Prefer allowing reads of the last committed or current filesystem state with an explicit stale-or-changing warning before implementing hard read blocking.
+☐ Measure how often parallel sessions actually produce overlapping file edits before enabling automatic file coordination by default.

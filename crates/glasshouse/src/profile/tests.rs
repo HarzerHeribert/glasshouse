@@ -632,6 +632,63 @@ fn a_gateway_serving_responses_resolves_a_codex_profile() {
     }
 }
 
+/// The pane adapter declares the Anthropic Messages protocol and the two
+/// environment names its wire reads, so a gateway-backed pane profile
+/// resolves exactly as a Claude Code one does: the child is pointed at this
+/// gateway through `ANTHROPIC_BASE_URL`, the gateway's own token reaches it
+/// as `ANTHROPIC_AUTH_TOKEN`, and the provider credential the gateway holds
+/// does not.
+#[test]
+fn a_gateway_serving_messages_resolves_a_pane_profile() {
+    let adapter = adapter_for(IntegrationId::Pane).expect("a harness");
+    let gateway = running_gateway();
+    let mut profile = profile_for(IntegrationId::Pane);
+    profile.backend = BackendResource::GlasshouseGateway;
+
+    let overlay = resolve_with_gateway(
+        &profile,
+        &native_cx(adapter, false, &FakeSecrets::empty()),
+        Some(&gateway),
+        &GatewayPairing::default(),
+    )
+    .expect("a pane profile resolves against a gateway that serves Messages");
+
+    let env: Vec<(String, String)> = overlay
+        .env()
+        .iter()
+        .map(|(key, value)| {
+            (
+                key.to_string_lossy().into_owned(),
+                value.to_string_lossy().into_owned(),
+            )
+        })
+        .collect();
+    let base_url = env
+        .iter()
+        .find(|(key, _)| key == "ANTHROPIC_BASE_URL")
+        .map(|(_, value)| value.as_str())
+        .unwrap_or_else(|| panic!("the child was not pointed at the gateway: {env:?}"));
+    assert!(
+        base_url.starts_with(&format!("http://{}", gateway.address())),
+        "the child was pointed elsewhere: {base_url}"
+    );
+    let token = env
+        .iter()
+        .find(|(key, _)| key == "ANTHROPIC_AUTH_TOKEN")
+        .map(|(_, value)| value.as_str());
+    assert_eq!(
+        token,
+        Some(gateway.token().expose()),
+        "the gateway's token did not reach the child as the bearer: {env:?}"
+    );
+    for (key, value) in &env {
+        assert!(
+            !value.contains(PLANTED_CREDENTIAL),
+            "the provider credential reached the child in {key}"
+        );
+    }
+}
+
 /// A gateway serving every protocol its ingress knows how to carry
 /// resolves both harnesses that declare one — and hands each the
 /// protocol it actually speaks, never the first one the list happens to

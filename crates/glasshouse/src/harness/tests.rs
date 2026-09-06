@@ -512,9 +512,12 @@ fn a_verified_backend_declaration_is_never_an_empty_list() {
         if let Some(protocols) = backends.protocols.value() {
             assert!(!protocols.is_empty(), "{}", adapter.id().slug());
         }
-        if let Some(overrides) = backends.model_override.value() {
-            assert!(!overrides.is_empty(), "{}", adapter.id().slug());
-        }
+        // `model_override` alone may be verified-empty: a harness whose
+        // model is a constant in its own wire (pane) has *no* override
+        // mechanism, and that is a checked fact, not an unchecked one.
+        // `protocols` and `selection` can never be empty — a harness speaks
+        // something and is reached somehow.
+        let _ = backends.model_override.value();
         if let Some(selection) = backends.selection.value() {
             assert!(!selection.is_empty(), "{}", adapter.id().slug());
         }

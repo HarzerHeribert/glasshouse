@@ -161,3 +161,24 @@ Recorded scope limits — stated by the worker, not discovered later:
 ---
 
 ---
+
+## 1879, 1882 — CLOSED 2026-09-06 by the user's decision: adopted as standing rules
+
+The Cluster Q refusal above is superseded; its 1882 paragraph is the evaluation this rule asks for and stays the record.
+
+### Do not add a graph database solely to visualize project memory. (line 1879)
+
+Contract: Given a proposal for a graph database, when its stated purpose is visualizing project memory, it is refused; map line 1107 already forbids the decorative widget and this forbids the store.
+
+State: **COMPLETE** — ruled 2026-09-06 by the user ("i agree with you on all 7 items"), recorded in `design-decisions.md`, *Seven experiment gates adopted as standing rules*. Ticked on the decision, not on a mechanism: no embedding index or graph store exists in this build, so there is nothing to mutate and no test names it. 
+
+Limits: a standing rule, not a verified behaviour. Any package that adds what this line governs must cite this entry in its Phase −1 and carry the rule's own test; if such a package lands without one, this box comes back off.
+
+### Evaluate whether SQLite relations are insufficient before adopting a dedicated graph database. (line 1882)
+
+Contract: Given a proposal for a graph database, when it is made, it first shows a real query that SQLite relations cannot serve; today's record (one relationship ever needed, built by `GH-RELATIONSHIP-PROOFS`, serving a real query) is the evaluation the proposal must overturn.
+
+State: **COMPLETE** — ruled 2026-09-06 by the user ("i agree with you on all 7 items"), recorded in `design-decisions.md`, *Seven experiment gates adopted as standing rules*. Ticked on the decision, not on a mechanism: no embedding index or graph store exists in this build, so there is nothing to mutate and no test names it. The refusal paragraph above already recorded the evaluation; this entry makes it the standing answer.
+
+Limits: a standing rule, not a verified behaviour. Any package that adds what this line governs must cite this entry in its Phase −1 and carry the rule's own test; if such a package lands without one, this box comes back off.
+

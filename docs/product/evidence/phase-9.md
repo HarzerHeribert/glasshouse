@@ -211,3 +211,20 @@ Missing evidence, and what unblocks it:
   turn to populate `~/.gemini/antigravity/conversations/` and read the
   identifier's shape for line 2; and confirm from a signed-in `--help` whether
   any hook mechanism exists before declaring lines 5-6 unavailable.
+
+## Closed as decided-out — 2026-09-06, the user's decision 5 (`GH-REFUSED-LINES-CENSUS`)
+
+The user authorised closing lines whose producer is a vendor's that will never ship or a concept the design dropped, with the register's reasoning recorded (`design-decisions.md`, *Steering decisions of record — 2026-09-06*, item 5). The census (`.agent-runtime/report-refused-lines-census.md`, Table 1) named these; each box is ticked on that decision, not on a mechanism.
+
+### Integrate structured Antigravity lifecycle events where the CLI exposes them. (line 340)
+
+State: **COMPLETE — decided-out**, ruled 2026-09-06 by the orchestrator under decision 5. Why the producer will not exist: the adapter's own words: no hook, event, or notification mechanism exists anywhere in the Antigravity CLI — a vendor signal that does not arrive (register:1341; `harness/antigravity.rs:194,333`).
+
+Limits: no behaviour is verified; the box records that the input the line depends on is not Glasshouse's to produce. It comes back off the day the Antigravity CLI ships a lifecycle event surface — that package cites this entry in its Phase −1.
+
+### Translate supported Antigravity lifecycle state into Glasshouse lifecycle events. (line 341)
+
+State: **COMPLETE — decided-out**, ruled 2026-09-06 by the orchestrator under decision 5. Why the producer will not exist: downstream of 340: nothing to translate until the vendor ships an event surface (register:1342).
+
+Limits: no behaviour is verified; the box records that the input the line depends on is not Glasshouse's to produce. It comes back off the day line 340's producer appears — that package cites this entry in its Phase −1.
+
