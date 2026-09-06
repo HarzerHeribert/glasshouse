@@ -278,13 +278,18 @@ fn an_attempt_runs_its_test_on_the_worktree_and_never_in_the_checkout() {
         result.outcome
     );
 
-    let attempt_dir = scratch.join(format!("{}-{}-{}", task.id, harness.as_str(), 1));
-
     let harness_saw = fs::read_to_string(&harness_cwd).unwrap();
     let test_saw = fs::read_to_string(&test_cwd).unwrap();
-    let expected = fs::canonicalize(&attempt_dir).unwrap_or(attempt_dir.clone());
-    assert_eq!(PathBuf::from(harness_saw.trim()), expected);
-    assert_eq!(PathBuf::from(test_saw.trim()), expected);
+    let attempt_dir = PathBuf::from(harness_saw.trim());
+    assert_eq!(PathBuf::from(test_saw.trim()), attempt_dir);
+    assert!(
+        attempt_dir
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with(&format!("{}-{}-{}-", task.id, harness.as_str(), 1)),
+        "basename must still carry the task, harness and repeat: {attempt_dir:?}"
+    );
 
     assert!(
         !attempt_dir.exists(),
@@ -467,7 +472,7 @@ fn the_worktree_is_removed_even_when_the_test_command_fails() {
 
     assert_eq!(result.outcome, Outcome::Fail);
 
-    let attempt_dir = scratch.join(format!("{}-{}-{}", task.id, harness.as_str(), 1));
+    let attempt_dir = PathBuf::from(fs::read_to_string(&harness_cwd).unwrap().trim());
     assert!(
         !attempt_dir.exists(),
         "worktree must be removed even when the test fails"
@@ -531,18 +536,21 @@ fn the_pane_row_launches_session_with_the_attempts_root_and_the_statement() {
     let result = attempt::run_one(&task, &harness, 1, &opts);
     assert!(result.outcome.completed(), "{:?}", result.outcome);
 
-    let expected_root = scratch.join(format!("{}-{}-{}", task.id, harness.as_str(), 1));
     let argv = read_argv(&argv_record);
-    assert_eq!(
-        argv,
-        vec![
-            "session".to_string(),
-            "--root".to_string(),
-            expected_root.to_string_lossy().into_owned(),
-            "--task".to_string(),
-            task.statement.to_string(),
-        ]
+    assert_eq!(argv.len(), 5, "the template's own five elements, no more");
+    assert_eq!(argv[0], "session");
+    assert_eq!(argv[1], "--root");
+    let actual_root = PathBuf::from(&argv[2]);
+    assert!(
+        actual_root
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with(&format!("{}-{}-{}-", task.id, harness.as_str(), 1)),
+        "root basename must still carry the task, harness and repeat: {actual_root:?}"
     );
+    assert_eq!(argv[3], "--task");
+    assert_eq!(argv[4], task.statement);
 
     let env = fs::read_to_string(&env_record).unwrap();
     assert_eq!(env, "http://127.0.0.1:8731");
@@ -635,11 +643,14 @@ fn the_codex_row_runs_exec_with_the_bypass_and_the_statement() {
         ]
     );
 
-    let expected_root = scratch.join(format!("{}-{}-{}", task.id, harness.as_str(), 1));
-    assert_eq!(
-        read_argv_cwd(&argv_record),
-        expected_root,
-        "codex takes no --root-equivalent flag; it must still launch in the attempt's own worktree"
+    let actual_root = read_argv_cwd(&argv_record);
+    assert!(
+        actual_root
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with(&format!("{}-{}-{}-", task.id, harness.as_str(), 1)),
+        "codex takes no --root-equivalent flag; it must still launch in the attempt's own worktree: {actual_root:?}"
     );
 }
 
@@ -792,27 +803,33 @@ fn a_bare_via_glasshouse_still_applies_one_profile_to_every_row() {
     let result = attempt::run_one(&task, &harness, 1, &opts);
     assert!(result.outcome.completed(), "{:?}", result.outcome);
 
-    let expected_root = scratch.join(format!("{}-{}-{}", task.id, harness.as_str(), 1));
     let argv = read_argv(&launch_argv_record);
-    assert_eq!(
-        argv,
-        vec![
-            "launch".to_string(),
-            "pane".to_string(),
-            "--profile".to_string(),
-            "bench".to_string(),
-            "--headless".to_string(),
-            "--fresh".to_string(),
-            "--no-routing".to_string(),
-            "--no-memory".to_string(),
-            "--".to_string(),
-            "session".to_string(),
-            "--root".to_string(),
-            expected_root.to_string_lossy().into_owned(),
-            "--task".to_string(),
-            task.statement.to_string(),
-        ]
+    let expected_prefix: Vec<String> = vec![
+        "launch".to_string(),
+        "pane".to_string(),
+        "--profile".to_string(),
+        "bench".to_string(),
+        "--headless".to_string(),
+        "--fresh".to_string(),
+        "--no-routing".to_string(),
+        "--no-memory".to_string(),
+        "--".to_string(),
+        "session".to_string(),
+        "--root".to_string(),
+    ];
+    assert_eq!(argv.len(), 14);
+    assert_eq!(argv[..11], expected_prefix[..]);
+    let actual_root = PathBuf::from(&argv[11]);
+    assert!(
+        actual_root
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with(&format!("{}-{}-{}-", task.id, harness.as_str(), 1)),
+        "{actual_root:?}"
     );
+    assert_eq!(argv[12], "--task");
+    assert_eq!(argv[13], task.statement);
 
     // The same shape for claude-code -- the second baseline the packet
     // names by name.
@@ -918,26 +935,38 @@ fn via_glasshouse_takes_one_profile_per_row() {
 
     let by_row = group_launch_calls_by_row(&launch_argv_record);
 
-    let pane_root = scratch.join(format!("{}-{}-{}", pane_task.id, pane_harness.as_str(), 1));
-    assert_eq!(
-        by_row.get("pane"),
-        Some(&vec![
-            "launch".to_string(),
-            "pane".to_string(),
-            "--profile".to_string(),
-            "bench-pane".to_string(),
-            "--headless".to_string(),
-            "--fresh".to_string(),
-            "--no-routing".to_string(),
-            "--no-memory".to_string(),
-            "--".to_string(),
-            "session".to_string(),
-            "--root".to_string(),
-            pane_root.to_string_lossy().into_owned(),
-            "--task".to_string(),
-            pane_task.statement.to_string(),
-        ])
+    let pane_argv = by_row.get("pane").expect("pane row must have launched");
+    let expected_pane_prefix: Vec<String> = vec![
+        "launch".to_string(),
+        "pane".to_string(),
+        "--profile".to_string(),
+        "bench-pane".to_string(),
+        "--headless".to_string(),
+        "--fresh".to_string(),
+        "--no-routing".to_string(),
+        "--no-memory".to_string(),
+        "--".to_string(),
+        "session".to_string(),
+        "--root".to_string(),
+    ];
+    assert_eq!(pane_argv.len(), 14);
+    assert_eq!(pane_argv[..11], expected_pane_prefix[..]);
+    let pane_root = PathBuf::from(&pane_argv[11]);
+    assert!(
+        pane_root
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .starts_with(&format!(
+                "{}-{}-{}-",
+                pane_task.id,
+                pane_harness.as_str(),
+                1
+            )),
+        "{pane_root:?}"
     );
+    assert_eq!(pane_argv[12], "--task");
+    assert_eq!(pane_argv[13], pane_task.statement);
 
     assert_eq!(
         by_row.get("claude-code"),
@@ -1120,8 +1149,7 @@ fn the_meter_reads_routing_cost_from_the_attempts_worktree() {
     let result = attempt::run_one(&task, &harness, 1, &opts);
     assert!(result.outcome.completed(), "{:?}", result.outcome);
 
-    let expected_dir = scratch.join(format!("{}-{}-{}", task.id, harness.as_str(), 1));
-    let expected_dir = fs::canonicalize(&expected_dir).unwrap_or(expected_dir);
+    let expected_dir = PathBuf::from(fs::read_to_string(&harness_cwd).unwrap().trim());
     let recorded = fs::read_to_string(&meter_cwd_record).unwrap();
     assert_eq!(
         PathBuf::from(recorded.trim()),
@@ -1153,8 +1181,7 @@ fn the_meter_reads_routing_cost_from_the_attempts_worktree() {
     let result2 = attempt::run_one(&task2, &harness2, 1, &opts2);
     assert!(result2.outcome.completed(), "{:?}", result2.outcome);
 
-    let expected_dir2 = scratch2.join(format!("{}-{}-{}", task2.id, harness2.as_str(), 1));
-    let expected_dir2 = fs::canonicalize(&expected_dir2).unwrap_or(expected_dir2);
+    let expected_dir2 = PathBuf::from(fs::read_to_string(&test_cwd2).unwrap().trim());
     let recorded2 = fs::read_to_string(&meter_cwd_record2).unwrap();
     assert_eq!(
         PathBuf::from(recorded2.trim()),
@@ -1202,4 +1229,147 @@ fn via_glasshouse_needs_the_meter_and_excludes_a_standing_gateway() {
     let message2 = with_gateway.expect_err("--via-glasshouse with --gateway must be refused");
     assert!(message2.contains("--via-glasshouse"), "{message2}");
     assert!(message2.contains("--gateway"), "{message2}");
+}
+
+/// Not a standalone acceptance test: a helper this file's other tests
+/// re-invoke, filtered by `--exact`, as a genuinely separate OS process.
+/// Run directly (the normal full-suite case, `RULER_PROBE_SCRATCH` unset)
+/// it is a no-op -- the point is exclusively the isolated re-invocation
+/// below, since [`attempt::run_one`]'s attempt-dir counter is process-wide
+/// and this file's other tests call it too, so only a fresh process can
+/// promise "this is that process's first attempt".
+#[test]
+fn probe_helper_runs_one_attempt() {
+    let Ok(scratch) = std::env::var("RULER_PROBE_SCRATCH") else {
+        return;
+    };
+    let scratch = PathBuf::from(scratch);
+    fs::create_dir_all(&scratch).unwrap();
+    let cwd_record = scratch.join("cwd_record.txt");
+    let harness_script = write_script(&scratch, "harness.sh", &cwd_record, 0);
+    let noop_cwd = scratch.join("noop_cwd.txt");
+    let test_script = write_script(&scratch, "noop.sh", &noop_cwd, 0);
+
+    let commit = leak(head_commit());
+    let task = base_task(commit, single_command(&test_script));
+    let opts = base_opts(scratch, harness_script);
+    let harness = Harness::new("fake");
+
+    let result = attempt::run_one(&task, &harness, 1, &opts);
+    assert!(result.outcome.completed(), "{:?}", result.outcome);
+}
+
+/// Spawns this test binary as a subprocess restricted, via `--exact`, to
+/// exactly [`probe_helper_runs_one_attempt`] -- a genuinely separate
+/// process whose very first (and only) call to `run_one` therefore has a
+/// process-wide counter starting fresh at 1 -- and returns the worktree
+/// directory that call's fake harness recorded its own `pwd` into.
+/// Returns the attempt directory the probe process recorded and that
+/// process's own pid, so a test can assert the name carries the *real* pid
+/// rather than any number -- a constant in the pid's place survived the
+/// lead's mutation until this returned it (2026-09-06).
+fn run_probe_attempt_in_subprocess(label: &str) -> (PathBuf, u32) {
+    let scratch = scratch_dir(label);
+    let child = Command::new(std::env::current_exe().unwrap())
+        .arg("probe_helper_runs_one_attempt")
+        .arg("--exact")
+        .arg("--test-threads=1")
+        .env("RULER_PROBE_SCRATCH", &scratch)
+        .spawn()
+        .unwrap();
+    let pid = child.id();
+    let status = child.wait_with_output().unwrap().status;
+    assert!(
+        status.success(),
+        "probe subprocess must complete an attempt"
+    );
+    let dir = PathBuf::from(
+        fs::read_to_string(scratch.join("cwd_record.txt"))
+            .unwrap()
+            .trim(),
+    );
+    (dir, pid)
+}
+
+/// Two ruler processes cutting an attempt of the same task, harness and
+/// repeat at the same moment must never share a worktree basename --
+/// the exact collision behind `.git/worktrees/<basename>/commondir`
+/// failing to read while the other process is creating or removing it.
+#[test]
+fn two_attempts_of_one_row_in_two_processes_never_share_a_worktree_name() {
+    let scratch = scratch_dir("two-process-name");
+    let direct_cwd = scratch.join("direct_cwd.txt");
+    let direct_harness = write_script(&scratch, "direct_harness.sh", &direct_cwd, 0);
+    let direct_test = write_script(
+        &scratch,
+        "direct_test.sh",
+        &scratch.join("direct_test.txt"),
+        0,
+    );
+
+    let commit = leak(head_commit());
+    let task = base_task(commit, single_command(&direct_test));
+    let opts = base_opts(scratch.clone(), direct_harness);
+    let harness = Harness::new("fake");
+
+    let direct_result = attempt::run_one(&task, &harness, 1, &opts);
+    assert!(
+        direct_result.outcome.completed(),
+        "{:?}",
+        direct_result.outcome
+    );
+    let direct_dir = PathBuf::from(fs::read_to_string(&direct_cwd).unwrap().trim());
+
+    let (subprocess_dir, _pid) = run_probe_attempt_in_subprocess("two-process-name-subprocess");
+
+    let direct_name = direct_dir
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let subprocess_name = subprocess_dir
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+
+    assert_ne!(
+        direct_name, subprocess_name,
+        "two processes cutting the same attempt must never share a basename"
+    );
+    let prefix = "T1-fake-1-";
+    assert!(direct_name.starts_with(prefix), "{direct_name}");
+    assert!(subprocess_name.starts_with(prefix), "{subprocess_name}");
+}
+
+/// One attempt's basename ends `-<pid>-1`: the counter is 1-based and the
+/// pid is the process that cut the worktree, not the ruler's own pid at
+/// some other point.
+#[test]
+fn an_attempt_worktree_name_carries_the_pid_and_a_counter() {
+    let (subprocess_dir, probe_pid) = run_probe_attempt_in_subprocess("pid-and-counter");
+    let name = subprocess_dir
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+
+    let suffix = name
+        .strip_prefix("T1-fake-1-")
+        .unwrap_or_else(|| panic!("expected a T1-fake-1- prefix: {name}"));
+    let mut parts = suffix.splitn(2, '-');
+    let pid_part = parts.next().unwrap();
+    let counter_part = parts
+        .next()
+        .unwrap_or_else(|| panic!("expected <pid>-<n>: {name}"));
+
+    assert_eq!(
+        pid_part,
+        probe_pid.to_string(),
+        "the pid segment must be the probe process's own pid, not any number: {name}"
+    );
+    assert_eq!(
+        counter_part, "1",
+        "the first attempt in a fresh process must end -<pid>-1: {name}"
+    );
 }
