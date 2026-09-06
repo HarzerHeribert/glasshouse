@@ -336,6 +336,45 @@ const READ_POLL: Duration = Duration::from_millis(10);
 /// than the exit poll — the exit is what this test is usually waiting for.
 const CPU_SAMPLE_INTERVAL: Duration = Duration::from_millis(250);
 
+/// How long `session::attach`'s supervising loop gives a harness to stop
+/// after asking it to, before killing it outright.
+///
+/// Mirrors `TERMINATION_GRACE` in `crates/glasshouse/src/session/attach.rs`,
+/// which is private. Only the launch test below uses it, and only to say what
+/// its deadline is made of: a launcher that had to reach the kill cannot have
+/// exited sooner than this, so the bound is the sum rather than either half.
+#[cfg(target_os = "macos")]
+const TERMINATION_GRACE: Duration = Duration::from_secs(5);
+
+/// How many times the revoked-terminal launch scenario is run.
+///
+/// Three, and for the reason [`BLIND_TRIALS`] is three rather than the reason
+/// [`TRIALS`] is fifteen: revoking a descriptor is not a race. Every step it
+/// depends on was measured to be deterministic on macOS 25.5 — a revoked
+/// descriptor polls `POLLNVAL` and wakes a blocked `read` with `Ok(0)` every
+/// time, and a write to it fails with `EIO` every time. Repetition here is
+/// repetition, not statistics (practice §60).
+#[cfg(target_os = "macos")]
+const LAUNCH_TRIALS: usize = 3;
+
+/// What the fixture harness prints once, at startup.
+///
+/// The launch equivalent of [`Shell::wait_for_first_frame`]'s banner: it
+/// reaches the test only by travelling the whole production path — the
+/// harness's pty, `pump_output`, the launcher's standard output — so seeing
+/// it proves the session is genuinely attached before its terminal is taken
+/// away.
+#[cfg(target_os = "macos")]
+const HARNESS_MARKER: &str = "FIXTURE-HARNESS-UP";
+
+/// How long the harness's child is given to be gone after the launcher is.
+///
+/// The launcher only returns once `try_wait` has reaped the harness, so this
+/// is a formality against `pgrep` seeing a corpse mid-teardown rather than a
+/// real wait.
+#[cfg(target_os = "macos")]
+const HARNESS_GONE_DEADLINE: Duration = Duration::from_secs(2);
+
 /// A terminal that goes away ends the interface, and the interface is what
 /// ends it.
 ///
@@ -888,6 +927,207 @@ fn one_resize_then_keystroke(trial: usize, gap: Duration) -> Option<String> {
 
 /// A project, a state directory and a user configuration, all thrown away
 /// with the test.
+/// A launched session whose terminal is revoked without any signal still ends,
+/// and its harness goes with it.
+///
+/// # The defect this exists for
+///
+/// Two `glasshouse launch claude-code` processes were found alive on
+/// 2026-09-06, five hours and twenty minutes and one hour and seventeen
+/// minutes after the panes that started them had closed. `lsof` showed fds 0,
+/// 1 and 2 `(revoked)`; the launcher sat at 0.8% of a core in
+/// `session::attach`'s supervising loop; and each harness child was in `ps`
+/// state `?Es` — trying to exit, and never reaped. One `SIGHUP` to each
+/// launcher ended launcher, child and shell within four seconds, so the
+/// signal path was never the gap.
+///
+/// The gap was that **nothing kept draining the harness's pty**. `pump_output`
+/// broke out of its loop the first time a write to the revoked standard output
+/// failed, so the harness's own writes filled its terminal, and the exit it had
+/// been asked to make could not finish. `supervise` polled a `try_wait` that
+/// would never report, for as long as anyone left it.
+///
+/// # Why revoking is not the same as closing
+///
+/// The two tests above take the terminal away by closing every master
+/// descriptor, which is a hangup — and a hangup also delivers `SIGHUP`. This
+/// one uses `revoke(2)`, which delivers nothing: the descriptors are
+/// invalidated in place. That is the state the field processes were in, and it
+/// is the reason they were still there to be found. See
+/// [`Shell::revoke_terminal`] for what was measured about it, and
+/// `session::attach`'s `hung_up` for what the production detector reads.
+///
+/// # What is asserted, and why a stopwatch is not enough
+///
+/// The harness writes 32 KiB on its way out — more than a pty's output queue
+/// holds — and only then records [`Fixture::farewell_mark`] and exits. So the
+/// mark existing is a *direct* statement that the drain outlived the terminal:
+/// a harness whose pty stopped being read blocks part-way through that write
+/// and is removed by `supervise`'s kill instead, leaving no mark. The deadline
+/// and the processor-time bound are the same claims the tests above make.
+#[cfg(target_os = "macos")]
+#[test]
+fn a_launch_whose_terminal_is_revoked_without_a_signal_still_ends() {
+    for trial in 1..=LAUNCH_TRIALS {
+        one_revoked_launch(trial);
+    }
+}
+
+/// One trial of the above.
+#[cfg(target_os = "macos")]
+fn one_revoked_launch(trial: usize) {
+    let fixture = Fixture::new_for_launch();
+    let mut child = fixture.start_launch();
+
+    // Prove a session is really attached before taking its terminal away: the
+    // marker only reaches this pty by way of the harness's own pty and
+    // `pump_output`.
+    child.wait_for_harness();
+
+    // Reach the state the field processes were in — attached, idle, and
+    // printing nothing. It is also the case a failed write cannot notice on
+    // its own, so this is what makes the input pump's detector load-bearing.
+    // See `SETTLE`.
+    let settled = Instant::now() + SETTLE;
+    while Instant::now() < settled {
+        child.drain();
+        std::thread::sleep(READ_POLL);
+    }
+    assert!(
+        child.try_wait().is_none(),
+        "trial {trial}: glasshouse launch had already exited before its terminal was revoked, \
+         so this run proves nothing\n--- output ---\n{}\n--- end ---",
+        child.output()
+    );
+    assert!(
+        !fixture.farewell_mark().exists(),
+        "trial {trial}: the harness said goodbye before it was asked to — the fixture harness \
+         is not idling and this run would prove nothing"
+    );
+
+    // Non-vacuity for the "nothing is left" assertion at the end: there has to
+    // be something to be left. Without this, a `launcher_children` that never
+    // matched anything would let that assertion pass by failing to look.
+    let launcher = child.process_id();
+    assert!(
+        !launcher_children(launcher).is_empty(),
+        "trial {trial}: the launcher has no child, so no harness is attached and the \
+         assertions below would hold for the wrong reason\n--- output ---\n{}\n--- end ---",
+        child.output()
+    );
+
+    let cpu_before = child.cpu_seconds();
+    let revoked = Instant::now();
+    child.revoke_terminal();
+
+    // The launcher may take `TERMINATION_GRACE` to reach its kill, so the
+    // bound on being gone is the sum. What separates a session that ended
+    // because its harness was killed from one that ended because its harness
+    // was let go is the farewell mark, asserted after this loop.
+    let deadline = revoked + HANGUP_DEADLINE + TERMINATION_GRACE;
+    let mut cpu_after = cpu_before;
+    let mut next_sample = revoked + CPU_SAMPLE_INTERVAL;
+    let took = loop {
+        if child.try_wait().is_some() {
+            break revoked.elapsed();
+        }
+        if Instant::now() >= next_sample {
+            next_sample += CPU_SAMPLE_INTERVAL;
+            if let Some(sampled) = child.cpu_seconds() {
+                cpu_after = Some(sampled);
+            }
+        }
+        if Instant::now() >= deadline {
+            let still_there = launcher_children(launcher);
+            child.kill();
+            panic!(
+                "trial {trial}: glasshouse launch was still running {:?} after its terminal \
+                 was revoked. This is the state two launched sessions were found in, hours \
+                 after their panes closed: the launcher in `supervise`'s poll loop on a \
+                 `try_wait` that never reports, because nothing is draining the harness's \
+                 terminal and the harness cannot finish the exit it was asked to make. An \
+                 empty list below is that same state — a child in `?Es` has no argument \
+                 vector left to print.\n--- the launcher's children ---\n{still_there}\n\
+                 --- end ---",
+                HANGUP_DEADLINE + TERMINATION_GRACE,
+            );
+        }
+        std::thread::sleep(EXIT_POLL);
+    };
+
+    // **The assertion the fix is about.** The harness only gets here by
+    // finishing a write far larger than its pty holds, which it can only do
+    // if `pump_output` kept reading that pty after the launcher's own
+    // terminal was revoked.
+    assert!(
+        fixture.farewell_mark().exists(),
+        "trial {trial}: glasshouse launch exited after {took:?}, but its harness never \
+         finished saying goodbye — so nothing was draining the harness's terminal and the \
+         harness was removed rather than let go. This is `pump_output` breaking out of its \
+         loop on a failed write instead of reading on."
+    );
+
+    // Nothing of the session is left: the launcher returns only once
+    // `try_wait` has reaped the harness, so anything still here is the `?Es`
+    // the field found.
+    let gone_by = Instant::now() + HARNESS_GONE_DEADLINE;
+    loop {
+        let remaining = launcher_children(launcher);
+        if remaining.is_empty() {
+            break;
+        }
+        assert!(
+            Instant::now() < gone_by,
+            "trial {trial}: the launcher exited after {took:?} but its harness is still \
+             here:\n{remaining}"
+        );
+        std::thread::sleep(EXIT_POLL);
+    }
+
+    let cpu = cpu_after
+        .zip(cpu_before)
+        .map(|(after, before)| after - before);
+    assert!(
+        cpu.is_none_or(|burned| burned <= MAX_CPU_AFTER_HANGUP),
+        "trial {trial}: the launcher exited after {took:?}, but burned {:?}s of processor \
+         time doing it — a wind-down should cost almost none",
+        cpu.unwrap_or_default(),
+    );
+    println!("trial {trial}: revoked terminal, launcher gone in {took:?}");
+}
+
+/// The launcher's own children, with their states, or an empty string when it
+/// has none.
+///
+/// **By parent, not by command line, and that is the point.** A harness in the
+/// state the field found — `?Es`, trying to exit and never reaped — has no
+/// argument vector left for `pgrep -f` to match, and neither has a zombie, so
+/// searching for the harness's path reports "gone" for exactly the two
+/// outcomes this test exists to catch. Every process still parented to the
+/// launcher is one it failed to reap, whatever `ps` can still say about it.
+///
+/// `-o stat` rather than a bare "is it alive?": a message that names the state
+/// is worth more than one that says a pid exists.
+#[cfg(target_os = "macos")]
+fn launcher_children(launcher: u32) -> String {
+    let found = std::process::Command::new("pgrep")
+        .args(["-P", &launcher.to_string()])
+        .output()
+        .expect("run pgrep");
+    let pids: Vec<String> = String::from_utf8_lossy(&found.stdout)
+        .split_whitespace()
+        .map(str::to_owned)
+        .collect();
+    if pids.is_empty() {
+        return String::new();
+    }
+    let listed = std::process::Command::new("ps")
+        .args(["-o", "pid,stat,command", "-p", &pids.join(",")])
+        .output()
+        .expect("run ps");
+    String::from_utf8_lossy(&listed.stdout).trim().to_owned()
+}
+
 struct Fixture {
     dir: tempfile::TempDir,
 }
@@ -910,8 +1150,103 @@ impl Fixture {
         Self { dir }
     }
 
+    /// A fixture whose configuration also declares a fixture harness, so
+    /// `glasshouse launch claude-code` reaches `session::attach` and runs
+    /// something real on a pty of its own.
+    ///
+    /// The harness is the shape of the field observation rather than a
+    /// convenience: **idle until asked to stop, and with something to say on
+    /// its way out.** Idle is the state a revoked terminal is found in
+    /// (practice §59, and [`SETTLE`]'s own note), and the farewell is the half
+    /// that can only be written if somebody is still draining the harness's
+    /// pty — which is what [`a_launch_whose_terminal_is_revoked_without_a_signal_still_ends`]
+    /// is about.
+    #[cfg(target_os = "macos")]
+    fn new_for_launch() -> Self {
+        use std::os::unix::fs::PermissionsExt;
+
+        let fixture = Self::new();
+        // `launch` resolves a project, and a project is a repository.
+        std::fs::create_dir_all(fixture.dir.path().join("project").join(".git"))
+            .expect("fixture project directory");
+        std::fs::create_dir_all(fixture.dir.path().join("bin")).expect("fixture bin directory");
+
+        let harness = fixture.harness();
+        std::fs::write(&harness, fixture.harness_script()).expect("write the fixture harness");
+        let mut perms = std::fs::metadata(&harness).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&harness, perms).expect("make the fixture harness executable");
+
+        let config = fixture.dir.path().join("config").join("config.toml");
+        let mut toml = std::fs::read_to_string(&config).expect("read the fixture config");
+        toml.push_str(&format!(
+            "\n[integrations.claude-code]\nenabled = true\nexecutable = \"{}\"\n",
+            harness.display()
+        ));
+        std::fs::write(&config, toml).expect("declare the fixture harness");
+        fixture
+    }
+
+    /// The fixture harness's executable.
+    #[cfg(target_os = "macos")]
+    fn harness(&self) -> std::path::PathBuf {
+        self.dir.path().join("bin").join("fixture-harness")
+    }
+
+    /// The file the fixture harness writes **after** its farewell has reached
+    /// the pty and **before** it exits.
+    ///
+    /// This is the acceptance test's real evidence, and the reason it does not
+    /// rest on a stopwatch: the farewell is deliberately larger than a pty's
+    /// output queue (measured at 1024 bytes on macOS 25.5), so this file can
+    /// only appear if something kept reading the harness's terminal after the
+    /// launcher's own terminal had gone. A harness that was killed part-way
+    /// through that write leaves no mark.
+    #[cfg(target_os = "macos")]
+    fn farewell_mark(&self) -> std::path::PathBuf {
+        self.dir.path().join("farewell")
+    }
+
+    /// The fixture harness, as a shell script.
+    ///
+    /// The farewell path is baked in rather than passed in the environment:
+    /// what a harness inherits from the launcher is `pty::TerminalCommand`'s
+    /// business, and this test has no business depending on it.
+    #[cfg(target_os = "macos")]
+    fn harness_script(&self) -> String {
+        format!(
+            r#"#!/bin/sh
+# A fixture harness for terminal_loss.rs. Idle until asked to stop, then
+# writes 32 KiB -- far more than a pty's output queue holds -- and only then
+# records that it finished and exits cleanly.
+farewell() {{
+    i=0
+    while [ "$i" -lt 32 ]; do
+        printf '%1024s' ''
+        i=$((i + 1))
+    done
+    echo done > '{mark}'
+    exit 0
+}}
+trap farewell TERM
+printf '{marker}\n'
+while :; do
+    sleep 0.2
+done
+"#,
+            mark = self.farewell_mark().display(),
+            marker = HARNESS_MARKER,
+        )
+    }
+
     fn start_shell(&self) -> Shell {
         self.start_shell_with(&[])
+    }
+
+    /// Start `glasshouse launch claude-code` on a pty this fixture owns.
+    #[cfg(target_os = "macos")]
+    fn start_launch(&self) -> Shell {
+        self.start_with(&["launch", "claude-code"], &[])
     }
 
     /// Start the interface with extra environment on top of this process's.
@@ -920,6 +1255,12 @@ impl Fixture {
     /// the only way to construct the interleaving the watchdog exists for. See
     /// `an_interface_that_cannot_see_a_hangup_is_still_ended`.
     fn start_shell_with(&self, extra: &[(&str, &str)]) -> Shell {
+        self.start_with(&[], extra)
+    }
+
+    /// Start the binary on a pty this fixture owns, with `args` after the
+    /// scope and directory flags every start needs.
+    fn start_with(&self, args: &[&str], extra: &[(&str, &str)]) -> Shell {
         let pair = native_pty_system()
             .openpty(PtySize {
                 rows: 40,
@@ -946,6 +1287,10 @@ impl Fixture {
             "--config-dir",
             &self.dir.path().join("config").display().to_string(),
         ]);
+
+        for arg in args {
+            command.arg(arg);
+        }
 
         for (key, value) in extra {
             command.env(key, value);
@@ -1087,6 +1432,89 @@ impl Shell {
     fn close_terminal(&mut self) {
         self.drain();
         drop(self.master.take());
+    }
+
+    /// Take the terminal away the way the *kernel* does when a pane closes
+    /// under a still-running session: revoke the slave device, and send
+    /// nothing.
+    ///
+    /// **The master is deliberately left open**, which is the whole difference
+    /// from [`Shell::close_terminal`]. Closing every master descriptor is a
+    /// hangup, and a hangup also delivers `SIGHUP` — the path that already
+    /// worked, and the one the two tests above cover. `revoke(2)` delivers no
+    /// signal at all: it invalidates the descriptors in place, which is what
+    /// `lsof` reported as `(revoked)` on fds 0, 1 and 2 of the two launched
+    /// sessions found alive on 2026-09-06, five hours after their panes had
+    /// closed. Measured on macOS 25.5 with a handler installed: no `SIGHUP`,
+    /// `poll` reports `POLLNVAL`, and a blocked `read` wakes at once with
+    /// `Ok(0)`.
+    ///
+    /// macOS only: `revoke(2)` is a BSD call and neither Linux nor Windows
+    /// has it.
+    #[cfg(target_os = "macos")]
+    fn revoke_terminal(&mut self) {
+        self.drain();
+        // SAFETY: `self.fd` is the master of a pty this struct still owns.
+        // `ptsname` returns a pointer to storage owned by the C library, valid
+        // until the next call on this thread; it is copied out immediately.
+        let name = unsafe { libc::ptsname(self.fd) };
+        assert!(
+            !name.is_null(),
+            "the pty master could not name its slave: {}",
+            std::io::Error::last_os_error()
+        );
+        // SAFETY: non-null and NUL-terminated, per `ptsname`.
+        let path = unsafe { std::ffi::CStr::from_ptr(name) }.to_owned();
+        // `revoke(2)` is a BSD call the `libc` crate does not declare for
+        // this target, so it is declared here rather than reached for.
+        unsafe extern "C" {
+            fn revoke(path: *const libc::c_char) -> libc::c_int;
+        }
+        // SAFETY: `path` is a live NUL-terminated C string; `revoke` reads it
+        // and takes nothing else.
+        let revoked = unsafe { revoke(path.as_ptr()) };
+        assert_eq!(
+            revoked,
+            0,
+            "could not revoke {}: {}",
+            path.to_string_lossy(),
+            std::io::Error::last_os_error()
+        );
+    }
+
+    /// Wait until the fixture harness has printed [`HARNESS_MARKER`], or fail
+    /// saying what the launcher did instead.
+    #[cfg(target_os = "macos")]
+    fn wait_for_harness(&mut self) {
+        let deadline = Instant::now() + STARTUP_TIMEOUT;
+        while Instant::now() < deadline {
+            self.drain();
+            if strip_terminal_sequences(&self.output()).contains(HARNESS_MARKER) {
+                return;
+            }
+            if let Some(status) = self.try_wait() {
+                panic!(
+                    "glasshouse launch exited ({status:?}) before its harness said anything — \
+                     this test cannot say anything about a revoked terminal if no session was \
+                     ever attached.\n--- output ---\n{}\n--- end ---",
+                    self.output()
+                );
+            }
+            std::thread::sleep(READ_POLL);
+        }
+        panic!(
+            "the fixture harness never printed {HARNESS_MARKER:?} within \
+             {STARTUP_TIMEOUT:?}\n--- output ---\n{}\n--- end ---",
+            self.output()
+        );
+    }
+
+    /// The launcher's own process id.
+    #[cfg(target_os = "macos")]
+    fn process_id(&self) -> u32 {
+        self.child
+            .process_id()
+            .expect("a live glasshouse has a process id")
     }
 
     fn try_wait(&mut self) -> Option<portable_pty::ExitStatus> {

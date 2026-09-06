@@ -197,14 +197,33 @@ fn supervise(process: &Mutex<PtyProcess>, initial_size: TerminalSize) -> Result<
     }
 }
 
-/// Relay everything the harness prints to this process's standard output.
+/// Relay everything the harness prints to this process's standard output,
+/// and keep reading the pty even once nobody is listening.
 ///
 /// Every chunk is flushed as it arrives. Buffering would be visible as an
 /// interface that lags behind the keystrokes producing it, which for an
 /// interactive harness is indistinguishable from it having hung.
+///
+/// **Invariant: this is the only thing draining the harness's terminal, so it
+/// reads until the pty ends — whatever happens to the destination.** A write
+/// that fails stops the relay and never the drain. Ending the drain is what
+/// leaves the harness unable to finish: its own writes fill the pty, and its
+/// exit blocks in the terminal's drain with nothing on the other side, so
+/// `supervise`'s `try_wait` never reports and the launcher polls forever. That
+/// is the state two launched sessions were found in on 2026-09-06 — launcher
+/// alive at 0.8% of a core, harness child in `ps` state `?Es`, five hours after
+/// the pane that started them had closed.
+///
+/// A failed write is also the *only* notice an attached session gets that its
+/// terminal is gone while the harness is still producing output, so a
+/// confirmed hangup requests shutdown here for the same belt-and-braces reason
+/// [`pump_input`] does. [`hung_up`] is asked rather than inferred: a write can
+/// fail for reasons that are nobody's terminal, and a transient one must not
+/// end a working session.
 fn pump_output(mut output: PtyOutput, drained: &AtomicBool) {
     let mut buffer = [0u8; 8192];
     let mut stdout = std::io::stdout();
+    let mut relaying = true;
     // Both `Ok(0)` and an error mean the same thing here: nothing more is
     // coming. A pty reports the end of a session as end-of-file on some
     // platforms and as a read error on others, and neither is a fault to
@@ -212,8 +231,16 @@ fn pump_output(mut output: PtyOutput, drained: &AtomicBool) {
     // the process itself. A read a signal interrupted is neither, and
     // [`next_chunk`] keeps it from ending this relay.
     while let Some(read) = next_chunk(&mut output, &mut buffer) {
+        if !relaying {
+            // Read and discard. Nothing is written anywhere: the bytes had
+            // one destination and it is gone.
+            continue;
+        }
         if stdout.write_all(&buffer[..read]).is_err() || stdout.flush().is_err() {
-            break;
+            relaying = false;
+            if stdout_hung_up() {
+                crate::shutdown::request_shutdown();
+            }
         }
     }
     drained.store(true, Ordering::SeqCst);
@@ -298,6 +325,22 @@ fn pump_input(mut input: impl Read, process: &Weak<Mutex<PtyProcess>>) {
 }
 
 /// Whether standard input's far end has gone away.
+#[cfg(unix)]
+fn stdin_hung_up() -> bool {
+    use std::os::fd::AsRawFd;
+
+    hung_up(std::io::stdin().as_raw_fd())
+}
+
+/// Whether standard output's far end has gone away.
+#[cfg(unix)]
+fn stdout_hung_up() -> bool {
+    use std::os::fd::AsRawFd;
+
+    hung_up(std::io::stdout().as_raw_fd())
+}
+
+/// Whether `fd`'s far end has gone away.
 ///
 /// Mirrors [`crate::tui::event::wait_for_terminal`]'s `POLLHUP` check rather
 /// than duplicating its reasoning by inference: a hung-up descriptor reports
@@ -305,12 +348,33 @@ fn pump_input(mut input: impl Read, process: &Weak<Mutex<PtyProcess>>) {
 /// by a different route) independently of whatever a prior read on it
 /// returned. The poll has a zero timeout — the read that got us here already
 /// did the waiting, so this only asks what state the descriptor is in now.
+///
+/// **`POLLNVAL` is what covers a revoked terminal, and it is why nothing else
+/// here needs a second detector.** macOS's `revoke(2)` — what closing a pane
+/// runs under a still-live session — does not deliver a signal and does not
+/// hang the descriptor up; it invalidates it. Measured on macOS 25.5, one pty
+/// slave revoked while a thread sat blocked in `read`:
+///
+/// ```text
+///                     attached, idle          revoked
+///   poll(POLLIN, 0)   0 ready, no revents     1 ready, POLLNVAL
+///   blocking read     blocks                  wakes at once with Ok(0)
+///   write             succeeds                EIO
+///   fstat             succeeds                EBADF
+///   isatty/tcgetattr  succeeds                ENOTTY
+/// ```
+///
+/// So the two answers this needs are already the two it gives: an attached
+/// idle terminal sets no revent and is not a hangup, and a revoked one sets
+/// `POLLNVAL` and is. The read that woke [`pump_input`] with `Ok(0)` is the
+/// same event, which is why an *idle* harness — one that will never print
+/// again and so can never fail a write in [`pump_output`] — still ends its
+/// session within [`TERMINATION_GRACE`]: the input pump notices, not the
+/// output pump.
 #[cfg(unix)]
-fn stdin_hung_up() -> bool {
-    use std::os::fd::AsRawFd;
-
+fn hung_up(fd: std::os::fd::RawFd) -> bool {
     let mut watched = libc::pollfd {
-        fd: std::io::stdin().as_raw_fd(),
+        fd,
         events: libc::POLLIN,
         revents: 0,
     };
@@ -324,8 +388,15 @@ fn stdin_hung_up() -> bool {
 /// [`crate::tui::event::wait_for_terminal`]'s own Windows note. Reporting
 /// "not hung up" here keeps the old behaviour exactly: the pump still ends,
 /// it just does not request a shutdown nobody has confirmed is warranted.
+/// There is no `revoke(2)` on Windows or Linux either, so nothing is lost.
 #[cfg(not(unix))]
 fn stdin_hung_up() -> bool {
+    false
+}
+
+/// The output side of the note above, for the same reason.
+#[cfg(not(unix))]
+fn stdout_hung_up() -> bool {
     false
 }
 
