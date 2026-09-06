@@ -7,7 +7,9 @@
 use std::fs;
 use std::io::{self, BufRead, IsTerminal};
 use std::path::PathBuf;
-use std::time::{Duration, SystemTime};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant, SystemTime};
 
 use clap::Parser;
 use ratatui::Terminal;
@@ -22,7 +24,7 @@ use crate::prompt::{self, Budget, CellResult, ErrorSection, ExhaustedReason, Ext
 use crate::rollout::{self, Rollout};
 use crate::runtime::handles::HandleTable;
 use crate::runtime::isolate::{DEFAULT_HEAP_LIMIT_BYTES, Runtime};
-use crate::runtime::outcome::{CellOutcome, CellRecord};
+use crate::runtime::outcome::{CellOutcome, CellRecord, Ended};
 use crate::runtime::preview;
 use crate::sandbox::profile::Profile;
 use crate::supervisor::Supervisor;
@@ -44,6 +46,256 @@ const NO_PROGRAM: &str = "no program ran; send one pane block";
 /// sentence is the contract's own: running the first is the silently-wrong
 /// reading, because the second is usually the one the model meant.
 const TWO_BLOCKS: &str = "two pane blocks in one turn; send one";
+
+/// The class a cancelled call throws with (`bindings.rs`'s `Cancelled`), read
+/// off the cell's own trajectory so the session knows a Ctrl-C was delivered.
+const CANCELLED: &str = "Cancelled";
+
+/// A second Ctrl-C inside this window ends the session; a later one starts a
+/// new pair. Two seconds is long enough that a person who meant "again"
+/// reaches it and short enough that an interrupt an hour ago is not half of
+/// today's.
+const DOUBLE_INTERRUPT_WINDOW: Duration = Duration::from_secs(2);
+
+/// How often the watcher asks whether the handler fired -- the same 20 ms
+/// `tools::invoke` polls its child with, so a Ctrl-C costs at most two polls.
+const INTERRUPT_POLL: Duration = Duration::from_millis(20);
+
+/// The status a shell reports for a process ended by SIGINT.
+const INTERRUPTED_EXIT: i32 = 130;
+
+/// How long the second Ctrl-C gives the cancelled call to kill and reap its
+/// own child before exiting anyway: twelve of `invoke`'s 20 ms polls, spent
+/// holding the rollout's write lock so the task loop cannot start another
+/// call inside it. See [`Interrupter::end_the_session`].
+const REAP_GRACE: Duration = Duration::from_millis(250);
+
+/// Raised by the signal handler and by nothing else.
+///
+/// **A handler may do exactly one async-signal-safe thing, and this is it.**
+/// Everything the interrupt means -- which token to cancel, whether it is the
+/// second of a pair, whether a rollout line is half written -- is decided by
+/// [`watch`] on an ordinary thread, where locks and allocation are legal.
+static INTERRUPT: AtomicBool = AtomicBool::new(false);
+
+/// Installs the process's SIGINT handler. Unix: `signal(2)`, whose BSD
+/// semantics on both platforms pane ships for leave the handler installed
+/// across deliveries, so a second Ctrl-C reaches the same function.
+///
+/// `libc` is not a dependency of this crate on macOS and this is two lines of
+/// declaration, so the handler is declared rather than depended on -- the same
+/// choice `sandbox::macos` makes for `sandbox_init`.
+#[cfg(unix)]
+fn install_interrupt_handler() {
+    /// `SIGINT` on every unix pane ships for.
+    const SIGINT: i32 = 2;
+
+    unsafe extern "C" {
+        fn signal(sig: i32, handler: usize) -> usize;
+    }
+
+    extern "C" fn on_interrupt(_sig: i32) {
+        INTERRUPT.store(true, Ordering::SeqCst);
+    }
+
+    unsafe { signal(SIGINT, on_interrupt as *const () as usize) };
+}
+
+/// The Windows half: the console's Ctrl-C routine sets the identical flag.
+///
+/// It runs on a thread of the console's own making rather than on top of the
+/// interrupted one, and returning `TRUE` says the event was handled -- which
+/// is what stops the default handler ending the process before [`watch`] has
+/// decided whether this was the first Ctrl-C or the second.
+#[cfg(windows)]
+fn install_interrupt_handler() {
+    use windows_sys::Win32::Foundation::TRUE;
+    use windows_sys::Win32::System::Console::{
+        CTRL_BREAK_EVENT, CTRL_C_EVENT, SetConsoleCtrlHandler,
+    };
+    use windows_sys::core::BOOL;
+
+    unsafe extern "system" fn on_interrupt(event: u32) -> BOOL {
+        if event == CTRL_C_EVENT || event == CTRL_BREAK_EVENT {
+            INTERRUPT.store(true, Ordering::SeqCst);
+        }
+        TRUE
+    }
+
+    unsafe { SetConsoleCtrlHandler(Some(on_interrupt), TRUE) };
+}
+
+/// The keyboard's end of the cancellation facility.
+///
+/// **A Ctrl-C cancels the call in flight; it never terminates the isolate.**
+/// JavaScript is stopped by the wall-clock watchdog (`runtime-contract.md`
+/// §7's limits) and by nothing else here: a second terminator racing the
+/// watchdog's own is how a runtime that could be stopped becomes one that
+/// cannot. So an interrupt raised while a cell is only computing is not lost
+/// and not applied either -- [`pending`](Self::pending) stays raised until a
+/// call actually ends `Cancelled`, which makes the *next* call the one it
+/// cancels.
+struct Interrupter {
+    /// The token of the cell now running, replaced before every cell so one
+    /// Ctrl-C cannot cancel every later call.
+    token: Mutex<invoke::CancellationToken>,
+    /// Raised when an interrupt has been seen and not yet consumed by a call
+    /// that ended `Cancelled`.
+    pending: AtomicBool,
+    /// Raised once the second Ctrl-C has decided to exit, and never lowered.
+    /// It pins [`pending`](Self::pending) raised, so every call started
+    /// during the reap grace is cancelled before it spawns a child.
+    ending: AtomicBool,
+    /// Held for the length of every rollout write. The second-Ctrl-C exit
+    /// takes it too, which is the whole of "the rollout's current line is
+    /// complete": `Rollout` writes one whole line per call, so waiting for
+    /// this lock is waiting for that call to return.
+    writing: Mutex<()>,
+}
+
+/// A lock that a panic elsewhere cannot turn into a second failure: the data
+/// behind both mutexes is a token and a unit, neither of which a panic can
+/// leave inconsistent.
+fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+impl Interrupter {
+    fn new() -> Self {
+        Self {
+            token: Mutex::new(invoke::CancellationToken::new()),
+            pending: AtomicBool::new(false),
+            ending: AtomicBool::new(false),
+            writing: Mutex::new(()),
+        }
+    }
+
+    /// Publishes the token the cell about to run will make its calls through,
+    /// cancelling it on the spot if an interrupt is still pending.
+    ///
+    /// The check and the store happen under one lock, so there is no window
+    /// in which [`raise`](Self::raise) cancels the token being replaced and
+    /// the replacement escapes uncancelled.
+    fn arm(&self, token: invoke::CancellationToken) {
+        let mut slot = lock(&self.token);
+        if self.pending.load(Ordering::SeqCst) {
+            token.cancel();
+        }
+        *slot = token;
+    }
+
+    /// One interrupt: cancel the call in flight and stay raised.
+    fn raise(&self) {
+        let slot = lock(&self.token);
+        self.pending.store(true, Ordering::SeqCst);
+        slot.cancel();
+    }
+
+    /// A call ended `Cancelled`, so the interrupt that asked for it has been
+    /// delivered and later cells start clean -- **unless the session is
+    /// already ending**, in which case there are no later cells and lowering
+    /// the flag would let one start a child the exit then orphans.
+    fn consumed(&self) {
+        if !self.ending.load(Ordering::SeqCst) {
+            self.pending.store(false, Ordering::SeqCst);
+        }
+    }
+
+    fn writing(&self) -> MutexGuard<'_, ()> {
+        lock(&self.writing)
+    }
+
+    /// The second Ctrl-C, and the only place in `pane` that exits from a
+    /// thread other than the main one.
+    ///
+    /// **It cancels before it exits, and that is not decoration.**
+    /// `std::process::exit` does not touch this process's children, so an
+    /// exit taken with a call in flight reparents the confined child to
+    /// `init` and leaves it there. Measured, before this function did
+    /// anything but exit: one `bash` spinning at 87% of a core, for ever.
+    /// Cancelling hands that child to `invoke::kill_and_reap`, which kills
+    /// *and* reaps it.
+    ///
+    /// **Then it takes [`writing`](Self::writing) and holds it across the
+    /// grace, and that ordering is the rest of the fix.** Taking the lock
+    /// waits for the rollout line in flight to finish, which is the
+    /// whole-line guarantee. *Holding* it stops the task loop at its next
+    /// write -- `act_on`'s cell line is the very next thing after the
+    /// cancelled call returns -- so the loop cannot answer the cell, ask for
+    /// another turn and start another cell inside the grace. It did exactly
+    /// that when the grace was an unguarded sleep, spawning a *fresh*
+    /// spinning child for the same exit to orphan.
+    ///
+    /// [`REAP_GRACE`] is bounded because a Ctrl-C that hangs is not a Ctrl-C:
+    /// after it, the exit proceeds whatever the child is doing.
+    fn end_the_session(&self) -> ! {
+        self.ending.store(true, Ordering::SeqCst);
+        self.raise();
+        let _line = self.writing();
+        std::thread::sleep(REAP_GRACE);
+        eprintln!("pane: interrupted twice; ending the session");
+        std::process::exit(INTERRUPTED_EXIT);
+    }
+}
+
+/// Turns the handler's flag into the session's decision, forever.
+///
+/// It is a thread because there is nowhere else to poll from: a task spends
+/// its whole life inside `send_turn` or inside `run_cell`, and neither
+/// returns to the loop while the call a Ctrl-C is meant to stop is running.
+fn watch(state: &Interrupter) -> ! {
+    let mut first: Option<Instant> = None;
+    loop {
+        std::thread::sleep(INTERRUPT_POLL);
+        if !INTERRUPT.swap(false, Ordering::SeqCst) {
+            continue;
+        }
+        let now = Instant::now();
+        if first.is_some_and(|earlier| now.duration_since(earlier) <= DOUBLE_INTERRUPT_WINDOW) {
+            state.end_the_session();
+        }
+        first = Some(now);
+        state.raise();
+    }
+}
+
+/// Whether this cell delivered the pending interrupt: any call of its
+/// trajectory that ended as a `Cancelled` throw did.
+///
+/// **The trajectory rather than the cell's own ending**, because a program
+/// may catch the throw (`runtime-contract.md` §9.1's stated limit) and a
+/// Ctrl-C the program swallowed was still delivered -- reading the cell's
+/// outcome instead would leave the flag raised and cancel the next cell too.
+fn delivered_the_interrupt(record: &CellRecord) -> bool {
+    record
+        .calls
+        .iter()
+        .any(|call| matches!(&call.ended, Ended::Threw { class } if class == CANCELLED))
+}
+
+/// The two rollout writes in this module, and every one of them goes through
+/// one of these -- which is what makes [`Interrupter::end_the_session`]'s
+/// "never a half line" a property of the code rather than of the timing.
+fn write_turn(
+    interrupt: &Interrupter,
+    rollout: &mut Rollout,
+    role: Role,
+    text: &str,
+) -> io::Result<()> {
+    let _line = interrupt.writing();
+    rollout.record_turn(role, text)
+}
+
+fn write_cell(
+    interrupt: &Interrupter,
+    rollout: &mut Rollout,
+    record: &CellRecord,
+) -> io::Result<()> {
+    let _line = interrupt.writing();
+    rollout.record_cell(record)
+}
 
 /// `pane session`'s whole flag set. A project root and a way to identify the
 /// rollout file are the only things every run needs; `--task` is the
@@ -293,6 +545,13 @@ fn run(args: SessionArgs) -> Result<(), String> {
             .unwrap_or_else(|| args.root.clone()),
     );
 
+    // Installed before the first task and never again: from here on a Ctrl-C
+    // cancels the call in flight rather than killing the process mid-line.
+    let interrupt = Arc::new(Interrupter::new());
+    install_interrupt_handler();
+    let watched = Arc::clone(&interrupt);
+    std::thread::spawn(move || watch(&watched));
+
     let session = Session {
         project: &project,
         config: &config,
@@ -300,7 +559,7 @@ fn run(args: SessionArgs) -> Result<(), String> {
         glasshouse: &glasshouse,
         id: &session_id,
         memory: &memory,
-        token: invoke::CancellationToken::new(),
+        interrupt: &interrupt,
     };
     let outcome = drive(&args, &session, &mut transcript, &mut rollout);
 
@@ -325,11 +584,11 @@ fn run(args: SessionArgs) -> Result<(), String> {
 struct Session<'a> {
     project: &'a ProjectConfig,
     config: &'a PaneConfig,
-    /// The token every tool call in this session is cancellable through
-    /// (`Runtime::with_token`). Nothing sets it yet: the `SIGINT` handler that
-    /// does is the follow-up after the isolate fix, so today it is plumbing
-    /// that makes a cancelled call a §5 `Cancelled` throw the moment it exists.
-    token: invoke::CancellationToken,
+    /// The keyboard's end of the cancellation facility: the SIGINT handler's
+    /// flag, the token of the cell now running, and the lock every rollout
+    /// write is taken under. A task publishes each cell's fresh token to it
+    /// and asks it to forget the interrupt a cancelled call has delivered.
+    interrupt: &'a Interrupter,
     profile: &'a Profile,
     glasshouse: &'a Glasshouse,
     id: &'a SessionId,
@@ -521,8 +780,7 @@ fn run_task(
         .conversation
         .messages
         .push(Message::text(Role::User, task));
-    rollout
-        .record_turn(Role::User, task)
+    write_turn(session.interrupt, rollout, Role::User, task)
         .map_err(|e| format!("could not record the user turn: {e}"))?;
 
     let mut runtime = Runtime::with_limits(
@@ -532,8 +790,7 @@ fn run_task(
         DEFAULT_HEAP_LIMIT_BYTES,
         Duration::from_secs(session.config.limits.cell_wall_clock_s),
     )
-    .with_response_byte_cap(session.config.limits.response_bytes)
-    .with_token(session.token.clone());
+    .with_response_byte_cap(session.config.limits.response_bytes);
     let mut budget = TaskBudget::new(
         session.config.limits.task_tokens,
         session.config.limits.cells,
@@ -552,17 +809,34 @@ fn run_task(
         let estimate = estimate_request_tokens(&transcript.conversation);
         let assistant_text = message_text(&turn.message);
         transcript.conversation.messages.push(turn.message);
-        rollout
-            .record_turn(Role::Assistant, &assistant_text)
+        write_turn(session.interrupt, rollout, Role::Assistant, &assistant_text)
             .map_err(|e| format!("could not record the assistant turn: {e}"))?;
 
         let served = glasshouse::served_by(session.glasshouse, since);
         budget.add(&served, turn.usage.as_ref(), estimate);
 
+        // A fresh token for this cell, published to the watcher before the
+        // cell can make a call: one Ctrl-C is one cell's cancellation, and
+        // `arm` cancels this one on the spot if an earlier interrupt is still
+        // pending, so an interrupt raised while nothing was in flight is
+        // spent on the next call rather than lost.
+        let cell_token = invoke::CancellationToken::new();
+        session.interrupt.arm(cell_token.clone());
+        runtime.set_token(cell_token);
+
         let ordinal = tui::cell_ordinal(&transcript.conversation, &transcript.notebook);
-        let mut step = act_on(&assistant_text, &mut runtime, &mut budget, rollout)?;
+        let mut step = act_on(
+            &assistant_text,
+            &mut runtime,
+            &mut budget,
+            rollout,
+            session.interrupt,
+        )?;
         prose_turns = if step.prose { prose_turns + 1 } else { 0 };
         if let Some(record) = step.record.take() {
+            if delivered_the_interrupt(&record) {
+                session.interrupt.consumed();
+            }
             cells_since_look.push(record);
         }
 
@@ -605,8 +879,7 @@ fn run_task(
                 .conversation
                 .messages
                 .push(Message::text(Role::Assistant, response));
-            rollout
-                .record_turn(Role::Assistant, response)
+            write_turn(session.interrupt, rollout, Role::Assistant, response)
                 .map_err(|e| format!("could not record the terminal response: {e}"))?;
         }
 
@@ -647,8 +920,7 @@ fn run_task(
                 .conversation
                 .messages
                 .push(Message::text(Role::User, answer));
-            rollout
-                .record_turn(Role::User, answer)
+            write_turn(session.interrupt, rollout, Role::User, answer)
                 .map_err(|e| format!("could not record the runtime's answer: {e}"))?;
         }
 
@@ -675,6 +947,7 @@ fn act_on(
     runtime: &mut Runtime,
     budget: &mut TaskBudget,
     rollout: &mut Rollout,
+    interrupt: &Interrupter,
 ) -> Result<Step, String> {
     let source = match prompt::extract_program(assistant_text) {
         Extracted::Program(source) => source,
@@ -714,8 +987,7 @@ fn act_on(
     budget.cells_used = budget.cells_used.saturating_add(1);
     let turn = outcome.turn();
     let record = turn.record.clone();
-    rollout
-        .record_cell(&turn.record)
+    write_cell(interrupt, rollout, &turn.record)
         .map_err(|e| format!("could not record the cell: {e}"))?;
 
     let mut view = CellView {
@@ -755,10 +1027,7 @@ fn act_on(
             result.error = Some(ErrorSection {
                 class: error.class.clone(),
                 message: error.message.clone(),
-                position: error
-                    .line
-                    .zip(error.column)
-                    .map(|(line, column)| (u64::from(line), u64::from(column))),
+                position: ErrorSection::position_of(error.line, error.column),
                 frames: error
                     .stack
                     .iter()

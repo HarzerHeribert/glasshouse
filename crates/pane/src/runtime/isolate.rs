@@ -21,7 +21,7 @@
 
 use std::ffi::c_void;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Once, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -96,6 +96,23 @@ const TERMINATE_RETRY_INTERVAL: Duration = Duration::from_millis(50);
 /// `pane.toml` beside the limit when 61F takes it.
 const HARD_DEADLINE_MULTIPLE: u32 = 3;
 
+/// How long the bookkeeping *after* a cell gets before it is stopped in
+/// turn.
+///
+/// `run_cell` re-reads every live handle when the cell ends, and reading a
+/// binding runs the model's own getter or `Proxy` trap. With the cell's
+/// watchdog already disarmed there, a cell that *finished* —
+/// `const report = { get summary() { while (true) {} } };` — hung the whole
+/// session with no `Watchdog` thread alive at all, measured through the
+/// shipped binary and killed at 75 s. So the epilogue is watched too, on its
+/// own clock rather than on what the cell left of its wall-clock limit: a
+/// cell that used its whole budget would otherwise have every preview
+/// terminated. Half a second is far more than sampling a handle table needs
+/// and far less than a person waiting on a hung session; a read stopped here
+/// keeps the preview it had, which is the trade `refresh_previews` was
+/// already written for.
+const EPILOGUE_WALL_CLOCK_LIMIT: Duration = Duration::from_millis(500);
+
 /// The prefix every script a model authored is named with. A stack frame
 /// from any other script is a host frame and is never shown (§5).
 const CELL_SCRIPT_PREFIX: &str = "pane:cell:";
@@ -138,31 +155,79 @@ fn initialize_v8() {
 /// hands that callback: the [`HeapGuard`] the isolate is signalled through,
 /// and how often the ceiling has been raised.
 ///
-/// **The ceiling is raised at most once per cell**, which is what makes it a
-/// ceiling. The raise exists to buy the terminated cell room to unwind;
-/// granting another `initial_heap_limit` on *every* callback turned a 256 MiB
-/// ceiling into 7 GB of resident memory while a cell that ignored its
-/// termination went on allocating.
+/// **A raise never refuses.** V8's rule is that answering the callback with
+/// the limit it already has aborts the process, so "raise once per cell and
+/// refuse after that" is a deliberate `FatalProcessOutOfMemory` for any cell
+/// whose *single* allocation cannot be satisfied — measured:
+/// `new Array(100000000).fill('y')` at the shipped 256 MiB ceiling killed the
+/// process on three runs out of three, which takes the session with it. The
+/// ceiling is instead enforced where it can be enforced without killing
+/// anything: [`heap_grant`] lets the cell finish, [`Runtime::finish`] fails
+/// any cell that crossed the ceiling, and
+/// [`Runtime::restore_heap_limit`] puts the limit back before the next one,
+/// so a raise is a cell's own emergency and never the task's new ceiling.
 struct HeapWatch {
     guard: Rc<HeapGuard>,
-    /// Cleared at the start of every cell by [`Runtime::run_cell`]; set by
-    /// the first callback that raises for that cell.
-    raised_this_cell: AtomicBool,
+    /// Cleared at the start of every cell by [`Runtime::run_cell`]; counts
+    /// this cell's raises, which is what shrinks the next grant.
+    raises_this_cell: AtomicU32,
     /// Raises since this runtime was built, which is what
     /// [`Runtime::heap_limit_raises`] answers with — the number that says
-    /// the ceiling held rather than moved.
+    /// how far the ceiling had to move.
     raises: AtomicU32,
+}
+
+/// The smallest a raise ever grants. Never zero: a grant of nothing is the
+/// current limit, and the current limit is the abort.
+const HEAP_RAISE_FLOOR_BYTES: usize = 8 * 1024 * 1024;
+
+/// How far one cell may push the ceiling out, as a multiple of the
+/// configured one. Past it the grant drops to [`HEAP_RAISE_FLOOR_BYTES`],
+/// which still is not `current_heap_limit` and so still is not an abort.
+const HEAP_RAISE_TOTAL_MULTIPLE: usize = 16;
+
+/// What one raise adds: the limit the isolate has now, so the ceiling
+/// doubles, until [`HEAP_RAISE_TOTAL_MULTIPLE`] is reached.
+///
+/// **Doubling, and measured rather than chosen.** V8 invokes the
+/// near-heap-limit callback only while it is still trying to satisfy an
+/// allocation, and it gives up after a handful of last-resort collections —
+/// so the number of raises a cell gets is small and a *shrinking* grant is
+/// the wrong shape. Measured on this host with
+/// `const big = new Array(100000000).fill('y')` at the shipped 256 MiB
+/// ceiling: grants of `initial >> n` were called four times, reached 699 MB,
+/// and V8 aborted the process anyway (the array needs about 1.9 GB while it
+/// converts its elements); doubling was called three times, reached 1,946 MB
+/// and the cell finished. What makes the ceiling a ceiling is not the size
+/// of the grant — V8 has no non-fatal way to refuse one — but
+/// [`Runtime::finish`], which fails any cell that crossed it, and
+/// [`Runtime::restore_heap_limit`], which puts the limit back before the
+/// next cell.
+fn heap_grant(current_heap_limit: usize, initial_heap_limit: usize) -> usize {
+    let ceiling = initial_heap_limit.saturating_mul(HEAP_RAISE_TOTAL_MULTIPLE);
+    if current_heap_limit >= ceiling {
+        return HEAP_RAISE_FLOOR_BYTES;
+    }
+    current_heap_limit
+        .min(ceiling - current_heap_limit)
+        .max(HEAP_RAISE_FLOOR_BYTES)
 }
 
 /// V8 hands this callback a `*mut c_void` and nothing else, so the isolate it
 /// must stop travels in the [`HeapWatch`] behind that pointer.
 ///
-/// The **first** call for a cell returns a raised limit on purpose:
-/// returning the current one makes V8 abort the process, and this crate
-/// answers an out-of-memory with a value. The raise buys just enough room for
-/// the terminated cell to unwind. Every **later** call for the same cell is a
-/// cell that took the room and kept allocating, so it is answered with the
-/// limit it already has and terminated again instead.
+/// Every call raises, and every call terminates. The raise buys the
+/// terminated cell room to reach the interrupt check where the termination
+/// is observed; returning `current_heap_limit` instead — which is what
+/// refusing a raise means to V8 — is a process abort, and this crate answers
+/// an out-of-memory with a value. What keeps the ceiling a ceiling is the
+/// termination this issues on the way in plus [`Runtime::finish`], which
+/// fails any cell that crossed it, and [`Runtime::restore_heap_limit`],
+/// which puts the limit back before the next cell — **not** the size of the
+/// grant, which is a refusal V8 has no non-fatal way to express.
+/// [`heap_grant`] bounds how far the limit can travel meanwhile
+/// ([`HEAP_RAISE_TOTAL_MULTIPLE`]); it does not shrink, and its own doc
+/// records the measurement that ruled shrinking out.
 unsafe extern "C" fn near_heap_limit(
     data: *mut c_void,
     current_heap_limit: usize,
@@ -176,12 +241,134 @@ unsafe extern "C" fn near_heap_limit(
     if let Some(isolate) = watch.guard.isolate.get() {
         isolate.terminate_execution();
     }
-    if watch.raised_this_cell.swap(true, Ordering::SeqCst) {
-        return current_heap_limit;
-    }
+    watch.raises_this_cell.fetch_add(1, Ordering::SeqCst);
     watch.raises.fetch_add(1, Ordering::SeqCst);
-    current_heap_limit.saturating_add(initial_heap_limit.max(8 * 1024 * 1024))
+    current_heap_limit.saturating_add(heap_grant(current_heap_limit, initial_heap_limit))
 }
+
+/// Every `ArrayBuffer` backing store in this isolate, counted and bounded.
+///
+/// An `ArrayBuffer`'s store is **external** memory, which V8's own heap
+/// ceiling never sees: `new ArrayBuffer(1024 * 1024 * 1024)` against a 32 MiB
+/// ceiling used to succeed with `raises = 0`, so anything model-authored had
+/// an unmetered allocator beside a metered heap. V8 takes those stores from
+/// the allocator its isolate was built with, which is this one, so this
+/// comparison is where `runtime-contract.md` §2's ceiling reaches them: an
+/// allocation that would cross it is **refused** rather than satisfied and
+/// regretted, and [`Runtime::run_cell`] answers the cell with
+/// `RuntimeOutOfMemory`.
+///
+/// **Nothing here calls back into V8**, which V8's allocator contract
+/// forbids. It counts, it allocates, and it records that it refused; the
+/// stopping is done by the runtime that reads [`ExternalMemory::refused`]
+/// when the cell ends.
+struct ExternalMemory {
+    /// Bytes handed to V8 and not yet given back.
+    live: AtomicUsize,
+    /// The ceiling, which is the isolate's configured heap ceiling: one
+    /// number for the model to reason about rather than two.
+    limit: usize,
+    /// Cleared at the start of every cell; set by an allocation this refused.
+    refused: AtomicBool,
+}
+
+/// V8's allocator interface carries no alignment, so a backing store is
+/// aligned the way the `malloc`-based default allocator this replaces aligns
+/// one.
+const EXTERNAL_ALIGN: usize = 16;
+
+impl ExternalMemory {
+    /// The layout `len` bytes were allocated with, which is also the layout
+    /// they must be freed with. `max(1)` because a zero-sized layout cannot
+    /// be allocated and V8 does ask for empty buffers.
+    fn layout(len: usize) -> Option<std::alloc::Layout> {
+        std::alloc::Layout::from_size_align(len.max(1), EXTERNAL_ALIGN).ok()
+    }
+
+    /// Claims `len` against the ceiling, or refuses and says so.
+    fn claim(&self, len: usize) -> bool {
+        let mut live = self.live.load(Ordering::Acquire);
+        loop {
+            let next = live.saturating_add(len);
+            if next > self.limit {
+                self.refused.store(true, Ordering::SeqCst);
+                return false;
+            }
+            match self
+                .live
+                .compare_exchange_weak(live, next, Ordering::AcqRel, Ordering::Acquire)
+            {
+                Ok(_) => return true,
+                Err(actual) => live = actual,
+            }
+        }
+    }
+
+    fn release(&self, len: usize) {
+        self.live.fetch_sub(len, Ordering::AcqRel);
+    }
+}
+
+fn external_alloc(memory: &ExternalMemory, len: usize, zeroed: bool) -> *mut c_void {
+    if !memory.claim(len) {
+        return std::ptr::null_mut();
+    }
+    let Some(layout) = ExternalMemory::layout(len) else {
+        memory.release(len);
+        return std::ptr::null_mut();
+    };
+    // SAFETY: the layout has a non-zero size and a power-of-two alignment.
+    // The pointer goes straight back to V8, which returns it to
+    // [`external_free`] with the same `len` and therefore the same layout.
+    let ptr = unsafe {
+        if zeroed {
+            std::alloc::alloc_zeroed(layout)
+        } else {
+            std::alloc::alloc(layout)
+        }
+    };
+    if ptr.is_null() {
+        memory.release(len);
+        return std::ptr::null_mut();
+    }
+    ptr.cast::<c_void>()
+}
+
+unsafe extern "C" fn external_allocate(memory: &ExternalMemory, len: usize) -> *mut c_void {
+    external_alloc(memory, len, true)
+}
+
+unsafe extern "C" fn external_allocate_uninitialized(
+    memory: &ExternalMemory,
+    len: usize,
+) -> *mut c_void {
+    external_alloc(memory, len, false)
+}
+
+unsafe extern "C" fn external_free(memory: &ExternalMemory, data: *mut c_void, len: usize) {
+    if data.is_null() {
+        return;
+    }
+    if let Some(layout) = ExternalMemory::layout(len) {
+        // SAFETY: `data` is what [`external_alloc`] returned for this `len`,
+        // so this is the layout it was allocated with.
+        unsafe { std::alloc::dealloc(data.cast::<u8>(), layout) };
+    }
+    memory.release(len);
+}
+
+unsafe extern "C" fn external_drop(memory: *const ExternalMemory) {
+    // SAFETY: the pointer V8 holds is one `Arc::into_raw` produced, and V8
+    // calls this exactly once, when the allocator it belongs to is destroyed.
+    drop(unsafe { Arc::from_raw(memory) });
+}
+
+static EXTERNAL_VTABLE: v8::RustAllocatorVtable<ExternalMemory> = v8::RustAllocatorVtable {
+    allocate: external_allocate,
+    allocate_uninitialized: external_allocate_uninitialized,
+    free: external_free,
+    drop: external_drop,
+};
 
 /// One task's isolate.
 ///
@@ -193,6 +380,13 @@ pub struct Runtime {
     isolate: v8::OwnedIsolate,
     state: Rc<RuntimeState>,
     heap: Rc<HeapWatch>,
+    /// The other half of the ceiling: what the isolate's `ArrayBuffer`
+    /// allocator has handed out, and whether it refused.
+    external: Arc<ExternalMemory>,
+    /// The ceiling this runtime was configured with, kept because a raise
+    /// moves the isolate's own and [`Runtime::restore_heap_limit`] puts this
+    /// one back.
+    heap_limit_bytes: usize,
     wall_clock_limit: Duration,
     /// The cell that ran past [`HARD_DEADLINE_MULTIPLE`] × the wall-clock
     /// limit while being terminated every [`TERMINATE_RETRY_INTERVAL`], if
@@ -250,8 +444,22 @@ impl Runtime {
         wall_clock_limit: Duration,
     ) -> Self {
         initialize_v8();
-        let mut isolate =
-            v8::Isolate::new(v8::CreateParams::default().heap_limits(0, heap_limit_bytes));
+        let external = Arc::new(ExternalMemory {
+            live: AtomicUsize::new(0),
+            limit: heap_limit_bytes,
+            refused: AtomicBool::new(false),
+        });
+        // SAFETY: the handle is an `Arc` reference this runtime keeps a
+        // second one of, and `external_drop` gives exactly that reference
+        // back when V8 destroys the allocator.
+        let allocator = unsafe {
+            v8::new_rust_allocator(Arc::into_raw(Arc::clone(&external)), &EXTERNAL_VTABLE)
+        };
+        let mut isolate = v8::Isolate::new(
+            v8::CreateParams::default()
+                .heap_limits(0, heap_limit_bytes)
+                .array_buffer_allocator(allocator),
+        );
         isolate.set_microtasks_policy(v8::MicrotasksPolicy::Explicit);
         // `Atomics.wait` blocks inside V8 where an interrupt may never land,
         // so the watchdog is not the answer to it: this line is, and measured
@@ -273,7 +481,7 @@ impl Runtime {
         let _ = guard.isolate.set(isolate.thread_safe_handle());
         let heap = Rc::new(HeapWatch {
             guard,
-            raised_this_cell: AtomicBool::new(false),
+            raises_this_cell: AtomicU32::new(0),
             raises: AtomicU32::new(0),
         });
         isolate.add_near_heap_limit_callback(
@@ -302,6 +510,8 @@ impl Runtime {
             isolate,
             state,
             heap,
+            external,
+            heap_limit_bytes,
             wall_clock_limit,
             poisoned_by: None,
         }
@@ -338,8 +548,27 @@ impl Runtime {
     /// returns before a child exists or kills one that does.
     #[must_use]
     pub fn with_token(self, token: CancellationToken) -> Self {
+        // `let mut runtime = self` rather than `mut self` in the signature,
+        // the same shape `with_response_byte_cap` above uses: it keeps this a
+        // builder over an already-built runtime, which is the property
+        // `runtime_cells::the_runtime_cannot_be_built_without_a_profile`
+        // reads off this line.
+        let mut runtime = self;
+        runtime.set_token(token);
+        runtime
+    }
+
+    /// The token the **next** cell's calls are cancellable through, replacing
+    /// whatever [`with_token`](Self::with_token) or an earlier call installed.
+    ///
+    /// **A cancelled token has no way back, so a task hands each cell a fresh
+    /// one.** [`CancellationToken::cancel`] is deliberately one-way — a token
+    /// is one call's decision, not a reusable switch — so a session that kept
+    /// one token for the whole task would answer every cell after the first
+    /// cancellation with an instant `Cancelled` throw. This is how one Ctrl-C
+    /// cancels one cell's calls; `session.rs` is its only caller.
+    pub fn set_token(&mut self, token: CancellationToken) {
         *self.state.token.borrow_mut() = token;
-        self
     }
 
     /// The number of the cell that ran last; 0 before the first.
@@ -361,9 +590,10 @@ impl Runtime {
     }
 
     /// How many times the near-heap-limit callback has raised this isolate's
-    /// ceiling since it was built — at most once per cell, which is what
-    /// makes `DEFAULT_HEAP_LIMIT_BYTES` a ceiling rather than a first
-    /// instalment.
+    /// ceiling since it was built — the number that says how far
+    /// `DEFAULT_HEAP_LIMIT_BYTES` had to move for a cell to be stopped.
+    /// Each raise is smaller than the last ([`heap_grant`]), so a handful of
+    /// them is still a ceiling and not a first instalment.
     pub fn heap_limit_raises(&self) -> u32 {
         self.heap.raises.load(Ordering::SeqCst)
     }
@@ -439,9 +669,14 @@ impl Runtime {
         // A hit the previous cell did not consume — one raised while its own
         // previews were being taken — is not this cell's reason for stopping.
         self.heap.guard.take_hit();
-        // The ceiling may be raised once for *this* cell, whatever the last
-        // one needed.
-        self.heap.raised_this_cell.store(false, Ordering::SeqCst);
+        // Whatever the last cell had to be granted, this one starts at the
+        // configured ceiling again — otherwise one bad cell would leave the
+        // whole task running against a ceiling sixteen times the one §7
+        // names.
+        self.restore_heap_limit();
+        // A refusal the previous cell was already answered with is not this
+        // cell's.
+        self.external.refused.store(false, Ordering::SeqCst);
 
         let compiled = match cell::compile(source, cell) {
             Ok(compiled) => compiled,
@@ -463,6 +698,7 @@ impl Runtime {
         let stopped = Stopped {
             timed_out: disarmed.fired,
             heap_hit: self.heap.guard.take_hit(),
+            external_hit: self.external.refused.load(Ordering::SeqCst),
             yielded: self.trace().take_yield(),
         };
         // Unconditionally, and it is not tidiness. Until a termination is
@@ -475,6 +711,15 @@ impl Runtime {
         // into. A cancel with nothing pending is a no-op that returns false.
         self.isolate.cancel_terminate_execution();
 
+        // Everything below re-enters the isolate and therefore runs the
+        // model's own accessors, so it gets a watchdog of its own — see
+        // [`EPILOGUE_WALL_CLOCK_LIMIT`]. `finish` is inside it because
+        // `out_of_memory` sizes every live handle, and sizing a `Proxy` runs
+        // its `ownKeys` trap.
+        let epilogue = Watchdog::arm(
+            self.heap.guard.isolate.get().cloned(),
+            EPILOGUE_WALL_CLOCK_LIMIT,
+        );
         self.forget_freed();
         self.refresh_previews();
         // Once more, because the refresh above re-reads the model's own
@@ -488,16 +733,31 @@ impl Runtime {
         // more than the hard deadline of terminations to do it, so this is
         // the last cell that runs in this isolate. Reported ahead of the heap
         // hit: a ceiling that fired is recoverable and this is not.
-        if disarmed.gave_up {
+        let outcome = if disarmed.gave_up {
             self.poisoned_by = Some(cell);
             let error = gave_up(
                 started.elapsed(),
                 self.wall_clock_limit,
                 self.wall_clock_limit.saturating_mul(HARD_DEADLINE_MULTIPLE),
             );
-            return self.finish(cell, source, started, Ending::Threw(error), Stopped::none());
+            self.finish(cell, source, started, Ending::Threw(error), Stopped::none())
+        } else {
+            self.finish(cell, source, started, ending, stopped)
+        };
+        let epilogue = epilogue.disarm();
+        // The epilogue's watchdog re-issues its termination until it is
+        // disarmed, so this is the cancel that leaves the isolate clean for
+        // the next cell.
+        self.isolate.cancel_terminate_execution();
+        // An epilogue that ran past its own hard deadline while being
+        // terminated is the same event as a cell that did: an isolate this
+        // runtime can no longer stop. This cell keeps the answer it earned —
+        // the model's program did finish — and no later one enters the
+        // isolate.
+        if epilogue.gave_up {
+            self.poisoned_by = Some(cell);
         }
-        self.finish(cell, source, started, ending, stopped)
+        outcome
     }
 
     /// Everything that happens inside the isolate, so every V8 handle is
@@ -636,6 +896,27 @@ impl Runtime {
         ending
     }
 
+    /// Puts the isolate's heap limit back to the configured ceiling and
+    /// starts this cell's raise count at zero.
+    ///
+    /// A raise is permanent as far as V8 is concerned, so without this the
+    /// first cell to cross the ceiling would raise it for the rest of the
+    /// task and §2's ceiling would be whatever the worst cell so far needed.
+    /// `remove_near_heap_limit_callback` is V8's own way to restore a limit —
+    /// it lowers it to the given value, or to the least the live heap allows
+    /// if that is higher — and the callback goes straight back on.
+    fn restore_heap_limit(&mut self) {
+        if self.heap.raises_this_cell.swap(0, Ordering::SeqCst) == 0 {
+            return;
+        }
+        let limit = self.heap_limit_bytes;
+        let data = Rc::as_ptr(&self.heap).cast_mut().cast::<c_void>();
+        self.isolate
+            .remove_near_heap_limit_callback(near_heap_limit, limit);
+        self.isolate
+            .add_near_heap_limit_callback(near_heap_limit, data);
+    }
+
     /// `free("name")` is one of §2's three lifetime events, and the epilogue
     /// that re-reads every binding for the value it ended with must not undo
     /// one the cell itself performed: a program that declares a name and then
@@ -713,7 +994,13 @@ impl Runtime {
         {
             v8::scope!(let handle_scope, &mut self.isolate);
             let context = v8::Local::new(handle_scope, &self.context);
-            let scope = &mut v8::ContextScope::new(handle_scope, context);
+            let context_scope = &mut v8::ContextScope::new(handle_scope, context);
+            // A getter read here is the model's own code and may throw. The
+            // `TryCatch` is what keeps that exception from being left pending
+            // on the isolate for the next cell's first statement to inherit;
+            // it is reset when this scope ends, and the name keeps the
+            // preview it had.
+            v8::tc_scope!(let scope, context_scope);
             let global = context.global(scope);
             for name in names {
                 let Some(key) = v8::String::new(scope, &name) else {
@@ -772,7 +1059,20 @@ impl Runtime {
         // the out-of-memory list names the five largest live handles, and a
         // timeout's own message promises the cell's bindings are still there.
         let ending = match ending {
-            Ending::Terminated if stopped.heap_hit => Ending::Threw(self.out_of_memory()),
+            // Ahead of every other arm, and whatever the cell did next: §2
+            // says a cell that crosses the ceiling fails, and an external
+            // allocation the ceiling refused is one the cell may have caught
+            // as an ordinary `RangeError` and gone on from.
+            _ if stopped.external_hit => Ending::Threw(self.out_of_memory(EXTERNAL_CEILING)),
+            // Likewise whatever the cell did next, and this is §2 read
+            // strictly: *"when the isolate's heap crosses its configured
+            // ceiling the cell fails with `RuntimeOutOfMemory`"*. Only a
+            // *terminated* cell used to be answered that way, so a cell that
+            // crossed the ceiling and finished anyway — which is exactly what
+            // the raise exists to let it do — was an ordinary yield with the
+            // oversized handle live and nothing said, having moved the
+            // ceiling by up to `HEAP_RAISE_TOTAL_MULTIPLE` on the way.
+            _ if stopped.heap_hit => Ending::Threw(self.out_of_memory(HEAP_CEILING)),
             Ending::Terminated if stopped.timed_out => {
                 Ending::Threw(timed_out(started.elapsed(), self.wall_clock_limit))
             }
@@ -887,7 +1187,10 @@ impl Runtime {
         {
             v8::scope!(let handle_scope, &mut self.isolate);
             let context = v8::Local::new(handle_scope, &self.context);
-            let scope = &mut v8::ContextScope::new(handle_scope, context);
+            let context_scope = &mut v8::ContextScope::new(handle_scope, context);
+            // Sizing runs `get_own_property_names`, which is a `Proxy`'s
+            // `ownKeys` trap: the model's own code again, and it may throw.
+            v8::tc_scope!(let scope, context_scope);
             let global = context.global(scope);
             for (name, size) in &mut sized {
                 let Some(key) = v8::String::new(scope, name) else {
@@ -911,7 +1214,7 @@ impl Runtime {
     /// the *model* can choose what to free. Nothing is evicted here — §2 is
     /// explicit that a handle vanishing under a program that still names it
     /// is the one failure that would make the channel untrustworthy.
-    fn out_of_memory(&mut self) -> ErrorValue {
+    fn out_of_memory(&mut self, cause: &str) -> ErrorValue {
         let largest = self.largest_live_now(5);
         let listed = if largest.is_empty() {
             "no live handles".to_string()
@@ -925,8 +1228,8 @@ impl Runtime {
         ErrorValue {
             class: "RuntimeOutOfMemory".to_string(),
             message: format!(
-                "the isolate reached its heap ceiling; nothing was freed. Largest live handles: \
-                 {listed}. Call free(\"name\") on what you no longer need."
+                "{cause}; nothing was freed. Largest live handles: {listed}. Call free(\"name\") \
+                 on what you no longer need."
             ),
             line: None,
             column: None,
@@ -934,6 +1237,14 @@ impl Runtime {
         }
     }
 }
+
+/// Why a `RuntimeOutOfMemory` was raised: the V8 heap filled, or an
+/// `ArrayBuffer`'s backing store would have taken external memory over the
+/// same ceiling. The model is told which, because only one of them is
+/// answered by holding fewer objects.
+const HEAP_CEILING: &str = "the isolate reached its heap ceiling";
+const EXTERNAL_CEILING: &str = "an ArrayBuffer allocation would have taken this isolate's external memory over its ceiling \
+     and was refused";
 
 /// How a cell ended, before the turn around it is assembled.
 enum Ending {
@@ -958,6 +1269,11 @@ enum Ending {
 #[derive(Debug, Clone)]
 struct Stopped {
     heap_hit: bool,
+    /// The `ArrayBuffer` allocator refused an allocation that would have
+    /// crossed the ceiling. Read rather than taken: it is cleared at the
+    /// start of every cell, and unlike the heap hit it cannot be raised by
+    /// the runtime's own bookkeeping, which allocates no backing stores.
+    external_hit: bool,
     timed_out: bool,
     /// `Some` when `yieldNow` was called, with the reason it gave.
     yielded: Option<Option<String>>,
@@ -968,6 +1284,7 @@ impl Stopped {
     fn none() -> Self {
         Self {
             heap_hit: false,
+            external_hit: false,
             timed_out: false,
             yielded: None,
         }
@@ -1146,6 +1463,72 @@ fn write_json(
             &call.preview,
             PREVIEW_TOKEN_CAP,
         )));
+        return Ok(());
+    }
+    // Before the array and object arms: a `Map` is neither, and the object
+    // arm rendered both collections as `{}` — `return new Set([1,2,3])` was
+    // the task's answer with `cut: false`, so nothing said anything was
+    // dropped. §9.2's own shape for each: a `Map` is an object, a `Set` is
+    // an array.
+    if value.is_map() {
+        let map: v8::Local<v8::Map> = value.try_into().expect("is_map");
+        if map.size() > marshal::COLLECTION_MEASURE_WALK_LIMIT {
+            json.push("{}");
+            json.over = true;
+            return Ok(());
+        }
+        // `as_array` is `[k0, v0, k1, v1, …]`.
+        let flat = map.as_array(scope);
+        json.push("{");
+        let mut first = true;
+        let mut index = 0;
+        while index + 1 < flat.length() {
+            if json.full() {
+                json.over = true;
+                break;
+            }
+            let key = flat.get_index(scope, index).ok_or(ReadFailed)?;
+            let property = flat.get_index(scope, index + 1).ok_or(ReadFailed)?;
+            index += 2;
+            if json_skips(property) {
+                continue;
+            }
+            if !first {
+                json.push(",");
+            }
+            first = false;
+            json.push(&json_string(&key.to_rust_string_lossy(scope)));
+            json.push(":");
+            write_json(scope, state, property, json, depth + 1)?;
+        }
+        json.push("}");
+        return Ok(());
+    }
+    if value.is_set() {
+        let set: v8::Local<v8::Set> = value.try_into().expect("is_set");
+        if set.size() > marshal::COLLECTION_MEASURE_WALK_LIMIT {
+            json.push("[]");
+            json.over = true;
+            return Ok(());
+        }
+        let flat = set.as_array(scope);
+        json.push("[");
+        for index in 0..flat.length() {
+            if json.full() {
+                json.over = true;
+                break;
+            }
+            if index > 0 {
+                json.push(",");
+            }
+            let element = flat.get_index(scope, index).ok_or(ReadFailed)?;
+            if json_skips(element) {
+                json.push("null");
+            } else {
+                write_json(scope, state, element, json, depth + 1)?;
+            }
+        }
+        json.push("]");
         return Ok(());
     }
     if value.is_array() {
@@ -1472,6 +1855,15 @@ fn thrown_error(scope: &mut v8::PinScope, exception: v8::Local<v8::Value>) -> Er
             }
             let line = (frame.get_line_number() as u32).saturating_sub(LINE_OFFSET);
             let column = (frame.get_column() as u32).saturating_sub(1);
+            // V8 reports a stack overflow's frames as present-and-zero, and
+            // `ErrorSection::position` is explicit that `line 0, column 0`
+            // names a place that does not exist. `function f(n) { return
+            // f(n + 1); } f(0)` was rendered to the model as ten frames of
+            // it, which is the position a model-written traversal is most
+            // likely to be handed wrongly.
+            if line == 0 && column == 0 {
+                continue;
+            }
             if error.line.is_none() {
                 error.line = Some(line);
                 error.column = Some(column);

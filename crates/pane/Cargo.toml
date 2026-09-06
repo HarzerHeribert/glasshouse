@@ -58,11 +58,14 @@ workspace = true
 libc.workspace = true
 
 [target.'cfg(target_os = "windows")'.dependencies]
-# `Win32_Security_Isolation` (the AppContainer) and `Win32_Security_Authorization`
-# (the project directory's ACL) are the two feature sets the workspace pin does
-# not already carry; cargo unions features, so naming them here adds API surface
-# and changes nothing for `glasshouse`.
+# `Win32_Security_Isolation` (the AppContainer), `Win32_Security_Authorization`
+# (the project directory's ACL) and `Win32_System_Console`
+# (`SetConsoleCtrlHandler`, the Ctrl-C half of `session`'s interrupt) are the
+# feature sets the workspace pin does not already carry; cargo unions features,
+# so naming them here adds API surface and changes nothing for `glasshouse`.
+# Features are not part of `Cargo.lock`, so this adds no lock change either.
 windows-sys = { workspace = true, features = [
     "Win32_Security_Authorization",
     "Win32_Security_Isolation",
+    "Win32_System_Console",
 ] }

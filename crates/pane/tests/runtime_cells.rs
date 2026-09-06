@@ -1798,14 +1798,16 @@ fn a_cell_that_allocates_forever_is_answered_as_a_timeout_within_the_grace() {
     }
 }
 
-/// The heap ceiling is a ceiling: it is raised **once** per cell, to buy the
-/// terminated cell room to unwind, and never again.
+/// The heap ceiling is a ceiling: a raise buys the terminated cell room to
+/// unwind, and each raise is smaller than the last, so the ceiling holds
+/// rather than becoming a first instalment.
 ///
 /// `near_heap_limit` used to add another `initial_heap_limit` on every
 /// callback, so a cell that ignored its termination was handed a new ceiling
 /// as fast as it could fill the last one — which is how 256 MiB became about
-/// 7 GB of resident memory, and why §2's `RuntimeOutOfMemory` never arrived
-/// for this shape at all.
+/// 7 GB of resident memory. Answering the second callback with the limit it
+/// already had fixed that and cost the process instead (V8 aborts on it), so
+/// what bounds the growth now is the shrinking grant.
 #[test]
 fn a_cell_that_fills_the_heap_is_answered_at_the_configured_ceiling() {
     let fixture = Fixture::new("fill-heap");
@@ -1834,8 +1836,8 @@ fn a_cell_that_fills_the_heap_is_answered_at_the_configured_ceiling() {
     let error = threw(&outcome);
     assert_eq!(error.class, "RuntimeOutOfMemory", "{error:?}");
     assert!(
-        runtime.heap_limit_raises() <= 1,
-        "the ceiling was raised {} times; once is the whole allowance",
+        runtime.heap_limit_raises() <= 4,
+        "the ceiling was raised {} times; a handful of shrinking grants is the whole allowance",
         runtime.heap_limit_raises()
     );
     // The ceiling, not the wall clock: answered long before the 20 s limit.
@@ -2219,4 +2221,355 @@ fn grep_with_no_match_is_an_empty_array_and_a_bad_pattern_throws() {
         "{}",
         error.message
     );
+}
+
+// --- the epilogue: the model's own code, after `execute` ----------------
+
+/// §2's wall clock covers the **whole** of `run_cell`, not only `execute`.
+///
+/// `run_cell` used to disarm the watchdog and *then* re-read every live
+/// handle off the persistent scope — and reading a binding runs the model's
+/// own getter or `Proxy` trap. A cell that *finished* therefore hung the
+/// session forever: measured through the shipped binary with
+/// `const report = { get summary() { while (true) {} } };`, killed at 75 s,
+/// with no `Watchdog` thread in the process at all. Each shape below binds
+/// (or `keep`s) a value whose accessor never returns, which is what makes
+/// the hang the refresh's rather than the cell's.
+#[test]
+fn an_accessor_that_never_returns_is_stopped_after_the_cell_as_well() {
+    let fixture = Fixture::new("epilogue-getter");
+    let glasshouse = Glasshouse::None;
+    let limit = Duration::from_millis(500);
+    let shapes = [
+        "const o = { get spin() { while (true) {} } };\n",
+        "const o = { get spin() { while (true) { const x = new Array(100).fill('y'); } } };\n",
+        "keep('o', { get spin() { while (true) {} } });\n",
+        "const view = new Proxy({}, { get(){ while (true) {} }, ownKeys(){ return [\"a\"]; }, \
+         getOwnPropertyDescriptor(){ return { enumerable: true, configurable: true }; } });\n",
+    ];
+
+    for (index, shape) in shapes.iter().enumerate() {
+        let session = SessionId::new(format!("epilogue-getter-{index}"));
+        let mut runtime = Runtime::with_limits(
+            &fixture.profile(),
+            &glasshouse,
+            &session,
+            DEFAULT_HEAP_LIMIT_BYTES,
+            limit,
+        );
+
+        let started = Instant::now();
+        let outcome = runtime.run_cell(shape);
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < limit + Duration::from_secs(2),
+            "shape {index} took {elapsed:?} against a {limit:?} limit: {outcome:?}"
+        );
+
+        // And the session is still a session: the next cell runs.
+        let started = Instant::now();
+        let next = runtime.run_cell("return 7;\n");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < limit + Duration::from_secs(2),
+            "shape {index}'s next cell took {elapsed:?}: {next:?}"
+        );
+        assert_eq!(returned(&next), &Value::Number(7.0), "shape {index}");
+    }
+}
+
+/// The same hazard one cell later, which is the cost of reading every live
+/// name rather than only this cell's captures: cell 2 binds nothing and adds
+/// a spinning getter to a handle cell 1 declared.
+#[test]
+fn a_getter_a_later_cell_adds_to_an_older_handle_is_stopped_too() {
+    let fixture = Fixture::new("epilogue-define");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("epilogue-define");
+    let limit = Duration::from_millis(500);
+    let mut runtime = Runtime::with_limits(
+        &fixture.profile(),
+        &glasshouse,
+        &session,
+        DEFAULT_HEAP_LIMIT_BYTES,
+        limit,
+    );
+
+    let first = runtime.run_cell("const o = { n: 1 };\n");
+    assert!(matches!(first, CellOutcome::Yielded { .. }), "{first:?}");
+
+    let started = Instant::now();
+    let second = runtime.run_cell(
+        "Object.defineProperty(o, \"spin\", { get(){ while (true) {} }, enumerable: true });\n",
+    );
+    let elapsed = started.elapsed();
+    assert!(
+        elapsed < limit + Duration::from_secs(2),
+        "the refresh of an older handle took {elapsed:?}: {second:?}"
+    );
+
+    let third = runtime.run_cell("return 7;\n");
+    assert_eq!(returned(&third), &Value::Number(7.0), "{third:?}");
+}
+
+/// §2's ceiling, for the allocation that cannot be satisfied at all.
+///
+/// The raise used to be once per cell, and V8's own rule is that answering
+/// the near-heap-limit callback with the *current* limit aborts the process:
+/// `new Array(100000000).fill('y')` at the shipped 256 MiB ceiling printed
+/// `Fatal JavaScript out of memory: Reached heap limit` and killed the
+/// process, deterministically. Many small allocations survive it — the
+/// termination the first callback requested lands between the two — which is
+/// why the ceiling's own test never saw this.
+#[test]
+fn a_single_allocation_over_the_ceiling_is_answered_and_not_a_process_abort() {
+    let fixture = Fixture::new("single-alloc");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("single-alloc");
+    let mut runtime = Runtime::with_limits(
+        &fixture.profile(),
+        &glasshouse,
+        &session,
+        DEFAULT_HEAP_LIMIT_BYTES,
+        Duration::from_secs(30),
+    );
+
+    let outcome = runtime.run_cell("const big = new Array(100000000).fill('y');\n");
+    let error = threw(&outcome);
+    assert_eq!(error.class, "RuntimeOutOfMemory", "{outcome:?}");
+
+    // The whole point of answering rather than aborting: the task goes on.
+    let after = runtime.run_cell("free(\"big\");\nreturn 7;\n");
+    assert_eq!(returned(&after), &Value::Number(7.0), "{after:?}");
+}
+
+/// §2's ceiling for **external** memory: an `ArrayBuffer`'s backing store is
+/// not V8 heap, so `near_heap_limit` never sees it and a 1 GiB buffer
+/// against a 32 MiB ceiling used to yield with the handle live — an
+/// unmetered allocator for anything model-authored.
+#[test]
+fn an_array_buffer_over_the_ceiling_is_out_of_memory() {
+    let fixture = Fixture::new("external-memory");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("external-memory");
+    let mut runtime = Runtime::with_limits(
+        &fixture.profile(),
+        &glasshouse,
+        &session,
+        32 * 1024 * 1024,
+        Duration::from_secs(20),
+    );
+
+    // A buffer inside the ceiling is ordinary work and stays ordinary work.
+    let ok =
+        runtime.run_cell("const small = new ArrayBuffer(1024 * 1024);\nreturn small.byteLength;\n");
+    assert_eq!(returned(&ok), &Value::Number(1024.0 * 1024.0), "{ok:?}");
+
+    let outcome = runtime.run_cell("const b = new ArrayBuffer(1024 * 1024 * 1024);\n");
+    let error = threw(&outcome);
+    assert_eq!(error.class, "RuntimeOutOfMemory", "{outcome:?}");
+
+    let after = runtime.run_cell("return 7;\n");
+    assert_eq!(returned(&after), &Value::Number(7.0), "{after:?}");
+}
+
+/// A ceiling the cell crossed and *survived* used to be dropped on the
+/// floor: `finish` converted a heap hit into `RuntimeOutOfMemory` only under
+/// `Ending::Terminated`, so `const big = new Array(50000000).fill('y')` at
+/// the shipped 256 MiB ceiling was an ordinary yield — `raises = 1`, the
+/// oversized handle live, nothing said. §2 says the cell fails, and it now
+/// does whether or not the termination the callback requested stopped it.
+#[test]
+fn a_ceiling_the_cell_survived_still_fails_the_cell() {
+    let fixture = Fixture::new("survived-ceiling");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("survived-ceiling");
+    let mut runtime = Runtime::with_limits(
+        &fixture.profile(),
+        &glasshouse,
+        &session,
+        DEFAULT_HEAP_LIMIT_BYTES,
+        Duration::from_secs(30),
+    );
+
+    let outcome = runtime.run_cell("const big = new Array(50000000).fill('y');\n");
+    let error = threw(&outcome);
+    assert_eq!(error.class, "RuntimeOutOfMemory", "{outcome:?}");
+    // Nothing was evicted: §2's recovery is the model's to perform.
+    assert!(runtime.is_live("big"), "{}", runtime.render_handles());
+
+    let freed = runtime.run_cell("free(\"big\");\nreturn 7;\n");
+    assert_eq!(returned(&freed), &Value::Number(7.0), "{freed:?}");
+}
+
+/// A raise is permanent as far as V8 is concerned, so the ceiling has to be
+/// put back: without `Runtime::restore_heap_limit` the first cell to cross it
+/// would leave the whole task running against whatever that cell needed —
+/// up to sixteen times the configured ceiling — and §2's ceiling would be a
+/// high-water mark rather than a setting.
+///
+/// What this asserts is what a test can see from outside the isolate: the
+/// callback is still installed and still fires after a cell has been granted
+/// a raise. V8 restores a limit only as far as the *live* heap allows
+/// (`remove_near_heap_limit_callback`'s own rule), so the exact number the
+/// limit returns to is V8's and not this crate's; dropping the re-arm
+/// altogether leaves no ceiling at all, which is what the second crossing
+/// here catches.
+#[test]
+fn the_ceiling_still_fires_after_a_cell_has_been_granted_a_raise() {
+    let fixture = Fixture::new("restore-ceiling");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("restore-ceiling");
+    let mut runtime = Runtime::with_limits(
+        &fixture.profile(),
+        &glasshouse,
+        &session,
+        32 * 1024 * 1024,
+        Duration::from_secs(20),
+    );
+
+    let first = runtime.run_cell("const rows = [];\n");
+    assert!(matches!(first, CellOutcome::Yielded { .. }), "{first:?}");
+    let crossed = runtime.run_cell("while (true) { rows.push(new Array(1000).fill(\"y\")); }\n");
+    assert_eq!(threw(&crossed).class, "RuntimeOutOfMemory", "{crossed:?}");
+    let raised_once = runtime.heap_limit_raises();
+    assert!(raised_once >= 1, "the ceiling was never raised");
+
+    let recovered = runtime.run_cell("free(\"rows\");\nreturn 7;\n");
+    assert_eq!(returned(&recovered), &Value::Number(7.0), "{recovered:?}");
+
+    let again = runtime
+        .run_cell("const more = [];\nwhile (true) { more.push(new Array(1000).fill(\"y\")); }\n");
+    assert_eq!(threw(&again).class, "RuntimeOutOfMemory", "{again:?}");
+    assert!(
+        runtime.heap_limit_raises() > raised_once,
+        "the near-heap-limit callback did not survive the restore: {} raises both times",
+        raised_once
+    );
+}
+
+/// §3's preview, §2's ranking and §9.2's result, for the two collections
+/// that have no own enumerable properties at all.
+///
+/// All three walkers read own string keys, and a `Map`/`Set` has none: the
+/// table showed an empty preview whatever the collection held, the
+/// out-of-memory list ranked the `Map` that filled the heap at `~32 B`
+/// behind a 16-byte counter, and `return new Set([1,2,3])` wrote `{}` as the
+/// task's answer with `cut: false`.
+#[test]
+fn a_map_and_a_set_are_previewed_ranked_and_returned_by_what_they_hold() {
+    let fixture = Fixture::new("collections");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("collections");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+
+    let first =
+        runtime.run_cell("const s = new Set([1, 2, 3]);\nconst m = new Map([[\"a\", 1]]);\n");
+    assert!(matches!(first, CellOutcome::Yielded { .. }), "{first:?}");
+    let table = runtime.render_handles();
+    assert!(
+        table
+            .lines()
+            .any(|line| line.starts_with("s") && line.contains("Set")),
+        "a Set renders as a Set: {table}"
+    );
+    assert!(
+        table.contains("size=3"),
+        "a Set's preview carries its size: {table}"
+    );
+    assert!(
+        table.contains("size=1"),
+        "a Map's preview carries its size: {table}"
+    );
+
+    // §9.2's result: a Set is an array and a Map is an object.
+    let set = runtime.run_cell("return new Set([1, 2, 3]);\n");
+    let CellOutcome::Returned { terminal, .. } = &set else {
+        panic!("expected a return, got {set:?}");
+    };
+    assert_eq!(terminal.render(returned(&set)), "[1,2,3]", "{set:?}");
+
+    let map_session = SessionId::new("collections-map");
+    let mut map_runtime = Runtime::new(&fixture.profile(), &glasshouse, &map_session);
+    let map = map_runtime.run_cell("return new Map([[\"a\", 1], [\"b\", 2]]);\n");
+    let CellOutcome::Returned { terminal, .. } = &map else {
+        panic!("expected a return, got {map:?}");
+    };
+    assert_eq!(
+        terminal.render(returned(&map)),
+        "{\"a\":1,\"b\":2}",
+        "{map:?}"
+    );
+}
+
+/// The ranking half of the same defect, across a cell boundary: the `Map`
+/// that filled a 32 MiB heap must be the handle the model is told to free.
+#[test]
+fn the_out_of_memory_ranking_counts_what_a_map_holds() {
+    let fixture = Fixture::new("map-ranking");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("map-ranking");
+    let mut runtime = Runtime::with_limits(
+        &fixture.profile(),
+        &glasshouse,
+        &session,
+        32 * 1024 * 1024,
+        Duration::from_secs(20),
+    );
+
+    let first = runtime.run_cell("const m = new Map();\n");
+    assert!(matches!(first, CellOutcome::Yielded { .. }), "{first:?}");
+
+    let outcome = runtime
+        .run_cell("let i = 0;\nwhile (true) { m.set(i, new Array(1000).fill('y')); i++; }\n");
+    let error = threw(&outcome);
+    assert_eq!(error.class, "RuntimeOutOfMemory", "{error:?}");
+    assert!(
+        error.message.contains("Largest live handles: m ("),
+        "the Map that filled the heap must rank first: {}",
+        error.message
+    );
+    let sized = error
+        .message
+        .split("Largest live handles: m (~")
+        .nth(1)
+        .and_then(|rest| rest.split(" B)").next())
+        .and_then(|digits| digits.parse::<u64>().ok())
+        .unwrap_or_else(|| panic!("no size for `m`: {}", error.message));
+    assert!(
+        sized > 1024 * 1024,
+        "the Map filled a 32 MiB heap and was ranked at {sized} B: {}",
+        error.message
+    );
+}
+
+/// §5's position, for the throw a model-written traversal produces most
+/// often. V8 reports a stack overflow as present-and-zero, so
+/// `error.line.zip(error.column)` was `Some((0, 0))` and the model was
+/// handed `line 0, column 0` — a place `ErrorSection::position`'s own doc
+/// comment says is never written — three times over.
+#[test]
+fn a_stack_overflow_names_no_position_and_no_zero_frame() {
+    let fixture = Fixture::new("overflow");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("overflow");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+
+    let outcome = runtime.run_cell("function f(n) { return f(n + 1); }\nf(0);\n");
+    let error = threw(&outcome);
+    assert_eq!(error.class, "RangeError", "{error:?}");
+    assert!(
+        !matches!((error.line, error.column), (Some(0), Some(0))),
+        "(0, 0) is not a place: {error:?}"
+    );
+    for frame in &error.stack {
+        assert!(
+            !frame.description.contains("line 0, column 0"),
+            "a frame naming a place that does not exist: {error:?}"
+        );
+    }
+
+    // And the session goes on.
+    let after = runtime.run_cell("return 7;\n");
+    assert_eq!(returned(&after), &Value::Number(7.0), "{after:?}");
 }
