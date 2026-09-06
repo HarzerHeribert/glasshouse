@@ -8,11 +8,52 @@
 //! `&HandleTable`, a shared reference, so there is no path by which rendering
 //! could free anything: the borrow checker refuses it, not a comment.
 
+use serde::Serialize;
+use std::collections::BTreeMap;
+
 use crate::runtime::preview::{self, Value};
+
+/// Which recorded tool call produced a handle — `runtime-contract.md` §4's
+/// `provenance` object.
+///
+/// `pure` is copied from the tool's own declaration
+/// ([`crate::tools::registry::Purity`]) and is never inferred from the call,
+/// the arguments or the result: §4 makes re-materialising a stale handle
+/// depend on it, so a guess here would silently re-run something with an
+/// effect.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Provenance {
+    pub tool: String,
+    pub args: BTreeMap<String, String>,
+    pub sha256: String,
+    pub pure: bool,
+}
+
+/// What the runtime knows about a handle beyond its preview.
+///
+/// Kept beside the value rather than inside it because none of it is
+/// rendered by `preview.rs`'s type rules: the type label replaces the
+/// structural name in the table header (`Grep.Match[]`, not `Array`), the
+/// size estimate only ever answers §2's "five largest live handles" question
+/// when the heap ceiling is hit, and the provenance is §4's rollout field.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct HandleMeta {
+    /// The declared type as the model's own tool signature spells it, when
+    /// the producer had one. `None` falls back to
+    /// [`preview::type_name`].
+    pub type_label: Option<String>,
+    /// A cheap marshalled estimate of the live object's size, in bytes.
+    /// **Not a retained size** — V8 offers no per-object retained size
+    /// without a heap snapshot, and taking one to answer an out-of-memory
+    /// error would allocate at exactly the wrong moment.
+    pub size_estimate: u64,
+    pub provenance: Option<Provenance>,
+}
 
 struct HandleEntry {
     name: String,
     value: Value,
+    meta: HandleMeta,
     /// Set when this declaration replaced a live handle of the same name;
     /// carries the cell the replacement happened in, for `render_table`'s
     /// `(replaced at cell N)` annotation — `runtime-contract.md` §2.
@@ -38,6 +79,18 @@ impl HandleTable {
     /// `name` already names a live handle, that handle is freed immediately
     /// and the new one's next rendering carries `(replaced at cell N)`.
     pub fn declare(&mut self, name: impl Into<String>, value: Value, cell: u64) {
+        self.declare_with(name, value, cell, HandleMeta::default());
+    }
+
+    /// [`HandleTable::declare`], carrying what the isolate knows about the
+    /// live object behind the preview.
+    pub fn declare_with(
+        &mut self,
+        name: impl Into<String>,
+        value: Value,
+        cell: u64,
+        meta: HandleMeta,
+    ) {
         let name = name.into();
         let replaced_at_cell = if let Some(pos) = self.entries.iter().position(|e| e.name == name) {
             self.entries.remove(pos);
@@ -48,6 +101,7 @@ impl HandleTable {
         self.entries.push(HandleEntry {
             name,
             value,
+            meta,
             replaced_at_cell,
         });
     }
@@ -71,6 +125,13 @@ impl HandleTable {
             .map(|e| &e.value)
     }
 
+    pub fn meta(&self, name: &str) -> Option<&HandleMeta> {
+        self.entries
+            .iter()
+            .find(|e| e.name == name)
+            .map(|e| &e.meta)
+    }
+
     pub fn is_live(&self, name: &str) -> bool {
         self.entries.iter().any(|e| e.name == name)
     }
@@ -82,6 +143,45 @@ impl HandleTable {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    /// Every live name, in declaration order — what the model's `handles()`
+    /// answers, and what §3's drop note promises is still there.
+    pub fn names(&self) -> Vec<&str> {
+        self.entries.iter().map(|e| e.name.as_str()).collect()
+    }
+
+    /// The `n` live handles with the largest [`HandleMeta::size_estimate`],
+    /// largest first. `runtime-contract.md` §2 shows these in the
+    /// `RuntimeOutOfMemory` preview so the *model* can choose what to free;
+    /// **this function frees nothing**, and it takes `&self` so it cannot.
+    pub fn largest(&self, n: usize) -> Vec<(&str, u64)> {
+        let mut sized: Vec<(&str, u64)> = self
+            .entries
+            .iter()
+            .map(|e| (e.name.as_str(), e.meta.size_estimate))
+            .collect();
+        sized.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(b.0)));
+        sized.truncate(n);
+        sized
+    }
+
+    /// Every live handle as `(name, type label, preview body, provenance)`,
+    /// in declaration order — the rollout's `handles` array
+    /// (`runtime-contract.md` §4), assembled by the caller that owns the
+    /// record's shape.
+    pub fn rows(&self, entry_cap: usize) -> Vec<(String, String, String, Option<Provenance>)> {
+        self.entries
+            .iter()
+            .map(|entry| {
+                (
+                    entry.name.clone(),
+                    type_label(entry).to_string(),
+                    preview::render_preview(&entry.value, entry_cap),
+                    entry.meta.provenance.clone(),
+                )
+            })
+            .collect()
+    }
 }
 
 /// Renders every live handle as one entry in declaration order, each entry's
@@ -90,10 +190,17 @@ impl HandleTable {
 /// the *rendering* oldest-first — this takes `&HandleTable`, so nothing it
 /// does can free a handle — and one line names how many were not shown.
 pub fn render_table(table: &HandleTable, entry_cap: usize, table_cap: usize) -> String {
+    let name_width = table
+        .entries
+        .iter()
+        .map(|e| e.name.chars().count())
+        .max()
+        .unwrap_or(0)
+        + NAME_COLUMN_GAP;
     let rendered: Vec<String> = table
         .entries
         .iter()
-        .map(|entry| render_entry(entry, entry_cap))
+        .map(|entry| render_entry(entry, entry_cap, name_width))
         .collect();
 
     // Try showing every entry, then all but the oldest, then all but the two
@@ -120,18 +227,117 @@ fn with_drop_note(dropped: usize, visible: &str) -> String {
     }
 }
 
-fn render_entry(entry: &HandleEntry, cap: usize) -> String {
+fn type_label(entry: &HandleEntry) -> &str {
+    entry
+        .meta
+        .type_label
+        .as_deref()
+        .unwrap_or_else(|| preview::type_name(&entry.value))
+}
+
+/// Trailing spaces every header's name field carries beyond the widest live
+/// name in the table — `model-contract.md` §7's `hits`/`adapter` column:
+/// `hits` (4 chars) pads to width 9 alongside `adapter` (7 chars), so the
+/// gap here is 2.
+const NAME_COLUMN_GAP: usize = 2;
+
+/// The fixed number of spaces separating a header's fields after the type
+/// label. Not padded to a shared column across entries — unlike the name
+/// field, type labels vary too widely in length (`File` vs `Grep.Match[]`)
+/// for a shared column to read cleanly — `model-contract.md` §7.
+const HEADER_FIELD_GAP: usize = 3;
+
+/// Builds one handle's header and body — `model-contract.md` §7's exact
+/// shape, the only place that shape is built (box line 2465). The header
+/// always carries the name (padded to `name_width`, the widest live name in
+/// the table) and the type label; what follows depends on the value:
+///
+/// - an `Array` carries `n=<len>` then `inline cost ~<N> tok · preview <M>
+///   tok` on the header itself, and the element rows are the body;
+/// - a `File` carries `<path>   <bytes> B · <lines> lines · <mtime>` on the
+///   header — its own byte count already states the size, so no `inline
+///   cost` repeats it — and the preview's own token count is appended to
+///   the last `L#` line of the body instead, padded by [`HEADER_FIELD_GAP`];
+/// - every other type carries `inline cost ~<N> tok · preview <M> tok` on
+///   the header, and its body is unchanged from [`preview::render_preview`].
+///
+/// `inline cost` is [`preview::tokens_for_bytes`] over
+/// [`HandleMeta::size_estimate`] — the bytes the isolate recorded for the
+/// call that produced this handle, before anything was parsed into a
+/// structured value. `preview` is [`preview::estimate_tokens`] over the
+/// rendered preview body itself, computed after rendering so it reflects
+/// whatever cap-driven shrinking already happened.
+fn render_entry(entry: &HandleEntry, cap: usize, name_width: usize) -> String {
     let name = preview::escape_line(&entry.name);
-    let type_name = preview::type_name(&entry.value);
-    let mut header = format!("{name}  {type_name}");
+    let type_name = preview::escape_line(type_label(entry));
+    let gap = " ".repeat(HEADER_FIELD_GAP);
+
+    let mut header = format!("{name:<name_width$}{type_name}");
     if let Some(cell) = entry.replaced_at_cell {
         header.push_str(&format!("  (replaced at cell {cell})"));
     }
-    let body = preview::render_preview(&entry.value, cap);
-    if body.is_empty() {
-        header
-    } else {
-        format!("{header}\n{body}")
+
+    let inline_cost = preview::tokens_for_bytes(entry.meta.size_estimate);
+
+    match &entry.value {
+        Value::Array(array) => {
+            let body = preview::render_preview(&entry.value, cap);
+            let preview_tokens = preview::estimate_tokens(&body);
+            header.push_str(&gap);
+            header.push_str(&format!(
+                "n={}{gap}inline cost ~{} tok · preview {} tok",
+                array.len(),
+                preview::thousands(inline_cost as u64),
+                preview::thousands(preview_tokens as u64),
+            ));
+            // `array_elements_only` prefixes every element with its own
+            // `\n`, the same convention `render_preview`'s `n=`+elements
+            // join relies on -- no extra separator here, or a blank line
+            // would appear between the header and `[0]`.
+            let elements = preview::array_elements_only(array, cap);
+            format!("{header}{elements}")
+        }
+        Value::File(file) => {
+            header.push_str(&gap);
+            header.push_str(&format!(
+                "{}{gap}{} B · {} lines · {}",
+                preview::escape_line(&file.path),
+                preview::thousands(file.byte_len),
+                preview::thousands(file.line_count),
+                preview::escape_line(&file.mtime),
+            ));
+            let body = preview::render_preview(&entry.value, cap);
+            let preview_tokens = preview::estimate_tokens(&body);
+            let annotation = format!(
+                "{gap}preview {} tok",
+                preview::thousands(preview_tokens as u64)
+            );
+            let mut lines = preview::file_lines_only(file);
+            match lines.last_mut() {
+                Some(last) => last.push_str(&annotation),
+                None => header.push_str(&annotation),
+            }
+            if lines.is_empty() {
+                header
+            } else {
+                format!("{header}\n{}", lines.join("\n"))
+            }
+        }
+        _ => {
+            let body = preview::render_preview(&entry.value, cap);
+            let preview_tokens = preview::estimate_tokens(&body);
+            header.push_str(&gap);
+            header.push_str(&format!(
+                "inline cost ~{} tok · preview {} tok",
+                preview::thousands(inline_cost as u64),
+                preview::thousands(preview_tokens as u64),
+            ));
+            if body.is_empty() {
+                header
+            } else {
+                format!("{header}\n{body}")
+            }
+        }
     }
 }
 
@@ -139,6 +345,32 @@ fn render_entry(entry: &HandleEntry, cap: usize) -> String {
 mod tests {
     use super::*;
     use crate::runtime::preview::Value;
+
+    /// The header carries the declared type, the array's own length, and
+    /// both token figures — `model-contract.md` §7's `hits` line shape.
+    #[test]
+    fn an_entry_header_carries_the_type_the_length_and_both_token_figures() {
+        let mut table = HandleTable::new();
+        table.declare_with(
+            "hits",
+            Value::array(vec![Value::Number(1.0), Value::Number(2.0)]),
+            1,
+            HandleMeta {
+                type_label: Some("Grep.Match[]".into()),
+                size_estimate: 40,
+                ..HandleMeta::default()
+            },
+        );
+        let rendered = render_table(&table, preview::PREVIEW_TOKEN_CAP, preview::TABLE_TOKEN_CAP);
+        let header = rendered.lines().next().unwrap();
+        assert!(
+            header.starts_with("hits  Grep.Match[]   n=2   "),
+            "{header}"
+        );
+        assert!(header.contains("inline cost ~10 tok"), "{header}");
+        assert!(header.contains("· preview "), "{header}");
+        assert!(header.ends_with("tok"), "{header}");
+    }
 
     #[test]
     fn a_handle_is_freed_only_by_redeclaration_free_or_task_end() {
@@ -178,7 +410,7 @@ mod tests {
         let mut table = HandleTable::new();
         let long = "y".repeat(100);
         for i in 0..5u64 {
-            table.declare(format!("h{i}"), Value::String(long.clone()), i);
+            table.declare(format!("h{i}"), Value::string(&long), i);
         }
 
         // Each entry alone is well under the per-preview cap, but five of
@@ -202,5 +434,42 @@ mod tests {
         let table = HandleTable::new();
         let rendered = render_table(&table, preview::PREVIEW_TOKEN_CAP, preview::TABLE_TOKEN_CAP);
         assert_eq!(rendered, "");
+    }
+
+    /// The declared type replaces the structural one in the header, so the
+    /// model reads the name its own tool signature used.
+    #[test]
+    fn a_declared_type_label_is_what_the_header_shows() {
+        let mut table = HandleTable::new();
+        table.declare_with(
+            "hits",
+            Value::array(vec![Value::Number(1.0)]),
+            1,
+            HandleMeta {
+                type_label: Some("Grep.Match[]".into()),
+                ..HandleMeta::default()
+            },
+        );
+        let rendered = render_table(&table, preview::PREVIEW_TOKEN_CAP, preview::TABLE_TOKEN_CAP);
+        assert!(rendered.starts_with("hits  Grep.Match[]"), "{rendered}");
+    }
+
+    #[test]
+    fn the_largest_handles_are_ranked_and_nothing_is_freed_to_find_them() {
+        let mut table = HandleTable::new();
+        for (name, size) in [("a", 10u64), ("b", 900), ("c", 50)] {
+            table.declare_with(
+                name,
+                Value::Number(0.0),
+                1,
+                HandleMeta {
+                    size_estimate: size,
+                    ..HandleMeta::default()
+                },
+            );
+        }
+        assert_eq!(table.largest(2), vec![("b", 900), ("c", 50)]);
+        assert_eq!(table.len(), 3);
+        assert_eq!(table.names(), vec!["a", "b", "c"]);
     }
 }

@@ -31,6 +31,7 @@ pub const ACCEPTED_FLAGS: &[&str] = &[
     "--repeat",
     "--gateway",
     "--meter",
+    "--via-glasshouse",
     "--out",
 ];
 
@@ -49,6 +50,11 @@ pub struct RunArgs {
     pub harness: Vec<String>,
     #[arg(long, default_value_t = MIN_REPEAT)]
     pub repeat: u32,
+    /// Sets `ANTHROPIC_BASE_URL` on the harness child, for a standing
+    /// gateway -- none exists today
+    /// (`.agent-runtime/pane/ask-primary-gateway-for-benchmark.md`'s ANSWER
+    /// §1). `--via-glasshouse` is how a run gets a gateway instead; the two
+    /// refuse each other.
     #[arg(long)]
     pub gateway: Option<String>,
     /// Path to the `glasshouse` executable to read exchange rows from (via
@@ -56,6 +62,15 @@ pub struct RunArgs {
     /// absent for every attempt, never a fabricated zero.
     #[arg(long)]
     pub meter: Option<PathBuf>,
+    /// Launches each row through `<glasshouse> launch <row> --profile
+    /// <profile> -- <substituted argv>` in the attempt's own worktree,
+    /// instead of the row's own program, and reads the meter from that same
+    /// worktree -- `ruler.md` §3's "one meter" is the project ledger, not a
+    /// standing process. Requires `--meter` (the launch and the ledger are
+    /// one binary) and refuses `--gateway` (no standing gateway to point
+    /// at).
+    #[arg(long)]
+    pub via_glasshouse: Option<String>,
     #[arg(long)]
     pub out: PathBuf,
 }
@@ -81,6 +96,18 @@ fn run(flags: &[String]) -> Result<(), String> {
             "--repeat must be at least {MIN_REPEAT}: a single attempt of an agent task measures the sample, not the harness"
         ));
     }
+    if args.via_glasshouse.is_some() && args.meter.is_none() {
+        return Err(
+            "--via-glasshouse needs --meter <glasshouse>: the launch and the ledger are one binary"
+                .to_string(),
+        );
+    }
+    if args.via_glasshouse.is_some() && args.gateway.is_some() {
+        return Err(
+            "--via-glasshouse and --gateway cannot be combined: --gateway is for a standing gateway, and none exists today"
+                .to_string(),
+        );
+    }
 
     let tasks = resolve_tasks(&args)?;
     if tasks.is_empty() {
@@ -91,6 +118,7 @@ fn run(flags: &[String]) -> Result<(), String> {
     let opts = RunOpts {
         scratch: std::env::temp_dir().join("pane-ruler"),
         gateway: args.gateway.clone(),
+        via_glasshouse: args.via_glasshouse.clone(),
         meter: match &args.meter {
             Some(glasshouse) => Meter::Command {
                 glasshouse: glasshouse.clone(),

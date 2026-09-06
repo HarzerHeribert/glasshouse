@@ -39,6 +39,89 @@ fn write_script(dir: &Path, name: &str, record: &Path, exit_code: i32) -> PathBu
     path
 }
 
+/// Writes an executable shell script to `dir` that appends its own argv --
+/// NUL-separated, so an argument containing spaces, quotes or a `{` survives
+/// as the one argument it was launched with -- to `argv_record`, writes its
+/// `ANTHROPIC_BASE_URL` to `env_record` and its working directory to
+/// `argv_record` with a `.cwd` suffix, then exits with `exit_code`.
+fn write_argv_script(
+    dir: &Path,
+    name: &str,
+    argv_record: &Path,
+    env_record: &Path,
+    exit_code: i32,
+) -> PathBuf {
+    let path = dir.join(name);
+    let cwd_record = argv_record.with_extension("cwd");
+    let contents = format!(
+        "#!/bin/sh\nprintf '%s\\0' \"$@\" >> \"{}\"\nprintf '%s' \"$ANTHROPIC_BASE_URL\" > \"{}\"\npwd > \"{}\"\nexit {}\n",
+        argv_record.display(),
+        env_record.display(),
+        cwd_record.display(),
+        exit_code
+    );
+    fs::write(&path, contents).unwrap();
+    let mut perms = fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&path, perms).unwrap();
+    path
+}
+
+/// Writes an executable shell script that stands in for `glasshouse` on the
+/// `--via-glasshouse` path: a `launch ...` invocation (the harness half)
+/// records its NUL-separated argv to `launch_argv_record`; any other
+/// invocation (the `routing-cost` half, the meter) is a silent exit 0. One
+/// fake binary plays both roles because the real `glasshouse` does too --
+/// `--via-glasshouse` needs `--meter <glasshouse>` for exactly that reason.
+fn write_via_glasshouse_script(dir: &Path, name: &str, launch_argv_record: &Path) -> PathBuf {
+    let path = dir.join(name);
+    let contents = format!(
+        "#!/bin/sh\nif [ \"$1\" = \"launch\" ]; then\n  printf '%s\\0' \"$@\" >> \"{}\"\nfi\nexit 0\n",
+        launch_argv_record.display()
+    );
+    fs::write(&path, contents).unwrap();
+    let mut perms = fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&path, perms).unwrap();
+    path
+}
+
+/// Writes an executable shell script that stands in for `glasshouse` on the
+/// meter half only: a `routing-cost ...` invocation appends its own working
+/// directory to `meter_cwd_record`; any other invocation (a `launch ...`
+/// call standing in for the harness) is a silent exit 0.
+fn write_meter_script(dir: &Path, name: &str, meter_cwd_record: &Path) -> PathBuf {
+    let path = dir.join(name);
+    let contents = format!(
+        "#!/bin/sh\nif [ \"$1\" = \"routing-cost\" ]; then\n  pwd >> \"{}\"\nfi\nexit 0\n",
+        meter_cwd_record.display()
+    );
+    fs::write(&path, contents).unwrap();
+    let mut perms = fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&path, perms).unwrap();
+    path
+}
+
+/// Reads a NUL-separated argv record written by [`write_argv_script`].
+fn read_argv(record: &Path) -> Vec<String> {
+    fs::read(record)
+        .unwrap()
+        .split(|&b| b == 0)
+        .filter(|s| !s.is_empty())
+        .map(|s| String::from_utf8_lossy(s).into_owned())
+        .collect()
+}
+
+/// Reads the `.cwd` sibling [`write_argv_script`] writes next to `record`.
+fn read_argv_cwd(record: &Path) -> PathBuf {
+    PathBuf::from(
+        fs::read_to_string(record.with_extension("cwd"))
+            .unwrap()
+            .trim(),
+    )
+}
+
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
@@ -132,13 +215,13 @@ fn base_opts(scratch: PathBuf, harness_program: PathBuf) -> RunOpts {
         "fake".to_string(),
         HarnessCommand {
             program: harness_program,
-            fixed_args: vec![],
-            carries_statement: true,
+            args: vec!["{statement}".to_string()],
         },
     );
     RunOpts {
         scratch,
         gateway: None,
+        via_glasshouse: None,
         meter: Meter::None,
         harnesses,
     }
@@ -388,6 +471,196 @@ fn a_two_command_task_fails_when_the_second_command_fails() {
 }
 
 #[test]
+fn the_pane_row_launches_session_with_the_attempts_root_and_the_statement() {
+    let scratch = scratch_dir("pane-row");
+    let argv_record = scratch.join("argv.txt");
+    let env_record = scratch.join("env.txt");
+    let fake_pane = write_argv_script(&scratch, "fake_pane.sh", &argv_record, &env_record, 0);
+    let noop_cwd = scratch.join("noop_cwd.txt");
+    let test_script = write_script(&scratch, "noop_test.sh", &noop_cwd, 0);
+
+    let pane_row = attempt::default_harnesses().remove("pane").unwrap();
+    let mut harnesses = HashMap::new();
+    harnesses.insert(
+        "pane".to_string(),
+        HarnessCommand {
+            program: fake_pane,
+            args: pane_row.args,
+        },
+    );
+
+    let commit = leak(head_commit());
+    let task = base_task(commit, single_command(&test_script));
+    let opts = RunOpts {
+        scratch: scratch.clone(),
+        gateway: Some("http://127.0.0.1:8731".to_string()),
+        via_glasshouse: None,
+        meter: Meter::None,
+        harnesses,
+    };
+    let harness = Harness::new("pane");
+
+    let result = attempt::run_one(&task, &harness, 1, &opts);
+    assert!(result.outcome.completed(), "{:?}", result.outcome);
+
+    let expected_root = scratch.join(format!("{}-{}-{}", task.id, harness.as_str(), 1));
+    let argv = read_argv(&argv_record);
+    assert_eq!(
+        argv,
+        vec![
+            "session".to_string(),
+            "--root".to_string(),
+            expected_root.to_string_lossy().into_owned(),
+            "--task".to_string(),
+            task.statement.to_string(),
+        ]
+    );
+
+    let env = fs::read_to_string(&env_record).unwrap();
+    assert_eq!(env, "http://127.0.0.1:8731");
+}
+
+#[test]
+fn the_claude_code_row_still_carries_the_statement_as_a_bare_argument() {
+    let scratch = scratch_dir("claude-code-row");
+    let argv_record = scratch.join("argv.txt");
+    let env_record = scratch.join("env.txt");
+    let fake_claude = write_argv_script(&scratch, "fake_claude.sh", &argv_record, &env_record, 0);
+    let noop_cwd = scratch.join("noop_cwd.txt");
+    let test_script = write_script(&scratch, "noop_test.sh", &noop_cwd, 0);
+
+    let claude_row = attempt::default_harnesses().remove("claude-code").unwrap();
+    let mut harnesses = HashMap::new();
+    harnesses.insert(
+        "claude-code".to_string(),
+        HarnessCommand {
+            program: fake_claude,
+            args: claude_row.args,
+        },
+    );
+
+    let commit = leak(head_commit());
+    let task = base_task(commit, single_command(&test_script));
+    let opts = RunOpts {
+        scratch: scratch.clone(),
+        gateway: None,
+        via_glasshouse: None,
+        meter: Meter::None,
+        harnesses,
+    };
+    let harness = Harness::new("claude-code");
+
+    let result = attempt::run_one(&task, &harness, 1, &opts);
+    assert!(result.outcome.completed(), "{:?}", result.outcome);
+
+    let argv = read_argv(&argv_record);
+    assert_eq!(
+        argv,
+        vec![
+            "--print".to_string(),
+            "--dangerously-skip-permissions".to_string(),
+            task.statement.to_string(),
+        ]
+    );
+}
+
+#[test]
+fn the_codex_row_runs_exec_with_the_bypass_and_the_statement() {
+    let scratch = scratch_dir("codex-row");
+    let argv_record = scratch.join("argv.txt");
+    let env_record = scratch.join("env.txt");
+    let fake_codex = write_argv_script(&scratch, "fake_codex.sh", &argv_record, &env_record, 0);
+    let noop_cwd = scratch.join("noop_cwd.txt");
+    let test_script = write_script(&scratch, "noop_test.sh", &noop_cwd, 0);
+
+    let codex_row = attempt::default_harnesses().remove("codex").unwrap();
+    let mut harnesses = HashMap::new();
+    harnesses.insert(
+        "codex".to_string(),
+        HarnessCommand {
+            program: fake_codex,
+            args: codex_row.args,
+        },
+    );
+
+    let commit = leak(head_commit());
+    let task = base_task(commit, single_command(&test_script));
+    let opts = RunOpts {
+        scratch: scratch.clone(),
+        gateway: None,
+        via_glasshouse: None,
+        meter: Meter::None,
+        harnesses,
+    };
+    let harness = Harness::new("codex");
+
+    let result = attempt::run_one(&task, &harness, 1, &opts);
+    assert!(result.outcome.completed(), "{:?}", result.outcome);
+
+    let argv = read_argv(&argv_record);
+    assert_eq!(
+        argv,
+        vec![
+            "exec".to_string(),
+            "--dangerously-bypass-approvals-and-sandbox".to_string(),
+            task.statement.to_string(),
+        ]
+    );
+
+    let expected_root = scratch.join(format!("{}-{}-{}", task.id, harness.as_str(), 1));
+    assert_eq!(
+        read_argv_cwd(&argv_record),
+        expected_root,
+        "codex takes no --root-equivalent flag; it must still launch in the attempt's own worktree"
+    );
+}
+
+#[test]
+fn a_statement_with_spaces_and_braces_reaches_the_child_as_one_argument() {
+    let scratch = scratch_dir("statement-braces");
+    let argv_record = scratch.join("argv.txt");
+    let env_record = scratch.join("env.txt");
+    let fake_pane = write_argv_script(&scratch, "fake_pane.sh", &argv_record, &env_record, 0);
+    let noop_cwd = scratch.join("noop_cwd.txt");
+    let test_script = write_script(&scratch, "noop_test.sh", &noop_cwd, 0);
+
+    let pane_row = attempt::default_harnesses().remove("pane").unwrap();
+    let mut harnesses = HashMap::new();
+    harnesses.insert(
+        "pane".to_string(),
+        HarnessCommand {
+            program: fake_pane,
+            args: pane_row.args,
+        },
+    );
+
+    let statement: &'static str =
+        "split \"main.rs\" into {root} and {statement}, quoted 'like this'";
+    let commit = leak(head_commit());
+    let mut task = base_task(commit, single_command(&test_script));
+    task.statement = statement;
+    let opts = RunOpts {
+        scratch: scratch.clone(),
+        gateway: None,
+        via_glasshouse: None,
+        meter: Meter::None,
+        harnesses,
+    };
+    let harness = Harness::new("pane");
+
+    let result = attempt::run_one(&task, &harness, 1, &opts);
+    assert!(result.outcome.completed(), "{:?}", result.outcome);
+
+    let argv = read_argv(&argv_record);
+    assert_eq!(
+        argv.last().map(String::as_str),
+        Some(statement),
+        "the statement must arrive as exactly one argv element, unsplit and unsubstituted"
+    );
+    assert_eq!(argv.len(), 5, "the template's own five elements, no more");
+}
+
+#[test]
 fn repeat_below_three_is_refused() {
     let out = scratch_dir("repeat-refused");
     let args = vec![
@@ -422,6 +695,7 @@ fn the_accepted_flags_are_exactly_these() {
             "--repeat",
             "--gateway",
             "--meter",
+            "--via-glasshouse",
             "--out"
         ]
     );
@@ -459,4 +733,208 @@ fn the_meter_parses_the_readouts_full_twenty_two_key_row() {
         Some(2),
         "both rows are exchanges; only one of them was metered"
     );
+}
+
+/// Required behaviour 1 and 2 of `GH-PANE-RULER-VIA-GLASSHOUSE`: with
+/// `--via-glasshouse`, a row's argv is exactly `launch <row> --profile
+/// <profile> -- <the row's own substituted argv>` -- for both `pane` and
+/// `claude-code`.
+#[test]
+fn via_glasshouse_launches_the_row_through_glasshouse_launch_in_the_attempts_worktree() {
+    let scratch = scratch_dir("via-glasshouse-pane");
+    let launch_argv_record = scratch.join("launch_argv.txt");
+    let fake_glasshouse =
+        write_via_glasshouse_script(&scratch, "fake_glasshouse.sh", &launch_argv_record);
+    let test_cwd = scratch.join("test_cwd.txt");
+    let test_script = write_script(&scratch, "noop_test.sh", &test_cwd, 0);
+
+    let commit = leak(head_commit());
+    let task = base_task(commit, single_command(&test_script));
+    let opts = RunOpts {
+        scratch: scratch.clone(),
+        gateway: None,
+        via_glasshouse: Some("bench".to_string()),
+        meter: Meter::Command {
+            glasshouse: fake_glasshouse,
+        },
+        harnesses: attempt::default_harnesses(),
+    };
+    let harness = Harness::new("pane");
+
+    let result = attempt::run_one(&task, &harness, 1, &opts);
+    assert!(result.outcome.completed(), "{:?}", result.outcome);
+
+    let expected_root = scratch.join(format!("{}-{}-{}", task.id, harness.as_str(), 1));
+    let argv = read_argv(&launch_argv_record);
+    assert_eq!(
+        argv,
+        vec![
+            "launch".to_string(),
+            "pane".to_string(),
+            "--profile".to_string(),
+            "bench".to_string(),
+            "--headless".to_string(),
+            "--fresh".to_string(),
+            "--no-routing".to_string(),
+            "--no-memory".to_string(),
+            "--".to_string(),
+            "session".to_string(),
+            "--root".to_string(),
+            expected_root.to_string_lossy().into_owned(),
+            "--task".to_string(),
+            task.statement.to_string(),
+        ]
+    );
+
+    // The same shape for claude-code -- the second baseline the packet
+    // names by name.
+    let scratch2 = scratch_dir("via-glasshouse-claude-code");
+    let launch_argv_record2 = scratch2.join("launch_argv.txt");
+    let fake_glasshouse2 =
+        write_via_glasshouse_script(&scratch2, "fake_glasshouse.sh", &launch_argv_record2);
+    let test_cwd2 = scratch2.join("test_cwd.txt");
+    let test_script2 = write_script(&scratch2, "noop_test.sh", &test_cwd2, 0);
+
+    let commit2 = leak(head_commit());
+    let task2 = base_task(commit2, single_command(&test_script2));
+    let opts2 = RunOpts {
+        scratch: scratch2.clone(),
+        gateway: None,
+        via_glasshouse: Some("bench".to_string()),
+        meter: Meter::Command {
+            glasshouse: fake_glasshouse2,
+        },
+        harnesses: attempt::default_harnesses(),
+    };
+    let harness2 = Harness::new("claude-code");
+
+    let result2 = attempt::run_one(&task2, &harness2, 1, &opts2);
+    assert!(result2.outcome.completed(), "{:?}", result2.outcome);
+
+    let argv2 = read_argv(&launch_argv_record2);
+    assert_eq!(
+        argv2,
+        vec![
+            "launch".to_string(),
+            "claude-code".to_string(),
+            "--profile".to_string(),
+            "bench".to_string(),
+            "--headless".to_string(),
+            "--fresh".to_string(),
+            "--no-routing".to_string(),
+            "--no-memory".to_string(),
+            "--".to_string(),
+            "--print".to_string(),
+            "--dangerously-skip-permissions".to_string(),
+            task2.statement.to_string(),
+        ]
+    );
+}
+
+/// Required behaviour 4: `routing-cost` runs with the attempt's own worktree
+/// as its current directory, both without and with `--via-glasshouse`.
+#[test]
+fn the_meter_reads_routing_cost_from_the_attempts_worktree() {
+    // Without --via-glasshouse: the harness is one program, the meter another.
+    let scratch = scratch_dir("meter-cwd-plain");
+    let meter_cwd_record = scratch.join("meter_cwd.txt");
+    let fake_glasshouse = write_meter_script(&scratch, "fake_glasshouse.sh", &meter_cwd_record);
+    let harness_cwd = scratch.join("harness_cwd.txt");
+    let harness_script = write_script(&scratch, "fake_harness.sh", &harness_cwd, 0);
+    let test_cwd = scratch.join("test_cwd.txt");
+    let test_script = write_script(&scratch, "noop_test.sh", &test_cwd, 0);
+
+    let commit = leak(head_commit());
+    let task = base_task(commit, single_command(&test_script));
+    let mut opts = base_opts(scratch.clone(), harness_script);
+    opts.meter = Meter::Command {
+        glasshouse: fake_glasshouse,
+    };
+    let harness = Harness::new("fake");
+
+    let result = attempt::run_one(&task, &harness, 1, &opts);
+    assert!(result.outcome.completed(), "{:?}", result.outcome);
+
+    let expected_dir = scratch.join(format!("{}-{}-{}", task.id, harness.as_str(), 1));
+    let expected_dir = fs::canonicalize(&expected_dir).unwrap_or(expected_dir);
+    let recorded = fs::read_to_string(&meter_cwd_record).unwrap();
+    assert_eq!(
+        PathBuf::from(recorded.trim()),
+        expected_dir,
+        "the meter must read the attempt's worktree, not the ruler's own cwd"
+    );
+
+    // With --via-glasshouse: harness and meter share the same glasshouse
+    // binary, but the meter call must still land in the attempt's worktree.
+    let scratch2 = scratch_dir("meter-cwd-via-glasshouse");
+    let meter_cwd_record2 = scratch2.join("meter_cwd.txt");
+    let fake_glasshouse2 = write_meter_script(&scratch2, "fake_glasshouse.sh", &meter_cwd_record2);
+    let test_cwd2 = scratch2.join("test_cwd.txt");
+    let test_script2 = write_script(&scratch2, "noop_test.sh", &test_cwd2, 0);
+
+    let commit2 = leak(head_commit());
+    let task2 = base_task(commit2, single_command(&test_script2));
+    let opts2 = RunOpts {
+        scratch: scratch2.clone(),
+        gateway: None,
+        via_glasshouse: Some("bench".to_string()),
+        meter: Meter::Command {
+            glasshouse: fake_glasshouse2,
+        },
+        harnesses: attempt::default_harnesses(),
+    };
+    let harness2 = Harness::new("pane");
+
+    let result2 = attempt::run_one(&task2, &harness2, 1, &opts2);
+    assert!(result2.outcome.completed(), "{:?}", result2.outcome);
+
+    let expected_dir2 = scratch2.join(format!("{}-{}-{}", task2.id, harness2.as_str(), 1));
+    let expected_dir2 = fs::canonicalize(&expected_dir2).unwrap_or(expected_dir2);
+    let recorded2 = fs::read_to_string(&meter_cwd_record2).unwrap();
+    assert_eq!(
+        PathBuf::from(recorded2.trim()),
+        expected_dir2,
+        "via-glasshouse path: the meter must still read the attempt's own worktree"
+    );
+}
+
+/// Required behaviour 5: both illegal combinations are refused before any
+/// attempt runs.
+#[test]
+fn via_glasshouse_needs_the_meter_and_excludes_a_standing_gateway() {
+    let out = scratch_dir("via-glasshouse-refusals");
+
+    let no_meter = cli::dispatch(&[
+        "run".to_string(),
+        "--task".to_string(),
+        "L1".to_string(),
+        "--harness".to_string(),
+        "pane".to_string(),
+        "--via-glasshouse".to_string(),
+        "bench".to_string(),
+        "--out".to_string(),
+        out.to_string_lossy().into_owned(),
+    ]);
+    let message = no_meter.expect_err("--via-glasshouse without --meter must be refused");
+    assert!(message.contains("--via-glasshouse"), "{message}");
+    assert!(message.contains("--meter"), "{message}");
+
+    let with_gateway = cli::dispatch(&[
+        "run".to_string(),
+        "--task".to_string(),
+        "L1".to_string(),
+        "--harness".to_string(),
+        "pane".to_string(),
+        "--via-glasshouse".to_string(),
+        "bench".to_string(),
+        "--meter".to_string(),
+        "/definitely/does/not/exist/glasshouse".to_string(),
+        "--gateway".to_string(),
+        "http://127.0.0.1:8731".to_string(),
+        "--out".to_string(),
+        out.to_string_lossy().into_owned(),
+    ]);
+    let message2 = with_gateway.expect_err("--via-glasshouse with --gateway must be refused");
+    assert!(message2.contains("--via-glasshouse"), "{message2}");
+    assert!(message2.contains("--gateway"), "{message2}");
 }

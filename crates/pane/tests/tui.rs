@@ -5,8 +5,8 @@
 
 use pane::contract::{Conversation, Message, Role, ServedBy};
 use pane::runtime::handles::{HandleTable, render_table};
-use pane::runtime::preview::{FileValue, PREVIEW_TOKEN_CAP, TABLE_TOKEN_CAP, Value};
-use pane::tui::render;
+use pane::runtime::preview::{ArrayValue, FileValue, PREVIEW_TOKEN_CAP, TABLE_TOKEN_CAP, Value};
+use pane::tui::{CellError, CellView, Notebook, render};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
@@ -36,16 +36,60 @@ fn rendered(conversation: &Conversation, served_by: &ServedBy) -> Buffer {
     rendered_with_handles(conversation, served_by, &HandleTable::new())
 }
 
-/// Renders `conversation`, `served_by` and `handles` into an 80x20 buffer.
+/// Renders `conversation`, `served_by` and `handles` into an 80x20 buffer,
+/// with no cell views -- the shape every pre-runtime test still exercises.
 fn rendered_with_handles(
     conversation: &Conversation,
     served_by: &ServedBy,
     handles: &HandleTable,
 ) -> Buffer {
-    let backend = TestBackend::new(80, 20);
+    rendered_notebook(conversation, served_by, handles, &Notebook::default(), 20)
+}
+
+/// Renders everything, into a buffer `height` rows tall -- a notebook with
+/// its own cell views needs more rows than the two-region tests do.
+fn rendered_notebook(
+    conversation: &Conversation,
+    served_by: &ServedBy,
+    handles: &HandleTable,
+    notebook: &Notebook,
+    height: u16,
+) -> Buffer {
+    rendered_sized(conversation, served_by, handles, notebook, 80, height)
+}
+
+/// The same render into a `width`x20 buffer with no cell views, for a
+/// fixture whose lines must not wrap in the conversation column -- a handle
+/// header carries its type, length and both token figures on one line
+/// (`model-contract.md` §7).
+fn rendered_at_width(
+    conversation: &Conversation,
+    served_by: &ServedBy,
+    handles: &HandleTable,
+    width: u16,
+) -> Buffer {
+    rendered_sized(
+        conversation,
+        served_by,
+        handles,
+        &Notebook::default(),
+        width,
+        20,
+    )
+}
+
+fn rendered_sized(
+    conversation: &Conversation,
+    served_by: &ServedBy,
+    handles: &HandleTable,
+    notebook: &Notebook,
+    width: u16,
+    height: u16,
+) -> Buffer {
+    let backend = TestBackend::new(width, height);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal
-        .draw(|frame| render(frame, conversation, served_by, handles))
+        .draw(|frame| render(frame, conversation, served_by, handles, notebook))
         .unwrap();
     terminal.backend().buffer().clone()
 }
@@ -107,6 +151,36 @@ fn rows_after(buffer: &Buffer, marker: &str, count: usize) -> Vec<String> {
 /// as [`rows_after`] -- for an output region that is exactly one line.
 fn line_after(buffer: &Buffer, marker: &str) -> String {
     rows_after(buffer, marker, 1).remove(0)
+}
+
+/// The `count` rows beneath `marker`, cut to the **conversation column
+/// alone** -- so a cell's region can be compared against plain text whatever
+/// the sidebar happens to be drawing on the same rows. [`rows_after`] trims
+/// borders and cannot: it keeps whatever the sidebar wrote after them.
+fn conversation_rows(buffer: &Buffer, marker: &str, count: usize) -> Vec<String> {
+    let text = buffer_text(buffer);
+    let lines: Vec<&str> = text.lines().collect();
+    let marker_row = lines
+        .iter()
+        .position(|line| line.contains(marker))
+        .unwrap_or_else(|| panic!("{marker:?} not found in buffer:\n{text}"));
+    (1..=count)
+        .map(|offset| {
+            lines
+                .get(marker_row + offset)
+                .map(|line| {
+                    let inner = line.trim_start_matches('\u{2502}');
+                    let end = inner.find('\u{2502}').unwrap_or(inner.len());
+                    inner[..end].trim_end().to_string()
+                })
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
+/// The single conversation-column row beneath `marker`.
+fn conversation_row(buffer: &Buffer, marker: &str) -> String {
+    conversation_rows(buffer, marker, 1).remove(0)
 }
 
 /// The x of the sidebar's left border on the top row: the second box-drawing
@@ -296,7 +370,11 @@ fn the_latest_cell_shows_the_live_handle_table_through_the_one_renderer() {
     );
     handles.declare(
         "arr",
-        Value::Array(vec![Value::Number(1.0), Value::Number(2.0)]),
+        Value::Array(ArrayValue::sampled(
+            2,
+            vec![Value::Number(1.0), Value::Number(2.0)],
+            None,
+        )),
         1,
     );
 
@@ -304,7 +382,9 @@ fn the_latest_cell_shows_the_live_handle_table_through_the_one_renderer() {
     assert!(!expected.is_empty(), "the fixture table must not be empty");
     let expected_lines: Vec<String> = expected.lines().map(str::to_string).collect();
 
-    let buffer = rendered_with_handles(&two_cell_task(), &known_served_by(), &handles);
+    // 120 columns: the array header is 52 characters and must reach the
+    // buffer unwrapped for a line-by-line comparison to mean anything.
+    let buffer = rendered_at_width(&two_cell_task(), &known_served_by(), &handles, 120);
 
     let actual = rows_after(&buffer, "[2] out", expected_lines.len());
     assert_eq!(
@@ -399,5 +479,196 @@ fn the_sidebar_is_unchanged_by_the_notebook() {
     assert!(
         text.contains("123") && text.contains("456"),
         "the sidebar must still show the tokens:\n{text}"
+    );
+}
+
+/// One cell that ran a program and ended the task with a value: the input
+/// region is the **program**, not the prose the model wrapped it in, and the
+/// value is the cell's return region.
+///
+/// The prose around the block is what makes this test decisive. A notebook
+/// that drew the assistant message's whole text -- which is what it did
+/// before the runtime existed -- shows the explanation and the fence too, and
+/// then there is no way to tell from the screen what actually ran.
+#[test]
+fn a_cell_shows_its_program_as_the_input_region_and_a_return_as_the_last_cells_value() {
+    let message = "Counting them now.\n\n```pane\nconst n = hits.length;\nreturn { total: n };\n```\n\nThat should do it.";
+    let conversation = conversation(vec![
+        Message::text(Role::User, "the task"),
+        Message::text(Role::Assistant, message),
+    ]);
+
+    let mut notebook = Notebook::default();
+    notebook.set(
+        1,
+        CellView {
+            table: Some("n  number  1195".to_string()),
+            error: None,
+            returned: Some("\"total\": number".to_string()),
+            answered: false,
+        },
+    );
+
+    let buffer = rendered_notebook(
+        &conversation,
+        &known_served_by(),
+        &HandleTable::new(),
+        &notebook,
+        24,
+    );
+    let text = buffer_text(&buffer);
+
+    assert_eq!(
+        conversation_rows(&buffer, "[1] in", 2),
+        vec![
+            "const n = hits.length;".to_string(),
+            "return { total: n };".to_string()
+        ],
+        "the input region must be the program the message carried:\n{text}"
+    );
+    assert!(
+        !text.contains("Counting them now"),
+        "the prose around the block is not what ran and must not be the input region:\n{text}"
+    );
+    assert_eq!(
+        conversation_row(&buffer, "[1] out"),
+        "n  number  1195",
+        "the output region is the cell's own handle table:\n{text}"
+    );
+    assert_eq!(
+        conversation_row(&buffer, "[1] return"),
+        "\"total\": number",
+        "a top-level return renders as the cell's return region:\n{text}"
+    );
+}
+
+/// A throw is a result: it gets its own region under the cell that threw,
+/// carrying the class, the message and the position inside the model's own
+/// program -- `runtime-contract.md` §5's first two items and nothing else.
+#[test]
+fn a_throw_renders_as_the_cells_error_region() {
+    let conversation = conversation(vec![
+        Message::text(Role::User, "the task"),
+        Message::text(Role::Assistant, "```pane\nnosuch.field;\n```"),
+    ]);
+
+    let mut notebook = Notebook::default();
+    notebook.set(
+        1,
+        CellView {
+            table: Some(String::new()),
+            error: Some(CellError {
+                class: "ReferenceError".to_string(),
+                message: "nosuch is not defined".to_string(),
+                line: Some(1),
+                column: Some(1),
+            }),
+            returned: None,
+            answered: true,
+        },
+    );
+
+    let buffer = rendered_notebook(
+        &conversation,
+        &known_served_by(),
+        &HandleTable::new(),
+        &notebook,
+        24,
+    );
+    let text = buffer_text(&buffer);
+
+    assert_eq!(
+        conversation_rows(&buffer, "[1] error", 2),
+        vec![
+            "ReferenceError: nosuch is not defined".to_string(),
+            "line 1, column 1".to_string(),
+        ],
+        "a throw's class, message and position must be the cell's error region:\n{text}"
+    );
+    assert_eq!(
+        conversation_row(&buffer, "[1] out"),
+        "(no outputs)",
+        "the cell's own empty table still says so rather than collapsing:\n{text}"
+    );
+}
+
+/// The runtime's answer to a cell is not a person typing, and every section
+/// of it is already drawn above as that cell's own regions. Drawing it again
+/// as `you: …` puts the whole handle table on the screen twice.
+#[test]
+fn the_runtimes_answer_to_a_cell_is_not_drawn_as_a_person_typing() {
+    let conversation = conversation(vec![
+        Message::text(Role::User, "the task"),
+        Message::text(Role::Assistant, "```pane\nconst n = 1;\n```"),
+        Message::text(
+            Role::User,
+            "[cell 1 yielded in 3 ms]\n\n## Handles\nn  number  1",
+        ),
+        Message::text(Role::Assistant, "```pane\nreturn n;\n```"),
+    ]);
+
+    let mut notebook = Notebook::default();
+    notebook.set(
+        1,
+        CellView {
+            table: Some("n  number  1".to_string()),
+            error: None,
+            returned: None,
+            answered: true,
+        },
+    );
+
+    let text = buffer_text(&rendered_notebook(
+        &conversation,
+        &known_served_by(),
+        &HandleTable::new(),
+        &notebook,
+        24,
+    ));
+
+    assert!(
+        !text.contains("you:"),
+        "the runtime's own answer must not be drawn as a person typing:\n{text}"
+    );
+    assert_eq!(
+        text.matches("n  number  1").count(),
+        1,
+        "the handle table must appear once, as the cell's output region:\n{text}"
+    );
+}
+
+/// A person typing between tasks still gets a `you:` line -- the suppression
+/// above is the cell's own claim about the message after it, not a blanket
+/// rule about user messages.
+#[test]
+fn a_person_typing_after_a_task_ended_is_still_drawn() {
+    let conversation = conversation(vec![
+        Message::text(Role::User, "the first task"),
+        Message::text(Role::Assistant, "```pane\nreturn 1;\n```"),
+        Message::text(Role::User, "the second task"),
+    ]);
+
+    let mut notebook = Notebook::default();
+    notebook.set(
+        1,
+        CellView {
+            table: Some(String::new()),
+            error: None,
+            returned: Some("1".to_string()),
+            answered: false,
+        },
+    );
+
+    let text = buffer_text(&rendered_notebook(
+        &conversation,
+        &known_served_by(),
+        &HandleTable::new(),
+        &notebook,
+        24,
+    ));
+
+    assert!(
+        text.contains("you: the second task"),
+        "a task typed after the previous one returned must still be drawn:\n{text}"
     );
 }

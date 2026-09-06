@@ -9,7 +9,15 @@ const adapter = await read({ path: "crates/glasshouse/src/harness/mod.rs" });
 [cell 1 yielded in 412 ms]
 
 ## Handles
-{{HANDLES}}
+hits     Grep.Match[]   n=5   inline cost ~1,074 tok · preview 61 tok
+  [0] "crates/glasshouse/tests/gateway_translate_effort.rs:29"
+  [1] "crates/glasshouse/tests/gateway_translate_effort.rs:512"
+  [2] "crates/glasshouse/tests/gateway_translate_responses.rs:35"
+  [4] "crates/pane/src/tools/registry.rs:12"
+
+adapter  File   crates/glasshouse/src/harness/mod.rs   63,979 B · 1,508 lines · 2026-09-05T14:18:26Z
+L1   "//! The contract every supported harness is reached through."
+L2   "//!"   preview 41 tok
 
 ## Budget
 turn cap 8,000 · task 3,412/400,000 · cells 1/40

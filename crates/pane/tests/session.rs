@@ -72,24 +72,47 @@ fn refused_base_url() -> String {
 /// `Content-Length`, records it, and answers with that reply's bytes as a
 /// `200 application/json` response. Exits once every reply has been sent.
 fn start_fake_provider(replies: Vec<String>) -> (String, Arc<Mutex<Vec<String>>>) {
+    let turns = replies.len();
+    let next = Mutex::new(0usize);
+    start_answering_provider(turns, move |_body| {
+        let mut index = next.lock().unwrap();
+        let reply = replies[*index].clone();
+        *index += 1;
+        reply
+    })
+}
+
+/// The same endpoint, answering each request from the **request body**.
+///
+/// A task's second turn is only meaningful if the model saw what the runtime
+/// said in the first: a fixed list answers a request nobody looked at, and
+/// would pass just as happily if the result block had been empty.
+fn start_answering_provider<F>(turns: usize, answer: F) -> (String, Arc<Mutex<Vec<String>>>)
+where
+    F: Fn(&str) -> String + Send + 'static,
+{
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let bodies = Arc::new(Mutex::new(Vec::new()));
     let bodies_thread = Arc::clone(&bodies);
 
     thread::spawn(move || {
-        for reply in replies {
+        for _ in 0..turns {
             let Ok((stream, _)) = listener.accept() else {
                 return;
             };
-            handle_one_request(stream, &reply, &bodies_thread);
+            handle_one_request(stream, &answer, &bodies_thread);
         }
     });
 
     (format!("http://127.0.0.1:{port}"), bodies)
 }
 
-fn handle_one_request(mut stream: TcpStream, reply: &str, bodies: &Mutex<Vec<String>>) {
+fn handle_one_request<F: Fn(&str) -> String>(
+    mut stream: TcpStream,
+    answer: &F,
+    bodies: &Mutex<Vec<String>>,
+) {
     let mut reader = BufReader::new(stream.try_clone().unwrap());
     let mut content_length = 0usize;
     loop {
@@ -108,10 +131,9 @@ fn handle_one_request(mut stream: TcpStream, reply: &str, bodies: &Mutex<Vec<Str
     if reader.read_exact(&mut body).is_err() {
         return;
     }
-    bodies
-        .lock()
-        .unwrap()
-        .push(String::from_utf8_lossy(&body).into_owned());
+    let body = String::from_utf8_lossy(&body).into_owned();
+    let reply = answer(&body);
+    bodies.lock().unwrap().push(body);
 
     let response_body = reply.as_bytes();
     let response = format!(
@@ -163,6 +185,42 @@ fn run_session(
     command.output().unwrap()
 }
 
+/// The reply that ends a task: a cell whose one statement is a top-level
+/// `return`.
+///
+/// **Every test whose own scripted reply is prose needs one.** A prose reply
+/// is *answered*, not obeyed (`model-contract.md` §5): pane sends back the
+/// unchanged handle table and one line, and the task runs on until something
+/// ends it. Before the session loop existed a turn was the whole run, and
+/// these fixtures scripted one reply because one reply was all a run could
+/// consume.
+fn ending_reply() -> String {
+    assistant_reply("```pane\nreturn 1;\n```")
+}
+
+/// The text of the last `user` message in a recorded request body -- what the
+/// runtime told the model on the turn that request opened.
+fn last_user_text(body: &str) -> String {
+    let request: serde_json::Value = serde_json::from_str(body).unwrap();
+    let messages = request["messages"].as_array().unwrap();
+    messages
+        .iter()
+        .rev()
+        .find(|message| message["role"] == "user")
+        .expect("every request carries at least the task")["content"][0]["text"]
+        .as_str()
+        .unwrap()
+        .to_string()
+}
+
+/// Every `cell` line in the rollout, in file order.
+fn cell_lines(path: &Path) -> Vec<serde_json::Value> {
+    rollout_lines(path)
+        .into_iter()
+        .filter(|line| line["kind"] == "cell")
+        .collect()
+}
+
 fn rollout_lines(path: &Path) -> Vec<serde_json::Value> {
     fs::read_to_string(path)
         .unwrap()
@@ -175,7 +233,8 @@ fn rollout_lines(path: &Path) -> Vec<serde_json::Value> {
 fn the_binary_runs_a_turn_and_writes_a_rollout() {
     let root = scratch_dir("turn-root");
     let rollout = root.join("rollout.jsonl");
-    let (base_url, bodies) = start_fake_provider(vec![assistant_reply("hi from the model")]);
+    let (base_url, bodies) =
+        start_fake_provider(vec![assistant_reply("hi from the model"), ending_reply()]);
 
     let output = run_session(&root, &rollout, "sess-turn", "hello there", &base_url, None);
 
@@ -200,7 +259,11 @@ fn the_binary_runs_a_turn_and_writes_a_rollout() {
         "no assistant turn in {lines:?}"
     );
 
-    assert_eq!(bodies.lock().unwrap().len(), 1);
+    // Two, not one: the model's prose reply is answered with the handle
+    // table and one line (§5), and the task runs until the second reply
+    // returns. A run that stopped after one turn would be the old
+    // one-turn-per-input session, not a task.
+    assert_eq!(bodies.lock().unwrap().len(), 2);
 }
 
 #[test]
@@ -208,7 +271,8 @@ fn the_binary_resumes_an_existing_rollout_instead_of_starting_over() {
     let root = scratch_dir("resume-root");
     let rollout = root.join("rollout.jsonl");
 
-    let (first_url, _first_bodies) = start_fake_provider(vec![assistant_reply("first reply")]);
+    let (first_url, _first_bodies) =
+        start_fake_provider(vec![assistant_reply("first reply"), ending_reply()]);
     let first = run_session(
         &root,
         &rollout,
@@ -223,7 +287,8 @@ fn the_binary_resumes_an_existing_rollout_instead_of_starting_over() {
         String::from_utf8_lossy(&first.stderr)
     );
 
-    let (second_url, second_bodies) = start_fake_provider(vec![assistant_reply("second reply")]);
+    let (second_url, second_bodies) =
+        start_fake_provider(vec![assistant_reply("second reply"), ending_reply()]);
     let second = run_session(
         &root,
         &rollout,
@@ -239,7 +304,7 @@ fn the_binary_resumes_an_existing_rollout_instead_of_starting_over() {
     );
 
     let bodies = second_bodies.lock().unwrap();
-    assert_eq!(bodies.len(), 1);
+    assert_eq!(bodies.len(), 2);
     let request: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
     let messages = request["messages"].as_array().unwrap();
     let texts: Vec<&str> = messages
@@ -270,7 +335,7 @@ fn the_binary_loads_the_projects_own_instructions() {
     )
     .unwrap();
     let rollout = root.join("rollout.jsonl");
-    let (base_url, bodies) = start_fake_provider(vec![assistant_reply("ack")]);
+    let (base_url, bodies) = start_fake_provider(vec![assistant_reply("ack"), ending_reply()]);
 
     let output = run_session(&root, &rollout, "sess-instructions", "hi", &base_url, None);
     assert!(
@@ -295,7 +360,7 @@ fn the_binary_emits_session_start_to_the_hook_command() {
     let rollout = root.join("rollout.jsonl");
     let record = root.join("argv.txt");
     let glasshouse = write_argv_recorder(&root, &record);
-    let (base_url, _bodies) = start_fake_provider(vec![assistant_reply("ack")]);
+    let (base_url, _bodies) = start_fake_provider(vec![assistant_reply("ack"), ending_reply()]);
 
     let output = run_session(
         &root,
@@ -389,7 +454,8 @@ fn nothing_the_model_returns_is_executed() {
     let rollout = root.join("rollout.jsonl");
     let sentinel = root.join("sentinel-should-not-exist");
     let malicious = format!("```sh\ntouch {}\n```", sentinel.display());
-    let (base_url, _bodies) = start_fake_provider(vec![assistant_reply(&malicious)]);
+    let (base_url, _bodies) =
+        start_fake_provider(vec![assistant_reply(&malicious), ending_reply()]);
 
     let output = run_session(
         &root,
@@ -520,8 +586,10 @@ fn a_piped_session_prints_the_models_reply() {
     let root = scratch_dir("print-reply-root");
     let rollout = root.join("rollout.jsonl");
     let absent = root.join("no-such-glasshouse");
-    let (base_url, _bodies) =
-        start_fake_provider(vec![assistant_reply("PANE-PRINTED-REPLY-MARKER")]);
+    let (base_url, _bodies) = start_fake_provider(vec![
+        assistant_reply("PANE-PRINTED-REPLY-MARKER"),
+        ending_reply(),
+    ]);
 
     let output = run_session(
         &root,
@@ -558,7 +626,7 @@ fn a_piped_session_prints_the_sidebar_content() {
     let root = scratch_dir("print-sidebar-root");
     let rollout = root.join("rollout.jsonl");
     let absent = root.join("no-such-glasshouse");
-    let (base_url, _bodies) = start_fake_provider(vec![assistant_reply("ack")]);
+    let (base_url, _bodies) = start_fake_provider(vec![assistant_reply("ack"), ending_reply()]);
 
     let output = run_session(
         &root,
@@ -653,5 +721,497 @@ fn a_project_skill_resolves_by_name() {
     assert!(
         stdout.contains("ProjectSkill"),
         "resolving a bare project skill by name never reached the binary's ProjectSkill branch:\n{stdout}"
+    );
+}
+
+/// **2462, and the package's whole point: the model acts by returning a
+/// TypeScript program that calls tools by name on live objects.**
+///
+/// Two cells, `model-contract.md` §7's own worked turn with its paths adapted
+/// to a fixture tree: cell 1 greps and reads, cell 2 computes over the array
+/// the grep produced and returns. Nothing between them is a person -- the
+/// binary sends the second turn itself.
+///
+/// The provider answers from the **request body** rather than from a list, so
+/// cell 2 is only sent because the runtime's own result block reached the
+/// model naming `hits`. A fixed list would pass with an empty result block.
+///
+/// **2465 is the marker assertion.** `harness.rs` line 5 is never in a
+/// message: `adapter` is a live `File` handle whose preview is a path, a size
+/// and its first two lines, and there is no code path that writes a payload
+/// into the conversation.
+///
+/// Unix only, and the reason is the runtime's, not this file's: on Windows a
+/// tool call refuses before spawning, so cell 1 would throw `PermissionDenied`
+/// and `hits` would never bind. That refusal is correct and is the runtime's
+/// own to test; what this test needs is a host where a program's tool call
+/// actually runs.
+#[cfg(unix)]
+#[test]
+fn a_scripted_two_cell_task_runs_through_the_binary_and_returns() {
+    let root = scratch_dir("two-cell-root");
+    fs::create_dir_all(root.join("src")).unwrap();
+    fs::create_dir_all(root.join("tests")).unwrap();
+    fs::write(
+        root.join("src").join("lib.rs"),
+        "use crate::IntegrationId;\npub struct IntegrationId;\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("src").join("harness.rs"),
+        "// IntegrationId lives here\n// two\n// three\n// four\n// PAYLOAD-MARKER-NEVER-IN-A-MESSAGE\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("tests").join("it.rs"),
+        "use pane::IntegrationId;\n",
+    )
+    .unwrap();
+
+    // Outside the fixture tree on purpose: a rollout inside it would be one
+    // more file the model's own `grep` reads, and the counts it returns would
+    // then depend on the session's own record of asking for them.
+    let rollout = scratch_dir("two-cell-rollout").join("rollout.jsonl");
+    let absent = root.join("no-such-glasshouse");
+
+    let cell_one = format!(
+        "```pane\nconst hits = await grep({{ pattern: \"IntegrationId\", path: \"{root}\" }});\nconst adapter = await read({{ path: \"{root}/src/harness.rs\" }});\n```",
+        root = root.display()
+    );
+    let cell_two = "```pane\nconst isTest = (m) => m.path.includes(\"/tests/\");\nconst inTests = hits.filter(isTest);\nconst prodFiles = new Set(hits.filter(m => !isTest(m)).map(m => m.path));\nreturn { total: hits.length, in_tests: inTests.length, prod_files: prodFiles.size };\n```";
+
+    let (base_url, bodies) = start_answering_provider(2, move |body| {
+        if body.contains("## Handles") && body.contains("hits") {
+            assistant_reply(cell_two)
+        } else {
+            assistant_reply(&cell_one)
+        }
+    });
+
+    let output = run_session(
+        &root,
+        &rollout,
+        "sess-two-cell",
+        "How many files name that type, and how many are tests?",
+        &base_url,
+        Some(&absent),
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let cells = cell_lines(&rollout);
+    assert_eq!(cells.len(), 2, "two cells ran: {cells:?}");
+    assert_eq!(cells[0]["cell"], 1);
+    assert_eq!(cells[0]["outcome"], "yielded");
+    assert_eq!(cells[1]["cell"], 2);
+    assert_eq!(cells[1]["outcome"], "returned");
+
+    let hits = cells[0]["handles"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|handle| handle["name"] == "hits")
+        .unwrap_or_else(|| panic!("the grep result never became a handle: {cells:?}"));
+    assert_eq!(hits["provenance"]["tool"], "grep");
+    let preview = hits["preview"].as_str().unwrap();
+    assert!(
+        preview.contains("n=4"),
+        "the four matches must be countable through the handle: {preview}"
+    );
+
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 2, "the binary sent the second turn itself");
+    let result_block = last_user_text(&bodies[1]);
+    assert!(
+        result_block.starts_with("[cell 1 yielded in"),
+        "the second turn opened with the first cell's result: {result_block}"
+    );
+    assert!(
+        !bodies[1].contains("PAYLOAD-MARKER-NEVER-IN-A-MESSAGE"),
+        "a handle's payload reached the conversation: {}",
+        bodies[1]
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    for key in ["\"total\"", "\"in_tests\"", "\"prod_files\""] {
+        assert!(
+            stdout.contains(key),
+            "the returned value's preview must name {key}:\n{stdout}"
+        );
+    }
+}
+
+/// §5: a message with no `pane` block is prose. The task does not advance,
+/// **the cell counter does not move**, and the answer is the unchanged handle
+/// table and one line.
+///
+/// The prose here contains a ```` ```ts ```` block, which is the case §5 names
+/// outright: a model writing about TypeScript emits those constantly, and a
+/// parser that ran them would run the model's explanations.
+#[test]
+fn a_prose_reply_advances_no_cell_and_is_answered_with_the_table() {
+    let root = scratch_dir("prose-root");
+    let rollout = root.join("rollout.jsonl");
+    let absent = root.join("no-such-glasshouse");
+
+    let (base_url, bodies) = start_fake_provider(vec![
+        assistant_reply("Here is how I would do it:\n\n```ts\nconst x = 1;\n```\n\nShall I?"),
+        ending_reply(),
+    ]);
+
+    let output = run_session(
+        &root,
+        &rollout,
+        "sess-prose",
+        "count them",
+        &base_url,
+        Some(&absent),
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let cells = cell_lines(&rollout);
+    assert_eq!(
+        cells.len(),
+        1,
+        "only the second reply ran a cell: {cells:?}"
+    );
+    assert_eq!(
+        cells[0]["cell"], 1,
+        "the prose turn must not have consumed cell 1: {cells:?}"
+    );
+
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 2);
+    assert_eq!(
+        last_user_text(&bodies[1]),
+        "## Handles\n(none)\n\nno program ran; send one pane block",
+        "prose is answered with the unchanged table and one line"
+    );
+}
+
+/// §5: two `pane` blocks in one message are a protocol error and **neither
+/// runs** -- running the first is the silently-wrong reading, because the
+/// second is usually the one the model meant.
+///
+/// The third cell asks the isolate itself: `typeof a` is `"undefined"` only if
+/// the first block never ran. A loop that ran the first block would bind `a`
+/// on the persistent scope and this would return `"number"`.
+#[test]
+fn two_pane_blocks_run_neither() {
+    let root = scratch_dir("two-blocks-root");
+    let rollout = root.join("rollout.jsonl");
+    let absent = root.join("no-such-glasshouse");
+
+    let (base_url, bodies) = start_fake_provider(vec![
+        assistant_reply("```pane\nconst a = 1;\n```\n\n```pane\nconst b = 2;\n```"),
+        assistant_reply("```pane\nreturn typeof a;\n```"),
+    ]);
+
+    let output = run_session(
+        &root,
+        &rollout,
+        "sess-two-blocks",
+        "do the thing",
+        &base_url,
+        Some(&absent),
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let cells = cell_lines(&rollout);
+    assert_eq!(
+        cells.len(),
+        1,
+        "neither block ran: only the third message's cell is recorded: {cells:?}"
+    );
+
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 2);
+    assert_eq!(
+        last_user_text(&bodies[1]),
+        "two pane blocks in one turn; send one",
+        "the answer is the contract's own sentence and carries no handle table"
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("\"undefined\""),
+        "the first block's binding must not exist in the isolate:\n{stdout}"
+    );
+}
+
+/// §5: a throw is a result. It fills the turn slot a yield would have used,
+/// carries the class, the message and the position inside the model's own
+/// program, and **the turn is not retried** -- the session sends the next one
+/// and the task keeps going.
+#[test]
+fn a_cell_that_throws_is_answered_and_the_session_continues() {
+    let root = scratch_dir("throw-root");
+    let rollout = root.join("rollout.jsonl");
+    let absent = root.join("no-such-glasshouse");
+
+    let (base_url, bodies) = start_fake_provider(vec![
+        assistant_reply("```pane\nconst before = 1;\nnosuch.field;\n```"),
+        ending_reply(),
+    ]);
+
+    let output = run_session(
+        &root,
+        &rollout,
+        "sess-throw",
+        "do the thing",
+        &base_url,
+        Some(&absent),
+    );
+    assert!(
+        output.status.success(),
+        "a throw must not fail the session; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let cells = cell_lines(&rollout);
+    assert_eq!(cells.len(), 2, "{cells:?}");
+    assert_eq!(cells[0]["outcome"], "threw");
+    assert_eq!(cells[1]["outcome"], "returned");
+
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 2, "the session continued after the throw");
+    let answer = last_user_text(&bodies[1]);
+    assert!(
+        answer.starts_with("[cell 1 threw in"),
+        "the throw fills the turn slot a yield would have used: {answer}"
+    );
+    assert!(
+        answer.contains("## Error\nReferenceError:"),
+        "the error section carries the class and the message: {answer}"
+    );
+    assert!(
+        answer.contains("before"),
+        "the binding made before the throw must still be in the table: {answer}"
+    );
+    assert_eq!(
+        bodies[1].matches("nosuch.field").count(),
+        1,
+        "the turn is never retried: the throwing program appears once, as the \
+         assistant message that sent it"
+    );
+}
+
+/// REQUIRED BEHAVIOR 6, and `model-contract.md` §1: the system block the
+/// binary sends is `prompt::render_system`'s bytes for the same inputs -- the
+/// preamble, one declaration per registered tool, then the project's own
+/// instructions.
+///
+/// **Byte equality, not `contains`.** The system block is what the provider's
+/// prompt cache holds for the whole task; a second spelling of it here that
+/// merely carried the same words would break the cache and would make §8's
+/// gateway comparison a comparison of two prompts.
+#[test]
+fn the_system_block_is_render_systems_own_bytes() {
+    let root = scratch_dir("system-bytes-root");
+    fs::write(root.join("CLAUDE.md"), "PROJECT-INSTRUCTION-ONE").unwrap();
+    let rollout = root.join("rollout.jsonl");
+    let absent = root.join("no-such-glasshouse");
+    let (base_url, bodies) = start_fake_provider(vec![ending_reply()]);
+
+    let output = run_session(
+        &root,
+        &rollout,
+        "sess-system-bytes",
+        "hi",
+        &base_url,
+        Some(&absent),
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let expected = pane::prompt::render_system(
+        "PROJECT-INSTRUCTION-ONE",
+        &pane::tools::registry::ALL.iter().collect::<Vec<_>>(),
+    );
+
+    let bodies = bodies.lock().unwrap();
+    let request: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
+    assert_eq!(request["system"].as_str().unwrap(), expected);
+}
+
+/// §6's cell cap, and the one sentence that replaces the preamble when a
+/// budget is spent.
+///
+/// **The loop ends after that turn whatever the model does**, so the cap is
+/// asserted by the provider running out of scripted turns: a loop that kept
+/// going would open a forty-second connection to a listener that has already
+/// exited, and the run would fail rather than succeed.
+///
+/// The final turn's program still runs. It has to: `exhausted_preamble` says
+/// the only permitted action is a top-level `return`, and a return is a
+/// program -- refusing to run it would make the sentence unfollowable.
+#[test]
+fn the_cell_cap_replaces_the_preamble_and_ends_the_task_after_one_more_turn() {
+    let root = scratch_dir("cell-cap-root");
+    let rollout = root.join("rollout.jsonl");
+    let absent = root.join("no-such-glasshouse");
+
+    // 40 is `CELL_CAP`; the forty-first turn is the one the spent budget buys.
+    let turns = 41;
+    let replies = (0..turns)
+        .map(|_| assistant_reply("```pane\nconst x = 1;\n```"))
+        .collect();
+    let (base_url, bodies) = start_fake_provider(replies);
+
+    let output = run_session(
+        &root,
+        &rollout,
+        "sess-cell-cap",
+        "keep going",
+        &base_url,
+        Some(&absent),
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(
+        bodies.len(),
+        turns,
+        "the task must stop one turn after the cap, not run on"
+    );
+    assert!(
+        !last_user_text(&bodies[turns - 2]).starts_with("The task budget is exhausted"),
+        "the turn before the cap carries the ordinary result block"
+    );
+    assert!(
+        last_user_text(&bodies[turns - 1]).starts_with("The task budget is exhausted"),
+        "the turn a spent budget buys opens with the one sentence that replaces \
+         the preamble: {}",
+        last_user_text(&bodies[turns - 1])
+    );
+}
+
+/// A fake `glasshouse` whose `routing-cost --json` answers with one
+/// observation row, and which is silent for every other subcommand.
+/// `once_only` makes it answer the **first** call and nothing after it.
+#[cfg(unix)]
+fn write_routing_cost(dir: &Path, name: &str, once_only: bool) -> PathBuf {
+    let state = dir.join(format!("{name}.seen"));
+    let row = r#"{"provider":"anthropic","model":"claude-sonnet-5","quota_context":"pro-plan","input_tokens":100,"output_tokens":20}"#;
+    let guard = if once_only {
+        format!(
+            "[ -f {state} ] && exit 0\ntouch {state}\n",
+            state = state.display()
+        )
+    } else {
+        String::new()
+    };
+    let body = format!(
+        "#!/bin/sh\ncase \"$1\" in\n  routing-cost)\n{guard}    echo '{row}'\n    ;;\nesac\nexit 0\n"
+    );
+    write_script(dir, name, &body)
+}
+
+/// §6: the task's token figure is the gateway's own usage row when there is
+/// one -- "read from the gateway's own usage row rather than estimated".
+///
+/// 120 is `100 + 20`, the row's own two figures. The estimate for this
+/// conversation is several hundred tokens, so a budget line reading `task
+/// 120/400,000` cannot have been produced by the fallback.
+#[cfg(unix)]
+#[test]
+fn a_gateway_reported_turn_is_counted_from_the_usage_row_not_estimated() {
+    let root = scratch_dir("budget-gateway-root");
+    let rollout = root.join("rollout.jsonl");
+    let glasshouse = write_routing_cost(&root, "fake_routing_cost.sh", false);
+
+    let (base_url, bodies) = start_fake_provider(vec![
+        assistant_reply("```pane\nconst x = 1;\n```"),
+        ending_reply(),
+    ]);
+
+    let output = run_session(
+        &root,
+        &rollout,
+        "sess-budget-gateway",
+        "count them",
+        &base_url,
+        Some(&glasshouse),
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let bodies = bodies.lock().unwrap();
+    let result_block = last_user_text(&bodies[1]);
+    assert!(
+        result_block.contains("turn cap 8,000 · task 120/400,000 · cells 1/40"),
+        "the budget line must carry the gateway's own figures: {result_block}"
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("budget: 240/400000 tok"),
+        "two reported turns total 240 in the sidebar:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("counted: reported"),
+        "the sidebar must say the figure was reported, not estimated:\n{stdout}"
+    );
+}
+
+/// The other half of §6's rule, and the reason the sidebar has a provenance
+/// line at all: **a total that mixes a measurement with a heuristic says so.**
+///
+/// This gateway meters the first turn and not the second, so the total is one
+/// reported figure plus one estimate. Labelling that `gateway-reported` would
+/// be the honesty failure 2449 forbids -- a number that looks measured and is
+/// not -- and labelling it `estimated` would understate a figure that is
+/// partly real.
+#[cfg(unix)]
+#[test]
+fn a_turn_the_gateway_never_metered_is_labelled_rather_than_averaged() {
+    let root = scratch_dir("budget-mixed-root");
+    let rollout = root.join("rollout.jsonl");
+    let glasshouse = write_routing_cost(&root, "fake_routing_cost_once.sh", true);
+
+    let (base_url, _bodies) = start_fake_provider(vec![
+        assistant_reply("```pane\nconst x = 1;\n```"),
+        ending_reply(),
+    ]);
+
+    let output = run_session(
+        &root,
+        &rollout,
+        "sess-budget-mixed",
+        "count them",
+        &base_url,
+        Some(&glasshouse),
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("counted: part estimated"),
+        "a total built from both sources must say so:\n{stdout}"
     );
 }

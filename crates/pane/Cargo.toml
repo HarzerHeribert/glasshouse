@@ -3,7 +3,14 @@ name = "pane"
 description = "The Glasshouse native harness -- a standalone process, integrated by protocol only."
 version.workspace = true
 edition.workspace = true
-rust-version.workspace = true
+# NOT `rust-version.workspace = true`, and this is the one place the two
+# crates' floors differ. `oxc` 0.148 declares `rust-version = "1.96"` -- and
+# so does every version of it back past 0.109 declare something above 1.88 --
+# so a manifest claiming the workspace's 1.88 here would be a claim cargo
+# itself refuses to honour (`cargo +1.88.0 check -p pane` fails naming eight
+# oxc crates). `crates/glasshouse` still declares 1.88 and is unaffected:
+# nothing in this crate is in its tree. The declared CI compiler is 1.98.
+rust-version = "1.96"
 license.workspace = true
 repository.workspace = true
 
@@ -21,7 +28,22 @@ crossterm = { workspace = true }
 ratatui = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+sha2 = { workspace = true }
 ureq = { workspace = true }
+
+# The embedded JavaScript engine, pinned exactly. `v8` (rusty_v8) rather than
+# `deno_core`: pane has no async runtime and the workspace has none on purpose,
+# and a module loader plus an event loop are surplus to a REPL-scoped script
+# runner. It ships a prebuilt static library, so this is a download rather than
+# a V8 source build -- and it is why `crates/pane` is its own workspace member:
+# `cargo build -p glasshouse` compiles none of it.
+v8 = "=152.2.0"
+
+# The TypeScript front end, pinned exactly. `oxc` rather than `swc`: measured
+# below, and it is the parser for BOTH jobs this crate has -- erasing the types
+# and naming the cell's top-level bindings -- so there is one grammar in the
+# process and not two.
+oxc = { version = "=0.148.0", default-features = false, features = ["ast_visit"] }
 
 [lints]
 workspace = true

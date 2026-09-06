@@ -5,13 +5,22 @@
 //! BEHAVIOR #4.
 
 use std::fs::OpenOptions;
-use std::io::Write as _;
+use std::io::{BufRead, BufReader, Read, Write as _};
+use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread;
 
 use pane::contract::{Conversation, Message, Role, SessionId};
 use pane::rollout::{self, Rollout};
-use pane::wire;
+use pane::wire::{self, WireError};
+
+/// `ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY` are process-global, and
+/// `cargo test` runs this file's tests on several threads at once -- every
+/// test below that touches either one holds this for its duration so their
+/// sets and removes cannot interleave.
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// A fresh directory unique to the calling test. Parallel test threads can
 /// land in the same millisecond, so a monotonic counter breaks the tie that
@@ -52,10 +61,12 @@ fn sample_conversation() -> Conversation {
 /// construction rather than by care.
 #[test]
 fn the_gateway_hop_changes_no_byte() {
+    let _guard = ENV_LOCK.lock().unwrap();
     let conversation = sample_conversation();
 
-    // SAFETY: no other test reads or writes `ANTHROPIC_BASE_URL`; the
-    // verification commands also run with it unset in the parent process.
+    // SAFETY: `_guard` holds `ENV_LOCK` for the duration of this test, so no
+    // other test's `ANTHROPIC_BASE_URL`/`ANTHROPIC_API_KEY` set or remove can
+    // interleave with these.
     unsafe {
         std::env::remove_var("ANTHROPIC_BASE_URL");
     }
@@ -218,4 +229,165 @@ fn reopening_a_rollout_appends_to_it_rather_than_truncating_it() {
         .flat_map(|message| message.content.iter().map(|block| block.text()))
         .collect();
     assert_eq!(texts, vec!["before the restart", "after the restart"]);
+}
+
+/// Binds an ephemeral local port, answers the single connection it receives
+/// with a fixed status line and body, then exits -- one turn only, since
+/// `send_turn` never retries.
+fn start_status_provider(status_line: &'static str, body: &'static [u8]) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    thread::spawn(move || {
+        let Ok((stream, _)) = listener.accept() else {
+            return;
+        };
+        respond(stream, status_line, body);
+    });
+    format!("http://127.0.0.1:{port}")
+}
+
+/// Reads a minimal HTTP/1.1 request (headers, then its declared
+/// `Content-Length` body) and discards it, then writes back `status_line`
+/// and `body` as the whole response.
+fn respond(mut stream: TcpStream, status_line: &str, body: &[u8]) {
+    let mut reader = BufReader::new(stream.try_clone().unwrap());
+    let mut content_length = 0usize;
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+            break;
+        }
+        if line == "\r\n" || line == "\n" {
+            break;
+        }
+        if let Some(rest) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+            content_length = rest.trim().parse().unwrap_or(0);
+        }
+    }
+    let mut request_body = vec![0u8; content_length];
+    reader.read_exact(&mut request_body).ok();
+
+    let mut response = format!(
+        "HTTP/1.1 {status_line}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    )
+    .into_bytes();
+    response.extend_from_slice(body);
+    stream.write_all(&response).unwrap();
+    stream.flush().unwrap();
+}
+
+/// Binds an ephemeral local port and drops the listener immediately, so a
+/// connection to it is refused fast, locally, and without ever reaching a
+/// real host.
+fn refused_base_url() -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    drop(listener);
+    format!("http://127.0.0.1:{port}")
+}
+
+/// Sets `ANTHROPIC_BASE_URL` to `base_url`, runs `send_turn`, then restores
+/// the environment. Caller holds `ENV_LOCK`.
+fn send_turn_against(base_url: &str) -> Result<Message, WireError> {
+    // SAFETY: the caller holds `ENV_LOCK` for the duration of this call, so
+    // no other test's env mutation can interleave with this one.
+    unsafe {
+        std::env::set_var("ANTHROPIC_BASE_URL", base_url);
+    }
+    let result = wire::send_turn(&sample_conversation());
+    unsafe {
+        std::env::remove_var("ANTHROPIC_BASE_URL");
+    }
+    result
+}
+
+#[test]
+fn a_failed_status_carries_the_head_of_the_providers_body() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let body = br#"{"type":"error","error":{"type":"not_found_error","message":"model: claude-sonnet-5"}}"#;
+    let base_url = start_status_provider("404 Not Found", body);
+
+    let err = send_turn_against(&base_url).unwrap_err();
+
+    assert!(matches!(err, WireError::Status { status: 404, .. }));
+    let display = err.to_string();
+    assert!(display.contains("http status: 404"), "{display}");
+    assert!(display.contains("not_found_error"), "{display}");
+    assert!(display.contains("model: claude-sonnet-5"), "{display}");
+}
+
+#[test]
+fn a_long_error_body_is_cut_on_a_char_boundary_and_says_so() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    // 239 ASCII bytes (offsets 0..238), then a 3-byte '€' spanning offsets
+    // 239..242 -- byte 240, the cut point, falls in the middle of that
+    // character, so the cut must back off to the boundary at 239 rather
+    // than split it.
+    let mut body = "a".repeat(239);
+    body.push('€');
+    body.push_str(&"a".repeat(1000 - body.len() - "€".len()));
+    let body: &'static str = Box::leak(body.into_boxed_str());
+    let base_url = start_status_provider("500 Internal Server Error", body.as_bytes());
+
+    let err = send_turn_against(&base_url).unwrap_err();
+
+    let display = err.to_string();
+    let (_, head) = display.split_once('—').unwrap();
+    let head = head.trim();
+    assert_eq!(head.chars().filter(|&c| c == 'a').count(), 239, "{display}");
+    assert!(!head.contains('€'), "{display}");
+    assert!(head.ends_with('…'), "{display}");
+}
+
+#[test]
+fn an_error_body_is_escaped_onto_one_line_and_an_empty_one_says_empty() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let base_url = start_status_provider("400 Bad Request", b"line1\nline2\0end");
+
+    let err = send_turn_against(&base_url).unwrap_err();
+
+    let display = err.to_string();
+    assert_eq!(display.lines().count(), 1, "{display}");
+    assert!(display.contains("line1\\nline2"), "{display}");
+    assert!(display.contains("\\u{0}"), "{display}");
+
+    let base_url = start_status_provider("500 Internal Server Error", b"");
+    let err = send_turn_against(&base_url).unwrap_err();
+    assert!(
+        err.to_string().contains("http status: 500 — (empty body)"),
+        "{}",
+        err
+    );
+}
+
+#[test]
+fn a_transport_failure_still_reports_as_before() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let base_url = refused_base_url();
+
+    let err = send_turn_against(&base_url).unwrap_err();
+
+    assert!(matches!(err, WireError::Http(_)));
+    assert!(err.to_string().starts_with("request failed:"), "{err}");
+}
+
+#[test]
+fn no_request_credential_ever_appears_in_an_error() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let sentinel = "sk-ant-test-sentinel-do-not-leak";
+    // SAFETY: `_guard` holds `ENV_LOCK` for this call and `send_turn_against`
+    // scopes `ANTHROPIC_BASE_URL` the same way; no other test reads or
+    // writes `ANTHROPIC_API_KEY`.
+    unsafe {
+        std::env::set_var("ANTHROPIC_API_KEY", sentinel);
+    }
+    let base_url = start_status_provider("404 Not Found", b"not found");
+
+    let err = send_turn_against(&base_url).unwrap_err();
+
+    unsafe {
+        std::env::remove_var("ANTHROPIC_API_KEY");
+    }
+    assert!(!err.to_string().contains(sentinel), "{err}");
 }

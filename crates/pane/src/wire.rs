@@ -104,11 +104,19 @@ struct ResponseBody {
     content: Vec<WireBlock>,
 }
 
+/// The most of a response body an error will ever carry, in bytes.
+const BODY_HEAD_LIMIT: usize = 240;
+
 /// Everything that can go wrong sending or parsing one turn.
 #[derive(Debug)]
 pub enum WireError {
-    /// The HTTP call itself failed, including a non-2xx status.
+    /// The request could not reach a server at all: DNS, a refused
+    /// connection, or any other transport-level failure below HTTP status.
     Http(Box<ureq::Error>),
+    /// The server answered with a non-2xx status. `body_head` is the first
+    /// [`BODY_HEAD_LIMIT`] bytes of its response body, escaped onto one
+    /// line -- never anything from the request.
+    Status { status: u16, body_head: String },
     /// The response body was not the JSON shape a Messages response has.
     Json(serde_json::Error),
     /// The response parsed, but its `role` was not `"assistant"`.
@@ -119,6 +127,9 @@ impl fmt::Display for WireError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             WireError::Http(err) => write!(f, "request failed: {err}"),
+            WireError::Status { status, body_head } => {
+                write!(f, "http status: {status} — {body_head}")
+            }
             WireError::Json(err) => write!(f, "could not parse response: {err}"),
             WireError::UnexpectedRole(role) => write!(f, "unexpected response role {role:?}"),
         }
@@ -129,10 +140,40 @@ impl std::error::Error for WireError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             WireError::Http(err) => Some(err),
+            WireError::Status { .. } => None,
             WireError::Json(err) => Some(err),
             WireError::UnexpectedRole(_) => None,
         }
     }
+}
+
+/// Renders a provider's response body as an error's `body_head`: the first
+/// [`BODY_HEAD_LIMIT`] bytes, cut on a char boundary, with control
+/// characters escaped so the whole thing prints on one line, `…` appended
+/// when the body was longer, and a fixed placeholder for an empty body.
+fn body_head(body: &str) -> String {
+    if body.is_empty() {
+        return "(empty body)".to_string();
+    }
+    let mut cut = body.len().min(BODY_HEAD_LIMIT);
+    while !body.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let truncated = cut < body.len();
+    let mut head: String = body[..cut]
+        .chars()
+        .flat_map(|c| match c {
+            '\n' => "\\n".chars().collect::<Vec<_>>(),
+            '\r' => "\\r".chars().collect::<Vec<_>>(),
+            '\t' => "\\t".chars().collect::<Vec<_>>(),
+            c if c.is_control() => format!("\\u{{{:x}}}", c as u32).chars().collect::<Vec<_>>(),
+            c => vec![c],
+        })
+        .collect();
+    if truncated {
+        head.push('…');
+    }
+    head
 }
 
 /// The credential pane attaches to a request, and the header it goes in.
@@ -158,11 +199,20 @@ fn credential_header() -> Option<(&'static str, String)> {
 /// and returns the assistant's reply. Blocking, and it does not stream --
 /// see the packet's OBJECTIVE for why a streaming reader is out of scope
 /// here.
+///
+/// `http_status_as_error(false)` turns off `ureq`'s default of folding a
+/// non-2xx status into `Err(ureq::Error::StatusCode)` before the body can be
+/// read at all -- with it on, [`WireError::Status`]'s `body_head` would
+/// always be empty. With it off, `send` only errors on an actual transport
+/// failure, and status is read and handled here instead.
 pub fn send_turn(conversation: &Conversation) -> Result<Message, WireError> {
     let url = format!("{}{MESSAGES_PATH}", base_url());
     let body = request_body(conversation);
 
     let mut request = ureq::post(&url)
+        .config()
+        .http_status_as_error(false)
+        .build()
         .header("content-type", "application/json")
         .header("anthropic-version", ANTHROPIC_VERSION);
     if let Some((name, value)) = credential_header() {
@@ -172,10 +222,17 @@ pub fn send_turn(conversation: &Conversation) -> Result<Message, WireError> {
     let mut response = request
         .send(body.as_slice())
         .map_err(|err| WireError::Http(Box::new(err)))?;
+    let status = response.status().as_u16();
     let text = response
         .body_mut()
         .read_to_string()
         .map_err(|err| WireError::Http(Box::new(err)))?;
+    if !response.status().is_success() {
+        return Err(WireError::Status {
+            status,
+            body_head: body_head(&text),
+        });
+    }
     parse_response(&text)
 }
 
