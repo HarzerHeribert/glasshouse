@@ -2,9 +2,11 @@ use super::*;
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::sync::Mutex;
 use std::sync::mpsc;
-use std::time::Instant;
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+use clap::Parser;
 
 use super::fixture::FixtureUpstream;
 use crate::integrations::IntegrationId;
@@ -1022,4 +1024,191 @@ fn no_part_of_the_relay_deserializes_anything() {
     // than passing because the needle was misspelled.
     let violating = production_code("use serde_json::Value;\nfn peek() {}");
     assert!(FORBIDDEN.iter().any(|needle| violating.contains(needle)));
+}
+
+// --- GH-GATEWAY-PURPOSE-HEADER ----------------------------------------------
+
+/// [`conformance::evidence_ledger_fixture`]'s pattern, duplicated here rather
+/// than shared: that helper is private to `conformance.rs`, and this
+/// packet's `FORBIDDEN FILES` leaves that module untouched.
+fn purpose_header_evidence_ledger_fixture(
+    base: &std::path::Path,
+) -> Arc<crate::routing::evidence::EvidenceLedger> {
+    let root = base.join("workspace").join("proj");
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    let root = std::fs::canonicalize(&root).unwrap();
+    let cli = crate::Cli::try_parse_from([
+        "glasshouse",
+        "--data-dir",
+        base.join("data").to_str().unwrap(),
+        "--config-dir",
+        base.join("config").to_str().unwrap(),
+    ])
+    .unwrap();
+    let runtime = crate::bootstrap(&cli, &root).unwrap();
+    Arc::new(crate::routing::evidence::EvidenceLedger::open(&runtime).unwrap())
+}
+
+/// A gateway bound to a real, freshly bootstrapped [`crate::routing::evidence::EvidenceLedger`]
+/// and a fixture upstream — [`gateway_to`] plus the ledger wiring
+/// `Gateway::start_with_telemetry` takes.
+fn gateway_to_with_evidence_ledger(
+    fixture: &FixtureUpstream,
+    ledger: Arc<crate::routing::evidence::EvidenceLedger>,
+) -> Gateway {
+    Gateway::start_with_telemetry(
+        anthropic_upstream_to(&fixture.base_url()),
+        None,
+        Some(ledger),
+        None,
+    )
+    .expect("loopback is bindable")
+}
+
+/// [`messages_request`], with one extra header line before the empty line
+/// that ends the head.
+fn messages_request_with_header(token: &str, body: &str, header_line: &str) -> Vec<u8> {
+    format!(
+        "POST /v1/messages?beta=true HTTP/1.1\r\n\
+         Host: 127.0.0.1\r\n\
+         Authorization: Bearer {token}\r\n\
+         Content-Type: application/json\r\n\
+         Anthropic-Version: 2023-06-01\r\n\
+         {header_line}\r\n\
+         Content-Length: {}\r\n\
+         \r\n\
+         {body}",
+        body.len()
+    )
+    .into_bytes()
+}
+
+/// A bound, real, end-to-end exchange's newest routing-evidence row, polled
+/// the way `conformance::a_real_forwarded_exchange_reaches_the_routing_evidence_ledger`
+/// does: the write lands on the connection thread after the response is
+/// already on the wire.
+fn newest_purpose_row(
+    ledger: &crate::routing::evidence::EvidenceLedger,
+) -> crate::routing::evidence::RoutingObservation {
+    let query = crate::routing::evidence::ObservationQuery {
+        provider: "fixture",
+        model: "fixture-model",
+        route: Some("anthropic-messages"),
+        harness: Some("fixture-harness"),
+    };
+    let mut attempts = 0;
+    loop {
+        let rows = ledger.recent(query, 10).unwrap();
+        if let Some(row) = rows.into_iter().next() {
+            return row;
+        }
+        attempts += 1;
+        assert!(
+            attempts < 200,
+            "no routing observation was recorded within 2s of a completed, bound exchange"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+/// A bound gateway wired to `ledger`, so a purpose-header test only has to
+/// send the request and read the newest row back.
+fn bound_gateway_with_evidence_ledger(
+    fixture: &FixtureUpstream,
+    ledger: Arc<crate::routing::evidence::EvidenceLedger>,
+) -> Gateway {
+    use crate::routing::AssignedModel;
+
+    let gateway = gateway_to_with_evidence_ledger(fixture, ledger);
+    gateway.routing().bind(
+        "fixture-harness",
+        "anthropic-messages",
+        AssignedModel::named("fixture-model"),
+        gateway.upstream(),
+    );
+    gateway
+}
+
+/// A `supervisor` purpose header stamps the ledger row and never reaches the
+/// upstream — `ask-primary-supervisor-purpose-header.md`, ruled yes.
+#[test]
+fn a_supervisor_purpose_header_stamps_the_row_and_never_reaches_the_upstream() {
+    use crate::routing::evidence::SUPERVISOR_PURPOSE;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let ledger = purpose_header_evidence_ledger_fixture(tmp.path());
+    let fixture = FixtureUpstream::answering("HTTP/1.1 200 OK", "", "{\"ok\":true}");
+    let gateway = bound_gateway_with_evidence_ledger(&fixture, Arc::clone(&ledger));
+
+    let response = read_all(send(
+        gateway.address(),
+        &messages_request_with_header(
+            gateway.token().expose(),
+            "{}",
+            "X-Glasshouse-Purpose: supervisor",
+        ),
+    ));
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+
+    let request = fixture.only_request();
+    assert_eq!(
+        request.header("x-glasshouse-purpose"),
+        None,
+        "the purpose header must never reach the upstream"
+    );
+
+    let row = newest_purpose_row(&ledger);
+    assert_eq!(row.purpose.as_deref(), Some(SUPERVISOR_PURPOSE));
+}
+
+/// An unknown purpose value is stripped like a known one, and the row stays
+/// `harness-turn`.
+#[test]
+fn an_unknown_purpose_header_is_stripped_and_the_row_stays_harness_turn() {
+    use crate::routing::evidence::HARNESS_TURN_PURPOSE;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let ledger = purpose_header_evidence_ledger_fixture(tmp.path());
+    let fixture = FixtureUpstream::answering("HTTP/1.1 200 OK", "", "{\"ok\":true}");
+    let gateway = bound_gateway_with_evidence_ledger(&fixture, Arc::clone(&ledger));
+
+    let response = read_all(send(
+        gateway.address(),
+        &messages_request_with_header(
+            gateway.token().expose(),
+            "{}",
+            "X-Glasshouse-Purpose: not-a-purpose",
+        ),
+    ));
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+
+    let request = fixture.only_request();
+    assert_eq!(
+        request.header("x-glasshouse-purpose"),
+        None,
+        "an unrecognised purpose header must still never reach the upstream"
+    );
+
+    let row = newest_purpose_row(&ledger);
+    assert_eq!(row.purpose.as_deref(), Some(HARNESS_TURN_PURPOSE));
+}
+
+/// No header at all is recorded exactly as before this package.
+#[test]
+fn a_request_without_a_purpose_header_is_recorded_as_a_harness_turn() {
+    use crate::routing::evidence::HARNESS_TURN_PURPOSE;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let ledger = purpose_header_evidence_ledger_fixture(tmp.path());
+    let fixture = FixtureUpstream::answering("HTTP/1.1 200 OK", "", "{\"ok\":true}");
+    let gateway = bound_gateway_with_evidence_ledger(&fixture, Arc::clone(&ledger));
+
+    let response = read_all(send(
+        gateway.address(),
+        &messages_request(gateway.token().expose(), "{}"),
+    ));
+    assert!(response.starts_with("HTTP/1.1 200 OK"), "{response}");
+
+    let row = newest_purpose_row(&ledger);
+    assert_eq!(row.purpose.as_deref(), Some(HARNESS_TURN_PURPOSE));
 }

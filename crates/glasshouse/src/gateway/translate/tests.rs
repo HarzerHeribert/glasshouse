@@ -613,6 +613,7 @@ fn test_finish(
             status,
             provider: String::new(),
             protocol: None,
+            purpose: None,
             host: String::new(),
             first_byte_at: None,
             first_token_at: first.first_token_at,

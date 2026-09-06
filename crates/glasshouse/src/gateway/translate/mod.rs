@@ -1540,6 +1540,10 @@ fn exchange(
         status,
         provider: upstream.provider().to_owned(),
         protocol: Some(pair.slug()),
+        // The translated path never reads `ingress::PURPOSE_HEADER` — only
+        // `ingress::forward`'s relay loop does — so a translated exchange
+        // never carries a client-named purpose.
+        purpose: None,
         host: route.host(),
         first_byte_at: None,
         // Line 1331/1332's pair: `None` for the same reason as `first_byte_at`

@@ -55,6 +55,7 @@ fn unreachable_exchange(provider: &str) -> Exchange {
         status: 502,
         provider: provider.to_owned(),
         protocol: Some("anthropic-messages".to_owned()),
+        purpose: None,
         host: String::new(),
         // No response ever arrived — this outcome exists precisely
         // because the provider could not be reached at all.
@@ -119,6 +120,7 @@ fn forwarded_exchange(
         status,
         provider: provider.to_owned(),
         protocol: Some("anthropic-messages".to_owned()),
+        purpose: None,
         host: String::new(),
         first_byte_at: Some(1_700_000_000),
         first_token_at: None,

@@ -490,7 +490,9 @@ impl SessionRouting {
         )
         .with_route(exchange.protocol.clone())
         .with_harness(Some(assignment.harness().to_owned()))
-        .with_purpose(Some(HARNESS_TURN_PURPOSE))
+        .with_purpose(Some(
+            exchange.purpose.as_deref().unwrap_or(HARNESS_TURN_PURPOSE),
+        ))
         .with_quota_context(Some(assignment.backend().credential().label()))
         .with_timing(
             Some(reading.dispatched_at_unix),

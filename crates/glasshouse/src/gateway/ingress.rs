@@ -40,6 +40,12 @@ use super::usage;
 /// is recorded.
 const BEARER_PREFIX: &str = "Bearer ";
 
+/// A client's request header naming which fixed purpose this exchange's
+/// ledger row should carry, instead of [`crate::routing::evidence::HARNESS_TURN_PURPOSE`].
+/// Never forwarded upstream, whatever its value —
+/// `ask-primary-supervisor-purpose-header.md`, ruled yes.
+const PURPOSE_HEADER: &str = "x-glasshouse-purpose";
+
 /// How long the gateway waits for a request head before hanging up.
 ///
 /// A connection that has been opened but has sent nothing holds a thread.
@@ -85,6 +91,12 @@ pub(super) struct Exchange {
     /// The slug of the protocol the request target was placed in, or `None`
     /// when it was refused before it could be placed. A name.
     pub(super) protocol: Option<String>,
+    /// A name from [`crate::routing::evidence::CLIENT_NAMEABLE_PURPOSES`],
+    /// read off the stripped [`PURPOSE_HEADER`] when its value is in that
+    /// list; `None` otherwise — no header, an unknown value, or a request
+    /// never reaching [`forward`]'s header loop. Never client text: this
+    /// field is a name from a fixed list or nothing.
+    pub(super) purpose: Option<String>,
     /// The upstream host **of the route that carried it**. A host: never a
     /// path, never a query. Empty when no route was chosen, because there is
     /// then no host this request was ever going to reach — and naming one
@@ -536,8 +548,21 @@ fn forward(
         );
     };
 
+    // `Some` only when the header named a purpose from the fixed list — see
+    // `Exchange::purpose`. The header itself is never forwarded, whatever
+    // its value: the `continue` below drops it before the `is_hop_by_hop`
+    // check even runs.
+    let mut purpose: Option<String> = None;
     let mut request = Request::builder().method(head.method.clone()).uri(uri);
     for (name, value) in head.headers.iter() {
+        if name.as_str().eq_ignore_ascii_case(PURPOSE_HEADER) {
+            if let Ok(value) = value.to_str()
+                && crate::routing::evidence::CLIENT_NAMEABLE_PURPOSES.contains(&value)
+            {
+                purpose = Some(value.to_owned());
+            }
+            continue;
+        }
         if http::is_hop_by_hop(name) || name == header::HOST || name == header::AUTHORIZATION {
             continue;
         }
@@ -569,7 +594,10 @@ fn forward(
         // the drain goes through `out` — see `settle_queued`.
         settle_queued(out);
         return (
-            exchange(Outcome::Declined, 400, upstream, Some(route)),
+            Exchange {
+                purpose: purpose.clone(),
+                ..exchange(Outcome::Declined, 400, upstream, Some(route))
+            },
             no_quota(),
         );
     };
@@ -602,7 +630,10 @@ fn forward(
             // `settle_queued`.
             settle_queued(out);
             return (
-                exchange(Outcome::Unreachable { detail }, 502, upstream, Some(route)),
+                Exchange {
+                    purpose: purpose.clone(),
+                    ..exchange(Outcome::Unreachable { detail }, 502, upstream, Some(route))
+                },
                 no_quota(),
             );
         }
@@ -698,6 +729,7 @@ fn forward(
                 first_byte_ms,
                 completed_ms: Some(millis_since(dispatch)),
                 framing: Some(framing),
+                purpose: purpose.clone(),
                 ..exchange(Outcome::ClientGone, status.as_u16(), upstream, Some(route))
             },
             quota,
@@ -768,6 +800,7 @@ fn forward(
                         first_byte_ms,
                         completed_ms: Some(millis_since(dispatch)),
                         framing: Some(framing),
+                        purpose: purpose.clone(),
                         ..exchange(Outcome::ClientGone, status.as_u16(), upstream, Some(route))
                     },
                     quota,
@@ -822,6 +855,7 @@ fn forward(
             first_tool_call_at: first_tool_call.map(|(at, _)| at),
             first_tool_call_ms: first_tool_call.map(|(_, ms)| ms),
             tokens,
+            purpose,
             ..exchange(
                 Outcome::Forwarded {
                     upstream_status: status.as_u16(),
@@ -1136,6 +1170,11 @@ fn exchange(outcome: Outcome, status: u16, upstream: &Upstream, route: Option<&R
         status,
         provider: upstream.provider().to_owned(),
         protocol: route.map(|route| route.protocol().to_owned()),
+        // Every caller of this helper is a refusal path that returns before
+        // `forward`'s header loop can have read `PURPOSE_HEADER` — the loop
+        // is the only producer, and `forward`'s own returns override this
+        // via struct-update syntax once it has run.
+        purpose: None,
         host: route.map(Route::host).unwrap_or_default(),
         // Every caller of this helper returns before a response ever
         // arrived; [`forward`]'s own three post-response returns override
@@ -1332,6 +1371,7 @@ mod tests {
                 status: 429,
                 provider: "openrouter".to_owned(),
                 protocol: Some("anthropic-messages".to_owned()),
+                purpose: None,
                 host: "openrouter.ai".to_owned(),
                 first_byte_at: Some(1_700_000_000),
                 first_token_at: Some(1_700_000_001),
