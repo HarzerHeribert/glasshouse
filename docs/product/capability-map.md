@@ -2535,3 +2535,19 @@ by the same instruction, worked in parallel.
 ☐ Complete slash commands as they are typed, listing the matches and naming what each one does.
 ☐ Carry a status line stating at least the active model, the project, the sandbox posture and whether Glasshouse is connected.
 ☐ Draw every region inside its own bounds at any terminal width, never clipping, overlapping or interleaving output.
+
+Phase 64 — pane: subagents
+
+Recorded from the user's decision of 2026-09-06: *"Subagents should be a thing of
+pane."* Ruled under the boundary of the same day (`design-decisions.md`, *Where
+the line falls between pane and Glasshouse*): a subagent is spawned by one
+session and returns into it, which is inside-a-session work, where Glasshouse's
+delegation is between peer sessions visible in the session list. The two are
+different mechanisms with different visibility contracts and neither replaces the
+other. Sized and ordered after Phase 63; not a release blocker.
+
+☐ Let a cell start a subagent with its own task and its own turn budget, and receive its result as a handle rather than as text.
+☐ Run a subagent under the parent session's own compiled profile, so it can reach nothing the parent could not.
+☐ Charge a subagent's turns to the parent task's budget, and refuse to start one that the remaining budget cannot pay for.
+☐ Show a running subagent in the session's own display and let the person stop it, so no work runs that nothing on screen accounts for.
+☐ Do not give a subagent its own inbox, its own row in Glasshouse's session list, or the ability to start a subagent of its own.

@@ -19996,3 +19996,83 @@ Also asked and answered the same night: the seven Phase 52/53 gates are standing
 ## Fourteen parked lines promoted — the user, 2026-09-06 02:35
 
 The census (`GH-REFUSED-LINES-CENSUS`, Table 2) ranked the fifteen parked Maybe lines most worth pulling into the committed map, by product value for someone running several harness sessions on real projects; the orchestrator put them to the user as yes/no with a recommendation each, and the user answered *"yes i agree with your 15 points"* — fourteen promoted, the fifteenth (read-intent, parked 2081) parked until queueing exists. They are **Phase 62** (map lines 2493–2518, appended so no id shifts), in five sub-phases: 62A queue/override/re-plan (from Maybe A/D/E/H), 62B convergent co-editing (Maybe L — the co-edit protocol this project already runs by hand), 62C session drift advisory (Maybe K), 62D in-turn diagnostics through `PostToolUse` (Maybe J), 62E prediction inputs, read visibility and the measurement gate (Maybe C/G/I). **Order:** after 61E-WIRE and the ruler's two-column run; the user's words — *"decide that before you have to build them"*. **Why:** each is the next step the map always intended past Phase 60's narrow detection, and this project is its own first user of every one.
+
+## Where the line falls between pane and Glasshouse — the user, 2026-09-06
+
+Asked whether Glasshouse is "just trying to shape Claude Code and Codex into
+what pane is," and whether the concepts it delivers through hooks should be
+native in pane instead. The answer separated three things, and the user affirmed
+the separation.
+
+**The rule.** *Anything that happens inside one turn or one session belongs to
+pane. Anything that spans sessions, projects, providers or machines belongs to
+Glasshouse.* pane is one session and can never own the second list; Glasshouse
+does not own a turn and should not reach into one.
+
+**Three buckets, and only the first is what the question suspected.**
+
+1. **Glasshouse as adapter.** The context firewall, hook-delivered diagnostics,
+   hook-extracted memory, the generated shim, PTY-driving a foreign binary,
+   per-harness event normalization. These exist *only because Claude Code and
+   Codex cannot be changed* — the hook protocol's own sentence is that a hook is
+   a gate, not a proxy, and every concept has been bent to fit that door. This
+   bucket is real, it is valuable, it never goes away, and **none of it should
+   ever be pointed at pane.**
+2. **Glasshouse as the thing between.** Routing across providers and
+   entitlements, credentials across projects, parallel-session file coordination
+   (Phases 60 and 62), the event bus, cross-session memory, the ruler comparing
+   harnesses. Not adapter work — definitionally plural. This does not shrink as
+   pane grows.
+3. **Inside one session.** Context management, the plan, assumptions,
+   diagnostics on the model's own code, the sandbox, the supervisor,
+   **subagents**. pane owns these outright because it has the authority to;
+   Glasshouse keeps its hook-shaped version for the foreign harnesses only.
+
+**Subagents are pane's, ruled explicitly** (the user, same conversation): a
+subagent is spawned by one session and returns into it, which is inside-a-session
+work. Glasshouse's delegation is between *peer* sessions a person can see in the
+session list, which is a different mechanism with a different visibility
+contract. Recorded as Phase 64.
+
+**The consequence that needs a test.** Glasshouse's firewall must never be
+pointed at pane — pane's results never become text, so reducing them is
+double-handling something that is already a handle. Today this holds by
+accident: pane emits hook events fire-and-forget and never reads the response,
+so the substitution half cannot reach it while the observation half still feeds
+memory extraction and the bus. That is the right relationship and it should be
+asserted rather than left as an implementation detail.
+
+**Phase 62 carries hook vocabulary that does not apply to pane.** 62C's "quiet
+session marker" and 62D's "allow PostToolUse diagnostics to be returned as
+concise model-visible feedback" are phrased that way because a hook is the only
+way to put text in front of Claude Code mid-turn. For pane both are native
+features — 62C is already half-built as the supervisor — and implementing them
+as hook consumers there would build each twice in two shapes.
+
+## The adoption ladder, and the reframing it asked for — the user, 2026-09-06
+
+The user's concern: *"I am scared that using full Glasshouse has big overhead
+like it requiring a user to start with using orchestrators and multiple sessions
+instead of just being an intelligent adapter."*
+
+**The concern was about presentation, not architecture.** Nothing in the
+single-session path touches orchestration: the router, gateway, memory,
+checkpoints and firewall all work for exactly one session, and claims,
+delegation and Phase 60/62 coordination only mean anything once a second session
+exists. The gateway already starts on demand — `gateway::start_if_required` runs
+when a launch profile needs one — which was the user's own intent and is easy to
+miss.
+
+What actually imposed the cost was the README opening on the five-agents problem
+and `--help` listing twenty-eight subcommands, so a reader decides what the
+product is for before reaching anything that helps one session.
+
+**The ladder, which already worked and was never presented as one:** `pane
+session --root .` with a key → point `ANTHROPIC_BASE_URL` at the gateway for
+routing, memory and cost → `glasshouse launch` and, only if wanted, a second
+session. Each rung useful alone, each opt-in, and **most people should stop at
+the second.**
+
+Acted on in the README the same day: it now opens on the two products and the
+ladder, states the boundary rule above, and moves the fleet story to its own
+section after both. The `--help` split is not done.

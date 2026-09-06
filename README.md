@@ -1,50 +1,130 @@
 # Glasshouse
 
-**Coding agents are excellent, and every one of them is a silo.**
+**Two things that belong together, and either one works alone.**
 
-Claude Code, Codex, Antigravity, OpenCode — each owns its own sessions, its own
-memory, its own credentials, its own idea of what the project is. Run two of
-them, or two sessions of one, and nothing above them knows what is already warm,
-which subscription is paying for the current turn, what one session learned an
-hour ago that the next will re-derive from scratch, or that two of them are
-about to edit the same file.
+- **`pane`** is a coding harness. You give it a task in a project and it works
+  the task in turns. It needs an API key and nothing else — no Glasshouse, no
+  daemon, no configuration.
+- **`glasshouse`** is a control plane for coding harnesses — `pane`, Claude
+  Code, Codex, whatever you already have installed. It starts them as real
+  sessions you can see and type into, routes their requests across your
+  subscriptions and keys, and remembers what the project learned.
 
-Glasshouse is the layer that knows. It is a lean, project-scoped control plane
-for the harnesses you already have installed. It starts them as **real native
-harness sessions** over a PTY, keeps every one of them directly observable and
-typeable into, routes work between sessions and model resources on measured
-evidence, records what the project learned, and lets an orchestrator session
-delegate work to other first-class sessions.
+You do not have to adopt both. Most of the value arrives before you do.
+
+## Start where you like
+
+Three steps. Each one is useful on its own, and **most people should stop at the
+second.**
+
+**1 — Just the harness.** An API key in the environment, and go:
+
+```sh
+pane session --root .
+```
+
+That is a complete coding agent. Nothing above it, nothing beside it.
+
+**2 — Add routing, memory and cost.** Point the same binary at Glasshouse:
+
+```sh
+glasshouse launch --harness pane
+```
+
+Same harness, same behaviour, one extra network hop. Now your requests are
+routed across every subscription and key you have configured, the project's
+memory is injected and extracted, and you can see what each turn cost and which
+account paid. Still one session. No orchestrator, nothing to coordinate.
+
+**3 — Run several at once.** Only if you want it. Sessions become a list, one
+can delegate to another, and Glasshouse tells you when two of them are heading
+for the same file. This is the part that takes a change in how you work, and it
+is the part you can ignore indefinitely.
+
+## What makes `pane` different
+
+Every shipping harness turns a tool result into text in the conversation. A grep
+over a large repository is paid for when it arrives, and paid for again on every
+turn that carries it afterwards.
+
+> A tool result never becomes text in the conversation.
+
+It becomes a **named object in a runtime the model addresses from code**. The
+model gets a bounded preview and a handle; the object stays where it is, and the
+model acts by writing a TypeScript program that calls tools by name on those
+objects. Measured, in a test that runs on every commit: **275,020 bytes of grep
+output cost 205 tokens**, and the handle is still filterable in the next cell.
+
+Two consequences fall out of that one decision:
+
+- **There is no edit tool, and there will not be one.** The model already holds
+  the file as an object, so an edit is `text.replace(a, b)` in the cell followed
+  by one `write`. A second tool with its own matching rules would be a worse
+  version of the language.
+- **Running out of context is survivable.** When the conversation stops fitting,
+  the redundant parts are dropped first — losslessly, because every handle table
+  is re-rendered whole each turn — and if that is not enough the conversation is
+  replaced by a checkpoint **while the isolate keeps running**. A grep from turn
+  three is still addressable afterwards. A harness whose results *are* its
+  transcript cannot do that.
+
+`pane` runs model-authored code, so it does it under an OS sandbox — seatbelt,
+Landlock, Windows job objects — whose grants come from the `.claude/settings.json`
+your project already has. No model-authored code ran before that sandbox existed,
+and that ordering was not negotiable.
+
+## What Glasshouse adds
+
+Nothing in this list requires a second session.
+
+- **Routes on evidence, and can explain it.** The router picks a destination
+  from what it has measured — latency, reliability, prompt-cache temperature,
+  remaining capacity and burn rate across several subscriptions and providers at
+  once — and records the reasoning behind every choice.
+- **Remembers the project.** Durable memory with authority classes, decision
+  provenance and age decay, extracted from real sessions and injected into new
+  ones as memory rather than as instruction.
+- **Keeps context from filling up in the harnesses that need it.** A context
+  firewall sits between the harness and the model and compacts tool output
+  before it crosses. `pane` does not need it — its results never cross — which
+  is exactly why the firewall stays: every other harness does.
+- **Runs the real thing.** Every interactive session is backed by a real
+  installed harness, launched through an isolated profile and driven over a PTY.
+  Nothing is emulated, and nothing is wrapped in a loop you cannot see.
+- **One project, hard boundaries.** Memory, sessions, logs and runtime state are
+  scoped to a single project root, and cross-project access is disabled
+  structurally rather than by convention.
+- **One executable.** `glasshouse` is a single binary. No daemon, no background
+  service, no Node, no Python. The local gateway starts itself when a launch
+  needs one and stops with it.
+
+## When you run more than one
+
+Coding agents are excellent, and every one of them is a silo. Claude Code,
+Codex, Antigravity, OpenCode — each owns its own sessions, its own memory, its
+own credentials, its own idea of what the project is. Run two of them, or two
+sessions of one, and nothing above them knows what is already warm, which
+subscription is paying for the current turn, what one session learned an hour
+ago that the next will re-derive from scratch, or that two of them are about to
+edit the same file.
+
+Glasshouse is the layer that knows. It lets an orchestrator session delegate
+work to other first-class sessions, and it coordinates them: soft,
+project-scoped, turn-scoped file claims and structured edit intent, so that when
+two sessions are heading for the same file Glasshouse says so and the
+orchestrator re-plans only the conflicting part.
 
 It does not replace those products, and it does not hide them behind a
 proprietary agent loop.
 
 > Glasshouse orchestrates agents without hiding them.
 
-## What it does today
-
-- **Runs the real thing.** Every interactive session is backed by a real
-  installed harness, launched through an isolated profile and driven over a
-  PTY. Nothing is emulated, and nothing is wrapped in a loop you cannot see.
-- **One project, hard boundaries.** Memory, sessions, logs and runtime state are
-  scoped to a single project root, and cross-project access is disabled
-  structurally rather than by convention.
-- **Routes on evidence, and can explain it.** The router picks a destination
-  from what it has measured — latency, reliability, prompt-cache temperature,
-  remaining capacity and burn rate across several subscriptions and providers
-  at once — and every choice it makes is recorded with the reasoning behind it.
-- **Remembers the project.** Durable memory with authority classes, decision
-  provenance and age decay, extracted from real sessions and injected into new
-  ones as memory rather than as instruction.
-- **Keeps context from filling up.** A context firewall sits between the harness
-  and the model and compacts tool output before it crosses.
-- **Coordinates parallel sessions.** Soft, project-scoped, turn-scoped file
-  claims and structured edit intent, so that when two sessions are heading for
-  the same file Glasshouse says so and the orchestrator re-plans only the
-  conflicting part — the newest of these, and the one the table below still
-  shows in progress.
-- **One executable.** `glasshouse` is a single binary. No daemon, no background
-  service, no Node, no Python.
+**Where the line falls between the two.** Anything that happens inside one turn
+or one session belongs to `pane` — its plan, its handles, its sandbox, its
+supervisor, its subagents. Anything that spans sessions, projects, providers or
+machines belongs to Glasshouse — routing, entitlements, cross-session memory,
+delegation, file coordination. `pane` is one session and can never own the
+second list; Glasshouse does not own a turn and should not reach into one.
 
 ## Status
 
@@ -54,12 +134,12 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`█████████████████████████████████████░░░` **1348 closed** · **77 active committed open** (94%)
+`█████████████████████████████████████░░░` **1348 closed** · **82 active committed open** (94%)
 
 Separately tracked, and not release-blocking: **0 deferred gate criteria** (Phase 52, Phase 53) awaiting a decision, and **229 parked experimental lines** under Maybe / Experimental.
 
 <details>
-<summary>Per-phase breakdown (95 of 111 active phases complete)</summary>
+<summary>Per-phase breakdown (95 of 112 active phases complete)</summary>
 
 | Phase | Done |
 |---|---|
@@ -176,93 +256,51 @@ Separately tracked, and not release-blocking: **0 deferred gate criteria** (Phas
 | Phase 61 — pane: the first-party harness | 20/35 |
 | Phase 62 — Parallel-session coordination, second slice: queueing, co-editing, drift, in-turn diagnostics | 0/14 |
 | Phase 63 — pane's terminal interface | 0/5 |
+| Phase 64 — pane: subagents | 0/5 |
 | Phase 52 — Criteria before adding semantic/vector retrieval (deferred experiment gate) | 6/6 — deferred gate |
 | Phase 53 — Criteria before adding graph storage (deferred experiment gate) | 5/5 — deferred gate |
 
 </details>
 <!-- progress:end -->
 
-## pane — the first-party harness
-
-Every shipping harness turns a tool result into text in the conversation. The
-context firewall reduces what crosses; it does not change the shape of the
-problem. A grep over a large repository is paid for when it arrives, and paid
-for again on every turn that carries it afterwards.
-
-`pane` is a harness built on one decision made differently.
-
-> A tool result never becomes text in the conversation.
-
-It becomes a **named object in a runtime the model addresses from code**. The
-model receives a bounded preview and the handle; the object stays where it is,
-and the model acts by returning a program that calls tools by name on those
-objects. Everything else about the harness may be ordinary — that one decision
-is the harness.
+## Where `pane` stands
 
 `pane` is a second crate with its own binary, joined to Glasshouse by protocol
 rather than by linkage. Neither side depends on the other at compile time.
-Glasshouse reaches `pane` exactly as it reaches Claude Code: a declared
-executable, declared arguments, a PTY. `pane` reaches Glasshouse the way any
-harness does — a gateway base URL, an MCP endpoint, a hook command — each one
-optional. Standalone is simply the mode where nobody answers on the socket:
-every Glasshouse-provided capability degrades to a local one, never to an error.
+Glasshouse reaches it exactly as it reaches Claude Code — a declared executable,
+declared arguments, a PTY. `pane` reaches Glasshouse the way any harness does: a
+gateway base URL, an MCP endpoint, a hook command, each one optional. Standalone
+is simply the mode where nobody answers on the socket.
 
-What it is being built to be:
+It runs. It reads your `CLAUDE.md`, `AGENTS.md`, `.claude/settings.json` hooks
+and permissions, `.claude/commands` and skills with nothing edited. It works a
+real task to a real result, keeps a plan it writes itself, runs background jobs
+and monitors whose completions arrive as one batched event rather than one turn
+each, resumes from a rollout file, and is watched by a cheaper model that catches
+a planted three-turn loop within two turns.
 
-- **Drop-in.** It reads `CLAUDE.md`, `AGENTS.md`, the hooks and permissions in
-  `.claude/settings.json`, `.claude/commands`, the skills directories and
-  `.mcp.json` from the project, with nothing edited.
-- **Sandboxed before it is useful.** The project's existing permissions file
-  becomes the sandbox grant, and no model-authored code runs until the sandbox
-  exists. That ordering is fixed: the alternative is a window in which generated
-  code runs beside your keyring with nothing in between.
-- **Honest about what paid.** A two-region interface — conversation on one side,
-  telemetry on the other — showing which entitlement served each request and
-  what it cost. When Glasshouse is absent, the sidebar collapses instead of
-  guessing.
-- **Watched.** A supervisor reads a compressed trajectory every few turns with a
-  cheaper model and makes exactly one decision: intervene or not. Its target is
-  a planted three-turn loop caught within two turns, with no human in the room.
+**What is not built, stated plainly:**
 
-`pane` is not "a better harness", and it is not trying to be. It arrives as one
-row in the capability registry — a destination with an unusual cost profile that
-the router picks when the workload suits it and ignores when it does not. Two
-destinations that behave identically teach a router nothing; two that fail
-differently are evidence.
+- **The comparison that would justify the whole thing.** The ruler scores per
+  workload tier and refuses to measure tokens per turn, but the two-column run
+  against Claude Code on a fixed task set has not happened. Every performance
+  claim here except the 205-token one is therefore architecture, not evidence.
+- **MCP tools are read, not callable.** `.mcp.json` is parsed and its permission
+  patterns compile into the sandbox profile; no server is connected yet.
+- **Subagents.** Planned, and `pane`'s rather than Glasshouse's: a subagent is
+  spawned by one session and returns into it, which is inside-a-session work.
+  Glasshouse's delegation is between peer sessions you can see, which is a
+  different thing.
+- **Standing handlers and a session inbox.** The batch machinery they would ride
+  is built; these two are not.
+- **The terminal interface.** Turn blocks, a persistent input area, slash-command
+  completion and a status line are being built now.
 
-## What pane is built to achieve
-
-These are aims, in the future tense, each with the measurement that would settle
-it named beside it.
-
-- **Tokens per turn that stay roughly flat as a task grows.** A preview does not
-  grow with the object behind it, so the conversation should stop inflating with
-  the work. Settled by tokens per *completed task*, per workload tier.
-- **A 48k-token tool result that costs a preview line to know about and nothing
-  to compute over.** Settled the same way, on a workload where a large result is
-  produced early and used repeatedly.
-- **The success criterion, and it is deliberately narrow:** *on at least one
-  workload tier, measured over completed tasks rather than turns, native beats
-  the adapter path on tokens or wall-clock without losing on outcome.* One tier
-  is enough. A head-on comparison against harnesses better resourced and better
-  tuned against their own models is a bet lost slowly, and it is not the bet
-  being made here.
-
-## There are no measurements yet
-
-Not one. `pane` does not run today; the crate is being stood up now. The first
-piece of work in its phase is not the runtime and not the sandbox — it is the
-ruler: one fixed task set through an existing harness and through the candidate,
-reporting tokens per completed task, wall-clock and outcome side by side, scored
-per workload tier so that a win on one tier is visible when the aggregate is
-not. That comes first precisely because the interesting claim is the kind that
-feels true and often isn't, and because a comparison that measures tokens per
-turn instead of tokens per completed task is not allowed to count. Recording
-that a tier showed no win is a complete outcome of that work, not a failure of
-it.
-
-The table above is what exists, phase by phase, with the evidence behind each
-closed line in `docs/product/evidence/`. Everything under *pane* is an aim.
+The success criterion is deliberately narrow: *on at least one workload tier,
+measured over completed tasks rather than turns, `pane` beats the adapter path on
+tokens or wall-clock without losing on outcome.* One tier is enough. A head-on
+comparison against harnesses better resourced and better tuned against their own
+models is a bet lost slowly, and it is not the bet being made.
 
 ## Agent development process
 
@@ -305,8 +343,19 @@ cargo check --workspace --all-targets --target x86_64-pc-windows-msvc
 
 ## Usage
 
+The harness, on its own — an API key in the environment is the only requirement:
+
+```sh
+pane session --root .              # work tasks from stdin in this project
+pane session --root . --task "…"   # one scripted task, non-interactive
+pane session --root . --yolo       # grant the project root and every command
+```
+
+The control plane, when you want routing, memory and cost:
+
 ```sh
 glasshouse                    # operate on the current project
+glasshouse launch             # start a harness session, gateway and all
 glasshouse --scope <path>     # select a project root explicitly
 glasshouse --help
 ```
