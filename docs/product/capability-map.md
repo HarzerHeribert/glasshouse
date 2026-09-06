@@ -2483,3 +2483,36 @@ record: the session artifact *The Glasshouse Native Harness*.
 61E — Code over live objects, amended 2026-09-06 (direct verified completion — the user's decision to implement it directly; `runtime-contract.md` §9)
 
 ☐ End a task from within the program: a top-level `return` renders and persists the terminal response and sends no further request, and no execution that threw, was refused, was cancelled or whose guard was unmet becomes one.
+
+Phase 62 — Parallel-session coordination, second slice: queueing, co-editing, drift, in-turn diagnostics
+
+Recorded 2026-09-06 from the user's yes on fourteen of the fifteen parked lines the census ranked (`design-decisions.md`, *Fourteen parked lines promoted — the user, 2026-09-06*); each line's text is the parked line's own, and the parked original stays where it is. Packaged after 61E-WIRE and the ruler's two-column run, in this order.
+
+62A — Queue, override and re-plan around a claimed file
+
+☐ Consider allowing Glasshouse to queue a worker turn when it would edit a file actively claimed by another session.
+☐ Wake a queued worker automatically when the conflicting claim is released.
+☐ Allow the user to override a conflict warning and let both sessions continue.
+☐ Allow the user to assign reconciliation to a new worker session.
+☐ Allow the orchestrator to instruct one worker to work on tests, documentation, or analysis while another owns the conflicting implementation file.
+
+62B — Convergent co-editing of one contended file
+
+☐ Consider letting two sessions work on the same file concurrently in isolated buffers, rather than serializing them behind a claim, when both genuinely need it.
+☐ Escalate to the orchestrator or the user, with both versions visible, when reconciliation cannot preserve both intents.
+
+62C — Session drift and rework, advisory first
+
+☐ Experiment with detecting when an active agent session appears to be compounding an invalid premise, drifting from the requested task, or repeatedly repairing its own avoidable changes.
+☐ Start with a quiet session marker and concise evidence summary rather than interrupting the agent immediately.
+
+62D — In-turn repository diagnostics
+
+☐ Use deterministic repository diagnostics to catch newly introduced mechanical errors before they survive until a CI run.
+☐ Allow PostToolUse diagnostics to be returned as concise model-visible feedback so the same agent can repair newly introduced problems.
+
+62E — Prediction, read visibility and the measurement gate
+
+☐ Allow the router to use task plans, touched-file history, Git diffs, and current claims as conflict-prediction inputs.
+☐ Prefer allowing reads of the last committed or current filesystem state with an explicit stale-or-changing warning before implementing hard read blocking.
+☐ Measure how often parallel sessions actually produce overlapping file edits before enabling automatic file coordination by default.
