@@ -21,7 +21,7 @@
 
 use std::ffi::c_void;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Condvar, Mutex, Once, PoisonError};
 use std::time::{Duration, Instant};
 
@@ -68,39 +68,118 @@ pub const DEFAULT_RESPONSE_BYTE_CAP: usize = 16 * 1024;
 /// jobs enqueue; the rest are slack.
 const MICROTASK_CHECKPOINTS: usize = 8;
 
+/// How deep a stack V8 captures for a throw. Deeper than the three frames
+/// `runtime-contract.md` §3 renders, so the host-frame filter in
+/// [`thrown_error`] still has something to filter after the model's own
+/// frames run out.
+const STACK_TRACE_FRAME_LIMIT: i32 = 10;
+
+/// How often a watchdog that has already fired asks again, until the cell
+/// actually stops.
+///
+/// A termination request V8 does not observe is otherwise never re-issued:
+/// measured on this host, `while (true) { const x = new Array(100).fill("y"); }`
+/// ran for minutes against a 500 ms limit because the request landed while
+/// the thread was inside `Builtin_ArrayPrototypeFill`, which checks no
+/// interrupt. At this interval a lost request costs 50 ms rather than the
+/// session.
+const TERMINATE_RETRY_INTERVAL: Duration = Duration::from_millis(50);
+
+/// The multiple of the wall-clock limit past which a cell that is *still*
+/// running has ignored every termination the watchdog issued, and the
+/// runtime stops trusting its isolate: the cell is answered as a
+/// `RuntimeTimeout` naming both deadlines and [`Runtime::poisoned`] becomes
+/// true, so no later cell of the task runs code in it.
+///
+/// `runtime-contract.md` §7 owns the wall clock itself. This multiplier and
+/// [`TERMINATE_RETRY_INTERVAL`] are the watchdog's own mechanics and move to
+/// `pane.toml` beside the limit when 61F takes it.
+const HARD_DEADLINE_MULTIPLE: u32 = 3;
+
 /// The prefix every script a model authored is named with. A stack frame
 /// from any other script is a host frame and is never shown (§5).
 const CELL_SCRIPT_PREFIX: &str = "pane:cell:";
 
 static V8_ONCE: Once = Once::new();
 
+/// The V8 flags every isolate in this process is built under.
+///
+/// **A cell can always be stopped by a termination request, because no tier
+/// that elides interrupt checks runs model code.** `terminate_execution` is
+/// observed at V8's own interrupt checks, and TurboFan's code for an
+/// allocating loop reaches none of them: measured on this host, with the
+/// watchdog re-issuing the request every [`TERMINATE_RETRY_INTERVAL`],
+/// `while (true) { const x = new Array(100).fill("y"); }` never stopped at
+/// all, while `while (true) {}`, `while (true) { const x = new Array(100); }`,
+/// a preallocated `a.fill("y")` and the same cell plus `Math.random()` each
+/// stopped at ~305 ms against a 300 ms limit. Same binary, same cell, one
+/// flag: no flag → never; `--no-maglev` → never; **`--no-turbofan` → 300 ms**;
+/// `--jitless` → 311 ms.
+///
+/// **Maglev stays on**, so this gives up the top optimising tier and not the
+/// JIT. A cell is a short program that calls tools, which that tier buys
+/// almost nothing, and a cell that cannot be stopped is a session that cannot
+/// be trusted — `runtime-contract.md` §2's wall clock is the whole reason
+/// [`DEFAULT_CELL_WALL_CLOCK_LIMIT`] exists.
+const V8_FLAGS: &str = "--no-turbofan";
+
 fn initialize_v8() {
     V8_ONCE.call_once(|| {
+        // Before the platform, because a flag read at initialisation is
+        // ignored if it arrives after it.
+        v8::V8::set_flags_from_string(V8_FLAGS);
         let platform = v8::new_default_platform(0, false).make_shared();
         v8::V8::initialize_platform(platform);
         v8::V8::initialize();
     });
 }
 
-/// V8 hands this callback a `*mut c_void` and nothing else, so the isolate it
-/// must stop travels in the [`HeapGuard`] behind that pointer.
+/// The near-heap-limit callback's own state, behind the one `*mut c_void` V8
+/// hands that callback: the [`HeapGuard`] the isolate is signalled through,
+/// and how often the ceiling has been raised.
 ///
-/// It returns a **raised** limit on purpose: returning the current one makes
-/// V8 abort the process, and this crate answers an out-of-memory with a
-/// value. The raise buys just enough room for the terminated cell to unwind.
+/// **The ceiling is raised at most once per cell**, which is what makes it a
+/// ceiling. The raise exists to buy the terminated cell room to unwind;
+/// granting another `initial_heap_limit` on *every* callback turned a 256 MiB
+/// ceiling into 7 GB of resident memory while a cell that ignored its
+/// termination went on allocating.
+struct HeapWatch {
+    guard: Rc<HeapGuard>,
+    /// Cleared at the start of every cell by [`Runtime::run_cell`]; set by
+    /// the first callback that raises for that cell.
+    raised_this_cell: AtomicBool,
+    /// Raises since this runtime was built, which is what
+    /// [`Runtime::heap_limit_raises`] answers with — the number that says
+    /// the ceiling held rather than moved.
+    raises: AtomicU32,
+}
+
+/// V8 hands this callback a `*mut c_void` and nothing else, so the isolate it
+/// must stop travels in the [`HeapWatch`] behind that pointer.
+///
+/// The **first** call for a cell returns a raised limit on purpose:
+/// returning the current one makes V8 abort the process, and this crate
+/// answers an out-of-memory with a value. The raise buys just enough room for
+/// the terminated cell to unwind. Every **later** call for the same cell is a
+/// cell that took the room and kept allocating, so it is answered with the
+/// limit it already has and terminated again instead.
 unsafe extern "C" fn near_heap_limit(
     data: *mut c_void,
     current_heap_limit: usize,
     initial_heap_limit: usize,
 ) -> usize {
-    // SAFETY: `data` is the address of a `HeapGuard` the `Runtime` owns and
-    // declares *after* its isolate, so the guard outlives every callback the
+    // SAFETY: `data` is the address of a `HeapWatch` the `Runtime` owns and
+    // declares *after* its isolate, so the watch outlives every callback the
     // isolate can make.
-    let guard = unsafe { &*(data as *const HeapGuard) };
-    guard.hit.store(true, Ordering::SeqCst);
-    if let Some(isolate) = guard.isolate.get() {
+    let watch = unsafe { &*(data as *const HeapWatch) };
+    watch.guard.hit.store(true, Ordering::SeqCst);
+    if let Some(isolate) = watch.guard.isolate.get() {
         isolate.terminate_execution();
     }
+    if watch.raised_this_cell.swap(true, Ordering::SeqCst) {
+        return current_heap_limit;
+    }
+    watch.raises.fetch_add(1, Ordering::SeqCst);
     current_heap_limit.saturating_add(initial_heap_limit.max(8 * 1024 * 1024))
 }
 
@@ -113,8 +192,13 @@ pub struct Runtime {
     context: v8::Global<v8::Context>,
     isolate: v8::OwnedIsolate,
     state: Rc<RuntimeState>,
-    heap: Rc<HeapGuard>,
+    heap: Rc<HeapWatch>,
     wall_clock_limit: Duration,
+    /// The cell that ran past [`HARD_DEADLINE_MULTIPLE`] × the wall-clock
+    /// limit while being terminated every [`TERMINATE_RETRY_INTERVAL`], if
+    /// one did. Once it is set nothing in this type enters the isolate
+    /// again — see [`Runtime::poisoned`].
+    poisoned_by: Option<u64>,
 }
 
 impl Runtime {
@@ -178,9 +262,20 @@ impl Runtime {
         // with no workers has nothing to share memory with and because
         // `the_isolate_has_no_ambient_authority` can then enumerate them.
         isolate.set_allow_atomics_wait(false);
+        // Without this V8 captures no structured trace at all:
+        // `v8::Exception::get_stack_trace` answers `None` for every throw, so
+        // §5's "the top three in-program frames" was an empty list on every
+        // error a model has ever been shown, and the two assertions that
+        // looked like they checked it were quantifiers over that empty list.
+        isolate.set_capture_stack_trace_for_uncaught_exceptions(true, STACK_TRACE_FRAME_LIMIT);
 
-        let heap = HeapGuard::new();
-        let _ = heap.isolate.set(isolate.thread_safe_handle());
+        let guard = HeapGuard::new();
+        let _ = guard.isolate.set(isolate.thread_safe_handle());
+        let heap = Rc::new(HeapWatch {
+            guard,
+            raised_this_cell: AtomicBool::new(false),
+            raises: AtomicU32::new(0),
+        });
         isolate.add_near_heap_limit_callback(
             near_heap_limit,
             Rc::as_ptr(&heap).cast_mut().cast::<c_void>(),
@@ -208,6 +303,7 @@ impl Runtime {
             state,
             heap,
             wall_clock_limit,
+            poisoned_by: None,
         }
     }
 
@@ -251,6 +347,27 @@ impl Runtime {
         self.state.cell.get()
     }
 
+    /// Whether this runtime has stopped trusting its isolate.
+    ///
+    /// It is set by exactly one event: a cell that went on running past
+    /// [`HARD_DEADLINE_MULTIPLE`] × the wall-clock limit while the watchdog
+    /// terminated it every [`TERMINATE_RETRY_INTERVAL`]. A cell that ignored
+    /// that many requests is running code the runtime cannot stop, so from
+    /// then on [`Runtime::run_cell`] answers a throw naming the cell that did
+    /// it **without entering the isolate**, and [`Runtime::end_task`] drops
+    /// the handles without entering it either.
+    pub fn poisoned(&self) -> bool {
+        self.poisoned_by.is_some()
+    }
+
+    /// How many times the near-heap-limit callback has raised this isolate's
+    /// ceiling since it was built — at most once per cell, which is what
+    /// makes `DEFAULT_HEAP_LIMIT_BYTES` a ceiling rather than a first
+    /// instalment.
+    pub fn heap_limit_raises(&self) -> u32 {
+        self.heap.raises.load(Ordering::SeqCst)
+    }
+
     pub fn is_live(&self, name: &str) -> bool {
         self.state.table.borrow().is_live(name)
     }
@@ -277,8 +394,12 @@ impl Runtime {
     /// The task ending — `runtime-contract.md` §2's third and last lifetime
     /// event, and the only one this type performs itself.
     pub fn end_task(&mut self) {
-        let names = self.handle_names();
-        {
+        // A poisoned runtime's isolate ignored every termination the watchdog
+        // issued, and [`Runtime::poisoned`] promises nothing re-enters it.
+        // The handles go with the task either way: the table below is the
+        // host's own record, and the persistent scope dies with the isolate.
+        if !self.poisoned() {
+            let names = self.handle_names();
             v8::scope!(let handle_scope, &mut self.isolate);
             let context = v8::Local::new(handle_scope, &self.context);
             let scope = &mut v8::ContextScope::new(handle_scope, context);
@@ -303,9 +424,24 @@ impl Runtime {
         let started = Instant::now();
         let cell = self.state.begin_cell();
         self.trace().begin_cell();
+        // Before anything touches V8: an isolate that ignored every
+        // termination is one this runtime no longer runs code in, and the
+        // model is told which cell did it rather than being handed a hang.
+        if let Some(by) = self.poisoned_by {
+            return self.finish(
+                cell,
+                source,
+                started,
+                Ending::Threw(poisoned_error(by)),
+                Stopped::none(),
+            );
+        }
         // A hit the previous cell did not consume — one raised while its own
         // previews were being taken — is not this cell's reason for stopping.
-        self.heap.take_hit();
+        self.heap.guard.take_hit();
+        // The ceiling may be raised once for *this* cell, whatever the last
+        // one needed.
+        self.heap.raised_this_cell.store(false, Ordering::SeqCst);
 
         let compiled = match cell::compile(source, cell) {
             Ok(compiled) => compiled,
@@ -315,14 +451,18 @@ impl Runtime {
             }
         };
 
-        let watchdog = Watchdog::arm(self.heap.isolate.get().cloned(), self.wall_clock_limit);
+        let watchdog = Watchdog::arm(
+            self.heap.guard.isolate.get().cloned(),
+            self.wall_clock_limit,
+        );
         let ending = self.execute(&compiled);
         // Both halves are read here, before anything below allocates: taking
         // a preview can itself raise the heap callback, and a hit raised by
         // the runtime's own bookkeeping is not why the cell stopped.
+        let disarmed = watchdog.disarm();
         let stopped = Stopped {
-            timed_out: watchdog.disarm(),
-            heap_hit: self.heap.take_hit(),
+            timed_out: disarmed.fired,
+            heap_hit: self.heap.guard.take_hit(),
             yielded: self.trace().take_yield(),
         };
         // Unconditionally, and it is not tidiness. Until a termination is
@@ -344,6 +484,19 @@ impl Runtime {
         // cell's first statement. The refresh already saw every effect of it
         // (the read answered with nothing); this is only the flag.
         self.isolate.cancel_terminate_execution();
+        // The cell did stop, or this line would not be running — but it took
+        // more than the hard deadline of terminations to do it, so this is
+        // the last cell that runs in this isolate. Reported ahead of the heap
+        // hit: a ceiling that fired is recoverable and this is not.
+        if disarmed.gave_up {
+            self.poisoned_by = Some(cell);
+            let error = gave_up(
+                started.elapsed(),
+                self.wall_clock_limit,
+                self.wall_clock_limit.saturating_mul(HARD_DEADLINE_MULTIPLE),
+            );
+            return self.finish(cell, source, started, Ending::Threw(error), Stopped::none());
+        }
         self.finish(cell, source, started, ending, stopped)
     }
 
@@ -521,8 +674,25 @@ impl Runtime {
     /// epilogue's own re-capture covers the same ground for a binding the
     /// `finally` can reach; this is what covers a `class`, a `keep`, and the
     /// two endings where the `finally` never runs at all.
+    ///
+    /// **Every live name, not only the ones this cell bound.** The captures
+    /// alone are the cell that has just ended, so `const arr = []` in cell 1
+    /// and `arr.push(1,2,3,4,5)` in cell 2 left the model reading `n=0` for an
+    /// array of five for the rest of the task. A captured name is written back
+    /// into `current.captures`, which [`Runtime::finish`] drains into the
+    /// table; a live-but-uncaptured one goes straight to the table through
+    /// [`handles::HandleTable::refresh`], which is the only write that does
+    /// not reorder it or claim the model redeclared the name.
     fn refresh_previews(&mut self) {
-        let names: Vec<String> = self
+        let mut names: Vec<String> = self
+            .state
+            .table
+            .borrow()
+            .names()
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        let captured: Vec<String> = self
             .state
             .current
             .borrow()
@@ -530,6 +700,11 @@ impl Runtime {
             .iter()
             .map(|capture| capture.name.clone())
             .collect();
+        for name in &captured {
+            if !names.contains(name) {
+                names.push(name.clone());
+            }
+        }
         if names.is_empty() {
             return;
         }
@@ -566,6 +741,10 @@ impl Runtime {
             {
                 capture.value = preview;
                 capture.meta = meta;
+            } else {
+                // Live, and this cell did not bind it: the table's own entry
+                // is the only copy there is.
+                state.table.borrow_mut().refresh(&name, preview, meta);
             }
         }
     }
@@ -672,13 +851,68 @@ impl Runtime {
         }
     }
 
+    /// The `n` largest live handles **as they are now**, largest first, each
+    /// measured off the persistent scope at the moment the error is built.
+    ///
+    /// `HandleMeta::size_estimate` is taken where a handle is captured, so
+    /// for a handle the *current* cell never bound it is the size that
+    /// handle had in some earlier cell. That is the common shape here — a
+    /// model declares `const acc = []` in one cell and fills it in the next
+    /// — and it ranked the array that filled the heap last, at `~0 B`,
+    /// behind a 44-character string. §2 promises "the five largest live
+    /// handles by retained size" so that the model can choose what to free,
+    /// and a ranking by stale sizes tells it to free the wrong thing.
+    ///
+    /// Measuring here rather than refreshing every cell keeps the cost on
+    /// the path that has already lost: `marshal::size_estimate` is the
+    /// deliberately shallow one written for this moment (it never walks an
+    /// array's elements or asks an array for its property names), and it
+    /// runs after `run_cell`'s unconditional `cancel_terminate_execution`,
+    /// so V8 answers rather than bailing. A name the scope no longer holds
+    /// keeps the size the table recorded for it.
+    fn largest_live_now(&mut self, n: usize) -> Vec<(String, u64)> {
+        let mut sized: Vec<(String, u64)> = {
+            let table = self.state.table.borrow();
+            table
+                .names()
+                .into_iter()
+                .map(|name| {
+                    (
+                        name.to_string(),
+                        table.meta(name).map_or(0, |meta| meta.size_estimate),
+                    )
+                })
+                .collect()
+        };
+        {
+            v8::scope!(let handle_scope, &mut self.isolate);
+            let context = v8::Local::new(handle_scope, &self.context);
+            let scope = &mut v8::ContextScope::new(handle_scope, context);
+            let global = context.global(scope);
+            for (name, size) in &mut sized {
+                let Some(key) = v8::String::new(scope, name) else {
+                    continue;
+                };
+                if global.has(scope, key.into()) != Some(true) {
+                    continue;
+                }
+                let Some(value) = global.get(scope, key.into()) else {
+                    continue;
+                };
+                *size = marshal::size_estimate(scope, value);
+            }
+        }
+        sized.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+        sized.truncate(n);
+        sized
+    }
+
     /// The `RuntimeOutOfMemory` preview: the five largest live handles, so
     /// the *model* can choose what to free. Nothing is evicted here — §2 is
     /// explicit that a handle vanishing under a program that still names it
     /// is the one failure that would make the channel untrustworthy.
     fn out_of_memory(&mut self) -> ErrorValue {
-        let table = self.state.table.borrow();
-        let largest = table.largest(5);
+        let largest = self.largest_live_now(5);
         let listed = if largest.is_empty() {
             "no live handles".to_string()
         } else {
@@ -991,6 +1225,18 @@ fn bounded_utf8(
     (String::from_utf8_lossy(&buffer).into_owned(), false)
 }
 
+/// What a [`Watchdog`] did while its cell ran.
+#[derive(Debug, Clone, Copy)]
+struct Disarmed {
+    /// The wall-clock limit passed and the watchdog terminated the cell.
+    fired: bool,
+    /// The cell went on running past [`HARD_DEADLINE_MULTIPLE`] × the limit
+    /// while being terminated every [`TERMINATE_RETRY_INTERVAL`]. It stopped
+    /// in the end — nothing downstream of `disarm` could run otherwise — but
+    /// the isolate is no longer one this runtime will re-enter.
+    gave_up: bool,
+}
+
 /// The wall clock, as one thread per cell.
 ///
 /// It holds a clone of the isolate's `IsolateHandle` — the same `Send` handle
@@ -999,9 +1245,25 @@ fn bounded_utf8(
 /// first. The condition variable rather than a sleep loop is what makes
 /// [`Watchdog::disarm`] return immediately for the overwhelming majority of
 /// cells, which finish in milliseconds.
+///
+/// **It terminates until the cell stops, not once.** V8 observes a
+/// termination request at its own interrupt checks, and there are stretches
+/// with none: measured on this host, a cell allocating through
+/// `Array.prototype.fill` sat inside `Builtin_ArrayPrototypeFill` and never
+/// saw the single request the watchdog used to issue, so a 500 ms limit
+/// became minutes and a 30 s one became 1:59 through the shipped binary.
+/// Asking again every [`TERMINATE_RETRY_INTERVAL`] turns a lost request into
+/// a 50 ms delay.
+///
+/// **And it never stops asking**, even past the hard deadline, because the
+/// thread blocked inside V8 is the one that must return: giving up on the
+/// request would be giving up on `run_cell` ever answering. What the hard
+/// deadline does is record that this isolate stopped being stoppable, which
+/// is what [`Runtime::poisoned`] then acts on.
 struct Watchdog {
     done: Arc<(Mutex<bool>, Condvar)>,
     fired: Arc<AtomicBool>,
+    gave_up: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -1009,20 +1271,43 @@ impl Watchdog {
     fn arm(isolate: Option<v8::IsolateHandle>, limit: Duration) -> Self {
         let done = Arc::new((Mutex::new(false), Condvar::new()));
         let fired = Arc::new(AtomicBool::new(false));
+        let gave_up = Arc::new(AtomicBool::new(false));
+        let armed = Instant::now();
+        let hard = limit.saturating_mul(HARD_DEADLINE_MULTIPLE);
         let thread = isolate.map(|isolate| {
             let done = Arc::clone(&done);
             let fired = Arc::clone(&fired);
+            let gave_up = Arc::clone(&gave_up);
             std::thread::spawn(move || {
                 let (lock, finished) = &*done;
                 let guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
-                let (done, timeout) = finished
+                let (mut guard, timeout) = finished
                     .wait_timeout_while(guard, limit, |done| !*done)
                     .unwrap_or_else(PoisonError::into_inner);
-                if timeout.timed_out() && !*done {
-                    // Ordered before the terminate so the flag is visible to
-                    // `disarm`, which cannot run until this thread releases
-                    // the lock it is still holding.
-                    fired.store(true, Ordering::SeqCst);
+                if !timeout.timed_out() || *guard {
+                    return;
+                }
+                // Ordered before the terminate so the flag is visible to
+                // `disarm`, which cannot run until this thread releases the
+                // lock it is still holding.
+                fired.store(true, Ordering::SeqCst);
+                isolate.terminate_execution();
+                loop {
+                    let (next, _) = finished
+                        .wait_timeout_while(guard, TERMINATE_RETRY_INTERVAL, |done| !*done)
+                        .unwrap_or_else(PoisonError::into_inner);
+                    guard = next;
+                    // Read before the cell's own ending is: a cell that
+                    // stopped at last, but only after the hard deadline, is
+                    // exactly the one this flag is about. Checking it after
+                    // the `return` below would answer "false" for every cell
+                    // that eventually stopped, which is all of them.
+                    if armed.elapsed() >= hard {
+                        gave_up.store(true, Ordering::SeqCst);
+                    }
+                    if *guard {
+                        return;
+                    }
                     isolate.terminate_execution();
                 }
             })
@@ -1030,14 +1315,18 @@ impl Watchdog {
         Self {
             done,
             fired,
+            gave_up,
             thread,
         }
     }
 
-    /// Stops the watch and answers whether it fired.
-    fn disarm(mut self) -> bool {
+    /// Stops the watch and answers what it did.
+    fn disarm(mut self) -> Disarmed {
         self.stop();
-        self.fired.load(Ordering::SeqCst)
+        Disarmed {
+            fired: self.fired.load(Ordering::SeqCst),
+            gave_up: self.gave_up.load(Ordering::SeqCst),
+        }
     }
 
     /// Tells the thread the cell finished and waits for it to notice.
@@ -1076,6 +1365,46 @@ fn timed_out(elapsed: Duration, limit: Duration) -> ErrorValue {
              of {} ms; nothing was freed and the bindings it completed are still live",
             elapsed.as_millis(),
             limit.as_millis()
+        ),
+        line: None,
+        column: None,
+        stack: Vec::new(),
+    }
+}
+
+/// The `RuntimeTimeout` a cell that ignored the whole ladder of
+/// terminations is answered with — the wall-clock limit it passed, and the
+/// hard deadline past which this isolate stopped being trusted.
+///
+/// Still a throw, and still `RuntimeTimeout`: from the model's side this is
+/// the same event as [`timed_out`], only worse, and §5's shape does not
+/// change because the host lost confidence in its isolate.
+fn gave_up(elapsed: Duration, limit: Duration, hard: Duration) -> ErrorValue {
+    ErrorValue {
+        class: "RuntimeTimeout".to_string(),
+        message: format!(
+            "the cell ran for {} ms, ignoring every termination pane issued from its wall-clock \
+             limit of {} ms onwards and past its hard deadline of {} ms; nothing was freed, and \
+             no later cell runs in this isolate",
+            elapsed.as_millis(),
+            limit.as_millis(),
+            hard.as_millis()
+        ),
+        line: None,
+        column: None,
+        stack: Vec::new(),
+    }
+}
+
+/// What every cell after [`gave_up`] is answered with, naming the cell that
+/// cost the isolate its trust. Built without touching V8, which is the whole
+/// promise of [`Runtime::poisoned`].
+fn poisoned_error(by: u64) -> ErrorValue {
+    ErrorValue {
+        class: "RuntimePoisoned".to_string(),
+        message: format!(
+            "cell {by} did not stop when pane terminated it, so this isolate is no longer trusted \
+             and no later cell runs in it; the task is over"
         ),
         line: None,
         column: None,

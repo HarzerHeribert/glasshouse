@@ -106,6 +106,25 @@ impl HandleTable {
         });
     }
 
+    /// Takes a live handle's preview and size again, in place —
+    /// `runtime-contract.md` §3's "the preview shows the value's type and
+    /// size **as it now is**", for a handle the current cell never bound.
+    ///
+    /// The invariant this module is built on is untouched: this can neither
+    /// add nor remove a live name, and it leaves the entry's position and its
+    /// `(replaced at cell N)` annotation exactly as they were, so a refresh is
+    /// invisible to everything but the preview and §2's ranking.
+    /// [`HandleTable::declare_with`] cannot do this job — it removes and
+    /// re-appends, which would reorder the table by refresh instead of by
+    /// declaration, and it stamps `replaced_at_cell`, which means the model
+    /// redeclared the name.
+    pub fn refresh(&mut self, name: &str, value: Value, meta: HandleMeta) {
+        if let Some(entry) = self.entries.iter_mut().find(|e| e.name == name) {
+            entry.value = value;
+            entry.meta = meta;
+        }
+    }
+
     /// The model's own `free("name")`. Freeing a name that is not live is a
     /// no-op: there is nothing for the model to have gotten wrong.
     pub fn free(&mut self, name: &str) {

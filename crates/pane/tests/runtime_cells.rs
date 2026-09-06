@@ -222,6 +222,10 @@ fn a_throw_is_a_result_and_keeps_the_bindings_made_before_it() {
     // The model's own line 2, and the model's own column -- not the
     // wrapper's.
     assert_eq!(error.line, Some(2), "{error:?}");
+    // A frame must exist for the quantifier below to mean anything: until
+    // the isolate was asked to capture traces, `error.stack` was empty for
+    // every throw and this assertion was vacuously true.
+    assert!(!error.stack.is_empty(), "§5 promises frames: {error:?}");
     assert!(
         error
             .stack
@@ -950,6 +954,12 @@ fn a_refusal_carries_the_models_own_line_and_column_and_no_host_frame() {
         (error.line, error.column),
         (Some(1), Some(21)),
         "the refusal must point at the model's own `read(` call: {error:?}"
+    );
+    // Not vacuous: a refusal is thrown from a native callback, and with the
+    // isolate now capturing traces the model's own `read(` call is on it.
+    assert!(
+        !error.stack.is_empty(),
+        "the refusal must carry the model's own frame: {error:?}"
     );
     for frame in &error.stack {
         let inside_program =
@@ -1709,4 +1719,504 @@ fn a_result_whose_getter_never_returns_is_a_timeout_not_a_result() {
     assert_eq!(error.message, "no");
     assert_eq!(error.line, Some(1), "{error:?}");
     assert!(!thrown.ends_the_task());
+}
+
+// ---- GH-PANE-61E-ISOLATE-FIX-2 ----
+//
+// The second independent verifier's findings 1-6, plus the lead's `read` of a
+// missing file, each with the cell that demonstrated it. Every one was executed
+// against the shipped defaults before it was written down: the first two cells
+// below ran for 1:59 and reached about 7 GB of resident memory against a 30 s
+// wall clock and a 256 MiB ceiling.
+
+/// The wall clock stops a cell whose loop body *allocates*, not only one that
+/// spins — `runtime-contract.md` §2's `RuntimeTimeout`.
+///
+/// A termination request is observed at V8's own interrupt checks, and
+/// TurboFan's code for this loop reaches none — so re-issuing the request
+/// every `TERMINATE_RETRY_INTERVAL` did nothing for it either, and the hard
+/// deadline could not rescue it because the thread blocked inside V8 is the
+/// thread that must return. `isolate::V8_FLAGS` is what makes the request
+/// observable; this test is what says so. Measured before that flag, 300 ms
+/// limit, killed externally at 6 s:
+///
+/// | cell | outcome |
+/// |---|---|
+/// | `while (true) {}` | `RuntimeTimeout` at 311 ms |
+/// | `while (true) { const x = new Array(100); }` | `RuntimeTimeout` at 310 ms |
+/// | `const a = new Array(100); while (true) { a.fill("y"); }` | `RuntimeTimeout` at 303 ms |
+/// | `while (true) { const x = new Array(100).fill("y"); Math.random(); }` | `RuntimeTimeout` at 308 ms |
+/// | `while (true) { const x = new Array(100).fill("y"); }` | **never** |
+/// | `while (true) { const x = new Array(100); x.fill("y"); }` | **never** |
+/// | `while (true) { new Array(100).fill("y"); }` | **never** |
+///
+/// The old regression (`a_cell_that_never_yields_…`, whose `while (true) {}`
+/// allocates nothing) sat on the safe side of a threshold it could not see.
+#[test]
+fn a_cell_that_allocates_forever_is_answered_as_a_timeout_within_the_grace() {
+    let fixture = Fixture::new("fill-timeout");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("fill-timeout");
+    let limit = Duration::from_millis(500);
+    let mut runtime = Runtime::with_limits(
+        &fixture.profile(),
+        &glasshouse,
+        &session,
+        DEFAULT_HEAP_LIMIT_BYTES,
+        limit,
+    );
+
+    for width in [100u32, 1000] {
+        let started = Instant::now();
+        let outcome = runtime.run_cell(&format!(
+            "const before = {width};\nwhile (true) {{ const x = new Array({width}).fill(\"y\"); }}\n"
+        ));
+        let elapsed = started.elapsed();
+
+        let error = threw(&outcome);
+        assert_eq!(error.class, "RuntimeTimeout", "fill({width}): {error:?}");
+        assert!(
+            elapsed < limit + Duration::from_secs(2),
+            "fill({width}) took {elapsed:?} against a {limit:?} limit"
+        );
+        // Stopped by an ordinary re-issued termination, well inside the hard
+        // deadline: the isolate is still trusted.
+        assert!(
+            !runtime.poisoned(),
+            "fill({width}) took the hard deadline to stop: {error:?}"
+        );
+
+        // §5: the binding made before the loop is live, and the next cell
+        // reads it -- whatever the loop body was allocating.
+        assert!(runtime.is_live("before"), "{}", runtime.render_handles());
+        let after = runtime.run_cell("return before + 1;\n");
+        assert_eq!(
+            returned(&after),
+            &Value::Number(f64::from(width + 1)),
+            "fill({width}): {after:?}"
+        );
+    }
+}
+
+/// The heap ceiling is a ceiling: it is raised **once** per cell, to buy the
+/// terminated cell room to unwind, and never again.
+///
+/// `near_heap_limit` used to add another `initial_heap_limit` on every
+/// callback, so a cell that ignored its termination was handed a new ceiling
+/// as fast as it could fill the last one — which is how 256 MiB became about
+/// 7 GB of resident memory, and why §2's `RuntimeOutOfMemory` never arrived
+/// for this shape at all.
+#[test]
+fn a_cell_that_fills_the_heap_is_answered_at_the_configured_ceiling() {
+    let fixture = Fixture::new("fill-heap");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("fill-heap");
+    let mut runtime = Runtime::with_limits(
+        &fixture.profile(),
+        &glasshouse,
+        &session,
+        32 * 1024 * 1024,
+        Duration::from_secs(20),
+    );
+
+    let first = runtime.run_cell("const rows = [];\n");
+    assert!(matches!(first, CellOutcome::Yielded { .. }), "{first:?}");
+    assert_eq!(
+        runtime.heap_limit_raises(),
+        0,
+        "nothing has hit the ceiling"
+    );
+
+    let started = Instant::now();
+    let outcome = runtime.run_cell("while (true) { rows.push(new Array(1000).fill(\"y\")); }\n");
+    let elapsed = started.elapsed();
+
+    let error = threw(&outcome);
+    assert_eq!(error.class, "RuntimeOutOfMemory", "{error:?}");
+    assert!(
+        runtime.heap_limit_raises() <= 1,
+        "the ceiling was raised {} times; once is the whole allowance",
+        runtime.heap_limit_raises()
+    );
+    // The ceiling, not the wall clock: answered long before the 20 s limit.
+    assert!(
+        elapsed < Duration::from_secs(10),
+        "the cell took {elapsed:?} to reach a 32 MiB ceiling"
+    );
+
+    // Nothing was evicted, and the model can act on what it was told.
+    assert!(runtime.is_live("rows"), "{}", runtime.render_handles());
+    let recovered = runtime.run_cell("free(\"rows\");\nreturn 7;\n");
+    assert_eq!(returned(&recovered), &Value::Number(7.0), "{recovered:?}");
+}
+
+/// A cell that ignores every termination for the hard deadline costs the
+/// isolate its trust: the cell is answered as a `RuntimeTimeout` naming both
+/// deadlines, and no later cell of the task runs code in it.
+///
+/// The cell is one `Array.prototype.fill` of 30 million elements — a single
+/// uninterruptible builtin call, measured at ~34 ms on this host, against a
+/// 1 ms limit and therefore a 3 ms hard deadline. That is the shape the
+/// watchdog cannot interrupt at all, which is exactly the case the deadline
+/// exists for; a loop of small fills is stopped by the re-issued termination
+/// long before it (see the timeout test above). The limit is 1 ms rather than
+/// the wall clock's own scale so the margin is ~34x: a machine that could run
+/// the fill inside 3 ms would fail the `poisoned()` assertion loudly rather
+/// than quietly proving nothing.
+#[test]
+fn a_runtime_that_could_not_stop_a_cell_is_poisoned_and_says_so() {
+    let fixture = Fixture::new("poison");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("poison");
+    let limit = Duration::from_millis(1);
+    let mut runtime = Runtime::with_limits(
+        &fixture.profile(),
+        &glasshouse,
+        &session,
+        1024 * 1024 * 1024,
+        limit,
+    );
+
+    let outcome = runtime.run_cell("const wall = new Array(30_000_000).fill(\"y\");\n");
+    let error = threw(&outcome);
+    assert_eq!(error.class, "RuntimeTimeout", "{error:?}");
+    assert!(
+        error.message.contains("hard deadline of 3 ms"),
+        "both deadlines must be named: {}",
+        error.message
+    );
+    assert!(
+        error.message.contains("wall-clock limit of 1 ms"),
+        "both deadlines must be named: {}",
+        error.message
+    );
+    assert!(runtime.poisoned(), "{error:?}");
+
+    // Every later cell is answered without the isolate being entered, and the
+    // answer names the cell that did it.
+    let refused = runtime.run_cell("return 1;\n");
+    let refusal = threw(&refused);
+    assert_eq!(refusal.class, "RuntimePoisoned", "{refusal:?}");
+    assert!(refusal.message.contains("cell 1"), "{}", refusal.message);
+    assert_eq!(refused.turn().record.cell, 2, "{refused:?}");
+
+    // And ending the task does not enter it either.
+    runtime.end_task();
+    assert!(runtime.handle_names().is_empty());
+}
+
+/// §3's preview is of the handle **as it now is**, across a cell boundary.
+///
+/// `refresh_previews` iterated the captures of the cell that had just ended,
+/// so a handle declared in an earlier cell was in the *table* and not in the
+/// captures, and its preview and size were never taken again for the rest of
+/// the task: `const arr = []` in cell 1 and `arr.push(1, 2, 3, 4, 5)` in cell 2
+/// left the model reading `n=0` for an array of five while
+/// `return arr.length` answered 5. Splitting work across cells is what this
+/// runtime is for, so the fixed case was the rarer one.
+#[test]
+fn a_handle_declared_earlier_shows_the_value_it_now_has() {
+    let fixture = Fixture::new("refresh-earlier");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("refresh-earlier");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+
+    let first = runtime.run_cell("const arr = [];\nconst tag = \"kept\";\n");
+    assert!(matches!(first, CellOutcome::Yielded { .. }), "{first:?}");
+    assert!(first.turn().table.contains("n=0"), "{}", first.turn().table);
+
+    // Cell 2 binds nothing: `arr` is mutated, not declared.
+    let second = runtime.run_cell("arr.push(1, 2, 3, 4, 5);\n");
+    assert!(matches!(second, CellOutcome::Yielded { .. }), "{second:?}");
+    assert!(
+        second.turn().table.contains("n=5"),
+        "the table must show the array as it is now: {}",
+        second.turn().table
+    );
+    assert_eq!(handle(&second, "arr").type_name, "Array");
+
+    // Refreshing must not reorder the table or claim a redeclaration.
+    assert_eq!(runtime.handle_names(), vec!["arr", "tag"]);
+    assert!(
+        !second.turn().table.contains("replaced at cell"),
+        "nothing was redeclared: {}",
+        second.turn().table
+    );
+
+    // And the value itself is unchanged by any of it.
+    let third = runtime.run_cell("return arr.length;\n");
+    assert_eq!(returned(&third), &Value::Number(5.0), "{third:?}");
+}
+
+/// §2's one recovery mechanism, across a cell boundary: the
+/// `RuntimeOutOfMemory` list ranks by the size a handle has **now**.
+///
+/// `HandleMeta::size_estimate` is taken where a handle is captured, so a
+/// handle the failing cell never bound carried the size it had in the cell
+/// that declared it: the array that filled a 32 MiB heap was reported at
+/// `~0 B` and ranked behind a 44-character string, telling the model to free
+/// exactly the wrong thing. Splitting work across cells is what this runtime
+/// is for, so this is the common shape rather than the rare one.
+#[test]
+fn the_out_of_memory_ranking_counts_a_handle_from_an_earlier_cell() {
+    let fixture = Fixture::new("oom-earlier");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("oom-earlier");
+    let mut runtime = Runtime::with_limits(
+        &fixture.profile(),
+        &glasshouse,
+        &session,
+        32 * 1024 * 1024,
+        Duration::from_secs(20),
+    );
+
+    let first = runtime.run_cell(
+        "const acc = [];\nconst decoy = \"a much longer string than the empty array is\";\n",
+    );
+    assert!(matches!(first, CellOutcome::Yielded { .. }), "{first:?}");
+
+    let outcome = runtime.run_cell("while (true) { acc.push(new Array(10000).fill(\"x\")); }\n");
+    let error = threw(&outcome);
+    assert_eq!(error.class, "RuntimeOutOfMemory", "{error:?}");
+    assert!(
+        error.message.contains("Largest live handles: acc ("),
+        "the handle that filled the heap was declared a cell earlier and must still rank first: \
+         {}",
+        error.message
+    );
+    assert!(error.message.contains("decoy"), "{}", error.message);
+}
+
+/// §2's lifetime rule from the other side: `free("x")` and then a *rebinding*
+/// of `x` in the same cell leaves `x` live with the new value.
+///
+/// `Runtime::forget_freed` deletes every name the cell freed off the
+/// persistent scope after the cell, which is right for declare-then-free and
+/// destroyed the binding for free-then-declare — the cheapest recovery the
+/// `RuntimeOutOfMemory` message itself invites ("call free(\"name\") on what
+/// you no longer need"), performed in one cell, lost both the object and its
+/// summary.
+#[test]
+fn free_then_rebind_in_one_cell_keeps_the_new_binding() {
+    let fixture = Fixture::new("free-rebind");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("free-rebind");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+
+    let first = runtime.run_cell("const big = [1, 2, 3];\nconst w = 0;\n");
+    assert!(matches!(first, CellOutcome::Yielded { .. }), "{first:?}");
+
+    // A redeclaration after the free.
+    let second = runtime.run_cell("free(\"big\");\nconst big = [1];\n");
+    assert!(matches!(second, CellOutcome::Yielded { .. }), "{second:?}");
+    assert!(
+        runtime.is_live("big"),
+        "the rebinding vanished: {}",
+        runtime.render_handles()
+    );
+
+    // A `keep` after the free, and `handles()` mid-cell sees it.
+    let third = runtime.run_cell(
+        "free(\"w\");\nkeep(\"w\", 42);\nconsole.log(\"LIVE:\" + handles().join(\",\"));\n",
+    );
+    assert!(matches!(third, CellOutcome::Yielded { .. }), "{third:?}");
+    let logged = &third.turn().stdout_tail;
+    assert!(
+        logged.contains("LIVE:") && logged.contains('w'),
+        "handles() must list the name the cell just re-kept: {logged}"
+    );
+    assert!(runtime.is_live("w"), "{}", runtime.render_handles());
+
+    // And the next cell reads both, which is the whole claim.
+    let fourth = runtime.run_cell("return JSON.stringify([big, w]);\n");
+    assert_eq!(returned_string(&fourth), "[[1],42]", "{fourth:?}");
+}
+
+/// A write to the persistent scope the scope refuses is a throw the model
+/// sees, not a handle that vanishes between turns.
+///
+/// `capture()` discarded `global.set`'s result, so on a frozen `globalThis`
+/// the name went into the handle table, was rendered to the model this turn,
+/// and was `undefined` the next — §2's "a handle vanishing under a program
+/// that still names it is the failure that would make the whole channel
+/// untrustworthy", reached by one line of defensive tidiness.
+#[test]
+fn a_refused_scope_write_is_a_throw_not_a_vanished_handle() {
+    let fixture = Fixture::new("frozen-scope");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("frozen-scope");
+
+    {
+        let mut runtime = runtime(&fixture, &glasshouse, &session);
+        let outcome = runtime.run_cell("Object.freeze(globalThis);\nconst x = 5;\n");
+        let error = threw(&outcome);
+        assert_eq!(error.class, "TypeError", "{error:?}");
+        assert!(
+            error.message.contains("`x` could not be bound"),
+            "the throw must name the binding: {}",
+            error.message
+        );
+        assert!(
+            !runtime.is_live("x"),
+            "a handle the scope refused reached the table: {}",
+            runtime.render_handles()
+        );
+    }
+
+    // The quieter variant: a pre-existing non-writable own property.
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+    let outcome = runtime.run_cell(
+        "Object.defineProperty(globalThis, \"y\", { value: 1, writable: false, configurable: \
+         false });\nconst y = 99;\n",
+    );
+    let error = threw(&outcome);
+    assert_eq!(error.class, "TypeError", "{error:?}");
+    assert!(
+        error.message.contains("`y` could not be bound"),
+        "{}",
+        error.message
+    );
+    assert!(!runtime.is_live("y"), "{}", runtime.render_handles());
+}
+
+/// §5's "the top three in-program frames", which were an empty list on every
+/// error a model has ever been shown.
+///
+/// `thrown_error` reads frames from `v8::Exception::get_stack_trace`, which
+/// yields a structured trace only when the isolate has been asked to capture
+/// one — and nothing asked. Both existing assertions about frames are
+/// quantifiers over the frame list, so both were vacuously true; this is the
+/// one that says a frame exists.
+#[test]
+fn a_nested_throw_carries_its_in_program_frames() {
+    let fixture = Fixture::new("frames");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("frames");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+
+    let outcome = runtime.run_cell(
+        "function inner() { throw new Error(\"boom\"); }\nfunction outer() { return inner(); \
+         }\nfunction top() { return outer(); }\ntop();\n",
+    );
+    let error = threw(&outcome);
+    assert_eq!(error.class, "Error", "{error:?}");
+    assert!(
+        !error.stack.is_empty(),
+        "§5 promises the top in-program frames: {error:?}"
+    );
+    assert!(
+        error.stack[0].description.starts_with("inner ("),
+        "the innermost frame is the model's own `inner`: {:?}",
+        error.stack
+    );
+    // And still only the model's own program: no host frame, ever.
+    for frame in &error.stack {
+        assert!(
+            frame.description.contains("cell 1,"),
+            "a host frame reached the model: {frame:?}"
+        );
+    }
+}
+
+/// A compile-time refusal points at the declaration it refused.
+///
+/// `CellError::ShadowsHostFunction` and `CellError::ReservedName` carried no
+/// span, so `compile_error_value` produced `line: None` and the model was
+/// shown `line 0, column 0` — a position no program has — on a program it can
+/// write on its first turn.
+#[test]
+fn a_compile_time_refusal_carries_the_span_of_the_declaration() {
+    let fixture = Fixture::new("refusal-span");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("refusal-span");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+
+    let outcome = runtime.run_cell("const read = 1;\n");
+    let error = threw(&outcome);
+    assert_eq!(error.class, "ShadowsHostFunction", "{error:?}");
+    assert_eq!((error.line, error.column), (Some(1), Some(0)), "{error:?}");
+
+    // The span is the declaration's own, not the program's start.
+    let later = runtime.run_cell("const a = 1;\nconst b = 2;\n  const __pane_x = 3;\n");
+    let error = threw(&later);
+    assert_eq!(error.class, "ReservedName", "{error:?}");
+    assert_eq!((error.line, error.column), (Some(3), Some(2)), "{error:?}");
+}
+
+/// `runtime-contract.md` §9.1: a failed call cannot itself become an answer.
+///
+/// Every builder in `bindings.rs` reads the child's `stdout` and none of them
+/// read its exit code, so `read` of a missing file answered with a `File`
+/// handle — `0 B`, `0 lines`, the SHA-256 of the empty string as its
+/// provenance — and `"all good: " + f.text` became the task's terminal
+/// response while `cat` had exited 1 with its message on stderr.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn a_read_of_a_missing_file_throws_and_never_becomes_a_result() {
+    let fixture = Fixture::new("read-missing");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("read-missing-session");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+
+    let outcome = runtime.run_cell(&format!(
+        "const f = await read({{ path: {path:?} }});\nreturn \"all good: \" + f.text;\n",
+        path = fixture.root.join("missing.txt").to_string_lossy()
+    ));
+    let error = threw(&outcome);
+    assert_eq!(error.class, "ToolError", "{error:?}");
+    assert!(
+        error.message.contains("`read` failed with exit 1"),
+        "the throw must name the tool and the child's status: {}",
+        error.message
+    );
+    // The model's own line, so §5's position is one its program has.
+    assert_eq!(error.line, Some(1), "{error:?}");
+    // And no handle was minted for a call that did not produce one.
+    assert!(
+        !runtime.is_live("f"),
+        "a failed call became a handle: {}",
+        runtime.render_handles()
+    );
+
+    // A read that succeeds is untouched by the check.
+    let notes = fixture.write(&fixture.root.join("notes.txt"), "alpha\nbeta\n");
+    let ok = runtime.run_cell(&format!(
+        "const g = await read({{ path: {path:?} }});\nreturn g.lines.length;\n",
+        path = notes.to_string_lossy()
+    ));
+    assert_eq!(returned(&ok), &Value::Number(2.0), "{ok:?}");
+}
+
+/// The one exception, and its boundary: for `grep` and `glob`, exit 1 is "no
+/// matches" and stays an empty array; exit 2 and above is a real failure and
+/// throws like `read`.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn grep_with_no_match_is_an_empty_array_and_a_bad_pattern_throws() {
+    let fixture = Fixture::new("grep-exit");
+    fixture.write(&fixture.root.join("hit.txt"), "alpha\n");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("grep-exit-session");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+
+    // Exit 1: no matches. Still a result, and still an empty array.
+    let empty = runtime.run_cell(&format!(
+        "const none = await grep({{ pattern: \"NOTHINGMATCHESTHIS\", path: {path:?} \
+         }});\nreturn none.length;\n",
+        path = fixture.root.to_string_lossy()
+    ));
+    assert_eq!(returned(&empty), &Value::Number(0.0), "{empty:?}");
+
+    // Exit 2: a pattern grep cannot compile. A failure, and a throw.
+    let bad = runtime.run_cell(&format!(
+        "const hits = await grep({{ pattern: \"a\\\\\", path: {path:?} }});\nreturn hits.length;\n",
+        path = fixture.root.to_string_lossy()
+    ));
+    let error = threw(&bad);
+    assert_eq!(error.class, "ToolError", "{error:?}");
+    assert!(
+        error.message.contains("`grep` failed with exit"),
+        "{}",
+        error.message
+    );
 }

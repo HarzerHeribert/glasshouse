@@ -6,7 +6,9 @@
 use pane::contract::{Conversation, Message, Role, ServedBy};
 use pane::runtime::handles::{HandleTable, render_table};
 use pane::runtime::preview::{ArrayValue, FileValue, PREVIEW_TOKEN_CAP, TABLE_TOKEN_CAP, Value};
-use pane::tui::{CellError, CellView, Notebook, cell_ordinal, render};
+use pane::tui::{
+    CellError, CellView, Counted, Notebook, SupervisorStatus, TaskTokens, cell_ordinal, render,
+};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
@@ -748,4 +750,43 @@ fn a_terminal_response_is_the_assistants_turn_and_a_yield_reason_sits_by_the_tab
         "the response is drawn as the assistant's turn:\n{text}"
     );
     assert!(!text.contains("[3] in"), "the reply is not a cell:\n{text}");
+}
+
+// --- docs/product/pane/supervisor.md §4: the sidebar's own line ----------
+
+/// §4: the sidebar shows the supervisor's line under the budget line, and a
+/// nudge's own reason is what it says.
+#[test]
+fn a_nudge_shows_under_the_budget_line() {
+    let notebook = Notebook {
+        tokens: Some(TaskTokens {
+            used: 100,
+            cap: 400_000,
+            counted: Counted::Estimated,
+        }),
+        // Short enough to fit the sidebar's own width on one row -- this test
+        // is about placement, not wrapping, which `notebook_lines`' own
+        // `push_text_region` already covers for the conversation column.
+        supervisor: Some(SupervisorStatus::Nudged("looping".to_string())),
+        ..Notebook::default()
+    };
+
+    let conversation = conversation(vec![Message::text(Role::User, "hi")]);
+    let buffer = rendered_notebook(
+        &conversation,
+        &known_served_by(),
+        &HandleTable::new(),
+        &notebook,
+        20,
+    );
+    let text = buffer_text(&buffer);
+
+    let budget_at = text.find("budget:").expect("the budget line renders");
+    let supervisor_at = text
+        .find("supervisor: looping")
+        .expect("the nudge's own reason renders under the budget line");
+    assert!(
+        budget_at < supervisor_at,
+        "the supervisor line must sit under the budget line:\n{text}"
+    );
 }

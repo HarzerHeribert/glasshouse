@@ -4,6 +4,7 @@
 //! crate. It builds and tests independently of the rest of the workspace.
 
 pub mod commands;
+pub mod config;
 pub mod contract;
 pub mod events;
 pub mod glasshouse;
@@ -14,6 +15,7 @@ pub mod ruler;
 pub mod runtime;
 pub mod sandbox;
 pub mod session;
+pub mod supervisor;
 pub mod tools;
 pub mod tui;
 pub mod wire;

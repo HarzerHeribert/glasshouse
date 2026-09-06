@@ -279,6 +279,67 @@ pub fn send_turn(conversation: &Conversation) -> Result<Turn, WireError> {
     parse_response(&text)
 }
 
+/// [`send_turn`] with an explicit `model`, `max_tokens` and one optional
+/// extra header -- the supervisor's look (`docs/product/pane/supervisor.md`
+/// §3): a **cheaper** model than the task's own, a small `max_tokens` for its
+/// one-line JSON answer, and a header the ledger can key on before the
+/// gateway reads it itself.
+///
+/// [`request_body`] stays untouched: this builds its own body rather than
+/// share it, so nothing here can change a byte of an ordinary task turn's
+/// request or its pinned golden test -- `send_turn` still names [`MODEL`].
+pub fn send_turn_with(
+    conversation: &Conversation,
+    model: &str,
+    max_tokens: u32,
+    extra_header: Option<(&str, &str)>,
+) -> Result<Message, WireError> {
+    let url = format!("{}{MESSAGES_PATH}", base_url());
+    let body = build_request_body(model, max_tokens, conversation);
+
+    let mut request = ureq::post(&url)
+        .config()
+        .http_status_as_error(false)
+        .build()
+        .header("content-type", "application/json")
+        .header("anthropic-version", ANTHROPIC_VERSION);
+    if let Some((name, value)) = extra_header {
+        request = request.header(name, value);
+    }
+    if let Some((name, value)) = credential_header() {
+        request = request.header(name, value);
+    }
+
+    let mut response = request
+        .send(body.as_slice())
+        .map_err(|err| WireError::Http(Box::new(err)))?;
+    let status = response.status().as_u16();
+    let text = response
+        .body_mut()
+        .read_to_string()
+        .map_err(|err| WireError::Http(Box::new(err)))?;
+    if !response.status().is_success() {
+        return Err(WireError::Status {
+            status,
+            body_head: body_head(&text),
+        });
+    }
+    parse_response(&text).map(|turn| turn.message)
+}
+
+/// [`send_turn_with`]'s own body, factored out so `model` can be asserted on
+/// without a socket -- [`request_body`] is a separate, untouched function and
+/// shares nothing with this one, so the pinned path never sees `model`.
+fn build_request_body(model: &str, max_tokens: u32, conversation: &Conversation) -> Vec<u8> {
+    let body = RequestBody {
+        model,
+        max_tokens,
+        system: &conversation.system,
+        messages: conversation.messages.iter().map(to_wire_message).collect(),
+    };
+    serde_json::to_vec(&body).expect("Conversation has no non-serialisable field")
+}
+
 fn parse_response(text: &str) -> Result<Turn, WireError> {
     let parsed: ResponseBody = serde_json::from_str(text).map_err(WireError::Json)?;
     if parsed.role != "assistant" {
@@ -325,6 +386,19 @@ mod tests {
         assert_eq!(value["system"], conversation.system);
         assert_eq!(value["messages"][0]["role"], "user");
         assert_eq!(value["messages"][1]["role"], "assistant");
+    }
+
+    #[test]
+    fn send_turn_with_names_the_model_it_is_given() {
+        let conversation = sample_conversation();
+        let body = build_request_body("cheap-model-for-the-test", 200, &conversation);
+        let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(value["model"], "cheap-model-for-the-test");
+        assert_eq!(value["max_tokens"], 200);
+        assert_ne!(
+            value["model"], MODEL,
+            "the look must not fall back to the task's own model"
+        );
     }
 
     #[test]
