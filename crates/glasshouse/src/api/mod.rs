@@ -66,6 +66,10 @@ pub use unix::serve;
 /// Defined here rather than inside `client` (which is `#[cfg(unix)]`)
 /// because the non-Unix fallback for [`send_machine_message`] below needs
 /// to name it too.
+// Off Unix only `NotListening` is ever constructed (the fallback below); the
+// other three are the Unix client's, and `warnings = "deny"` would otherwise
+// refuse the build there — sweep 33999957234, every Windows cell.
+#[cfg_attr(not(unix), allow(dead_code))]
 pub(crate) enum CallError {
     /// The socket does not exist, or nothing accepted the connection:
     /// `glasshouse api serve` is not running for this project.
