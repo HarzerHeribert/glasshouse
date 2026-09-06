@@ -290,7 +290,7 @@ fn refused_base_url() -> String {
 
 /// Sets `ANTHROPIC_BASE_URL` to `base_url`, runs `send_turn`, then restores
 /// the environment. Caller holds `ENV_LOCK`.
-fn send_turn_against(base_url: &str) -> Result<Message, WireError> {
+fn send_turn_against(base_url: &str) -> Result<wire::Turn, WireError> {
     // SAFETY: the caller holds `ENV_LOCK` for the duration of this call, so
     // no other test's env mutation can interleave with this one.
     unsafe {
@@ -301,6 +301,19 @@ fn send_turn_against(base_url: &str) -> Result<Message, WireError> {
         std::env::remove_var("ANTHROPIC_BASE_URL");
     }
     result
+}
+
+/// §6: a response with no `usage` object leaves `Turn::usage` `None`, never a
+/// fabricated zero -- a zero would read as "the provider reported no
+/// tokens", which is not what an absent object means.
+#[test]
+fn a_response_without_usage_yields_none_not_zero() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let body = br#"{"role":"assistant","content":[{"type":"text","text":"hi"}]}"#;
+    let base_url = start_status_provider("200 OK", body);
+
+    let turn = send_turn_against(&base_url).unwrap();
+    assert_eq!(turn.usage, None);
 }
 
 #[test]

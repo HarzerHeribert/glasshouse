@@ -157,6 +157,19 @@ fn assistant_reply(text: &str) -> String {
     .to_string()
 }
 
+/// The same reply, plus a Messages `usage` object -- the shape a direct
+/// provider always sends and the gateway tests never need, so this stays a
+/// separate builder rather than a change to [`assistant_reply`] that every
+/// other fixture in this file would inherit.
+fn assistant_reply_with_usage(text: &str, input_tokens: u64, output_tokens: u64) -> String {
+    serde_json::json!({
+        "role": "assistant",
+        "content": [{"type": "text", "text": text}],
+        "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
+    })
+    .to_string()
+}
+
 fn run_session(
     root: &Path,
     rollout: &Path,
@@ -196,6 +209,11 @@ fn run_session(
 /// consume.
 fn ending_reply() -> String {
     assistant_reply("```pane\nreturn 1;\n```")
+}
+
+/// [`ending_reply`], with a `usage` object attached.
+fn ending_reply_with_usage(input_tokens: u64, output_tokens: u64) -> String {
+    assistant_reply_with_usage("```pane\nreturn 1;\n```", input_tokens, output_tokens)
 }
 
 /// The text of the last `user` message in a recorded request body -- what the
@@ -1541,5 +1559,105 @@ fn the_budget_line_names_the_max_tokens_actually_sent() {
     assert!(
         result_block.contains("turn cap 8,192 ·"),
         "the budget line names the figure actually sent: {result_block}"
+    );
+}
+
+// --- runtime-contract.md §6 addendum: a direct provider's own `usage` -----
+
+/// §6, direct-provider path: with no gateway data at all, a Messages
+/// response's own `usage` object is counted as reported, not estimated.
+///
+/// 30 is `20 + 10`, one reply's own two figures; 60 is both replies'. The
+/// estimate for this conversation is a different figure entirely (several
+/// hundred tokens, as the gateway test's own comment notes), so a budget
+/// line reading `task 30/400,000` cannot have come from the fallback.
+#[cfg(unix)]
+#[test]
+fn a_direct_providers_usage_is_counted_as_reported_not_estimated() {
+    let root = scratch_dir("budget-direct-root");
+    let rollout = root.join("rollout.jsonl");
+    let absent = root.join("no-such-glasshouse");
+
+    let (base_url, bodies) = start_fake_provider(vec![
+        assistant_reply_with_usage("```pane\nconst x = 1;\n```", 20, 10),
+        ending_reply_with_usage(20, 10),
+    ]);
+
+    let output = run_session(
+        &root,
+        &rollout,
+        "sess-budget-direct",
+        "count them",
+        &base_url,
+        Some(&absent),
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let bodies = bodies.lock().unwrap();
+    let result_block = last_user_text(&bodies[1]);
+    assert!(
+        result_block.contains("turn cap 8,192 · task 30/400,000 · cells 1/40"),
+        "the budget line must carry the response's own usage: {result_block}"
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("budget: 60/400000 tok"),
+        "two reported turns total 60 in the sidebar:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("counted: reported"),
+        "the sidebar must say the figure was reported, not estimated, when a \
+         direct provider's own usage is all there is:\n{stdout}"
+    );
+}
+
+/// The precedence half of the §6 addendum, which neither gateway test above
+/// can see because their replies carry no `usage`: when the gateway's own row
+/// and the response's `usage` both report a turn, the gateway's figures are
+/// the ones counted. The row says 100 + 20 per turn; the replies say 20 + 10.
+/// Written by the lead at integration, because a mutation preferring the
+/// response's `usage` would otherwise survive every test in this file.
+#[cfg(unix)]
+#[test]
+fn the_gateways_row_wins_over_the_responses_usage_when_both_report() {
+    let root = scratch_dir("budget-gateway-over-usage-root");
+    let rollout = root.join("rollout.jsonl");
+    let glasshouse = write_routing_cost(&root, "fake_routing_cost.sh", false);
+
+    let (base_url, bodies) = start_fake_provider(vec![
+        assistant_reply_with_usage("```pane\nconst x = 1;\n```", 20, 10),
+        ending_reply_with_usage(20, 10),
+    ]);
+
+    let output = run_session(
+        &root,
+        &rollout,
+        "sess-budget-gateway-over-usage",
+        "count them",
+        &base_url,
+        Some(&glasshouse),
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let bodies = bodies.lock().unwrap();
+    let result_block = last_user_text(&bodies[1]);
+    assert!(
+        result_block.contains("turn cap 8,192 · task 120/400,000 · cells 1/40"),
+        "the gateway's row (120) must win over the response's usage (30): {result_block}"
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("budget: 240/400000 tok"),
+        "two gateway-reported turns total 240, not the responses' 60:\n{stdout}"
     );
 }

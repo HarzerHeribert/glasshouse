@@ -384,7 +384,7 @@ fn process_input(
 struct TaskBudget {
     used: u64,
     cells_used: u64,
-    gateway: bool,
+    reported: bool,
     estimated: bool,
 }
 
@@ -393,36 +393,49 @@ impl TaskBudget {
         Self {
             used: 0,
             cells_used: 0,
-            gateway: false,
+            reported: false,
             estimated: false,
         }
     }
 
     /// Adds one turn's cost: the gateway's own usage row when it reported
-    /// one, `estimate` otherwise.
+    /// one, else the Messages response's own `usage`, else `estimate`.
     ///
-    /// **Which of the two was used is recorded, not averaged.** §6 reads the
+    /// **Which source was used is recorded, not averaged.** §6 reads a
     /// provider's figure "rather than estimated", and a total that quietly
     /// mixed a measurement with a heuristic would be a number the sidebar
-    /// could not honestly label.
-    fn add(&mut self, served: &ServedBy, estimate: u64) {
+    /// could not honestly label. The gateway's row is preferred over the
+    /// response's own `usage` when both are present, because it is what
+    /// `served_by` was built to make authoritative -- but the sidebar calls
+    /// either one `reported`: a reader deciding whether to trust this figure
+    /// only needs to know it did not come from `estimate_tokens`.
+    fn add(&mut self, served: &ServedBy, usage: Option<&wire::Usage>, estimate: u64) {
         match (served.input_tokens, served.output_tokens) {
-            (None, None) => {
-                self.used = self.used.saturating_add(estimate);
-                self.estimated = true;
-            }
+            (None, None) => match usage {
+                Some(usage) => {
+                    self.used = self
+                        .used
+                        .saturating_add(usage.input_tokens)
+                        .saturating_add(usage.output_tokens);
+                    self.reported = true;
+                }
+                None => {
+                    self.used = self.used.saturating_add(estimate);
+                    self.estimated = true;
+                }
+            },
             (input, output) => {
                 self.used = self
                     .used
                     .saturating_add(input.unwrap_or(0))
                     .saturating_add(output.unwrap_or(0));
-                self.gateway = true;
+                self.reported = true;
             }
         }
     }
 
     fn counted(&self) -> Option<Counted> {
-        match (self.gateway, self.estimated) {
+        match (self.reported, self.estimated) {
             (true, true) => Some(Counted::Mixed),
             (true, false) => Some(Counted::Gateway),
             (false, true) => Some(Counted::Estimated),
@@ -509,17 +522,17 @@ fn run_task(
 
     loop {
         let since = SystemTime::now();
-        let assistant = wire::send_turn(&transcript.conversation)
+        let turn = wire::send_turn(&transcript.conversation)
             .map_err(|e| format!("request failed: {e}"))?;
         let estimate = estimate_request_tokens(&transcript.conversation);
-        let assistant_text = message_text(&assistant);
-        transcript.conversation.messages.push(assistant);
+        let assistant_text = message_text(&turn.message);
+        transcript.conversation.messages.push(turn.message);
         rollout
             .record_turn(Role::Assistant, &assistant_text)
             .map_err(|e| format!("could not record the assistant turn: {e}"))?;
 
         let served = glasshouse::served_by(session.glasshouse, since);
-        budget.add(&served, estimate);
+        budget.add(&served, turn.usage.as_ref(), estimate);
 
         let ordinal = tui::cell_ordinal(&transcript.conversation, &transcript.notebook);
         let mut step = act_on(&assistant_text, &mut runtime, &mut budget, rollout)?;
