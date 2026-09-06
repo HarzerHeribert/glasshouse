@@ -202,10 +202,10 @@ to do, and the orchestrator should follow its own rule.
 Newest first, from `docs/process/handoff.md`. Read the top one in full;
 the rest are context you probably do not need.
 
+- Checkpoint — 2026-09-06 (03:10), wave 142 in flight: 1331 / 1413 (94.2%) — the credential strip's verifier finds the hooks, the user asks for a key-leak guard, the benchmark's meter is the ledger
 - Checkpoint — 2026-09-06 (02:35), waves 140–141: 1331 / 1413 (94.2%) — Phase 60 complete, the census and the user's rulings move the map, two dogfooding defects, the site in the user's words
 - Checkpoint — 2026-09-06 (01:30), wave 139: 1312 / 1398 (93.8%) — Phase 59 complete, the product site live, the trailing sweep green on all sixteen glasshouse cells
 - Checkpoint — 2026-09-06 (after midnight), wave 138: 1311 / 1398 (93.8%) — the routing-2 trim lands, the pane lane hands to a Fable successor lead, and mutate.sh tells a compile error from a kill
-- Checkpoint — 2026-09-05 (night), waves 118–137: 1311 / 1398 (93.8%) — pane 61B, 61C and 61D merged, Phase 37 complete, 2054 closed, three 61C ticks taken back off on the lane's own audit, the served-by producers, twenty-nine files trimmed, the first fully green sixteen-cell sweep
 
 ## Evidence ledger files
 
