@@ -64,6 +64,14 @@ jobs:
       # Both versions are declared once, in Cargo.toml -- the same read
       # ci-extended.yml and scripts/ci-local.sh use, so none of the three can
       # drift from each other.
+      # The Linux Secret Service backend links libdbus through libdbus-sys,
+      # whose build script needs the dev headers and pkg-config on the build
+      # host -- the same step ci-extended.yml runs; the first dry run
+      # (34011510206, 2026-09-06) failed both Linux builds without it.
+      - name: Linux build-host packages (libdbus for the Secret Service backend)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q libdbus-1-dev pkg-config
+
       - name: Resolve the declared toolchain
         id: tc
         shell: bash
