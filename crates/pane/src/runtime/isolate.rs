@@ -177,6 +177,11 @@ struct HeapWatch {
     /// [`Runtime::heap_limit_raises`] answers with — the number that says
     /// how far the ceiling had to move.
     raises: AtomicU32,
+    /// What [`Runtime::observe_heap_ceiling`] last saw the isolate holding.
+    /// The callback cannot read the heap itself — it is handed a `*mut
+    /// c_void` and two limits — so the runtime leaves the number here for
+    /// [`heap_grant`] to floor its bound with.
+    live_floor: AtomicUsize,
 }
 
 /// The smallest a raise ever grants. Never zero: a grant of nothing is the
@@ -186,33 +191,54 @@ const HEAP_RAISE_FLOOR_BYTES: usize = 8 * 1024 * 1024;
 /// How far one cell may push the ceiling out, as a multiple of the
 /// configured one. Past it the grant drops to [`HEAP_RAISE_FLOOR_BYTES`],
 /// which still is not `current_heap_limit` and so still is not an abort.
+///
+/// **It is a bound on growth, never below what the isolate already holds.**
+/// V8 satisfies a large-object allocation without consulting
+/// [`near_heap_limit`] at all, so a cell can leave a live heap many times
+/// this multiple behind it with `raises = 0`; a later ordinary allocation
+/// then asks for a raise the bound cannot give, and V8 answers a bound it
+/// cannot reach with `FatalProcessOutOfMemory` — the process, not the cell.
+/// Refusing there reclaims nothing, because the memory is already held. So
+/// [`heap_grant`] floors this bound at twice
+/// [`HeapWatch::live_floor`], the heap [`Runtime::observe_heap_ceiling`] last
+/// measured. Measured on this host: a 16 MiB ceiling and a 240 MB array
+/// aborted the process on the next cell's 4 MB allocation with the bound at
+/// 16× alone, and answers `RuntimeOutOfMemory` with the floor.
 const HEAP_RAISE_TOTAL_MULTIPLE: usize = 16;
 
-/// What one raise adds: the limit the isolate has now, so the ceiling
-/// doubles, until [`HEAP_RAISE_TOTAL_MULTIPLE`] is reached.
+/// What one raise adds: **all** of what is left of
+/// [`HEAP_RAISE_TOTAL_MULTIPLE`], so the bound is reached on the first
+/// callback rather than approached over several.
 ///
-/// **Doubling, and measured rather than chosen.** V8 invokes the
-/// near-heap-limit callback only while it is still trying to satisfy an
-/// allocation, and it gives up after a handful of last-resort collections —
-/// so the number of raises a cell gets is small and a *shrinking* grant is
-/// the wrong shape. Measured on this host with
-/// `const big = new Array(100000000).fill('y')` at the shipped 256 MiB
-/// ceiling: grants of `initial >> n` were called four times, reached 699 MB,
-/// and V8 aborted the process anyway (the array needs about 1.9 GB while it
-/// converts its elements); doubling was called three times, reached 1,946 MB
-/// and the cell finished. What makes the ceiling a ceiling is not the size
-/// of the grant — V8 has no non-fatal way to refuse one — but
-/// [`Runtime::finish`], which fails any cell that crossed it, and
-/// [`Runtime::restore_heap_limit`], which puts the limit back before the
-/// next cell.
-fn heap_grant(current_heap_limit: usize, initial_heap_limit: usize) -> usize {
-    let ceiling = initial_heap_limit.saturating_mul(HEAP_RAISE_TOTAL_MULTIPLE);
+/// **The bound has to be reachable in one callback, because V8 offers about
+/// two.** V8 invokes the near-heap-limit callback only while it is still
+/// trying to satisfy an allocation and gives up after a handful of
+/// last-resort collections, so a grant that merely *approaches* the bound
+/// never arrives. Measured on this host: a cell that left a 152.8 MB live
+/// heap behind a 32 MiB ceiling (`new Array(20000000).fill('y')`, which V8
+/// satisfies from large-object space without ever calling this back) was
+/// answered on the *next* cell's ordinary 4 MB allocation with two doubling
+/// grants — 32 → 64 → 128 MiB, still under the live heap — and then
+/// `Fatal JavaScript out of memory: Reached heap limit`, which is the
+/// process, not the cell. Granting the remainder at once takes the limit to
+/// 512 MiB on that first callback and the cell is answered with a value.
+///
+/// It does not weaken the ceiling and it does not raise the peak. The grant
+/// was never what enforced the ceiling — [`Runtime::finish`] fails any cell
+/// that crossed it, whether [`near_heap_limit`] reported the crossing or
+/// [`Runtime::observe_heap_ceiling`] observed it, and
+/// [`Runtime::restore_heap_limit`] puts the limit back before the next cell.
+/// And the callback terminates the cell on the way in, so what a raise buys
+/// is room to unwind; [`HEAP_RAISE_TOTAL_MULTIPLE`] is the same bound on how
+/// far the limit can travel either way.
+fn heap_grant(current_heap_limit: usize, initial_heap_limit: usize, live_floor: usize) -> usize {
+    let ceiling = initial_heap_limit
+        .saturating_mul(HEAP_RAISE_TOTAL_MULTIPLE)
+        .max(live_floor.saturating_mul(2));
     if current_heap_limit >= ceiling {
         return HEAP_RAISE_FLOOR_BYTES;
     }
-    current_heap_limit
-        .min(ceiling - current_heap_limit)
-        .max(HEAP_RAISE_FLOOR_BYTES)
+    (ceiling - current_heap_limit).max(HEAP_RAISE_FLOOR_BYTES)
 }
 
 /// V8 hands this callback a `*mut c_void` and nothing else, so the isolate it
@@ -245,7 +271,12 @@ unsafe extern "C" fn near_heap_limit(
     }
     watch.raises_this_cell.fetch_add(1, Ordering::SeqCst);
     watch.raises.fetch_add(1, Ordering::SeqCst);
-    current_heap_limit.saturating_add(heap_grant(current_heap_limit, initial_heap_limit))
+    let live_floor = watch.live_floor.load(Ordering::SeqCst);
+    current_heap_limit.saturating_add(heap_grant(
+        current_heap_limit,
+        initial_heap_limit,
+        live_floor,
+    ))
 }
 
 /// Every `ArrayBuffer` backing store in this isolate, counted and bounded.
@@ -270,8 +301,13 @@ struct ExternalMemory {
     /// The ceiling, which is the isolate's configured heap ceiling: one
     /// number for the model to reason about rather than two.
     limit: usize,
-    /// Cleared at the start of every cell; set by an allocation this refused.
+    /// Cleared at the start of every cell; set by a refusal that was
+    /// **final** — see [`ExternalMemory::settle`].
     refused: AtomicBool,
+    /// The size of the claim this refused most recently and has not yet seen
+    /// satisfied, or zero. It is how a refusal V8 recovers from is told
+    /// apart from one it does not; see [`ExternalMemory::settle`].
+    pending: AtomicUsize,
 }
 
 /// V8's allocator interface carries no alignment, so a backing store is
@@ -287,23 +323,66 @@ impl ExternalMemory {
         std::alloc::Layout::from_size_align(len.max(1), EXTERNAL_ALIGN).ok()
     }
 
-    /// Claims `len` against the ceiling, or refuses and says so.
+    /// Claims `len` against the ceiling, or refuses and records the size it
+    /// refused.
     fn claim(&self, len: usize) -> bool {
         let mut live = self.live.load(Ordering::Acquire);
         loop {
             let next = live.saturating_add(len);
             if next > self.limit {
-                self.refused.store(true, Ordering::SeqCst);
+                self.pending.store(len.max(1), Ordering::SeqCst);
                 return false;
             }
             match self
                 .live
                 .compare_exchange_weak(live, next, Ordering::AcqRel, Ordering::Acquire)
             {
-                Ok(_) => return true,
+                Ok(_) => {
+                    self.settle(len);
+                    return true;
+                }
                 Err(actual) => live = actual,
             }
         }
+    }
+
+    /// **A refusal V8 recovers from is a request for a collection, not a
+    /// refusal.** [`ExternalMemory::release`] runs only when V8 frees a
+    /// backing store, which needs a garbage collection, and V8 asks for one
+    /// itself: an allocator that answers null makes `Heap::
+    /// AllocateExternalBackingStore` collect and ask again *for the same
+    /// size*, up to three more times, before it gives up and throws. Latching
+    /// on the first null therefore refused a program that never held more
+    /// than a megabyte at once — measured: a hundred 1 MiB `ArrayBuffer`s
+    /// allocated and dropped in one cell, under a 32 MiB ceiling, answered
+    /// `RuntimeOutOfMemory`, and an `ArrayBuffer` was effectively single-use
+    /// up to the ceiling for the life of a task.
+    ///
+    /// So a claim that succeeds settles the refusal before it. The *same*
+    /// size succeeding is V8's retry landing, and there was no refusal to
+    /// report. A **different** size succeeding means the refused claim was
+    /// never satisfied — the program went on to something smaller, which is
+    /// exactly the `try { new ArrayBuffer(1 << 30) } catch {}` shape §2 does
+    /// not let a cell walk away from — so that refusal is final and is
+    /// latched here.
+    fn settle(&self, len: usize) {
+        let pending = self.pending.swap(0, Ordering::SeqCst);
+        if pending != 0 && pending != len.max(1) {
+            self.refused.store(true, Ordering::SeqCst);
+        }
+    }
+
+    /// Whether this cell crossed the external ceiling: a refusal already
+    /// final, or one still outstanding because nothing satisfied it.
+    fn hit(&self) -> bool {
+        self.refused.load(Ordering::SeqCst) || self.pending.load(Ordering::SeqCst) != 0
+    }
+
+    /// A refusal the previous cell was already answered with is not this
+    /// cell's, and neither is a claim V8 abandoned when the cell ended.
+    fn reset(&self) {
+        self.refused.store(false, Ordering::SeqCst);
+        self.pending.store(0, Ordering::SeqCst);
     }
 
     fn release(&self, len: usize) {
@@ -390,11 +469,17 @@ pub struct Runtime {
     /// one back.
     heap_limit_bytes: usize,
     wall_clock_limit: Duration,
+    /// Whether the isolate's own heap was over [`Runtime::heap_limit_bytes`]
+    /// when the last cell ended, so that §2's ceiling fails **the cell that
+    /// crosses it** and not every cell after it — see
+    /// [`Runtime::observe_heap_ceiling`].
+    heap_over_ceiling: bool,
     /// The cell that ran past [`HARD_DEADLINE_MULTIPLE`] × the wall-clock
     /// limit while being terminated every [`TERMINATE_RETRY_INTERVAL`], if
-    /// one did. Once it is set nothing in this type enters the isolate
-    /// again — see [`Runtime::poisoned`].
-    poisoned_by: Option<u64>,
+    /// one did, and which of the two things that run model code did it. Once
+    /// it is set nothing in this type enters the isolate again — see
+    /// [`Runtime::poisoned`].
+    poisoned_by: Option<Poisoned>,
 }
 
 impl Runtime {
@@ -450,6 +535,7 @@ impl Runtime {
             live: AtomicUsize::new(0),
             limit: heap_limit_bytes,
             refused: AtomicBool::new(false),
+            pending: AtomicUsize::new(0),
         });
         // SAFETY: the handle is an `Arc` reference this runtime keeps a
         // second one of, and `external_drop` gives exactly that reference
@@ -485,6 +571,7 @@ impl Runtime {
             guard,
             raises_this_cell: AtomicU32::new(0),
             raises: AtomicU32::new(0),
+            live_floor: AtomicUsize::new(0),
         });
         isolate.add_near_heap_limit_callback(
             near_heap_limit,
@@ -515,6 +602,7 @@ impl Runtime {
             external,
             heap_limit_bytes,
             wall_clock_limit,
+            heap_over_ceiling: false,
             poisoned_by: None,
         }
     }
@@ -729,6 +817,7 @@ impl Runtime {
                 started,
                 Ending::Threw(poisoned_error(by)),
                 Stopped::none(),
+                &EpilogueBudget::unwatched(),
             );
         }
         // A hit the previous cell did not consume — one raised while its own
@@ -739,15 +828,20 @@ impl Runtime {
         // whole task running against a ceiling sixteen times the one §7
         // names.
         self.restore_heap_limit();
-        // A refusal the previous cell was already answered with is not this
-        // cell's.
-        self.external.refused.store(false, Ordering::SeqCst);
+        self.external.reset();
 
         let compiled = match cell::compile(source, cell) {
             Ok(compiled) => compiled,
             Err(error) => {
                 let value = compile_error_value(&error);
-                return self.finish(cell, source, started, Ending::Threw(value), Stopped::none());
+                return self.finish(
+                    cell,
+                    source,
+                    started,
+                    Ending::Threw(value),
+                    Stopped::none(),
+                    &EpilogueBudget::unwatched(),
+                );
             }
         };
 
@@ -760,10 +854,11 @@ impl Runtime {
         // a preview can itself raise the heap callback, and a hit raised by
         // the runtime's own bookkeeping is not why the cell stopped.
         let disarmed = watchdog.disarm();
-        let stopped = Stopped {
+        let mut stopped = Stopped {
             timed_out: disarmed.fired,
             heap_hit: self.heap.guard.take_hit(),
-            external_hit: self.external.refused.load(Ordering::SeqCst),
+            external_hit: self.external.hit(),
+            heap_crossed: false,
             yielded: self.trace().take_yield(),
         };
         // Unconditionally, and it is not tidiness. Until a termination is
@@ -780,13 +875,18 @@ impl Runtime {
         // model's own accessors, so it gets a watchdog of its own — see
         // [`EPILOGUE_WALL_CLOCK_LIMIT`]. `finish` is inside it because
         // `out_of_memory` sizes every live handle, and sizing a `Proxy` runs
-        // its `ownKeys` trap.
+        // its `ownKeys` trap. The [`EpilogueBudget`] is the other half of
+        // that watchdog and the reason the deadline is one the *epilogue*
+        // has rather than one every live handle has: without it the loops
+        // below enter V8 once per name and pay `TERMINATE_RETRY_INTERVAL`
+        // again for each, so thirty handles cost thirty times what one does.
         let epilogue = Watchdog::arm(
             self.heap.guard.isolate.get().cloned(),
             EPILOGUE_WALL_CLOCK_LIMIT,
         );
+        let budget = EpilogueBudget::of(&epilogue);
         self.forget_freed();
-        self.refresh_previews();
+        self.refresh_previews(&budget);
         // Once more, because the refresh above re-reads the model's own
         // values and a getter is the model's own code: one that calls
         // `yieldNow` or fills the heap there requests a termination after the
@@ -794,20 +894,36 @@ impl Runtime {
         // cell's first statement. The refresh already saw every effect of it
         // (the read answered with nothing); this is only the flag.
         self.isolate.cancel_terminate_execution();
+        // After the previews and before the answer: the previews are the
+        // model's own getters, so an allocation one of them makes belongs to
+        // the cell whose table was being read, and reading the heap costs no
+        // allocation and runs no code that a termination could be pending
+        // against.
+        stopped.heap_crossed = self.observe_heap_ceiling();
         // The cell did stop, or this line would not be running — but it took
         // more than the hard deadline of terminations to do it, so this is
         // the last cell that runs in this isolate. Reported ahead of the heap
         // hit: a ceiling that fired is recoverable and this is not.
         let outcome = if disarmed.gave_up {
-            self.poisoned_by = Some(cell);
+            self.poisoned_by = Some(Poisoned {
+                cell,
+                cause: PoisonCause::Cell,
+            });
             let error = gave_up(
                 started.elapsed(),
                 self.wall_clock_limit,
                 self.wall_clock_limit.saturating_mul(HARD_DEADLINE_MULTIPLE),
             );
-            self.finish(cell, source, started, Ending::Threw(error), Stopped::none())
+            self.finish(
+                cell,
+                source,
+                started,
+                Ending::Threw(error),
+                Stopped::none(),
+                &budget,
+            )
         } else {
-            self.finish(cell, source, started, ending, stopped)
+            self.finish(cell, source, started, ending, stopped, &budget)
         };
         let epilogue = epilogue.disarm();
         // The epilogue's watchdog re-issues its termination until it is
@@ -820,7 +936,10 @@ impl Runtime {
         // the model's program did finish — and no later one enters the
         // isolate.
         if epilogue.gave_up {
-            self.poisoned_by = Some(cell);
+            self.poisoned_by = Some(Poisoned {
+                cell,
+                cause: PoisonCause::Epilogue,
+            });
         }
         outcome
     }
@@ -1029,7 +1148,17 @@ impl Runtime {
     /// table; a live-but-uncaptured one goes straight to the table through
     /// [`handles::HandleTable::refresh`], which is the only write that does
     /// not reorder it or claim the model redeclared the name.
-    fn refresh_previews(&mut self) {
+    ///
+    /// **Bounded by one [`EpilogueBudget`], not by one per name.** Every name
+    /// is a fresh entry into V8, so a read the epilogue watchdog stopped
+    /// costs about one [`TERMINATE_RETRY_INTERVAL`] and the next name starts
+    /// the clock again — against a fixed budget that is linear in the number
+    /// of live handles. Measured before this loop polled the budget: thirty
+    /// handles each carrying an ordinary 100 ms lazy accessor, at the shipped
+    /// [`DEFAULT_CELL_WALL_CLOCK_LIMIT`], ran the epilogue past its hard
+    /// deadline, poisoned the isolate and ended the task — for a program with
+    /// no loop in it, reported to the model as `cell 1 yielded in 7881 ms`.
+    fn refresh_previews(&mut self, budget: &EpilogueBudget) {
         let mut names: Vec<String> = self
             .state
             .table
@@ -1068,6 +1197,15 @@ impl Runtime {
             v8::tc_scope!(let scope, context_scope);
             let global = context.global(scope);
             for name in names {
+                // The epilogue's budget is spent by the epilogue, not by
+                // each name in it: a read the watchdog stopped costs one
+                // `TERMINATE_RETRY_INTERVAL`, and entering V8 for the next
+                // name pays it again. A name not reached keeps the preview
+                // it had, which is the same degradation a stopped read
+                // already produces.
+                if budget.spent() {
+                    break;
+                }
                 let Some(key) = v8::String::new(scope, &name) else {
                     continue;
                 };
@@ -1101,6 +1239,37 @@ impl Runtime {
         }
     }
 
+    /// Whether **this** cell took the isolate's heap over its configured
+    /// ceiling, read off the isolate rather than off the callback.
+    ///
+    /// [`near_heap_limit`] answers a crossing V8 *reported*, and V8 does not
+    /// always report one: an allocation V8 satisfies out of large-object
+    /// space never calls the callback back at all. Measured on this host,
+    /// `const big = new Array(12000000).fill('y')` under a 32 MiB ceiling
+    /// yielded in 11 ms with `raises = 0` and a 96 MB heap — an ordinary
+    /// success, with the oversized handle live and nothing said — and at
+    /// 20 million elements the *next* ordinary allocation, two cells later,
+    /// killed the process. `used_heap_size` is on the isolate's own thread,
+    /// allocates nothing and runs no model code, so it is an observation the
+    /// runtime can always make where the callback was silent.
+    ///
+    /// **Latched, because §2 fails the cell that *crosses* the ceiling.**
+    /// Nothing is freed when a cell fails, so the heap stays over afterwards;
+    /// reporting it again on every later cell would answer the model's own
+    /// `free("big")` with the error it is answering, and there would be no
+    /// way out of the task. The latch clears itself when the heap is next
+    /// observed under the ceiling, so a second crossing is a second answer.
+    fn observe_heap_ceiling(&mut self) -> bool {
+        let used = self.isolate.get_heap_statistics().used_heap_size();
+        // What the isolate is holding is also what [`heap_grant`] may not
+        // refuse to accommodate; see [`HEAP_RAISE_TOTAL_MULTIPLE`].
+        self.heap.live_floor.store(used, Ordering::SeqCst);
+        let over = used >= self.heap_limit_bytes;
+        let crossed = over && !self.heap_over_ceiling;
+        self.heap_over_ceiling = over;
+        crossed
+    }
+
     /// Turns a cell's ending into the turn the session loop reads.
     fn finish(
         &mut self,
@@ -1109,6 +1278,7 @@ impl Runtime {
         started: Instant,
         ending: Ending,
         stopped: Stopped,
+        budget: &EpilogueBudget,
     ) -> CellOutcome {
         let captures = std::mem::take(&mut self.state.current.borrow_mut().captures);
         for capture in captures {
@@ -1128,7 +1298,9 @@ impl Runtime {
             // says a cell that crosses the ceiling fails, and an external
             // allocation the ceiling refused is one the cell may have caught
             // as an ordinary `RangeError` and gone on from.
-            _ if stopped.external_hit => Ending::Threw(self.out_of_memory(EXTERNAL_CEILING)),
+            _ if stopped.external_hit => {
+                Ending::Threw(self.out_of_memory(EXTERNAL_CEILING, budget))
+            }
             // Likewise whatever the cell did next, and this is §2 read
             // strictly: *"when the isolate's heap crosses its configured
             // ceiling the cell fails with `RuntimeOutOfMemory`"*. Only a
@@ -1137,7 +1309,12 @@ impl Runtime {
             // the raise exists to let it do — was an ordinary yield with the
             // oversized handle live and nothing said, having moved the
             // ceiling by up to `HEAP_RAISE_TOTAL_MULTIPLE` on the way.
-            _ if stopped.heap_hit => Ending::Threw(self.out_of_memory(HEAP_CEILING)),
+            // `heap_crossed` beside `heap_hit` because the two answer
+            // different questions: the flag is a crossing the callback
+            // reported, and V8 reports only some of them.
+            _ if stopped.heap_hit || stopped.heap_crossed => {
+                Ending::Threw(self.out_of_memory(HEAP_CEILING, budget))
+            }
             Ending::Terminated if stopped.timed_out => {
                 Ending::Threw(timed_out(started.elapsed(), self.wall_clock_limit))
             }
@@ -1235,7 +1412,7 @@ impl Runtime {
     /// runs after `run_cell`'s unconditional `cancel_terminate_execution`,
     /// so V8 answers rather than bailing. A name the scope no longer holds
     /// keeps the size the table recorded for it.
-    fn largest_live_now(&mut self, n: usize) -> Vec<(String, u64)> {
+    fn largest_live_now(&mut self, n: usize, budget: &EpilogueBudget) -> Vec<(String, u64)> {
         let mut sized: Vec<(String, u64)> = {
             let table = self.state.table.borrow();
             table
@@ -1258,6 +1435,12 @@ impl Runtime {
             v8::tc_scope!(let scope, context_scope);
             let global = context.global(scope);
             for (name, size) in &mut sized {
+                // The same budget [`Runtime::refresh_previews`] spends, and
+                // for the same reason: a name not reached keeps the size the
+                // table recorded for it.
+                if budget.spent() {
+                    break;
+                }
                 let Some(key) = v8::String::new(scope, name) else {
                     continue;
                 };
@@ -1279,8 +1462,8 @@ impl Runtime {
     /// the *model* can choose what to free. Nothing is evicted here — §2 is
     /// explicit that a handle vanishing under a program that still names it
     /// is the one failure that would make the channel untrustworthy.
-    fn out_of_memory(&mut self, cause: &str) -> ErrorValue {
-        let largest = self.largest_live_now(5);
+    fn out_of_memory(&mut self, cause: &str, budget: &EpilogueBudget) -> ErrorValue {
+        let largest = self.largest_live_now(5, budget);
         let listed = if largest.is_empty() {
             "no live handles".to_string()
         } else {
@@ -1334,6 +1517,10 @@ enum Ending {
 #[derive(Debug, Clone)]
 struct Stopped {
     heap_hit: bool,
+    /// The isolate's own heap was over the configured ceiling when the cell
+    /// ended, whether or not [`near_heap_limit`] said so — see
+    /// [`Runtime::observe_heap_ceiling`].
+    heap_crossed: bool,
     /// The `ArrayBuffer` allocator refused an allocation that would have
     /// crossed the ceiling. Read rather than taken: it is cleared at the
     /// start of every cell, and unlike the heap hit it cannot be raised by
@@ -1349,6 +1536,7 @@ impl Stopped {
     fn none() -> Self {
         Self {
             heap_hit: false,
+            heap_crossed: false,
             external_hit: false,
             timed_out: false,
             yielded: None,
@@ -1673,6 +1861,51 @@ fn bounded_utf8(
     (String::from_utf8_lossy(&buffer).into_owned(), false)
 }
 
+/// The epilogue's whole budget, shared with the loops that spend it.
+///
+/// **The invariant: the epilogue costs one budget, not one budget per live
+/// handle.** [`Runtime::refresh_previews`] and [`Runtime::largest_live_now`]
+/// enter V8 once per name, and a read the epilogue watchdog stopped costs
+/// about one [`TERMINATE_RETRY_INTERVAL`] before the next name starts the
+/// clock again — so without something the loops poll, the epilogue's cost is
+/// linear in the number of handles while [`EPILOGUE_WALL_CLOCK_LIMIT`] is a
+/// constant, and enough handles run it past the hard deadline that poisons
+/// the isolate. Both halves are here because they fail differently: the flag
+/// is the watchdog's own verdict and needs no clock of this thread's, and
+/// the deadline holds even if that thread has not been scheduled yet.
+#[derive(Debug, Clone)]
+struct EpilogueBudget {
+    fired: Option<Arc<AtomicBool>>,
+    deadline: Instant,
+}
+
+impl EpilogueBudget {
+    /// The budget of an epilogue watched by `watchdog`, starting now.
+    fn of(watchdog: &Watchdog) -> Self {
+        Self {
+            fired: Some(Arc::clone(&watchdog.fired)),
+            deadline: Instant::now() + EPILOGUE_WALL_CLOCK_LIMIT,
+        }
+    }
+
+    /// A cell answered without an epilogue at all — one that did not
+    /// compile, or one a poisoned runtime refused before touching V8.
+    fn unwatched() -> Self {
+        Self {
+            fired: None,
+            deadline: Instant::now() + EPILOGUE_WALL_CLOCK_LIMIT,
+        }
+    }
+
+    /// Whether the epilogue has spent what it was given.
+    fn spent(&self) -> bool {
+        self.fired
+            .as_ref()
+            .is_some_and(|fired| fired.load(Ordering::SeqCst))
+            || Instant::now() >= self.deadline
+    }
+}
+
 /// What a [`Watchdog`] did while its cell ran.
 #[derive(Debug, Clone, Copy)]
 struct Disarmed {
@@ -1844,16 +2077,51 @@ fn gave_up(elapsed: Duration, limit: Duration, hard: Duration) -> ErrorValue {
     }
 }
 
+/// Which cell cost the isolate its trust, and which of the two things that
+/// run model code was still running when the hard deadline passed.
+///
+/// **The distinction is the model's to know.** A cell that ignores every
+/// termination is the model's own program; an epilogue that does is pane
+/// re-reading the handle table, which runs the getters and proxy traps the
+/// program defined but is pane's own loop and pane's own deadline. Telling
+/// the model `cell N did not stop` for the second case says something untrue
+/// about its program — measured through the shipped binary, on a cell that
+/// had already been reported to it as `cell 1 yielded in 7895 ms`.
+#[derive(Debug, Clone, Copy)]
+struct Poisoned {
+    cell: u64,
+    cause: PoisonCause,
+}
+
+/// See [`Poisoned`].
+#[derive(Debug, Clone, Copy)]
+enum PoisonCause {
+    /// The cell's own program went on running past the hard deadline.
+    Cell,
+    /// The cell finished; reading its handles afterwards did not.
+    Epilogue,
+}
+
 /// What every cell after [`gave_up`] is answered with, naming the cell that
-/// cost the isolate its trust. Built without touching V8, which is the whole
-/// promise of [`Runtime::poisoned`].
-fn poisoned_error(by: u64) -> ErrorValue {
+/// cost the isolate its trust and what was running at the time. Built
+/// without touching V8, which is the whole promise of [`Runtime::poisoned`].
+fn poisoned_error(by: Poisoned) -> ErrorValue {
+    let cell = by.cell;
+    let message = match by.cause {
+        PoisonCause::Cell => format!(
+            "cell {cell} did not stop when pane terminated it, so this isolate is no longer \
+             trusted and no later cell runs in it; the task is over"
+        ),
+        PoisonCause::Epilogue => format!(
+            "cell {cell} finished, but reading its handles afterwards did not stop when pane \
+             terminated it — a handle is read by running the getters and proxy traps the program \
+             defined — so this isolate is no longer trusted and no later cell runs in it; the \
+             task is over"
+        ),
+    };
     ErrorValue {
         class: "RuntimePoisoned".to_string(),
-        message: format!(
-            "cell {by} did not stop when pane terminated it, so this isolate is no longer trusted \
-             and no later cell runs in it; the task is over"
-        ),
+        message,
         line: None,
         column: None,
         stack: Vec::new(),
@@ -1973,6 +2241,8 @@ fn thrown_error(scope: &mut v8::PinScope, exception: v8::Local<v8::Value>) -> Er
 /// (`sandbox-grants.md` §1.5).
 #[cfg(test)]
 mod tests {
+    use super::{PoisonCause, Poisoned, poisoned_error};
+
     const ISOLATE_SOURCE: &str = include_str!("isolate.rs");
     const BINDINGS_SOURCE: &str = include_str!("bindings.rs");
     const STATE_SOURCE: &str = include_str!("state.rs");
@@ -2006,6 +2276,48 @@ mod tests {
     /// A scan that scanned nothing would pass every assertion below, so each
     /// file's production half is checked to still contain the item that
     /// makes it that file.
+    /// The epilogue that could not be stopped is not the cell that could
+    /// not be stopped, and the model is not told it was.
+    ///
+    /// `a0186fa` had one message for both, so a task ended by pane's own
+    /// handle-table read — thirty ordinary lazy accessors, a program with no
+    /// loop in it, reported to the model one turn earlier as `cell 1 yielded
+    /// in 7895 ms` — was explained to the model as `cell 1 did not stop when
+    /// pane terminated it`. That is a false statement about the model's own
+    /// program, and it is the half of Blocker 1 that a bounded budget does
+    /// not by itself repair.
+    #[test]
+    fn the_epilogue_and_the_cell_are_not_the_same_poisoning() {
+        let by_cell = poisoned_error(Poisoned {
+            cell: 1,
+            cause: PoisonCause::Cell,
+        });
+        let by_epilogue = poisoned_error(Poisoned {
+            cell: 1,
+            cause: PoisonCause::Epilogue,
+        });
+        assert_eq!(by_cell.class, by_epilogue.class);
+        assert_ne!(
+            by_cell.message, by_epilogue.message,
+            "the two are told apart or the model is told something untrue"
+        );
+        assert!(
+            by_cell.message.contains("cell 1 did not stop"),
+            "{}",
+            by_cell.message
+        );
+        assert!(
+            !by_epilogue.message.contains("cell 1 did not stop"),
+            "the cell did stop; what did not was the read of its handles: {}",
+            by_epilogue.message
+        );
+        assert!(
+            by_epilogue.message.contains("reading its handles"),
+            "{}",
+            by_epilogue.message
+        );
+    }
+
     #[test]
     fn the_scan_has_something_to_scan() {
         for (name, source) in SOURCES {
