@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant, SystemTime};
 
 use super::meter::Meter;
@@ -31,6 +32,25 @@ use super::model::{Attempt, Harness, Outcome, Task, Tokens};
 /// "call this serially" cannot stop a future refactor from parallelizing the
 /// loop in `cli::run`; this lock can.
 static ATTEMPT_LOCK: Mutex<()> = Mutex::new(());
+
+/// Process-wide, monotonically increasing, starting at 1: the `<n>` in an
+/// attempt worktree's basename (`<task>-<harness>-<repeat>-<pid>-<n>`).
+///
+/// **Why this exists:** two `pane ruler` processes on one machine can cut
+/// attempt worktrees for the same task, harness and repeat at the same
+/// moment -- two `cargo test -p pane` gates in two worktrees, or two
+/// rulers -- and git keys `.git/worktrees/<basename>` by that basename
+/// alone, so a shared basename raced `commondir` reads/writes between the
+/// two processes (`ruler_run::the_attempt_starts_at_the_parent_commit` red
+/// twice in one week). `std::process::id()` alone is not enough: pids are
+/// small and OS-recycled, so two rulers started far enough apart can still
+/// collide on both task/harness/repeat *and* pid. The counter, unique
+/// within this process, closes that gap.
+static ATTEMPT_DIR_ORDINAL: AtomicU64 = AtomicU64::new(0);
+
+fn next_attempt_dir_ordinal() -> u64 {
+    ATTEMPT_DIR_ORDINAL.fetch_add(1, Ordering::Relaxed) + 1
+}
 
 /// One harness's executable and the argv template it is launched with.
 /// `"{root}"` and `"{statement}"` are substituted by [`run_attempt_in`] when
@@ -138,9 +158,14 @@ pub fn run_one(task: &Task, harness: &Harness, attempt_no: u32, opts: &RunOpts) 
         return errored();
     }
 
-    let dir = opts
-        .scratch
-        .join(format!("{}-{}-{}", task.id, harness.as_str(), attempt_no));
+    let dir = opts.scratch.join(format!(
+        "{}-{}-{}-{}-{}",
+        task.id,
+        harness.as_str(),
+        attempt_no,
+        std::process::id(),
+        next_attempt_dir_ordinal(),
+    ));
     if dir.exists() {
         return errored();
     }
