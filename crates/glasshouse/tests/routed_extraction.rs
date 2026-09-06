@@ -639,7 +639,7 @@ fn no_adequate_resource_fails_in_words_and_dials_nothing() {
     );
     assert!(
         ran.stdout
-            .contains("no provider is configured for Glasshouse's own support work"),
+            .contains("no configured provider names a model for Glasshouse's own support work"),
         "the refusal must say why, not merely that: {}",
         ran.stdout
     );

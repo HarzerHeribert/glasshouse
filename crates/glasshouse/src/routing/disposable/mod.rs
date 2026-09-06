@@ -164,9 +164,11 @@ pub enum NoResource {
 impl std::fmt::Display for NoResource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::NothingConfigured => {
-                f.write_str("no provider is configured for Glasshouse's own support work")
-            }
+            Self::NothingConfigured => f.write_str(
+                "no configured provider names a model for Glasshouse's own support work — add \
+                 `free_models` or `metered_models` to a `[providers.<name>]` entry, and an \
+                 `[entitlements.<name>]` that may charge it",
+            ),
             Self::PinnedResourceUnavailable { provider, model } => write!(
                 f,
                 "the pinned free resource `{model}` on `{provider}` cannot serve right now, and a \

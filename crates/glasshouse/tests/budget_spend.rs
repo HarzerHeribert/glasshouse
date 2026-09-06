@@ -415,8 +415,8 @@ fn a_support_work_dispatch_finds_nothing_configured_once_its_only_provider_is_ex
 
     assert!(
         said.contains(
-            "would select    nothing — no provider is configured for Glasshouse's own support \
-             work"
+            "would select    nothing — no configured provider names a model for Glasshouse's \
+             own support work"
         ),
         "the exhausted provider's only candidate must be excluded before support work is \
          chosen, the same way a disabled provider already is:\n{said}"
