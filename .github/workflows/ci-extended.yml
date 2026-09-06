@@ -226,6 +226,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Resolve the declared toolchain
         id: tc
         shell: bash
@@ -242,6 +244,18 @@ jobs:
         run: python3 scripts/progress.py --check
       - name: File-size ratchet
         run: python3 scripts/check-file-sizes.py
+      - name: Secrets
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BEFORE_SHA: ${{ github.event.before }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          zero="0000000000000000000000000000000000000000"
+          if [ "$EVENT_NAME" = "push" ] && [ -n "$BEFORE_SHA" ] && [ "$BEFORE_SHA" != "$zero" ]; then
+            python3 scripts/check-secrets.py --range "$BEFORE_SHA..$HEAD_SHA"
+          else
+            python3 scripts/check-secrets.py --tree
+          fi
       - name: Doc boundary
         run: scripts/check-doc-boundary.sh
       - name: Evidence coverage

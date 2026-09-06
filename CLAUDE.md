@@ -584,7 +584,7 @@ batch 51's eight closures) · `pipeline.sh` (nags when the board runs dry) ·
 **Verification:** `ci-local.sh` (`--scoped` for the fast tier; `--macos
 --linux --windows-vm` for legs; **any flag suppresses the macOS+Linux
 default**) · `blast-radius.sh` · `mutate.sh` · `msrv-check.sh` ·
-`check-doc-boundary.sh` · `check-evidence-coverage.py` · `lib/accel.sh`
+`check-doc-boundary.sh` · `check-evidence-coverage.py` · **`check-secrets.py`** (the key-leak guard, user instruction 2026-09-06: your local key values by exact match and never printed, provider key shapes with an entropy bar, a fingerprint allowlist `check-secrets-allow.txt` for planted fixtures, the `glasshouse:not-a-secret` marker; it runs as `scripts/git-hooks/{pre-commit,pre-push}` through `core.hooksPath` — `install-git-hooks.sh` sets it, shared by every worktree — and in both lint lanes; `--fingerprint <path>:<line>` prints the allowlist entry for a new fixture) · `lib/accel.sh`
 (sourced by both gates: sccache when installed, silent when not)
 
 **The LOCAL gate is the BLOCKING gate; GitHub is the trailing sweep — since

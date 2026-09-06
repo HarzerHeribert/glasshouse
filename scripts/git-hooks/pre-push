@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+# Refuse a push whose new commits carry a credential in an added line.
+#
+# git feeds "<local ref> <local sha> <remote ref> <remote sha>" lines on
+# stdin, one per ref being pushed. scripts/check-secrets.py --range does the
+# scanning; this hook only turns each line into the right range.
+set -uo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+zero="0000000000000000000000000000000000000000"
+blocked=0
+
+while read -r local_ref local_sha remote_ref remote_sha; do
+  [ -z "${local_ref:-}" ] && continue
+
+  if [ "$local_sha" = "$zero" ]; then
+    # Deleting a ref: nothing new is being introduced.
+    continue
+  fi
+
+  if [ "$remote_sha" = "$zero" ]; then
+    # A new branch. Scan from the merge base with origin/main when that ref
+    # exists; otherwise there is no shared history to diff from, so scan the
+    # whole tree at the tip.
+    if git rev-parse --verify -q origin/main >/dev/null; then
+      base="$(git merge-base origin/main "$local_sha" 2>/dev/null || true)"
+    else
+      base=""
+    fi
+    if [ -n "$base" ]; then
+      range="$base..$local_sha"
+    else
+      if ! python3 "$repo_root/scripts/check-secrets.py" --tree; then
+        blocked=1
+      fi
+      continue
+    fi
+  else
+    range="$remote_sha..$local_sha"
+  fi
+
+  if ! python3 "$repo_root/scripts/check-secrets.py" --range "$range"; then
+    blocked=1
+  fi
+done
+
+if [ "$blocked" -ne 0 ]; then
+  echo "" >&2
+  echo "Blocked by scripts/git-hooks/pre-push (scripts/check-secrets.py above)." >&2
+  echo "A real credential is never pushed. A known fixture line is allowed" >&2
+  echo "with the '// glasshouse:not-a-secret' marker or by adding its" >&2
+  echo "fingerprint (scripts/check-secrets.py --fingerprint <path>:<line>) to" >&2
+  echo "scripts/check-secrets-allow.txt -- neither applies to a local-key finding." >&2
+  exit 1
+fi
+
+exit 0

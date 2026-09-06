@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# Refuse a commit whose staged added lines carry a credential.
+#
+# scripts/check-secrets.py is the scanner; this hook only wires it to the
+# index. core.hooksPath is repository config, so this file resolves relative
+# to whichever worktree is committing (main checkout or a worker worktree).
+set -euo pipefail
+
+repo_root="$(git rev-parse --show-toplevel)"
+
+if ! python3 "$repo_root/scripts/check-secrets.py" --staged --quiet; then
+  echo "" >&2
+  echo "Blocked by scripts/git-hooks/pre-commit (scripts/check-secrets.py above)." >&2
+  echo "A real credential is never committed. A known fixture line is allowed" >&2
+  echo "with the '// glasshouse:not-a-secret' marker or by adding its" >&2
+  echo "fingerprint (scripts/check-secrets.py --fingerprint <path>:<line>) to" >&2
+  echo "scripts/check-secrets-allow.txt -- neither applies to a local-key finding." >&2
+  exit 1
+fi
