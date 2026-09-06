@@ -7,35 +7,29 @@
 use std::fs;
 use std::io::{self, BufRead, IsTerminal};
 use std::path::PathBuf;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use clap::Parser;
 use ratatui::Terminal;
 use ratatui::backend::{CrosstermBackend, TestBackend};
 
 use crate::commands::{self, CommandStatus};
+use crate::config::PaneConfig;
 use crate::contract::{Block, Conversation, Message, ProjectConfig, Role, ServedBy, SessionId};
 use crate::glasshouse::{self, Glasshouse, LifecycleEvent, LocalMemory};
 use crate::project;
 use crate::prompt::{self, Budget, CellResult, ErrorSection, ExhaustedReason, Extracted};
 use crate::rollout::{self, Rollout};
 use crate::runtime::handles::HandleTable;
-use crate::runtime::isolate::Runtime;
-use crate::runtime::outcome::CellOutcome;
+use crate::runtime::isolate::{DEFAULT_HEAP_LIMIT_BYTES, Runtime};
+use crate::runtime::outcome::{CellOutcome, CellRecord};
 use crate::runtime::preview;
 use crate::sandbox::profile::Profile;
+use crate::supervisor::Supervisor;
 use crate::tools::invoke::{self, Args, ToolContext, ToolError};
 use crate::tools::registry;
-use crate::tui::{self, CellError, CellView, Counted, Notebook, TaskTokens};
+use crate::tui::{self, CellError, CellView, Counted, Notebook, SupervisorStatus, TaskTokens};
 use crate::wire;
-
-/// `model-contract.md` §6's task defaults. Constants until `pane.toml`
-/// supplies them -- 61F owns the setting, and a figure the model is told is
-/// worth nothing if it is invented twice, so they are spelled once here. The
-/// turn cap is not spelled at all: the budget line reads [`wire::MAX_TOKENS`],
-/// the figure actually sent, so the model is told the cap that binds it.
-const TASK_TOKEN_CAP: u64 = 400_000;
-const CELL_CAP: u64 = 40;
 
 /// How many prose turns in a row end the task (the primary's addendum of
 /// 2026-09-06): on this one, the answer carries the exhausted preamble and
@@ -235,6 +229,10 @@ fn render_as_lines(transcript: &Transcript, served_by: &ServedBy) {
 /// stdin's, one per line) at a time until the input source is exhausted.
 fn run(args: SessionArgs) -> Result<(), String> {
     let project = project::load(&args.root);
+    let config = PaneConfig::load(&args.root)?;
+    if config.supervisor.model.is_none() {
+        println!("supervisor: off (no model)");
+    }
 
     // `sandbox-grants.md` §1.5: computed once, at session start, immutable
     // for the session's life. `.claude/` lives inside the writable project
@@ -297,6 +295,7 @@ fn run(args: SessionArgs) -> Result<(), String> {
 
     let session = Session {
         project: &project,
+        config: &config,
         profile: &profile,
         glasshouse: &glasshouse,
         id: &session_id,
@@ -325,6 +324,7 @@ fn run(args: SessionArgs) -> Result<(), String> {
 /// against; there is no owned field here that a later call could replace.
 struct Session<'a> {
     project: &'a ProjectConfig,
+    config: &'a PaneConfig,
     /// The token every tool call in this session is cancellable through
     /// (`Runtime::with_token`). Nothing sets it yet: the `SIGINT` handler that
     /// does is the follow-up after the isolate fix, so today it is plumbing
@@ -386,15 +386,22 @@ struct TaskBudget {
     cells_used: u64,
     reported: bool,
     estimated: bool,
+    /// `pane.toml`'s `[limits]` -- `task_tokens` and `cells`, 61F's own
+    /// replacement for what were the constants `TASK_TOKEN_CAP` and
+    /// `CELL_CAP`. Defaults match those constants exactly.
+    task_cap: u64,
+    cells_cap: u64,
 }
 
 impl TaskBudget {
-    fn new() -> Self {
+    fn new(task_cap: u64, cells_cap: u64) -> Self {
         Self {
             used: 0,
             cells_used: 0,
             reported: false,
             estimated: false,
+            task_cap,
+            cells_cap,
         }
     }
 
@@ -448,16 +455,16 @@ impl TaskBudget {
         Budget {
             turn_cap: u64::from(wire::MAX_TOKENS),
             task_used: self.used,
-            task_cap: TASK_TOKEN_CAP,
+            task_cap: self.task_cap,
             cells_used: self.cells_used,
-            cells_cap: CELL_CAP,
+            cells_cap: self.cells_cap,
         }
     }
 
     fn tokens(&self) -> Option<TaskTokens> {
         Some(TaskTokens {
             used: self.used,
-            cap: TASK_TOKEN_CAP,
+            cap: self.task_cap,
             counted: self.counted()?,
         })
     }
@@ -466,7 +473,7 @@ impl TaskBudget {
     /// answered -- §6's cap on cells and its task budget, either of which
     /// buys exactly one more turn under [`prompt::exhausted_preamble`].
     fn spent(&self) -> bool {
-        self.used >= TASK_TOKEN_CAP || self.cells_used >= CELL_CAP
+        self.used >= self.task_cap || self.cells_used >= self.cells_cap
     }
 }
 
@@ -482,6 +489,10 @@ struct Step {
     /// Whether the message carried no program (§5's prose), counted by
     /// [`run_task`] against [`PROSE_TURN_CAP`].
     prose: bool,
+    /// The cell this turn ran, for the supervisor's own buffer
+    /// (`supervisor.md` §2) -- `None` for prose and for two blocks, neither
+    /// of which ran a cell at all, so neither counts toward the cadence.
+    record: Option<CellRecord>,
     view: CellView,
 }
 
@@ -514,11 +525,25 @@ fn run_task(
         .record_turn(Role::User, task)
         .map_err(|e| format!("could not record the user turn: {e}"))?;
 
-    let mut runtime = Runtime::new(session.profile, session.glasshouse, session.id)
-        .with_token(session.token.clone());
-    let mut budget = TaskBudget::new();
+    let mut runtime = Runtime::with_limits(
+        session.profile,
+        session.glasshouse,
+        session.id,
+        DEFAULT_HEAP_LIMIT_BYTES,
+        Duration::from_secs(session.config.limits.cell_wall_clock_s),
+    )
+    .with_response_byte_cap(session.config.limits.response_bytes)
+    .with_token(session.token.clone());
+    let mut budget = TaskBudget::new(
+        session.config.limits.task_tokens,
+        session.config.limits.cells,
+    );
     let mut final_turn = false;
     let mut prose_turns = 0u32;
+    let supervisor = Supervisor::new();
+    let supervisor_active =
+        session.config.supervisor.enabled && session.config.supervisor.model.is_some();
+    let mut cells_since_look: Vec<CellRecord> = Vec::new();
 
     loop {
         let since = SystemTime::now();
@@ -537,6 +562,39 @@ fn run_task(
         let ordinal = tui::cell_ordinal(&transcript.conversation, &transcript.notebook);
         let mut step = act_on(&assistant_text, &mut runtime, &mut budget, rollout)?;
         prose_turns = if step.prose { prose_turns + 1 } else { 0 };
+        if let Some(record) = step.record.take() {
+            cells_since_look.push(record);
+        }
+
+        // `supervisor.md` §3: one look every `every` cells, and only when
+        // there is a next user message left to head -- a task that just
+        // ended has nothing for a nudge to attach to, so no look is spent on
+        // one. §2: prose and two-blocks turns never reach `cells_since_look`
+        // at all (they push no record above), so they never count.
+        let mut nudge_reason: Option<String> = None;
+        if step.answer.is_some() {
+            if !supervisor_active {
+                transcript.notebook.supervisor = Some(SupervisorStatus::Off);
+            } else if cells_since_look.len() as u32 >= session.config.supervisor.every {
+                let trajectory = crate::supervisor::compress(&cells_since_look);
+                cells_since_look.clear();
+                // `supervisor_active` already established `model.is_some()`.
+                let model = session
+                    .config
+                    .supervisor
+                    .model
+                    .as_deref()
+                    .expect("supervisor_active implies a configured model");
+                let decision = supervisor.look(model, &trajectory);
+                if decision.intervene {
+                    nudge_reason = Some(decision.reason.clone());
+                    transcript.notebook.supervisor =
+                        Some(SupervisorStatus::Nudged(decision.reason));
+                } else {
+                    transcript.notebook.supervisor = Some(SupervisorStatus::LookedNoNudge);
+                }
+            }
+        }
 
         // §9.2: the terminal response is the assistant's own turn -- the same
         // line an assistant message has always written, so `resume` rebuilds
@@ -569,6 +627,15 @@ fn run_task(
                 .answer
                 .map(|answer| format!("{}\n\n{answer}", prompt::exhausted_preamble(reason)));
             final_turn = true;
+        }
+
+        // `supervisor.md` §4: the nudge is the very head of the next user
+        // message -- applied last, so a look that coincides with the
+        // exhausted preamble puts the nudge first, ahead of it.
+        if let Some(reason) = nudge_reason
+            && let Some(answer) = step.answer.take()
+        {
+            step.answer = Some(format!("supervisor: {reason}\n{answer}"));
         }
 
         step.view.answered = step.answer.is_some();
@@ -622,6 +689,7 @@ fn act_on(
                 answer: Some(unchanged_table(&table)),
                 response: None,
                 prose: true,
+                record: None,
                 view: CellView {
                     table: Some(table),
                     ..CellView::default()
@@ -633,6 +701,7 @@ fn act_on(
                 answer: Some(TWO_BLOCKS.to_string()),
                 response: None,
                 prose: false,
+                record: None,
                 view: CellView {
                     table: Some(runtime.render_handles()),
                     ..CellView::default()
@@ -644,6 +713,7 @@ fn act_on(
     let outcome = runtime.run_cell(&source);
     budget.cells_used = budget.cells_used.saturating_add(1);
     let turn = outcome.turn();
+    let record = turn.record.clone();
     rollout
         .record_cell(&turn.record)
         .map_err(|e| format!("could not record the cell: {e}"))?;
@@ -712,6 +782,7 @@ fn act_on(
         answer,
         response,
         prose: false,
+        record: Some(record),
         view,
     })
 }

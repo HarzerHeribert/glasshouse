@@ -112,13 +112,26 @@ pub struct TaskTokens {
     pub counted: Counted,
 }
 
+/// The supervisor's own sidebar line -- `docs/product/pane/supervisor.md` §4
+/// and §5: a nudge's own reason, a look that did not intervene (which also
+/// covers an unparseable or failed look -- both answer `not_intervene` and so
+/// render identically, correctly as "not a nudge"), or off because no model
+/// is configured or the switch is off.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SupervisorStatus {
+    Nudged(String),
+    LookedNoNudge,
+    Off,
+}
+
 /// What the session knows about the conversation beyond the messages
-/// themselves: one view per assistant cell, in cell order, and the task's
-/// token total.
+/// themselves: one view per assistant cell, in cell order, the task's token
+/// total, and the supervisor's latest status.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Notebook {
     pub cells: Vec<CellView>,
     pub tokens: Option<TaskTokens>,
+    pub supervisor: Option<SupervisorStatus>,
 }
 
 impl Notebook {
@@ -378,6 +391,9 @@ fn render_sidebar(frame: &mut Frame, area: Rect, served_by: &ServedBy, notebook:
         )));
         lines.push(Line::from(format!("counted: {}", tokens.counted.as_str())));
     }
+    if let Some(status) = &notebook.supervisor {
+        lines.push(Line::from(supervisor_line(status)));
+    }
 
     let paragraph = Paragraph::new(lines)
         .block(Block::default().borders(Borders::ALL))
@@ -408,4 +424,14 @@ fn known_sidebar_lines(served_by: &ServedBy) -> Vec<Line<'static>> {
         (None, None) => {}
     }
     lines
+}
+
+/// §4 and §5's three fixed lines, and nothing else -- the sidebar shows this
+/// one line under the budget line, whatever `served_by` says.
+fn supervisor_line(status: &SupervisorStatus) -> String {
+    match status {
+        SupervisorStatus::Nudged(reason) => format!("supervisor: {reason}"),
+        SupervisorStatus::LookedNoNudge => "supervisor: looked, no nudge".to_string(),
+        SupervisorStatus::Off => "supervisor: off (no model)".to_string(),
+    }
 }
