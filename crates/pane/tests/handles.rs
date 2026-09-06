@@ -340,10 +340,14 @@ fn a_grep_of_122kb_costs_under_300_tokens_and_survives_one_yield() {
         raw.stdout.len()
     );
 
-    // What the model is shown.
+    // What the model is shown. The name field is padded to the widest live
+    // name in the table (`handles.rs`'s `render_entry`), so "hits" carries
+    // more trailing spaces than "adapter" -- checked by prefix, not by an
+    // exact gap width.
     let rendered = &turn.table;
+    let hits_line = rendered.lines().next().unwrap_or_default();
     assert!(
-        rendered.contains("hits  Grep.Match[]"),
+        hits_line.starts_with("hits") && hits_line.contains("Grep.Match[]"),
         "the handle carries its declared type: {rendered}"
     );
     assert!(rendered.contains("adapter  File"), "{rendered}");

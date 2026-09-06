@@ -14,22 +14,33 @@
 //! so that a top-level `return` is legal (§1) and a redeclaration in a later
 //! cell is a fresh function scope rather than a `SyntaxError` (§2).
 //!
-//! **A binding is captured where it is made, not at the end of the cell.**
-//! One `s("name", name)` call is inserted after each top-level declaration —
-//! at the end of the line it finishes on, so nothing before it moves — which
-//! is what makes `runtime-contract.md` §5's "the bindings made before the
-//! throw persist" true without a `finally`. A `finally` could not do it
-//! anyway: `const` and `let` are block-scoped, so a `try { const x = 1 }`
-//! leaves nothing for `finally` to see.
+//! **A binding persists with the value it holds when the cell ends**, which
+//! is what `runtime-contract.md` §2 promises and a capture taken only where
+//! the binding is made cannot give: a counter bumped in a loop body would
+//! come back at its first value. So every top-level `let` and `const` is
+//! rewritten to `var` — padded to the same width, so no column moves — and
+//! the body runs inside one `try`/`finally`. `var` is function-scoped, so
+//! the `finally` reads each name after a fall-off, a `return` or a throw and
+//! captures what it holds then. The price is that `const` is not immutable
+//! and there is no temporal dead zone *within* one cell: a REPL scope is not
+//! a module scope, which §2 already says for redeclaration.
+//!
+//! **The declaration-line capture stays**, because it is all there is when
+//! the `finally` never runs: a heap-limit termination, and an `await`
+//! nothing can settle. It is also what a `class` gets, since a class binding
+//! keeps its own block scope and no same-width rewrite hoists one. So
+//! reassigning a top-level `class` or `function` name inside the cell that
+//! declared it does not persist; every other binding is read again.
 
 use oxc::allocator::Allocator;
 use oxc::ast::ast::{
-    AccessorProperty, BindingPattern, Class, Expression, FormalParameter, Function,
-    MethodDefinition, Program, PropertyDefinition, Statement, TSAsExpression, TSEnumDeclaration,
-    TSExternalModuleDeclaration, TSGlobalDeclaration, TSImportEqualsDeclaration,
+    AccessorProperty, AssignmentTarget, BindingPattern, Class, Expression, FormalParameter,
+    Function, MethodDefinition, Program, PropertyDefinition, Statement, TSAsExpression,
+    TSEnumDeclaration, TSExternalModuleDeclaration, TSGlobalDeclaration, TSImportEqualsDeclaration,
     TSInstantiationExpression, TSInterfaceDeclaration, TSNamespaceDeclaration, TSNonNullExpression,
     TSSatisfiesExpression, TSTypeAliasDeclaration, TSTypeAnnotation, TSTypeAssertion,
-    TSTypeParameterDeclaration, TSTypeParameterInstantiation, VariableDeclarator,
+    TSTypeParameterDeclaration, TSTypeParameterInstantiation, VariableDeclarationKind,
+    VariableDeclarator,
 };
 use oxc::ast_visit::{Visit, walk};
 use oxc::parser::{ParseOptions, Parser};
@@ -56,6 +67,13 @@ pub const HOST_FUNCTIONS: [&str; 7] = ["read", "glob", "grep", "bash", "keep", "
 /// off its end. It is a parameter, not a global, so it is gone the moment
 /// the cell's function returns.
 const HOST: &str = "__pane_cell";
+
+/// The cell-local record of which top-level bindings the program actually
+/// reached. `var` hoists, so without it the epilogue would read every
+/// declaration a throw never reached as `undefined` and replace whatever
+/// handle an earlier cell had made under that name. It is `__pane_`-prefixed,
+/// so [`CellError::ReservedName`] already keeps a program from touching it.
+const MADE: &str = "__pane_made";
 
 /// How many lines the wrapper puts before the model's first line. The
 /// prologue is exactly one line, so a V8 position maps back by subtracting
@@ -182,8 +200,9 @@ pub fn compile(source: &str, cell: u64) -> Result<CompiledCell, CellError> {
     }
     let blanks = eraser.blanks;
 
-    let captures = top_level_captures(&parsed.program, source);
-    let declared: Vec<String> = captures
+    let scan = top_level(&parsed.program, source);
+    let declared: Vec<String> = scan
+        .captures
         .iter()
         .flat_map(|capture| capture.names.iter().cloned())
         .collect();
@@ -197,9 +216,15 @@ pub fn compile(source: &str, cell: u64) -> Result<CompiledCell, CellError> {
         return Err(CellError::ShadowsHostFunction { name: name.clone() });
     }
 
-    let body = render(source, &blanks, &captures);
+    let late: Vec<String> = scan
+        .captures
+        .iter()
+        .filter(|capture| capture.late)
+        .flat_map(|capture| capture.names.iter().cloned())
+        .collect();
+    let body = render(source, &blanks, &scan.captures, &scan.rewrites);
     Ok(CompiledCell {
-        javascript: wrap(&body),
+        javascript: wrap(&body, &late),
         declared,
         script_name: script_name(cell),
     })
@@ -214,8 +239,17 @@ pub fn script_name(cell: u64) -> String {
 /// The generated program. Line 1 is the whole prologue, so the model's line
 /// *n* is the script's line *n + [`LINE_OFFSET`]* and every column is
 /// unchanged.
-fn wrap(body: &str) -> String {
-    let mut out = format!("(async function({HOST}){{\n");
+///
+/// `late` is every name the epilogue may re-read for the value it holds when
+/// the cell ends. The `finally` runs on all three endings — a fall-off, a
+/// `return`, and a throw — which is what makes §5's "the bindings made before
+/// the throw persist" carry the *latest* value rather than the first. Each
+/// read is guarded twice: by [`MADE`], so a declaration the program never
+/// reached is not captured as `var`'s hoisted `undefined`, and by a `catch`,
+/// so a name that turns out not to be in scope leaves the model's own error
+/// standing rather than replacing it with a `ReferenceError`.
+fn wrap(body: &str, late: &[String]) -> String {
+    let mut out = format!("(async function({HOST}){{var {MADE}={{__proto__:null}};try{{\n");
     out.push_str(body);
     if !body.ends_with('\n') {
         out.push('\n');
@@ -223,7 +257,13 @@ fn wrap(body: &str) -> String {
     // A leading `;` so no statement of the model's can continue into the
     // epilogue, and `e()` last so it runs exactly when the body fell off its
     // end rather than returning.
-    out.push_str(&format!(";{HOST}.e();\n}})"));
+    out.push_str(&format!(";{HOST}.e();\n}}finally{{\n"));
+    for name in late {
+        out.push_str(&format!(
+            "try{{if({MADE}.{name}){HOST}.s(\"{name}\",{name})}}catch{{}}\n"
+        ));
+    }
+    out.push_str("}})");
     out
 }
 
@@ -236,17 +276,41 @@ struct TopLevelCapture {
     /// of the line the statement finishes on, so a program written one
     /// statement per line has every column exactly where the model put it.
     insert_at: u32,
+    /// Whether the epilogue can read these names again when the cell ends.
+    /// True for everything the rewrite below makes function-scoped; false for
+    /// a `class` and for `using`, which keep a block scope the `finally` is
+    /// outside of.
+    late: bool,
+}
+
+/// One keyword replaced by another of the **same character width**, so a
+/// rewrite never moves a column. Today that is only `let`/`const` → `var`.
+type Rewrite = (u32, u32, &'static str);
+
+/// What one pass over a cell's top level found.
+#[derive(Debug, Default)]
+struct TopLevel {
+    captures: Vec<TopLevelCapture>,
+    rewrites: Vec<Rewrite>,
 }
 
 /// Every name a cell's top level binds, in source order, with the point each
-/// is captured at.
+/// is captured at and the keyword rewrites that make it readable again when
+/// the cell ends.
 ///
 /// `const`, `let`, `var`, `function` and `class` are §2's "top-level
 /// binding". A bare top-level assignment to an identifier is included too:
 /// it also survives into the next cell, because the wrapper's scope chain
 /// ends at the global object, and a value that persists and is not in the
 /// table is exactly the untracked object this contract exists to not have.
-fn top_level_captures(program: &Program<'_>, source: &str) -> Vec<TopLevelCapture> {
+///
+/// **An assignment binds only when its target is a plain identifier.**
+/// `box.hits = 7`, `arr[0] = 1` and `a.b.c = d` bind nothing: they mutate an
+/// object a binding already names. `oxc`'s own
+/// `AssignmentTarget::get_identifier_name` answers a member expression with
+/// its *property* name, which made `box.hits = 7` insert a capture of a
+/// binding named `hits` that no scope has.
+fn top_level(program: &Program<'_>, source: &str) -> TopLevel {
     let bounds: Vec<(u32, u32)> = program
         .body
         .iter()
@@ -256,12 +320,35 @@ fn top_level_captures(program: &Program<'_>, source: &str) -> Vec<TopLevelCaptur
         })
         .collect();
 
-    let mut captures: Vec<TopLevelCapture> = Vec::new();
+    let mut found = TopLevel::default();
     let mut seen: Vec<String> = Vec::new();
     for (index, statement) in program.body.iter().enumerate() {
         let mut names: Vec<String> = Vec::new();
+        let mut late = true;
         match statement {
             Statement::VariableDeclaration(declaration) => {
+                if declaration.declare {
+                    // `declare const x: number` states a type and emits no
+                    // code; there is nothing to bind and nothing to rewrite.
+                    continue;
+                }
+                match declaration.kind {
+                    // `var` is already function-scoped.
+                    VariableDeclarationKind::Var => {}
+                    VariableDeclarationKind::Let | VariableDeclarationKind::Const => {
+                        if let Some(rewrite) =
+                            to_var(source, declaration.span.start, declaration.kind)
+                        {
+                            found.rewrites.push(rewrite);
+                        }
+                    }
+                    // `using x = r` disposes `r` when its block ends;
+                    // rewriting it to `var` would drop the disposal, so it
+                    // keeps its scope and its declaration-line capture.
+                    VariableDeclarationKind::Using | VariableDeclarationKind::AwaitUsing => {
+                        late = false;
+                    }
+                }
                 for declarator in &declaration.declarations {
                     for ident in binding_names(&declarator.id) {
                         names.push(ident.to_string());
@@ -274,16 +361,22 @@ fn top_level_captures(program: &Program<'_>, source: &str) -> Vec<TopLevelCaptur
                 }
             }
             Statement::ClassDeclaration(class) => {
+                // A `class` binding is block-scoped to the `try` and no
+                // same-width rewrite hoists one, so the epilogue cannot read
+                // the binding itself — only the copy the declaration line
+                // already put on the persistent scope, which is the same
+                // object. Re-reading it would buy nothing and would suggest a
+                // later `C = other` had been seen, which it has not.
+                late = false;
                 if let Some(id) = &class.id {
                     names.push(id.name.to_string());
                 }
             }
             Statement::ExpressionStatement(expression) => {
                 if let Expression::AssignmentExpression(assignment) = &expression.expression
-                    && let Some(target) = assignment.left.as_simple_assignment_target()
-                    && let Some(ident) = target.get_identifier_name()
+                    && let AssignmentTarget::AssignmentTargetIdentifier(ident) = &assignment.left
                 {
-                    names.push(ident.to_string());
+                    names.push(ident.name.to_string());
                 }
             }
             _ => continue,
@@ -301,12 +394,32 @@ fn top_level_captures(program: &Program<'_>, source: &str) -> Vec<TopLevelCaptur
         }
         let end = bounds[index].1;
         let next_start = bounds.get(index + 1).map_or(source.len() as u32, |b| b.0);
-        captures.push(TopLevelCapture {
+        found.captures.push(TopLevelCapture {
             names,
             insert_at: insertion_point(source, end, next_start),
+            late,
         });
     }
-    captures
+    found
+}
+
+/// `let` → `var` and `const` → `var` plus two spaces, so the declarator that
+/// follows keeps the column the model wrote it at. `None` when the keyword is
+/// not where the span says it is, which leaves the declaration alone rather
+/// than corrupting the program.
+fn to_var(source: &str, start: u32, kind: VariableDeclarationKind) -> Option<Rewrite> {
+    let keyword = kind.as_str();
+    let end = start as usize + keyword.len();
+    if source.get(start as usize..end)? != keyword {
+        return None;
+    }
+    let padded: &'static str = match kind {
+        VariableDeclarationKind::Let => "var",
+        VariableDeclarationKind::Const => "var  ",
+        _ => return None,
+    };
+    debug_assert_eq!(padded.len(), keyword.len());
+    Some((start, end as u32, padded))
 }
 
 /// The end of the line `end` falls on, unless the next top-level statement
@@ -330,13 +443,22 @@ fn binding_names<'a>(pattern: &BindingPattern<'a>) -> Vec<&'a str> {
 
 /// Rewrites `source` with every span in `blanks` replaced by spaces, one
 /// space per character so a column never moves, `\n`/`\r` kept so a line
-/// never moves either, and each capture's `s(...)` calls spliced in at its
-/// own offset.
+/// never moves either, each `rewrites` span replaced by its same-width
+/// keyword, and each capture's `s(...)` calls spliced in at its own offset.
 ///
-/// Both are applied in one pass, over the *original* offsets: blanking a
+/// All three are applied in one pass, over the *original* offsets: blanking a
 /// multi-byte character to one space changes byte positions, so a second
 /// pass would splice in the wrong place.
-fn render(source: &str, blanks: &[Span], captures: &[TopLevelCapture]) -> String {
+///
+/// A capture's splice always **begins** with `;<host>.s(`, so a reader — the
+/// module's own tests included — can recover the model's line by cutting
+/// there.
+fn render(
+    source: &str,
+    blanks: &[Span],
+    captures: &[TopLevelCapture],
+    rewrites: &[Rewrite],
+) -> String {
     let mut ranges: Vec<(u32, u32)> = blanks
         .iter()
         .filter(|span| span.end > span.start)
@@ -358,6 +480,9 @@ fn render(source: &str, blanks: &[Span], captures: &[TopLevelCapture]) -> String
             let mut text = String::new();
             for name in &capture.names {
                 text.push_str(&format!(";{HOST}.s(\"{name}\",{name})"));
+                if capture.late {
+                    text.push_str(&format!(";{MADE}.{name}=1"));
+                }
             }
             text.push(';');
             (capture.insert_at, text)
@@ -365,20 +490,34 @@ fn render(source: &str, blanks: &[Span], captures: &[TopLevelCapture]) -> String
         .collect();
     splices.sort_by_key(|(at, _)| *at);
 
+    let mut rewrites: Vec<Rewrite> = rewrites.to_vec();
+    rewrites.sort_unstable();
+
     let mut out = String::with_capacity(source.len());
     let mut next = 0usize;
     let mut spliced = 0usize;
+    let mut rewritten = 0usize;
+    let mut skip_to = 0u32;
     for (offset, ch) in source.char_indices() {
-        while spliced < splices.len() && splices[spliced].0 as usize <= offset {
+        let offset = offset as u32;
+        while spliced < splices.len() && splices[spliced].0 <= offset {
             out.push_str(&splices[spliced].1);
             spliced += 1;
         }
-        while next < merged.len() && (offset as u32) >= merged[next].1 {
+        while rewritten < rewrites.len() && rewrites[rewritten].1 <= offset {
+            rewritten += 1;
+        }
+        if rewritten < rewrites.len() && rewrites[rewritten].0 == offset {
+            out.push_str(rewrites[rewritten].2);
+            skip_to = rewrites[rewritten].1;
+        }
+        if offset < skip_to {
+            continue;
+        }
+        while next < merged.len() && offset >= merged[next].1 {
             next += 1;
         }
-        let blanked = next < merged.len()
-            && (offset as u32) >= merged[next].0
-            && (offset as u32) < merged[next].1;
+        let blanked = next < merged.len() && offset >= merged[next].0 && offset < merged[next].1;
         if blanked && ch != '\n' && ch != '\r' {
             out.push(' ');
         } else {
@@ -655,7 +794,7 @@ mod tests {
         let compiled = compile(source, 1).unwrap();
         let body = body_of(&compiled.javascript);
         assert_eq!(
-            body, "const n         = 1;\nconst s         = \"x\";",
+            body, "var   n         = 1;\nvar   s         = \"x\";",
             "{body:?}"
         );
         assert_eq!(compiled.declared, vec!["n", "s"]);
@@ -780,7 +919,10 @@ mod tests {
     fn the_prologue_is_exactly_one_line() {
         let compiled = compile("const a = 1;\n", 1).unwrap();
         let first = compiled.javascript.lines().next().unwrap();
-        assert_eq!(first, "(async function(__pane_cell){");
+        assert_eq!(
+            first,
+            "(async function(__pane_cell){var __pane_made={__proto__:null};try{"
+        );
         assert_eq!(LINE_OFFSET, 1);
         assert!(
             compiled
@@ -788,7 +930,7 @@ mod tests {
                 .lines()
                 .nth(1)
                 .unwrap()
-                .starts_with("const a = 1;"),
+                .starts_with("var   a = 1;"),
             "{}",
             compiled.javascript
         );
@@ -800,8 +942,14 @@ mod tests {
     fn a_capture_is_appended_where_the_declaration_ends() {
         let compiled = compile("const a = 1;\nlet b = 2;\n", 1).unwrap();
         let lines: Vec<&str> = compiled.javascript.lines().collect();
-        assert_eq!(lines[1], "const a = 1;;__pane_cell.s(\"a\",a);");
-        assert_eq!(lines[2], "let b = 2;;__pane_cell.s(\"b\",b);");
+        assert_eq!(
+            lines[1],
+            "var   a = 1;;__pane_cell.s(\"a\",a);__pane_made.a=1;"
+        );
+        assert_eq!(
+            lines[2],
+            "var b = 2;;__pane_cell.s(\"b\",b);__pane_made.b=1;"
+        );
         assert_eq!(compiled.declared, vec!["a", "b"]);
     }
 
@@ -814,5 +962,58 @@ mod tests {
         let capture = compiled.javascript.find("s(\"before\"").unwrap();
         let throw = compiled.javascript.find("throw new Error").unwrap();
         assert!(capture < throw, "{}", compiled.javascript);
+    }
+
+    /// The other half of the same claim: the epilogue reads the name again
+    /// when the cell ends, which is the only way a value assigned after the
+    /// declaration line reaches the next cell.
+    #[test]
+    fn the_epilogue_reads_every_hoisted_binding_again() {
+        let compiled = compile("let n = 0;\nn = 5;\nclass K {}\n", 1).unwrap();
+        let javascript = &compiled.javascript;
+        assert!(
+            javascript.contains("try{if(__pane_made.n)__pane_cell.s(\"n\",n)}catch{}"),
+            "{javascript}"
+        );
+        // A `class` keeps its block scope, so the epilogue must not name it.
+        assert!(!javascript.contains("__pane_made.K"), "{javascript}");
+        assert_eq!(compiled.declared, vec!["n", "K"]);
+    }
+
+    /// `oxc` answers a member expression's `get_identifier_name` with the
+    /// *property* name, so `box.hits = 7` used to insert a capture of a
+    /// binding named `hits` that no scope has, and the cell threw
+    /// `ReferenceError: hits is not defined`.
+    #[test]
+    fn a_member_assignment_binds_nothing() {
+        let compiled = compile(
+            "const box = { hits: 0 };\nbox.hits = 7;\nbox[\"k\"] = 1;\nbox.a.b = 2;\n",
+            1,
+        )
+        .unwrap();
+        assert_eq!(compiled.declared, vec!["box"]);
+        assert!(
+            !compiled.javascript.contains("\"hits\""),
+            "{}",
+            compiled.javascript
+        );
+    }
+
+    /// The rewrite is the one thing that could move a column, so it is
+    /// width-preserving by construction and checked here for both keywords.
+    #[test]
+    fn the_var_rewrite_keeps_every_column() {
+        let source = "const { a, b } = obj;\nlet   c = 1;\nvar d = 2;\nc = 3;\n";
+        let compiled = compile(source, 1).unwrap();
+        for (original, erased) in source.lines().zip(body_of(&compiled.javascript).lines()) {
+            assert_eq!(
+                original.chars().count(),
+                erased.chars().count(),
+                "a line changed width: {original:?} -> {erased:?}"
+            );
+        }
+        let body = body_of(&compiled.javascript);
+        assert!(body.starts_with("var   { a, b } = obj;"), "{body:?}");
+        assert_eq!(compiled.declared, vec!["a", "b", "c", "d"]);
     }
 }

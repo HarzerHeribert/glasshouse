@@ -122,8 +122,12 @@ fn a_top_level_binding_persists_into_the_next_cell_and_a_redeclaration_replaces_
     let third = runtime.run_cell("const hits = [9];\n");
     assert!(matches!(third, CellOutcome::Yielded { .. }), "{third:?}");
     let rendered = runtime.render_handles();
+    // The name field is padded to the widest live name in the table, so the
+    // gap after `hits` depends on what else is live; match the row, not a gap.
     assert!(
-        rendered.contains("hits  Array  (replaced at cell 3)"),
+        rendered
+            .lines()
+            .any(|line| line.starts_with("hits") && line.contains("Array  (replaced at cell 3)")),
         "{rendered}"
     );
     assert_eq!(runtime.handle_names(), vec!["other", "hits"]);
@@ -199,6 +203,170 @@ fn a_throw_is_a_result_and_keeps_the_bindings_made_before_it() {
     // And the next cell recovers in one line, which is the point of it.
     let recovered = runtime.run_cell("return before + 1;\n");
     assert_eq!(returned(&recovered), &Value::Number(42.0));
+}
+
+/// The lead's probe, `runtime-contract.md` §2: the value a binding holds when
+/// the cell **ends** is what the next cell reads — a counter bumped in a loop
+/// body, a `let` reassigned on a later line. A capture taken on the
+/// declaration line alone would persist the first value, which a model would
+/// meet in its first counter loop.
+#[test]
+fn a_binding_persists_with_the_value_it_holds_when_the_cell_ends() {
+    let fixture = Fixture::new("final-value");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("final-value");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+
+    let first = runtime.run_cell(
+        "let n = 0;\nfor (const i of [1, 2, 3]) n += i;\nlet x = 1;\nx = 2;\nconst box = { hits: 0 };\nbox.hits = 7;\n",
+    );
+    assert!(matches!(first, CellOutcome::Yielded { .. }), "{first:?}");
+
+    let second = runtime.run_cell("return [n, x, box.hits].join(',');\n");
+    assert_eq!(
+        returned_string(&second),
+        "6,2,7",
+        "a binding must persist with the value it held when the cell ended: {second:?}"
+    );
+}
+
+/// §2's "only three things become handles": a member assignment mutates an
+/// object a binding already names and introduces no name of its own. The
+/// parser's `get_identifier_name` answers a member expression with its
+/// *property* name, so this used to compile a capture of a binding named
+/// `hits` and throw `ReferenceError: hits is not defined` at the model.
+#[test]
+fn a_member_assignment_at_top_level_binds_nothing() {
+    let fixture = Fixture::new("member");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("member-session");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+
+    let outcome = runtime.run_cell(
+        "const box = { hits: 0 };\nconst arr = [0];\nbox.hits = 7;\narr[0] = 1;\nbox.nested = { deep: 0 };\nbox.nested.deep = 3;\n",
+    );
+    assert!(
+        matches!(outcome, CellOutcome::Yielded { .. }),
+        "a member assignment must not throw: {outcome:?}"
+    );
+    assert_eq!(
+        runtime.handle_names(),
+        vec!["box".to_string(), "arr".to_string()],
+        "a member name became a handle"
+    );
+
+    let next = runtime.run_cell("return [box.hits, arr[0], box.nested.deep].join(',');\n");
+    assert_eq!(returned_string(&next), "7,1,3", "{next:?}");
+}
+
+/// `runtime-contract.md` §5's third item, with the value §2 requires: the
+/// bindings made before the throw persist, each holding what it held when the
+/// cell ended, not what it held on the line it was declared.
+#[test]
+fn a_throw_keeps_the_latest_value_of_every_binding_made_before_it() {
+    let fixture = Fixture::new("throw-latest");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("throw-latest");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+
+    let outcome = runtime.run_cell(
+        "let n = 0;\nn = 5;\nconst seen = [];\nseen.push(\"one\");\nthrow new TypeError(\"boom\");\nlet never = 1;\n",
+    );
+    let CellOutcome::Threw { error, .. } = &outcome else {
+        panic!("expected a throw, got {outcome:?}");
+    };
+    assert_eq!(error.class, "TypeError", "{error:?}");
+    assert_eq!(error.line, Some(5), "the model's own line: {error:?}");
+    assert!(!runtime.is_live("never"), "a line the throw never reached");
+
+    let recovered = runtime.run_cell("return [n, seen.length].join(',');\n");
+    assert_eq!(
+        returned_string(&recovered),
+        "5,1",
+        "a throw must keep each binding's latest value: {recovered:?}"
+    );
+}
+
+/// The other four shapes §2 calls a top-level binding. `class` keeps its own
+/// block scope, so it is the one that cannot be re-read when the cell ends and
+/// is captured where it is declared instead.
+#[test]
+fn destructuring_var_function_and_class_all_persist() {
+    let fixture = Fixture::new("shapes");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("shapes-session");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+
+    let first = runtime.run_cell(
+        "const { a, b: renamed } = { a: 1, b: 2 };\nconst [first, ...rest] = [3, 4, 5];\nvar counted = 0;\nfor (const n of rest) counted += n;\nfunction twice(n) { return n * 2; }\nclass Box { constructor(v) { this.v = v; } }\n",
+    );
+    assert!(matches!(first, CellOutcome::Yielded { .. }), "{first:?}");
+    for name in ["a", "renamed", "first", "rest", "counted", "twice", "Box"] {
+        assert!(runtime.is_live(name), "{name} did not become a handle");
+    }
+
+    let second = runtime.run_cell(
+        "return [a, renamed, first, rest.length, counted, twice(3), new Box(6).v].join(',');\n",
+    );
+    // `counted` is 9 only because the loop body's mutation reached the next
+    // cell; a declaration-line capture would answer 0.
+    assert_eq!(returned_string(&second), "1,2,3,2,9,6,6", "{second:?}");
+}
+
+/// `free` is one of §2's three lifetime events, and the epilogue that re-reads
+/// every binding must not undo one the cell performed on itself: the object
+/// leaves the persistent scope as well as the table.
+#[test]
+fn a_name_freed_in_the_cell_that_declared_it_does_not_come_back() {
+    let fixture = Fixture::new("free-same-cell");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("free-same-cell");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+
+    let first = runtime.run_cell("const temp = [1, 2, 3];\nfree(\"temp\");\n");
+    assert!(matches!(first, CellOutcome::Yielded { .. }), "{first:?}");
+    assert!(!runtime.is_live("temp"), "the table still lists it");
+
+    let second = runtime.run_cell("return typeof temp;\n");
+    assert_eq!(
+        returned_string(&second),
+        "undefined",
+        "a freed binding was left on the persistent scope: {second:?}"
+    );
+}
+
+/// A cell that ends with `return` ends the task with the value the expression
+/// has *then* — the epilogue reads the bindings after it, and must not change
+/// what the model returned.
+#[test]
+fn a_return_after_a_mutation_ends_the_task_with_the_bumped_value() {
+    let fixture = Fixture::new("return-bumped");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("return-bumped");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+
+    let outcome = runtime.run_cell("let n = 1;\nfor (const i of [1, 2, 3]) n += i;\nreturn n;\n");
+    assert_eq!(returned(&outcome), &Value::Number(7.0), "{outcome:?}");
+}
+
+/// The epilogue captures a name a second time, and the table must stay in
+/// the order the model declared: a `class` cannot be re-read when the cell
+/// ends, so a capture that removed and re-appended would sort it ahead of
+/// every name that can be. Added at integration: the mutation
+/// `remove-and-append` survived every other test.
+#[test]
+fn the_table_keeps_declaration_order_when_the_epilogue_recaptures_a_name() {
+    let fixture = Fixture::new("declaration-order");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("declaration-order");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+
+    let outcome = runtime.run_cell("let n = 0;\nclass K {}\nn = 1;\n");
+    assert!(
+        matches!(outcome, CellOutcome::Yielded { .. }),
+        "{outcome:?}"
+    );
+    assert_eq!(runtime.handle_names(), vec!["n", "K"]);
 }
 
 /// A cell that will not even compile is answered in the same turn slot, with

@@ -278,6 +278,35 @@ pub fn estimate_tokens(text: &str) -> usize {
     text.chars().count().div_ceil(4)
 }
 
+/// The token cost a payload of `bytes` length would have had inline, using
+/// the same `/4` heuristic as [`estimate_tokens`] — `model-contract.md` §7's
+/// `inline cost ~30,565 tok` for 122,261 bytes of grep output.
+/// [`crate::runtime::handles::HandleMeta::size_estimate`] is recorded in
+/// bytes, before any string is marshalled, so this takes a byte count
+/// rather than reusing `estimate_tokens`'s `&str` signature.
+pub(crate) fn tokens_for_bytes(bytes: u64) -> usize {
+    (bytes as usize).div_ceil(4)
+}
+
+/// `n` with a comma every three digits from the right —
+/// `model-contract.md` §7's `30,565` / `63,979` / `1,508`. `prompt::thousands`
+/// does the same formatting for the budget line, but `prompt/**` belongs to
+/// another package for this task and this crate has no third module both
+/// already depend on, so this is a deliberate duplicate of that one
+/// four-line function rather than a new shared one.
+pub(crate) fn thousands(n: u64) -> String {
+    let digits = n.to_string();
+    let bytes = digits.as_bytes();
+    let mut out = String::with_capacity(bytes.len() + bytes.len() / 3);
+    for (i, byte) in bytes.iter().enumerate() {
+        if i > 0 && (bytes.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(*byte as char);
+    }
+    out
+}
+
 /// The type name shown in the handle table's header and in an object's
 /// key/type listing, for a value whose producer declared no better one.
 pub fn type_name(value: &Value) -> &'static str {
@@ -338,13 +367,11 @@ pub(crate) fn take_chars(s: &str, n: usize) -> String {
 pub fn render_preview(value: &Value, cap_tokens: usize) -> String {
     match value {
         Value::Array(array) => {
-            for &n in &ARRAY_ELEMENT_STEPS {
-                let candidate = render_array_body(array, n);
-                if n == 0 || estimate_tokens(&candidate) <= cap_tokens {
-                    return candidate;
-                }
-            }
-            render_array_body(array, 0)
+            format!(
+                "n={}{}",
+                array.len(),
+                array_elements_only(array, cap_tokens)
+            )
         }
         Value::Object(object) => {
             for &n in &OBJECT_KEY_STEPS {
@@ -376,8 +403,24 @@ fn select_indices(len: usize, n: usize) -> Vec<usize> {
     indices
 }
 
-fn render_array_body(array: &ArrayValue, n: usize) -> String {
-    let mut out = format!("n={}", array.len());
+/// The array's element rows only — no `n=` summary line. [`render_preview`]
+/// prepends that summary itself; this is exposed separately so
+/// `handles::render_entry` can put the summary in the handle table's header
+/// instead of repeating it in the body, which is the second-serialization
+/// box line 2465 asks this package to close for arrays
+/// (`model-contract.md` §7).
+pub(crate) fn array_elements_only(array: &ArrayValue, cap_tokens: usize) -> String {
+    for &n in &ARRAY_ELEMENT_STEPS {
+        let elements = render_array_elements(array, n);
+        if n == 0 || estimate_tokens(&format!("n={}{elements}", array.len())) <= cap_tokens {
+            return elements;
+        }
+    }
+    unreachable!("the loop always returns at n == 0")
+}
+
+fn render_array_elements(array: &ArrayValue, n: usize) -> String {
+    let mut out = String::new();
     for idx in select_indices(array.len(), n) {
         let Some(item) = array.get(idx) else { continue };
         out.push_str(&format!("\n  [{idx}] {}", render_inline(item)));
@@ -453,17 +496,34 @@ fn render_string_body(s: &StringValue) -> String {
 }
 
 fn render_file_body(file: &FileValue) -> String {
-    let mut out = format!(
+    let mut out = file_summary(file);
+    for line in file_lines_only(file) {
+        out.push('\n');
+        out.push_str(&line);
+    }
+    out
+}
+
+fn file_summary(file: &FileValue) -> String {
+    format!(
         "{}   {} B · {} lines · {}",
         quote(&file.path),
         file.byte_len,
         file.line_count,
         escape_line(&file.mtime)
-    );
-    for (i, line) in file.lines.iter().take(2).enumerate() {
-        out.push_str(&format!("\nL{}   {}", i + 1, quote(line)));
-    }
-    out
+    )
+}
+
+/// The `File` row's `L1`/`L2` lines only — no summary line. Exposed
+/// separately, like [`array_elements_only`], so `handles::render_entry` can
+/// put the summary in the header instead of repeating it in the body.
+pub(crate) fn file_lines_only(file: &FileValue) -> Vec<String> {
+    file.lines
+        .iter()
+        .take(2)
+        .enumerate()
+        .map(|(i, line)| format!("L{}   {}", i + 1, quote(line)))
+        .collect()
 }
 
 fn render_test_report_body(report: &TestReportValue) -> String {

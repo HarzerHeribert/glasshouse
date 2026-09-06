@@ -226,6 +226,7 @@ impl Runtime {
         };
 
         let ending = self.execute(&compiled);
+        self.forget_freed();
         self.finish(cell, source, started, ending)
     }
 
@@ -334,6 +335,28 @@ impl Runtime {
                 "the cell awaited a promise nothing can settle: pane's isolate has no timers, no \
                  sockets and no event loop, and every tool call is synchronous",
             )),
+        }
+    }
+
+    /// `free("name")` is one of §2's three lifetime events, and the epilogue
+    /// that re-reads every binding for the value it ended with must not undo
+    /// one the cell itself performed: a program that declares a name and then
+    /// frees it would otherwise leave the object on the persistent scope,
+    /// live to the next cell and absent from the table that is supposed to
+    /// list everything live.
+    fn forget_freed(&mut self) {
+        let freed = self.state.current.borrow().freed.clone();
+        if freed.is_empty() {
+            return;
+        }
+        v8::scope!(let handle_scope, &mut self.isolate);
+        let context = v8::Local::new(handle_scope, &self.context);
+        let scope = &mut v8::ContextScope::new(handle_scope, context);
+        let global = context.global(scope);
+        for name in &freed {
+            if let Some(key) = v8::String::new(scope, name) {
+                global.delete(scope, key.into());
+            }
         }
     }
 

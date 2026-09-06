@@ -156,12 +156,26 @@ impl RuntimeState {
         self.current.borrow().calls.get(index).cloned()
     }
 
+    /// A name is captured twice in the ordinary case — once where the
+    /// binding is made, once by the epilogue that reads the value it ended
+    /// with — so the second capture **overwrites in place**. Removing and
+    /// re-appending would order the table by the epilogue instead of by the
+    /// model's own declarations, and a name the epilogue cannot read (a
+    /// `class`) would then sort ahead of every name it can.
     pub(crate) fn capture(&self, name: &str, value: Value, meta: HandleMeta) {
         let mut current = self.current.borrow_mut();
         if current.freed.iter().any(|freed| freed == name) {
             return;
         }
-        current.captures.retain(|existing| existing.name != name);
+        if let Some(existing) = current
+            .captures
+            .iter_mut()
+            .find(|existing| existing.name == name)
+        {
+            existing.value = value;
+            existing.meta = meta;
+            return;
+        }
         current.captures.push(Capture {
             name: name.to_string(),
             value,

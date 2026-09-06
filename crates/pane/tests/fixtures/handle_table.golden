@@ -1,39 +1,37 @@
-arr  Array
-n=5
+arr      Array   n=5   inline cost ~0 tok · preview 10 tok
   [0] 10
   [1] 20
   [2] 30
   [4] 50
 
-file  File
-"src/lib.rs"   120 B · 10 lines · 2026-09-05T00:00:00Z
+file     File   src/lib.rs   120 B · 10 lines · 2026-09-05T00:00:00Z
 L1   "fn main() {}"
-L2   "// second line"
+L2   "// second line"   preview 24 tok
 
-report  TestReport
+report   TestReport   inline cost ~0 tok · preview 10 tok
 passed=3 failed=1 skipped=0
   "test_x"
 
-str  string
+str      string   inline cost ~0 tok · preview 5 tok
 len=11
 "hello world"
 
-num  number
+num      number   inline cost ~0 tok · preview 1 tok
 42
 
-flag  boolean
+flag     boolean   inline cost ~0 tok · preview 1 tok
 true
 
-empty  null
+empty    null   inline cost ~0 tok · preview 1 tok
 null
 
-missing  undefined
+missing  undefined   inline cost ~0 tok · preview 3 tok
 undefined
 
-obj  Object
+obj      Object   inline cost ~0 tok · preview 6 tok
 "a": number
 "b": string
 
-err  Error
+err      Error   inline cost ~0 tok · preview 11 tok
 TypeError: "bad thing"
   at "cell 2, line 3"

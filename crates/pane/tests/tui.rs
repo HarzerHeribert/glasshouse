@@ -42,7 +42,19 @@ fn rendered_with_handles(
     served_by: &ServedBy,
     handles: &HandleTable,
 ) -> Buffer {
-    let backend = TestBackend::new(80, 20);
+    rendered_at_width(conversation, served_by, handles, 80)
+}
+
+/// The same render into a `width`x20 buffer, for a fixture whose lines must
+/// not wrap in the conversation column -- a handle header carries its type,
+/// length and both token figures on one line (`model-contract.md` §7).
+fn rendered_at_width(
+    conversation: &Conversation,
+    served_by: &ServedBy,
+    handles: &HandleTable,
+    width: u16,
+) -> Buffer {
+    let backend = TestBackend::new(width, 20);
     let mut terminal = Terminal::new(backend).unwrap();
     terminal
         .draw(|frame| render(frame, conversation, served_by, handles))
@@ -308,7 +320,9 @@ fn the_latest_cell_shows_the_live_handle_table_through_the_one_renderer() {
     assert!(!expected.is_empty(), "the fixture table must not be empty");
     let expected_lines: Vec<String> = expected.lines().map(str::to_string).collect();
 
-    let buffer = rendered_with_handles(&two_cell_task(), &known_served_by(), &handles);
+    // 120 columns: the array header is 52 characters and must reach the
+    // buffer unwrapped for a line-by-line comparison to mean anything.
+    let buffer = rendered_at_width(&two_cell_task(), &known_served_by(), &handles, 120);
 
     let actual = rows_after(&buffer, "[2] out", expected_lines.len());
     assert_eq!(

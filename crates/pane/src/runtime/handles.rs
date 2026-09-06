@@ -190,10 +190,17 @@ impl HandleTable {
 /// the *rendering* oldest-first — this takes `&HandleTable`, so nothing it
 /// does can free a handle — and one line names how many were not shown.
 pub fn render_table(table: &HandleTable, entry_cap: usize, table_cap: usize) -> String {
+    let name_width = table
+        .entries
+        .iter()
+        .map(|e| e.name.chars().count())
+        .max()
+        .unwrap_or(0)
+        + NAME_COLUMN_GAP;
     let rendered: Vec<String> = table
         .entries
         .iter()
-        .map(|entry| render_entry(entry, entry_cap))
+        .map(|entry| render_entry(entry, entry_cap, name_width))
         .collect();
 
     // Try showing every entry, then all but the oldest, then all but the two
@@ -228,18 +235,109 @@ fn type_label(entry: &HandleEntry) -> &str {
         .unwrap_or_else(|| preview::type_name(&entry.value))
 }
 
-fn render_entry(entry: &HandleEntry, cap: usize) -> String {
+/// Trailing spaces every header's name field carries beyond the widest live
+/// name in the table — `model-contract.md` §7's `hits`/`adapter` column:
+/// `hits` (4 chars) pads to width 9 alongside `adapter` (7 chars), so the
+/// gap here is 2.
+const NAME_COLUMN_GAP: usize = 2;
+
+/// The fixed number of spaces separating a header's fields after the type
+/// label. Not padded to a shared column across entries — unlike the name
+/// field, type labels vary too widely in length (`File` vs `Grep.Match[]`)
+/// for a shared column to read cleanly — `model-contract.md` §7.
+const HEADER_FIELD_GAP: usize = 3;
+
+/// Builds one handle's header and body — `model-contract.md` §7's exact
+/// shape, the only place that shape is built (box line 2465). The header
+/// always carries the name (padded to `name_width`, the widest live name in
+/// the table) and the type label; what follows depends on the value:
+///
+/// - an `Array` carries `n=<len>` then `inline cost ~<N> tok · preview <M>
+///   tok` on the header itself, and the element rows are the body;
+/// - a `File` carries `<path>   <bytes> B · <lines> lines · <mtime>` on the
+///   header — its own byte count already states the size, so no `inline
+///   cost` repeats it — and the preview's own token count is appended to
+///   the last `L#` line of the body instead, padded by [`HEADER_FIELD_GAP`];
+/// - every other type carries `inline cost ~<N> tok · preview <M> tok` on
+///   the header, and its body is unchanged from [`preview::render_preview`].
+///
+/// `inline cost` is [`preview::tokens_for_bytes`] over
+/// [`HandleMeta::size_estimate`] — the bytes the isolate recorded for the
+/// call that produced this handle, before anything was parsed into a
+/// structured value. `preview` is [`preview::estimate_tokens`] over the
+/// rendered preview body itself, computed after rendering so it reflects
+/// whatever cap-driven shrinking already happened.
+fn render_entry(entry: &HandleEntry, cap: usize, name_width: usize) -> String {
     let name = preview::escape_line(&entry.name);
     let type_name = preview::escape_line(type_label(entry));
-    let mut header = format!("{name}  {type_name}");
+    let gap = " ".repeat(HEADER_FIELD_GAP);
+
+    let mut header = format!("{name:<name_width$}{type_name}");
     if let Some(cell) = entry.replaced_at_cell {
         header.push_str(&format!("  (replaced at cell {cell})"));
     }
-    let body = preview::render_preview(&entry.value, cap);
-    if body.is_empty() {
-        header
-    } else {
-        format!("{header}\n{body}")
+
+    let inline_cost = preview::tokens_for_bytes(entry.meta.size_estimate);
+
+    match &entry.value {
+        Value::Array(array) => {
+            let body = preview::render_preview(&entry.value, cap);
+            let preview_tokens = preview::estimate_tokens(&body);
+            header.push_str(&gap);
+            header.push_str(&format!(
+                "n={}{gap}inline cost ~{} tok · preview {} tok",
+                array.len(),
+                preview::thousands(inline_cost as u64),
+                preview::thousands(preview_tokens as u64),
+            ));
+            // `array_elements_only` prefixes every element with its own
+            // `\n`, the same convention `render_preview`'s `n=`+elements
+            // join relies on -- no extra separator here, or a blank line
+            // would appear between the header and `[0]`.
+            let elements = preview::array_elements_only(array, cap);
+            format!("{header}{elements}")
+        }
+        Value::File(file) => {
+            header.push_str(&gap);
+            header.push_str(&format!(
+                "{}{gap}{} B · {} lines · {}",
+                preview::escape_line(&file.path),
+                preview::thousands(file.byte_len),
+                preview::thousands(file.line_count),
+                preview::escape_line(&file.mtime),
+            ));
+            let body = preview::render_preview(&entry.value, cap);
+            let preview_tokens = preview::estimate_tokens(&body);
+            let annotation = format!(
+                "{gap}preview {} tok",
+                preview::thousands(preview_tokens as u64)
+            );
+            let mut lines = preview::file_lines_only(file);
+            match lines.last_mut() {
+                Some(last) => last.push_str(&annotation),
+                None => header.push_str(&annotation),
+            }
+            if lines.is_empty() {
+                header
+            } else {
+                format!("{header}\n{}", lines.join("\n"))
+            }
+        }
+        _ => {
+            let body = preview::render_preview(&entry.value, cap);
+            let preview_tokens = preview::estimate_tokens(&body);
+            header.push_str(&gap);
+            header.push_str(&format!(
+                "inline cost ~{} tok · preview {} tok",
+                preview::thousands(inline_cost as u64),
+                preview::thousands(preview_tokens as u64),
+            ));
+            if body.is_empty() {
+                header
+            } else {
+                format!("{header}\n{body}")
+            }
+        }
     }
 }
 
@@ -247,6 +345,32 @@ fn render_entry(entry: &HandleEntry, cap: usize) -> String {
 mod tests {
     use super::*;
     use crate::runtime::preview::Value;
+
+    /// The header carries the declared type, the array's own length, and
+    /// both token figures — `model-contract.md` §7's `hits` line shape.
+    #[test]
+    fn an_entry_header_carries_the_type_the_length_and_both_token_figures() {
+        let mut table = HandleTable::new();
+        table.declare_with(
+            "hits",
+            Value::array(vec![Value::Number(1.0), Value::Number(2.0)]),
+            1,
+            HandleMeta {
+                type_label: Some("Grep.Match[]".into()),
+                size_estimate: 40,
+                ..HandleMeta::default()
+            },
+        );
+        let rendered = render_table(&table, preview::PREVIEW_TOKEN_CAP, preview::TABLE_TOKEN_CAP);
+        let header = rendered.lines().next().unwrap();
+        assert!(
+            header.starts_with("hits  Grep.Match[]   n=2   "),
+            "{header}"
+        );
+        assert!(header.contains("inline cost ~10 tok"), "{header}");
+        assert!(header.contains("· preview "), "{header}");
+        assert!(header.ends_with("tok"), "{header}");
+    }
 
     #[test]
     fn a_handle_is_freed_only_by_redeclaration_free_or_task_end() {

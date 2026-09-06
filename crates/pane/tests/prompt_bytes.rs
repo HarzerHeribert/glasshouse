@@ -2,16 +2,18 @@
 //! `docs/product/pane/model-contract.md`.
 
 use pane::prompt::{self, Budget, CellResult, ErrorSection, Extracted};
-use pane::runtime::handles::{HandleTable, render_table};
+use pane::runtime::handles::{HandleMeta, HandleTable, render_table};
 use pane::runtime::preview::{
     ArrayValue, FileValue, PREVIEW_TOKEN_CAP, StringValue, TABLE_TOKEN_CAP, Value,
 };
 use pane::tools::registry::{self, Tool};
 
-/// §7's four messages, as a golden file. The `{{HANDLES}}` marker stands in
-/// for the one region that is not this package's: `render_table`'s own
-/// bytes for a fixture table, not yet §7's aspirational ones (that is
-/// `GH-PANE-61E-TABLE-BYTES`, a later package).
+/// §7's four messages, as a golden file. The handle table region is
+/// `render_table`'s real bytes for a small fixture, not `model-contract.md`
+/// §7's own repository-measured figures (`n=1195`, `inline cost ~30,565
+/// tok`) -- those were measured on a real grep and this fixture is five
+/// elements, so its `n=`, `inline cost` and `preview` figures are honest for
+/// the fixture and illustrative of the shape, not §7's literal numbers.
 ///
 /// Compared with `\r\n` normalised to `\n` on both sides, per the packet's
 /// cross-platform requirement.
@@ -51,11 +53,12 @@ fn the_worked_turn_renders_byte_for_byte() {
         )
     );
 
-    // The cell-1 result is this package's own rendering. Its handle table
-    // is `render_table`'s real bytes for a fixture holding `hits` and
-    // `adapter`, substituted into the golden's `{{HANDLES}}` region.
+    // The cell-1 result is this package's own rendering: `render_table`'s
+    // real bytes for a fixture holding `hits` and `adapter`, declared with
+    // the same `HandleMeta` the isolate would record for a real `grep`/
+    // `read` call so the header carries §7's declared type names.
     let mut fixture = HandleTable::new();
-    fixture.declare(
+    fixture.declare_with(
         "hits",
         Value::Array(ArrayValue::sampled(
             5,
@@ -79,6 +82,13 @@ fn the_worked_turn_renders_byte_for_byte() {
             ))),
         )),
         1,
+        HandleMeta {
+            type_label: Some("Grep.Match[]".into()),
+            // Illustrative of a real grep's stdout size, not a measurement:
+            // this fixture's own five elements are a few hundred bytes.
+            size_estimate: 4_296,
+            ..HandleMeta::default()
+        },
     );
     fixture.declare(
         "adapter",
@@ -111,8 +121,7 @@ fn the_worked_turn_renders_byte_for_byte() {
         },
     };
 
-    let expected = cell_1_result.replace("{{HANDLES}}", &handle_table);
-    assert_eq!(prompt::render_result(&result), expected);
+    assert_eq!(prompt::render_result(&result), cell_1_result);
 }
 
 /// The constant against §2's text, embedded here so the two can never drift
