@@ -646,7 +646,13 @@ fn the_preview_shrinks_its_samples_before_cutting_anything_above_them() {
 // the refusal a program catches, and the `batch` row the delivery leaves —
 // is `tests/runtime_cells.rs`, where a `Runtime` is already in hand.
 
-use pane::bg::{self, RunOptions, WatchOptions};
+use pane::bg::{self, RunOptions};
+// `WatchOptions` has exactly one user, `a_watch_emits_per_match_and_stops_when_until_matches`,
+// which is `#[cfg(any(macos, linux))]` because `invoke::confine` refuses before spawning
+// anywhere else. An ungated import is therefore dead on Windows, and dead is an error under
+// `[workspace.lints.rust]`'s `-D warnings` — so the import carries its user's gate.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+use pane::bg::WatchOptions;
 use pane::contract::SessionId;
 use pane::glasshouse::Glasshouse;
 use pane::sandbox::profile::Profile;
