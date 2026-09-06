@@ -17,13 +17,32 @@ use crate::commands::{self, CommandStatus};
 use crate::contract::{Block, Conversation, Message, ProjectConfig, Role, ServedBy, SessionId};
 use crate::glasshouse::{self, Glasshouse, LifecycleEvent, LocalMemory};
 use crate::project;
+use crate::prompt::{self, Budget, CellResult, ErrorSection, Extracted};
 use crate::rollout::{self, Rollout};
 use crate::runtime::handles::HandleTable;
+use crate::runtime::isolate::Runtime;
+use crate::runtime::outcome::CellOutcome;
+use crate::runtime::preview::{self, PREVIEW_TOKEN_CAP};
 use crate::sandbox::profile::Profile;
 use crate::tools::invoke::{self, Args, ToolContext, ToolError};
 use crate::tools::registry;
-use crate::tui;
+use crate::tui::{self, CellError, CellView, Counted, Notebook, TaskTokens};
 use crate::wire;
+
+/// `model-contract.md` §6's three defaults. Constants until `pane.toml`
+/// supplies them -- 61F owns the setting, and a figure the model is told is
+/// worth nothing if it is invented twice, so they are spelled once here.
+const TURN_TOKEN_CAP: u64 = 8_000;
+const TASK_TOKEN_CAP: u64 = 400_000;
+const CELL_CAP: u64 = 40;
+
+/// §5's answer to a message that carried no program.
+const NO_PROGRAM: &str = "no program ran; send one pane block";
+
+/// §5's answer to a message that carried two. **Neither runs**, and the
+/// sentence is the contract's own: running the first is the silently-wrong
+/// reading, because the second is usually the one the model meant.
+const TWO_BLOCKS: &str = "two pane blocks in one turn; send one";
 
 /// `pane session`'s whole flag set. A project root and a way to identify the
 /// rollout file are the only things every run needs; `--task` is the
@@ -84,16 +103,22 @@ fn default_rollout_path(root: &std::path::Path) -> PathBuf {
     root.join(".pane").join("rollout.jsonl")
 }
 
-/// Every project instruction document, concatenated in the order
-/// `project::load` found them. The format is this package's own choice --
-/// map line 2448 fixes what is loaded, not how it is joined into one prompt.
+/// The system block, and it is [`prompt::render_system`]'s bytes and nothing
+/// else -- `model-contract.md` §1: the preamble, one declaration per
+/// registered tool, then the project's own instructions.
+///
+/// **The joining of the instruction documents is all this function decides.**
+/// Map line 2448 fixes what is loaded, not how it is joined; everything from
+/// the preamble outwards is `prompt`'s, whose own golden test pins it byte for
+/// byte, so there is no second spelling of the contract here to drift from it.
 fn build_system_prompt(project: &ProjectConfig) -> String {
-    project
+    let instructions = project
         .instructions
         .iter()
         .map(|(_, text)| text.as_str())
         .collect::<Vec<_>>()
-        .join("\n\n")
+        .join("\n\n");
+    prompt::render_system(&instructions, &registry::ALL.iter().collect::<Vec<_>>())
 }
 
 fn message_text(message: &Message) -> String {
@@ -105,26 +130,56 @@ fn message_text(message: &Message) -> String {
         .join("")
 }
 
+/// The conversation and, beside it, everything the notebook column knows
+/// about it that the messages themselves do not say: which cell threw, which
+/// returned, what its handle table looked like as it ended.
+///
+/// **They travel together because they are indexed together.** A cell's view
+/// is found by the same ordinal the screen numbers the cell with, so a
+/// conversation that grew without its notebook -- a resumed session, whose
+/// cells came back from the rollout file -- would hang every later view under
+/// the wrong cell.
+struct Transcript {
+    conversation: Conversation,
+    notebook: Notebook,
+}
+
+/// **Nothing in the notebook is a live object.** The runtime hands out a
+/// rendered handle table and a rendered preview and never its table or its
+/// value, so `tui` receives strings; the empty [`HandleTable`] below is the
+/// argument for a caller that holds one, which the session never does.
+fn empty_handles() -> HandleTable {
+    HandleTable::new()
+}
+
 /// Draws the two-region screen where a user or a test can actually see it.
 /// A live interactive terminal (raw mode, an alternate screen, a
 /// resize-aware redraw loop) is out of scope for this package -- see the
-/// report's limits -- so this draws one frame per turn either way, through
+/// report's limits -- so this draws one frame per cell either way, through
 /// the same unmodified `tui::render`: to a real `CrosstermBackend` when
 /// stdout is a tty, and to stdout as plain lines otherwise, so a pipe never
 /// makes the session's output disappear the way it used to.
-fn render(conversation: &Conversation, served_by: &ServedBy) {
+fn render(transcript: &Transcript, served_by: &ServedBy) {
     if io::stdout().is_terminal() {
-        render_to_terminal(conversation, served_by);
+        render_to_terminal(transcript, served_by);
     } else {
-        render_as_lines(conversation, served_by);
+        render_as_lines(transcript, served_by);
     }
 }
 
-fn render_to_terminal(conversation: &Conversation, served_by: &ServedBy) {
+fn render_to_terminal(transcript: &Transcript, served_by: &ServedBy) {
     let Ok(mut terminal) = Terminal::new(CrosstermBackend::new(io::stdout())) else {
         return;
     };
-    let _ = terminal.draw(|frame| tui::render(frame, conversation, served_by, &HandleTable::new()));
+    let _ = terminal.draw(|frame| {
+        tui::render(
+            frame,
+            &transcript.conversation,
+            served_by,
+            &empty_handles(),
+            &transcript.notebook,
+        )
+    });
 }
 
 /// Every acceptance test below, and any real pipe, takes this path. Draws
@@ -133,10 +188,26 @@ fn render_to_terminal(conversation: &Conversation, served_by: &ServedBy) {
 /// non-blank row as a line of text -- so the conversation column and the
 /// sidebar's content (including its honest "not connected" collapse) reach
 /// stdout rather than a dropped `TestBackend`.
-fn render_as_lines(conversation: &Conversation, served_by: &ServedBy) {
-    let backend = TestBackend::new(100, 40);
+///
+/// **The buffer is sized to the notebook rather than fixed.** A pipe has no
+/// scrollback, so a height chosen once would silently drop the newest cell
+/// exactly when a task had run long enough to be worth reading; the doubling
+/// is the room a wrapped table line takes.
+fn render_as_lines(transcript: &Transcript, served_by: &ServedBy) {
+    let handles = empty_handles();
+    let rows = tui::notebook_height(&transcript.conversation, &handles, &transcript.notebook);
+    let height = (rows * 2 + 8).clamp(40, 2_000) as u16;
+    let backend = TestBackend::new(100, height);
     let mut terminal = Terminal::new(backend).expect("an in-memory backend never fails to init");
-    let _ = terminal.draw(|frame| tui::render(frame, conversation, served_by, &HandleTable::new()));
+    let _ = terminal.draw(|frame| {
+        tui::render(
+            frame,
+            &transcript.conversation,
+            served_by,
+            &handles,
+            &transcript.notebook,
+        )
+    });
     let buffer = terminal.backend().buffer();
     for y in 0..buffer.area.height {
         let mut line = String::new();
@@ -184,7 +255,7 @@ fn run(args: SessionArgs) -> Result<(), String> {
     };
 
     let resuming = rollout_path.exists();
-    let mut conversation = if resuming {
+    let conversation = if resuming {
         rollout::resume(&rollout_path)
             .map_err(|e| format!("could not resume {}: {e}", rollout_path.display()))?
     } else {
@@ -196,6 +267,14 @@ fn run(args: SessionArgs) -> Result<(), String> {
 
     let mut rollout = Rollout::create(&rollout_path, session_id.clone(), &conversation.system)
         .map_err(|e| format!("could not open {}: {e}", rollout_path.display()))?;
+
+    // A resumed conversation's cells are not replayed (`runtime-contract.md`
+    // §4), so the notebook starts empty and pads: an earlier cell renders
+    // with no view of its own rather than with the next task's.
+    let mut transcript = Transcript {
+        conversation,
+        notebook: Notebook::default(),
+    };
 
     glasshouse::emit_lifecycle(&glasshouse, &session_id, LifecycleEvent::SessionStart);
 
@@ -216,7 +295,7 @@ fn run(args: SessionArgs) -> Result<(), String> {
         id: &session_id,
         memory: &memory,
     };
-    let outcome = drive(&args, &session, &mut conversation, &mut rollout);
+    let outcome = drive(&args, &session, &mut transcript, &mut rollout);
 
     glasshouse::emit_lifecycle(
         &glasshouse,
@@ -250,59 +329,343 @@ struct Session<'a> {
 fn drive(
     args: &SessionArgs,
     session: &Session<'_>,
-    conversation: &mut Conversation,
+    transcript: &mut Transcript,
     rollout: &mut Rollout,
 ) -> Result<(), String> {
     if let Some(task) = &args.task {
-        return process_input(task, session, conversation, rollout);
+        return process_input(task, session, transcript, rollout);
     }
 
     let stdin = io::stdin();
     for line in stdin.lock().lines() {
         let line = line.map_err(|e| e.to_string())?;
-        process_input(&line, session, conversation, rollout)?;
+        process_input(&line, session, transcript, rollout)?;
     }
     Ok(())
 }
 
-/// One input: a slash command answered locally, or a turn sent to the model.
+/// One input: a slash command answered locally, or a **task** run to its end.
 /// A slash command -- resolved or not -- never reaches [`wire::send_turn`];
 /// only text that is not a slash command does.
+///
+/// **A slash command is answered between tasks, never inside one.** The one
+/// [`Runtime`] a task owns lives inside [`run_task`] and is dropped when the
+/// task ends, so there is no code path on which a command could reach it.
 fn process_input(
     input: &str,
     session: &Session<'_>,
-    conversation: &mut Conversation,
+    transcript: &mut Transcript,
     rollout: &mut Rollout,
 ) -> Result<(), String> {
     if let Some(rest) = input.strip_prefix('/') {
         let (name, argument) = split_command(rest);
         answer_command(rest, name, argument, session);
-        render(conversation, &ServedBy::default());
+        render(transcript, &ServedBy::default());
         return Ok(());
     }
+    run_task(input, session, transcript, rollout)
+}
 
+/// The task's token total and the cells it has spent, and where each turn's
+/// figure came from -- `model-contract.md` §6's budget line.
+struct TaskBudget {
+    used: u64,
+    cells_used: u64,
+    gateway: bool,
+    estimated: bool,
+}
+
+impl TaskBudget {
+    fn new() -> Self {
+        Self {
+            used: 0,
+            cells_used: 0,
+            gateway: false,
+            estimated: false,
+        }
+    }
+
+    /// Adds one turn's cost: the gateway's own usage row when it reported
+    /// one, `estimate` otherwise.
+    ///
+    /// **Which of the two was used is recorded, not averaged.** §6 reads the
+    /// provider's figure "rather than estimated", and a total that quietly
+    /// mixed a measurement with a heuristic would be a number the sidebar
+    /// could not honestly label.
+    fn add(&mut self, served: &ServedBy, estimate: u64) {
+        match (served.input_tokens, served.output_tokens) {
+            (None, None) => {
+                self.used = self.used.saturating_add(estimate);
+                self.estimated = true;
+            }
+            (input, output) => {
+                self.used = self
+                    .used
+                    .saturating_add(input.unwrap_or(0))
+                    .saturating_add(output.unwrap_or(0));
+                self.gateway = true;
+            }
+        }
+    }
+
+    fn counted(&self) -> Option<Counted> {
+        match (self.gateway, self.estimated) {
+            (true, true) => Some(Counted::Mixed),
+            (true, false) => Some(Counted::Gateway),
+            (false, true) => Some(Counted::Estimated),
+            (false, false) => None,
+        }
+    }
+
+    /// §6's own line, for the result block the model reads next.
+    fn line(&self) -> Budget {
+        Budget {
+            turn_cap: TURN_TOKEN_CAP,
+            task_used: self.used,
+            task_cap: TASK_TOKEN_CAP,
+            cells_used: self.cells_used,
+            cells_cap: CELL_CAP,
+        }
+    }
+
+    fn tokens(&self) -> Option<TaskTokens> {
+        Some(TaskTokens {
+            used: self.used,
+            cap: TASK_TOKEN_CAP,
+            counted: self.counted()?,
+        })
+    }
+
+    /// Whether this task may still ask for another turn after the one being
+    /// answered -- §6's cap on cells and its task budget, either of which
+    /// buys exactly one more turn under [`prompt::exhausted_preamble`].
+    fn spent(&self) -> bool {
+        self.used >= TASK_TOKEN_CAP || self.cells_used >= CELL_CAP
+    }
+}
+
+/// What one assistant message asked the session to do.
+struct Step {
+    /// The next user message, or `None` when the task is over: a top-level
+    /// `return` is answered with nothing at all, because nothing further is
+    /// asked of the model (`runtime-contract.md` §1).
+    answer: Option<String>,
+    view: CellView,
+}
+
+/// Runs one task to its end: every turn's program goes to this task's own
+/// isolate and every outcome comes back as the next user message, with no
+/// person in the loop, until a top-level `return`, the cell cap or the task
+/// budget ends it.
+///
+/// **One [`Runtime`] per task, built from the session's one compiled
+/// [`Profile`].** `sandbox-grants.md` §1.5 is that the profile is computed
+/// once at session start; this borrows it and compiles nothing, so a second
+/// task cannot widen the first's grants and a program cannot widen its own.
+fn run_task(
+    task: &str,
+    session: &Session<'_>,
+    transcript: &mut Transcript,
+    rollout: &mut Rollout,
+) -> Result<(), String> {
     glasshouse::emit_lifecycle(
         session.glasshouse,
         session.id,
         LifecycleEvent::UserPromptSubmit,
     );
 
-    conversation.messages.push(Message::text(Role::User, input));
+    transcript
+        .conversation
+        .messages
+        .push(Message::text(Role::User, task));
     rollout
-        .record_turn(Role::User, input)
+        .record_turn(Role::User, task)
         .map_err(|e| format!("could not record the user turn: {e}"))?;
 
-    let since = SystemTime::now();
-    let assistant = wire::send_turn(conversation).map_err(|e| format!("request failed: {e}"))?;
-    let assistant_text = message_text(&assistant);
-    conversation.messages.push(assistant);
-    rollout
-        .record_turn(Role::Assistant, &assistant_text)
-        .map_err(|e| format!("could not record the assistant turn: {e}"))?;
+    let mut runtime = Runtime::new(session.profile, session.glasshouse, session.id);
+    let mut budget = TaskBudget::new();
+    let mut final_turn = false;
 
-    let served = glasshouse::served_by(session.glasshouse, since);
-    render(conversation, &served);
+    loop {
+        let since = SystemTime::now();
+        let assistant = wire::send_turn(&transcript.conversation)
+            .map_err(|e| format!("request failed: {e}"))?;
+        let estimate = estimate_request_tokens(&transcript.conversation);
+        let assistant_text = message_text(&assistant);
+        transcript.conversation.messages.push(assistant);
+        rollout
+            .record_turn(Role::Assistant, &assistant_text)
+            .map_err(|e| format!("could not record the assistant turn: {e}"))?;
+
+        let served = glasshouse::served_by(session.glasshouse, since);
+        budget.add(&served, estimate);
+
+        let ordinal = cell_ordinal(&transcript.conversation);
+        let mut step = act_on(&assistant_text, &mut runtime, &mut budget, rollout)?;
+
+        // The flag is read before this turn decorates it, so the turn that
+        // carries the exhausted preamble is sent, answered and only then
+        // ends the task -- §6's "the only permitted action is a top-level
+        // `return`" needs that turn to actually happen.
+        let stop = step.answer.is_none() || final_turn;
+        if !stop && budget.spent() {
+            step.answer = step
+                .answer
+                .map(|answer| format!("{}\n\n{answer}", prompt::exhausted_preamble()));
+            final_turn = true;
+        }
+
+        step.view.answered = step.answer.is_some();
+        transcript.notebook.tokens = budget.tokens();
+        transcript.notebook.set(ordinal, step.view);
+
+        if let Some(answer) = &step.answer {
+            transcript
+                .conversation
+                .messages
+                .push(Message::text(Role::User, answer));
+            rollout
+                .record_turn(Role::User, answer)
+                .map_err(|e| format!("could not record the runtime's answer: {e}"))?;
+        }
+
+        render(transcript, &served);
+
+        if stop {
+            break;
+        }
+    }
+
+    runtime.end_task();
     Ok(())
+}
+
+/// `model-contract.md` §5 applied to one assistant message: one `pane` block
+/// is a program and runs, two run neither, and anything else is prose.
+///
+/// **Nothing in `assistant_text` reaches a shell.** The one thing extracted
+/// from it is a program, and the only thing that ever receives a program is
+/// [`Runtime::run_cell`]; every tool that program calls goes through
+/// `tools::invoke` and the session's sandbox from inside the isolate.
+fn act_on(
+    assistant_text: &str,
+    runtime: &mut Runtime,
+    budget: &mut TaskBudget,
+    rollout: &mut Rollout,
+) -> Result<Step, String> {
+    let source = match prompt::extract_program(assistant_text) {
+        Extracted::Program(source) => source,
+        // §5: the task does not advance and the cell counter does not move.
+        // The screen still shows the table, because it is still what the
+        // isolate holds -- an output region saying `(no outputs)` beside live
+        // handles would be the screen disagreeing with the message sent in
+        // the same breath.
+        Extracted::Prose => {
+            let table = runtime.render_handles();
+            return Ok(Step {
+                answer: Some(unchanged_table(&table)),
+                view: CellView {
+                    table: Some(table),
+                    ..CellView::default()
+                },
+            });
+        }
+        Extracted::TwoBlocks => {
+            return Ok(Step {
+                answer: Some(TWO_BLOCKS.to_string()),
+                view: CellView {
+                    table: Some(runtime.render_handles()),
+                    ..CellView::default()
+                },
+            });
+        }
+    };
+
+    let outcome = runtime.run_cell(&source);
+    budget.cells_used = budget.cells_used.saturating_add(1);
+    let turn = outcome.turn();
+    rollout
+        .record_cell(&turn.record)
+        .map_err(|e| format!("could not record the cell: {e}"))?;
+
+    let mut view = CellView {
+        table: Some(turn.table.clone()),
+        ..CellView::default()
+    };
+    let mut result = CellResult {
+        cell: turn.record.cell,
+        elapsed_ms: turn.elapsed_ms,
+        error: None,
+        handle_table: turn.table.clone(),
+        stdout_tail: (!turn.stdout_tail.is_empty()).then(|| turn.stdout_tail.clone()),
+        budget: budget.line(),
+    };
+
+    let answer = match &outcome {
+        // §1: the task ends with this value and nothing further is asked of
+        // the model. Nothing that threw, was refused or was cancelled reaches
+        // this arm -- each of those is a `Threw`, and a throw is answered.
+        CellOutcome::Returned { value, .. } => {
+            view.returned = Some(preview::render_preview(value, PREVIEW_TOKEN_CAP));
+            None
+        }
+        CellOutcome::Threw { error, .. } => {
+            view.error = Some(CellError {
+                class: error.class.clone(),
+                message: error.message.clone(),
+                line: error.line,
+                column: error.column,
+            });
+            result.error = Some(ErrorSection {
+                class: error.class.clone(),
+                message: error.message.clone(),
+                // `0` where the runtime could not attribute the throw to a
+                // line of the model's own program: §6's section has no absent
+                // case, and `prompt` is not this package's to change.
+                line: error.line.unwrap_or(0).into(),
+                column: error.column.unwrap_or(0).into(),
+                frames: error
+                    .stack
+                    .iter()
+                    .map(|frame| frame.description.clone())
+                    .collect(),
+            });
+            Some(prompt::render_result(&result))
+        }
+        CellOutcome::Yielded { .. } => Some(prompt::render_result(&result)),
+    };
+
+    Ok(Step { answer, view })
+}
+
+/// §5's answer to a message that carried no program: the handle table
+/// unchanged, and one line saying so. `(none)` rather than an empty section,
+/// the same rule [`prompt::render_result`] keeps for the same table.
+fn unchanged_table(table: &str) -> String {
+    let shown = if table.is_empty() { "(none)" } else { table };
+    format!("## Handles\n{shown}\n\n{NO_PROGRAM}")
+}
+
+/// Which cell the screen will number the newest assistant message, counted
+/// exactly as `tui`'s own notebook counts it: the task is the first message
+/// and is drawn as a header, so a cell is an assistant message after it.
+fn cell_ordinal(conversation: &Conversation) -> usize {
+    conversation
+        .messages
+        .iter()
+        .skip(1)
+        .filter(|message| message.role == Role::Assistant)
+        .count()
+}
+
+/// The turn's cost when the gateway reported none: `estimate_tokens` over the
+/// bytes actually sent, which is what makes it comparable turn to turn.
+///
+/// It counts the request and not the reply, so it is a floor rather than a
+/// total -- the sidebar says `estimated` for exactly this reason.
+fn estimate_request_tokens(conversation: &Conversation) -> u64 {
+    let body = wire::request_body(conversation);
+    preview::estimate_tokens(&String::from_utf8_lossy(&body)) as u64
 }
 
 /// Splits a slash command's name from whatever follows it -- `/memory a

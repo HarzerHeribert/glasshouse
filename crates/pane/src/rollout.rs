@@ -15,6 +15,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::contract::{Conversation, Message, Role, RolloutKind, SessionId};
+use crate::runtime::outcome::CellRecord;
 
 /// The `kind` pane writes for the one line per session that carries the
 /// system prompt. `RolloutKind` (`contract.rs`, frozen) only names the two
@@ -42,6 +43,21 @@ struct TurnLine {
     role: String,
     text: String,
     at_millis: u64,
+}
+
+/// One cell's line: `runtime-contract.md` §4's own object, with the two
+/// fields every line in this shared file carries in front of it.
+///
+/// **`#[serde(flatten)]` rather than a struct that repeats §4's fields.** The
+/// contract's shape is `CellRecord`'s and the runtime owns it; re-spelling it
+/// here would be a second place for it to drift, and the drift would be
+/// invisible because both halves would still serialise.
+#[derive(Serialize)]
+struct CellLine<'a> {
+    kind: &'static str,
+    session_id: &'a str,
+    #[serde(flatten)]
+    record: &'a CellRecord,
 }
 
 fn now_millis() -> u64 {
@@ -95,6 +111,23 @@ impl Rollout {
         self.append_line(&line)?;
         self.next_turn += 1;
         Ok(())
+    }
+
+    /// Appends one cell's line -- `runtime-contract.md` §4.
+    ///
+    /// **It does not advance the turn number.** A cell is not a turn: the
+    /// user and assistant messages around it write their own `turn` lines and
+    /// [`resume`] rebuilds the conversation from those alone, so a cell line
+    /// that consumed a turn number would leave a hole in the sequence
+    /// `record_turn` maintains.
+    pub fn record_cell(&mut self, record: &CellRecord) -> io::Result<()> {
+        let session_id = self.session_id.clone();
+        let line = CellLine {
+            kind: RolloutKind::Cell.as_str(),
+            session_id: session_id.as_str(),
+            record,
+        };
+        self.append_line(&line)
     }
 
     fn append_line<T: Serialize>(&mut self, line: &T) -> io::Result<()> {
