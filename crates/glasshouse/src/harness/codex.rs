@@ -69,7 +69,7 @@ const HOOK_EVENTS: &[&str] = &[
 /// check can be driven from a tool call.
 ///
 /// History: design-decisions.md, "Trims: config, checkpoint, evaluation and codex module docs", codex.rs `CATALOGUE_OBSERVED_VERSION`.
-pub const CATALOGUE_OBSERVED_VERSION: &str = "0.153.3";
+pub const CATALOGUE_OBSERVED_VERSION: &str = "0.153.4";
 /// The events Glasshouse asks Codex to report.
 ///
 /// A subset of [`HOOK_EVENTS`], deliberately not the remaining per-tool
