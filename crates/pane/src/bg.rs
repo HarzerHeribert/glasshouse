@@ -231,7 +231,7 @@ pub fn run(
         profile,
         glasshouse,
         session,
-        command,
+        Work::Command(command.to_string()),
         options.timeout_ms,
         None,
     ))
@@ -255,7 +255,7 @@ pub fn watch(
         profile,
         glasshouse,
         session,
-        command,
+        Work::Command(command.to_string()),
         options.timeout_ms,
         Some(options.clone()),
     ))
@@ -264,11 +264,39 @@ pub fn watch(
 /// Mints the handle, registers the job and starts its thread — the one place
 /// a job comes into existence, so `run` and `watch` cannot drift about what a
 /// job is.
+/// Phase 64's entry: start a subagent and answer with its handle at once.
+///
+/// It admits no command line, because a subagent runs none of its own — its
+/// tools go through the same `Profile` its parent's do, and the profile is
+/// cloned rather than recompiled so the two cannot drift. The refusals that
+/// belong to the *caller* — a subagent starting a subagent, a budget that
+/// cannot pay — are made where the caller is known, in the binding, before
+/// this is reached and before a handle exists.
+pub fn agent(
+    profile: &Profile,
+    glasshouse: &Glasshouse,
+    session: &SessionId,
+    task: &str,
+    options: &crate::agent::AgentOptions,
+) -> String {
+    start(
+        profile,
+        glasshouse,
+        session,
+        Work::Agent {
+            task: task.to_string(),
+            options: options.clone(),
+        },
+        None,
+        None,
+    )
+}
+
 fn start(
     profile: &Profile,
     glasshouse: &Glasshouse,
     session: &SessionId,
-    command: &str,
+    work: Work,
     timeout_ms: Option<u64>,
     watching: Option<WatchOptions>,
 ) -> String {
@@ -293,7 +321,7 @@ fn start(
         profile: profile.clone(),
         glasshouse: glasshouse.clone(),
         session: session.clone(),
-        command: command.to_string(),
+        work,
         token: token.clone(),
         watching,
     };
@@ -363,12 +391,38 @@ fn raise(session: &SessionId, event: Event) {
 /// session's profile, and cloning it is what `RuntimeState` already does.
 /// Cloning cannot widen anything: [`Profile`] has no method that mutates it
 /// and no constructor outside `Profile::compile`.
+/// What a job actually does.
+///
+/// **A subagent is a job whose work is a turn loop rather than a spawned
+/// command** (Phase 64). It is a variant here and not a second system because
+/// everything around the work — the board, the cancellation token, the
+/// deadline, the payload store, the emission, the batch and its dedup — is
+/// identical for both, and a parallel path would have had to reproduce all of
+/// it to gain nothing.
+enum Work {
+    Command(String),
+    Agent {
+        task: String,
+        options: crate::agent::AgentOptions,
+    },
+}
+
+impl Work {
+    /// How the completion line names this job.
+    fn summary_subject(&self) -> String {
+        match self {
+            Work::Command(command) => command.clone(),
+            Work::Agent { task, .. } => format!("subagent: {task}"),
+        }
+    }
+}
+
 struct JobThread {
     handle: String,
     profile: Profile,
     glasshouse: Glasshouse,
     session: SessionId,
-    command: String,
+    work: Work,
     token: CancellationToken,
     watching: Option<WatchOptions>,
 }
@@ -390,8 +444,34 @@ impl JobThread {
     /// so the emission is the constant §1's dedup table needs to make that
     /// true.
     fn serve_once(&self) {
-        let result = self.call();
-        self.emit("exit", result);
+        match &self.work {
+            Work::Command(_) => {
+                let result = self.call();
+                self.emit("exit", result);
+            }
+            Work::Agent { task, options } => {
+                let answered = crate::agent::run(
+                    &self.profile,
+                    &self.glasshouse,
+                    &self.session,
+                    task,
+                    options,
+                    &self.token,
+                );
+                // The answer is the job's output, so a subagent's result is
+                // read exactly as a command's is — `stdout`, `stderr`,
+                // `status` — and nothing downstream learns a second shape.
+                let status = answered.status.clone();
+                self.emit(
+                    &status,
+                    Ok(JobResult {
+                        stdout: answered.answer,
+                        stderr: String::new(),
+                        status: answered.status,
+                    }),
+                );
+            }
+        }
     }
 
     /// §5's watch: `cmd` every `every` ms, one `bg.done` per match, until
@@ -455,7 +535,15 @@ impl JobThread {
             glasshouse: &self.glasshouse,
             session: &self.session,
         };
-        let args = Args::new().with("command", self.command.clone());
+        let Work::Command(command) = &self.work else {
+            // Unreachable: `serve_once` sends an agent down the other arm and
+            // a watch is refused for one at `agent`, so nothing reaches here
+            // with anything but a command line.
+            return Err(ToolError::Cancelled {
+                tool: "bash".to_string(),
+            });
+        };
+        let args = Args::new().with("command", command.clone());
         invoke::run_cancellable(&context, &self.token, "bash", &args).map(|result| JobResult {
             stdout: result.stdout,
             stderr: result.stderr,
@@ -486,17 +574,25 @@ impl JobThread {
         let payload = format!("{}#{emission}", self.handle);
         let line = summary(&format!(
             "{} → {} ({} B out)",
-            self.command,
+            self.work.summary_subject(),
             job.status,
             job.stdout.len()
         ));
         with_board(&self.session, |board| {
             board.payloads.insert(payload.clone(), job);
             board.pending.push(Event::pending(
-                Kind::BgDone {
-                    emission: emission.to_string(),
+                match &self.work {
+                    Work::Command(_) => Kind::BgDone {
+                        emission: emission.to_string(),
+                    },
+                    Work::Agent { .. } => Kind::AgentDone {
+                        emission: emission.to_string(),
+                    },
                 },
-                format!("bg/{}", self.handle),
+                match &self.work {
+                    Work::Command(_) => format!("bg/{}", self.handle),
+                    Work::Agent { .. } => format!("agent/{}", self.handle),
+                },
                 now(),
                 PayloadRef::new(payload.clone()),
                 Priority::Batch,

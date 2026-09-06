@@ -80,6 +80,10 @@ pub enum Kind {
     CiRun { conclusion: String },
     CiCell { cell: String, conclusion: String },
     BgDone { emission: String },
+    /// A subagent finished — Phase 64. Its own kind and not a `bg.done`,
+    /// because a program that selects finished shell jobs must not be handed
+    /// an answer to a question it asked, and the reverse.
+    AgentDone { emission: String },
     Hook(String),
     Message { message_id: String },
     Timer { deadline: String },
@@ -96,6 +100,7 @@ impl Kind {
             Kind::CiRun { .. } => "ci.run".to_string(),
             Kind::CiCell { .. } => "ci.cell".to_string(),
             Kind::BgDone { .. } => "bg.done".to_string(),
+            Kind::AgentDone { .. } => "agent.done".to_string(),
             Kind::Hook(name) => format!("hook.{name}"),
             Kind::Message { .. } => "message".to_string(),
             Kind::Timer { .. } => "timer".to_string(),
@@ -279,6 +284,10 @@ impl Event {
                 format!("ci.cell|{}|{cell}|{conclusion}", self.source)
             }
             Kind::BgDone { emission } => format!("bg.done|{}|{emission}", self.source),
+            // A subagent completes once, so the source alone would do; the
+            // emission is kept for the same reason `bg.done` keeps it, which
+            // is that one shape for both is one thing to reason about.
+            Kind::AgentDone { emission } => format!("agent.done|{}|{emission}", self.source),
             Kind::Hook(name) => format!(
                 "hook|{}|{name}|{}",
                 self.source,

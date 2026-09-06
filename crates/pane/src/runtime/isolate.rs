@@ -803,6 +803,26 @@ impl Runtime {
         }
     }
 
+    /// What the task around this runtime is spending and on which model, so a
+    /// subagent can inherit the model and be refused when the budget cannot
+    /// pay for it. Called once per turn; `remaining` of `0` means unknown.
+    pub fn set_task_context(&mut self, remaining: u64, model: &str) {
+        self.state.budget_remaining.set(remaining);
+        *self.state.model.borrow_mut() = model.to_string();
+    }
+
+    /// Marks this runtime as a subagent's, which is what refuses a nested
+    /// `agent.run`.
+    ///
+    /// Phase 64's last line: a subagent has no subagent of its own. The depth
+    /// is a flag rather than a counter because there is no second rung to
+    /// count to — one level is the whole ladder, and a counter would invite a
+    /// caller to raise it.
+    pub fn as_subagent(self) -> Self {
+        self.state.subagent.set(true);
+        self
+    }
+
     /// Every name the global object carries: the host functions, the
     /// JavaScript built-ins, and every live handle.
     ///

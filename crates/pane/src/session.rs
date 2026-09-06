@@ -455,8 +455,8 @@ fn build_system_prompt(project: &ProjectConfig, profile: &Profile) -> String {
 pub fn session_facts(profile: &Profile) -> prompt::SessionFacts {
     let mut writable: Vec<String> = profile
         .rules()
-        .filter(|rule| rule.write())
-        .flat_map(|rule| rule.glob().to_vec())
+        .filter(|rule| rule.write() && rule.effect() == crate::sandbox::profile::Effect::Allow)
+        .map(|rule| rule.written().to_string())
         .collect();
     writable.sort();
     writable.dedup();
@@ -1050,6 +1050,12 @@ fn run_task(
         let cell_token = invoke::CancellationToken::new();
         session.interrupt.arm(cell_token.clone());
         runtime.set_token(cell_token);
+        // What a subagent inherits and is measured against — Phase 64. Set
+        // per turn rather than once, because both change during a task.
+        runtime.set_task_context(
+            budget.task_cap.saturating_sub(budget.used),
+            &session.model.borrow(),
+        );
 
         // `events-contract.md` §4: the window that was open while this turn
         // was being answered closes here and its batch is bound into the
@@ -1077,6 +1083,7 @@ fn run_task(
             &mut budget,
             rollout,
             session.interrupt,
+            session.profile,
         )?;
         prose_turns = if step.prose { prose_turns + 1 } else { 0 };
         if let Some(record) = step.record.take() {
@@ -1246,6 +1253,7 @@ fn act_on(
     budget: &mut TaskBudget,
     rollout: &mut Rollout,
     interrupt: &Interrupter,
+    profile: &Profile,
 ) -> Result<Step, String> {
     let source = match prompt::extract_program(assistant_text) {
         Extracted::Program(source) => source,
@@ -1254,6 +1262,17 @@ fn act_on(
         // isolate holds -- an output region saying `(no outputs)` beside live
         // handles would be the screen disagreeing with the message sent in
         // the same breath.
+        Extracted::Prose
+            if !assistant_text.contains("<php-pane>") && !assistant_text.contains("```pane") =>
+        {
+            return Ok(Step {
+                answer: None,
+                response: None,
+                prose: false,
+                record: None,
+                view: CellView::default(),
+            });
+        }
         Extracted::Prose => {
             let table = runtime.render_handles();
             return Ok(Step {
@@ -1281,7 +1300,9 @@ fn act_on(
         }
     };
 
+    let before = crate::changes::Snapshot::capture(profile);
     let outcome = runtime.run_cell(&source);
+    let changes = before.diff(&crate::changes::Snapshot::capture(profile));
     budget.cells_used = budget.cells_used.saturating_add(1);
     let turn = outcome.turn();
     let record = turn.record.clone();
@@ -1289,6 +1310,7 @@ fn act_on(
         .map_err(|e| format!("could not record the cell: {e}"))?;
 
     let mut view = CellView {
+        changes,
         execution: Some(if record.calls.is_empty() {
             "No tool calls ran in this cell.".into()
         } else {

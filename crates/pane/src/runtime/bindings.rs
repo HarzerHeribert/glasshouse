@@ -252,6 +252,14 @@ pub(crate) fn install(scope: &mut v8::PinScope) {
     }
     set_fixed_key(scope, global, "bg", background.into());
 
+    // Subagents. Fixed for the same reason as `bg`: a program that replaced
+    // `agent` could not stop what it started.
+    let agent = v8::Object::new(scope);
+    if let Some(function) = v8::Function::builder(agent_run_callback).build(scope) {
+        set_fixed_key(scope, agent, "run", function.into());
+    }
+    set_fixed_key(scope, global, "agent", agent.into());
+
     // The model's own plan. Fixed like every other host object: a program
     // that replaced `todo` would leave the screen showing a checklist nothing
     // could update.
@@ -1203,6 +1211,96 @@ fn stream(
     let id = args.data().to_rust_string_lossy(scope);
     let session = state(scope).session.clone();
     bg::payload(&session, &id).map(pick).unwrap_or_default()
+}
+
+// --- agent.run ---------------------------------------------------------
+
+/// Phase 64's `agent.run(task, {turns, model})`.
+///
+/// **Both refusals happen before a handle exists**, which is `bg.run`'s own
+/// rule and matters for the same reason: a program that catches the exception
+/// is holding nothing, and there is no started subagent to stop.
+///
+/// The first refusal is depth — a subagent may not start a subagent, and the
+/// runtime knows which it is. The second is budget: a subagent charges the
+/// parent's task budget, so one the parent cannot pay for is refused rather
+/// than started and killed halfway, which would spend the tokens and produce
+/// nothing.
+fn agent_run_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    mut retval: v8::ReturnValue,
+) {
+    let task = args.get(0).to_rust_string_lossy(scope);
+    if task.trim().is_empty() {
+        throw_tool_error(scope, "agent.run needs a task to work on");
+        return;
+    }
+    let turns = read_millis(scope, args.get(1), "turns").unwrap_or(crate::agent::DEFAULT_TURNS);
+    let asked_model = read_option(scope, args.get(1), "model");
+
+    let state = state(scope);
+    if state.subagent.get() {
+        throw_denied(
+            scope,
+            &PermissionDenied {
+                tool: "agent".to_string(),
+                path: String::new(),
+                rule: "a subagent may not start a subagent; answer the question you were given"
+                    .to_string(),
+            },
+        );
+        return;
+    }
+
+    // A turn's worth of budget is the floor, not the whole cost: what a
+    // subagent actually spends is charged as its `agent.done` arrives. This
+    // refuses the case the parent plainly cannot afford rather than
+    // predicting one it might.
+    let remaining = state.budget_remaining.get();
+    if remaining > 0 && remaining < MINIMUM_AGENT_BUDGET {
+        throw_denied(
+            scope,
+            &PermissionDenied {
+                tool: "agent".to_string(),
+                path: String::new(),
+                rule: format!(
+                    "the task has {remaining} token(s) left and a subagent needs at least \
+                     {MINIMUM_AGENT_BUDGET}; finish or return"
+                ),
+            },
+        );
+        return;
+    }
+
+    let options = crate::agent::AgentOptions {
+        turns: turns.clamp(1, crate::agent::MAX_TURNS),
+        model: asked_model.unwrap_or_else(|| state.model.borrow().clone()),
+        effort: crate::wire::Effort::default(),
+    };
+    let handle = crate::bg::agent(
+        &state.profile,
+        &state.glasshouse,
+        &state.session,
+        &task,
+        &options,
+    );
+    let object = agent_object(scope, &handle);
+    retval.set(object);
+}
+
+/// What a task must have left before a subagent may start. One ordinary
+/// turn's ceiling, which is the smallest amount that could produce an answer
+/// rather than a truncation.
+const MINIMUM_AGENT_BUDGET: u64 = crate::wire::MAX_TOKENS as u64;
+
+fn agent_object<'s>(scope: &mut v8::PinScope<'s, '_>, handle: &str) -> v8::Local<'s, v8::Value> {
+    let object = v8::Object::new(scope);
+    let id = js_string(scope, handle);
+    set_fixed_key(scope, object, "id", id);
+    let source = js_string(scope, &format!("agent/{handle}"));
+    set_fixed_key(scope, object, "source", source);
+    object.into()
 }
 
 // --- todo.write, todo.read ---------------------------------------------

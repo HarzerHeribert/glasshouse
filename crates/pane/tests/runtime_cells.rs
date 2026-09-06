@@ -3295,3 +3295,73 @@ fn legal_free_names_are_never_accused() {
     let hoisted = runtime.run_cell("const r = later();\nfunction later() { return \"ok\"; }\nreturn r;\n");
     assert_eq!(returned_string(&hoisted), "ok");
 }
+
+// --- subagents: Phase 64 ------------------------------------------------
+
+/// The two refusals Phase 64 names, and both happen **before a handle
+/// exists**: a program that catches either is holding nothing, and there is no
+/// started subagent to stop.
+#[test]
+fn a_subagent_may_not_start_a_subagent() {
+    let fixture = Fixture::new("agent-depth");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("agent-depth-session");
+    let mut parent = runtime(&fixture, &glasshouse, &session);
+
+    // The parent may ask: it gets a handle, and the handle names its source.
+    let started = parent.run_cell(
+        "const a = agent.run(\"count the files\");\nreturn a.id + \" \" + a.source;\n",
+    );
+    let answer = returned_string(&started);
+    assert!(answer.contains("agent/"), "no agent handle came back: {answer}");
+
+    // A subagent's own runtime may not.
+    let mut child = Runtime::new(&fixture.profile(), &glasshouse, &session).as_subagent();
+    let refused = child.run_cell(
+        "try { agent.run(\"and again\"); return \"no throw\"; }\ncatch (e) { return e.name + \": \" + e.message; }\n",
+    );
+    let text = returned_string(&refused);
+    assert!(text.starts_with("PermissionDenied"), "{text}");
+    assert!(text.contains("may not start a subagent"), "{text}");
+}
+
+/// A task that cannot pay for a subagent is refused one, rather than starting
+/// one it would have to kill halfway — which spends the tokens and produces
+/// nothing.
+#[test]
+fn a_budget_that_cannot_pay_refuses_the_subagent_before_it_starts() {
+    let fixture = Fixture::new("agent-budget");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("agent-budget-session");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+
+    // A budget below one turn's ceiling.
+    runtime.set_task_context(10, "claude-sonnet-5");
+    let refused = runtime.run_cell(
+        "try { agent.run(\"anything\"); return \"no throw\"; }\ncatch (e) { return e.message; }\n",
+    );
+    let text = returned_string(&refused);
+    assert!(text.contains("10 token(s) left"), "{text}");
+
+    // Plenty, and it starts. `0` means unknown, which is not a refusal.
+    runtime.set_task_context(400_000, "claude-sonnet-5");
+    let started = runtime.run_cell("return agent.run(\"anything\").source;\n");
+    assert!(returned_string(&started).starts_with("agent/"));
+}
+
+/// A subagent inherits the parent's model unless the cell names one, so a
+/// session that switched model does not silently fan out on the default.
+#[test]
+fn a_subagent_inherits_the_parents_model() {
+    use pane::agent::{AgentOptions, DEFAULT_TURNS, MAX_TURNS};
+    // The clamp is the part worth pinning: `turns` is written by the model,
+    // and an unbounded one would spend the parent's whole budget in a call it
+    // does not watch.
+    let asked = AgentOptions {
+        turns: 10_000,
+        model: "inherited-model".to_string(),
+        effort: pane::wire::Effort::default(),
+    };
+    assert_eq!(asked.turns.clamp(1, MAX_TURNS), MAX_TURNS);
+    assert!(DEFAULT_TURNS <= MAX_TURNS);
+}

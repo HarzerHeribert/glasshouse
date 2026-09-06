@@ -30,6 +30,7 @@ The nine kinds, each with the **dedup key** deciding whether a second arrival is
 | `ci.run` | `source + conclusion` | |
 | `ci.cell` | `source + cell + conclusion` | a cell landing twice is one event |
 | `bg.done` | `bg/<handle> + emission` | a job completes once; a watch emits one per match |
+| `agent.done` | `agent/<handle> + emission` | a subagent completes once (Phase 64) |
 | `hook.<name>` | `source + hook + tool call id` | thirty tool calls are thirty events |
 | `message` | `sender + message id` | |
 | `timer` | `bg/<handle> + deadline` | the only kind pane itself sources |
@@ -113,6 +114,23 @@ timed-out job still emits `bg.done` with `status: "cancelled"`, so nothing waits
 **A background job runs under the same sandbox grant and budget as a foreground turn**, so nothing
 widens because it is asynchronous: a `bg.run` outside the grant throws `PermissionDenied` at the
 call, before any handle exists, as `sandbox-grants.md` §5's refusal does.
+
+## 5b. Subagents
+
+    agent.run(task, {turns, model})     → Agent handle, immediately
+
+A subagent is **a background job whose work is a turn loop**, so everything in
+§5 applies to it unchanged: it returns a handle before it has done anything, it
+never blocks, `bg.cancel` stops it, and its completion arrives in a later batch
+rather than as its own turn. Its result reads as a job's does — `stdout` is the
+answer, `status` is `returned`, `turns`, `cancelled` or `failed`.
+
+It is a separate `kind` and not a `bg.done` because a program selecting finished
+shell commands must not be handed an answer to a question it asked, and the
+reverse. It runs under the parent session's own compiled profile, cloned rather
+than recompiled, so the two cannot drift. Two refusals happen before a handle
+exists: a subagent may not start a subagent, and a task whose budget cannot pay
+for one is refused rather than starting one it would have to kill.
 
 ## 6. Standing handlers
 

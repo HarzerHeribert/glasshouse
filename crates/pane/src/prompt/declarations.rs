@@ -137,6 +137,20 @@ pub const RUNTIME: &[Binding] = &[
                       // happened.",
     },
     Binding {
+        global: "agent",
+        declaration: "declare const agent: {\n  \
+                      run(task: string, options?: {turns?: number; model?: string}): Job;\n\
+                      };\n\
+                      // Start a subagent on one self-contained question. It returns a handle\n\
+                      // at once and never blocks; its answer arrives later as an `agent.done`\n\
+                      // event whose result is a handle, selected with\n\
+                      // `batch.where({kind: \"agent.done\"})`. It runs under this session's own\n\
+                      // grant, spends this task's budget, and cannot start a subagent of its\n\
+                      // own. Worth it when a question is separable and its working would\n\
+                      // otherwise fill your own context; not worth it for anything you could\n\
+                      // answer in the next cell. `bg.cancel` stops one.",
+    },
+    Binding {
         global: "todo",
         declaration: "declare const todo: {\n  \
                       write(items: {text: string; status: \"pending\" | \"active\" | \"done\"}[]): void;\n  \

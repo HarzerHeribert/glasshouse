@@ -141,6 +141,15 @@ pub(crate) struct RuntimeState {
     /// a plan is the shape of the task in hand, so it is cleared with the
     /// task rather than carried into the next one.
     plan: RefCell<Vec<PlanItem>>,
+    /// Whether this runtime belongs to a subagent, which may not start one.
+    pub(crate) subagent: std::cell::Cell<bool>,
+    /// What the parent task has left to spend, in tokens, refreshed each turn.
+    /// `0` means unknown rather than exhausted -- a runtime nobody told is not
+    /// a runtime that must refuse.
+    pub(crate) budget_remaining: std::cell::Cell<u64>,
+    /// The model the parent task is using, so a subagent inherits it rather
+    /// than silently falling back to the compiled-in default.
+    pub(crate) model: RefCell<String>,
 }
 
 impl RuntimeState {
@@ -156,6 +165,9 @@ impl RuntimeState {
             calls: RefCell::new(HashMap::new()),
             next_call: std::cell::Cell::new(0),
             plan: RefCell::new(Vec::new()),
+            subagent: std::cell::Cell::new(false),
+            budget_remaining: std::cell::Cell::new(0),
+            model: RefCell::new(crate::wire::MODEL.to_string()),
         }
     }
 
