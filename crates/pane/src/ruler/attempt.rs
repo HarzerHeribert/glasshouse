@@ -30,41 +30,63 @@ use super::model::{Attempt, Harness, Outcome, Task, Tokens};
 /// loop in `cli::run`; this lock can.
 static ATTEMPT_LOCK: Mutex<()> = Mutex::new(());
 
-/// One harness's executable, the argv it is always launched with, and
-/// whether the task's statement is appended as the final argument. A second
-/// harness is a row here, never a branch inside [`run_one`].
+/// One harness's executable and the argv template it is launched with.
+/// `"{root}"` and `"{statement}"` are substituted by [`run_attempt_in`] when
+/// an argv element is *exactly* one of those two strings -- never as a
+/// substring, and never inside the statement's own text, so a statement that
+/// happens to contain `{root}` or `{statement}` verbatim changes nothing
+/// about what is launched. A second harness is a row here, never a branch
+/// inside [`run_one`].
 #[derive(Debug, Clone)]
 pub struct HarnessCommand {
     pub program: PathBuf,
-    pub fixed_args: Vec<String>,
-    /// `false` for `pane`: its invocation is bare (no argument vector at
-    /// all) until 61C gives it a way to carry a statement. Passing one today
-    /// would hand it an argument it does not accept.
-    pub carries_statement: bool,
+    pub args: Vec<String>,
 }
 
-/// The table's two production rows. Claude Code is run non-interactively and
-/// without permission prompts, exactly as `ruler.md` §4 specifies it; `pane`
-/// is invoked bare, per the adapter that landed on `main`.
+/// The table's three production rows. Claude Code is run non-interactively
+/// and without permission prompts, exactly as `ruler.md` §4 specifies it;
+/// `pane` is run as `pane session --root <the attempt's worktree> --task
+/// <the statement>`, `session.rs`'s non-interactive, single-shot entry point;
+/// `codex` is run as `codex exec --dangerously-bypass-approvals-and-sandbox
+/// <the statement>` in the attempt's own `current_dir` (Codex takes no
+/// `--root`-equivalent flag; it works in its launch directory). The Codex
+/// argv is `crates/glasshouse/src/harness/codex.rs`'s own doc comment's
+/// authority -- that file says "change the argv here and there together".
 pub fn default_harnesses() -> HashMap<String, HarnessCommand> {
     let mut table = HashMap::new();
     table.insert(
         "claude-code".to_string(),
         HarnessCommand {
             program: PathBuf::from("claude"),
-            fixed_args: vec![
+            args: vec![
                 "--print".to_string(),
                 "--dangerously-skip-permissions".to_string(),
+                "{statement}".to_string(),
             ],
-            carries_statement: true,
         },
     );
     table.insert(
         "pane".to_string(),
         HarnessCommand {
             program: PathBuf::from("pane"),
-            fixed_args: vec![],
-            carries_statement: false,
+            args: vec![
+                "session".to_string(),
+                "--root".to_string(),
+                "{root}".to_string(),
+                "--task".to_string(),
+                "{statement}".to_string(),
+            ],
+        },
+    );
+    table.insert(
+        "codex".to_string(),
+        HarnessCommand {
+            program: PathBuf::from("codex"),
+            args: vec![
+                "exec".to_string(),
+                "--dangerously-bypass-approvals-and-sandbox".to_string(),
+                "{statement}".to_string(),
+            ],
         },
     );
     table
@@ -160,9 +182,12 @@ fn run_attempt_in(
     };
 
     let mut launch = Command::new(&command.program);
-    launch.args(&command.fixed_args);
-    if command.carries_statement {
-        launch.arg(task.statement);
+    for arg in &command.args {
+        match arg.as_str() {
+            "{root}" => launch.arg(dir),
+            "{statement}" => launch.arg(task.statement),
+            _ => launch.arg(arg),
+        };
     }
     launch.current_dir(dir);
     if let Some(gateway) = &opts.gateway {
@@ -322,14 +347,29 @@ mod tests {
     use super::*;
 
     #[test]
-    fn pane_row_is_bare_and_claude_code_row_carries_the_statement() {
+    fn all_three_harness_rows_are_pinned_by_their_argv_template() {
         let table = default_harnesses();
 
         let claude_code = &table["claude-code"];
-        assert!(claude_code.carries_statement);
+        assert_eq!(
+            claude_code.args,
+            vec!["--print", "--dangerously-skip-permissions", "{statement}"]
+        );
 
         let pane = &table["pane"];
-        assert!(!pane.carries_statement);
-        assert!(pane.fixed_args.is_empty());
+        assert_eq!(
+            pane.args,
+            vec!["session", "--root", "{root}", "--task", "{statement}"]
+        );
+
+        let codex = &table["codex"];
+        assert_eq!(
+            codex.args,
+            vec![
+                "exec",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "{statement}"
+            ]
+        );
     }
 }

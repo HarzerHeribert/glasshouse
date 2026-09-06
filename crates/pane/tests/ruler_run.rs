@@ -39,6 +39,53 @@ fn write_script(dir: &Path, name: &str, record: &Path, exit_code: i32) -> PathBu
     path
 }
 
+/// Writes an executable shell script to `dir` that appends its own argv --
+/// NUL-separated, so an argument containing spaces, quotes or a `{` survives
+/// as the one argument it was launched with -- to `argv_record`, writes its
+/// `ANTHROPIC_BASE_URL` to `env_record` and its working directory to
+/// `argv_record` with a `.cwd` suffix, then exits with `exit_code`.
+fn write_argv_script(
+    dir: &Path,
+    name: &str,
+    argv_record: &Path,
+    env_record: &Path,
+    exit_code: i32,
+) -> PathBuf {
+    let path = dir.join(name);
+    let cwd_record = argv_record.with_extension("cwd");
+    let contents = format!(
+        "#!/bin/sh\nprintf '%s\\0' \"$@\" >> \"{}\"\nprintf '%s' \"$ANTHROPIC_BASE_URL\" > \"{}\"\npwd > \"{}\"\nexit {}\n",
+        argv_record.display(),
+        env_record.display(),
+        cwd_record.display(),
+        exit_code
+    );
+    fs::write(&path, contents).unwrap();
+    let mut perms = fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&path, perms).unwrap();
+    path
+}
+
+/// Reads a NUL-separated argv record written by [`write_argv_script`].
+fn read_argv(record: &Path) -> Vec<String> {
+    fs::read(record)
+        .unwrap()
+        .split(|&b| b == 0)
+        .filter(|s| !s.is_empty())
+        .map(|s| String::from_utf8_lossy(s).into_owned())
+        .collect()
+}
+
+/// Reads the `.cwd` sibling [`write_argv_script`] writes next to `record`.
+fn read_argv_cwd(record: &Path) -> PathBuf {
+    PathBuf::from(
+        fs::read_to_string(record.with_extension("cwd"))
+            .unwrap()
+            .trim(),
+    )
+}
+
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
@@ -132,8 +179,7 @@ fn base_opts(scratch: PathBuf, harness_program: PathBuf) -> RunOpts {
         "fake".to_string(),
         HarnessCommand {
             program: harness_program,
-            fixed_args: vec![],
-            carries_statement: true,
+            args: vec!["{statement}".to_string()],
         },
     );
     RunOpts {
@@ -385,6 +431,192 @@ fn a_two_command_task_fails_when_the_second_command_fails() {
         first_record.exists(),
         "the first command should still have run"
     );
+}
+
+#[test]
+fn the_pane_row_launches_session_with_the_attempts_root_and_the_statement() {
+    let scratch = scratch_dir("pane-row");
+    let argv_record = scratch.join("argv.txt");
+    let env_record = scratch.join("env.txt");
+    let fake_pane = write_argv_script(&scratch, "fake_pane.sh", &argv_record, &env_record, 0);
+    let noop_cwd = scratch.join("noop_cwd.txt");
+    let test_script = write_script(&scratch, "noop_test.sh", &noop_cwd, 0);
+
+    let pane_row = attempt::default_harnesses().remove("pane").unwrap();
+    let mut harnesses = HashMap::new();
+    harnesses.insert(
+        "pane".to_string(),
+        HarnessCommand {
+            program: fake_pane,
+            args: pane_row.args,
+        },
+    );
+
+    let commit = leak(head_commit());
+    let task = base_task(commit, single_command(&test_script));
+    let opts = RunOpts {
+        scratch: scratch.clone(),
+        gateway: Some("http://127.0.0.1:8731".to_string()),
+        meter: Meter::None,
+        harnesses,
+    };
+    let harness = Harness::new("pane");
+
+    let result = attempt::run_one(&task, &harness, 1, &opts);
+    assert!(result.outcome.completed(), "{:?}", result.outcome);
+
+    let expected_root = scratch.join(format!("{}-{}-{}", task.id, harness.as_str(), 1));
+    let argv = read_argv(&argv_record);
+    assert_eq!(
+        argv,
+        vec![
+            "session".to_string(),
+            "--root".to_string(),
+            expected_root.to_string_lossy().into_owned(),
+            "--task".to_string(),
+            task.statement.to_string(),
+        ]
+    );
+
+    let env = fs::read_to_string(&env_record).unwrap();
+    assert_eq!(env, "http://127.0.0.1:8731");
+}
+
+#[test]
+fn the_claude_code_row_still_carries_the_statement_as_a_bare_argument() {
+    let scratch = scratch_dir("claude-code-row");
+    let argv_record = scratch.join("argv.txt");
+    let env_record = scratch.join("env.txt");
+    let fake_claude = write_argv_script(&scratch, "fake_claude.sh", &argv_record, &env_record, 0);
+    let noop_cwd = scratch.join("noop_cwd.txt");
+    let test_script = write_script(&scratch, "noop_test.sh", &noop_cwd, 0);
+
+    let claude_row = attempt::default_harnesses().remove("claude-code").unwrap();
+    let mut harnesses = HashMap::new();
+    harnesses.insert(
+        "claude-code".to_string(),
+        HarnessCommand {
+            program: fake_claude,
+            args: claude_row.args,
+        },
+    );
+
+    let commit = leak(head_commit());
+    let task = base_task(commit, single_command(&test_script));
+    let opts = RunOpts {
+        scratch: scratch.clone(),
+        gateway: None,
+        meter: Meter::None,
+        harnesses,
+    };
+    let harness = Harness::new("claude-code");
+
+    let result = attempt::run_one(&task, &harness, 1, &opts);
+    assert!(result.outcome.completed(), "{:?}", result.outcome);
+
+    let argv = read_argv(&argv_record);
+    assert_eq!(
+        argv,
+        vec![
+            "--print".to_string(),
+            "--dangerously-skip-permissions".to_string(),
+            task.statement.to_string(),
+        ]
+    );
+}
+
+#[test]
+fn the_codex_row_runs_exec_with_the_bypass_and_the_statement() {
+    let scratch = scratch_dir("codex-row");
+    let argv_record = scratch.join("argv.txt");
+    let env_record = scratch.join("env.txt");
+    let fake_codex = write_argv_script(&scratch, "fake_codex.sh", &argv_record, &env_record, 0);
+    let noop_cwd = scratch.join("noop_cwd.txt");
+    let test_script = write_script(&scratch, "noop_test.sh", &noop_cwd, 0);
+
+    let codex_row = attempt::default_harnesses().remove("codex").unwrap();
+    let mut harnesses = HashMap::new();
+    harnesses.insert(
+        "codex".to_string(),
+        HarnessCommand {
+            program: fake_codex,
+            args: codex_row.args,
+        },
+    );
+
+    let commit = leak(head_commit());
+    let task = base_task(commit, single_command(&test_script));
+    let opts = RunOpts {
+        scratch: scratch.clone(),
+        gateway: None,
+        meter: Meter::None,
+        harnesses,
+    };
+    let harness = Harness::new("codex");
+
+    let result = attempt::run_one(&task, &harness, 1, &opts);
+    assert!(result.outcome.completed(), "{:?}", result.outcome);
+
+    let argv = read_argv(&argv_record);
+    assert_eq!(
+        argv,
+        vec![
+            "exec".to_string(),
+            "--dangerously-bypass-approvals-and-sandbox".to_string(),
+            task.statement.to_string(),
+        ]
+    );
+
+    let expected_root = scratch.join(format!("{}-{}-{}", task.id, harness.as_str(), 1));
+    assert_eq!(
+        read_argv_cwd(&argv_record),
+        expected_root,
+        "codex takes no --root-equivalent flag; it must still launch in the attempt's own worktree"
+    );
+}
+
+#[test]
+fn a_statement_with_spaces_and_braces_reaches_the_child_as_one_argument() {
+    let scratch = scratch_dir("statement-braces");
+    let argv_record = scratch.join("argv.txt");
+    let env_record = scratch.join("env.txt");
+    let fake_pane = write_argv_script(&scratch, "fake_pane.sh", &argv_record, &env_record, 0);
+    let noop_cwd = scratch.join("noop_cwd.txt");
+    let test_script = write_script(&scratch, "noop_test.sh", &noop_cwd, 0);
+
+    let pane_row = attempt::default_harnesses().remove("pane").unwrap();
+    let mut harnesses = HashMap::new();
+    harnesses.insert(
+        "pane".to_string(),
+        HarnessCommand {
+            program: fake_pane,
+            args: pane_row.args,
+        },
+    );
+
+    let statement: &'static str =
+        "split \"main.rs\" into {root} and {statement}, quoted 'like this'";
+    let commit = leak(head_commit());
+    let mut task = base_task(commit, single_command(&test_script));
+    task.statement = statement;
+    let opts = RunOpts {
+        scratch: scratch.clone(),
+        gateway: None,
+        meter: Meter::None,
+        harnesses,
+    };
+    let harness = Harness::new("pane");
+
+    let result = attempt::run_one(&task, &harness, 1, &opts);
+    assert!(result.outcome.completed(), "{:?}", result.outcome);
+
+    let argv = read_argv(&argv_record);
+    assert_eq!(
+        argv.last().map(String::as_str),
+        Some(statement),
+        "the statement must arrive as exactly one argv element, unsplit and unsubstituted"
+    );
+    assert_eq!(argv.len(), 5, "the template's own five elements, no more");
 }
 
 #[test]
