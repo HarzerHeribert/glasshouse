@@ -12,10 +12,12 @@ use std::process::{Command, Output, Stdio};
 
 use clap::Parser;
 use glasshouse::Runtime;
+use glasshouse::events::{EventLog, LifecycleEvent};
 use glasshouse::routing::evidence::{
     CONTEXT_FIREWALL_BYPASS_PURPOSE, CONTEXT_FIREWALL_EXPANSION_PURPOSE,
     CONTEXT_FIREWALL_REDUCTION_PURPOSE, EvidenceLedger, ObservationQuery,
 };
+use glasshouse::session::SessionId;
 
 // ===========================================================================
 // Fixture: a bootstrapped project, and the shipped binary pointed at it.
@@ -117,6 +119,25 @@ fn post_tool_use(
 
 fn text_response(text: &str) -> serde_json::Value {
     serde_json::json!({"type": "text", "text": text})
+}
+
+/// A real `PostToolUse` shape for `Edit`, naming `file_path` the way a
+/// harness reports it — exactly as its own process sees the path, never
+/// re-resolved through the filesystem.
+fn post_tool_use_edit(file_path: &Path, session_id: &str, tool_use_id: &str) -> serde_json::Value {
+    let file_path = file_path.display().to_string();
+    serde_json::json!({
+        "tool_name": "Edit",
+        "tool_input": {
+            "file_path": file_path,
+            "old_string": "hi",
+            "new_string": "ho",
+        },
+        "tool_response": {"filePath": file_path},
+        "tool_use_id": tool_use_id,
+        "session_id": session_id,
+        "cwd": "/tmp",
+    })
 }
 
 fn bash_response(
@@ -599,5 +620,87 @@ fn the_default_response_is_a_no_op_until_emit_updated_output_is_set() {
         serde_json::json!({}),
         "reduction still ran (line 1984's raw store test covers that); the response must not \
          substitute anything without the flag"
+    );
+}
+
+// ===========================================================================
+// Map line 1139's producer — GH-FIREWALL-FILE-TOUCHED.
+// ===========================================================================
+
+/// The third dogfooding session's own reproduction, reduced to a test: a
+/// writing tool's `PostToolUse`, with `--session` given, must leave exactly
+/// one `file_touched` row naming the project-relative path.
+///
+/// `tmp.path()` is deliberately used unresolved for the event's `file_path`
+/// — exactly the spelling a real harness reports, since it is the harness's
+/// own process that saw the path, never Glasshouse re-resolving it — while
+/// `Fixture::new` canonicalizes the same directory into `fixture.root`
+/// before ever handing it to `--scope`. On macOS this is not a contrived
+/// gap: `$TMPDIR` is `/var/folders/...`, a symlink to
+/// `/private/var/folders/...` (`settings_persistence.rs`'s
+/// `confirming_a_project_level_save_creates_exactly_one_file_that_parses_back`
+/// documents the identical gotcha for `/tmp`), so this reproduces map line
+/// 1139's producer failing in production without inventing a symlink the
+/// dogfooding session's own throwaway project never had. On a platform
+/// where `canonicalize` does not change the path, `raw_file_path` and
+/// `fixture.root` already agree and this test still passes — it is not
+/// asserting a platform-specific mismatch, only that recording survives
+/// whichever spelling the harness used.
+#[test]
+fn a_writing_tools_post_tool_use_records_one_file_touched_row_for_a_project_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(tmp.path());
+    std::fs::write(fixture.root.join("README.md"), "hi").unwrap();
+
+    // The harness's own (possibly unresolved) view of the project directory,
+    // not `fixture.root`.
+    let raw_file_path = tmp.path().join("workspace").join("README.md");
+
+    let event = post_tool_use_edit(&raw_file_path, "s-file-touched", "tu-1");
+    let response = fixture.hook(&event, &["--session", "s-file-touched"]);
+    assert_eq!(
+        response,
+        serde_json::json!({}),
+        "the hook's stdout stays the reduction protocol's JSON alone"
+    );
+
+    let log = EventLog::open(&fixture.runtime).unwrap();
+    let events = log.for_session(&SessionId::new("s-file-touched")).unwrap();
+    let touched: Vec<&str> = events
+        .iter()
+        .filter_map(|logged| match &logged.event {
+            LifecycleEvent::FileTouched { path } => Some(path.as_str()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        touched,
+        vec!["README.md"],
+        "exactly one file_touched row, naming the project-relative path"
+    );
+}
+
+/// The invariant kept alongside the fix above: a path outside the project
+/// (even after symlink resolution) still records nothing.
+#[test]
+fn a_path_outside_the_project_records_no_file_touched_row() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(tmp.path());
+
+    let outside = tmp.path().join("elsewhere").join("secret.env");
+    std::fs::create_dir_all(outside.parent().unwrap()).unwrap();
+    std::fs::write(&outside, "outside").unwrap();
+
+    let event = post_tool_use_edit(&outside, "s-outside", "tu-1");
+    let response = fixture.hook(&event, &["--session", "s-outside"]);
+    assert_eq!(response, serde_json::json!({}));
+
+    let log = EventLog::open(&fixture.runtime).unwrap();
+    let events = log.for_session(&SessionId::new("s-outside")).unwrap();
+    assert!(
+        events
+            .iter()
+            .all(|logged| !matches!(logged.event, LifecycleEvent::FileTouched { .. })),
+        "a path outside the project must never be recorded, even as a filtered-out candidate"
     );
 }

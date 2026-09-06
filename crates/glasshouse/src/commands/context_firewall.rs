@@ -175,7 +175,12 @@ pub(crate) fn record_file_touches(
     let root = runtime.project().root();
     let mut paths: Vec<String> = Vec::new();
     for raw in glasshouse::firewall::adapter::tool_input_paths(&event.tool_input) {
-        let Some(path) = project_relative_path(root, &raw) else {
+        let resolved = resolve_symlinks_for_comparison(root, &raw);
+        let Some(path) = project_relative_path(root, &resolved) else {
+            tracing::debug!(
+                raw = %raw,
+                "context firewall: a writing tool's path is outside the project; not recorded"
+            );
             continue;
         };
         if !paths.contains(&path) {
@@ -220,6 +225,43 @@ pub(crate) fn record_file_touches(
                 "context firewall: could not record an edited file"
             );
         }
+    }
+}
+
+/// `raw` with every existing ancestor's symlinks resolved, or `raw`
+/// unchanged when that resolution is not possible — the dropping gate
+/// map line 1139's producer actually hit in production.
+///
+/// `root` is [`crate::project::scope::ProjectScope::for_root`]'s output,
+/// which canonicalizes: on macOS, a project opened under the default
+/// `$TMPDIR` (`/var/folders/...`) or `/tmp` resolves to
+/// `/private/var/folders/...` or `/private/tmp` (the exact gotcha
+/// `settings_persistence.rs`'s `confirming_a_project_level_save_...` test
+/// already documents for `display_root`). A harness reports a tool's path
+/// exactly as its own process saw it — never re-resolved — so a `PostToolUse`
+/// event's `file_path` carries the *unresolved* spelling while
+/// [`project_relative_path`]'s `root` argument is always resolved; the
+/// lexical prefix test between them fails even though the file is inside the
+/// project, and the row is silently dropped as "outside".
+///
+/// Resolving `raw` here, once, keeps [`project_relative_path`] itself a pure
+/// lexical function (its own doc comment and unit tests below depend on
+/// that: they compare fictional roots that exist nowhere on disk).
+/// `PostToolUse` fires after the tool ran, so the writing tool's target
+/// exists by the time this runs; when it does not (a race, a tool that
+/// deleted what it wrote), `canonicalize` fails and `raw` is compared
+/// unresolved exactly as before — this only widens what recording can
+/// recognise, never what it decides.
+pub(crate) fn resolve_symlinks_for_comparison(root: &std::path::Path, raw: &str) -> String {
+    let candidate = std::path::Path::new(raw);
+    let absolute = if candidate.is_absolute() {
+        candidate.to_path_buf()
+    } else {
+        root.join(candidate)
+    };
+    match std::fs::canonicalize(&absolute) {
+        Ok(resolved) => resolved.display().to_string(),
+        Err(_) => raw.to_string(),
     }
 }
 
