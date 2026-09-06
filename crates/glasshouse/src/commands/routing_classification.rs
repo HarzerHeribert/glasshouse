@@ -1131,16 +1131,55 @@ pub(crate) fn disposable_extraction_model(
         glasshouse::evaluation::now_unix(),
     );
 
+    // The routed choice, named once here so both the consent sentence and
+    // the withheld-credential notice's `only` filter agree on the same
+    // provider rather than each re-deriving it from `routed`.
+    let routed_choice = routed
+        .choice()
+        .ok()
+        .map(|choice| (choice.provider().to_owned(), choice.model().to_owned()));
+
     // Map line 488, said out loud: when the extraction provider's credential
     // resolves from nowhere this hook can see, the model's own description —
     // the string the outcome stores and the hook's stderr line prints —
-    // carries the notice. The routed model itself is untouched.
-    let withheld = withheld_provider_credentials(
-        &effective,
-        &secrets,
-        consented.as_ref().map(|chosen| chosen.provider()),
-    );
-    crate::commands::memory_extraction::noting_withheld_credentials(Box::new(routed), &withheld)
+    // carries the notice. The routed model itself is untouched. `only`
+    // never names a provider the decision did not choose: the consented
+    // provider when there is consent, else the routed choice's provider —
+    // never every configured provider — so an unconsented run whose routing
+    // picked one candidate does not also warn about an unrelated one.
+    let only = consented
+        .as_ref()
+        .map(|chosen| chosen.provider().to_owned())
+        .or_else(|| routed_choice.as_ref().map(|(provider, _)| provider.clone()));
+    let withheld = withheld_provider_credentials(&effective, &secrets, only.as_deref());
+
+    let model: Box<dyn glasshouse::memory::ExtractionModel> = if consented.is_none() {
+        let notice = consent_missing_notice(routed_choice.as_ref());
+        crate::commands::memory_extraction::noting_missing_consent(Box::new(routed), notice)
+    } else {
+        Box::new(routed)
+    };
+    crate::commands::memory_extraction::noting_withheld_credentials(model, &withheld)
+}
+
+/// The one sentence [`disposable_extraction_model`] appends when
+/// [`configured_extraction_choice`] found no consent: what is missing (the
+/// config key, map line 488's sibling for consent rather than credentials),
+/// and the routed choice so a person can act on the one decision that was
+/// actually made rather than guess at one. `routed` is `None` when routing
+/// itself found no candidate at all, in which case nothing was chosen and
+/// the placeholders stay literal.
+fn consent_missing_notice(routed: Option<&(String, String)>) -> String {
+    let (provider, model) = match routed {
+        Some((provider, model)) => (provider.as_str(), model.as_str()),
+        None => ("<provider>", "<model>"),
+    };
+    format!(
+        "no extraction model is consented — the route above was decided and recorded but \
+         nothing was called: set memory_extraction_model = {{ provider = \"{provider}\", model \
+         = \"{model}\" }} in the user config or the project's .glasshouse/config.toml to let \
+         Glasshouse call it"
+    )
 }
 
 /// `[memory] rerank_model` resolved into a callable model, for

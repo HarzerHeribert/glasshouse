@@ -73,6 +73,43 @@ impl glasshouse::memory::ExtractionModel for CredentialWithheld {
     }
 }
 
+/// `model`, with `routing_classification::consent_missing_notice`'s
+/// sentence appended to its description; `complete` untouched.
+///
+/// Shaped exactly like [`CredentialWithheld`] beside it: `describe` appends
+/// one sentence built by the caller (the commands layer is the one that
+/// knows the `memory_extraction_model` config key, not
+/// `memory/extract/disposable.rs`), and `complete` delegates unchanged — the
+/// consent boundary this wraps is the one the inner model already enforces
+/// by calling nothing.
+pub(crate) fn noting_missing_consent(
+    model: Box<dyn glasshouse::memory::ExtractionModel>,
+    notice: String,
+) -> Box<dyn glasshouse::memory::ExtractionModel> {
+    Box::new(ConsentMissing {
+        inner: model,
+        notice,
+    })
+}
+
+struct ConsentMissing {
+    inner: Box<dyn glasshouse::memory::ExtractionModel>,
+    notice: String,
+}
+
+impl glasshouse::memory::ExtractionModel for ConsentMissing {
+    fn describe(&self) -> String {
+        format!("{}; {}", self.inner.describe(), self.notice)
+    }
+
+    fn complete(
+        &self,
+        prompt: &glasshouse::memory::extract::Prompt,
+    ) -> Result<String, glasshouse::memory::ModelError> {
+        self.inner.complete(prompt)
+    }
+}
+
 /// How long a hook process will wait for extraction before going on without
 /// it.
 ///

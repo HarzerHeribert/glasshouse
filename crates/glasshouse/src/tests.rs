@@ -1157,6 +1157,106 @@ fn a_withheld_provider_credential_is_named_by_the_extraction_notice_and_never_it
     );
 }
 
+/// The third dogfooding session's row 11: an unconsented extraction read as
+/// a credential problem when the only missing thing was consent. One
+/// provider with a free model and its credential present, no
+/// `memory_extraction_model` — `disposable_extraction_model`'s description
+/// must say what is missing (the config key) and name the choice routing
+/// already made, not merely that nothing was called.
+#[test]
+fn an_unconsented_extraction_names_the_missing_consent_and_the_routed_model() {
+    const VAR: &str = "GLASSHOUSE_TEST_ONLY_CONSENT_NOTICE_KEY";
+    // SAFETY: `VAR` is unique to this test and removed again below.
+    unsafe {
+        std::env::set_var(VAR, "sk-fabricated-test-value-not-a-real-credential");
+    }
+
+    let fixture = CliFixture::new();
+    let mut user = UserConfig::load(fixture.runtime.paths()).unwrap();
+    let mut provider = glasshouse::config::ProviderConfig::new("openai-compatible");
+    provider.set_credential_env(vec![VAR.to_owned()]);
+    provider.set_free_models(vec!["m".to_owned()]);
+    user.providers_mut()
+        .set("consent-notice-test-provider", provider);
+    user.save(fixture.runtime.paths()).unwrap();
+
+    let model = crate::commands::routing_classification::disposable_extraction_model(
+        &fixture.runtime,
+        &a_session_not_overridden(),
+    );
+    let described = model.describe();
+
+    unsafe {
+        std::env::remove_var(VAR);
+    }
+
+    assert!(
+        described.contains("no extraction model is consented"),
+        "the description must name what is missing: {described}"
+    );
+    assert!(
+        described.contains("provider = \"consent-notice-test-provider\", model = \"m\""),
+        "the description must name the routed choice, not a placeholder: {described}"
+    );
+    assert!(
+        !described.contains("resolves from neither"),
+        "the routed provider's own credential is present, so no withheld-credential notice \
+         belongs here: {described}"
+    );
+}
+
+/// The `only` half of the same defect: an unconsented run whose routing
+/// chose one candidate must not also warn about a second, unrelated
+/// provider's withheld credential — the withheld-credential notice names
+/// only the provider the decision actually chose.
+#[test]
+fn the_withheld_notice_names_only_the_routed_provider() {
+    const CHOSEN_VAR: &str = "GLASSHOUSE_TEST_ONLY_CONSENT_ROUTED_KEY";
+    const OTHER_VAR: &str = "GLASSHOUSE_TEST_ONLY_CONSENT_UNROUTED_KEY";
+    assert!(
+        std::env::var_os(OTHER_VAR).is_none(),
+        "test setup: {OTHER_VAR} is already set"
+    );
+    // SAFETY: `CHOSEN_VAR` is unique to this test and removed again below;
+    // `OTHER_VAR` is deliberately never set, so that provider's credential
+    // is withheld.
+    unsafe {
+        std::env::set_var(CHOSEN_VAR, "sk-fabricated-test-value-not-a-real-credential"); // glasshouse:not-a-secret
+    }
+
+    let fixture = CliFixture::new();
+    let mut user = UserConfig::load(fixture.runtime.paths()).unwrap();
+    let mut chosen = glasshouse::config::ProviderConfig::new("openai-compatible");
+    chosen.set_credential_env(vec![CHOSEN_VAR.to_owned()]);
+    chosen.set_free_models(vec!["m".to_owned()]);
+    user.providers_mut()
+        .set("consent-routed-test-provider", chosen);
+    let mut other = glasshouse::config::ProviderConfig::new("openai-compatible");
+    other.set_credential_env(vec![OTHER_VAR.to_owned()]);
+    user.providers_mut()
+        .set("consent-unrouted-test-provider", other);
+    user.save(fixture.runtime.paths()).unwrap();
+
+    let model = crate::commands::routing_classification::disposable_extraction_model(
+        &fixture.runtime,
+        &a_session_not_overridden(),
+    );
+    let described = model.describe();
+
+    unsafe {
+        std::env::remove_var(CHOSEN_VAR);
+    }
+
+    assert!(
+        described.contains("consent-routed-test-provider"),
+        "the routed provider must still be named by its own choice: {described}"
+    );
+    assert!(
+        !described.contains("consent-unrouted-test-provider"),
+        "a provider the routing decision did not choose must not be named: {described}"
+    );
+}
+
 /// The context-firewall hook's half of the same notice: the configured
 /// reducer's provider — named directly or through an entitlement — is
 /// reported when its credential is withheld; a `local:` reducer and an
