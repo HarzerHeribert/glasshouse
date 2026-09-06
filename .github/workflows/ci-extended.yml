@@ -277,8 +277,19 @@ jobs:
     name: audit
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    # The action posts a check run when it has something to say; without
+    # checks: write it fails on that POST rather than on the advisory
+    # (sweep 34009634577, 2026-09-06: "Resource not accessible by
+    # integration" after one unmaintained-crate warning).
+    permissions:
+      contents: read
+      checks: write
     steps:
       - uses: actions/checkout@v4
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          # RUSTSEC-2024-0436: `paste` is unmaintained; it reaches this tree
+          # only through pane's V8 crate (rusty_v8), whose maintainers own
+          # the replacement. Re-read when rusty_v8 moves.
+          ignore: RUSTSEC-2024-0436

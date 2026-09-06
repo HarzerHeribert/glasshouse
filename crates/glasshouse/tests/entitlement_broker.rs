@@ -933,8 +933,9 @@ fn route_burns_a_tight_remainder_about_to_expire_and_preserves_a_distant_one() {
 /// with claude-a's account throttled (56A-2's account-scoped narrowing),
 /// the broker chooses claude-b, the announcement names it, and the harness
 /// process is bound to it — claude-b's credential value stands in the
-/// harness's own credential variable, claude-b's reference variable rides
-/// along, and claude-a's variable and value appear nowhere in the child.
+/// harness's own credential variable, claude-b's reference variable does
+/// not ride along (map line 488, since 2026-09-06), and claude-a's variable
+/// and value appear nowhere in the child.
 #[test]
 fn a_launch_on_a_pooled_provider_is_bound_to_the_chosen_account() {
     let binary = Binary::with_config(&pool_config());
@@ -975,9 +976,13 @@ fn a_launch_on_a_pooled_provider_is_bound_to_the_chosen_account() {
     );
 
     let child = binary.child_env();
+    // Map line 488 (re-ticked 2026-09-06): every configured provider's
+    // credential variable is withheld from the harness child, the serving
+    // account's own reference variable included — its VALUE reaches the
+    // harness through the harness's own variable below, and nothing else.
     assert!(
-        child.contains(VAR_B) && child.contains(VALUE_B),
-        "the serving account's own variable reaches the child:\n{child}"
+        !child.contains(VAR_B),
+        "the serving account's reference variable no longer rides along (488):\n{child}"
     );
     assert!(
         !child.contains(VAR_A),
