@@ -5,6 +5,7 @@
 
 pub mod commands;
 pub mod contract;
+pub mod events;
 pub mod glasshouse;
 pub mod project;
 pub mod prompt;
