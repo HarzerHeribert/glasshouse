@@ -118,13 +118,23 @@ pub enum CellError {
         line: u32,
         column: u32,
     },
-    /// A top-level binding whose name is the runtime's own.
-    ReservedName { name: String },
+    /// A top-level binding whose name is the runtime's own. The position is
+    /// the declaration's, so `runtime-contract.md` §5's "the source line and
+    /// column inside the model's own program" is one the program has.
+    ReservedName {
+        name: String,
+        line: u32,
+        column: u32,
+    },
     /// A top-level binding whose name is one of the host functions. It would
     /// be captured onto the persistent scope and would shadow that function
     /// for **every later cell of the task**, with nothing the model could
     /// write to get it back.
-    ShadowsHostFunction { name: String },
+    ShadowsHostFunction {
+        name: String,
+        line: u32,
+        column: u32,
+    },
 }
 
 impl CellError {
@@ -144,11 +154,11 @@ impl CellError {
                 "`{construct}` is TypeScript that has no JavaScript to erase to; pane strips \
                  types, it does not compile them"
             ),
-            CellError::ReservedName { name } => format!(
+            CellError::ReservedName { name, .. } => format!(
                 "`{name}` starts with `{RESERVED_PREFIX}`, which the runtime reserves for its own \
                  bindings"
             ),
-            CellError::ShadowsHostFunction { name } => format!(
+            CellError::ShadowsHostFunction { name, .. } => format!(
                 "`{name}` is a host function; binding it would replace it on the persistent scope \
                  for the rest of the task and nothing could put it back"
             ),
@@ -157,10 +167,10 @@ impl CellError {
 
     pub fn position(&self) -> Option<(u32, u32)> {
         match self {
-            CellError::Parse { line, column, .. } | CellError::NotErasable { line, column, .. } => {
-                Some((*line, *column))
-            }
-            CellError::ReservedName { .. } | CellError::ShadowsHostFunction { .. } => None,
+            CellError::Parse { line, column, .. }
+            | CellError::NotErasable { line, column, .. }
+            | CellError::ReservedName { line, column, .. }
+            | CellError::ShadowsHostFunction { line, column, .. } => Some((*line, *column)),
         }
     }
 }
@@ -209,14 +219,28 @@ pub fn compile(source: &str, cell: u64) -> Result<CompiledCell, CellError> {
         .iter()
         .flat_map(|capture| capture.names.iter().cloned())
         .collect();
+    // The declaration's own position, so a refusal a model reads on its
+    // first turn points at a line that exists. `find_declaration` answers
+    // with the statement the name was bound by, which `top_level` has
+    // already walked.
     if let Some(name) = declared.iter().find(|n| n.starts_with(RESERVED_PREFIX)) {
-        return Err(CellError::ReservedName { name: name.clone() });
+        let (line, column) = find_declaration(source, &scan, name);
+        return Err(CellError::ReservedName {
+            name: name.clone(),
+            line,
+            column,
+        });
     }
     if let Some(name) = declared
         .iter()
         .find(|n| HOST_FUNCTIONS.contains(&n.as_str()))
     {
-        return Err(CellError::ShadowsHostFunction { name: name.clone() });
+        let (line, column) = find_declaration(source, &scan, name);
+        return Err(CellError::ShadowsHostFunction {
+            name: name.clone(),
+            line,
+            column,
+        });
     }
 
     let late: Vec<String> = scan
@@ -244,7 +268,10 @@ pub fn script_name(cell: u64) -> String {
 /// unchanged.
 ///
 /// `late` is every name the epilogue may re-read for the value it holds when
-/// the cell ends. The `finally` runs on all three endings — a fall-off, a
+/// the cell ends. Its calls pass a third argument the declaration lines do
+/// not, which is how `bindings::capture` tells a re-read from a binding the
+/// program made: a name the model freed and then bound again in this cell
+/// must survive, and a name it declared and then freed must not come back. The `finally` runs on all three endings — a fall-off, a
 /// `return`, and a throw — which is what makes §5's "the bindings made before
 /// the throw persist" carry the *latest* value rather than the first. Each
 /// read is guarded twice: by [`MADE`], so a declaration the program never
@@ -271,7 +298,7 @@ fn wrap(body: &str, late: &[String]) -> String {
     out.push_str(&format!(";return {HOST}.e();\n}}finally{{\n"));
     for name in late {
         out.push_str(&format!(
-            "try{{if({MADE}.{name}){HOST}.s(\"{name}\",{name})}}catch{{}}\n"
+            "try{{if({MADE}.{name}){HOST}.s(\"{name}\",{name},true)}}catch{{}}\n"
         ));
     }
     out.push_str("}})");
@@ -283,6 +310,10 @@ fn wrap(body: &str, late: &[String]) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TopLevelCapture {
     names: Vec<String>,
+    /// The byte offset the statement that binds these names starts at — the
+    /// position a refusal of one of them reports (`CellError::ReservedName`,
+    /// `CellError::ShadowsHostFunction`).
+    at: u32,
     /// The byte offset the `s("name", name)` calls are inserted at: the end
     /// of the line the statement finishes on, so a program written one
     /// statement per line has every column exactly where the model put it.
@@ -415,11 +446,24 @@ fn top_level(program: &Program<'_>, source: &str) -> TopLevel {
         let next_start = bounds.get(index + 1).map_or(source.len() as u32, |b| b.0);
         found.captures.push(TopLevelCapture {
             names,
+            at: bounds[index].0,
             insert_at: insertion_point(source, end, next_start),
             late,
         });
     }
     found
+}
+
+/// Where the top-level statement that bound `name` starts, as the model's own
+/// line and column. `(1, 0)` when no capture claims the name, which cannot
+/// happen for a name `compile` read out of `scan.captures` — it is the answer
+/// that reports the start of the program rather than inventing `line 0`, the
+/// one position no program has.
+fn find_declaration(source: &str, scan: &TopLevel, name: &str) -> (u32, u32) {
+    scan.captures
+        .iter()
+        .find(|capture| capture.names.iter().any(|bound| bound == name))
+        .map_or((1, 0), |capture| line_and_column(source, capture.at))
 }
 
 /// `let` → `var` and `const` → `var` plus two spaces, so the declarator that
@@ -970,7 +1014,14 @@ mod tests {
     fn a_binding_may_not_take_a_host_functions_name() {
         let error = compile("const read = 1;\n", 1).unwrap_err();
         assert!(
-            matches!(error, CellError::ShadowsHostFunction { ref name } if name == "read"),
+            matches!(
+                error,
+                CellError::ShadowsHostFunction {
+                    ref name,
+                    line: 1,
+                    column: 0
+                } if name == "read"
+            ),
             "{error:?}"
         );
         // Every declared host function is guarded, and `console` is not.
@@ -1055,7 +1106,7 @@ mod tests {
         let compiled = compile("let n = 0;\nn = 5;\nclass K {}\n", 1).unwrap();
         let javascript = &compiled.javascript;
         assert!(
-            javascript.contains("try{if(__pane_made.n)__pane_cell.s(\"n\",n)}catch{}"),
+            javascript.contains("try{if(__pane_made.n)__pane_cell.s(\"n\",n,true)}catch{}"),
             "{javascript}"
         );
         // A `class` keeps its block scope, so the epilogue must not name it.

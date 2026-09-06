@@ -75,6 +75,12 @@ fn call_tag<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Private> 
 /// kept from an earlier cell does not answer for a later one. `v8::Private`
 /// is API-only — there is no JavaScript operation that sets one — which is
 /// the same property the preview tag above relies on.
+///
+/// **Only the host can mint it, and the host mints it on demand** for the
+/// cell's own `__pane_cell.e()`, so `return __pane_cell.e()` yields by
+/// construction — §1's one counterexample to "a top-level `return` ends the
+/// task", reachable only by naming an internal the model is never shown, and
+/// gaining no authority when it is.
 fn end_tag<'s>(scope: &mut v8::PinScope<'s, '_>) -> v8::Local<'s, v8::Private> {
     let name = v8::String::new(scope, "pane.end").expect("a short literal is a valid string");
     v8::Private::for_api(scope, Some(name))
@@ -369,6 +375,18 @@ fn typed_result<'s>(
     result: &ToolResult,
     state: &Rc<RuntimeState>,
 ) -> v8::Local<'s, v8::Value> {
+    // Before the builders, because every one of them reads `stdout` and none
+    // of them reads the exit code: a `read` of a missing file produced a
+    // `File` handle of 0 bytes carrying the SHA-256 of the empty string, and
+    // a model quoted it as the task's answer.
+    if let Some(message) = call_failure(tool.name(), result) {
+        throw_tool_error(scope, &message);
+        // The exception is what the callback answers with; V8 discards a
+        // return value once one is pending, and nothing below has run, so no
+        // call is recorded and no handle is minted.
+        return v8::undefined(scope).into();
+    }
+
     let (value, preview, label) = match tool.name() {
         "read" => {
             let (value, preview) = build_file(scope, args, result);
@@ -407,6 +425,39 @@ fn typed_result<'s>(
         object.set_private(scope, tag, marker.into());
     }
     value
+}
+
+/// Why a tool call cannot become a result — `runtime-contract.md` §9.1's *a
+/// failed call cannot itself become an answer*.
+///
+/// **`grep` and `glob` keep exit 1**, which is "no matches" and is an empty
+/// array rather than a failure; exit 2 and above is a bad pattern or an
+/// unreadable root and throws like everything else. **`bash` is never refused
+/// here**: its exit code is part of its declared result and the program reads
+/// it. A child killed by a signal has no exit status (`None`) and is left to
+/// the builders, which is the behaviour that was there before.
+fn call_failure(tool: &str, result: &ToolResult) -> Option<String> {
+    let code = result.exit_code?;
+    let tolerated = match tool {
+        "bash" => return None,
+        "grep" | "glob" => code <= 1,
+        _ => code == 0,
+    };
+    if tolerated {
+        return None;
+    }
+    // One line, bounded like a preview: the model needs the reason, not the
+    // child's whole diagnostic.
+    let detail = result
+        .stderr
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map_or_else(
+            || "the child wrote nothing to stderr".to_string(),
+            |line| line.chars().take(200).collect::<String>(),
+        );
+    Some(format!("`{tool}` failed with exit {code}: {detail}"))
 }
 
 fn build_file<'s>(
@@ -641,7 +692,7 @@ fn keep_callback(
         );
         return;
     }
-    capture(scope, &name, args.get(1));
+    capture(scope, &name, args.get(1), false);
 }
 
 fn free_callback(
@@ -696,13 +747,24 @@ fn handles_callback(
     retval.set(array.into());
 }
 
+/// `s(name, value)` from a declaration line, and `s(name, value, true)` from
+/// the generated epilogue.
+///
+/// The third argument is what tells the two apart, and it is load-bearing for
+/// `free`: a name the model freed and then bound again in the same cell must
+/// come back (that is a binding the program still names), while the
+/// epilogue's blind re-read of every `late` name must **not** resurrect one
+/// the model freed after declaring it. Only [`cell::compile`] writes either
+/// call, and a program that reaches this callback by hand reaches it through
+/// `keep`, which passes no third argument.
 fn capture_callback(
     scope: &mut v8::PinScope,
     args: v8::FunctionCallbackArguments,
     _retval: v8::ReturnValue,
 ) {
     let name = args.get(0).to_rust_string_lossy(scope);
-    capture(scope, &name, args.get(1));
+    let late = args.get(2).is_true();
+    capture(scope, &name, args.get(1), late);
 }
 
 /// The most characters of a `yieldNow` reason the result block carries —
@@ -798,15 +860,57 @@ fn fell_callback(
 /// `cell::compile`. The compile-time refusal is the good early message for a
 /// binding a program declared; this is the one that holds for a name it
 /// assembled at run time.
-fn capture(scope: &mut v8::PinScope, name: &str, value: v8::Local<v8::Value>) {
+///
+/// **The write is checked, and a refused write is a throw.** Until it was,
+/// a frozen `globalThis` put the name in the handle table, rendered it to the
+/// model this turn, and left it `undefined` the next — the one failure
+/// `runtime-contract.md` §2 says would make the whole channel untrustworthy,
+/// reached by one line of defensive tidiness in the model's own program.
+///
+/// `late` marks the generated epilogue's re-read of a name, which is the one
+/// caller that must not un-free anything: see [`capture_callback`].
+fn capture(scope: &mut v8::PinScope, name: &str, value: v8::Local<v8::Value>, late: bool) {
     if refuse_host_name(scope, name, "bound") {
         return;
     }
     let state = state(scope);
     let context = scope.get_current_context();
     let global = context.global(scope);
-    if let Some(key) = v8::String::new(scope, name) {
-        global.set(scope, key.into(), value);
+    let Some(key) = v8::String::new(scope, name).map(v8::Local::<v8::Value>::from) else {
+        throw_unbindable(scope, name);
+        return;
+    };
+    global.set(scope, key, value);
+    // Checked by reading the binding back, not by `set`'s own answer.
+    // `v8::Object::set` performs a **sloppy-mode** store: on a frozen
+    // `globalThis` it silently does nothing and still answers `Some(true)`
+    // (measured — afterwards `Object.isExtensible(globalThis)` is false, the
+    // name is not an own property, and `typeof globalThis.x` is
+    // `"undefined"`). §2's question is only ever "will this name be there
+    // next cell", and reading it back is that question exactly — a
+    // non-writable property that kept its old value and a setter that stored
+    // somewhere else both answer it correctly, and neither is visible in a
+    // boolean.
+    let bound = global
+        .get(scope, key)
+        .is_some_and(|read| read.same_value(value));
+    if !bound {
+        throw_unbindable(scope, name);
+        return;
+    }
+    if !late {
+        // §2 gives a handle three ways to die and `free` is one of them —
+        // but a name the same cell binds *again* after freeing it is a
+        // binding the program still names, and `Runtime::forget_freed` would
+        // otherwise delete it off the persistent scope after the cell. This
+        // is the cheapest recovery `RuntimeOutOfMemory`'s own message invites
+        // ("call free(\"name\") on what you no longer need"), so it has to
+        // leave the model holding the summary it kept.
+        state
+            .current
+            .borrow_mut()
+            .freed
+            .retain(|freed| freed != name);
     }
     let (preview, meta) = preview_of(scope, &state, value);
     state.capture(name, preview, meta);
@@ -924,6 +1028,23 @@ fn refuse_host_name(scope: &mut v8::PinScope, name: &str, verb: &str) -> bool {
         return true;
     }
     false
+}
+
+/// A write to the persistent scope the scope itself refused.
+///
+/// A `TypeError`, because that is what assigning to a frozen or non-writable
+/// property throws in strict-mode JavaScript, and because the model's
+/// question is about its own `globalThis`, not about a tool.
+fn throw_unbindable(scope: &mut v8::PinScope, name: &str) {
+    let message = format!(
+        "`{name}` could not be bound on the persistent scope, so it would not be there next \
+         cell; is `globalThis` frozen, or is `{name}` a non-writable property of it?"
+    );
+    let Some(text) = v8::String::new(scope, &message) else {
+        return;
+    };
+    let error = v8::Exception::type_error(scope, text);
+    scope.throw_exception(error);
 }
 
 fn throw_cancelled(scope: &mut v8::PinScope, tool: &str) {
