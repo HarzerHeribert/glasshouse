@@ -41,6 +41,13 @@ validated and waiting on the commit. Next action: `.agent-runtime/CONTINUATION.m
 
 Last updated: 2026-09-02, late night (Europe/Berlin)
 
+## Checkpoint — 2026-09-06 (02:35), waves 140–141: 1331 / 1413 (94.2%) — Phase 60 complete, the census and the user's rulings move the map, two dogfooding defects, the site in the user's words
+
+- **State:** `main` at `4ec2ec6`, pushed. Phase 60 complete (`4b70d72`); Phase 61's 61D+61E merged (`221e355`); direct verified completion specified and authorised (`26ed07a`, line 2485); seven gates adopted (`064f19b`); ten lines decided-out (`7c911bd`); **Phase 62** recorded from fourteen promoted parked lines (`961b7c6`); 488 un-ticked on a dogfooding finding (`88d1a7f`), its Red fix built and under independent verification. Live: the third pane lead with its subs (WIRE — pane's first real task — then the ruler's two-column run), the credential-strip verifier, the dogfooding session.
+- **Ruled:** the user's seventeen yes/no answers (`design-decisions.md`, *Steering decisions of record — 2026-09-06*, *Seven experiment gates*, *Fourteen parked lines promoted*, *Direct verified completion*). Benchmark data is the milestone after WIRE (`ruling-benchmark-first.md`).
+- **Trailing sweeps:** glasshouse cells green on `17599f3`; the pane windows cell's verdict with the cherry-picked fixture repairs is `34001464037`.
+- **Next, by risk:** verifier ACCEPT → integrate the strip, re-tick 488; the lead's isolate merge and WIRE; the sixteen disputed census rows, one ruling each; the `NothingConfigured` message; blast-radius runs the Windows-target check itself; the pre-release once the pane cell is green (decision 10).
+
 ## Checkpoint — 2026-09-06 (01:30), wave 139: 1312 / 1398 (93.8%) — Phase 59 complete, the product site live, the trailing sweep green on all sixteen glasshouse cells
 
 - **State:** `main` at `3f138ee` plus this checkpoint, pushed. **Phase 59 is complete**: line 2053 closed on the corrected measurement (production part to `#[cfg(test)]` + `mod tests`; content lines ≤ 20), eight invariant-exception blocks listed in `phase-59.md`. Nine multi-file trims landed tonight in eight integrations. The product site (`c038163`) is deployed by its own Pages workflow. Live: the pane lead (Fable xhigh) with its subs — the Windows path-normalisation review first, then `GH-PANE-NOTEBOOK-VIEW`, 61E-RUNTIME with the cancellation token.
