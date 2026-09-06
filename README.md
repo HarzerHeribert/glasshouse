@@ -54,12 +54,12 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`█████████████████████████████████████░░░` **1321 closed** · **85 active committed open** (93%)
+`█████████████████████████████████████░░░` **1331 closed** · **75 active committed open** (94%)
 
 Separately tracked, and not release-blocking: **0 deferred gate criteria** (Phase 52, Phase 53) awaiting a decision, and **229 parked experimental lines** under Maybe / Experimental.
 
 <details>
-<summary>Per-phase breakdown (89 of 109 active phases complete)</summary>
+<summary>Per-phase breakdown (90 of 109 active phases complete)</summary>
 
 | Phase | Done |
 |---|---|
@@ -76,7 +76,7 @@ Separately tracked, and not release-blocking: **0 deferred gate criteria** (Phas
 | Phase 6 — Harness adapter interface | 13/13 ✅ |
 | Phase 7 — Claude Code adapter | 10/10 ✅ |
 | Phase 8 — Codex adapter | 10/10 ✅ |
-| Phase 9 — Antigravity adapter | 5/7 |
+| Phase 9 — Antigravity adapter | 7/7 ✅ |
 | Phase 9A — Harness launch profiles | 26/26 ✅ |
 | Phase 9B — Scoped harness wrappers and shims | 9/9 ✅ |
 | Phase 9C — Provider protocol model | 12/12 ✅ |
@@ -121,9 +121,9 @@ Separately tracked, and not release-blocking: **0 deferred gate criteria** (Phas
 | Phase 28 — File-aware memory lookup | 5/5 ✅ |
 | Phase 29 — Memory commits | 8/8 ✅ |
 | Phase 30 — Session context metadata | 8/8 ✅ |
-| Phase 31 — Compaction-aware behavior | 2/7 |
+| Phase 31 — Compaction-aware behavior | 5/7 |
 | Phase 32 — Resource registry | 12/12 ✅ |
-| Phase 32A — Unified quota and capacity model | 14/21 |
+| Phase 32A — Unified quota and capacity model | 19/21 |
 | Phase 32B — Quota telemetry sources | 14/14 ✅ |
 | Phase 32C — Subscription capacity estimation | 11/12 |
 | Phase 32D — Normalized remaining-capacity score | 11/12 |

@@ -126,11 +126,11 @@ whose consuming phases are still at zero. **It belongs in Cluster D.**
 
 | line | why it is not ours |
 |---|---|
-| 1205 | no header names an input-vs-output token split |
-| 1206 | no `RATE_LIMIT_HEADERS` entry contains "cache" |
-| 1208 | the one live account read answers `null` |
-| 1213 | no concurrency header exists |
-| 1215 | Groq's token ceiling arrives with **no window**; filing it per-minute would invent the period |
+| ~~1205~~ **CLOSED 2026-09-06 (decided-out, decision 5)** | no header names an input-vs-output token split |
+| ~~1206~~ **CLOSED 2026-09-06 (decided-out, decision 5)** | no `RATE_LIMIT_HEADERS` entry contains "cache" |
+| ~~1208~~ **CLOSED 2026-09-06 (decided-out, decision 5)** | the one live account read answers `null` |
+| ~~1213~~ **CLOSED 2026-09-06 (decided-out, decision 5)** | no concurrency header exists |
+| ~~1215~~ **CLOSED 2026-09-06 (decided-out, decision 5)** | Groq's token ceiling arrives with **no window**; filing it per-minute would invent the period |
 | 1216 | reader built and wired; no host has ever sent a window > 60s |
 | 1317 | nothing states whether a 429 is provider-, model-, account- or pool-scoped |
 
@@ -1508,3 +1508,8 @@ The first `--windows-vm` run in a day found, in order: a `libc::mktime` that lib
 ## 1866–1870, 1879, 1882 CLOSED — 2026-09-06, the user's decision
 
 Seven experiment-gate criteria (Phases 52 and 53) were put to the user as yes/no and adopted as standing rules; their Cluster Q refusals are superseded and the boxes are ticked on the decision (`design-decisions.md`, *Seven experiment gates adopted as standing rules*; `phase-52.md`, `phase-53.md`). Do not package them; cite them.
+
+
+## 340, 341, 1169, 1172, 1173, 1205, 1206, 1208, 1213, 1215 CLOSED — 2026-09-06, decided-out under the user's decision 5
+
+The census (`.agent-runtime/report-refused-lines-census.md`) found ten open lines whose producer is a vendor's that will never ship (Antigravity's event surface; provider headers that no observed provider sends) or a concept the design refuses (Glasshouse never compacts a session itself). Closed on the decision, each with an evidence entry naming what would reopen it. The 34 keep-open lines name their producer package in the census; the 16 disputed rows are the orchestrator's to rule, one by one, and stay open meanwhile.

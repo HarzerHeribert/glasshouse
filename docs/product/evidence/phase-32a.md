@@ -733,3 +733,38 @@ at all and the budget pool is the binding dimension regardless.
 State: **COMPLETE**. Phase 32A stands at 14 of 21; the seven still open are
 Cluster E — a provider signal that does not arrive (1205, 1206, 1208, 1210,
 1213, 1215, 1216).
+
+## Closed as decided-out — 2026-09-06, the user's decision 5 (`GH-REFUSED-LINES-CENSUS`)
+
+The user authorised closing lines whose producer is a vendor's that will never ship or a concept the design dropped, with the register's reasoning recorded (`design-decisions.md`, *Steering decisions of record — 2026-09-06*, item 5). The census (`.agent-runtime/report-refused-lines-census.md`, Table 1) named these; each box is ticked on that decision, not on a mechanism.
+
+### Track input-token budget independently from output-token budget when the provider exposes separate limits. (line 1205)
+
+State: **COMPLETE — decided-out**, ruled 2026-09-06 by the orchestrator under decision 5. Why the producer will not exist: no provider header names an input-vs-output token split; the signal does not arrive (register:129 (Cluster E)).
+
+Limits: no behaviour is verified; the box records that the input the line depends on is not Glasshouse's to produce. It comes back off the day a provider states the split in a header Glasshouse reads — that package cites this entry in its Phase −1.
+
+### Track cached-input usage independently when the provider exposes cache telemetry. (line 1206)
+
+State: **COMPLETE — decided-out**, ruled 2026-09-06 by the orchestrator under decision 5. Why the producer will not exist: no `RATE_LIMIT_HEADERS` entry of any observed provider contains "cache" (register:130 (Cluster E)).
+
+Limits: no behaviour is verified; the box records that the input the line depends on is not Glasshouse's to produce. It comes back off the day a provider states a cache quota in its headers — that package cites this entry in its Phase −1.
+
+### Track provider credits independently from raw tokens when credits are the actual limiting unit. (line 1208)
+
+State: **COMPLETE — decided-out**, ruled 2026-09-06 by the orchestrator under decision 5. Why the producer will not exist: the one live account-credits read answers `null` (register:131 (Cluster E)).
+
+Limits: no behaviour is verified; the box records that the input the line depends on is not Glasshouse's to produce. It comes back off the day a provider's account-credits endpoint answers with a number — that package cites this entry in its Phase −1.
+
+### Track concurrent-request limits when they materially affect routability. (line 1213)
+
+State: **COMPLETE — decided-out**, ruled 2026-09-06 by the orchestrator under decision 5. Why the producer will not exist: no concurrency header exists on any observed provider (register:132 (Cluster E)).
+
+Limits: no behaviour is verified; the box records that the input the line depends on is not Glasshouse's to produce. It comes back off the day a provider states a concurrency limit in a header — that package cites this entry in its Phase −1.
+
+### Track tokens-per-minute limits when known. (line 1215)
+
+State: **COMPLETE — decided-out**, ruled 2026-09-06 by the orchestrator under decision 5. Why the producer will not exist: Groq's token ceiling arrives with no window; filing it per minute would invent the period (register:133 (Cluster E)).
+
+Limits: no behaviour is verified; the box records that the input the line depends on is not Glasshouse's to produce. It comes back off the day a provider states the window with the ceiling — that package cites this entry in its Phase −1.
+

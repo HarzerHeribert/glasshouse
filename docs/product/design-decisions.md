@@ -19983,3 +19983,7 @@ Put as yes/no by the orchestrator and answered *"agree with all of the proposed 
 10. **A tagged pre-release** (a GitHub release with built binaries, no crates.io publish) is cut from `main` once the pane Windows cell is green.
 
 Also asked and answered the same night: the seven Phase 52/53 gates are standing rules (*Seven experiment gates adopted as standing rules*), and direct verified completion is implemented directly with no Codex step (*Direct verified completion — decided directly*). **Next question the user asked for:** which Maybe/Experimental lines are worth pulling into the committed map — to be put as a yes/no list from the census.
+
+### Decision 5 applied — ten lines closed as decided-out, 2026-09-06 02:20
+
+`GH-REFUSED-LINES-CENSUS` (Sonnet, read-only) classified the 60 open mandatory lines outside Phase 61: **10 decided-out** (340, 341 — Antigravity ships no event surface; 1169, 1172, 1173 — Glasshouse never compacts a session itself, by design; 1205, 1206, 1208, 1213, 1215 — provider signals no observed provider sends), **34 keep-open** with a named producer, **16 disputed** (register and evidence disagree, or the row is stale) for the orchestrator to rule one by one, and **0 packageable now**. The ten are ticked on this decision with evidence entries naming what would reopen each; the register rows are retired. The 182 parked Maybe lines were ranked for the user's next yes/no list (Table 2 of the census).

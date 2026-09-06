@@ -337,8 +337,8 @@ Fixed architectural requirements
 ☑ Capture the native Antigravity conversation identifier when it can be obtained reliably.
 ☑ Support resuming a known Antigravity conversation through its native mechanism when available.
 ☑ Preserve the native Antigravity terminal experience inside the Glasshouse PTY.
-☐ Integrate structured Antigravity lifecycle events where the CLI exposes them.
-☐ Translate supported Antigravity lifecycle state into Glasshouse lifecycle events.
+☑ Integrate structured Antigravity lifecycle events where the CLI exposes them.
+☑ Translate supported Antigravity lifecycle state into Glasshouse lifecycle events.
 ☑ Treat unsupported lifecycle information as unknown instead of fabricating certainty from terminal text.
 
 Phase 9A — Harness launch profiles
@@ -1166,11 +1166,11 @@ Phase 30 — Session context metadata
 
 Phase 31 — Compaction-aware behavior
 
-☐ Never compact a session solely because its prompt cache is estimated to be cold.
+☑ Never compact a session solely because its prompt cache is estimated to be cold.
 ☐ Prefer continuing a relevant native session when its contextual value outweighs the cost of rehydrating it.
 ☑ Prefer creating or refreshing a portable checkpoint before intentional compaction when practical.
-☐ Prefer compaction at semantic task boundaries over arbitrary elapsed-time boundaries.
-☐ Allow the native harness to perform its own compaction mechanism rather than replacing it with a Glasshouse-specific history format.
+☑ Prefer compaction at semantic task boundaries over arbitrary elapsed-time boundaries.
+☑ Allow the native harness to perform its own compaction mechanism rather than replacing it with a Glasshouse-specific history format.
 ☑ Record enough pre-compaction durable memory that important project decisions do not depend solely on a lossy native compact summary.
 ☐ Allow a fresh session to bootstrap from a checkpoint when a huge cold native session is no longer economically or semantically attractive.
 
@@ -1202,17 +1202,17 @@ Phase 32A — Unified quota and capacity model
 ☑ Allow CapacityState to represent subscription resources with opaque provider-defined limits.
 ☑ Allow CapacityState to represent user-defined monetary budgets for metered APIs.
 ☑ Allow CapacityState to represent effectively unlimited local inference separately from remote quota.
-☐ Track input-token budget independently from output-token budget when the provider exposes separate limits.
-☐ Track cached-input usage independently when the provider exposes cache telemetry.
+☑ Track input-token budget independently from output-token budget when the provider exposes separate limits.
+☑ Track cached-input usage independently when the provider exposes cache telemetry.
 ☑ Track request count independently from token consumption when both can constrain a resource.
-☐ Track provider credits independently from raw tokens when credits are the actual limiting unit.
+☑ Track provider credits independently from raw tokens when credits are the actual limiting unit.
 ☑ Track remaining monetary budget independently from provider quota when the user has configured a spending ceiling.
 ☐ Track the current quota window start when known.
 ☑ Track the current quota reset time when known.
 ☑ Track rolling-window capacity separately from fixed calendar-window capacity.
-☐ Track concurrent-request limits when they materially affect routability.
+☑ Track concurrent-request limits when they materially affect routability.
 ☑ Track requests-per-minute limits when known.
-☐ Track tokens-per-minute limits when known.
+☑ Track tokens-per-minute limits when known.
 ☐ Track requests-per-day or equivalent long-window request pools when known.
 ☑ Preserve the provider-native quota units alongside any normalized percentage.
 ☑ Never discard raw telemetry merely because Glasshouse also computes a normalized capacity score.
