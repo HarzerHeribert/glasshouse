@@ -341,6 +341,45 @@ fn wait_for_rows(
     }
 }
 
+/// Claim the first still-unclaimed row whose class is `class`, for the case
+/// named `what`. Rows are matched to cases by content, never by position:
+/// the connection thread writes its row after the client's socket has
+/// closed, and on a Windows runner a stream-abort row landed after the row
+/// of the exchange that followed it, so `seq` order is not exchange order.
+/// A row carries no status line and no byte count, so its class is the key;
+/// cases that expect the same class expect identical rows, and each still
+/// claims a distinct one. A case that finds no row fails naming the rows
+/// still unclaimed.
+fn claim_row_with_class<'a>(
+    unclaimed: &mut [Option<&'a RoutingObservation>],
+    class: Option<FailureClass>,
+    what: &str,
+) -> &'a RoutingObservation {
+    let Some(position) = unclaimed
+        .iter()
+        .position(|row| matches!(row, Some(row) if row.failure_class == class))
+    else {
+        panic!(
+            "{what}: no unclaimed row has class {class:?}; unclaimed: {:#?}",
+            unclaimed.iter().flatten().collect::<Vec<_>>()
+        );
+    };
+    unclaimed[position]
+        .take()
+        .expect("`position` was found among the unclaimed rows")
+}
+
+/// The other half of [`claim_row_with_class`]: once every case has claimed
+/// its row none may be left, so every row was asserted against exactly one
+/// case.
+fn assert_every_row_claimed(unclaimed: &[Option<&RoutingObservation>]) {
+    assert!(
+        unclaimed.iter().all(Option::is_none),
+        "every row belongs to exactly one case; left over: {:#?}",
+        unclaimed.iter().flatten().collect::<Vec<_>>()
+    );
+}
+
 fn status_of(reply: &[u8]) -> String {
     String::from_utf8_lossy(reply)
         .lines()
@@ -477,7 +516,9 @@ fn each_failure_class_is_recorded_from_status_headers_and_framing_alone() {
         cases.len(),
         "one row per exchange that reached the provider: {rows:#?}"
     );
-    for ((what, _, _, expected), row) in cases.iter().zip(&rows) {
+    let mut unclaimed: Vec<Option<&RoutingObservation>> = rows.iter().map(Some).collect();
+    for (what, _, _, expected) in &cases {
+        let row = claim_row_with_class(&mut unclaimed, *expected, what);
         assert_eq!(row.failure_class, *expected, "{what}: {row:#?}");
         let expected_outcome = if expected.is_some() {
             Outcome::Failed
@@ -506,6 +547,7 @@ fn each_failure_class_is_recorded_from_status_headers_and_framing_alone() {
             "{what}: every forwarded exchange has a first byte"
         );
     }
+    assert_every_row_claimed(&unclaimed);
 }
 
 /// A provider that cannot be reached at all: the transport said "refused",
@@ -645,13 +687,20 @@ fn throttle_and_exhausted_quota_are_told_apart_by_headers_not_guessed() {
 
     let rows = wait_for_rows(&ledger, PROVIDER, cases.len());
     assert_eq!(rows.len(), cases.len(), "{rows:#?}");
-    for ((what, headers, expected), row) in cases.iter().zip(&rows) {
+    let mut unclaimed: Vec<Option<&RoutingObservation>> = rows.iter().map(Some).collect();
+    for (what, headers, expected) in &cases {
+        let row = claim_row_with_class(
+            &mut unclaimed,
+            Some(*expected),
+            &format!("{what} ({headers:?})"),
+        );
         assert_eq!(
             row.failure_class,
             Some(*expected),
             "{what} ({headers:?}): {row:#?}"
         );
     }
+    assert_every_row_claimed(&unclaimed);
 }
 
 // --- line 1334: failovers ----------------------------------------------------
