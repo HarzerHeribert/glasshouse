@@ -174,10 +174,10 @@ to do, and the orchestrator should follow its own rule.
 Newest first, from `docs/process/handoff.md`. Read the top one in full;
 the rest are context you probably do not need.
 
+- Checkpoint — 2026-09-06 (10:40), waves 146–148: 1348 / 1413 (95.3%) — the inbox ruled and its Glasshouse half dispatched, 2475/2481 closed, fix-4 merged, the 2463 preview seam found by its verifier, the sixth build rule
 - Checkpoint — 2026-09-06 (08:00), wave 145: 1342 / 1413 (95.0%) — three pane merges, decision 11's path proven in the third dogfooding session, the credentials verb's sweep red fixed forward, the Fable limit near
 - Checkpoint — 2026-09-06 (03:10), wave 142 in flight: 1331 / 1413 (94.2%) — the credential strip's verifier finds the hooks, the user asks for a key-leak guard, the benchmark's meter is the ledger
 - Checkpoint — 2026-09-06 (02:35), waves 140–141: 1331 / 1413 (94.2%) — Phase 60 complete, the census and the user's rulings move the map, two dogfooding defects, the site in the user's words
-- Checkpoint — 2026-09-06 (01:30), wave 139: 1312 / 1398 (93.8%) — Phase 59 complete, the product site live, the trailing sweep green on all sixteen glasshouse cells
 
 ## Evidence ledger files
 
