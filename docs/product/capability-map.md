@@ -2466,9 +2466,9 @@ record: the session artifact *The Glasshouse Native Harness*.
 
 61F — The supervisor
 
-☐ Watch a compressed trajectory every N turns with a cheaper model and emit one decision: intervene or not.
-☐ Catch a planted three-turn loop within two turns without a human.
-☐ Show every nudge in the trajectory and in the sidebar.
+☑ Watch a compressed trajectory every N turns with a cheaper model and emit one decision: intervene or not.
+☑ Catch a planted three-turn loop within two turns without a human.
+☑ Show every nudge in the trajectory and in the sidebar.
 
 61G — Events in batches, background work, messages
 
@@ -2482,7 +2482,7 @@ record: the session artifact *The Glasshouse Native Harness*.
 
 61E — Code over live objects, amended 2026-09-06 (direct verified completion — the user's decision to implement it directly; `runtime-contract.md` §9)
 
-☐ End a task from within the program: a top-level `return` renders and persists the terminal response and sends no further request, and no execution that threw, was refused, was cancelled or whose guard was unmet becomes one.
+☑ End a task from within the program: a top-level `return` renders and persists the terminal response and sends no further request, and no execution that threw, was refused, was cancelled or whose guard was unmet becomes one.
 
 Phase 62 — Parallel-session coordination, second slice: queueing, co-editing, drift, in-turn diagnostics
 

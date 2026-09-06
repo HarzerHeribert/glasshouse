@@ -54,7 +54,7 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`█████████████████████████████████████░░░` **1342 closed** · **78 active committed open** (94%)
+`█████████████████████████████████████░░░` **1346 closed** · **74 active committed open** (94%)
 
 Separately tracked, and not release-blocking: **0 deferred gate criteria** (Phase 52, Phase 53) awaiting a decision, and **229 parked experimental lines** under Maybe / Experimental.
 
@@ -173,7 +173,7 @@ Separately tracked, and not release-blocking: **0 deferred gate criteria** (Phas
 | Phase 58 — Context economy: cache-stable translation, entitlement-aware reduction, and a measured token budget | 15/15 ✅ |
 | Phase 59 — Decompression: the code's physical shape catches up with its architecture | 8/8 ✅ |
 | Phase 60 — Parallel-session file coordination | 16/16 ✅ |
-| Phase 61 — pane: the first-party harness | 14/35 |
+| Phase 61 — pane: the first-party harness | 18/35 |
 | Phase 62 — Parallel-session coordination, second slice: queueing, co-editing, drift, in-turn diagnostics | 0/14 |
 | Phase 52 — Criteria before adding semantic/vector retrieval (deferred experiment gate) | 6/6 — deferred gate |
 | Phase 53 — Criteria before adding graph storage (deferred experiment gate) | 5/5 — deferred gate |
