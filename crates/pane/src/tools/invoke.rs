@@ -321,15 +321,44 @@ pub fn run_cancellable(
     name: &str,
     args: &Args,
 ) -> Result<ToolResult, ToolError> {
+    run_traced(ctx, token, name, args).outcome
+}
+
+/// The arguments of one call as [`check_arguments`] admitted them — the
+/// spelling that reached the child, which is what `runtime-contract.md`
+/// §9.4's trajectory records. A path is `Profile::check`'s resolved path; a
+/// pattern and a command line are the text the profile admitted.
+pub type CheckedArgs = BTreeMap<String, String>;
+
+/// One call's result and, beside it, its arguments as checked. A refused
+/// call carries only what was admitted before the refusing argument, so a
+/// spelling the profile never admitted is never written down as one it did.
+pub struct Traced {
+    pub outcome: Result<ToolResult, ToolError>,
+    pub checked: CheckedArgs,
+}
+
+/// [`run_cancellable`], answering with the checked arguments too. The
+/// trajectory is the only reader; nothing about the call itself differs.
+pub fn run_traced(
+    ctx: &ToolContext<'_>,
+    token: &CancellationToken,
+    name: &str,
+    args: &Args,
+) -> Traced {
+    let mut checked = CheckedArgs::new();
     let Some(tool) = registry::lookup(name) else {
-        return Err(ToolError::Denied(PermissionDenied {
-            tool: name.to_string(),
-            path: String::new(),
-            rule: format!(
-                "no tool named `{name}` is registered; the registry declares {}",
-                registry::names().join(", ")
-            ),
-        }));
+        return Traced {
+            outcome: Err(ToolError::Denied(PermissionDenied {
+                tool: name.to_string(),
+                path: String::new(),
+                rule: format!(
+                    "no tool named `{name}` is registered; the registry declares {}",
+                    registry::names().join(", ")
+                ),
+            })),
+            checked,
+        };
     };
 
     let call = next_call_id();
@@ -345,7 +374,7 @@ pub fn run_cancellable(
         }),
     );
 
-    let outcome = checked_call(ctx, token, tool, args);
+    let outcome = checked_call(ctx, token, tool, args, &mut checked);
 
     emit(
         ctx,
@@ -359,7 +388,7 @@ pub fn run_cancellable(
         }),
     );
 
-    outcome
+    Traced { outcome, checked }
 }
 
 /// The `tool_response` the `PostToolUse` payload carries.
@@ -421,15 +450,39 @@ enum Checked {
     CommandLine(String),
 }
 
+impl Checked {
+    /// The spelling the trajectory records: the resolved path, or the text
+    /// the profile admitted.
+    fn spelling(&self) -> String {
+        match self {
+            Checked::Path(path) => path.to_string_lossy().into_owned(),
+            Checked::Pattern(text) | Checked::CommandLine(text) => text.clone(),
+        }
+    }
+}
+
 fn checked_call(
     ctx: &ToolContext<'_>,
     token: &CancellationToken,
     tool: &Tool,
     args: &Args,
+    trace: &mut CheckedArgs,
 ) -> Result<ToolResult, ToolError> {
-    let checked = check_arguments(ctx.profile, tool, args)?;
+    let checked = check_arguments(ctx.profile, tool, args, trace)?;
     let argv = build_argv(tool, &checked)?;
     spawn_confined(ctx.profile, token, tool, &argv)
+}
+
+/// Admits one argument: onto the argv list, and into the trajectory's
+/// record of what was checked.
+fn admit(
+    checked: &mut Vec<(&'static str, Checked)>,
+    trace: &mut CheckedArgs,
+    name: &'static str,
+    value: Checked,
+) {
+    trace.insert(name.to_string(), value.spelling());
+    checked.push((name, value));
 }
 
 /// Checks every declared argument, and refuses every undeclared one.
@@ -441,6 +494,7 @@ fn check_arguments(
     profile: &Profile,
     tool: &Tool,
     args: &Args,
+    trace: &mut CheckedArgs,
 ) -> Result<Vec<(&'static str, Checked)>, PermissionDenied> {
     for given in args.names() {
         if !tool.args().iter().any(|arg| arg.name() == given) {
@@ -458,7 +512,7 @@ fn check_arguments(
         match (arg.kind(), given) {
             (ArgKind::Path, Some(value)) => {
                 let resolved = profile.check(tool.name(), Access::Read, Path::new(value))?;
-                checked.push((arg.name(), Checked::Path(resolved)));
+                admit(&mut checked, trace, arg.name(), Checked::Path(resolved));
             }
             // The project root stands in for a missing path, and it is
             // checked rather than trusted: `Profile::check` is what says the
@@ -467,14 +521,24 @@ fn check_arguments(
             (ArgKind::Path, None) => {
                 let root = profile.root().to_path_buf();
                 let resolved = profile.check(tool.name(), Access::Read, &root)?;
-                checked.push((arg.name(), Checked::Path(resolved)));
+                admit(&mut checked, trace, arg.name(), Checked::Path(resolved));
             }
             (ArgKind::Pattern, Some(value)) => {
-                checked.push((arg.name(), Checked::Pattern(value.to_string())));
+                admit(
+                    &mut checked,
+                    trace,
+                    arg.name(),
+                    Checked::Pattern(value.to_string()),
+                );
             }
             (ArgKind::CommandLine, Some(value)) => {
                 profile.admits_command(value)?;
-                checked.push((arg.name(), Checked::CommandLine(value.to_string())));
+                admit(
+                    &mut checked,
+                    trace,
+                    arg.name(),
+                    Checked::CommandLine(value.to_string()),
+                );
             }
             (_, None) => {
                 return Err(PermissionDenied {
@@ -843,7 +907,7 @@ mod tests {
         let profile = Profile::compile(std::env::temp_dir(), None);
         let tool = registry::lookup("read").unwrap();
         let args = Args::new().with("path", "x").with("depth", "3");
-        let denied = check_arguments(&profile, tool, &args).unwrap_err();
+        let denied = check_arguments(&profile, tool, &args, &mut CheckedArgs::new()).unwrap_err();
         assert_eq!(denied.path, "depth");
         assert!(denied.rule.contains("declares no argument named `depth`"));
     }
@@ -852,7 +916,8 @@ mod tests {
     fn a_missing_required_argument_is_refused() {
         let profile = Profile::compile(std::env::temp_dir(), None);
         let tool = registry::lookup("grep").unwrap();
-        let denied = check_arguments(&profile, tool, &Args::new()).unwrap_err();
+        let denied =
+            check_arguments(&profile, tool, &Args::new(), &mut CheckedArgs::new()).unwrap_err();
         assert!(denied.rule.contains("requires an argument named `pattern`"));
     }
 
@@ -861,7 +926,10 @@ mod tests {
         let profile = Profile::compile(std::env::temp_dir(), None);
         let tool = registry::lookup("grep").unwrap();
         let args = Args::new().with("pattern", "-rf");
-        let checked = check_arguments(&profile, tool, &args).unwrap();
+        let mut trace = CheckedArgs::new();
+        let checked = check_arguments(&profile, tool, &args, &mut trace).unwrap();
+        // The trajectory records the pattern as admitted, and only that.
+        assert_eq!(trace.get("pattern").map(String::as_str), Some("-rf"));
         let argv = build_argv(tool, &checked).unwrap();
         let position = argv.iter().position(|a| a == "-rf").unwrap();
         assert_eq!(argv[position - 1], "-e", "{argv:?}");

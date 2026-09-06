@@ -27,12 +27,14 @@ use std::time::{Duration, Instant};
 
 use crate::contract::SessionId;
 use crate::glasshouse::Glasshouse;
-use crate::runtime::bindings;
+use crate::runtime::bindings::{self, CellTrace};
 use crate::runtime::cell::{self, CellError, CompiledCell, LINE_OFFSET};
 use crate::runtime::handles::{self, HandleMeta};
 use crate::runtime::marshal;
-use crate::runtime::outcome::{CellOutcome, CellOutcomeKind, CellRecord, CellTurn, HandleRecord};
-use crate::runtime::preview::{self, ErrorValue, StackFrame, Value};
+use crate::runtime::outcome::{
+    CellOutcome, CellOutcomeKind, CellRecord, CellTurn, HandleRecord, TERMINAL_JSON_CAP, Terminal,
+};
+use crate::runtime::preview::{self, ErrorValue, PREVIEW_TOKEN_CAP, StackFrame, Value};
 use crate::runtime::state::{HeapGuard, RuntimeState};
 use crate::sandbox::profile::Profile;
 use crate::tools::invoke::CancellationToken;
@@ -53,6 +55,13 @@ pub const DEFAULT_HEAP_LIMIT_BYTES: usize = 256 * 1024 * 1024;
 /// seconds is far longer than any cell measured here and far shorter than a
 /// person waiting on a hung session.
 pub const DEFAULT_CELL_WALL_CLOCK_LIMIT: Duration = Duration::from_secs(30);
+
+/// The most bytes a returned string may be before the cell yields with the
+/// cap as its reason instead of returning — `runtime-contract.md` §9.2's
+/// response cap. A constant here for the same reason as the two above: 61F
+/// owns the `pane.toml` setting. It is never a truncation: over it the task
+/// continues and the model is told the size.
+pub const DEFAULT_RESPONSE_BYTE_CAP: usize = 16 * 1024;
 
 /// How many microtask checkpoints a cell gets before its promise is declared
 /// unsettleable. One drains the whole queue, including jobs the queue's own
@@ -202,6 +211,27 @@ impl Runtime {
         }
     }
 
+    /// [`DEFAULT_RESPONSE_BYTE_CAP`] replaced, so a test can reach the
+    /// over-cap yield without building sixteen kilobytes.
+    #[must_use]
+    pub fn with_response_byte_cap(self, bytes: usize) -> Self {
+        let mut runtime = self;
+        runtime.trace().response_byte_cap.set(bytes);
+        runtime
+    }
+
+    /// §9's trajectory, yield request and response cap, in the isolate's
+    /// second slot -- keyed by its type, beside the state rather than in it,
+    /// and installed on first use so the constructor is unchanged.
+    fn trace(&mut self) -> Rc<CellTrace> {
+        if let Some(trace) = self.isolate.get_slot::<Rc<CellTrace>>() {
+            return trace.clone();
+        }
+        let trace = CellTrace::new();
+        self.isolate.set_slot(trace.clone());
+        trace
+    }
+
     /// The token every tool call this runtime makes becomes cancellable
     /// through — a builder, so [`Runtime::new`]'s signature is unchanged and
     /// a caller that has nothing to cancel goes on writing what it wrote.
@@ -272,6 +302,7 @@ impl Runtime {
     pub fn run_cell(&mut self, source: &str) -> CellOutcome {
         let started = Instant::now();
         let cell = self.state.begin_cell();
+        self.trace().begin_cell();
         // A hit the previous cell did not consume — one raised while its own
         // previews were being taken — is not this cell's reason for stopping.
         self.heap.take_hit();
@@ -292,6 +323,7 @@ impl Runtime {
         let stopped = Stopped {
             timed_out: watchdog.disarm(),
             heap_hit: self.heap.take_hit(),
+            yielded: self.trace().take_yield(),
         };
         // Unconditionally, and it is not tidiness. Until a termination is
         // cancelled every V8 call below it bails out, so the previews would
@@ -305,12 +337,20 @@ impl Runtime {
 
         self.forget_freed();
         self.refresh_previews();
+        // Once more, because the refresh above re-reads the model's own
+        // values and a getter is the model's own code: one that calls
+        // `yieldNow` or fills the heap there requests a termination after the
+        // cancel above, and a request nobody cancels is honoured by the next
+        // cell's first statement. The refresh already saw every effect of it
+        // (the read answered with nothing); this is only the flag.
+        self.isolate.cancel_terminate_execution();
         self.finish(cell, source, started, ending, stopped)
     }
 
     /// Everything that happens inside the isolate, so every V8 handle is
     /// released before the turn is assembled.
     fn execute(&mut self, compiled: &CompiledCell) -> Ending {
+        let response_byte_cap = self.trace().response_byte_cap.get();
         v8::scope!(let handle_scope, &mut self.isolate);
         let context = v8::Local::new(handle_scope, &self.context);
         let scope = &mut v8::ContextScope::new(handle_scope, context);
@@ -395,16 +435,32 @@ impl Runtime {
                 "the cell did not answer with a promise",
             ));
         };
-        match promise.state() {
+        let ending = match promise.state() {
             v8::PromiseState::Fulfilled => {
                 let value = promise.result(try_catch);
                 // §1's two endings, decided by the value rather than by a
                 // flag: the generated body ends `return __pane_cell.e()`, and
                 // only the host can mint what that answers with.
                 if bindings::is_end_marker(try_catch, value, self.state.cell.get()) {
-                    Ending::Yielded
+                    Ending::Yielded { reason: None }
                 } else {
-                    Ending::Returned(marshal::marshal(try_catch, value))
+                    // Inside the watchdog on purpose: reading a result walks
+                    // the model's own getters and proxy traps. A read that
+                    // did not answer leaves its exception or termination on
+                    // the `TryCatch`, and nothing may run the model's code
+                    // again until that has been read off -- measured: a
+                    // second read re-entered a getter the watchdog had just
+                    // stopped, with no watchdog left to stop it.
+                    match returned(try_catch, &self.state, response_byte_cap, value) {
+                        Ok(ending) => ending,
+                        Err(ReadFailed) => {
+                            if try_catch.has_terminated() {
+                                return Ending::Terminated;
+                            }
+                            let exception = try_catch.exception();
+                            return Ending::Threw(caught_error(try_catch, exception));
+                        }
+                    }
                 }
             }
             v8::PromiseState::Rejected => {
@@ -416,7 +472,15 @@ impl Runtime {
                 "the cell awaited a promise nothing can settle: pane's isolate has no timers, no \
                  sockets and no event loop, and every tool call is synchronous",
             )),
+        };
+        // Reading the result runs the model's getters, and a getter the
+        // watchdog stopped would otherwise hand back a partial value as a
+        // completed return: a termination raised while the ending was being
+        // read is the ending.
+        if try_catch.has_terminated() {
+            return Ending::Terminated;
         }
+        ending
     }
 
     /// `free("name")` is one of §2's three lifetime events, and the epilogue
@@ -533,22 +597,33 @@ impl Runtime {
             Ending::Terminated if stopped.timed_out => {
                 Ending::Threw(timed_out(started.elapsed(), self.wall_clock_limit))
             }
-            // Neither: nothing else in this crate terminates execution, so
-            // this is reported as what it is rather than as one of the two.
-            Ending::Terminated => Ending::Threw(plain_error(
-                "RuntimeTerminated",
-                "the isolate was terminated before the cell finished",
-            )),
+            // The two ceilings above win over the flag; the flag wins over
+            // nothing else terminating — `yieldNow` is a yield, never an
+            // error (§9.3).
+            Ending::Terminated => match stopped.yielded {
+                Some(reason) => Ending::Yielded { reason },
+                // Nothing else in this crate terminates execution, so this
+                // is reported as what it is rather than as one of the three.
+                None => Ending::Threw(plain_error(
+                    "RuntimeTerminated",
+                    "the isolate was terminated before the cell finished",
+                )),
+            },
             other => other,
         };
 
         let table = self.render_handles();
         let (stdout_tail, stdout_dropped_tokens) = self.state.current.borrow_mut().console.tail();
         let kind = match &ending {
-            Ending::Yielded => CellOutcomeKind::Yielded,
-            Ending::Returned(_) => CellOutcomeKind::Returned,
+            Ending::Yielded { .. } => CellOutcomeKind::Yielded,
+            Ending::Returned(..) => CellOutcomeKind::Returned,
             Ending::Threw(_) | Ending::Terminated => CellOutcomeKind::Threw,
         };
+        let yield_reason = match &ending {
+            Ending::Yielded { reason } => reason.clone(),
+            _ => None,
+        };
+        let calls = self.trace().take_calls();
         let record = CellRecord {
             cell,
             source: source.to_string(),
@@ -566,18 +641,24 @@ impl Runtime {
                     provenance,
                 })
                 .collect(),
+            calls,
         };
         let turn = CellTurn {
             elapsed_ms: started.elapsed().as_millis() as u64,
             table,
             stdout_tail,
             stdout_dropped_tokens,
+            yield_reason,
             record,
         };
 
         match ending {
-            Ending::Yielded => CellOutcome::Yielded { turn },
-            Ending::Returned(value) => CellOutcome::Returned { value, turn },
+            Ending::Yielded { .. } => CellOutcome::Yielded { turn },
+            Ending::Returned(value, terminal) => CellOutcome::Returned {
+                value,
+                terminal,
+                turn,
+            },
             Ending::Threw(error) => CellOutcome::Threw { error, turn },
             // Normalised above. An arm rather than an `unreachable!` so a
             // future ending cannot silently become a yield.
@@ -622,23 +703,30 @@ impl Runtime {
 
 /// How a cell ended, before the turn around it is assembled.
 enum Ending {
-    Yielded,
-    Returned(Value),
+    /// A fall-off (`reason: None`), or a yield on purpose with `yieldNow`'s
+    /// reason or the response cap's sentence (§9.3, §9.2).
+    Yielded {
+        reason: Option<String>,
+    },
+    Returned(Value, Terminal),
     Threw(ErrorValue),
     /// V8 stopped the cell. [`Stopped`] says which of the two ceilings did
-    /// it, because the model is told a different thing by each.
+    /// it, or that `yieldNow` asked, because the model is told a different
+    /// thing by each.
     Terminated,
 }
 
 /// Which ceiling stopped the cell, read the instant it stopped.
 ///
-/// Both flags are consumed once, before any of the bookkeeping that follows
+/// Every flag is consumed once, before any of the bookkeeping that follows
 /// a cell allocates: taking a preview can raise the heap callback itself,
 /// and a hit raised there would report a timeout as an out-of-memory.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Stopped {
     heap_hit: bool,
     timed_out: bool,
+    /// `Some` when `yieldNow` was called, with the reason it gave.
+    yielded: Option<Option<String>>,
 }
 
 impl Stopped {
@@ -647,8 +735,260 @@ impl Stopped {
         Self {
             heap_hit: false,
             timed_out: false,
+            yielded: None,
         }
     }
+}
+
+/// A read of the model's value that did not answer: the getter or trap it
+/// ran threw, or was stopped. The exception is on the `TryCatch` and the
+/// reader stops at once, because the next read would run that code again.
+struct ReadFailed;
+
+/// A top-level `return`'s value, read for what §9.2 makes of it.
+///
+/// A string is read **in full** — the terminal response is never `marshal`'s
+/// sample — unless it is over the response cap, in which case the cell
+/// yields with the cap as its reason and nothing of the string is rendered
+/// (§9.2: a response is never silently truncated). Any other value becomes
+/// its JSON under [`TERMINAL_JSON_CAP`].
+fn returned(
+    scope: &mut v8::PinScope,
+    state: &Rc<RuntimeState>,
+    response_byte_cap: usize,
+    value: v8::Local<v8::Value>,
+) -> Result<Ending, ReadFailed> {
+    if value.is_string() {
+        let string: v8::Local<v8::String> = value.try_into().expect("is_string");
+        let bytes = string.utf8_length(scope);
+        if bytes > response_byte_cap {
+            return Ok(Ending::Yielded {
+                reason: Some(format!(
+                    "the response is {} bytes, over the cap of {} bytes; return less or yield",
+                    preview::thousands(bytes as u64),
+                    preview::thousands(response_byte_cap as u64)
+                )),
+            });
+        }
+        let text = string.to_rust_string_lossy(scope);
+        return Ok(Ending::Returned(
+            marshal::marshal(scope, value),
+            Terminal::Text(text),
+        ));
+    }
+    // The walk first: it reads every property, so a getter that throws or
+    // never returns is found here, and `marshal` -- which would read the
+    // same getters again -- runs only once every read has answered.
+    let terminal = terminal_json(scope, state, value, TERMINAL_JSON_CAP)?;
+    Ok(Ending::Returned(marshal::marshal(scope, value), terminal))
+}
+
+/// §9.2's rendering of a non-string result: its JSON with values.
+///
+/// Written by the host rather than by `JSON.stringify` because only the host
+/// can read a tool object's private tag, and §4 says such an object
+/// contributes its preview and never its payload. The walk stops once the
+/// cap is passed, so a large value the program built costs the cap and not
+/// its size. `JSON.stringify`'s shape otherwise: an `undefined`, a function
+/// or a symbol is skipped in an object and `null` in an array, a
+/// non-finite number is `null`; a `toJSON` method is not consulted.
+fn terminal_json(
+    scope: &mut v8::PinScope,
+    state: &Rc<RuntimeState>,
+    value: v8::Local<v8::Value>,
+    cap: usize,
+) -> Result<Terminal, ReadFailed> {
+    let mut json = JsonText {
+        out: String::new(),
+        cap,
+        over: false,
+    };
+    write_json(scope, state, value, &mut json, 0)?;
+    let cut = json.over || json.out.len() > cap;
+    let mut text = json.out;
+    if text.len() > cap {
+        let mut end = cap;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+    }
+    Ok(Terminal::Json { text, cut })
+}
+
+/// The JSON being written, and whether the walk stopped short of the value.
+struct JsonText {
+    out: String,
+    cap: usize,
+    over: bool,
+}
+
+impl JsonText {
+    fn full(&self) -> bool {
+        self.out.len() > self.cap
+    }
+
+    fn push(&mut self, text: &str) {
+        if self.full() {
+            self.over = true;
+            return;
+        }
+        self.out.push_str(text);
+    }
+}
+
+/// Deeper than this and the walk stops: with the byte cap it is not what
+/// ends a cycle, only what bounds the stack while the cap does.
+const JSON_MAX_DEPTH: u32 = 64;
+
+/// A value that `JSON.stringify` leaves out of an object.
+fn json_skips(value: v8::Local<v8::Value>) -> bool {
+    value.is_undefined() || value.is_function() || value.is_symbol()
+}
+
+fn json_string(text: &str) -> String {
+    serde_json::Value::String(text.to_string()).to_string()
+}
+
+fn write_json(
+    scope: &mut v8::PinScope,
+    state: &Rc<RuntimeState>,
+    value: v8::Local<v8::Value>,
+    json: &mut JsonText,
+    depth: u32,
+) -> Result<(), ReadFailed> {
+    if json.full() || depth > JSON_MAX_DEPTH {
+        json.over = true;
+        return Ok(());
+    }
+    if value.is_null() {
+        json.push("null");
+        return Ok(());
+    }
+    if json_skips(value) {
+        json.push(if depth == 0 { "undefined" } else { "null" });
+        return Ok(());
+    }
+    if value.is_boolean() {
+        json.push(if value.boolean_value(scope) {
+            "true"
+        } else {
+            "false"
+        });
+        return Ok(());
+    }
+    if value.is_number() {
+        let number = value.number_value(scope).unwrap_or(f64::NAN);
+        if number.is_finite() {
+            json.push(&value.to_rust_string_lossy(scope));
+        } else {
+            json.push("null");
+        }
+        return Ok(());
+    }
+    if value.is_string() {
+        let string: v8::Local<v8::String> = value.try_into().expect("is_string");
+        let room = json.cap.saturating_sub(json.out.len()) + 4;
+        let (text, whole) = bounded_utf8(scope, string, room);
+        json.push(&json_string(&text));
+        if !whole {
+            json.over = true;
+        }
+        return Ok(());
+    }
+    if value.is_native_error() {
+        let error = marshal::error_of(scope, value);
+        json.push(&format!(
+            "{{\"name\":{},\"message\":{}}}",
+            json_string(&error.class),
+            json_string(&error.message)
+        ));
+        return Ok(());
+    }
+    // Before the array and object arms: a tool result is one of those, and
+    // its tag is what says it renders as its preview.
+    if let Some(call) = bindings::recorded_call(scope, state, value) {
+        json.push(&json_string(&preview::render_preview(
+            &call.preview,
+            PREVIEW_TOKEN_CAP,
+        )));
+        return Ok(());
+    }
+    if value.is_array() {
+        let array: v8::Local<v8::Array> = value.try_into().expect("is_array");
+        json.push("[");
+        for index in 0..array.length() {
+            if json.full() {
+                json.over = true;
+                break;
+            }
+            if index > 0 {
+                json.push(",");
+            }
+            let element = array.get_index(scope, index).ok_or(ReadFailed)?;
+            if json_skips(element) {
+                json.push("null");
+            } else {
+                write_json(scope, state, element, json, depth + 1)?;
+            }
+        }
+        json.push("]");
+        return Ok(());
+    }
+    if value.is_object() {
+        let object: v8::Local<v8::Object> = value.try_into().expect("is_object");
+        json.push("{");
+        let mut first = true;
+        let names = object
+            .get_own_property_names(scope, v8::GetPropertyNamesArgs::default())
+            .ok_or(ReadFailed)?;
+        for index in 0..names.length() {
+            if json.full() {
+                json.over = true;
+                break;
+            }
+            let key = names.get_index(scope, index).ok_or(ReadFailed)?;
+            let property = object.get(scope, key).ok_or(ReadFailed)?;
+            if json_skips(property) {
+                continue;
+            }
+            if !first {
+                json.push(",");
+            }
+            first = false;
+            json.push(&json_string(&key.to_rust_string_lossy(scope)));
+            json.push(":");
+            write_json(scope, state, property, json, depth + 1)?;
+        }
+        json.push("}");
+        return Ok(());
+    }
+    // A bigint: `JSON.stringify` throws on one; its canonical spelling,
+    // quoted, is the honest rendering of a value a person asked to see.
+    json.push(&json_string(&value.to_rust_string_lossy(scope)));
+    Ok(())
+}
+
+/// At most `max_bytes` of `string`, whole characters only, and whether that
+/// was all of it — so a string the program built out of a payload is read
+/// to the cap and not to its length.
+fn bounded_utf8(
+    scope: &mut v8::PinScope,
+    string: v8::Local<v8::String>,
+    max_bytes: usize,
+) -> (String, bool) {
+    if string.utf8_length(scope) <= max_bytes {
+        return (string.to_rust_string_lossy(scope), true);
+    }
+    let mut buffer = vec![0u8; max_bytes];
+    let written = string.write_utf8_v2(
+        scope,
+        &mut buffer,
+        v8::WriteFlags::kReplaceInvalidUtf8,
+        None,
+    );
+    buffer.truncate(written);
+    (String::from_utf8_lossy(&buffer).into_owned(), false)
 }
 
 /// The wall clock, as one thread per cell.

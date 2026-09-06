@@ -6,7 +6,7 @@
 use pane::contract::{Conversation, Message, Role, ServedBy};
 use pane::runtime::handles::{HandleTable, render_table};
 use pane::runtime::preview::{ArrayValue, FileValue, PREVIEW_TOKEN_CAP, TABLE_TOKEN_CAP, Value};
-use pane::tui::{CellError, CellView, Notebook, render};
+use pane::tui::{CellError, CellView, Notebook, cell_ordinal, render};
 use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
@@ -506,6 +506,7 @@ fn a_cell_shows_its_program_as_the_input_region_and_a_return_as_the_last_cells_v
             error: None,
             returned: Some("\"total\": number".to_string()),
             answered: false,
+            yield_reason: None,
         },
     );
 
@@ -565,6 +566,7 @@ fn a_throw_renders_as_the_cells_error_region() {
             }),
             returned: None,
             answered: true,
+            yield_reason: None,
         },
     );
 
@@ -615,6 +617,7 @@ fn the_runtimes_answer_to_a_cell_is_not_drawn_as_a_person_typing() {
             error: None,
             returned: None,
             answered: true,
+            yield_reason: None,
         },
     );
 
@@ -656,6 +659,7 @@ fn a_person_typing_after_a_task_ended_is_still_drawn() {
             error: None,
             returned: Some("1".to_string()),
             answered: false,
+            yield_reason: None,
         },
     );
 
@@ -671,4 +675,77 @@ fn a_person_typing_after_a_task_ended_is_still_drawn() {
         text.contains("you: the second task"),
         "a task typed after the previous one returned must still be drawn:\n{text}"
     );
+}
+
+/// `runtime-contract.md` §9: the terminal response is drawn as the
+/// assistant's turn and as the last cell's return region, and is not counted
+/// as a cell; a yield's reason is drawn in the output region beside the
+/// table, never in an error region.
+#[test]
+fn a_terminal_response_is_the_assistants_turn_and_a_yield_reason_sits_by_the_table() {
+    let conversation = conversation(vec![
+        Message::text(Role::User, "the task"),
+        Message::text(
+            Role::Assistant,
+            "```pane\nconst n = 1;\nyieldNow(\"why\");\n```",
+        ),
+        Message::text(
+            Role::User,
+            "[cell 1 yielded in 3 ms]\nwhy\n\n## Handles\nn  number  1",
+        ),
+        Message::text(Role::Assistant, "```pane\nreturn \"the answer\";\n```"),
+        Message::text(Role::Assistant, "the answer"),
+    ]);
+
+    let mut notebook = Notebook::default();
+    notebook.set(
+        1,
+        CellView {
+            table: Some("n  number  1".to_string()),
+            error: None,
+            returned: None,
+            answered: true,
+            yield_reason: Some("why".to_string()),
+        },
+    );
+    notebook.set(
+        2,
+        CellView {
+            table: Some("n  number  1".to_string()),
+            error: None,
+            returned: Some("the answer".to_string()),
+            answered: false,
+            yield_reason: None,
+        },
+    );
+    assert_eq!(cell_ordinal(&conversation, &notebook), 2);
+
+    let buffer = rendered_notebook(
+        &conversation,
+        &known_served_by(),
+        &HandleTable::new(),
+        &notebook,
+        30,
+    );
+    let text = buffer_text(&buffer);
+
+    assert_eq!(
+        conversation_rows(&buffer, "[1] out", 2),
+        vec!["n  number  1".to_string(), "yielded: why".to_string()],
+        "the reason sits by the table:\n{text}"
+    );
+    assert!(
+        !text.contains("[1] error"),
+        "a yield is not an error:\n{text}"
+    );
+    assert_eq!(
+        conversation_row(&buffer, "[2] return"),
+        "the answer",
+        "{text}"
+    );
+    assert!(
+        text.contains("assistant: the answer"),
+        "the response is drawn as the assistant's turn:\n{text}"
+    );
+    assert!(!text.contains("[3] in"), "the reply is not a cell:\n{text}");
 }

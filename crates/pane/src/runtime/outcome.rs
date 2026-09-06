@@ -1,5 +1,5 @@
 //! What one cell produced — `runtime-contract.md` §1's two endings, §5's
-//! third, and §4's rollout line.
+//! third, §4's rollout line, and §9's terminal response and trajectory.
 //!
 //! **A throw is a result, not an error.** [`CellOutcome::Threw`] carries the
 //! same turn a yield would have carried — the elapsed time, the rendered
@@ -8,10 +8,13 @@
 //! here is a `Result`, because none of the three endings is a failure of the
 //! runtime.
 
+use std::collections::BTreeMap;
+
 use serde::Serialize;
+use serde::ser::{SerializeMap, Serializer};
 
 use crate::runtime::handles::Provenance;
-use crate::runtime::preview::{ErrorValue, Value};
+use crate::runtime::preview::{self, ErrorValue, PREVIEW_TOKEN_CAP, Value};
 
 /// Everything a cell hands back whatever way it ended.
 #[derive(Debug, Clone, PartialEq)]
@@ -26,6 +29,12 @@ pub struct CellTurn {
     /// How many tokens of `console` output were dropped ahead of
     /// [`stdout_tail`](Self::stdout_tail).
     pub stdout_dropped_tokens: usize,
+    /// Why the cell yielded on purpose — `yieldNow(reason)`'s reason, or the
+    /// response cap's sentence (`runtime-contract.md` §9.3, §9.2). `None` for
+    /// a fall-off and for every ending that is not a yield. It rides the turn
+    /// rather than [`CellOutcome::Yielded`] because callers outside this
+    /// package match `Yielded { turn }` exhaustively.
+    pub yield_reason: Option<String>,
     /// The one rollout line this cell owes — appended by the wiring package,
     /// never by this one.
     pub record: CellRecord,
@@ -34,15 +43,53 @@ pub struct CellTurn {
 /// How a cell ended.
 #[derive(Debug, Clone, PartialEq)]
 pub enum CellOutcome {
-    /// It ran off the end. The model gets the table and another turn, and
-    /// the isolate stays warm (§1).
+    /// It ran off the end, or asked to hand back. The model gets the table
+    /// and another turn, and the isolate stays warm (§1, §9.3).
     Yielded { turn: CellTurn },
-    /// It executed a top-level `return`. The task ends with this value (§1).
-    Returned { value: Value, turn: CellTurn },
+    /// It executed a top-level `return`. The task ends with this value (§1),
+    /// and `terminal` is what the person reads (§9.2).
+    Returned {
+        value: Value,
+        terminal: Terminal,
+        turn: CellTurn,
+    },
     /// It threw. The turn slot a yield would have used carries the error
     /// instead, and the bindings made before the throw are in `turn.table`
     /// (§5).
     Threw { error: ErrorValue, turn: CellTurn },
+}
+
+/// The task's terminal response — `runtime-contract.md` §9.2 — read at the
+/// isolate boundary in full, never through `marshal`'s sample.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Terminal {
+    /// A returned string: the response, verbatim.
+    Text(String),
+    /// Any other returned value: its JSON with values, `cut` when the text
+    /// is a prefix stopped at [`TERMINAL_JSON_CAP`] bytes on a character
+    /// boundary.
+    Json { text: String, cut: bool },
+}
+
+/// How many bytes of a non-string result's JSON the response carries before
+/// it is cut — a *render* cap that never yields, unlike the response cap on a
+/// returned string, which always does (§9.2).
+pub const TERMINAL_JSON_CAP: usize = 2 * 1024;
+
+impl Terminal {
+    /// The response as the person reads it and the rollout keeps it. `whole`
+    /// is the marshalled sample of the same value; when the JSON was cut, its
+    /// type-only preview says what the cut removed.
+    pub fn render(&self, whole: &Value) -> String {
+        match self {
+            Terminal::Text(text) | Terminal::Json { text, cut: false } => text.clone(),
+            Terminal::Json { text, cut: true } => format!(
+                "{text}\n…(cut at {} bytes; the whole value, by type:)\n{}",
+                preview::thousands(TERMINAL_JSON_CAP as u64),
+                preview::render_preview(whole, PREVIEW_TOKEN_CAP)
+            ),
+        }
+    }
 }
 
 impl CellOutcome {
@@ -90,6 +137,10 @@ pub struct CellRecord {
     pub source: String,
     pub outcome: CellOutcomeKind,
     pub handles: Vec<HandleRecord>,
+    /// §9.4's trajectory: every call that actually ran in this cell, in
+    /// order. An untaken branch ran nothing and records nothing; the answer
+    /// itself is on the `turn` line, never here.
+    pub calls: Vec<CallRecord>,
 }
 
 /// One live handle as the rollout records it.
@@ -101,6 +152,45 @@ pub struct HandleRecord {
     pub preview: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provenance: Option<Provenance>,
+}
+
+/// One call of the trajectory — `runtime-contract.md` §9.4.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct CallRecord {
+    /// The registry name.
+    pub tool: String,
+    /// The arguments **as checked**: a path is the resolved path the child
+    /// was given, never the program's spelling. A refused call carries only
+    /// what was admitted before the refusing argument.
+    pub args: BTreeMap<String, String>,
+    pub ended: Ended,
+}
+
+/// How one call ended: `"ok"`, `{"threw": "<class>"}` or
+/// `{"denied": "<rule>"}` on the line. A cancelled call is a throw (§9.1).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Ended {
+    Ok,
+    Threw { class: String },
+    Denied { rule: String },
+}
+
+impl Serialize for Ended {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Ended::Ok => serializer.serialize_str("ok"),
+            Ended::Threw { class } => {
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("threw", class)?;
+                map.end()
+            }
+            Ended::Denied { rule } => {
+                let mut map = serializer.serialize_map(Some(1))?;
+                map.serialize_entry("denied", rule)?;
+                map.end()
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -125,42 +215,103 @@ mod tests {
                     pure: true,
                 }),
             }],
+            calls: vec![
+                CallRecord {
+                    tool: "grep".into(),
+                    args: BTreeMap::from([("path".to_string(), "/tmp/root".to_string())]),
+                    ended: Ended::Ok,
+                },
+                CallRecord {
+                    tool: "bash".into(),
+                    args: BTreeMap::new(),
+                    ended: Ended::Denied {
+                        rule: "no allow".into(),
+                    },
+                },
+                CallRecord {
+                    tool: "read".into(),
+                    args: BTreeMap::new(),
+                    ended: Ended::Threw {
+                        class: "Cancelled".into(),
+                    },
+                },
+            ],
         };
         let json = serde_json::to_string(&record).unwrap();
         assert!(json.contains(r#""cell":4"#), "{json}");
         assert!(json.contains(r#""outcome":"yielded""#), "{json}");
         assert!(json.contains(r#""type":"Grep.Match[]""#), "{json}");
         assert!(json.contains(r#""pure":true"#), "{json}");
+        assert!(
+            json.contains(r#""calls":[{"tool":"grep","args":{"path":"/tmp/root"},"ended":"ok"}"#),
+            "{json}"
+        );
+        assert!(json.contains(r#""ended":{"denied":"no allow"}"#), "{json}");
+        assert!(json.contains(r#""ended":{"threw":"Cancelled"}"#), "{json}");
     }
 
-    #[test]
-    fn only_a_return_ends_the_task() {
-        let turn = CellTurn {
+    fn turn() -> CellTurn {
+        CellTurn {
             elapsed_ms: 0,
             table: String::new(),
             stdout_tail: String::new(),
             stdout_dropped_tokens: 0,
+            yield_reason: None,
             record: CellRecord {
                 cell: 1,
                 source: String::new(),
                 outcome: CellOutcomeKind::Yielded,
                 handles: Vec::new(),
+                calls: Vec::new(),
             },
-        };
-        assert!(!CellOutcome::Yielded { turn: turn.clone() }.ends_the_task());
+        }
+    }
+
+    #[test]
+    fn only_a_return_ends_the_task() {
+        assert!(!CellOutcome::Yielded { turn: turn() }.ends_the_task());
         assert!(
             CellOutcome::Returned {
                 value: Value::Null,
-                turn: turn.clone()
+                terminal: Terminal::Json {
+                    text: "null".into(),
+                    cut: false
+                },
+                turn: turn()
             }
             .ends_the_task()
         );
         assert!(
             !CellOutcome::Threw {
                 error: ErrorValue::default(),
-                turn
+                turn: turn()
             }
             .ends_the_task()
+        );
+    }
+
+    #[test]
+    fn a_cut_result_says_so_and_describes_the_whole_by_type() {
+        let whole = Value::object(vec![
+            ("matches".to_string(), Value::Number(3.0)),
+            ("files".to_string(), Value::Number(2.0)),
+        ]);
+        let intact = Terminal::Json {
+            text: r#"{"matches":3,"files":2}"#.into(),
+            cut: false,
+        };
+        assert_eq!(intact.render(&whole), r#"{"matches":3,"files":2}"#);
+        let cut = Terminal::Json {
+            text: r#"{"matches":3,"fil"#.into(),
+            cut: true,
+        };
+        let rendered = cut.render(&whole);
+        assert!(rendered.starts_with(r#"{"matches":3,"fil"#), "{rendered}");
+        assert!(rendered.contains("cut at 2,048 bytes"), "{rendered}");
+        assert!(rendered.contains("\"matches\": number"), "{rendered}");
+        assert_eq!(
+            Terminal::Text("verbatim".into()).render(&Value::Null),
+            "verbatim"
         );
     }
 }

@@ -157,6 +157,19 @@ fn assistant_reply(text: &str) -> String {
     .to_string()
 }
 
+/// The same reply, plus a Messages `usage` object -- the shape a direct
+/// provider always sends and the gateway tests never need, so this stays a
+/// separate builder rather than a change to [`assistant_reply`] that every
+/// other fixture in this file would inherit.
+fn assistant_reply_with_usage(text: &str, input_tokens: u64, output_tokens: u64) -> String {
+    serde_json::json!({
+        "role": "assistant",
+        "content": [{"type": "text", "text": text}],
+        "usage": {"input_tokens": input_tokens, "output_tokens": output_tokens},
+    })
+    .to_string()
+}
+
 fn run_session(
     root: &Path,
     rollout: &Path,
@@ -196,6 +209,11 @@ fn run_session(
 /// consume.
 fn ending_reply() -> String {
     assistant_reply("```pane\nreturn 1;\n```")
+}
+
+/// [`ending_reply`], with a `usage` object attached.
+fn ending_reply_with_usage(input_tokens: u64, output_tokens: u64) -> String {
+    assistant_reply_with_usage("```pane\nreturn 1;\n```", input_tokens, output_tokens)
 }
 
 /// The text of the last `user` message in a recorded request body -- what the
@@ -943,10 +961,16 @@ fn two_pane_blocks_run_neither() {
         "the answer is the contract's own sentence and carries no handle table"
     );
 
+    // The returned string is the terminal response, verbatim (§9.2): the
+    // screen carries `undefined` as the assistant's reply, unquoted.
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("\"undefined\""),
+        stdout.contains("assistant: undefined"),
         "the first block's binding must not exist in the isolate:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("assistant: number"),
+        "the first block ran and bound `a`:\n{stdout}"
     );
 }
 
@@ -1005,6 +1029,16 @@ fn a_cell_that_throws_is_answered_and_the_session_continues() {
         "the turn is never retried: the throwing program appears once, as the \
          assistant message that sent it"
     );
+
+    // §9.1: a cell that threw did not return, so no assistant `turn` line
+    // follows its cell line -- the runtime's own answer does.
+    let lines = rollout_lines(&rollout);
+    let threw_at = lines
+        .iter()
+        .position(|line| line["kind"] == "cell" && line["outcome"] == "threw")
+        .unwrap();
+    assert_eq!(lines[threw_at + 1]["kind"], "turn", "{lines:?}");
+    assert_eq!(lines[threw_at + 1]["role"], "user", "{lines:?}");
 }
 
 /// REQUIRED BEHAVIOR 6, and `model-contract.md` §1: the system block the
@@ -1160,7 +1194,7 @@ fn a_gateway_reported_turn_is_counted_from_the_usage_row_not_estimated() {
     let bodies = bodies.lock().unwrap();
     let result_block = last_user_text(&bodies[1]);
     assert!(
-        result_block.contains("turn cap 8,000 · task 120/400,000 · cells 1/40"),
+        result_block.contains("turn cap 8,192 · task 120/400,000 · cells 1/40"),
         "the budget line must carry the gateway's own figures: {result_block}"
     );
 
@@ -1213,5 +1247,417 @@ fn a_turn_the_gateway_never_metered_is_labelled_rather_than_averaged() {
     assert!(
         stdout.contains("counted: part estimated"),
         "a total built from both sources must say so:\n{stdout}"
+    );
+}
+
+// --- runtime-contract.md §9: ending a task from inside the program -------
+
+/// §9.2 through the binary: a program ending `return "…"` -- the rollout's
+/// last two lines are the cell line and an assistant `turn` line carrying
+/// the string verbatim, the reply is on the screen as the assistant's turn,
+/// and the provider saw exactly as many requests as there were programs. A
+/// third reply is scripted so that a request sent after the return would be
+/// served and counted rather than fail on the connection.
+#[test]
+fn a_returned_string_is_the_assistants_turn_and_no_request_follows() {
+    let root = scratch_dir("terminal-string-root");
+    let rollout = root.join("rollout.jsonl");
+    let absent = root.join("no-such-glasshouse");
+    let answer = "Three files name it; two are tests.\nThe third is src/lib.rs.";
+
+    let (base_url, bodies) = start_fake_provider(vec![
+        assistant_reply("```pane\nconst n = 3;\n```"),
+        assistant_reply(&format!(
+            "```pane\nreturn {};\n```",
+            serde_json::to_string(answer).unwrap()
+        )),
+        assistant_reply("```pane\nreturn \"NEVER REQUESTED\";\n```"),
+    ]);
+
+    let output = run_session(
+        &root,
+        &rollout,
+        "sess-terminal-string",
+        "count them",
+        &base_url,
+        Some(&absent),
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let lines = rollout_lines(&rollout);
+    let n = lines.len();
+    assert_eq!(lines[n - 2]["kind"], "cell", "{lines:?}");
+    assert_eq!(lines[n - 2]["outcome"], "returned", "{lines:?}");
+    assert_eq!(lines[n - 1]["kind"], "turn", "{lines:?}");
+    assert_eq!(lines[n - 1]["role"], "assistant", "{lines:?}");
+    assert_eq!(
+        lines[n - 1]["text"],
+        answer,
+        "the response is kept verbatim"
+    );
+
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(
+        bodies.len(),
+        2,
+        "as many requests as programs, and none after the return"
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("assistant: Three files name it; two are tests."),
+        "the reply must be on the screen as the assistant's turn:\n{stdout}"
+    );
+}
+
+/// §9.1: a program whose only call throws, and which then returns a
+/// sentence anyway, is answered with the throw. `Threw` never ends the task:
+/// no assistant `turn` line follows the throw's cell line, the runtime's
+/// answer does, and the session sends the next turn.
+#[test]
+fn a_throw_never_becomes_a_terminal_response() {
+    let root = scratch_dir("throw-terminal-root");
+    let rollout = root.join("rollout.jsonl");
+    let absent = root.join("no-such-glasshouse");
+
+    let (base_url, bodies) = start_fake_provider(vec![
+        assistant_reply(
+            "```pane\nconst before = 1;\nnosuch.field;\nreturn \"CONFIDENT SENTENCE\";\n```",
+        ),
+        ending_reply(),
+    ]);
+
+    let output = run_session(
+        &root,
+        &rollout,
+        "sess-throw-terminal",
+        "do the thing",
+        &base_url,
+        Some(&absent),
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let lines = rollout_lines(&rollout);
+    let threw_at = lines
+        .iter()
+        .position(|line| line["kind"] == "cell" && line["outcome"] == "threw")
+        .unwrap_or_else(|| panic!("the throw's cell line is missing: {lines:?}"));
+    assert_eq!(lines[threw_at + 1]["kind"], "turn", "{lines:?}");
+    assert_eq!(
+        lines[threw_at + 1]["role"],
+        "user",
+        "the line after a throw is the runtime's answer, never an assistant turn: {lines:?}"
+    );
+    assert!(
+        !lines.iter().any(|line| {
+            line["kind"] == "turn"
+                && line["role"] == "assistant"
+                && line["text"] == "CONFIDENT SENTENCE"
+        }),
+        "the sentence after a throw became a terminal response: {lines:?}"
+    );
+
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 2, "the session continued after the throw");
+    let answer = last_user_text(&bodies[1]);
+    assert!(answer.starts_with("[cell 1 threw in"), "{answer}");
+    assert!(!answer.contains("CONFIDENT SENTENCE"), "{answer}");
+}
+
+/// Addendum 3: a non-string result is rendered as its JSON **with values**
+/// -- a person reading `{matches: 3, files: 2}` needs the 3 and the 2 -- and
+/// one over 2 KiB is cut on a character boundary, says so, and is followed
+/// by the type-only preview of the whole value.
+#[test]
+fn a_returned_object_is_rendered_as_its_json_with_values() {
+    let root = scratch_dir("terminal-json-root");
+    let rollout = root.join("rollout.jsonl");
+    let absent = root.join("no-such-glasshouse");
+    let (base_url, _bodies) = start_fake_provider(vec![assistant_reply(
+        "```pane\nreturn { matches: 3, files: 2, names: [\"a.rs\", \"b.rs\"] };\n```",
+    )]);
+
+    let output = run_session(
+        &root,
+        &rollout,
+        "sess-terminal-json",
+        "count them",
+        &base_url,
+        Some(&absent),
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let lines = rollout_lines(&rollout);
+    let last = lines.last().unwrap();
+    assert_eq!(last["role"], "assistant", "{lines:?}");
+    assert_eq!(
+        last["text"],
+        r#"{"matches":3,"files":2,"names":["a.rs","b.rs"]}"#
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains(r#"assistant: {"matches":3,"files":2"#),
+        "the values, not their types, reach the screen:\n{stdout}"
+    );
+
+    // Over the render cap: `{"b":"` is six bytes and every `€` three, so a
+    // cut at 2,048 falls inside a character and must back off to 2,046.
+    let root = scratch_dir("terminal-json-cut-root");
+    let rollout = root.join("rollout.jsonl");
+    let (base_url, _bodies) = start_fake_provider(vec![assistant_reply(
+        "```pane\nreturn { b: \"€\".repeat(3000), n: 1 };\n```",
+    )]);
+    let output = run_session(
+        &root,
+        &rollout,
+        "sess-terminal-json-cut",
+        "count them",
+        &base_url,
+        Some(&absent),
+    );
+    assert!(output.status.success());
+    let lines = rollout_lines(&rollout);
+    let text = lines.last().unwrap()["text"].as_str().unwrap().to_string();
+    let (json, rest) = text
+        .split_once('\n')
+        .expect("a cut result says so on the next line");
+    assert_eq!(
+        json.len(),
+        2046,
+        "cut at 2 KiB on a character boundary: {json:?}"
+    );
+    assert!(json.starts_with(r#"{"b":"€"#), "{json}");
+    assert!(json.ends_with('€'), "{json}");
+    assert!(rest.starts_with("…(cut at 2,048 bytes"), "{rest}");
+    assert!(
+        rest.contains("\"b\": string"),
+        "the type-only preview follows: {rest}"
+    );
+    assert!(rest.contains("\"n\": number"), "{rest}");
+}
+
+/// Addendum 2: the third consecutive prose turn carries the exhausted
+/// preamble naming the reason, the task ends after one more turn whatever
+/// the model does, and the second prose turn ends nothing. A fifth reply is
+/// scripted so a loop that ran on would be served and counted. A program in
+/// between resets the count.
+#[test]
+fn three_prose_turns_end_the_task_and_two_do_not() {
+    let prose = || assistant_reply("I would grep for it, then count the files.");
+
+    let root = scratch_dir("prose-cap-root");
+    let rollout = root.join("rollout.jsonl");
+    let absent = root.join("no-such-glasshouse");
+    let (base_url, bodies) = start_fake_provider(vec![prose(), prose(), prose(), prose(), prose()]);
+    let output = run_session(
+        &root,
+        &rollout,
+        "sess-prose-cap",
+        "count them",
+        &base_url,
+        Some(&absent),
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(
+        bodies.len(),
+        4,
+        "the third prose turn buys exactly one more turn"
+    );
+    assert!(
+        !last_user_text(&bodies[2]).contains("Three turns without a program"),
+        "the second prose turn ends nothing: {}",
+        last_user_text(&bodies[2])
+    );
+    assert!(
+        last_user_text(&bodies[3]).starts_with("Three turns without a program;"),
+        "the third carries the exhausted preamble naming the reason: {}",
+        last_user_text(&bodies[3])
+    );
+    drop(bodies);
+
+    let root = scratch_dir("prose-reset-root");
+    let rollout = root.join("rollout.jsonl");
+    let (base_url, bodies) = start_fake_provider(vec![
+        prose(),
+        prose(),
+        assistant_reply("```pane\nconst x = 1;\n```"),
+        prose(),
+        prose(),
+        ending_reply(),
+    ]);
+    let output = run_session(
+        &root,
+        &rollout,
+        "sess-prose-reset",
+        "count them",
+        &base_url,
+        Some(&absent),
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 6, "a program resets the count");
+    for body in bodies.iter() {
+        assert!(
+            !last_user_text(body).contains("Three turns without a program"),
+            "{}",
+            last_user_text(body)
+        );
+    }
+}
+
+/// Addendum 1: the budget line's turn cap is the `max_tokens` the request
+/// actually carries -- one constant, read from the wire -- so the model is
+/// told the figure that binds it.
+#[test]
+fn the_budget_line_names_the_max_tokens_actually_sent() {
+    let root = scratch_dir("turn-cap-root");
+    let rollout = root.join("rollout.jsonl");
+    let absent = root.join("no-such-glasshouse");
+    let (base_url, bodies) = start_fake_provider(vec![
+        assistant_reply("```pane\nconst x = 1;\n```"),
+        ending_reply(),
+    ]);
+    let output = run_session(
+        &root,
+        &rollout,
+        "sess-turn-cap",
+        "count them",
+        &base_url,
+        Some(&absent),
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let bodies = bodies.lock().unwrap();
+    let request: serde_json::Value = serde_json::from_str(&bodies[1]).unwrap();
+    let sent = request["max_tokens"].as_u64().unwrap();
+    assert_eq!(sent, u64::from(pane::wire::MAX_TOKENS));
+    assert_eq!(sent, 8_192);
+    let result_block = last_user_text(&bodies[1]);
+    assert!(
+        result_block.contains("turn cap 8,192 ·"),
+        "the budget line names the figure actually sent: {result_block}"
+    );
+}
+
+// --- runtime-contract.md §6 addendum: a direct provider's own `usage` -----
+
+/// §6, direct-provider path: with no gateway data at all, a Messages
+/// response's own `usage` object is counted as reported, not estimated.
+///
+/// 30 is `20 + 10`, one reply's own two figures; 60 is both replies'. The
+/// estimate for this conversation is a different figure entirely (several
+/// hundred tokens, as the gateway test's own comment notes), so a budget
+/// line reading `task 30/400,000` cannot have come from the fallback.
+#[cfg(unix)]
+#[test]
+fn a_direct_providers_usage_is_counted_as_reported_not_estimated() {
+    let root = scratch_dir("budget-direct-root");
+    let rollout = root.join("rollout.jsonl");
+    let absent = root.join("no-such-glasshouse");
+
+    let (base_url, bodies) = start_fake_provider(vec![
+        assistant_reply_with_usage("```pane\nconst x = 1;\n```", 20, 10),
+        ending_reply_with_usage(20, 10),
+    ]);
+
+    let output = run_session(
+        &root,
+        &rollout,
+        "sess-budget-direct",
+        "count them",
+        &base_url,
+        Some(&absent),
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let bodies = bodies.lock().unwrap();
+    let result_block = last_user_text(&bodies[1]);
+    assert!(
+        result_block.contains("turn cap 8,192 · task 30/400,000 · cells 1/40"),
+        "the budget line must carry the response's own usage: {result_block}"
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("budget: 60/400000 tok"),
+        "two reported turns total 60 in the sidebar:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("counted: reported"),
+        "the sidebar must say the figure was reported, not estimated, when a \
+         direct provider's own usage is all there is:\n{stdout}"
+    );
+}
+
+/// The precedence half of the §6 addendum, which neither gateway test above
+/// can see because their replies carry no `usage`: when the gateway's own row
+/// and the response's `usage` both report a turn, the gateway's figures are
+/// the ones counted. The row says 100 + 20 per turn; the replies say 20 + 10.
+/// Written by the lead at integration, because a mutation preferring the
+/// response's `usage` would otherwise survive every test in this file.
+#[cfg(unix)]
+#[test]
+fn the_gateways_row_wins_over_the_responses_usage_when_both_report() {
+    let root = scratch_dir("budget-gateway-over-usage-root");
+    let rollout = root.join("rollout.jsonl");
+    let glasshouse = write_routing_cost(&root, "fake_routing_cost.sh", false);
+
+    let (base_url, bodies) = start_fake_provider(vec![
+        assistant_reply_with_usage("```pane\nconst x = 1;\n```", 20, 10),
+        ending_reply_with_usage(20, 10),
+    ]);
+
+    let output = run_session(
+        &root,
+        &rollout,
+        "sess-budget-gateway-over-usage",
+        "count them",
+        &base_url,
+        Some(&glasshouse),
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let bodies = bodies.lock().unwrap();
+    let result_block = last_user_text(&bodies[1]);
+    assert!(
+        result_block.contains("turn cap 8,192 · task 120/400,000 · cells 1/40"),
+        "the gateway's row (120) must win over the response's usage (30): {result_block}"
+    );
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("budget: 240/400000 tok"),
+        "two gateway-reported turns total 240, not the responses' 60:\n{stdout}"
     );
 }

@@ -102,6 +102,49 @@ fn to_wire_block(block: &Block) -> WireBlock {
 struct ResponseBody {
     role: String,
     content: Vec<WireBlock>,
+    #[serde(default)]
+    usage: Option<UsageRow>,
+}
+
+/// The Messages response's own `usage` object, before the "absent or
+/// malformed is `None`, never zero" rule is applied -- either field can be
+/// missing without the object itself being.
+#[derive(Deserialize)]
+struct UsageRow {
+    #[serde(default)]
+    input_tokens: Option<u64>,
+    #[serde(default)]
+    output_tokens: Option<u64>,
+}
+
+/// The provider's own token count for the request that produced one turn.
+/// `model-contract.md` §6 reads this "rather than estimated" when there is
+/// nothing else to prefer -- see [`Turn::usage`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Usage {
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+}
+
+/// One assistant turn: the message the runtime and rollout act on, plus the
+/// provider's own usage for the request that produced it.
+///
+/// `usage` is `None` whenever the response carried no `usage` object, or one
+/// missing either field -- never a fabricated zero, because a zero here would
+/// read as "the provider reported no tokens" rather than "it reported
+/// nothing".
+#[derive(Debug)]
+pub struct Turn {
+    pub message: Message,
+    pub usage: Option<Usage>,
+}
+
+fn to_usage(row: Option<UsageRow>) -> Option<Usage> {
+    let row = row?;
+    Some(Usage {
+        input_tokens: row.input_tokens?,
+        output_tokens: row.output_tokens?,
+    })
 }
 
 /// The most of a response body an error will ever carry, in bytes.
@@ -205,7 +248,7 @@ fn credential_header() -> Option<(&'static str, String)> {
 /// read at all -- with it on, [`WireError::Status`]'s `body_head` would
 /// always be empty. With it off, `send` only errors on an actual transport
 /// failure, and status is read and handled here instead.
-pub fn send_turn(conversation: &Conversation) -> Result<Message, WireError> {
+pub fn send_turn(conversation: &Conversation) -> Result<Turn, WireError> {
     let url = format!("{}{MESSAGES_PATH}", base_url());
     let body = request_body(conversation);
 
@@ -236,7 +279,7 @@ pub fn send_turn(conversation: &Conversation) -> Result<Message, WireError> {
     parse_response(&text)
 }
 
-fn parse_response(text: &str) -> Result<Message, WireError> {
+fn parse_response(text: &str) -> Result<Turn, WireError> {
     let parsed: ResponseBody = serde_json::from_str(text).map_err(WireError::Json)?;
     if parsed.role != "assistant" {
         return Err(WireError::UnexpectedRole(parsed.role));
@@ -249,9 +292,12 @@ fn parse_response(text: &str) -> Result<Message, WireError> {
             WireBlock::Other => None,
         })
         .collect();
-    Ok(Message {
-        role: Role::Assistant,
-        content,
+    Ok(Turn {
+        message: Message {
+            role: Role::Assistant,
+            content,
+        },
+        usage: to_usage(parsed.usage),
     })
 }
 
@@ -284,9 +330,9 @@ mod tests {
     #[test]
     fn parse_response_reads_the_assistant_text() {
         let body = r#"{"role":"assistant","content":[{"type":"text","text":"hi"}]}"#;
-        let message = parse_response(body).unwrap();
-        assert_eq!(message.role, Role::Assistant);
-        assert_eq!(message.content, vec![Block::Text("hi".to_string())]);
+        let turn = parse_response(body).unwrap();
+        assert_eq!(turn.message.role, Role::Assistant);
+        assert_eq!(turn.message.content, vec![Block::Text("hi".to_string())]);
     }
 
     #[test]
@@ -295,8 +341,37 @@ mod tests {
             {"type":"tool_use","id":"1","name":"grep","input":{}},
             {"type":"text","text":"hi"}
         ]}"#;
-        let message = parse_response(body).unwrap();
-        assert_eq!(message.content, vec![Block::Text("hi".to_string())]);
+        let turn = parse_response(body).unwrap();
+        assert_eq!(turn.message.content, vec![Block::Text("hi".to_string())]);
+    }
+
+    #[test]
+    fn parse_response_reads_usage_when_present() {
+        let body = r#"{"role":"assistant","content":[{"type":"text","text":"hi"}],
+            "usage":{"input_tokens":10,"output_tokens":5}}"#;
+        let turn = parse_response(body).unwrap();
+        assert_eq!(
+            turn.usage,
+            Some(Usage {
+                input_tokens: 10,
+                output_tokens: 5
+            })
+        );
+    }
+
+    #[test]
+    fn parse_response_without_usage_yields_none_not_zero() {
+        let body = r#"{"role":"assistant","content":[{"type":"text","text":"hi"}]}"#;
+        let turn = parse_response(body).unwrap();
+        assert_eq!(turn.usage, None);
+    }
+
+    #[test]
+    fn parse_response_with_a_partial_usage_row_yields_none() {
+        let body = r#"{"role":"assistant","content":[{"type":"text","text":"hi"}],
+            "usage":{"input_tokens":10}}"#;
+        let turn = parse_response(body).unwrap();
+        assert_eq!(turn.usage, None);
     }
 
     #[test]

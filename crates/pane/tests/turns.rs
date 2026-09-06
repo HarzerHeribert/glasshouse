@@ -14,6 +14,7 @@ use std::thread;
 
 use pane::contract::{Conversation, Message, Role, SessionId};
 use pane::rollout::{self, Rollout};
+use pane::runtime::outcome::{CellOutcomeKind, CellRecord};
 use pane::wire::{self, WireError};
 
 /// `ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY` are process-global, and
@@ -289,7 +290,7 @@ fn refused_base_url() -> String {
 
 /// Sets `ANTHROPIC_BASE_URL` to `base_url`, runs `send_turn`, then restores
 /// the environment. Caller holds `ENV_LOCK`.
-fn send_turn_against(base_url: &str) -> Result<Message, WireError> {
+fn send_turn_against(base_url: &str) -> Result<wire::Turn, WireError> {
     // SAFETY: the caller holds `ENV_LOCK` for the duration of this call, so
     // no other test's env mutation can interleave with this one.
     unsafe {
@@ -300,6 +301,19 @@ fn send_turn_against(base_url: &str) -> Result<Message, WireError> {
         std::env::remove_var("ANTHROPIC_BASE_URL");
     }
     result
+}
+
+/// §6: a response with no `usage` object leaves `Turn::usage` `None`, never a
+/// fabricated zero -- a zero would read as "the provider reported no
+/// tokens", which is not what an absent object means.
+#[test]
+fn a_response_without_usage_yields_none_not_zero() {
+    let _guard = ENV_LOCK.lock().unwrap();
+    let body = br#"{"role":"assistant","content":[{"type":"text","text":"hi"}]}"#;
+    let base_url = start_status_provider("200 OK", body);
+
+    let turn = send_turn_against(&base_url).unwrap();
+    assert_eq!(turn.usage, None);
 }
 
 #[test]
@@ -390,4 +404,59 @@ fn no_request_credential_ever_appears_in_an_error() {
         std::env::remove_var("ANTHROPIC_API_KEY");
     }
     assert!(!err.to_string().contains(sentinel), "{err}");
+}
+
+/// `runtime-contract.md` §9.2: the terminal response is one assistant
+/// `turn` line after the cell line -- the same line an assistant message has
+/// always written -- so `resume` rebuilds it from the file alone with no new
+/// reader and no new kind, and the cell line stays skipped.
+#[test]
+fn a_terminal_response_is_one_assistant_turn_line_resume_rebuilds() {
+    let path = tempdir().join("session.jsonl");
+    let mut rollout = Rollout::create(&path, SessionId::new("s1"), "system prompt").unwrap();
+    rollout.record_turn(Role::User, "count them").unwrap();
+    rollout
+        .record_turn(Role::Assistant, "```pane\nreturn \"three files\";\n```")
+        .unwrap();
+    rollout
+        .record_cell(&CellRecord {
+            cell: 1,
+            source: "return \"three files\";\n".to_string(),
+            outcome: CellOutcomeKind::Returned,
+            handles: Vec::new(),
+            calls: Vec::new(),
+        })
+        .unwrap();
+    rollout.record_turn(Role::Assistant, "three files").unwrap();
+    drop(rollout);
+
+    let raw = std::fs::read_to_string(&path).unwrap();
+    let lines: Vec<serde_json::Value> = raw
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    let n = lines.len();
+    assert_eq!(lines[n - 2]["kind"], "cell");
+    assert_eq!(lines[n - 2]["outcome"], "returned");
+    assert_eq!(lines[n - 1]["kind"], "turn");
+    assert_eq!(lines[n - 1]["role"], "assistant");
+    assert_eq!(lines[n - 1]["text"], "three files");
+    assert_eq!(
+        lines
+            .iter()
+            .filter(|line| line["kind"] == "turn" && line["text"] == "three files")
+            .count(),
+        1,
+        "one line, one kind: {raw}"
+    );
+
+    let conversation = rollout::resume(&path).unwrap();
+    assert_eq!(
+        conversation.messages,
+        vec![
+            Message::text(Role::User, "count them"),
+            Message::text(Role::Assistant, "```pane\nreturn \"three files\";\n```"),
+            Message::text(Role::Assistant, "three files"),
+        ]
+    );
 }

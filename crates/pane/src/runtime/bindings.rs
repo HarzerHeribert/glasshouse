@@ -6,17 +6,23 @@
 //! handle table; `console` writes to a bounded buffer. There is no file, no
 //! socket, no timer, no `require` and no dynamic import here, because a V8
 //! context has none of those unless an embedder adds them and this module is
-//! the only place that adds anything.
+//! the only place that adds anything. `yieldNow` is the eighth function and
+//! the one that runs no code: it stops the cell (`runtime-contract.md` §9.3).
 //!
 //! A refusal is a throw of `PermissionDenied` inside the model's own program
 //! (`sandbox-grants.md` §1.4 and §5): catchable, final, and never a prompt.
 
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 
 use crate::runtime::cell::{HOST_FUNCTIONS, RESERVED_PREFIX};
 use crate::runtime::handles::HandleMeta;
+use crate::runtime::isolate::DEFAULT_RESPONSE_BYTE_CAP;
 use crate::runtime::marshal;
-use crate::runtime::preview::{ArrayValue, FileValue, StringValue, Value};
+use crate::runtime::outcome::{CallRecord, Ended};
+use crate::runtime::preview::{
+    ArrayValue, FileValue, PREVIEW_TOKEN_CAP, StringValue, Value, thousands,
+};
 use crate::runtime::state::{RecordedCall, RuntimeState, provenance};
 use crate::sandbox::profile::PermissionDenied;
 use crate::tools::invoke::{self, Args, ToolContext, ToolError, ToolResult};
@@ -97,6 +103,65 @@ pub(crate) fn state(scope: &v8::PinScope) -> Rc<RuntimeState> {
         .clone()
 }
 
+/// What the host keeps about a cell's ending beyond [`RuntimeState`]:
+/// §9.4's trajectory, §9.3's yield request, and §9.2's response cap. One per
+/// runtime, in the isolate's second slot; the trajectory and the request are
+/// cleared by the isolate at the start of every cell and consumed when the
+/// cell ends, and the cap is read when a cell returns a string.
+pub(crate) struct CellTrace {
+    calls: RefCell<Vec<CallRecord>>,
+    yield_requested: Cell<bool>,
+    yield_reason: RefCell<Option<String>>,
+    pub(crate) response_byte_cap: Cell<usize>,
+}
+
+impl CellTrace {
+    pub(crate) fn new() -> Rc<Self> {
+        Rc::new(Self {
+            calls: RefCell::new(Vec::new()),
+            yield_requested: Cell::new(false),
+            yield_reason: RefCell::new(None),
+            response_byte_cap: Cell::new(DEFAULT_RESPONSE_BYTE_CAP),
+        })
+    }
+
+    pub(crate) fn begin_cell(&self) {
+        self.calls.borrow_mut().clear();
+        self.yield_requested.set(false);
+        self.yield_reason.borrow_mut().take();
+    }
+
+    /// Every call that ran this cell, in order, taken once.
+    pub(crate) fn take_calls(&self) -> Vec<CallRecord> {
+        std::mem::take(&mut *self.calls.borrow_mut())
+    }
+
+    /// `Some(reason)` once per cell when `yieldNow` was called, with the
+    /// reason it gave; `None` when it was not.
+    pub(crate) fn take_yield(&self) -> Option<Option<String>> {
+        if !self.yield_requested.replace(false) {
+            return None;
+        }
+        Some(self.yield_reason.borrow_mut().take())
+    }
+
+    fn record(&self, call: CallRecord) {
+        self.calls.borrow_mut().push(call);
+    }
+
+    fn request_yield(&self, reason: Option<String>) {
+        self.yield_requested.set(true);
+        *self.yield_reason.borrow_mut() = reason;
+    }
+}
+
+fn trace(scope: &v8::PinScope) -> Rc<CellTrace> {
+    scope
+        .get_slot::<Rc<CellTrace>>()
+        .expect("the runtime installs its trace before any callback can run")
+        .clone()
+}
+
 fn js_string<'s>(scope: &mut v8::PinScope<'s, '_>, text: &str) -> v8::Local<'s, v8::Value> {
     v8::String::new(scope, text).map_or_else(|| v8::undefined(scope).into(), |string| string.into())
 }
@@ -158,6 +223,9 @@ pub(crate) fn install(scope: &mut v8::PinScope) {
     if let Some(function) = v8::Function::builder(handles_callback).build(scope) {
         set_fixed_key(scope, global, "handles", function.into());
     }
+    if let Some(function) = v8::Function::builder(yield_now_callback).build(scope) {
+        set_fixed_key(scope, global, "yieldNow", function.into());
+    }
 
     let console = v8::Object::new(scope);
     for method in ["log", "info", "warn", "error", "debug", "trace"] {
@@ -214,16 +282,38 @@ fn tool_callback(
     // thing this crate does, and a `RefCell` borrow held across it would
     // outlive every reason to hold it. Every clone names the same flag.
     let token = state.token.borrow().clone();
-    let outcome = {
+    let traced = {
         let context = ToolContext {
             profile: &state.profile,
             glasshouse: &state.glasshouse,
             session: &state.session,
         };
-        invoke::run_cancellable(&context, &token, tool.name(), &call_args)
+        invoke::run_traced(&context, &token, tool.name(), &call_args)
     };
 
-    match outcome {
+    // §9.4: recorded here because this is where every call funnels, and
+    // recorded with the arguments `invoke` checked rather than the ones the
+    // program wrote. Each class below is the class the matching throw
+    // constructs, so the line says what the program could have caught.
+    let ended = match &traced.outcome {
+        Ok(_) => Ended::Ok,
+        Err(ToolError::Denied(denied)) => Ended::Denied {
+            rule: denied.rule.clone(),
+        },
+        Err(ToolError::Cancelled { .. }) => Ended::Threw {
+            class: "Cancelled".to_string(),
+        },
+        Err(ToolError::Spawn { .. }) => Ended::Threw {
+            class: "ToolError".to_string(),
+        },
+    };
+    trace(scope).record(CallRecord {
+        tool: tool.name().to_string(),
+        args: traced.checked,
+        ended,
+    });
+
+    match traced.outcome {
         Ok(result) => {
             let value = typed_result(scope, tool, &call_args, &result, &state);
             retval.set(value);
@@ -615,6 +705,69 @@ fn capture_callback(
     capture(scope, &name, args.get(1));
 }
 
+/// The most characters of a `yieldNow` reason the result block carries —
+/// `runtime-contract.md` §3's preview cap, by the crate's own four-characters-
+/// a-token estimate.
+const REASON_CHARS: usize = PREVIEW_TOKEN_CAP * 4;
+
+/// `yieldNow(reason?)` — `runtime-contract.md` §9.3: the cell ends in the
+/// yield slot at once, from wherever it was called.
+///
+/// **It runs no code and touches no state but the cell's own flag.** The
+/// mechanism is `terminate_execution`, the one way V8 offers to stop a
+/// running program from inside a callback that no `try`/`catch` in the
+/// program can intercept; the isolate reads the flag the instant the cell
+/// stops and answers with a yield rather than the `RuntimeTerminated` a
+/// termination nobody asked for would be. The heap ceiling and the wall
+/// clock are read first and win, so a cell that hit either while also asking
+/// to yield is told the truth about why it stopped.
+fn yield_now_callback(
+    scope: &mut v8::PinScope,
+    args: v8::FunctionCallbackArguments,
+    _retval: v8::ReturnValue,
+) {
+    let given = args.get(0);
+    let reason = if given.is_undefined() || given.is_null() {
+        None
+    } else {
+        Some(bound_reason(&given.to_rust_string_lossy(scope)))
+    };
+    trace(scope).request_yield(reason);
+    scope.terminate_execution();
+    // `terminate_execution` requests an interrupt, and V8 services one at a
+    // stack check -- a function entry or a loop back-edge -- never on the
+    // return from an API callback. Measured: straight-line statements after
+    // `yieldNow()` ran to the end of the cell, which then fell off normally.
+    // Entering this loop is the stack check: the pending termination is
+    // serviced before its first iteration completes and unwinds through here
+    // and out of the program, so nothing after the call ever runs. It cannot
+    // spin -- the termination is already requested -- and were it somehow
+    // not honoured, the watchdog would end the cell as a timeout rather than
+    // let it hang.
+    if let Some(source) = v8::String::new(scope, "for (;;) {}")
+        && let Some(script) = v8::Script::compile(scope, source, None)
+    {
+        script.run(scope);
+    }
+}
+
+/// One line, at most [`REASON_CHARS`] characters, cut on a character
+/// boundary and saying so — the reason is a line of the result block and
+/// must neither forge a second line nor cost the turn more than a preview.
+fn bound_reason(reason: &str) -> String {
+    let one_line = reason.lines().collect::<Vec<_>>().join(" ");
+    let total = one_line.chars().count();
+    if total <= REASON_CHARS {
+        return one_line;
+    }
+    let head: String = one_line.chars().take(REASON_CHARS).collect();
+    format!(
+        "{head}…(reason cut at {} of {} characters)",
+        thousands(REASON_CHARS as u64),
+        thousands(total as u64)
+    )
+}
+
 /// The generated epilogue's `return __pane_cell.e()`: it answers with a
 /// fresh object carrying [`end_tag`] for the cell that is running, and the
 /// isolate reads the cell's ending off the value its promise fulfils with.
@@ -666,16 +819,8 @@ pub(crate) fn preview_of(
     state: &Rc<RuntimeState>,
     value: v8::Local<v8::Value>,
 ) -> (Value, HandleMeta) {
-    if let Ok(object) = v8::Local::<v8::Object>::try_from(value) {
-        let tag = call_tag(scope);
-        if let Some(marker) = object.get_private(scope, tag)
-            && let Some(id) = marker.number_value(scope)
-            && id.is_finite()
-            && id >= 1.0
-            && let Some(call) = state.recorded(id as u64)
-        {
-            return (call.preview, call.meta);
-        }
+    if let Some(call) = recorded_call(scope, state, value) {
+        return (call.preview, call.meta);
     }
     let preview = marshal::marshal(scope, value);
     let meta = HandleMeta {
@@ -684,6 +829,24 @@ pub(crate) fn preview_of(
         provenance: None,
     };
     (preview, meta)
+}
+
+/// The call a tool-produced object was tagged with, when `value` is one;
+/// `None` for anything the program built itself. This is the whole of
+/// "handle-aware": a reader that asks here before it reads a property can
+/// answer with the call's preview and never touch the payload (§4).
+pub(crate) fn recorded_call(
+    scope: &mut v8::PinScope,
+    state: &Rc<RuntimeState>,
+    value: v8::Local<v8::Value>,
+) -> Option<RecordedCall> {
+    let object = v8::Local::<v8::Object>::try_from(value).ok()?;
+    let tag = call_tag(scope);
+    let id = object.get_private(scope, tag)?.number_value(scope)?;
+    if !id.is_finite() || id < 1.0 {
+        return None;
+    }
+    state.recorded(id as u64)
 }
 
 fn is_identifier(name: &str) -> bool {
@@ -736,7 +899,7 @@ fn throw_denied(scope: &mut v8::PinScope, denied: &PermissionDenied) {
     }
 }
 
-/// Refuses a write or a free that names one of the seven host functions or
+/// Refuses a write or a free that names one of the eight host functions or
 /// the runtime's own `__pane_` prefix, and answers whether it did.
 ///
 /// A `ToolError` throw rather than a silent no-op: a model that lost `grep`
@@ -852,6 +1015,22 @@ mod tests {
         assert_eq!(found.text, "Binary file /tmp/root/bin.dat matches");
         // And it renders as what grep said, not as a located hit.
         assert_eq!(match_line(&found), "Binary file /tmp/root/bin.dat matches");
+    }
+
+    #[test]
+    fn a_yield_reason_is_one_line_and_bounded_on_a_character_boundary() {
+        assert_eq!(bound_reason("two\nlines"), "two lines");
+        let long: String = "é".repeat(REASON_CHARS + 5);
+        let bounded = bound_reason(&long);
+        assert!(bounded.starts_with(&"é".repeat(REASON_CHARS)), "{bounded}");
+        assert!(
+            bounded.contains("reason cut at 1,024 of 1,029 characters"),
+            "{bounded}"
+        );
+        assert!(
+            !bounded.contains(&"é".repeat(REASON_CHARS + 1)),
+            "{bounded}"
+        );
     }
 
     #[test]

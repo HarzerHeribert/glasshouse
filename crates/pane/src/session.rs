@@ -17,24 +17,31 @@ use crate::commands::{self, CommandStatus};
 use crate::contract::{Block, Conversation, Message, ProjectConfig, Role, ServedBy, SessionId};
 use crate::glasshouse::{self, Glasshouse, LifecycleEvent, LocalMemory};
 use crate::project;
-use crate::prompt::{self, Budget, CellResult, ErrorSection, Extracted};
+use crate::prompt::{self, Budget, CellResult, ErrorSection, ExhaustedReason, Extracted};
 use crate::rollout::{self, Rollout};
 use crate::runtime::handles::HandleTable;
 use crate::runtime::isolate::Runtime;
 use crate::runtime::outcome::CellOutcome;
-use crate::runtime::preview::{self, PREVIEW_TOKEN_CAP};
+use crate::runtime::preview;
 use crate::sandbox::profile::Profile;
 use crate::tools::invoke::{self, Args, ToolContext, ToolError};
 use crate::tools::registry;
 use crate::tui::{self, CellError, CellView, Counted, Notebook, TaskTokens};
 use crate::wire;
 
-/// `model-contract.md` §6's three defaults. Constants until `pane.toml`
+/// `model-contract.md` §6's task defaults. Constants until `pane.toml`
 /// supplies them -- 61F owns the setting, and a figure the model is told is
-/// worth nothing if it is invented twice, so they are spelled once here.
-const TURN_TOKEN_CAP: u64 = 8_000;
+/// worth nothing if it is invented twice, so they are spelled once here. The
+/// turn cap is not spelled at all: the budget line reads [`wire::MAX_TOKENS`],
+/// the figure actually sent, so the model is told the cap that binds it.
 const TASK_TOKEN_CAP: u64 = 400_000;
 const CELL_CAP: u64 = 40;
+
+/// How many prose turns in a row end the task (the primary's addendum of
+/// 2026-09-06): on this one, the answer carries the exhausted preamble and
+/// the loop ends after one more turn whatever the model does. A program or
+/// two blocks resets the count; the token budget stays the outer stop.
+const PROSE_TURN_CAP: u32 = 3;
 
 /// §5's answer to a message that carried no program.
 const NO_PROGRAM: &str = "no program ran; send one pane block";
@@ -377,7 +384,7 @@ fn process_input(
 struct TaskBudget {
     used: u64,
     cells_used: u64,
-    gateway: bool,
+    reported: bool,
     estimated: bool,
 }
 
@@ -386,36 +393,49 @@ impl TaskBudget {
         Self {
             used: 0,
             cells_used: 0,
-            gateway: false,
+            reported: false,
             estimated: false,
         }
     }
 
     /// Adds one turn's cost: the gateway's own usage row when it reported
-    /// one, `estimate` otherwise.
+    /// one, else the Messages response's own `usage`, else `estimate`.
     ///
-    /// **Which of the two was used is recorded, not averaged.** §6 reads the
+    /// **Which source was used is recorded, not averaged.** §6 reads a
     /// provider's figure "rather than estimated", and a total that quietly
     /// mixed a measurement with a heuristic would be a number the sidebar
-    /// could not honestly label.
-    fn add(&mut self, served: &ServedBy, estimate: u64) {
+    /// could not honestly label. The gateway's row is preferred over the
+    /// response's own `usage` when both are present, because it is what
+    /// `served_by` was built to make authoritative -- but the sidebar calls
+    /// either one `reported`: a reader deciding whether to trust this figure
+    /// only needs to know it did not come from `estimate_tokens`.
+    fn add(&mut self, served: &ServedBy, usage: Option<&wire::Usage>, estimate: u64) {
         match (served.input_tokens, served.output_tokens) {
-            (None, None) => {
-                self.used = self.used.saturating_add(estimate);
-                self.estimated = true;
-            }
+            (None, None) => match usage {
+                Some(usage) => {
+                    self.used = self
+                        .used
+                        .saturating_add(usage.input_tokens)
+                        .saturating_add(usage.output_tokens);
+                    self.reported = true;
+                }
+                None => {
+                    self.used = self.used.saturating_add(estimate);
+                    self.estimated = true;
+                }
+            },
             (input, output) => {
                 self.used = self
                     .used
                     .saturating_add(input.unwrap_or(0))
                     .saturating_add(output.unwrap_or(0));
-                self.gateway = true;
+                self.reported = true;
             }
         }
     }
 
     fn counted(&self) -> Option<Counted> {
-        match (self.gateway, self.estimated) {
+        match (self.reported, self.estimated) {
             (true, true) => Some(Counted::Mixed),
             (true, false) => Some(Counted::Gateway),
             (false, true) => Some(Counted::Estimated),
@@ -426,7 +446,7 @@ impl TaskBudget {
     /// §6's own line, for the result block the model reads next.
     fn line(&self) -> Budget {
         Budget {
-            turn_cap: TURN_TOKEN_CAP,
+            turn_cap: u64::from(wire::MAX_TOKENS),
             task_used: self.used,
             task_cap: TASK_TOKEN_CAP,
             cells_used: self.cells_used,
@@ -456,6 +476,12 @@ struct Step {
     /// `return` is answered with nothing at all, because nothing further is
     /// asked of the model (`runtime-contract.md` §1).
     answer: Option<String>,
+    /// The task's terminal response (`runtime-contract.md` §9.2): rendered
+    /// and kept as the assistant's own turn, with no request after it.
+    response: Option<String>,
+    /// Whether the message carried no program (§5's prose), counted by
+    /// [`run_task`] against [`PROSE_TURN_CAP`].
+    prose: bool,
     view: CellView,
 }
 
@@ -492,33 +518,56 @@ fn run_task(
         .with_token(session.token.clone());
     let mut budget = TaskBudget::new();
     let mut final_turn = false;
+    let mut prose_turns = 0u32;
 
     loop {
         let since = SystemTime::now();
-        let assistant = wire::send_turn(&transcript.conversation)
+        let turn = wire::send_turn(&transcript.conversation)
             .map_err(|e| format!("request failed: {e}"))?;
         let estimate = estimate_request_tokens(&transcript.conversation);
-        let assistant_text = message_text(&assistant);
-        transcript.conversation.messages.push(assistant);
+        let assistant_text = message_text(&turn.message);
+        transcript.conversation.messages.push(turn.message);
         rollout
             .record_turn(Role::Assistant, &assistant_text)
             .map_err(|e| format!("could not record the assistant turn: {e}"))?;
 
         let served = glasshouse::served_by(session.glasshouse, since);
-        budget.add(&served, estimate);
+        budget.add(&served, turn.usage.as_ref(), estimate);
 
-        let ordinal = cell_ordinal(&transcript.conversation);
+        let ordinal = tui::cell_ordinal(&transcript.conversation, &transcript.notebook);
         let mut step = act_on(&assistant_text, &mut runtime, &mut budget, rollout)?;
+        prose_turns = if step.prose { prose_turns + 1 } else { 0 };
+
+        // §9.2: the terminal response is the assistant's own turn -- the same
+        // line an assistant message has always written, so `resume` rebuilds
+        // it with no new reader -- and it is written after the cell line
+        // `act_on` already appended, so the rollout ends cell, then reply.
+        if let Some(response) = &step.response {
+            transcript
+                .conversation
+                .messages
+                .push(Message::text(Role::Assistant, response));
+            rollout
+                .record_turn(Role::Assistant, response)
+                .map_err(|e| format!("could not record the terminal response: {e}"))?;
+        }
 
         // The flag is read before this turn decorates it, so the turn that
         // carries the exhausted preamble is sent, answered and only then
         // ends the task -- §6's "the only permitted action is a top-level
         // `return`" needs that turn to actually happen.
         let stop = step.answer.is_none() || final_turn;
-        if !stop && budget.spent() {
+        let exhausted = if budget.spent() {
+            Some(ExhaustedReason::TaskBudget)
+        } else if prose_turns >= PROSE_TURN_CAP {
+            Some(ExhaustedReason::ThreeTurnsWithoutAProgram)
+        } else {
+            None
+        };
+        if !stop && let Some(reason) = exhausted {
             step.answer = step
                 .answer
-                .map(|answer| format!("{}\n\n{answer}", prompt::exhausted_preamble()));
+                .map(|answer| format!("{}\n\n{answer}", prompt::exhausted_preamble(reason)));
             final_turn = true;
         }
 
@@ -571,6 +620,8 @@ fn act_on(
             let table = runtime.render_handles();
             return Ok(Step {
                 answer: Some(unchanged_table(&table)),
+                response: None,
+                prose: true,
                 view: CellView {
                     table: Some(table),
                     ..CellView::default()
@@ -580,6 +631,8 @@ fn act_on(
         Extracted::TwoBlocks => {
             return Ok(Step {
                 answer: Some(TWO_BLOCKS.to_string()),
+                response: None,
+                prose: false,
                 view: CellView {
                     table: Some(runtime.render_handles()),
                     ..CellView::default()
@@ -603,18 +656,24 @@ fn act_on(
         cell: turn.record.cell,
         elapsed_ms: turn.elapsed_ms,
         error: None,
+        yield_reason: None,
         handle_table: turn.table.clone(),
         stdout_tail: (!turn.stdout_tail.is_empty()).then(|| turn.stdout_tail.clone()),
         budget: budget.line(),
     };
 
-    let answer = match &outcome {
-        // §1: the task ends with this value and nothing further is asked of
-        // the model. Nothing that threw, was refused or was cancelled reaches
-        // this arm -- each of those is a `Threw`, and a throw is answered.
-        CellOutcome::Returned { value, .. } => {
-            view.returned = Some(preview::render_preview(value, PREVIEW_TOKEN_CAP));
-            None
+    let mut response = None;
+    match &outcome {
+        // Nothing that threw, was refused or was cancelled reaches this arm
+        // -- each of those is a `Threw`, and a throw is answered. §9.2: what
+        // is rendered is the terminal response -- a string verbatim, any
+        // other value as its JSON -- never `marshal`'s sample.
+        CellOutcome::Returned {
+            value, terminal, ..
+        } => {
+            let text = terminal.render(value);
+            view.returned = Some(text.clone());
+            response = Some(text);
         }
         CellOutcome::Threw { error, .. } => {
             view.error = Some(CellError {
@@ -626,23 +685,35 @@ fn act_on(
             result.error = Some(ErrorSection {
                 class: error.class.clone(),
                 message: error.message.clone(),
-                // `0` where the runtime could not attribute the throw to a
-                // line of the model's own program: §6's section has no absent
-                // case, and `prompt` is not this package's to change.
-                line: error.line.unwrap_or(0).into(),
-                column: error.column.unwrap_or(0).into(),
+                position: error
+                    .line
+                    .zip(error.column)
+                    .map(|(line, column)| (u64::from(line), u64::from(column))),
                 frames: error
                     .stack
                     .iter()
                     .map(|frame| frame.description.clone())
                     .collect(),
             });
-            Some(prompt::render_result(&result))
         }
-        CellOutcome::Yielded { .. } => Some(prompt::render_result(&result)),
-    };
+        // §9.3: a yield on purpose says why, under the cell line and beside
+        // the table on the screen -- never in the error region.
+        CellOutcome::Yielded { turn } => {
+            view.yield_reason = turn.yield_reason.clone();
+            result.yield_reason = turn.yield_reason.clone();
+        }
+    }
+    // §1: the task ends with a `return` and nothing further is asked of the
+    // model; a yield and a throw are answered. The outcome's own predicate
+    // decides, so there is no second reading of §1 here to drift from it.
+    let answer = (!outcome.ends_the_task()).then(|| prompt::render_result(&result));
 
-    Ok(Step { answer, view })
+    Ok(Step {
+        answer,
+        response,
+        prose: false,
+        view,
+    })
 }
 
 /// §5's answer to a message that carried no program: the handle table
@@ -651,18 +722,6 @@ fn act_on(
 fn unchanged_table(table: &str) -> String {
     let shown = if table.is_empty() { "(none)" } else { table };
     format!("## Handles\n{shown}\n\n{NO_PROGRAM}")
-}
-
-/// Which cell the screen will number the newest assistant message, counted
-/// exactly as `tui`'s own notebook counts it: the task is the first message
-/// and is drawn as a header, so a cell is an assistant message after it.
-fn cell_ordinal(conversation: &Conversation) -> usize {
-    conversation
-        .messages
-        .iter()
-        .skip(1)
-        .filter(|message| message.role == Role::Assistant)
-        .count()
 }
 
 /// The turn's cost when the gateway reported none: `estimate_tokens` over the
