@@ -647,11 +647,11 @@ fn the_preview_shrinks_its_samples_before_cutting_anything_above_them() {
 // is `tests/runtime_cells.rs`, where a `Runtime` is already in hand.
 
 use pane::bg::{self, RunOptions};
-// `WatchOptions` has exactly one user, `a_watch_emits_per_match_and_stops_when_until_matches`,
-// which is `#[cfg(any(macos, linux))]` because `invoke::confine` refuses before spawning
-// anywhere else. An ungated import is therefore dead on Windows, and dead is an error under
-// `[workspace.lints.rust]`'s `-D warnings` — so the import carries its user's gate.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
+// `WatchOptions` has two users now, and the second one —
+// `a_watch_faster_than_the_floor_is_refused_rather_than_silently_slowed` — is ungated,
+// because the floor is an argument check that happens before anything is spawned and is
+// therefore the same decision on every platform. So the import is ungated too: it is dead
+// on no platform, and dead is an error under `[workspace.lints.rust]`'s `-D warnings`.
 use pane::bg::WatchOptions;
 use pane::contract::SessionId;
 use pane::glasshouse::Glasshouse;
@@ -922,7 +922,10 @@ fn a_watch_emits_per_match_and_stops_when_until_matches() {
         &fixture.session,
         "echo still-building",
         &WatchOptions {
-            every_ms: 20,
+            // The floor, not this test's own preference: a cadence under it
+            // is refused at the call now, and this watch ends on its first
+            // match either way.
+            every_ms: 100,
             until: Some("still-building".to_string()),
             timeout_ms: Some(10_000),
         },
@@ -1024,4 +1027,109 @@ fn a_background_job_refuses_where_nothing_can_confine_it() {
         "the refusal did not name the confinement: {}",
         payload.stderr
     );
+}
+
+/// Finding 2 of the lifecycle verifier's report: **an exit must not be
+/// charged for work that is already done.**
+///
+/// `shutdown` cancels every handle on the board, and `cancel`'s settle exists
+/// so a *running* job's poll loop reaches its next tick. A job that finished
+/// milliseconds after it started has no tick to reach, and paying
+/// `CANCEL_SETTLE` for each of them made the end of every task cost 50 ms per
+/// job the task had ever started -- measured against the shipped binary at
+/// 12.34 s for 200 short jobs, and paid mid-session, because `run_task` calls
+/// `shutdown` at the end of every task.
+///
+/// The bound is generous on purpose: the point is the slope, not the
+/// constant. Forty already-finished jobs cost two seconds without the check
+/// and milliseconds with it.
+#[test]
+fn shutdown_pays_no_settle_for_jobs_that_have_already_finished() {
+    const COUNT: usize = 40;
+    let fixture = JobFixture::new("finished-cost");
+    for _ in 0..COUNT {
+        bg::run(
+            &fixture.profile(),
+            &Glasshouse::None,
+            &fixture.session,
+            "echo done",
+            &RunOptions::default(),
+        )
+        .expect("`echo` is admitted by this fixture's profile");
+    }
+    assert!(
+        settles(Duration::from_secs(60), || bg::live(&fixture.session) == 0),
+        "the jobs never finished, so this test would measure something else"
+    );
+
+    let started = Instant::now();
+    bg::shutdown(&fixture.session);
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < Duration::from_secs(1),
+        "shutting {COUNT} already-finished jobs down took {elapsed:?}; the settle is being paid \
+         for work that was over before it was asked for"
+    );
+}
+
+/// Finding 3: **`every` has a floor, and the floor is told to the program
+/// rather than applied behind its back.**
+///
+/// A watch runs a fresh confined shell per tick, so the cadence is a resource
+/// bound on model-chosen work: `{every: 1}` re-ran its command about as fast
+/// as a process can be spawned and cost 13.20 s of CPU in a 24.5 s session
+/// against 1.03 s for the same watch at a second -- while §1's dedup meant
+/// the model saw exactly the same events either way.
+///
+/// It is a **refusal** rather than a clamp for the reason `cwd` and `env` are
+/// refused: a program that asked for 1 ms and silently got 100 ms has been
+/// told something untrue about its own polling. The refusal names the floor,
+/// so a program can retry at it.
+#[test]
+fn a_watch_faster_than_the_floor_is_refused_rather_than_silently_slowed() {
+    let fixture = JobFixture::new("floor");
+    let denied = bg::watch(
+        &fixture.profile(),
+        &Glasshouse::None,
+        &fixture.session,
+        "echo tick",
+        &WatchOptions {
+            every_ms: 1,
+            until: None,
+            timeout_ms: None,
+        },
+    )
+    .expect_err("a millisecond cadence is under the floor");
+    assert_eq!(denied.tool, "bg.watch");
+    assert_eq!(denied.path, "every");
+    assert!(
+        denied.rule.contains("100"),
+        "the refusal did not name the floor a program should retry at: {}",
+        denied.rule
+    );
+    assert_eq!(
+        bg::live(&fixture.session),
+        0,
+        "a refused watch left a job on the board"
+    );
+    assert!(
+        bg::drain(&fixture.session).is_empty(),
+        "a refused watch raised an event"
+    );
+
+    // The floor itself is a cadence a program may ask for: this is a floor,
+    // not a second default.
+    bg::watch(
+        &fixture.profile(),
+        &Glasshouse::None,
+        &fixture.session,
+        "echo tick",
+        &WatchOptions {
+            every_ms: 100,
+            until: Some("tick".to_string()),
+            timeout_ms: Some(10_000),
+        },
+    )
+    .expect("the floor itself is admitted");
 }

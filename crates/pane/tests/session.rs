@@ -2164,12 +2164,17 @@ mod interrupts {
     /// core, for ever -- until `Interrupter::end_the_session` learned to
     /// cancel and then hold the rollout's write lock across the reap grace.
     /// This is a regression test, not a tidiness check.
+    ///
+    /// **`ps -A -ww`, and the width flag is load-bearing**: macOS cuts
+    /// `-o command` at the terminal width, and a confined `bash`'s command
+    /// line carries an absolute interpreter path before the needle -- so a
+    /// truncated listing reads exactly like "nothing survived". The row is
+    /// printed with `pid` and `ppid` because an orphan's `ppid 1` is what
+    /// names the defect.
     fn no_spinner_survives(label: &str) {
         let needle = spins_and_marks(label);
         let listing = Command::new("ps")
-            .arg("ax")
-            .arg("-o")
-            .arg("command")
+            .args(["-A", "-ww", "-o", "pid,ppid,stat,%cpu,command"])
             .output()
             .expect("ps runs");
         let listing = String::from_utf8_lossy(&listing.stdout);
@@ -2199,7 +2204,10 @@ mod interrupts {
         fs::create_dir_all(root.join(".claude")).unwrap();
         fs::write(
             root.join(".claude").join("settings.json"),
-            r#"{"permissions":{"allow":["Bash(while*)","Bash(do*)","Bash(echo*)"]}}"#,
+            // `trap` is here for the stubborn-job test below, which needs a
+            // job that ignores every catchable signal; it grants no file
+            // access either (`sandbox-grants.md` §2).
+            r#"{"permissions":{"allow":["Bash(while*)","Bash(do*)","Bash(echo*)","Bash(trap*)"]}}"#,
         )
         .unwrap();
     }
@@ -2477,5 +2485,245 @@ mod interrupts {
             vec!["threw", "threw", "returned"],
             "each interrupt must have cancelled one call of its own"
         );
+    }
+
+    // --- GH-PANE-BG-EXIT-AND-COST: what an exit must take with it ---------
+    //
+    // The three tests above watch the foreground child of a call in flight.
+    // The three below watch the **background board**, which was added after
+    // `end_the_session` was written and was never wired into its fix: §5's
+    // "a background job outlives no session" has to be true of every exit
+    // this binary can take, not only of the tidy ones.
+
+    /// A cell that starts a background job and then **yields**.
+    ///
+    /// It must not `return`: a top-level return ends the task, and
+    /// `run_task`'s own `bg::shutdown` would take the job with it before any
+    /// signal arrived -- a different exit path, tested separately below.
+    fn background_cell(label: &str) -> String {
+        assistant_reply(&format!(
+            "```pane\nbg.run(\"{}\");\nconst started = 1;\n```",
+            spins_and_marks(label)
+        ))
+    }
+
+    /// Waits, bounded, for a path to appear, and answers whether it did.
+    /// Every wait in these tests is bounded: a job that never starts must
+    /// fail a test rather than hang one.
+    fn waits_for(path: &Path) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < deadline {
+            if path.exists() {
+                return true;
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        path.exists()
+    }
+
+    /// **The second Ctrl-C takes the background jobs with it.**
+    ///
+    /// `std::process::exit` does not touch a process's children, so before
+    /// `end_the_session` learned to shut the board down this left the job's
+    /// `bash` on `ppid 1` spinning at 99% of a core after `pane` had exited
+    /// 130 -- the same defect the foreground child's fix closed, in the same
+    /// function, for the half of it that did not exist yet.
+    ///
+    /// The exit is timed as well as asserted: a shutdown that waited for a
+    /// job that would not stop would be a worse defect than the orphan.
+    #[test]
+    fn a_second_sigint_takes_the_background_jobs_with_it() {
+        let root = scratch_dir("sigint-bg");
+        grant_the_spin(&root);
+        let rollout = root.join("rollout.jsonl");
+        let job = marker_of(&root, "bgjob");
+        let foreground = marker_of(&root, "bgfg");
+        let (base_url, _bodies) = start_fake_provider(vec![
+            background_cell("bgjob"),
+            spinning_cell("bgfg"),
+            spinning_cell("bgfg"),
+            spinning_cell("bgfg"),
+        ]);
+
+        let mut child = spawn_session(&root, &rollout, "start a job, then spin", &base_url);
+        // Both processes exist before the first signal: the job's, started by
+        // the first cell, and the call's, started by the second.
+        wait_for_marker(&job, &mut child);
+        wait_for_marker(&foreground, &mut child);
+        send_interrupt(&child);
+        thread::sleep(Duration::from_millis(200));
+        send_interrupt(&child);
+        let asked = Instant::now();
+        let output = child.wait_with_output().unwrap();
+        let exit_took = asked.elapsed();
+
+        assert_eq!(
+            output.status.code(),
+            Some(130),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        no_spinner_survives("bgfg");
+        no_spinner_survives("bgjob");
+        assert!(
+            exit_took < Duration::from_secs(5),
+            "the second Ctrl-C took {exit_took:?} to end the session; a Ctrl-C that waits is not \
+             a Ctrl-C"
+        );
+    }
+
+    /// The tidy exit: a task's top-level `return` reaches `run_task`'s own
+    /// `bg::shutdown`, and nothing it started is left running.
+    ///
+    /// The second turn is not answered until the job's own process exists,
+    /// so the assertion cannot hold vacuously by racing the job's start.
+    #[test]
+    fn a_task_that_returns_takes_its_background_job_with_it() {
+        let root = scratch_dir("bg-return");
+        grant_the_spin(&root);
+        let rollout = root.join("rollout.jsonl");
+        let job = marker_of(&root, "bgret");
+        let gate = job.clone();
+        let replies = [background_cell("bgret"), ending_reply()];
+        let next = Mutex::new(0usize);
+        let (base_url, _bodies) = start_answering_provider(2, move |_body| {
+            let mut index = next.lock().unwrap();
+            if *index > 0 {
+                assert!(waits_for(&gate), "the background job never started");
+            }
+            let reply = replies[*index].clone();
+            *index += 1;
+            reply
+        });
+
+        let output = run_session(
+            &root,
+            &rollout,
+            "sess-bg-return",
+            "start a job, then return",
+            &base_url,
+            None,
+        );
+
+        assert!(
+            output.status.success(),
+            "status {:?}, stderr: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(job.exists(), "the background job never started");
+        no_spinner_survives("bgret");
+    }
+
+    /// The untidy one: a task that fails mid-flight leaves `run_task` by `?`
+    /// without reaching its own shutdown, so `session::run`'s is what has to
+    /// catch the job -- which is the promise that call was added for.
+    ///
+    /// The failure is a reply that is not a Messages response at all, gated
+    /// on the job's marker so the job is running when the task dies.
+    #[test]
+    fn a_task_that_fails_mid_flight_takes_its_background_job_with_it() {
+        let root = scratch_dir("bg-fail");
+        grant_the_spin(&root);
+        let rollout = root.join("rollout.jsonl");
+        let job = marker_of(&root, "bgfail");
+        let gate = job.clone();
+        let replies = [
+            background_cell("bgfail"),
+            "this is not a Messages response".to_string(),
+        ];
+        let next = Mutex::new(0usize);
+        let (base_url, _bodies) = start_answering_provider(2, move |_body| {
+            let mut index = next.lock().unwrap();
+            if *index > 0 {
+                assert!(waits_for(&gate), "the background job never started");
+            }
+            let reply = replies[*index].clone();
+            *index += 1;
+            reply
+        });
+
+        let output = run_session(
+            &root,
+            &rollout,
+            "sess-bg-fail",
+            "start a job, then fail",
+            &base_url,
+            None,
+        );
+
+        assert!(
+            !output.status.success(),
+            "the unparseable reply was accepted: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(job.exists(), "the background job never started");
+        no_spinner_survives("bgfail");
+    }
+
+    /// A job that ignores every catchable signal, so only the ladder's second
+    /// rung stops it -- `invoke`'s `killpg(SIGKILL)` on the group the call
+    /// created.
+    fn stubborn_spin(label: &str) -> String {
+        format!("trap '' TERM INT HUP; {}", spins_and_marks(label))
+    }
+
+    /// A cell that starts ten of them and yields.
+    fn ten_stubborn_jobs(label: &str) -> String {
+        assistant_reply(&format!(
+            "```pane\nfor (let i = 0; i < 10; i++) {{ bg.run(\"{}\"); }}\nconst started = 1;\n```",
+            stubborn_spin(label)
+        ))
+    }
+
+    /// **The other half of the Blocker: the exit must stay prompt.**
+    ///
+    /// Killing the board is only half a fix. `bg::shutdown`'s own grace is
+    /// ten seconds, and an exit that spent it — or one settle per job — would
+    /// have made a double Ctrl-C worse than the orphan it closes, which is
+    /// why `end_the_session` passes its own reap grace and why the whole
+    /// shutdown is bounded by one grace rather than by one per job. Ten jobs
+    /// that ignore `TERM`, `INT` and `HUP`, and the exit is still measured in
+    /// hundreds of milliseconds.
+    #[test]
+    fn ten_signal_ignoring_jobs_do_not_hold_the_exit() {
+        let root = scratch_dir("sigint-stubborn");
+        grant_the_spin(&root);
+        let rollout = root.join("rollout.jsonl");
+        let job = marker_of(&root, "bgstub");
+        let foreground = marker_of(&root, "bgstubfg");
+        let (base_url, _bodies) = start_fake_provider(vec![
+            ten_stubborn_jobs("bgstub"),
+            spinning_cell("bgstubfg"),
+            spinning_cell("bgstubfg"),
+            spinning_cell("bgstubfg"),
+        ]);
+
+        let mut child = spawn_session(&root, &rollout, "start ten jobs, then spin", &base_url);
+        wait_for_marker(&job, &mut child);
+        wait_for_marker(&foreground, &mut child);
+        send_interrupt(&child);
+        thread::sleep(Duration::from_millis(200));
+        send_interrupt(&child);
+        let asked = Instant::now();
+        let output = child.wait_with_output().unwrap();
+        let exit_took = asked.elapsed();
+
+        assert_eq!(
+            output.status.code(),
+            Some(130),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        // Bounded by `REAP_GRACE` for the board and `REAP_GRACE` again for
+        // the foreground child, plus the settles the board's own grace caps:
+        // two seconds is a generous ceiling that a per-job grace would still
+        // blow through, and ten seconds is what `bg`'s own grace would cost.
+        assert!(
+            exit_took < Duration::from_secs(2),
+            "ten stubborn jobs held the exit for {exit_took:?}"
+        );
+        no_spinner_survives("bgstub");
+        no_spinner_survives("bgstubfg");
     }
 }
