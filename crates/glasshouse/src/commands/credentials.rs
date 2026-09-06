@@ -40,6 +40,32 @@ const ARGV_REFUSAL: &str = "the value is never an argument: command-line argumen
      credentials store <VARIABLE>` and type the value at the prompt, or pipe it in with \
      `glasshouse credentials store <VARIABLE> --stdin`";
 
+/// Whether `var` is a name Glasshouse will file a credential under.
+///
+/// Invariant: the native store only ever receives a name a shell could set —
+/// non-empty, ASCII letters, digits and underscores, not starting with a
+/// digit — because that is the namespace `credential_env` names and the one
+/// `credentials list` reads back. Checked before any store is probed and
+/// before any value is asked for, on every platform alike: macOS's Keychain
+/// happened to refuse an empty account, the Secret Service and Windows
+/// Credential Manager filed it (sweep 34013598118), and the difference must
+/// not be the store's to decide. The name is not echoed: a value mistaken
+/// for a name must not come back out in the refusal.
+fn usable_variable_name(var: &str) -> anyhow::Result<()> {
+    let mut chars = var.chars();
+    let usable = matches!(chars.next(), Some(first) if first == '_' || first.is_ascii_alphabetic())
+        && chars.all(|c| c == '_' || c.is_ascii_alphanumeric());
+    if usable {
+        Ok(())
+    } else {
+        bail!(
+            "the credential variable name is not usable: it must be non-empty, made of ASCII \
+             letters, digits and underscores, and not start with a digit — give the name a \
+             provider's `credential_env` lists"
+        );
+    }
+}
+
 /// Read one credential's value and file it under `var` in the native store.
 ///
 /// The order is deliberate: the store is probed **before** the value is
@@ -48,6 +74,7 @@ pub(crate) fn store(var: &str, from_stdin: bool, value_on_argv: &[String]) -> an
     if !value_on_argv.is_empty() {
         bail!("{ARGV_REFUSAL}");
     }
+    usable_variable_name(var)?;
 
     let secrets = PreferNativeSecretStore::detect();
     let native = match secrets.native() {
@@ -87,6 +114,7 @@ pub(crate) fn store(var: &str, from_stdin: bool, value_on_argv: &[String]) -> an
 
 /// Delete `var`'s credential from the native store.
 pub(crate) fn remove(var: &str) -> anyhow::Result<()> {
+    usable_variable_name(var)?;
     let secrets = PreferNativeSecretStore::detect();
     let native = match secrets.native() {
         Ok(native) => native,

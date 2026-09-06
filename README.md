@@ -322,6 +322,15 @@ memory are isolated per project root.
 | `GLASSHOUSE_CONFIG_DIR` | Override the per-user configuration directory |
 | `GLASSHOUSE_LOG` | Enable logging with a tracing filter, e.g. `debug` |
 
+#### Provider keys
+
+A provider key is filed, not exported. `glasshouse credentials store <VAR>`
+prompts for the value — never on the command line — and puts it in the operating
+system's own secure store, where the harness and its hooks can read it. A key
+exported only in your shell reaches the launcher and stops there.
+`glasshouse credentials list` shows where each configured variable resolves
+from, and reads no value to do it.
+
 ## License
 
 MIT OR Apache-2.0

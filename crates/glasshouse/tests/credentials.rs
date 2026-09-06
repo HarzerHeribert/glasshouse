@@ -180,6 +180,37 @@ fn a_store_failure_reports_the_stores_own_words_and_never_the_value() {
     assert_no_value_anywhere(&output, PLANTED, "a store failure");
 }
 
+/// A name no shell could set — a space in it — is refused on every platform
+/// before any store is probed or any value is asked for, and the refusal
+/// carries neither the value nor the name. The empty-name test above only
+/// held on macOS, whose Keychain happened to refuse an empty account; the
+/// Secret Service and Windows Credential Manager filed it (sweep
+/// 34013598118), which is why the guard is the command's and this test exists.
+#[test]
+fn a_name_no_shell_could_set_is_refused_before_any_prompt() {
+    let fixture = Fixture::new();
+    let output = fixture.run_with_stdin(
+        &["credentials", "store", "NOT A NAME", "--stdin"],
+        &format!("{PLANTED}\n"),
+    );
+
+    assert!(
+        !output.status.success(),
+        "a name with a space must fail: {}",
+        streams(&output)
+    );
+    let seen = streams(&output);
+    assert!(
+        seen.contains("not usable"),
+        "the refusal must say the name is unusable: {seen}"
+    );
+    assert!(
+        !seen.contains("NOT A NAME"),
+        "the refusal must not echo the name, which may be a value: {seen}"
+    );
+    assert_no_value_anywhere(&output, PLANTED, "an unusable name");
+}
+
 /// `credentials list` prints names and sources. A credential variable set in
 /// this test's own environment appears by name, with its source named, and
 /// its value nowhere.
