@@ -557,6 +557,7 @@ fn nothing_in_this_build_infers_task_nearly_complete() {
         include_str!("../src/commands/route.rs"),
         include_str!("../src/commands/routing_cost.rs"),
         include_str!("../src/commands/context_firewall.rs"),
+        include_str!("../src/commands/credentials.rs"),
         include_str!("../src/commands/sessions.rs"),
         include_str!("../src/commands/memory.rs"),
         include_str!("../src/commands/memory_extraction.rs"),

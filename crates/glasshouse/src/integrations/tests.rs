@@ -677,6 +677,86 @@ fn doctor_names_an_environment_only_provider_credential_the_harness_cannot_see()
     );
 }
 
+/// The instruction names Glasshouse's own verb, on every platform that has
+/// a store.
+///
+/// This is the whole of the 2026-09-06 dogfooding defect. The notice used to
+/// say `security add-generic-password`, which files a Keychain item on an
+/// access control list that does not name this binary, which Glasshouse then
+/// cannot read, which `doctor` then reports as *not set* -- so a user who
+/// follows the advice is told the advice did not work, and following it
+/// again cannot help. Asserted against the verb rather than the old text so
+/// that a revert reads as the regression it would be.
+#[test]
+fn the_store_instruction_names_the_glasshouse_verb_and_never_a_hand_filed_item() {
+    const VAR: &str = "GLASSHOUSE_TEST_INSTRUCTION_VAR";
+    let instruction = store_credential_instruction(VAR);
+
+    if cfg!(any(
+        target_os = "macos",
+        target_os = "linux",
+        target_os = "windows"
+    )) {
+        assert!(
+            instruction.contains("glasshouse credentials store"),
+            "the instruction must name the verb: {instruction}"
+        );
+        assert!(
+            instruction.contains(VAR),
+            "the instruction must name the variable: {instruction}"
+        );
+        assert!(
+            !instruction.contains("add-generic-password") && !instruction.contains("secret-tool"),
+            "no instruction may send a user to a tool whose item Glasshouse cannot read: \
+             {instruction}"
+        );
+    } else {
+        assert!(
+            instruction.contains("no secure store"),
+            "a platform with no store still says so plainly: {instruction}"
+        );
+    }
+}
+
+/// The value never enters `credential_whereabouts`, so it cannot leave it
+/// -- and the three states it can report are names and sources only.
+#[test]
+fn credential_whereabouts_prints_a_name_and_a_source_and_never_a_value() {
+    const VAR: &str = "GLASSHOUSE_TEST_WHEREABOUTS_VAR";
+    const VALUE: &str = "sk-whereabouts-test-never-a-real-key-zz99"; // glasshouse:not-a-secret
+
+    let secrets = crate::secret::native::PreferNativeSecretStore::detect();
+
+    let absent = credential_whereabouts(VAR, &secrets);
+    assert!(absent.contains(VAR), "{absent}");
+    assert!(absent.contains("value hidden"), "{absent}");
+    assert!(!absent.contains(VALUE), "{absent}");
+
+    assert!(
+        std::env::var_os(VAR).is_none(),
+        "test setup: {VAR} is already set"
+    );
+    // SAFETY: a name unique to this test, removed again before any assertion
+    // can panic, so no other test observes it.
+    unsafe {
+        std::env::set_var(VAR, VALUE);
+    }
+    let present = credential_whereabouts(VAR, &secrets);
+    unsafe {
+        std::env::remove_var(VAR);
+    }
+
+    assert!(present.contains(VAR), "{present}");
+    assert!(
+        present.contains("set in process environment"),
+        "the source must be named: {present}"
+    );
+    assert!(
+        !present.contains(VALUE),
+        "the whereabouts line leaked the value (value withheld from this message)"
+    );
+}
+
 /// `doctor` is where an adapter's declarations become visible to a user,
 /// and so it is the production caller that keeps them from being a
 /// write-only data structure.

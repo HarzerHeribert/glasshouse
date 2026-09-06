@@ -154,6 +154,36 @@ pub enum Deletion {
     AlreadyAbsent,
 }
 
+/// What the native store answered when asked whether an item is filed
+/// under a name — with **"there is nothing here" and "there is something
+/// here and you may not have it" kept apart**.
+///
+/// [`SecretStore::is_present`] answers one bit, which is the right answer
+/// for resolution: a credential Glasshouse cannot read is a credential
+/// Glasshouse cannot use, and every consumer treats both as absent. It is
+/// the wrong answer for a *diagnostic*. On macOS an item's access control
+/// list names the program that created it, and Glasshouse asks for no
+/// authorization dialog by design (`silence_authorization_dialogs`), so an
+/// item filed by hand with `security add-generic-password` fails its read
+/// and reads as absent — which is how `glasshouse doctor` came to say *not
+/// set* about a key sitting in the Keychain, and why a user following that
+/// advice stores it again by hand and is told *not set* again.
+///
+/// The fix that state calls for is a different one — re-store it *through*
+/// Glasshouse — so it needs a name of its own.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Presence {
+    /// The store has nothing filed under this name.
+    Absent,
+    /// The item is there and this process read it.
+    Present,
+    /// An item answered and the store would not hand it over. Not a
+    /// promise about *why*: the store's own reasons are reduced to fixed
+    /// text by `classify` long before anything here sees them, and this
+    /// variant deliberately carries none of it.
+    Refused,
+}
+
 /// Why a write to or a deletion from the native store did not happen.
 ///
 /// Every variant carries **names and fixed text only**. The store's own
@@ -238,6 +268,17 @@ impl NativeSecretStore {
             account: account.to_owned(),
             reason,
         })
+    }
+
+    /// Whether `reference` is filed here, telling absent from refused —
+    /// see [`Presence`] for why those are two answers and not one.
+    ///
+    /// For a **diagnostic only**. Resolution goes on asking
+    /// [`SecretStore::is_present`], which is this reduced to one bit, so no
+    /// caller can accidentally treat a refused item as a usable one.
+    pub fn presence(&self, reference: &SecretRef) -> Presence {
+        let (service, account) = entry_name(reference);
+        backend::presence(service, account)
     }
 }
 
@@ -416,7 +457,7 @@ mod backend {
     //! that must not diverge: it is the only thing standing between a
     //! `keyring::Error` payload and a Glasshouse message.
 
-    use super::{Deletion, PROBE_ACCOUNT, SERVICE, Unavailable};
+    use super::{Deletion, PROBE_ACCOUNT, Presence, SERVICE, Unavailable};
 
     /// [`super::SecretStore::describe`] for the native store alone.
     #[cfg(target_os = "macos")]
@@ -606,10 +647,39 @@ mod backend {
     /// The item is read for effect and its **attributes** are returned — an
     /// empty map on macOS, three names on Windows — so the value never
     /// enters this process. See `NativeSecretStore::is_present`.
+    ///
+    /// One bit, derived from [`presence`] rather than computed beside it:
+    /// the two answers must not be able to disagree about the same item.
     pub fn exists(service: &str, account: &str) -> bool {
-        entry(service, account)
-            .ok()
-            .is_some_and(|entry| entry.get_attributes().is_ok())
+        matches!(presence(service, account), Presence::Present)
+    }
+
+    /// Absent, present, or refused — the three-way answer behind
+    /// [`super::Presence`].
+    ///
+    /// `NoEntry` is the store's own *nothing is filed under this name*, and
+    /// it is the only answer that means absent. Every other error means the
+    /// store answered and would not hand the item over. On macOS that is
+    /// overwhelmingly the access-control refusal an item this binary did not
+    /// create produces: `keyring`'s attribute read calls `get_secret` for
+    /// effect (`keyring-3.6.3/src/credential.rs`), the Security framework
+    /// consults an access control list that does not name this program, and
+    /// `silence_authorization_dialogs` has already turned the *Allow* dialog
+    /// into an error. `keyring` surfaces it as `PlatformFailure`, because
+    /// `macos::decode_error` maps only `errSecItemNotFound` to `NoEntry`.
+    ///
+    /// A name the store will not accept at all — an empty service or account
+    /// on macOS, an over-long target on Windows — is `Absent`, and correctly
+    /// so: nothing can be filed under a name the store refuses to build.
+    pub fn presence(service: &str, account: &str) -> Presence {
+        let Ok(entry) = entry(service, account) else {
+            return Presence::Absent;
+        };
+        match entry.get_attributes() {
+            Ok(_) => Presence::Present,
+            Err(keyring::Error::NoEntry) => Presence::Absent,
+            Err(_) => Presence::Refused,
+        }
     }
 
     pub fn set(service: &str, account: &str, value: &str) -> Result<(), &'static str> {
@@ -655,7 +725,7 @@ mod backend {
 
     use dbus_secret_service::{Collection, EncryptionType, Error, SecretService};
 
-    use super::{Deletion, Unavailable};
+    use super::{Deletion, Presence, Unavailable};
 
     /// [`super::SecretStore::describe`] for the native store alone.
     pub const LABEL: &str = "a Secret Service keyring";
@@ -866,6 +936,23 @@ mod backend {
             .is_ok_and(|items| !items.is_empty())
     }
 
+    /// **This arm has no `Refused` state, and that is a fact about the
+    /// Secret Service rather than a gap here.** `SearchItems` answers with
+    /// object paths and decrypts nothing, so an item is either listed or it
+    /// is not; there is no per-item access control list to be refused by,
+    /// which is what produces the macOS state [`super::Presence::Refused`]
+    /// exists for. The one way this backend cannot answer — a locked
+    /// collection — is a property of the whole store, refused by
+    /// `unlocked_default_collection` before any item is named, and reported
+    /// by `probe` as [`Unavailable::StoreUnreachable`] on its own line.
+    pub fn presence(service: &str, account: &str) -> Presence {
+        if exists(service, account) {
+            Presence::Present
+        } else {
+            Presence::Absent
+        }
+    }
+
     pub fn set(service: &str, account: &str, value: &str) -> Result<(), &'static str> {
         let connection = open_service().map_err(|err| classify(&err))?;
         let collection = unlocked_default_collection(&connection)?;
@@ -912,7 +999,7 @@ mod backend {
     //! targets — see the module documentation's "Which platforms, and how the
     //! third one refuses".
 
-    use super::{Deletion, Unavailable};
+    use super::{Deletion, Presence, Unavailable};
 
     pub const LABEL: &str = "no native secure store";
 
@@ -937,6 +1024,11 @@ mod backend {
 
     pub fn exists(_service: &str, _account: &str) -> bool {
         false
+    }
+
+    /// Nothing is filed anywhere, so nothing can be refused either.
+    pub fn presence(_service: &str, _account: &str) -> Presence {
+        Presence::Absent
     }
 
     pub fn set(_service: &str, _account: &str, _value: &str) -> Result<(), &'static str> {
@@ -1896,6 +1988,145 @@ mod tests {
 
         assert!(resolved.as_deref() == Some(EXPORTED));
         assert_eq!(source, Some("process environment"));
+    }
+
+    /// [`Presence`] tells the two answers apart for an item **this binary
+    /// wrote**, which is the easy half and the one that must not regress.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[test]
+    fn presence_reports_an_item_this_binary_wrote_as_present_and_a_missing_one_as_absent() {
+        const VALUE: &str = "sk-presence-round-trip-test-0123456789abcd"; // glasshouse:not-a-secret
+
+        let store = match NativeSecretStore::detect() {
+            Ok(store) => store,
+            Err(refusal) => {
+                eprintln!(
+                    "SKIPPED: the native secure store would not open in this session: {}",
+                    refusal.reason()
+                );
+                return;
+            }
+        };
+
+        let missing = SecretRef::Environment {
+            var: test_account("PRESENCE_MISSING"),
+        };
+        assert_eq!(
+            store.presence(&missing),
+            Presence::Absent,
+            "a name nothing was ever filed under is absent, not refused"
+        );
+
+        let reference = SecretRef::Environment {
+            var: test_account("PRESENCE"),
+        };
+        let _item = KeychainItem::stored(&store, reference.clone(), VALUE);
+        assert_eq!(
+            store.presence(&reference),
+            Presence::Present,
+            "an item this binary wrote is one this binary reads"
+        );
+        assert!(
+            SecretStore::is_present(&store, &reference),
+            "`is_present` is `presence` reduced to one bit and must agree with it"
+        );
+    }
+
+    /// **The dogfooding defect of 2026-09-06, as a test.** An item created
+    /// by another program is *refused*, not *absent* — and reporting it as
+    /// absent is what made `glasshouse doctor` say *not set* about a key
+    /// that was in the Keychain all along.
+    ///
+    /// Planted with the platform's own CLI on purpose: an item this binary
+    /// wrote would be on its own access control list and would prove
+    /// nothing. `security` is the exact tool the old instruction told users
+    /// to run, so this is that user's item.
+    ///
+    /// macOS only, because the mechanism is macOS's: an item's access
+    /// control list names the program that created it, and
+    /// `silence_authorization_dialogs` has turned the *Allow* dialog this
+    /// binary would otherwise be offered into an error. Windows Credential
+    /// Manager has no per-item access control of that kind, and the Secret
+    /// Service answers a search without decrypting anything — see
+    /// `backend::presence` on each.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn an_item_another_program_created_is_refused_and_never_reported_absent() {
+        const PLANTED: &str = "placeholder-not-a-real-key-planted-by-a-test"; // glasshouse:not-a-secret
+
+        /// Removes the planted item however this test leaves.
+        struct Planted(String);
+        impl Drop for Planted {
+            fn drop(&mut self) {
+                let _ = std::process::Command::new("security")
+                    .args([
+                        "delete-generic-password",
+                        "-s",
+                        SERVICE,
+                        "-a",
+                        self.0.as_str(),
+                    ])
+                    .output();
+            }
+        }
+
+        let store = match NativeSecretStore::detect() {
+            Ok(store) => store,
+            Err(refusal) => {
+                eprintln!(
+                    "SKIPPED: the native secure store would not open in this session: {}",
+                    refusal.reason()
+                );
+                return;
+            }
+        };
+
+        let account = test_account("FOREIGN");
+        let planted = std::process::Command::new("security")
+            .args([
+                "add-generic-password",
+                "-s",
+                SERVICE,
+                "-a",
+                account.as_str(),
+                "-w",
+                PLANTED,
+                "-U",
+            ])
+            .output();
+        let Ok(planted_output) = planted else {
+            eprintln!("SKIPPED: the `security` CLI could not be run, so nothing was planted");
+            return;
+        };
+        if !planted_output.status.success() {
+            eprintln!(
+                "SKIPPED: `security add-generic-password` refused, so nothing was planted \
+                 (status {})",
+                planted_output.status
+            );
+            return;
+        }
+        let _cleanup = Planted(account.clone());
+        assert!(
+            os_cli_sees(&account),
+            "the planted item must really be in the keychain for this test to mean anything"
+        );
+
+        let reference = SecretRef::Environment { var: account };
+        assert_eq!(
+            store.presence(&reference),
+            Presence::Refused,
+            "an item this binary did not create must read as refused, not absent -- reporting \
+             it absent is the defect this state exists to name"
+        );
+        assert!(
+            !SecretStore::is_present(&store, &reference),
+            "a credential Glasshouse cannot read is still one it cannot use"
+        );
+        assert!(
+            store.resolve(&reference).is_none(),
+            "and it certainly must not resolve"
+        );
     }
 
     /// **Acceptance 1, end to end.** A credential stored in the OS store

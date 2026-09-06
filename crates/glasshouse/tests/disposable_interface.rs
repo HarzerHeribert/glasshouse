@@ -331,6 +331,7 @@ fn disposable_jobs_serve_classification_extraction_reranking_and_reduction_in_pr
         include_str!("../src/commands/route.rs"),
         include_str!("../src/commands/routing_cost.rs"),
         include_str!("../src/commands/context_firewall.rs"),
+        include_str!("../src/commands/credentials.rs"),
         include_str!("../src/commands/sessions.rs"),
         include_str!("../src/commands/memory.rs"),
         include_str!("../src/commands/memory_extraction.rs"),

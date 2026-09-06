@@ -310,6 +310,7 @@ const PRODUCTION_SOURCE_FILES: &[&str] = &[
     include_str!("commands/route.rs"),
     include_str!("commands/routing_cost.rs"),
     include_str!("commands/context_firewall.rs"),
+    include_str!("commands/credentials.rs"),
     include_str!("commands/sessions.rs"),
     include_str!("commands/memory.rs"),
     include_str!("commands/memory_extraction.rs"),

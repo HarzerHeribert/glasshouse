@@ -1343,13 +1343,7 @@ fn write_provider_report(
         let statuses: Vec<String> = provider
             .credential_env
             .iter()
-            .map(|var| {
-                let reference = crate::secret::SecretRef::Environment { var: var.clone() };
-                match secrets.source_of(&reference) {
-                    Some(source) => format!("{var} (set in {source}, value hidden)"),
-                    None => format!("{var} (not set, value hidden)"),
-                }
-            })
+            .map(|var| credential_whereabouts(var, secrets))
             .collect();
         let _ = writeln!(out, "      credential env: {}", statuses.join(", "));
         // Map line 488: a key only this process's environment holds is one
@@ -1407,32 +1401,72 @@ fn write_provider_report(
 /// How a user puts the credential for `var` inside the boundary map line 488
 /// keeps: the native secure store, filed under
 /// [`crate::secret::native::SERVICE`] with the variable name as the account,
-/// which is exactly where every store here reads it back from. An
-/// instruction that never takes the value — on macOS `security` prompts for
-/// it, so nothing crosses a command line or a shell history — and, on a
-/// platform with no native store, the plain statement that there is none.
+/// which is exactly where every store here reads it back from.
+///
+/// **It names Glasshouse's own verb, and it used to name the platform's.**
+/// `security add-generic-password` files a perfectly good Keychain item that
+/// Glasshouse then cannot read: on macOS an item's access control list names
+/// the program that created it, and `secret::native`'s
+/// `silence_authorization_dialogs` forbids the *Allow* dialog that would let
+/// this one past. So the honest instruction is the one that makes the
+/// running binary the item's creator — measured on 2026-09-06, four ways,
+/// against a hand-filed item `doctor` kept reporting as absent.
+///
+/// The value never crosses a command line either way: `glasshouse
+/// credentials store` prompts for it with echo off, or reads one line of
+/// standard input. On a platform with no native store this is the plain
+/// statement that there is none.
 pub fn store_credential_instruction(var: &str) -> String {
-    let service = crate::secret::native::SERVICE;
-    if cfg!(target_os = "macos") {
-        format!(
-            "store it in the macOS Keychain: `security add-generic-password -s {service} -a \
-             {var} -w` (it prompts for the value)"
-        )
+    if cfg!(any(target_os = "macos", target_os = "linux")) {
+        format!("store it with `glasshouse credentials store {var}` (it prompts for the value)")
     } else if cfg!(target_os = "windows") {
+        // The same verb, and the flag it needs here: turning a Windows
+        // console's echo off is a manifest change Glasshouse has not made,
+        // so `--stdin` is the whole supported path on this platform, and
+        // `commands::credentials` refuses the prompt in the same words.
         format!(
-            "store it in Windows Credential Manager as a generic credential with target \
-             `{var}.{service}`"
-        )
-    } else if cfg!(target_os = "linux") {
-        format!(
-            "store it in the Secret Service keyring: `secret-tool store --label={service} \
-             service {service} username {var}` (it prompts for the value; the backend's \
-             attribute is `username`, not `account`)"
+            "store it with `glasshouse credentials store {var} --stdin` (it reads one line from \
+             standard input)"
         )
     } else {
         "this platform has no secure store Glasshouse can use yet, so nothing the harness runs \
          can reach this credential"
             .to_owned()
+    }
+}
+
+/// Where one credential variable stands, as `doctor` and `glasshouse
+/// credentials list` both print it — **a name and a source, never a
+/// value.**
+///
+/// Shared rather than written twice so the two commands cannot describe the
+/// same credential differently, and **three states rather than two**.
+/// "Nothing is filed under this name" and "something is, and Glasshouse was
+/// refused it" call for different things from the user: only the second is
+/// fixed by storing it again *through Glasshouse*, and reporting it as *not
+/// set* is what sent a dogfooding session round in a circle on 2026-09-06 —
+/// the key was in the Keychain the whole time, filed by hand, on an access
+/// control list that does not name this binary. See
+/// [`crate::secret::native::Presence`].
+pub fn credential_whereabouts(
+    var: &str,
+    secrets: &crate::secret::native::PreferNativeSecretStore,
+) -> String {
+    use crate::secret::native::Presence;
+
+    let reference = crate::secret::SecretRef::Environment {
+        var: var.to_owned(),
+    };
+    if let Some(source) = secrets.source_of(&reference) {
+        return format!("{var} (set in {source}, value hidden)");
+    }
+    match secrets.native() {
+        Ok(native) if native.presence(&reference) == Presence::Refused => format!(
+            "{var} (in {} but Glasshouse could not read it, value hidden — {})",
+            crate::secret::SecretStore::describe(native),
+            store_credential_instruction(var),
+        ),
+        _ => format!("{var} (not set, value hidden)"),
     }
 }
 

@@ -3,7 +3,8 @@ use std::process::ExitCode;
 use std::io::IsTerminal;
 
 use glasshouse::cli::{
-    ApiCommand, ContextFirewallCommand, EditIntentCommand, GatewayCommand, McpCommand,
+    ApiCommand, ContextFirewallCommand, CredentialsCommand, EditIntentCommand, GatewayCommand,
+    McpCommand,
 };
 use glasshouse::config::{self, EffectiveConfig, UserConfig};
 use glasshouse::integrations::cmux;
@@ -75,6 +76,17 @@ fn run(cli: &Cli) -> anyhow::Result<ExitCode> {
         Some(Command::Doctor) => {
             print!("{}", glasshouse::integrations::doctor_report(&runtime));
         }
+        // The value is read inside `commands::credentials` and nowhere
+        // else: nothing on this line, and nothing in `cli`, can hold one.
+        Some(Command::Credentials { command }) => match command {
+            CredentialsCommand::Store {
+                var,
+                stdin,
+                value_on_argv,
+            } => crate::commands::credentials::store(var, *stdin, value_on_argv)?,
+            CredentialsCommand::Remove { var } => crate::commands::credentials::remove(var)?,
+            CredentialsCommand::List => crate::commands::credentials::list(&runtime)?,
+        },
         Some(Command::Gateway { command }) => match command {
             GatewayCommand::Pairs => {
                 print!("{}", crate::commands::gateway::gateway_pairs_report());

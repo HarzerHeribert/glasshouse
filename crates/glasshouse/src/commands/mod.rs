@@ -4,6 +4,7 @@
 pub(crate) mod assumptions;
 pub(crate) mod checkpoint;
 pub(crate) mod context_firewall;
+pub(crate) mod credentials;
 pub(crate) mod entitlements;
 pub(crate) mod gateway;
 pub(crate) mod hook;

@@ -149,6 +149,23 @@ pub enum Command {
     Entitlements,
     /// Report detected harnesses, optional integrations, and setup problems.
     Doctor,
+    /// File a provider credential in the operating system's own secure
+    /// store, remove one, or list where each credential comes from.
+    ///
+    /// **This is the supported way to put a provider key somewhere the
+    /// harness and its hooks can read it.** On macOS an item's access
+    /// control list names the program that created it, and Glasshouse asks
+    /// for no authorization dialog by design, so an item filed by hand with
+    /// `security add-generic-password` is one Glasshouse cannot read and
+    /// reports as *not set*. Only an item this binary wrote is one this
+    /// binary can resolve.
+    ///
+    /// No subcommand here takes a value on the command line, prints one, or
+    /// puts one in an error.
+    Credentials {
+        #[command(subcommand)]
+        command: CredentialsCommand,
+    },
     /// Report on the gateway's wire-protocol translation.
     Gateway {
         #[command(subcommand)]
@@ -1361,6 +1378,71 @@ mod tests {
         Cli::command().debug_assert();
     }
 
+    /// The value never has a place to be an argument, and the place it
+    /// would otherwise land is the hidden one that exists to refuse it —
+    /// asserted here because clap's own answer to an unexpected positional
+    /// is to print it, and printing it is the leak.
+    #[test]
+    fn a_credential_value_on_the_command_line_lands_in_the_refused_argument() {
+        let cli = Cli::try_parse_from([
+            "glasshouse",
+            "credentials",
+            "store",
+            "GROQ_API_KEY",
+            "a-value-that-must-never-be-taken", // glasshouse:not-a-secret
+        ])
+        .expect("the extra word is captured, not reported by clap");
+        let Some(Command::Credentials {
+            command:
+                CredentialsCommand::Store {
+                    var,
+                    stdin,
+                    value_on_argv,
+                },
+        }) = cli.command
+        else {
+            panic!("expected a credentials store command");
+        };
+        assert_eq!(var, "GROQ_API_KEY");
+        assert!(!stdin);
+        assert_eq!(
+            value_on_argv.len(),
+            1,
+            "the value must be captured so the command can refuse it itself"
+        );
+    }
+
+    /// `--stdin` still parses as a flag with the hidden trailing argument
+    /// declared beside it — the failure mode that would make the piped path
+    /// silently prompt instead.
+    #[test]
+    fn credentials_store_takes_stdin_as_a_flag_not_as_a_refused_word() {
+        let cli = Cli::try_parse_from([
+            "glasshouse",
+            "credentials",
+            "store",
+            "GROQ_API_KEY",
+            "--stdin",
+        ])
+        .unwrap();
+        let Some(Command::Credentials {
+            command:
+                CredentialsCommand::Store {
+                    stdin,
+                    value_on_argv,
+                    ..
+                },
+        }) = cli.command
+        else {
+            panic!("expected a credentials store command");
+        };
+        assert!(stdin, "`--stdin` must remain a flag");
+        assert!(
+            value_on_argv.is_empty(),
+            "`--stdin` must not be swallowed as a refused word"
+        );
+    }
+
     #[test]
     fn version_is_the_crate_version() {
         assert_eq!(
@@ -1965,6 +2047,57 @@ pub enum SessionCommand {
         /// conservatism `integrations::cmux`'s payload rule uses.
         instruction: String,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum CredentialsCommand {
+    /// Store one credential's value in the native secure store, reading it
+    /// from a prompt that does not echo.
+    ///
+    /// The value is typed at a prompt, or piped with `--stdin`. It is never
+    /// an argument: a command line is readable by every process on the
+    /// machine and is kept in your shell's history, so a value given that
+    /// way is refused rather than stored.
+    Store {
+        /// The environment variable this credential is known by — the
+        /// account it is filed under, beside the fixed `glasshouse`
+        /// service. A name, and the only thing this command takes.
+        #[arg(value_name = "VARIABLE")]
+        var: String,
+
+        /// Read the value as one line from standard input instead of
+        /// prompting. The line terminator is removed and nothing else is.
+        #[arg(long)]
+        stdin: bool,
+
+        /// **Declared so that it can be refused, and hidden so that nobody
+        /// is invited to use it.**
+        ///
+        /// `glasshouse credentials store VAR VALUE` has to fail, and *how*
+        /// it fails matters: without this argument clap answers an
+        /// unexpected positional by printing it, which would put the value
+        /// on stderr — the exact leak this command exists to prevent. Every
+        /// extra word lands here instead, is counted, and is never read.
+        #[arg(hide = true, num_args = 0.., value_name = "REFUSED")]
+        value_on_argv: Vec<String>,
+    },
+
+    /// Delete one credential from the native secure store.
+    ///
+    /// Removing something that is not there is not an error; it is already
+    /// the state you asked for, and the answer says which of the two
+    /// happened.
+    Remove {
+        /// The environment variable this credential is known by.
+        #[arg(value_name = "VARIABLE")]
+        var: String,
+    },
+
+    /// List every configured provider's credential variables and where each
+    /// one resolves from.
+    ///
+    /// Names and sources. No value is read, so none can be printed.
+    List,
 }
 
 #[derive(Debug, Subcommand)]
