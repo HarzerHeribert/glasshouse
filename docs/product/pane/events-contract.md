@@ -88,6 +88,8 @@ for; a fully acked batch is freed with the cell.
 
 ## 4. Delivery
 
+Before the first delivery, the `batch` API is usable with `n = 0`, empty `where`/`rest` results, and acknowledgements reporting every supplied id as unknown. This empty API creates no handle-table row and emits no event. It lets a program launch work and check for completion without an undefined-name error. Match a job’s events with `source: job.source`, not its bare `id`.
+
 The batch extends `model-contract.md` §4's handle table with exactly one row, named `batch`,
 **always last**, so the model's own bindings keep the order it made them in. It obeys
 `runtime-contract.md` §2's replacement rule — each delivery replaces and frees the previous batch,

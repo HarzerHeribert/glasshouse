@@ -2,6 +2,7 @@
 
 mod controls;
 mod markdown;
+mod ribbon;
 mod telemetry;
 pub use controls::{Mode, Panel, PanelRow, StatusLine};
 pub use telemetry::Pulse;
@@ -206,6 +207,7 @@ pub struct ScreenRegions {
     pub details: Rect,
     pub completions: Rect,
     pub notice: Rect,
+    pub activity: Rect,
     pub input: Rect,
     pub status: Rect,
 }
@@ -243,7 +245,33 @@ pub fn screen_regions(area: Rect, state: &ScreenState) -> ScreenRegions {
     let notice = Rect::new(area.x, completions.y - notice_h, area.width, notice_h);
     let header_h = (notice.y - area.y).min(2);
     let header = Rect::new(area.x, area.y, area.width, header_h);
-    let body_h = notice.y - header.bottom();
+    let available_body = notice.y - header.bottom();
+    let moving = matches!(
+        state.activity,
+        Activity::Thinking
+            | Activity::Streaming
+            | Activity::Executing
+            | Activity::Waiting
+            | Activity::Searching
+            | Activity::Compacting
+    ) || state.completion_tick.is_some();
+    let activity_h = if moving
+        && !state.telemetry_open
+        && area.height >= 28
+        && area.width >= 60
+        && available_body >= 18
+    {
+        if area.width >= 100 { 3 } else { 2 }
+    } else {
+        0
+    };
+    let activity = Rect::new(
+        area.x,
+        notice.y - activity_h,
+        area.width.min(180),
+        activity_h,
+    );
+    let body_h = activity.y - header.bottom();
     let sidebar_visible = match state.sidebar {
         SidebarVisibility::Auto => area.width >= 120,
         SidebarVisibility::Hidden => false,
@@ -271,6 +299,7 @@ pub fn screen_regions(area: Rect, state: &ScreenState) -> ScreenRegions {
         details,
         completions,
         notice,
+        activity,
         input,
         status,
     }
@@ -589,6 +618,7 @@ pub fn render_screen(
         );
         controls::render_panel(frame, regions.transcript, panel);
     }
+    ribbon::activity(frame, regions.activity, state);
     if let Some(notice) = &state.notice {
         let error = notice.starts_with("ERROR:");
         frame.render_widget(

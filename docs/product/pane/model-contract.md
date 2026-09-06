@@ -8,7 +8,9 @@ same worked turn from this side, and the two must agree.
 ## 1. The message layout
 
 One Anthropic Messages request per turn. The system block is stable for the
-whole task — it is what the provider's prompt cache holds — and the
+whole task, with the configured request model appended. A request-only
+context block marks the current user request and its fresh runtime; the
+user's saved text is unchanged. The provider can cache the stable prefix. The
 conversation carries alternating assistant cells and runtime results.
 
     system    : preamble · tool declarations · project instructions
@@ -18,40 +20,39 @@ conversation carries alternating assistant cells and runtime results.
     assistant : ```pane block (cell 2)
     …
 
-Nothing else is ever in a message. No tool-use blocks, no tool-result blocks,
+A plain-language assistant answer may end the request without a program. No tool-use blocks, no tool-result blocks,
 no second serialization of any object (61E's last line, and it is structural
 here: the runtime has no code path that writes a payload into a message).
 
 ## 2. The system preamble, verbatim
 
-    You act by writing TypeScript. Each turn you emit exactly one code block
-    tagged `pane`; pane runs it in a persistent V8 isolate and answers with
-    what your program produced.
+    You are Pane, a coding assistant. Answer conversational questions directly
+    in prose. To act with tools, write TypeScript in exactly one fenced `pane`
+    block:
 
-    Tool results are live objects, not text. `await grep(...)` returns an
-    array you can filter, index and count in the next line of the same
-    program. You are shown each object's name and a short preview; you are
-    never shown its payload, and you never need it.
+    ```pane
+    const file = await read({path: "example.txt"});
+    console.log(file.text);
+    ```
 
-    Bindings persist. A top-level `const` in one cell is in scope in the
-    next. Redeclaring a name replaces the object and frees the old one.
+    Use triple backticks, not XML tags. Only `pane` code executes; a syntax
+    error may offer `pane-edit` to amend it.
+    Tool results are live objects. Use their declared fields in code; the
+    handle table shows bounded previews, not full payloads.
 
-    A cell that runs off the end yields: you get the handle table and another
-    turn. A top-level `return` ends the task with that value. Return when the
-    task is answered, not before.
+    Top-level bindings persist between cells of the same user request only;
+    redeclaring replaces them. A new user request starts a fresh runtime.
+    Earlier requests are history, not unfinished work. Answer the current
+    request; a prose answer ends the request without running tools.
+    Running off the end yields results and another turn. `yieldNow(reason)`
+    also yields. A top-level `return` ends the task; return a string to answer
+    the person, grounded in results you actually observed.
+    To interpret file contents, read and yield first, then answer from the
+    next turn's preview. You may return values computed directly from objects.
 
-    Returning a string answers the person directly — it is rendered and kept
-    as your reply, and nothing is asked of you afterwards, so fill it from what
-    the run actually produced rather than from what you expected it to. Do not
-    answer from a call that threw, was refused, was cancelled, or whose guard
-    did not hold: yield instead and say what you found. Call `yieldNow(reason)`
-    to hand back from inside a branch; it is a yield, not an error.
-
-    A cell that throws is answered, not retried. You get the error, the line,
-    and every binding that completed before the throw. Write the next cell.
-
-    A call outside this session's sandbox grant throws PermissionDenied. It
-    is catchable and it is final: nothing you write widens a grant.
+    A thrown error comes back with its source position and completed bindings.
+    Continue from that state; failed or skipped calls did not succeed.
+    PermissionDenied is final: code cannot widen the session's sandbox grant.
 
 ## 3. Tool declarations are TypeScript, one line of prose each
 
@@ -116,10 +117,37 @@ protocol error: **neither** runs, and the model is told
 second is the silently-wrong reading — the second is usually the one the model
 meant.
 
-A message with no `pane` block and no `return` is prose; pane shows it in the
-conversation column and answers with the unchanged handle table and one line
-saying no program ran. The task does not advance and the cell counter does not
-move.
+A message with no executable `pane` block is a direct answer and ends the
+request without running a cell. Markdown examples are displayed, never run.
+Malformed executable attempts (such as `<php-pane>` tags) are rejected and
+receive format feedback; repeated malformed attempts are bounded. Ordinary
+answers must not be sent back to the model demanding executable code.
+
+### Repairing a parse-failed cell
+
+A parser error, before any code executes, offers a local repair primitive in
+that error's result. The model may send one complete `pane-edit` fence:
+
+    ```pane-edit
+    {"cell": 3, "replace": "return 'done;", "with": "return 'done';"}
+    ```
+
+The cell ID must name the latest parse-failed source in the current runtime.
+`replace` must be nonempty and match exactly once; replacement is literal,
+not a regex. Unknown JSON fields, no-op edits, ambiguous or missing matches,
+stale IDs, and oversized edits are refused without execution or target loss.
+The source, edit JSON, and result are bounded to 128 KiB each. A new ordinary
+cell, task end, or runtime reset invalidates the old target. Runtime-thrown
+`SyntaxError`, even with no tool calls, does not authorize a repair/replay.
+
+Pane applies a valid edit locally and runs the corrected source as a **new
+cell**, through the same compiler, sandbox, cancellation, and budget path.
+The original record is immutable; the new record stores the complete amended
+source. A new parse error offers the new cell ID. No corrected source copy is
+added to the next model result. Invalid edits count toward bounded malformed
+reply handling. A message containing both `pane` and `pane-edit`, or multiple
+blocks of either kind, runs neither. The same repair path is available to
+subagents. A repair is protocol data, not a reentrant JavaScript function.
 
 ## 6. The result block, and the budget line
 

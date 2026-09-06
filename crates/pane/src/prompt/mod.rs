@@ -485,8 +485,8 @@ pub fn compact_conversation(conversation: &mut Conversation) -> Compaction {
 /// checkpoint therefore names the handles rather than describing them — the
 /// table that follows it is authoritative and complete.
 ///
-/// Its four parts are `docs/process/` checkpoints' own: what the task was,
-/// where it got to, what it ruled out, what to do next.
+/// Its four parts are what the task was, where it got to, what it ruled out,
+/// and what to do next.
 pub fn checkpoint(
     task: &str,
     plan: &[PlanItem],

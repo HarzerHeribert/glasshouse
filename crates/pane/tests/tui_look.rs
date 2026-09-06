@@ -1008,3 +1008,38 @@ fn cell_repair_shows_the_amended_code_and_keeps_the_original_failure() {
         }
     }
 }
+
+#[test]
+fn activity_ribbons_use_reserved_space_and_reduced_motion_keeps_them_still() {
+    let c = conversation();
+    let n = Notebook::default();
+    for width in [60, 80, 120, 200] {
+        let mut state = state();
+        state.activity = Activity::Streaming;
+        let first = draw(width, 40, &state, &c, &n);
+        let regions = screen_regions(first.area, &state);
+        assert!(regions.activity.height > 0);
+        assert!(regions.transcript.bottom() <= regions.activity.y);
+        assert!(regions.activity.bottom() <= regions.input.y);
+        state.animation_frame = 15;
+        let moved = draw(width, 40, &state, &c, &n);
+        assert_ne!(first, moved);
+        state.reduced_motion = true;
+        let reduced = draw(width, 40, &state, &c, &n);
+        state.animation_frame = 30;
+        let later = draw(width, 40, &state, &c, &n);
+        for y in regions.activity.y..regions.activity.bottom() {
+            for x in regions.activity.x..regions.activity.right() {
+                assert_eq!(reduced[(x, y)], later[(x, y)]);
+            }
+        }
+        assert_eq!(
+            screen_regions(Rect::new(0, 0, width, 20), &state)
+                .activity
+                .height,
+            0
+        );
+        state.activity = Activity::Idle;
+        assert_eq!(screen_regions(first.area, &state).activity.height, 0);
+    }
+}

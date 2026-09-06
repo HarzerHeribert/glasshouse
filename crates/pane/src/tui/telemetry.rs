@@ -1,5 +1,5 @@
 //! Local instruments. Measurements and decorative motion have separate inputs.
-use super::{ACCENT, Activity, MUTED, Notebook, ScreenState};
+use super::{ACCENT, MUTED, Notebook, ScreenState};
 use crate::contract::{Conversation, Role, ServedBy};
 use ratatui::{
     Frame,
@@ -42,17 +42,6 @@ fn metric(value: Option<u64>) -> String {
     value
         .map(|v| v.to_string())
         .unwrap_or_else(|| "unreported".into())
-}
-fn active(state: &ScreenState) -> bool {
-    matches!(
-        state.activity,
-        Activity::Thinking
-            | Activity::Streaming
-            | Activity::Executing
-            | Activity::Waiting
-            | Activity::Searching
-            | Activity::Compacting
-    )
 }
 fn graph(samples: &[usize], width: usize, height: usize) -> Vec<Line<'static>> {
     let glyphs = [' ', '▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
@@ -210,49 +199,6 @@ pub(super) fn rail(
     lines.push(Line::default());
     lines.push(muted("Ctrl-T  open instruments"));
     frame.render_widget(Paragraph::new(super::wrap_lines(lines, inner.width)), inner);
-}
-
-/// An optical motif showing activity, not a fabricated throughput waveform.
-#[allow(clippy::needless_range_loop)] // Each ray crosses rows; x does not select a grid row.
-fn optics(width: usize, height: usize, state: &ScreenState) -> Vec<Line<'static>> {
-    let mut grid = vec![vec![' '; width]; height];
-    let phase = if active(state) && !state.reduced_motion {
-        state.animation_frame as f64 * 0.13
-    } else {
-        0.5
-    };
-    let center = (height.saturating_sub(1)) as f64 / 2.;
-    for ray in -3..=3 {
-        for x in 0..width {
-            let position = x as f64 / width.max(1) as f64;
-            let bend = (position * std::f64::consts::PI + phase).sin() * 0.65;
-            let y = (center + ray as f64 * (position * 0.8 + 0.2) + bend).round() as isize;
-            if y >= 0 && (y as usize) < height {
-                grid[y as usize][x] = if x % 7 == 0 {
-                    '·'
-                } else if ray < 0 {
-                    '╱'
-                } else if ray > 0 {
-                    '╲'
-                } else {
-                    '━'
-                };
-            }
-        }
-    }
-    grid.into_iter()
-        .enumerate()
-        .map(|(i, row)| {
-            Line::styled(
-                row.into_iter().collect::<String>(),
-                Style::default().fg(if i == height / 2 {
-                    ACCENT
-                } else {
-                    Color::DarkGray
-                }),
-            )
-        })
-        .collect()
 }
 
 fn selected_cell_source(
@@ -423,8 +369,13 @@ pub(super) fn expanded(
         "01 / {}",
         state.activity.label().to_uppercase()
     ))];
-    if wide {
-        instruments.extend(optics(34, if body.height >= 32 { 8 } else { 4 }, state));
+    let roomy = wide && body.width >= 150 && body.height >= 32;
+    if wide && !roomy {
+        instruments.extend(super::ribbon::lines(
+            34,
+            if body.height >= 32 { 8 } else { 4 },
+            state,
+        ));
     }
     instruments.push(Line::from(vec![
         Span::styled(
@@ -506,8 +457,24 @@ pub(super) fn expanded(
             detail.extend(execution(conversation, notebook, notebook.cells.len()));
         }
     }
-    frame.render_widget(
-        Paragraph::new(super::wrap_lines(detail, right.width)),
-        right,
-    );
+    let detail = super::wrap_lines(detail, right.width);
+    let used = (detail.len() as u16).min(right.height);
+    frame.render_widget(Paragraph::new(detail), right);
+    let remaining = right.height.saturating_sub(used + 2);
+    if roomy && remaining >= 8 {
+        let area = Rect::new(
+            right.x,
+            right.y + used + 2,
+            right.width.min(160),
+            remaining.min(14),
+        );
+        frame.render_widget(
+            Paragraph::new(super::ribbon::lines(
+                usize::from(area.width),
+                usize::from(area.height),
+                state,
+            )),
+            area,
+        );
+    }
 }
