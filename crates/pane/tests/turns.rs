@@ -12,7 +12,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::thread;
 
-use pane::contract::{Conversation, Message, Role, SessionId};
+use pane::contract::{Block, Conversation, Message, Role, SessionId};
 use pane::rollout::{self, Rollout};
 use pane::runtime::outcome::{CellOutcomeKind, CellRecord};
 use pane::wire::{self, WireError};
@@ -459,4 +459,109 @@ fn a_terminal_response_is_one_assistant_turn_line_resume_rebuilds() {
             Message::text(Role::Assistant, "three files"),
         ]
     );
+}
+
+// --- streaming ---------------------------------------------------------
+
+/// The real event sequence, over a real socket, chunked the way a gateway
+/// chunks it: the deltas must reach the caller *before* the reply is
+/// complete, which is the whole point of the path.
+#[test]
+fn a_streamed_turn_hands_over_deltas_as_they_arrive_and_ends_as_one_turn() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let body: &[u8] = b"event: message_start\n\
+data: {\"type\":\"message_start\",\"message\":{\"role\":\"assistant\",\"usage\":{\"input_tokens\":11,\"output_tokens\":0}}}\n\
+\n\
+event: content_block_delta\n\
+data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"one \"}}\n\
+\n\
+event: content_block_delta\n\
+data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"two\"}}\n\
+\n\
+event: message_delta\n\
+data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":11,\"output_tokens\":7}}\n\
+\n\
+event: message_stop\n\
+data: {\"type\":\"message_stop\"}\n\
+\n";
+    let base_url = start_status_provider("200 OK", body);
+    // SAFETY: `_guard` holds `ENV_LOCK` for this whole test.
+    unsafe {
+        std::env::set_var("ANTHROPIC_BASE_URL", &base_url);
+    }
+    let mut deltas: Vec<String> = Vec::new();
+    let result = wire::send_turn_streaming(&sample_conversation(), wire::MODEL, &mut |text| {
+        deltas.push(text.to_string())
+    });
+    unsafe {
+        std::env::remove_var("ANTHROPIC_BASE_URL");
+    }
+
+    let turn = result.expect("the stream should have produced a turn");
+    assert_eq!(
+        deltas,
+        vec!["one ".to_string(), "two".to_string()],
+        "the caller was not handed each fragment as it arrived"
+    );
+    assert_eq!(
+        turn.message.content,
+        vec![Block::Text("one two".to_string())]
+    );
+    let usage = turn.usage.expect("usage");
+    assert_eq!((usage.input_tokens, usage.output_tokens), (11, 7));
+}
+
+/// A stream that ends without `message_stop` is a cut connection, and a cut
+/// connection must not read as a short answer.
+#[test]
+fn a_truncated_stream_is_an_error_and_not_a_partial_answer() {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let body: &[u8] = b"event: content_block_delta\n\
+data: {\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"half an ans\"}}\n\
+\n";
+    let base_url = start_status_provider("200 OK", body);
+    // SAFETY: `_guard` holds `ENV_LOCK` for this whole test.
+    unsafe {
+        std::env::set_var("ANTHROPIC_BASE_URL", &base_url);
+    }
+    let result = wire::send_turn_streaming(&sample_conversation(), wire::MODEL, &mut |_| {});
+    unsafe {
+        std::env::remove_var("ANTHROPIC_BASE_URL");
+    }
+    assert!(
+        matches!(result, Err(WireError::Stream(_))),
+        "a truncated stream became {result:?}"
+    );
+}
+
+/// The same path against a real gateway. `#[ignore]` because it needs a key
+/// and a network: run it with
+/// `ANTHROPIC_BASE_URL=... ANTHROPIC_API_KEY=... cargo test -p pane --test
+/// turns -- --ignored streams_from_a_real_gateway --nocapture`.
+///
+/// It exists because a fake socket proves the parse and the framing but not
+/// that a live gateway chunks the way this reads it.
+#[test]
+#[ignore = "needs a real gateway and a credential"]
+fn streams_from_a_real_gateway() {
+    let conversation = Conversation {
+        system: "Answer with the digits only.".to_string(),
+        messages: vec![Message::text(Role::User, "Count from 1 to 20.")],
+    };
+    let mut chunks = 0usize;
+    let turn = wire::send_turn_streaming(&conversation, wire::MODEL, &mut |text| {
+        chunks += 1;
+        print!("{text}");
+        use std::io::Write as _;
+        std::io::stdout().flush().ok();
+    })
+    .expect("the gateway should stream");
+    println!("\n[{chunks} delta(s), usage {:?}]", turn.usage);
+    // **One delta is a pass.** Measured 2026-09-06 against the Experiential
+    // gateway: it buffers the whole reply and emits a single `text_delta`
+    // even at 561 output tokens, so how finely a reply is chunked is the
+    // far end's property and not this transport's. Asserting more than one
+    // would fail on a correct gateway and teach nothing about pane.
+    assert!(chunks > 0, "no delta arrived before the reply completed");
+    assert!(!turn.message.content.is_empty(), "the turn carried no text");
 }
