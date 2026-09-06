@@ -10,6 +10,7 @@
 //! objects.
 
 use std::cell::RefCell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -19,6 +20,7 @@ use crate::glasshouse::Glasshouse;
 use crate::runtime::handles::{HandleMeta, HandleTable, Provenance};
 use crate::runtime::preview::{self, Value};
 use crate::sandbox::profile::Profile;
+use crate::tools::invoke::CancellationToken;
 
 /// A `console` capture bounded ahead of rendering.
 ///
@@ -99,15 +101,11 @@ pub(crate) struct Capture {
 #[derive(Debug, Default)]
 pub(crate) struct CellState {
     pub(crate) console: ConsoleCapture,
-    pub(crate) calls: Vec<RecordedCall>,
     pub(crate) captures: Vec<Capture>,
     /// Names the model's own `free` released during this cell. A capture of
     /// one is skipped: `runtime-contract.md` §2 makes `free` a lifetime
     /// event, and re-capturing at the end of the cell would undo it.
     pub(crate) freed: Vec<String>,
-    /// Set by the generated epilogue's `e()` when the body ran off its end
-    /// rather than returning — `runtime-contract.md` §1's whole control flow.
-    pub(crate) fell_off_the_end: bool,
 }
 
 /// What every host callback can reach.
@@ -118,6 +116,24 @@ pub(crate) struct RuntimeState {
     pub(crate) cell: std::cell::Cell<u64>,
     pub(crate) table: RefCell<HandleTable>,
     pub(crate) current: RefCell<CellState>,
+    /// The token every tool call this runtime makes is cancellable through.
+    /// It is replaceable because [`crate::runtime::isolate::Runtime::with_token`]
+    /// is a builder over an already-constructed runtime, and a cell only ever
+    /// reads it, so there is no path by which a program can reach it.
+    pub(crate) token: RefCell<CancellationToken>,
+    /// Every call whose result became a live object, by the id the object is
+    /// tagged with.
+    ///
+    /// **Task-scoped, not cell-scoped.** A tag minted in cell *n* is read
+    /// again when a later cell rebinds the object it names — by an
+    /// assignment, by `keep`, or by the end-of-cell re-marshal — so a
+    /// per-cell store would answer with whatever call happened to sit at the
+    /// same position in the later cell, and the handle would be shown
+    /// another call's preview and provenance. The map is cleared by
+    /// [`RuntimeState::forget_calls`] when the task ends, which is the
+    /// lifetime `runtime-contract.md` §2 gives a handle.
+    calls: RefCell<HashMap<u64, RecordedCall>>,
+    next_call: std::cell::Cell<u64>,
 }
 
 impl RuntimeState {
@@ -129,6 +145,9 @@ impl RuntimeState {
             cell: std::cell::Cell::new(0),
             table: RefCell::new(HandleTable::new()),
             current: RefCell::new(CellState::default()),
+            token: RefCell::new(CancellationToken::new()),
+            calls: RefCell::new(HashMap::new()),
+            next_call: std::cell::Cell::new(0),
         }
     }
 
@@ -137,23 +156,30 @@ impl RuntimeState {
         self.cell.set(cell);
         let mut current = self.current.borrow_mut();
         current.console.clear();
-        current.calls.clear();
         current.captures.clear();
         current.freed.clear();
-        current.fell_off_the_end = false;
         cell
     }
 
     /// Records a call whose result became a live object, and answers with the
-    /// index the object is tagged with.
-    pub(crate) fn record_call(&self, call: RecordedCall) -> usize {
-        let mut current = self.current.borrow_mut();
-        current.calls.push(call);
-        current.calls.len() - 1
+    /// **task-scoped** id the object is tagged with. Ids start at 1, so a
+    /// zero read back from a tag is not a call.
+    pub(crate) fn record_call(&self, call: RecordedCall) -> u64 {
+        let id = self.next_call.get() + 1;
+        self.next_call.set(id);
+        self.calls.borrow_mut().insert(id, call);
+        id
     }
 
-    pub(crate) fn recorded(&self, index: usize) -> Option<RecordedCall> {
-        self.current.borrow().calls.get(index).cloned()
+    pub(crate) fn recorded(&self, id: u64) -> Option<RecordedCall> {
+        self.calls.borrow().get(&id).cloned()
+    }
+
+    /// The task ending. Every handle is gone, so every call recorded for one
+    /// is too.
+    pub(crate) fn forget_calls(&self) {
+        self.calls.borrow_mut().clear();
+        self.next_call.set(0);
     }
 
     /// A name is captured twice in the ordinary case — once where the

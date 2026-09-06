@@ -13,12 +13,14 @@
 
 use pane::contract::SessionId;
 use pane::glasshouse::Glasshouse;
-use pane::runtime::isolate::Runtime;
-use pane::runtime::outcome::CellOutcome;
-use pane::runtime::preview::{self, Value};
+use pane::runtime::isolate::{DEFAULT_HEAP_LIMIT_BYTES, Runtime};
+use pane::runtime::outcome::{CellOutcome, HandleRecord};
+use pane::runtime::preview::{self, ErrorValue, Value};
 use pane::sandbox::profile::Profile;
+use pane::tools::invoke::CancellationToken;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 static COUNTER: AtomicU64 = AtomicU64::new(0);
 
@@ -41,6 +43,10 @@ impl Fixture {
 
     fn profile(&self) -> Profile {
         Profile::compile(&self.root, Some(&settings()))
+    }
+
+    fn profile_with(&self, settings: &str) -> Profile {
+        Profile::compile(&self.root, Some(settings))
     }
 
     fn write(&self, path: &Path, contents: &str) -> PathBuf {
@@ -98,6 +104,23 @@ fn returned_string(outcome: &CellOutcome) -> String {
         Value::String(text) => text.head().to_string(),
         other => panic!("expected a string, got {other:?}"),
     }
+}
+
+fn threw(outcome: &CellOutcome) -> &ErrorValue {
+    match outcome {
+        CellOutcome::Threw { error, .. } => error,
+        other => panic!("expected a throw, got {other:?}"),
+    }
+}
+
+fn handle<'a>(outcome: &'a CellOutcome, name: &str) -> &'a HandleRecord {
+    outcome
+        .turn()
+        .record
+        .handles
+        .iter()
+        .find(|handle| handle.name == name)
+        .unwrap_or_else(|| panic!("`{name}` is not a handle: {:?}", outcome.turn().record))
 }
 
 // --- §1 and §2: the persistent scope -----------------------------------
@@ -706,9 +729,14 @@ fn the_runtime_cannot_be_built_without_a_profile() {
     let production = SOURCE
         .split_once("#[cfg(test)]")
         .map_or(SOURCE, |(before, _)| before);
+    // A builder over an already-built runtime (`fn with_x(self, …) -> Self`)
+    // is not a constructor: it cannot produce a `Runtime` that does not
+    // already exist, so it cannot produce one without a profile. Everything
+    // that answers with `Self` from nothing must name one.
     let constructors: Vec<&str> = production
         .lines()
         .filter(|line| line.trim_start().starts_with("pub fn ") && line.contains("-> Self"))
+        .filter(|line| !line.contains("(self,") && !line.contains("(self)"))
         .collect();
     assert!(
         !constructors.is_empty(),
@@ -718,6 +746,18 @@ fn the_runtime_cannot_be_built_without_a_profile() {
         assert!(
             constructor.contains("profile: &Profile"),
             "`{constructor}` builds a Runtime without a Profile"
+        );
+    }
+    // And the builders are still seen, so the filter above cannot be what
+    // hides a real constructor: every one of them consumes a `Runtime`.
+    for builder in production
+        .lines()
+        .filter(|line| line.trim_start().starts_with("pub fn ") && line.contains("-> Self"))
+        .filter(|line| line.contains("(self,") || line.contains("(self)"))
+    {
+        assert!(
+            builder.contains("(self"),
+            "`{builder}` was filtered out as a builder without taking a Runtime"
         );
     }
     assert!(
@@ -849,6 +889,11 @@ fn the_isolate_has_no_ambient_authority() {
         "Deno",
         "global",
         "importScripts",
+        // Shared memory is the one door out of this isolate that is not a
+        // capability but a *block*: `Atomics.wait` parks the thread inside
+        // V8, where an interrupt from another thread may never land.
+        "SharedArrayBuffer",
+        "Atomics",
     ];
     let program = format!(
         "return [{}].filter(n => typeof globalThis[n] !== \"undefined\").join(\",\");\n",
@@ -903,4 +948,466 @@ fn a_refusal_carries_the_models_own_line_and_column_and_no_host_frame() {
             frame.description
         );
     }
+}
+
+// --- GH-PANE-61E-ISOLATE-FIX: the verifier's eight findings -------------
+
+/// A handle rebound in a later cell keeps the provenance and the preview of
+/// the call that *made* it, not of whatever call sits at the same position in
+/// the cell that rebound it.
+///
+/// The private tag used to carry an index into a per-cell vector, so `const c
+/// = a` in a cell that read a different file showed the model that other
+/// file's path, byte count and first line, and recorded its SHA-256 as `c`'s
+/// provenance — which §4's resume would then have re-materialised `c` from.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn a_rebound_handle_keeps_its_own_previous_cells_provenance() {
+    let fixture = Fixture::new("alias");
+    let notes = fixture.write(&fixture.root.join("notes.txt"), "alpha\nbeta\ngamma\n");
+    let tricky = fixture.write(&fixture.root.join("tricky.txt"), "call foo:12:bar here\n");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("alias-session");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+
+    let first = runtime.run_cell(&format!(
+        "const a = await read({{ path: {path:?} }});\n",
+        path = notes.to_string_lossy()
+    ));
+    assert!(matches!(first, CellOutcome::Yielded { .. }), "{first:?}");
+
+    // Cell 2 makes a call of its own and rebinds cell 1's object.
+    let second = runtime.run_cell(&format!(
+        "const b = await read({{ path: {path:?} }});\nconst c = a;\n",
+        path = tricky.to_string_lossy()
+    ));
+    assert!(matches!(second, CellOutcome::Yielded { .. }), "{second:?}");
+
+    let c = handle(&second, "c");
+    assert_eq!(c.type_name, "File");
+    let provenance = c.provenance.as_ref().expect("a recorded call");
+    assert_eq!(
+        provenance.args.get("path").map(String::as_str),
+        Some(&*notes.to_string_lossy()),
+        "`c` was given another call's provenance: {provenance:?}"
+    );
+    assert!(c.preview.contains("alpha"), "{}", c.preview);
+    assert!(
+        !c.preview.contains("tricky"),
+        "`c` was shown the other file's preview: {}",
+        c.preview
+    );
+    // And `b`, which the same cell did bind to its own call, is unaffected.
+    let b = handle(&second, "b");
+    assert_eq!(
+        b.provenance
+            .as_ref()
+            .and_then(|p| p.args.get("path"))
+            .map(String::as_str),
+        Some(&*tricky.to_string_lossy())
+    );
+
+    // The values themselves were never in doubt; this is the assertion that
+    // says the preview now agrees with them.
+    let third = runtime.run_cell("return [c === a, c.path === a.path].join(\",\");\n");
+    assert_eq!(returned_string(&third), "true,true", "{third:?}");
+}
+
+/// An `abstract` member erases to nothing, so the subclass's method is the
+/// one that runs. The eraser used to leave the member's bare key behind,
+/// which is a field declaration: the base constructor created `area` as an
+/// own property initialised `undefined`, it shadowed `Sq`'s prototype method,
+/// and the program threw `TypeError: this.area is not a function` from inside
+/// the base class — nowhere near the cause, on a program `tsc` runs.
+#[test]
+fn an_abstract_member_erases_to_nothing() {
+    let fixture = Fixture::new("abstract");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("abstract-session");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+
+    let outcome = runtime.run_cell(
+        "abstract class Shape {\n  abstract area(): number;\n  describe(): string { return \
+         \"area=\" + this.area(); }\n}\nclass Sq extends Shape {\n  constructor(n: number) { \
+         super(); }\n  area(): number { return 42; }\n}\nconst s = new Sq(6);\nreturn \
+         s.describe();\n",
+    );
+    assert_eq!(returned_string(&outcome), "area=42", "{outcome:?}");
+}
+
+/// A cell that computes forever is stopped at the wall clock, answered as a
+/// `RuntimeTimeout` throw, and the session goes on.
+///
+/// `while (true) {}` allocates nothing, so the heap ceiling never sees it:
+/// before the watchdog `run_cell` simply did not return, and every later cell
+/// of the task was unreachable.
+#[test]
+fn a_cell_that_never_yields_is_answered_as_a_timeout_and_the_next_cell_runs() {
+    let fixture = Fixture::new("timeout");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("timeout-session");
+    let limit = Duration::from_millis(500);
+    let mut runtime = Runtime::with_limits(
+        &fixture.profile(),
+        &glasshouse,
+        &session,
+        DEFAULT_HEAP_LIMIT_BYTES,
+        limit,
+    );
+
+    let started = Instant::now();
+    let outcome = runtime.run_cell("const before = 41;\nwhile (true) {}\n");
+    let elapsed = started.elapsed();
+
+    let error = threw(&outcome);
+    assert_eq!(error.class, "RuntimeTimeout", "{error:?}");
+    assert!(
+        error.message.contains("wall-clock limit"),
+        "{}",
+        error.message
+    );
+    assert!(
+        elapsed < limit + Duration::from_secs(2),
+        "the cell took {elapsed:?} against a {limit:?} limit"
+    );
+
+    // §5: the binding the cell completed before it was stopped is live, and
+    // nothing was freed.
+    assert!(runtime.is_live("before"), "{}", runtime.render_handles());
+
+    // And the isolate is warm: the next cell runs, and reads that binding.
+    let after = runtime.run_cell("return before + 1;\n");
+    assert_eq!(returned(&after), &Value::Number(42.0), "{after:?}");
+}
+
+/// `Atomics.wait` parks the thread *inside* V8, where an interrupt from the
+/// watchdog's thread may never land — so it is closed at the door instead:
+/// the isolate is built with `set_allow_atomics_wait(false)` and the
+/// bootstrap deletes both globals, which is what this cell reaches.
+#[test]
+fn atomics_wait_cannot_block_the_session() {
+    let fixture = Fixture::new("atomics");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("atomics-session");
+    let limit = Duration::from_millis(500);
+    let mut runtime = Runtime::with_limits(
+        &fixture.profile(),
+        &glasshouse,
+        &session,
+        DEFAULT_HEAP_LIMIT_BYTES,
+        limit,
+    );
+
+    let started = Instant::now();
+    let outcome =
+        runtime.run_cell("Atomics.wait(new Int32Array(new SharedArrayBuffer(8)), 0, 0);\n");
+    let elapsed = started.elapsed();
+
+    let error = threw(&outcome);
+    assert_eq!(error.class, "ReferenceError", "{error:?}");
+    // Answered, not waited on — and not even by the watchdog: the name is
+    // gone, so the cell throws in microseconds.
+    assert!(elapsed < limit, "the cell took {elapsed:?}");
+
+    let after = runtime.run_cell("return 7;\n");
+    assert_eq!(returned(&after), &Value::Number(7.0), "{after:?}");
+}
+
+/// The seven host functions are the cell's whole authority, and no door
+/// replaces, removes or redefines one. The compile-time refusal covers a
+/// declaration; these are the five ways round it the verifier executed.
+#[test]
+fn no_door_shadows_deletes_or_redefines_a_host_function() {
+    let fixture = Fixture::new("doors");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("doors-session");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+
+    // 1. `keep` — the documented one, and the one a model tidying its table
+    //    by a tool's name would reach without trying to break anything.
+    let kept = runtime.run_cell(
+        "try { keep(\"read\", function fake(){ return \"NOT A TOOL\"; }); return \"no throw\"; } \
+         catch (e) { return e.name; }\n",
+    );
+    assert_eq!(returned_string(&kept), "ToolError", "{kept:?}");
+
+    // 2. `free`.
+    let freed = runtime
+        .run_cell("try { free(\"grep\"); return \"no throw\"; } catch (e) { return e.name; }\n");
+    assert_eq!(returned_string(&freed), "ToolError", "{freed:?}");
+
+    // 3. the private host object, reached by name or through `arguments`.
+    let assigned = runtime.run_cell(
+        "try { __pane_cell.s(\"read\", function(){ return \"SHADOWED\"; }); return \"no throw\"; \
+         } catch (e) { return e.name; }\n",
+    );
+    assert_eq!(returned_string(&assigned), "ToolError", "{assigned:?}");
+
+    // 4. `defineProperty` — refused by the language, because the property is
+    //    not configurable.
+    let defined = runtime.run_cell(
+        "try { Object.defineProperty(globalThis, \"grep\", { value: () => \"FORGED\", \
+         configurable: true }); return \"no throw\"; } catch (e) { return e.name; }\n",
+    );
+    assert_eq!(returned_string(&defined), "TypeError", "{defined:?}");
+
+    // 5. plain assignment and `delete`, both silent failures in sloppy mode.
+    //    The assignment is inside a function so that it is a *run-time*
+    //    write: `bash = 1` at top level is a binding, and `cell::compile`
+    //    refuses that one earlier and by name.
+    let refused = runtime.run_cell("bash = 1;\n");
+    assert_eq!(threw(&refused).class, "ShadowsHostFunction", "{refused:?}");
+    let written = runtime.run_cell(
+        "(function(){ bash = 1; })();\nconst gone = delete globalThis.handles;\nreturn [typeof \
+         bash, gone].join(\",\");\n",
+    );
+    assert_eq!(returned_string(&written), "function,false", "{written:?}");
+
+    // Every one of the seven is still the function this package installed,
+    // in a later cell, which is the property the guard exists for.
+    let survived = runtime.run_cell(
+        "return [\"grep\",\"read\",\"glob\",\"bash\",\"keep\",\"free\",\"handles\"]\n  .filter(n \
+         => typeof globalThis[n] === \"function\").length;\n",
+    );
+    assert_eq!(returned(&survived), &Value::Number(7.0), "{survived:?}");
+    // And none of the refused writes left a handle behind.
+    assert_eq!(runtime.handle_names(), vec!["gone"], "{survived:?}");
+}
+
+/// §1's "a top-level `return` ends the task" is decided by the value the
+/// cell's promise fulfils with, not by a flag the program can set.
+///
+/// `__pane_cell.e()` used to set that flag, so one line of the model's own
+/// program turned its `return` into a yield and the task never ended.
+#[test]
+fn a_forged_epilogue_does_not_turn_a_return_into_a_yield() {
+    let fixture = Fixture::new("epilogue");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("epilogue-session");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+
+    let named = runtime.run_cell("__pane_cell.e();\nreturn \"THIS SHOULD END THE TASK\";\n");
+    assert!(named.ends_the_task(), "{named:?}");
+    assert_eq!(returned_string(&named), "THIS SHOULD END THE TASK");
+
+    // The same object reached without naming it: `arguments[0]` is the host
+    // object, and it buys the same nothing.
+    let through_arguments = runtime.run_cell("arguments[0].e();\nreturn \"ALSO THE END\";\n");
+    assert!(through_arguments.ends_the_task(), "{through_arguments:?}");
+    assert_eq!(returned_string(&through_arguments), "ALSO THE END");
+
+    // A marker minted in an earlier cell does not answer for a later one.
+    let stashed = runtime.run_cell("const marker = __pane_cell.e();\n");
+    assert!(!stashed.ends_the_task(), "{stashed:?}");
+    let replayed = runtime.run_cell("return marker;\n");
+    assert!(
+        replayed.ends_the_task(),
+        "an earlier cell's marker yielded a later one: {replayed:?}"
+    );
+
+    // And the ordinary fall-off still yields.
+    let fell = runtime.run_cell("const ordinary = 1;\n");
+    assert!(matches!(fell, CellOutcome::Yielded { .. }), "{fell:?}");
+}
+
+/// §3's preview is of the handle, so it describes the value the cell ended
+/// with rather than the one its declaration line saw. `const arr = []` then
+/// `arr.push(1,2,3,4,5)` told the model `n=0` for an array of five.
+#[test]
+fn a_handles_preview_describes_the_value_the_cell_ended_with() {
+    let fixture = Fixture::new("preview");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("preview-session");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+
+    let outcome = runtime.run_cell("const arr = [];\narr.push(1, 2, 3, 4, 5);\n");
+    assert!(
+        handle(&outcome, "arr").preview.starts_with("n=5"),
+        "{}",
+        handle(&outcome, "arr").preview
+    );
+
+    // A `class` keeps its own block scope, so the epilogue cannot re-read it
+    // and the end-of-cell re-marshal is the only thing that can.
+    let kept = runtime.run_cell(
+        "class Box { }\nconst box = new Box();\nkeep(\"held\", box);\nbox.a = 1;\nbox.b = 2;\n",
+    );
+    assert!(
+        handle(&kept, "held").preview.contains("\"a\""),
+        "{}",
+        handle(&kept, "held").preview
+    );
+    assert!(
+        handle(&kept, "held").preview.contains("\"b\""),
+        "{}",
+        handle(&kept, "held").preview
+    );
+}
+
+/// §2's one recovery mechanism: the `RuntimeOutOfMemory` error lists the five
+/// largest live handles so the *model* can choose what to free. It ranked by
+/// the sizes taken on each handle's declaration line, so the array that
+/// filled the heap was ranked last, at `~0 B`.
+#[test]
+fn the_out_of_memory_list_names_the_handle_that_filled_the_heap() {
+    let fixture = Fixture::new("oom-rank");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("oom-rank-session");
+    let mut runtime =
+        Runtime::with_heap_limit(&fixture.profile(), &glasshouse, &session, 32 * 1024 * 1024);
+
+    let first = runtime.run_cell("const modest = \"m\".repeat(100_000);\n");
+    assert!(matches!(first, CellOutcome::Yielded { .. }), "{first:?}");
+
+    let outcome =
+        runtime.run_cell("const filler = [];\nwhile (true) { filler.push(new Array(200000)); }\n");
+    let error = threw(&outcome);
+    assert_eq!(error.class, "RuntimeOutOfMemory", "{error:?}");
+    assert!(
+        error.message.contains("Largest live handles: filler ("),
+        "the handle that filled the heap must be ranked first: {}",
+        error.message
+    );
+    assert!(error.message.contains("modest"), "{}", error.message);
+
+    // Nothing was evicted, and the model can still act on what it was told.
+    let recovered = runtime.run_cell("free(\"filler\");\nreturn modest.length;\n");
+    assert_eq!(
+        returned(&recovered),
+        &Value::Number(100_000.0),
+        "{recovered:?}"
+    );
+}
+
+/// `declare` states that something exists elsewhere. It emits no code, so it
+/// erases to nothing and binds nothing: the first two shapes used to reach V8
+/// with the keyword intact and throw `SyntaxError` on valid TypeScript, and
+/// the third generated a capture of a name that does not exist and threw
+/// `ReferenceError` at a column past the end of the model's own line.
+#[test]
+fn declare_erases_to_nothing_and_binds_nothing() {
+    let fixture = Fixture::new("declare");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("declare-session");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+
+    for source in [
+        "declare const missing: number;\n",
+        "declare class Z { n: number }\n",
+        "declare function foo(a: number): void;\n",
+    ] {
+        let outcome = runtime.run_cell(source);
+        assert!(
+            matches!(outcome, CellOutcome::Yielded { .. }),
+            "{source:?} -> {outcome:?}"
+        );
+        assert!(
+            outcome.turn().record.handles.is_empty(),
+            "{source:?} made a handle: {:?}",
+            outcome.turn().record.handles
+        );
+    }
+    assert!(runtime.handle_names().is_empty());
+}
+
+/// §3's drop note tells a model to call `handles()` "for the full list" when
+/// the table is over budget, and the model then decides what to `free` from
+/// what it is shown. Captures are drained into the table when the cell ends,
+/// so the list was one cell stale and did not contain what the model had just
+/// bound.
+#[test]
+fn handles_mid_cell_includes_the_current_cells_bindings() {
+    let fixture = Fixture::new("mid-cell");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("mid-cell-session");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+
+    let first = runtime.run_cell("const earlier = 1;\n");
+    assert!(matches!(first, CellOutcome::Yielded { .. }), "{first:?}");
+
+    let outcome = runtime.run_cell("const a = 1;\nconst b = 2;\nreturn handles().join(\",\");\n");
+    assert_eq!(returned_string(&outcome), "earlier,a,b", "{outcome:?}");
+
+    // And a name this cell freed is in neither half of the answer.
+    let after = runtime.run_cell("const c = 3;\nfree(\"c\");\nreturn handles().join(\",\");\n");
+    assert_eq!(returned_string(&after), "earlier,a,b", "{after:?}");
+}
+
+/// `grep -r` prints lines that are not located matches — `Binary file …
+/// matches` is the routine one. Attributing them to the searched path with
+/// `line: 0` made them indistinguishable from a hit at the top of a file, so
+/// §6's own worked cell (`new Set(hits.map(m => m.path)).size`) counted the
+/// searched *directory* as a file.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn a_grep_line_that_is_not_a_match_has_no_line_number() {
+    let fixture = Fixture::new("grep-binary");
+    fixture.write(&fixture.root.join("hit.txt"), "NEEDLE here\n");
+    std::fs::write(
+        fixture.root.join("bin.dat"),
+        b"NEEDLE\x00\x01\x02\x00binary\n",
+    )
+    .unwrap();
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("grep-binary-session");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+
+    let outcome = runtime.run_cell(&format!(
+        "const hits = await grep({{ pattern: \"NEEDLE\", path: {path:?} }});\nconst located = \
+         hits.filter(m => m.line !== null);\nreturn [hits.length > located.length, \
+         located.length, new Set(located.map(m => m.path)).size].join(\",\");\n",
+        path = fixture.root.to_string_lossy()
+    ));
+    assert_eq!(
+        returned_string(&outcome),
+        "true,1,1",
+        "a line grep printed that is not a located match must be filterable: {outcome:?}"
+    );
+}
+
+/// The cancellation facility the session layer consumes: a token the runtime
+/// holds, set from another thread while a call is in flight. A cancelled call
+/// is §5's throw in the turn slot a yield would have used, class `Cancelled`,
+/// and the session is intact afterwards.
+///
+/// The command is built out of `bash` builtins on purpose: the seatbelt names
+/// one resolved binary in `process-exec*` (the 61D exec-roots ruling), so a
+/// confined `bash` cannot exec `/bin/sleep` at all.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn a_token_set_during_a_call_cancels_it_and_the_cell_is_answered_as_a_throw() {
+    let fixture = Fixture::new("cancel");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("cancel-session");
+    let token = CancellationToken::new();
+    let mut runtime = Runtime::new(
+        &fixture.profile_with(r#"{"permissions":{"allow":["Bash(while*)","Bash(do*)"]}}"#),
+        &glasshouse,
+        &session,
+    )
+    .with_token(token.clone());
+
+    let setter = token.clone();
+    let canceller = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(200));
+        setter.cancel();
+    });
+
+    let started = Instant::now();
+    let outcome = runtime.run_cell(
+        "const before = 1;\nconst out = await bash({ command: \"while :; do :; done\" });\nreturn \
+         out.stdout;\n",
+    );
+    let elapsed = started.elapsed();
+    canceller.join().unwrap();
+
+    let error = threw(&outcome);
+    assert_eq!(error.class, "Cancelled", "{error:?}");
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "the call ran for {elapsed:?} against a child that never exits"
+    );
+    // §5: the binding made before the throw is live, and the turn carries it.
+    assert!(runtime.is_live("before"), "{}", runtime.render_handles());
+    assert_eq!(handle(&outcome, "before").preview, "1");
 }

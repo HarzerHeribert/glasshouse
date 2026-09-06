@@ -35,12 +35,13 @@
 use oxc::allocator::Allocator;
 use oxc::ast::ast::{
     AccessorProperty, AssignmentTarget, BindingPattern, Class, Expression, FormalParameter,
-    Function, MethodDefinition, Program, PropertyDefinition, Statement, TSAsExpression,
-    TSEnumDeclaration, TSExternalModuleDeclaration, TSGlobalDeclaration, TSImportEqualsDeclaration,
+    Function, MethodDefinition, MethodDefinitionType, Program, PropertyDefinition,
+    PropertyDefinitionType, Statement, TSAsExpression, TSEnumDeclaration,
+    TSExternalModuleDeclaration, TSGlobalDeclaration, TSImportEqualsDeclaration,
     TSInstantiationExpression, TSInterfaceDeclaration, TSNamespaceDeclaration, TSNonNullExpression,
     TSSatisfiesExpression, TSTypeAliasDeclaration, TSTypeAnnotation, TSTypeAssertion,
-    TSTypeParameterDeclaration, TSTypeParameterInstantiation, VariableDeclarationKind,
-    VariableDeclarator,
+    TSTypeParameterDeclaration, TSTypeParameterInstantiation, VariableDeclaration,
+    VariableDeclarationKind, VariableDeclarator,
 };
 use oxc::ast_visit::{Visit, walk};
 use oxc::parser::{ParseOptions, Parser};
@@ -248,6 +249,14 @@ pub fn script_name(cell: u64) -> String {
 /// reached is not captured as `var`'s hoisted `undefined`, and by a `catch`,
 /// so a name that turns out not to be in scope leaves the model's own error
 /// standing rather than replacing it with a `ReferenceError`.
+///
+/// **The body ends by `return`ing what `e()` answers, and that value is the
+/// whole of §1's two endings.** A host-side "it fell off the end" flag was
+/// one line of the model's own program away from turning a `return` into a
+/// yield (`__pane_cell.e(); return "x"` yielded); the value `e()` mints
+/// carries a private symbol no JavaScript operation can set, so a cell yields
+/// exactly when the value its promise fulfils with is the one the host minted
+/// for it.
 fn wrap(body: &str, late: &[String]) -> String {
     let mut out = format!("(async function({HOST}){{var {MADE}={{__proto__:null}};try{{\n");
     out.push_str(body);
@@ -255,9 +264,9 @@ fn wrap(body: &str, late: &[String]) -> String {
         out.push('\n');
     }
     // A leading `;` so no statement of the model's can continue into the
-    // epilogue, and `e()` last so it runs exactly when the body fell off its
-    // end rather than returning.
-    out.push_str(&format!(";{HOST}.e();\n}}finally{{\n"));
+    // epilogue, and `e()` last so its marker is what the promise fulfils
+    // with exactly when the body fell off its end rather than returning.
+    out.push_str(&format!(";return {HOST}.e();\n}}finally{{\n"));
     for name in late {
         out.push_str(&format!(
             "try{{if({MADE}.{name}){HOST}.s(\"{name}\",{name})}}catch{{}}\n"
@@ -356,10 +365,18 @@ fn top_level(program: &Program<'_>, source: &str) -> TopLevel {
                 }
             }
             Statement::FunctionDeclaration(function) => {
+                if function.declare {
+                    // `declare function f(): void` states a type and emits no
+                    // code, so there is no `f` for a capture call to read —
+                    // the generated `s("f", f)` threw `ReferenceError` from
+                    // pane's own line rather than from the model's.
+                    continue;
+                }
                 if let Some(id) = &function.id {
                     names.push(id.name.to_string());
                 }
             }
+            Statement::ClassDeclaration(class) if class.declare => continue,
             Statement::ClassDeclaration(class) => {
                 // A `class` binding is block-scoped to the `try` and no
                 // same-width rewrite hoists one, so the epilogue cannot read
@@ -612,6 +629,43 @@ impl<'s> Eraser<'s> {
         }
     }
 
+    /// Blanks a whole class member and the `;` that terminates it.
+    ///
+    /// An `abstract` member has to go **entirely**: blanking only its
+    /// modifier and its signature leaves the bare key behind, and a bare name
+    /// in a class body is a field declaration initialised `undefined` that
+    /// shadows the subclass's prototype method. `tsc` emits nothing for one.
+    fn blank_member(&mut self, span: Span) {
+        self.blank(span);
+        let rest = &self.source[span.end as usize..];
+        let gap = rest.len() - rest.trim_start_matches([' ', '\t']).len();
+        if rest[gap..].starts_with(';') {
+            let at = span.end + gap as u32;
+            self.blank(Span::new(at, at + 1));
+        }
+    }
+
+    /// Blanks a `declare` keyword standing immediately before `start`, for
+    /// the shapes whose own span begins after it. Blanking a span twice is a
+    /// no-op — [`render`] merges the ranges — so this is safe to call
+    /// wherever the span may or may not already cover the keyword.
+    fn blank_declare_before(&mut self, start: u32) {
+        let before = self.source[..start as usize].trim_end();
+        let Some(at) = before.len().checked_sub("declare".len()) else {
+            return;
+        };
+        if !before[at..].starts_with("declare") {
+            return;
+        }
+        let word = before[..at]
+            .chars()
+            .next_back()
+            .is_none_or(|c| !(c.is_alphanumeric() || c == '_' || c == '$'));
+        if word {
+            self.blank(Span::new(at as u32, before.len() as u32));
+        }
+    }
+
     fn refuse(&mut self, construct: &'static str, span: Span) {
         if self.not_erasable.is_none() {
             self.not_erasable = Some((construct, span.start));
@@ -680,6 +734,19 @@ impl<'a> Visit<'a> for Eraser<'_> {
         self.visit_expression(&it.expression);
     }
 
+    /// `declare const x: number` states a type and emits nothing at all —
+    /// keeping the keyword left V8 with `declare const …` and a
+    /// `SyntaxError` at the model's line for a program that is valid
+    /// TypeScript. [`top_level`] already declines to bind its names.
+    fn visit_variable_declaration(&mut self, it: &VariableDeclaration<'a>) {
+        if it.declare {
+            self.blank(it.span);
+            self.blank_declare_before(it.span.start);
+            return;
+        }
+        walk::walk_variable_declaration(self, it);
+    }
+
     fn visit_variable_declarator(&mut self, it: &VariableDeclarator<'a>) {
         if it.definite {
             self.blank_marker(it.id.span().end, '!');
@@ -703,14 +770,24 @@ impl<'a> Visit<'a> for Eraser<'_> {
 
     fn visit_function(&mut self, it: &Function<'a>, flags: ScopeFlags) {
         if it.body.is_none() {
-            // An overload signature: declaration only, no code.
+            // An overload signature or a `declare function`: declaration
+            // only, no code.
             self.blank(it.span);
+            if it.declare {
+                self.blank_declare_before(it.span.start);
+            }
             return;
         }
         walk::walk_function(self, it, flags);
     }
 
     fn visit_class(&mut self, it: &Class<'a>) {
+        if it.declare {
+            // `declare class Z { n: number }` declares a type, not a class.
+            self.blank(it.span);
+            self.blank_declare_before(it.span.start);
+            return;
+        }
         if it.r#abstract {
             self.blank_keywords(it.span.start, it.body.span.start, &["abstract"]);
         }
@@ -723,8 +800,8 @@ impl<'a> Visit<'a> for Eraser<'_> {
     }
 
     fn visit_property_definition(&mut self, it: &PropertyDefinition<'a>) {
-        if it.declare {
-            self.blank(it.span);
+        if it.declare || it.r#type == PropertyDefinitionType::TSAbstractPropertyDefinition {
+            self.blank_member(it.span);
             return;
         }
         self.blank_keywords(it.span.start, it.key.span().start, &CLASS_MEMBER_MODIFIERS);
@@ -738,6 +815,10 @@ impl<'a> Visit<'a> for Eraser<'_> {
     }
 
     fn visit_method_definition(&mut self, it: &MethodDefinition<'a>) {
+        if it.r#type == MethodDefinitionType::TSAbstractMethodDefinition {
+            self.blank_member(it.span);
+            return;
+        }
         self.blank_keywords(it.span.start, it.key.span().start, &CLASS_MEMBER_MODIFIERS);
         if it.optional {
             self.blank_marker(it.key.span().end, '?');
@@ -782,7 +863,7 @@ mod tests {
         javascript
             .lines()
             .skip(1)
-            .take_while(|line| *line != ";__pane_cell.e();")
+            .take_while(|line| *line != ";return __pane_cell.e();")
             .map(|line| line.split(";__pane_cell.s(").next().unwrap_or(line))
             .collect::<Vec<_>>()
             .join("\n")
@@ -997,6 +1078,73 @@ mod tests {
             "{}",
             compiled.javascript
         );
+    }
+
+    /// An `abstract` member erases to **nothing**. Blanking only its
+    /// modifier and its signature left the bare key behind, and a bare name
+    /// in a class body is an own field initialised `undefined` that shadows
+    /// the subclass's prototype method — so the program ran and meant
+    /// something else.
+    #[test]
+    fn an_abstract_member_erases_to_nothing() {
+        let source = "abstract class Shape {\n  abstract area(): number;\n  abstract n: number;\n                        describe(): string { return \"area=\" + this.area(); }\n}\n";
+        let compiled = compile(source, 1).unwrap();
+        let body = body_of(&compiled.javascript);
+        assert!(!body.contains("abstract"), "{body:?}");
+        // Nothing but whitespace is left of either member's own line — not
+        // the key, not the signature, not the `;`.
+        for line in body.lines().skip(1).take(2) {
+            assert!(line.trim().is_empty(), "a member survived: {line:?}");
+        }
+        // And the concrete method is untouched, at its own column.
+        for (original, erased) in source.lines().zip(body.lines()) {
+            assert_eq!(
+                original.chars().count(),
+                erased.chars().count(),
+                "a line changed width: {original:?} -> {erased:?}"
+            );
+        }
+        assert!(body.contains("this.area()"), "{body:?}");
+    }
+
+    /// `declare` states that something exists elsewhere and emits no code, so
+    /// it erases to nothing and binds nothing. Keeping the keyword gave V8
+    /// `declare const …` and a `SyntaxError` on valid TypeScript; generating a
+    /// capture for a `declare function` threw `ReferenceError` from pane's own
+    /// generated column, past the end of the model's line.
+    #[test]
+    fn a_declare_erases_to_nothing_and_binds_nothing() {
+        for source in [
+            "declare const missing: number;\n",
+            "declare let missing: number;\n",
+            "declare var missing: number;\n",
+            "declare class Z { n: number }\n",
+            "declare function foo(a: number): void;\n",
+        ] {
+            let compiled = compile(source, 1).unwrap();
+            let body = body_of(&compiled.javascript);
+            assert!(
+                body.trim().chars().all(|c| c == ';'),
+                "{source:?} left {body:?}"
+            );
+            assert!(
+                compiled.declared.is_empty(),
+                "{source:?} declared {:?}",
+                compiled.declared
+            );
+            assert!(
+                !compiled.javascript.contains("__pane_cell.s("),
+                "{source:?} generated a capture: {}",
+                compiled.javascript
+            );
+            for (original, erased) in source.lines().zip(body.lines()) {
+                assert_eq!(
+                    original.chars().count(),
+                    erased.chars().count(),
+                    "a line changed width: {original:?} -> {erased:?}"
+                );
+            }
+        }
     }
 
     /// The rewrite is the one thing that could move a column, so it is

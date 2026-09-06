@@ -294,6 +294,7 @@ fn run(args: SessionArgs) -> Result<(), String> {
         glasshouse: &glasshouse,
         id: &session_id,
         memory: &memory,
+        token: invoke::CancellationToken::new(),
     };
     let outcome = drive(&args, &session, &mut transcript, &mut rollout);
 
@@ -317,6 +318,11 @@ fn run(args: SessionArgs) -> Result<(), String> {
 /// against; there is no owned field here that a later call could replace.
 struct Session<'a> {
     project: &'a ProjectConfig,
+    /// The token every tool call in this session is cancellable through
+    /// (`Runtime::with_token`). Nothing sets it yet: the `SIGINT` handler that
+    /// does is the follow-up after the isolate fix, so today it is plumbing
+    /// that makes a cancelled call a §5 `Cancelled` throw the moment it exists.
+    token: invoke::CancellationToken,
     profile: &'a Profile,
     glasshouse: &'a Glasshouse,
     id: &'a SessionId,
@@ -482,7 +488,8 @@ fn run_task(
         .record_turn(Role::User, task)
         .map_err(|e| format!("could not record the user turn: {e}"))?;
 
-    let mut runtime = Runtime::new(session.profile, session.glasshouse, session.id);
+    let mut runtime = Runtime::new(session.profile, session.glasshouse, session.id)
+        .with_token(session.token.clone());
     let mut budget = TaskBudget::new();
     let mut final_turn = false;
 

@@ -192,10 +192,19 @@ pub(crate) fn size_estimate(scope: &mut v8::PinScope, value: v8::Local<v8::Value
 /// One element's contribution, measured without recursing: an array of
 /// arrays is not walked, because walking it would be the payload cost this
 /// whole module exists to not pay.
+///
+/// **An array is measured by its own `length`, never by its property names.**
+/// `get_own_property_names` on an array of 200,000 elements allocates 200,000
+/// names, and this function's one caller runs immediately after a heap-limit
+/// termination — the moment there is least to allocate from.
 fn element_estimate(scope: &mut v8::PinScope, value: v8::Local<v8::Value>) -> u64 {
     if value.is_string() {
         let string: v8::Local<v8::String> = value.try_into().expect("is_string");
         return string.length() as u64 * 2;
+    }
+    if value.is_array() {
+        let array: v8::Local<v8::Array> = value.try_into().expect("is_array");
+        return 32 + array.length() as u64 * 8;
     }
     if value.is_object() {
         let object: v8::Local<v8::Object> = value.try_into().expect("is_object");

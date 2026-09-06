@@ -21,26 +21,38 @@
 
 use std::ffi::c_void;
 use std::rc::Rc;
-use std::sync::Once;
-use std::sync::atomic::Ordering;
-use std::time::Instant;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Condvar, Mutex, Once, PoisonError};
+use std::time::{Duration, Instant};
 
 use crate::contract::SessionId;
 use crate::glasshouse::Glasshouse;
 use crate::runtime::bindings;
 use crate::runtime::cell::{self, CellError, CompiledCell, LINE_OFFSET};
-use crate::runtime::handles;
+use crate::runtime::handles::{self, HandleMeta};
 use crate::runtime::marshal;
 use crate::runtime::outcome::{CellOutcome, CellOutcomeKind, CellRecord, CellTurn, HandleRecord};
 use crate::runtime::preview::{self, ErrorValue, StackFrame, Value};
 use crate::runtime::state::{HeapGuard, RuntimeState};
 use crate::sandbox::profile::Profile;
+use crate::tools::invoke::CancellationToken;
 
 /// The isolate's heap ceiling until `pane.toml` supplies one — 61F owns the
 /// setting, `runtime-contract.md` §7 says so, and this is the default it
 /// takes until then. Crossing it fails the **cell** with
 /// `RuntimeOutOfMemory`; it never frees a handle (§2).
 pub const DEFAULT_HEAP_LIMIT_BYTES: usize = 256 * 1024 * 1024;
+
+/// How long one cell may occupy the session before the runtime stops it —
+/// the same shape as [`DEFAULT_HEAP_LIMIT_BYTES`], and 61F owns the
+/// configurable value.
+///
+/// It exists because `while (true) {}` allocates nothing, so the heap
+/// ceiling never sees it: without a wall clock a cell that computes forever
+/// takes the whole session with it and no later cell ever runs. Thirty
+/// seconds is far longer than any cell measured here and far shorter than a
+/// person waiting on a hung session.
+pub const DEFAULT_CELL_WALL_CLOCK_LIMIT: Duration = Duration::from_secs(30);
 
 /// How many microtask checkpoints a cell gets before its promise is declared
 /// unsettleable. One drains the whole queue, including jobs the queue's own
@@ -93,6 +105,7 @@ pub struct Runtime {
     isolate: v8::OwnedIsolate,
     state: Rc<RuntimeState>,
     heap: Rc<HeapGuard>,
+    wall_clock_limit: Duration,
 }
 
 impl Runtime {
@@ -125,10 +138,37 @@ impl Runtime {
         session: &SessionId,
         heap_limit_bytes: usize,
     ) -> Self {
+        Self::with_limits(
+            profile,
+            glasshouse,
+            session,
+            heap_limit_bytes,
+            DEFAULT_CELL_WALL_CLOCK_LIMIT,
+        )
+    }
+
+    /// Both ceilings explicitly, so a test can reach the timeout path
+    /// without waiting out the default.
+    pub fn with_limits(
+        profile: &Profile,
+        glasshouse: &Glasshouse,
+        session: &SessionId,
+        heap_limit_bytes: usize,
+        wall_clock_limit: Duration,
+    ) -> Self {
         initialize_v8();
         let mut isolate =
             v8::Isolate::new(v8::CreateParams::default().heap_limits(0, heap_limit_bytes));
         isolate.set_microtasks_policy(v8::MicrotasksPolicy::Explicit);
+        // `Atomics.wait` blocks inside V8 where an interrupt may never land,
+        // so the watchdog is not the answer to it: this line is, and measured
+        // it is sufficient on its own — with both globals present, the
+        // verifier's cell throws `TypeError: Atomics.wait cannot be called in
+        // this context` at the model's own line in 665 µs. The bootstrap
+        // deletes the two globals as well, because a single-threaded isolate
+        // with no workers has nothing to share memory with and because
+        // `the_isolate_has_no_ambient_authority` can then enumerate them.
+        isolate.set_allow_atomics_wait(false);
 
         let heap = HeapGuard::new();
         let _ = heap.isolate.set(isolate.thread_safe_handle());
@@ -158,7 +198,22 @@ impl Runtime {
             isolate,
             state,
             heap,
+            wall_clock_limit,
         }
+    }
+
+    /// The token every tool call this runtime makes becomes cancellable
+    /// through — a builder, so [`Runtime::new`]'s signature is unchanged and
+    /// a caller that has nothing to cancel goes on writing what it wrote.
+    ///
+    /// A cancelled call is `runtime-contract.md` §5's throw, class
+    /// `Cancelled`, in the turn slot a yield would have used. Setting the
+    /// token widens nothing and starts nothing: `tools::invoke` either
+    /// returns before a child exists or kills one that does.
+    #[must_use]
+    pub fn with_token(self, token: CancellationToken) -> Self {
+        *self.state.token.borrow_mut() = token;
+        self
     }
 
     /// The number of the cell that ran last; 0 before the first.
@@ -205,6 +260,7 @@ impl Runtime {
             }
         }
         self.state.table.borrow_mut().end_task();
+        self.state.forget_calls();
     }
 
     /// Runs one cell and answers with what it produced.
@@ -216,18 +272,40 @@ impl Runtime {
     pub fn run_cell(&mut self, source: &str) -> CellOutcome {
         let started = Instant::now();
         let cell = self.state.begin_cell();
+        // A hit the previous cell did not consume — one raised while its own
+        // previews were being taken — is not this cell's reason for stopping.
+        self.heap.take_hit();
 
         let compiled = match cell::compile(source, cell) {
             Ok(compiled) => compiled,
             Err(error) => {
                 let value = compile_error_value(&error);
-                return self.finish(cell, source, started, Ending::Threw(value));
+                return self.finish(cell, source, started, Ending::Threw(value), Stopped::none());
             }
         };
 
+        let watchdog = Watchdog::arm(self.heap.isolate.get().cloned(), self.wall_clock_limit);
         let ending = self.execute(&compiled);
+        // Both halves are read here, before anything below allocates: taking
+        // a preview can itself raise the heap callback, and a hit raised by
+        // the runtime's own bookkeeping is not why the cell stopped.
+        let stopped = Stopped {
+            timed_out: watchdog.disarm(),
+            heap_hit: self.heap.take_hit(),
+        };
+        // Unconditionally, and it is not tidiness. Until a termination is
+        // cancelled every V8 call below it bails out, so the previews would
+        // stay the ones the declaration lines took and the out-of-memory list
+        // would rank by them. Unconditional because the watchdog can also
+        // fire in the instant between `execute` returning and `disarm` taking
+        // the lock: the cell ends normally and a termination nobody asked for
+        // is left pending on the isolate, which the *next* cell would run
+        // into. A cancel with nothing pending is a no-op that returns false.
+        self.isolate.cancel_terminate_execution();
+
         self.forget_freed();
-        self.finish(cell, source, started, ending)
+        self.refresh_previews();
+        self.finish(cell, source, started, ending, stopped)
     }
 
     /// Everything that happens inside the isolate, so every V8 handle is
@@ -319,10 +397,13 @@ impl Runtime {
         };
         match promise.state() {
             v8::PromiseState::Fulfilled => {
-                if self.state.current.borrow().fell_off_the_end {
+                let value = promise.result(try_catch);
+                // §1's two endings, decided by the value rather than by a
+                // flag: the generated body ends `return __pane_cell.e()`, and
+                // only the host can mint what that answers with.
+                if bindings::is_end_marker(try_catch, value, self.state.cell.get()) {
                     Ending::Yielded
                 } else {
-                    let value = promise.result(try_catch);
                     Ending::Returned(marshal::marshal(try_catch, value))
                 }
             }
@@ -360,8 +441,80 @@ impl Runtime {
         }
     }
 
+    /// Takes every live capture's preview again from the value the name
+    /// holds now that the cell has ended.
+    ///
+    /// `capture()` marshals where `s(…)` runs, which is the end of the
+    /// declaration's line — so `const arr = []; arr.push(1,2,3,4,5)` showed
+    /// the model `n=0` for an array of five, and the `RuntimeOutOfMemory`
+    /// list ranked the array that filled the heap last, at `~0 B`, because
+    /// it was empty when it was declared. §3's preview is of the handle, and
+    /// §2's five largest are the five largest now.
+    ///
+    /// The persistent scope is where the value is read from: `capture()` has
+    /// already put every captured name on the global object, so this needs no
+    /// handle of its own and reads exactly what the next cell will see. The
+    /// epilogue's own re-capture covers the same ground for a binding the
+    /// `finally` can reach; this is what covers a `class`, a `keep`, and the
+    /// two endings where the `finally` never runs at all.
+    fn refresh_previews(&mut self) {
+        let names: Vec<String> = self
+            .state
+            .current
+            .borrow()
+            .captures
+            .iter()
+            .map(|capture| capture.name.clone())
+            .collect();
+        if names.is_empty() {
+            return;
+        }
+        let state = self.state.clone();
+        let mut refreshed: Vec<(String, Value, HandleMeta)> = Vec::with_capacity(names.len());
+        {
+            v8::scope!(let handle_scope, &mut self.isolate);
+            let context = v8::Local::new(handle_scope, &self.context);
+            let scope = &mut v8::ContextScope::new(handle_scope, context);
+            let global = context.global(scope);
+            for name in names {
+                let Some(key) = v8::String::new(scope, &name) else {
+                    continue;
+                };
+                // A name the scope no longer has keeps the preview it had:
+                // replacing it with `undefined` would report a handle the
+                // table still lists as having lost its value.
+                if global.has(scope, key.into()) != Some(true) {
+                    continue;
+                }
+                let Some(value) = global.get(scope, key.into()) else {
+                    continue;
+                };
+                let (preview, meta) = bindings::preview_of(scope, &state, value);
+                refreshed.push((name, preview, meta));
+            }
+        }
+        let mut current = state.current.borrow_mut();
+        for (name, preview, meta) in refreshed {
+            if let Some(capture) = current
+                .captures
+                .iter_mut()
+                .find(|capture| capture.name == name)
+            {
+                capture.value = preview;
+                capture.meta = meta;
+            }
+        }
+    }
+
     /// Turns a cell's ending into the turn the session loop reads.
-    fn finish(&mut self, cell: u64, source: &str, started: Instant, ending: Ending) -> CellOutcome {
+    fn finish(
+        &mut self,
+        cell: u64,
+        source: &str,
+        started: Instant,
+        ending: Ending,
+        stopped: Stopped,
+    ) -> CellOutcome {
         let captures = std::mem::take(&mut self.state.current.borrow_mut().captures);
         for capture in captures {
             self.state.table.borrow_mut().declare_with(
@@ -372,8 +525,20 @@ impl Runtime {
             );
         }
 
+        // After the captures are in the table, because both of these read it:
+        // the out-of-memory list names the five largest live handles, and a
+        // timeout's own message promises the cell's bindings are still there.
         let ending = match ending {
-            Ending::Terminated => Ending::Threw(self.out_of_memory()),
+            Ending::Terminated if stopped.heap_hit => Ending::Threw(self.out_of_memory()),
+            Ending::Terminated if stopped.timed_out => {
+                Ending::Threw(timed_out(started.elapsed(), self.wall_clock_limit))
+            }
+            // Neither: nothing else in this crate terminates execution, so
+            // this is reported as what it is rather than as one of the two.
+            Ending::Terminated => Ending::Threw(plain_error(
+                "RuntimeTerminated",
+                "the isolate was terminated before the cell finished",
+            )),
             other => other,
         };
 
@@ -418,7 +583,7 @@ impl Runtime {
             // future ending cannot silently become a yield.
             Ending::Terminated => CellOutcome::Threw {
                 error: plain_error(
-                    "RuntimeOutOfMemory",
+                    "RuntimeTerminated",
                     "the isolate was terminated before the cell finished",
                 ),
                 turn,
@@ -431,8 +596,6 @@ impl Runtime {
     /// explicit that a handle vanishing under a program that still names it
     /// is the one failure that would make the channel untrustworthy.
     fn out_of_memory(&mut self) -> ErrorValue {
-        self.heap.take_hit();
-        self.isolate.cancel_terminate_execution();
         let table = self.state.table.borrow();
         let largest = table.largest(5);
         let listed = if largest.is_empty() {
@@ -462,9 +625,122 @@ enum Ending {
     Yielded,
     Returned(Value),
     Threw(ErrorValue),
-    /// V8 stopped the cell: the heap ceiling, and nothing else in this
-    /// package terminates execution.
+    /// V8 stopped the cell. [`Stopped`] says which of the two ceilings did
+    /// it, because the model is told a different thing by each.
     Terminated,
+}
+
+/// Which ceiling stopped the cell, read the instant it stopped.
+///
+/// Both flags are consumed once, before any of the bookkeeping that follows
+/// a cell allocates: taking a preview can raise the heap callback itself,
+/// and a hit raised there would report a timeout as an out-of-memory.
+#[derive(Debug, Clone, Copy)]
+struct Stopped {
+    heap_hit: bool,
+    timed_out: bool,
+}
+
+impl Stopped {
+    /// A cell that never reached V8 — one that did not compile.
+    fn none() -> Self {
+        Self {
+            heap_hit: false,
+            timed_out: false,
+        }
+    }
+}
+
+/// The wall clock, as one thread per cell.
+///
+/// It holds a clone of the isolate's `IsolateHandle` — the same `Send` handle
+/// the near-heap-limit callback uses — waits on a condition variable for the
+/// cell to finish, and calls `terminate_execution` if the wait times out
+/// first. The condition variable rather than a sleep loop is what makes
+/// [`Watchdog::disarm`] return immediately for the overwhelming majority of
+/// cells, which finish in milliseconds.
+struct Watchdog {
+    done: Arc<(Mutex<bool>, Condvar)>,
+    fired: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Watchdog {
+    fn arm(isolate: Option<v8::IsolateHandle>, limit: Duration) -> Self {
+        let done = Arc::new((Mutex::new(false), Condvar::new()));
+        let fired = Arc::new(AtomicBool::new(false));
+        let thread = isolate.map(|isolate| {
+            let done = Arc::clone(&done);
+            let fired = Arc::clone(&fired);
+            std::thread::spawn(move || {
+                let (lock, finished) = &*done;
+                let guard = lock.lock().unwrap_or_else(PoisonError::into_inner);
+                let (done, timeout) = finished
+                    .wait_timeout_while(guard, limit, |done| !*done)
+                    .unwrap_or_else(PoisonError::into_inner);
+                if timeout.timed_out() && !*done {
+                    // Ordered before the terminate so the flag is visible to
+                    // `disarm`, which cannot run until this thread releases
+                    // the lock it is still holding.
+                    fired.store(true, Ordering::SeqCst);
+                    isolate.terminate_execution();
+                }
+            })
+        });
+        Self {
+            done,
+            fired,
+            thread,
+        }
+    }
+
+    /// Stops the watch and answers whether it fired.
+    fn disarm(mut self) -> bool {
+        self.stop();
+        self.fired.load(Ordering::SeqCst)
+    }
+
+    /// Tells the thread the cell finished and waits for it to notice.
+    /// Idempotent, so [`Watchdog::disarm`] and the `Drop` below can both run.
+    fn stop(&mut self) {
+        {
+            let (lock, finished) = &*self.done;
+            *lock.lock().unwrap_or_else(PoisonError::into_inner) = true;
+            finished.notify_all();
+        }
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+/// A panic between arming and disarming would otherwise leave a thread that
+/// terminates whatever the isolate is running when its deadline arrives —
+/// which, by then, is a later cell.
+impl Drop for Watchdog {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// The `RuntimeTimeout` a stopped cell is answered with.
+///
+/// It is a throw and not a runtime error for the reason §5 gives for every
+/// other one: the bindings the cell completed are in the table, the session
+/// is intact, and the model gets the next turn to decide what to do about it.
+fn timed_out(elapsed: Duration, limit: Duration) -> ErrorValue {
+    ErrorValue {
+        class: "RuntimeTimeout".to_string(),
+        message: format!(
+            "the cell ran for {} ms without finishing and was stopped at pane's wall-clock limit \
+             of {} ms; nothing was freed and the bindings it completed are still live",
+            elapsed.as_millis(),
+            limit.as_millis()
+        ),
+        line: None,
+        column: None,
+        stack: Vec::new(),
+    }
 }
 
 fn plain_error(class: &str, message: &str) -> ErrorValue {
