@@ -600,8 +600,9 @@ old seven-job `ci.yml` stays `workflow_dispatch` and can be deleted.
 hosted runner — and `--windows-vm` remains the only Windows-ARM64 run besides
 the `windows-11-arm` cell.
 
-**Five build rules. Each is a defect measured on 2026-09-05 (`efdf3ea`; the
-numbers and the findings are in `docs/process/handoff.md`, that date):**
+**Six build rules. The first five are defects measured on 2026-09-05 (`efdf3ea`;
+the numbers and the findings are in `docs/process/handoff.md`, that date); the
+sixth is four reds of one shape on 2026-09-06:**
 
 1. **Never set `RUSTFLAGS`.** Warnings are denied by `[workspace.lints.rust]`,
    identically for every invocation. `RUSTFLAGS` is part of cargo's
@@ -630,6 +631,14 @@ numbers and the findings are in `docs/process/handoff.md`, that date):**
 5. **`--scoped` is a tier, not the gate.** Lints plus `blast-radius.sh`,
    macOS-only, refuses platform legs, and prints a NOTE that it is not a CI
    prediction. Run it in the loop; run the full gate before any push claim.
+6. **pane's Windows test compile is verified only by the `pane (windows-latest)`
+   cell.** `rusty_v8` wants MSVC, so `blast-radius.sh`'s windows-gnu check
+   cannot build pane's tests, and `cargo check --tests -p pane --target
+   x86_64-pc-windows-msvc` does not build on this host either (`ring`'s C
+   build refuses the target; tried once, 2026-09-06). A `cfg`-gated test's
+   helpers and imports are gated **by reading** before a merge ask — dead is an
+   error under `-D warnings` — and the cell is the check. Four sweep reds of
+   exactly this shape in the week to 2026-09-06 (`b67b66c` is the last).
 
 Measured, so nobody re-measures: cold, three platforms, from a wiped tree,
 **2371s**; warm macOS **≈300s**, of which ≈175s is 136 test binaries run one
