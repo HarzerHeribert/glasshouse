@@ -161,6 +161,7 @@ fn assistant_reply(text: &str) -> String {
 /// provider always sends and the gateway tests never need, so this stays a
 /// separate builder rather than a change to [`assistant_reply`] that every
 /// other fixture in this file would inherit.
+#[cfg(unix)] // its only callers are the two unix-gated usage tests; dead on Windows otherwise
 fn assistant_reply_with_usage(text: &str, input_tokens: u64, output_tokens: u64) -> String {
     serde_json::json!({
         "role": "assistant",
@@ -212,6 +213,7 @@ fn ending_reply() -> String {
 }
 
 /// [`ending_reply`], with a `usage` object attached.
+#[cfg(unix)] // its only callers are the two unix-gated usage tests; dead on Windows otherwise
 fn ending_reply_with_usage(input_tokens: u64, output_tokens: u64) -> String {
     assistant_reply_with_usage("```pane\nreturn 1;\n```", input_tokens, output_tokens)
 }
