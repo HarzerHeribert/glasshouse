@@ -152,7 +152,17 @@ fn every_registered_tool_has_exactly_one_declaration_and_no_other_does() {
     assert_eq!(declared, registered);
 
     let tools: Vec<&Tool> = registry::ALL.iter().collect();
-    let system = prompt::render_system("", &tools);
+    let system = prompt::render_system(
+        "",
+        &tools,
+        &prompt::SessionFacts {
+            root: "/tmp/x".to_string(),
+            writable: Vec::new(),
+            command_patterns: 0,
+            all_commands: false,
+            network: false,
+        },
+    );
 
     assert_eq!(
         system.matches("declare function ").count(),

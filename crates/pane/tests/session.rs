@@ -1074,9 +1074,14 @@ fn the_system_block_is_render_systems_own_bytes() {
         String::from_utf8_lossy(&output.stderr)
     );
 
+    // The facts are built from a profile compiled exactly as the binary
+    // compiles it, through `session_facts` itself: a second spelling here
+    // would be the very drift this test exists to catch.
+    let profile = pane::sandbox::profile::Profile::compile(&root, None);
     let expected = pane::prompt::render_system(
         "PROJECT-INSTRUCTION-ONE",
         &pane::tools::registry::ALL.iter().collect::<Vec<_>>(),
+        &pane::session::session_facts(&profile),
     );
 
     let bodies = bodies.lock().unwrap();
@@ -2726,4 +2731,218 @@ mod interrupts {
         no_spinner_survives("bgstub");
         no_spinner_survives("bgstubfg");
     }
+}
+
+// ---------------------------------------------------------------------
+// The three ways a session used to die, and the flag that opens the grant
+// (the primary's fixes of 2026-09-06, from a real run against a strict
+// gateway). Each test reproduces the failure through the built binary.
+// ---------------------------------------------------------------------
+
+/// Drives the binary as a REPL rather than with `--task`: `inputs` are piped
+/// one per line, exactly as a person types them.
+fn run_session_stdin(
+    root: &Path,
+    rollout: &Path,
+    session_id: &str,
+    inputs: &[&str],
+    base_url: &str,
+    glasshouse: Option<&Path>,
+    yolo: bool,
+) -> std::process::Output {
+    use std::process::Stdio;
+    let mut command = Command::new(env!("CARGO_BIN_EXE_pane"));
+    command
+        .arg("session")
+        .arg("--root")
+        .arg(root)
+        .arg("--rollout")
+        .arg(rollout)
+        .arg("--session")
+        .arg(session_id)
+        .env("ANTHROPIC_BASE_URL", base_url)
+        .env_remove("ANTHROPIC_AUTH_TOKEN")
+        .env_remove("ANTHROPIC_API_KEY")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    if yolo {
+        command.arg("--yolo");
+    }
+    if let Some(glasshouse) = glasshouse {
+        command.arg("--glasshouse").arg(glasshouse);
+    }
+    let mut child = command.spawn().unwrap();
+    {
+        let stdin = child.stdin.as_mut().unwrap();
+        for line in inputs {
+            writeln!(stdin, "{line}").unwrap();
+        }
+    }
+    child.wait_with_output().unwrap()
+}
+
+/// A blank line is the commonest keystroke in a REPL, and it used to compose
+/// a message with no content — which a gateway enforcing the Messages shape
+/// answers `400` to, killing the task. It must not reach the provider at all.
+#[test]
+fn a_blank_input_is_not_a_turn_and_never_reaches_the_provider() {
+    let root = scratch_dir("blank-input-root");
+    let rollout = root.join("rollout.jsonl");
+    let absent = root.join("no-such-glasshouse");
+    // One reply, because exactly one of the four inputs is a turn.
+    let (base_url, bodies) = start_fake_provider(vec![ending_reply()]);
+
+    let output = run_session_stdin(
+        &root,
+        &rollout,
+        "sess-blank",
+        &["", "   ", "\t", "hi"],
+        &base_url,
+        Some(&absent),
+        false,
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 1, "only `hi` is a turn; three blanks are not");
+    let request: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
+    let messages = request["messages"].as_array().unwrap();
+    for message in messages {
+        let text: String = message["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|block| block["text"].as_str().unwrap_or_default())
+            .collect();
+        assert!(
+            !text.trim().is_empty(),
+            "no message may be empty; got {message}"
+        );
+    }
+}
+
+/// An empty reply used to be appended to the conversation and replayed on
+/// every later request, so one of them turned the whole task into a stream of
+/// `400`s. It must end that task instead — and the REPL must survive it, or a
+/// person loses the session to one bad turn.
+#[test]
+fn an_empty_reply_ends_its_task_without_ending_the_session() {
+    let root = scratch_dir("empty-reply-root");
+    let rollout = root.join("rollout.jsonl");
+    let absent = root.join("no-such-glasshouse");
+    // Turn one is answered with an empty message; turn two, a fresh task, is
+    // answered normally. Two requests prove the REPL lived through the first.
+    let (base_url, bodies) = start_fake_provider(vec![assistant_reply(""), ending_reply()]);
+
+    let output = run_session_stdin(
+        &root,
+        &rollout,
+        "sess-empty-reply",
+        &["first task", "second task"],
+        &base_url,
+        Some(&absent),
+        false,
+    );
+    assert!(
+        output.status.success(),
+        "the session must survive an empty reply; stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("empty reply"),
+        "the person is told why the task ended; stdout: {stdout}"
+    );
+
+    let bodies = bodies.lock().unwrap();
+    assert_eq!(bodies.len(), 2, "the second task was still attempted");
+    // The decisive assertion: the empty reply is nowhere in the second
+    // request. Appending it is what poisoned every later turn.
+    let second: serde_json::Value = serde_json::from_str(&bodies[1]).unwrap();
+    for message in second["messages"].as_array().unwrap() {
+        let text: String = message["content"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|block| block["text"].as_str().unwrap_or_default())
+            .collect();
+        assert!(
+            !text.trim().is_empty(),
+            "the empty assistant turn must not be replayed; got {message}"
+        );
+    }
+}
+
+/// `--yolo` is the person widening their own grant at session start, and the
+/// model is told so in the same breath: a grant it cannot see is a grant it
+/// plans around by failing.
+#[test]
+fn yolo_grants_every_command_line_and_the_system_block_says_so() {
+    let root = scratch_dir("yolo-root");
+    fs::write(root.join("CLAUDE.md"), "PROJECT").unwrap();
+    let rollout = root.join("rollout.jsonl");
+    let absent = root.join("no-such-glasshouse");
+    let (base_url, bodies) = start_fake_provider(vec![ending_reply()]);
+
+    let output = run_session_stdin(
+        &root,
+        &rollout,
+        "sess-yolo",
+        &["go"],
+        &base_url,
+        Some(&absent),
+        true,
+    );
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let bodies = bodies.lock().unwrap();
+    let request: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
+    let system = request["system"].as_str().unwrap();
+    assert!(
+        system.contains("every command line is admitted"),
+        "system block must state the yolo grant; got:\n{system}"
+    );
+    assert!(
+        system.contains("There is no write tool and no edit tool"),
+        "the model must be told the tool set has no writer; got:\n{system}"
+    );
+}
+
+/// Without `--yolo` and without a settings document the sandbox grants
+/// nothing, and the system block must say that rather than leave the model to
+/// discover it one `PermissionDenied` at a time.
+#[test]
+fn without_a_grant_the_system_block_says_no_command_may_run() {
+    let root = scratch_dir("nogrant-root");
+    let rollout = root.join("rollout.jsonl");
+    let absent = root.join("no-such-glasshouse");
+    let (base_url, bodies) = start_fake_provider(vec![ending_reply()]);
+
+    let output = run_session_stdin(
+        &root,
+        &rollout,
+        "sess-nogrant",
+        &["go"],
+        &base_url,
+        Some(&absent),
+        false,
+    );
+    assert!(output.status.success());
+
+    let bodies = bodies.lock().unwrap();
+    let request: serde_json::Value = serde_json::from_str(&bodies[0]).unwrap();
+    let system = request["system"].as_str().unwrap();
+    assert!(
+        system.contains("no command may be run at all"),
+        "got:\n{system}"
+    );
 }

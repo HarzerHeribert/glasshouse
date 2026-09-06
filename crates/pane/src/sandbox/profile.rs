@@ -581,6 +581,19 @@ impl Profile {
         Ok(())
     }
 
+    /// Whether a bare `Bash` grant admits every command line.
+    ///
+    /// **Derived from the compiled profile, never from the caller's
+    /// intention.** A session tells the model what its sandbox permits, and a
+    /// flag asking for a grant is not the same fact as a profile holding one:
+    /// a settings document that failed to parse, or a `--yolo` that never
+    /// reached the compiler, would otherwise be described to the model as an
+    /// open grant it does not have. Bare `Bash` is stored as the pattern `*`
+    /// (see the `"Bash"` arm above), which is the whole of this answer.
+    pub fn admits_every_command(&self) -> bool {
+        self.command_allow.iter().any(|pattern| pattern == "*")
+    }
+
     /// The second question of §2: may `tool` touch `path` for `access`, and
     /// **which path was that**?
     ///

@@ -43,13 +43,73 @@ pub fn exhausted_preamble(reason: ExhaustedReason) -> &'static str {
     }
 }
 
+/// What this particular session is, as the model needs to know it.
+///
+/// **The invariant: every field here is a fact the model cannot derive from
+/// the preamble and would otherwise discover by failing.** A model that does
+/// not know the tool set has no writer spends its turns asking `bash` to do
+/// it and reading `PermissionDenied`; a model that does not know which
+/// commands are admitted cannot tell a refusal it caused from one the person
+/// configured. Observed 2026-09-06: a session spent six cells rediscovering
+/// exactly these two facts and then returned a stub.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionFacts {
+    /// The project root every relative path resolves against.
+    pub root: String,
+    /// `Write`/`Edit` globs the compiled profile actually holds.
+    pub writable: Vec<String>,
+    /// How many `Bash(...)` patterns are admitted, ignored when
+    /// [`SessionFacts::all_commands`] is set.
+    pub command_patterns: usize,
+    /// Every command line is admitted — a bare `Bash` grant, which is what
+    /// `--yolo` synthesises.
+    pub all_commands: bool,
+    /// Whether the sandbox grants network access.
+    pub network: bool,
+}
+
+/// §1's *This session* block: the facts above, rendered.
+///
+/// Pure in its argument, so the golden test that pins the binary's system
+/// bytes can build the same string without running a session.
+pub fn render_session_facts(facts: &SessionFacts) -> String {
+    let writable = if facts.writable.is_empty() {
+        "nothing is writable".to_string()
+    } else {
+        format!("writable: {}", facts.writable.join(", "))
+    };
+    let commands = if facts.all_commands {
+        "every command line is admitted".to_string()
+    } else if facts.command_patterns == 0 {
+        "no command may be run at all".to_string()
+    } else {
+        format!(
+            "{} command pattern(s) admitted",
+            facts.command_patterns
+        )
+    };
+    format!(
+        "## This session\n\nThe project root is {root}. Relative paths resolve against it.\n\n\
+         There is no write tool and no edit tool. The tools above are the whole set, so a\n\
+         file is changed by running a command through `bash` — `cat > f <<'EOF' … EOF` and\n\
+         `python3 - <<'EOF' … EOF` are the usual shapes. Check the command you intend is\n\
+         admitted before you build a plan on it.\n\n\
+         Sandbox: {writable}; {commands}; network: {network}. Anything outside that throws\n\
+         PermissionDenied, which is final — no cell widens a grant, so a refusal means\n\
+         choose another route or say plainly that the grant forbids it.",
+        root = facts.root,
+        network = if facts.network { "yes" } else { "no" },
+    )
+}
+
 /// §1's system block: the preamble, one declaration per tool in `tools`'
-/// order, then the project's own instructions.
-pub fn render_system(instructions: &str, tools: &[&Tool]) -> String {
+/// order, this session's own facts, then the project's own instructions.
+pub fn render_system(instructions: &str, tools: &[&Tool], facts: &SessionFacts) -> String {
     let rendered: Vec<String> = tools.iter().map(|tool| render_declaration(tool)).collect();
     format!(
-        "{PREAMBLE}\n\n## Tools\n\n{}\n\n{instructions}",
-        rendered.join("\n\n")
+        "{PREAMBLE}\n\n## Tools\n\n{}\n\n{}\n\n{instructions}",
+        rendered.join("\n\n"),
+        render_session_facts(facts)
     )
 }
 

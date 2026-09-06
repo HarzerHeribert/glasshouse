@@ -374,6 +374,19 @@ pub struct SessionArgs {
     /// its own fake script so no test performs a real `PATH` lookup.
     #[arg(long)]
     pub glasshouse: Option<PathBuf>,
+
+    /// Grant the whole project root and every command line, ignoring
+    /// `.claude/settings.json`.
+    ///
+    /// **This is the person widening their own grant at session start, which
+    /// is the only widening `sandbox-grants.md` §1.1 permits** — it is a flag
+    /// on the command that starts the session, never something a cell can
+    /// reach, ask for or set. It compiles a synthesised settings document
+    /// rather than adding a second way to build a profile, so §4's
+    /// never-grantable set still applies: a debugger is refused under
+    /// `--yolo` exactly as it is without it.
+    #[arg(long)]
+    pub yolo: bool,
 }
 
 /// Parses `args` (everything after `pane session`) and runs it.
@@ -401,14 +414,50 @@ fn default_rollout_path(root: &std::path::Path) -> PathBuf {
 /// Map line 2448 fixes what is loaded, not how it is joined; everything from
 /// the preamble outwards is `prompt`'s, whose own golden test pins it byte for
 /// byte, so there is no second spelling of the contract here to drift from it.
-fn build_system_prompt(project: &ProjectConfig) -> String {
+fn build_system_prompt(project: &ProjectConfig, profile: &Profile) -> String {
     let instructions = project
         .instructions
         .iter()
         .map(|(_, text)| text.as_str())
         .collect::<Vec<_>>()
         .join("\n\n");
-    prompt::render_system(&instructions, &registry::ALL.iter().collect::<Vec<_>>())
+    prompt::render_system(
+        &instructions,
+        &registry::ALL.iter().collect::<Vec<_>>(),
+        &session_facts(profile),
+    )
+}
+
+/// The compiled profile, as the model needs to read it.
+///
+/// **The invariant: this reports the profile that is actually in force, never
+/// the one the configuration asked for.** It is built from `Profile`'s own
+/// accessors for that reason — a settings document that failed to parse
+/// grants nothing, and a model told otherwise would plan against grants it
+/// does not have.
+///
+/// `pub` so `tests/session.rs`'s byte-equality test can build the same facts
+/// the binary did rather than spelling them a second time — the same reason
+/// that test calls [`prompt::render_system`] instead of quoting its output.
+pub fn session_facts(profile: &Profile) -> prompt::SessionFacts {
+    let mut writable: Vec<String> = profile
+        .rules()
+        .filter(|rule| rule.write())
+        .flat_map(|rule| rule.glob().to_vec())
+        .collect();
+    writable.sort();
+    writable.dedup();
+    prompt::SessionFacts {
+        root: profile.root().display().to_string(),
+        writable,
+        command_patterns: profile.command_pattern_count(),
+        // Not `args.yolo`: the flag is a request, the profile is the grant.
+        // A mutation that stopped `--yolo` reaching the compiler survived
+        // while this read the flag, because the model was still told the
+        // grant was open (2026-09-06).
+        all_commands: profile.admits_every_command(),
+        network: profile.grants_network(),
+    }
 }
 
 fn message_text(message: &Message) -> String {
@@ -527,7 +576,7 @@ fn run(args: SessionArgs) -> Result<(), String> {
     // for the session's life. `.claude/` lives inside the writable project
     // root, so a profile recomputed mid-session would let a program widen
     // its own sandbox by editing the file it was derived from.
-    let profile = compile_profile_once(&project);
+    let profile = compile_profile_once(&project, args.yolo);
 
     let rollout_path = args
         .rollout
@@ -554,7 +603,7 @@ fn run(args: SessionArgs) -> Result<(), String> {
             .map_err(|e| format!("could not resume {}: {e}", rollout_path.display()))?
     } else {
         Conversation {
-            system: build_system_prompt(&project),
+            system: build_system_prompt(&project, &profile),
             messages: Vec::new(),
         }
     };
@@ -653,7 +702,16 @@ fn drive(
     let stdin = io::stdin();
     for line in stdin.lock().lines() {
         let line = line.map_err(|e| e.to_string())?;
-        process_input(&line, session, transcript, rollout)?;
+        // **A failed input ends that input, not the session.** A REPL that
+        // exits on the first upstream error loses the whole conversation to
+        // one 400 or one dropped connection, which is what a person watching
+        // reads as "it crashed"; `--task` above still propagates, because a
+        // scripted one-shot has nobody to report to but its exit code.
+        // Observed 2026-09-06: one empty message made a gateway answer 400
+        // and the session ended mid-task.
+        if let Err(message) = process_input(&line, session, transcript, rollout) {
+            println!("{message}");
+        }
     }
     Ok(())
 }
@@ -671,6 +729,15 @@ fn process_input(
     transcript: &mut Transcript,
     rollout: &mut Rollout,
 ) -> Result<(), String> {
+    // **Blank input is not a turn.** A message with no content is not a
+    // message: the Anthropic shape requires content, tool calls or reasoning
+    // blocks, and a gateway that enforces it answers 400 and the task dies.
+    // A bare Enter is the commonest keystroke in a REPL, so this guard is
+    // what stops it ending the session. Observed 2026-09-06 at `messages.0`
+    // and again at `messages.13`.
+    if input.trim().is_empty() {
+        return Ok(());
+    }
     if let Some(rest) = input.strip_prefix('/') {
         let (name, argument) = split_command(rest);
         answer_command(rest, name, argument, session);
@@ -855,6 +922,20 @@ fn run_task(
             .map_err(|e| format!("request failed: {e}"))?;
         let estimate = estimate_request_tokens(&transcript.conversation);
         let assistant_text = message_text(&turn.message);
+        // **An empty reply is never appended.** A message with no content is
+        // not a message, and appending one poisons the conversation for the
+        // whole task: every later request replays it, and a gateway that
+        // enforces the shape answers 400 to all of them, so one empty reply
+        // becomes a task that can no longer make any request at all. Ending
+        // here loses this turn; appending loses the session. Observed
+        // 2026-09-06: `messages.13` empty, then 400 on every retry.
+        if assistant_text.trim().is_empty() {
+            return Err(
+                "the model returned an empty reply; the task ends here rather than repeating it \
+                 on every later request"
+                    .to_string(),
+            );
+        }
         transcript.conversation.messages.push(turn.message);
         write_turn(session.interrupt, rollout, Role::Assistant, &assistant_text)
             .map_err(|e| format!("could not record the assistant turn: {e}"))?;
@@ -1291,8 +1372,16 @@ fn answer_memory(glasshouse: &Glasshouse, memory: &LocalMemory, argument: Option
 /// `pane session` that produces a `Profile` and it prints as it does so, a
 /// second compilation would print a second line, and
 /// `tests/tools.rs::the_profile_is_built_once_per_session` counts them.
-fn compile_profile_once(project: &ProjectConfig) -> Profile {
-    let profile = Profile::from_project(project);
+fn compile_profile_once(project: &ProjectConfig, yolo: bool) -> Profile {
+    let profile = if yolo {
+        println!(
+            "sandbox: --yolo — the project root and every command line are granted; \
+             .claude/settings.json is ignored and the never-grantable set still applies"
+        );
+        Profile::compile(&project.root, Some(&yolo_settings(&project.root)))
+    } else {
+        Profile::from_project(project)
+    };
     println!(
         "sandbox: profile compiled once for this session -- {} path rule(s), {} command \
          pattern(s), network: {}",
@@ -1308,6 +1397,20 @@ fn compile_profile_once(project: &ProjectConfig) -> Profile {
         println!("sandbox: {diagnostic}");
     }
     profile
+}
+
+/// The settings document `--yolo` compiles instead of the project's own.
+///
+/// **The invariant: this is an ordinary settings document and nothing else.**
+/// `--yolo` adds no grant kind and no bypass inside `Profile`, so every rule
+/// the compiler already enforces — §4's never-grantable set above all — is
+/// enforced here identically. `Bash` bare is the spec's own "every command
+/// line admitted"; the three path patterns are the project root's closure.
+fn yolo_settings(root: &std::path::Path) -> String {
+    let root = root.display().to_string().replace('\\', "\\\\");
+    format!(
+        r#"{{"permissions":{{"allow":["Read({root}/**)","Write({root}/**)","Edit({root}/**)","Bash"]}}}}"#
+    )
 }
 
 /// The rest of a `/tool …` line, or `None` for any other slash command.
