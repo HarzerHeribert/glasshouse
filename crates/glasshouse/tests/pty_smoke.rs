@@ -3543,6 +3543,104 @@ fn a_direct_provider_profile_reaches_a_real_child_and_only_that_child() {
     );
 }
 
+/// Map line 488, end to end through the shipped binary: a credential variable
+/// a configured provider reads from, exported in the shell that runs
+/// `glasshouse launch`, never reaches the harness child — while an unmentioned
+/// sibling variable planted the same way does, so the absence is a removal and
+/// not a dump that happened to show nothing.
+///
+/// This is the dogfooding finding of 2026-09-06 replayed with a placeholder:
+/// `[providers.<name>] credential_env = ["<VAR>"]` in the user config, `<VAR>`
+/// set in the launching environment, a native Claude Code launch, and the
+/// harness reporting its own environment. Nothing here builds a
+/// `HarnessLaunch`; the strip under test is the production launch command's.
+/// On failure only variable *names* and non-environment lines are printed —
+/// never a value, because the dump also carries the test runner's own shell.
+#[test]
+fn a_configured_providers_credential_never_reaches_the_launched_harness() {
+    const CREDENTIAL_VAR: &str = "GLASSHOUSE_TEST_PROVIDER_KEY";
+    const CREDENTIAL_VALUE: &str = "placeholder-glasshouse-pty-smoke-never-a-real-key";
+    const CONTROL_VAR: &str = "GLASSHOUSE_TEST_PROVIDER_STRIP_CONTROL";
+    const CONTROL_VALUE: &str = "control-variable-survived";
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path().join("proj");
+    std::fs::create_dir_all(project_dir.join(".git")).expect("create project");
+    let bin_dir = tmp.path().join("bin");
+    let state_dir = tmp.path().join("state");
+    let config_dir = tmp.path().join("config");
+    for dir in [&bin_dir, &state_dir, &config_dir] {
+        std::fs::create_dir_all(dir).expect("create dir");
+    }
+
+    let harness = install_env_dump_harness(&bin_dir, "env-dump-launch-strip");
+    // TOML needs its backslashes escaped, which matters only on Windows but
+    // is harmless everywhere.
+    let toml_path = harness.display().to_string().replace('\\', "\\\\");
+    std::fs::write(
+        config_dir.join("config.toml"),
+        format!(
+            "version = 1\n\n\
+             [integrations.claude-code]\nenabled = true\nexecutable = \"{toml_path}\"\n\n\
+             [providers.pty-smoke-strip]\ntemplate = \"openrouter\"\n\
+             credential_env = [\"{CREDENTIAL_VAR}\"]\n"
+        ),
+    )
+    .expect("write user config");
+
+    // Wide enough that no value this test plants can be wrapped by the
+    // pseudo-terminal and read back truncated.
+    let command = TerminalCommand::new(env!("CARGO_BIN_EXE_glasshouse"), tmp.path())
+        .arg("--scope")
+        .arg(&project_dir)
+        .arg("--data-dir")
+        .arg(&state_dir)
+        .arg("--config-dir")
+        .arg(&config_dir)
+        .arg("launch")
+        .arg("claude-code")
+        .env(CREDENTIAL_VAR, CREDENTIAL_VALUE)
+        .env(CONTROL_VAR, CONTROL_VALUE)
+        .size(TerminalSize::new(24, 400));
+    let mut session = Session::spawn(command);
+    let status = session.wait_for_exit();
+    let output = strip_terminal_sequences(&session.output());
+
+    // Diagnostic material that is safe to print: the names the harness
+    // reported, and every line that is not a `KEY=value` pair.
+    let names: Vec<&str> = output
+        .lines()
+        .filter_map(|line| line.trim_end_matches('\r').split_once('='))
+        .map(|(name, _)| name)
+        .collect();
+    let other_lines: Vec<&str> = output
+        .lines()
+        .filter(|line| !line.contains('=') && !line.trim().is_empty())
+        .collect();
+    assert!(
+        status.success(),
+        "`glasshouse launch claude-code` reported: {status}\n--- non-environment output ---\n{}\n--- names printed ---\n{names:?}",
+        other_lines.join("\n")
+    );
+    assert_eq!(
+        dumped_env_values(&output, CONTROL_VAR),
+        [CONTROL_VALUE],
+        "the control variable never reached the harness, so this dump proves nothing.\n\
+         --- non-environment output ---\n{}\n--- names printed ---\n{names:?}",
+        other_lines.join("\n")
+    );
+    assert!(
+        dumped_env_values(&output, CREDENTIAL_VAR).is_empty(),
+        "the configured provider's credential variable reached the harness child \
+         (value withheld from this message).\n--- names printed ---\n{names:?}"
+    );
+    assert!(
+        !output.contains(CREDENTIAL_VALUE),
+        "the placeholder credential value appeared in the launched session's output \
+         (value withheld from this message)"
+    );
+}
+
 /// An embedded session answers the cursor-position query itself.
 ///
 /// This is the rule `session::attach` inverts. `attach` is a pass-through and

@@ -158,3 +158,14 @@ State: **COMPLETE — decided-out**, ruled 2026-09-06 by the orchestrator under 
 
 Limits: no behaviour is verified; the box records that the input the line depends on is not Glasshouse's to produce. It comes back off the day Glasshouse ever holds or rewrites a session's history, which the design refuses — that package cites this entry in its Phase −1.
 
+
+
+---
+
+### Lines 1170 and 1175 — closed 2026-09-06 on mechanisms that already existed
+
+State: **COMPLETE** for both — `GH-PROVE-IT-BATCH-2` (Sonnet, Green, tests only; report `.agent-runtime/report-prove-it-batch-2.md`); the census had found no register row and no evidence line for either, and the primary traced the producers on 2026-09-06.
+
+**1170 — prefer continuing a relevant native session when its contextual value outweighs the cost of rehydrating it.** Production: `routing/session/reserve.rs:246`, the *switching and bootstrap cost* contribution the session router scores every candidate with — strictly worse for a fresh candidate that must bootstrap than for the session that stays. Test: `interactive_score_terms::a_candidate_needing_a_bootstrap_carries_switching_and_bootstrap_cost_and_it_moves_the_ranking` (existing; `stay` wins over `bootstrap` at equal contextual value, and the term is what moves the ranking). The other half — `fresh` over a bloated cold session — is 1594's (`phase-37.md`).
+
+**1175 — allow a fresh session to bootstrap from a checkpoint when a huge cold native session is no longer attractive.** Production: `glasshouse launch --from-checkpoint <id|latest>` (`cli.rs`; `commands/launch.rs`, `commands/resume.rs :: resolve_bootstrap_prompt`, Phase 40). Test: `handoff_lines::a_checkpoint_bootstraps_a_fresh_session_under_a_different_harness_through_the_shipped_binary` (existing; the shipped binary under a pty: a checkpoint saved from a source session, a fresh session started from it under another harness, and the source session's harness, lifecycle, presentation and native id unchanged — neither resumed nor closed). Limit: *when* to prefer this is the router's `fresh` recommendation (1594, 1170) and the user's invocation; the line asks only that it be allowed.

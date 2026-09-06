@@ -608,6 +608,75 @@ fn doctor_report_includes_project_identity_and_never_panics() {
     assert!(report.contains("Problems"));
 }
 
+/// Map line 488: a configured provider whose key is only in this process's
+/// environment is one the harness and its hooks cannot see, and `doctor`
+/// says so on its own line, naming the variable and the fix — never the
+/// value. The variable is planted with a placeholder and removed again.
+#[test]
+fn doctor_names_an_environment_only_provider_credential_the_harness_cannot_see() {
+    use clap::Parser;
+
+    const VAR: &str = "GLASSHOUSE_DOCTOR_TEST_ENV_ONLY_KEY";
+    const VALUE: &str = "placeholder-doctor-test-never-a-real-key";
+
+    let data = tempfile::tempdir().unwrap();
+    let workspace = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(workspace.path().join(".git")).unwrap();
+    std::fs::write(
+        data.path().join("config.toml"),
+        format!(
+            "version = 1\n\n[providers.env-only]\ntemplate = \"openrouter\"\ncredential_env = \
+             [\"{VAR}\"]\n"
+        ),
+    )
+    .unwrap();
+
+    let cli = crate::Cli::try_parse_from([
+        "glasshouse",
+        "--data-dir",
+        data.path().to_str().unwrap(),
+        "--config-dir",
+        data.path().to_str().unwrap(),
+    ])
+    .unwrap();
+    let runtime = crate::bootstrap(&cli, workspace.path()).unwrap();
+
+    assert!(
+        std::env::var_os(VAR).is_none(),
+        "test setup: {VAR} is already set"
+    );
+    // SAFETY: a name unique to this test, removed again before any assertion
+    // can panic, so no other test observes it.
+    unsafe {
+        std::env::set_var(VAR, VALUE);
+    }
+    let report = doctor_report(&runtime);
+    unsafe {
+        std::env::remove_var(VAR);
+    }
+
+    let line = report
+        .lines()
+        .find(|line| line.contains("map line 488"))
+        .unwrap_or_else(|| panic!("no map line 488 notice in the report:\n{report}"));
+    assert!(
+        line.contains(VAR),
+        "the notice must name the variable: {line}"
+    );
+    assert!(
+        line.contains("environment only") && line.contains("hooks it runs"),
+        "the notice must say who cannot see it: {line}"
+    );
+    assert!(
+        line.contains(&store_credential_instruction(VAR)),
+        "the notice must give the store instruction: {line}"
+    );
+    assert!(
+        !report.contains(VALUE),
+        "the report leaked the placeholder value (value withheld from this message)"
+    );
+}
+
 /// `doctor` is where an adapter's declarations become visible to a user,
 /// and so it is the production caller that keeps them from being a
 /// write-only data structure.

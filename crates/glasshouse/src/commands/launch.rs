@@ -1739,6 +1739,11 @@ pub(crate) fn launch_session(
     {
         launch = launch.env_remove(var);
     }
+    // Map line 488: a configured provider's credential stays inside the
+    // Glasshouse process — exactly the names the configuration's providers
+    // read from are removed, never a guess list of well-known variables, and
+    // before the overlay applies so its own `env` of the same name wins.
+    let launch = launch.without_provider_credentials(&effective);
     // The overlay is the only thing that may put its own arguments or
     // environment onto the launch — see `LaunchOverlay::apply`'s doc.
     let launch = overlay.apply(launch);

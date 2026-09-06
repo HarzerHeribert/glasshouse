@@ -150,9 +150,11 @@ Failure/isolation evidence:
 - Mutation: deleting `self.flag_contradictions(&mut scored)?;` from `search()`
   killed the first test above (`left: Active, right: Conflicted`).
 
-### Phase 20 lines 828 and 829 — still open, and deliberately not faked
+### Phase 20 lines 828 and 829 — closed 2026-09-06 on the rule the extraction prompt carries, with its limit stated
 
-State: NOT STARTED, blocked on a judgement the storage layer cannot make.
+State: **COMPLETE** — `GH-PROVE-IT-BATCH-2` (Sonnet, Green, tests only; report `.agent-runtime/report-prove-it-batch-2.md`), ruled by the primary on 2026-09-06 (`refusal-register.md`, *Rulings on the census's sixteen disputed rows*). The mechanism Glasshouse has for *what to store* is the extraction model's judgement under `memory::extract::schema::PROMPT_CONTRACT`, whose one sentence carries both lines: *"Emit only what a future agent working on this project would need and could not cheaply rediscover by reading the code"* — the negative clause is 828, the positive clause is 829. Tests: `memory_extract_schema::the_recorded_prompt_carries_the_contract_the_schema_and_the_activity` (extended: the sentence is asserted on the prompt the model actually received through `Extractor::run`); `memory_extract_schema::a_rediscoverable_source_fact_the_prompt_asks_to_omit_is_still_accepted_by_the_validator` (a well-formed memory that is an obvious source fact is stored, not refused). **Limit, and it is the whole point:** the rule is the model's to follow; Glasshouse pins that it is asked, never that it is obeyed — the keyword heuristic that would "enforce" it was refused because it refuses real memories and admits fake ones (the register's standing ruling, unchanged). The section below is the record of that refusal and stays as written.
+
+State before 2026-09-06: NOT STARTED, blocked on a judgement the storage layer cannot make.
 
 *"Do not store obvious source-code facts when rereading the source is cheaper"*
 and *"prefer storing information whose rediscovery would require significant

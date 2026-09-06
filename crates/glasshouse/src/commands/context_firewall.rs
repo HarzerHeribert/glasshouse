@@ -76,7 +76,25 @@ pub(crate) fn context_firewall_hook(
             .value
     });
     let active_reducer = match &user {
-        Some(user) => disposable_reducer(runtime, user, project.as_ref(), &event.session_id),
+        Some(user) => {
+            let reducer = disposable_reducer(runtime, user, project.as_ref(), &event.session_id);
+            // Map line 488, said out loud where a person can read it: hooks
+            // run with logging off, so a reducer lost to a withheld
+            // credential is one stderr line here, names only. Fail-open and
+            // the exit code are unchanged.
+            if reducer.is_none()
+                && let Some(notice) = reducer_credential_notice(
+                    user,
+                    project.as_ref(),
+                    &glasshouse::secret::native::PreferNativeSecretStore::detect(),
+                )
+            {
+                eprintln!(
+                    "glasshouse: warning: the context-firewall reducer is not running: {notice}"
+                );
+            }
+            reducer
+        }
         None => None,
     };
     let tool_query = glasshouse::firewall::adapter::tool_query(&event.tool_input);
@@ -629,6 +647,49 @@ fn record_context_firewall_expansion(runtime: &Runtime, found_tool: Option<&str>
 /// refuses [`glasshouse::routing::disposable::JobKind::ContextReduction`]
 /// for every matching candidate, which is this line's own per-entitlement
 /// job-kind rule applying unchanged.
+/// Map line 488's notice for this hook: the configured reducer's provider —
+/// named directly, or through the entitlement `reducer` names — when its
+/// credential resolves through neither `secrets` nor the native store.
+/// `None` for no reducer, for a `local:` tool (it has no credential), and
+/// when the credential resolves. Names only, never a value.
+pub(crate) fn reducer_credential_notice(
+    user: &UserConfig,
+    project: Option<&ProjectConfig>,
+    secrets: &dyn glasshouse::secret::SecretStore,
+) -> Option<String> {
+    use crate::commands::routing_classification::{
+        withheld_credential_notice, withheld_provider_credentials,
+    };
+
+    let effective = EffectiveConfig::new(user, project);
+    let reducer_ref = effective.context_firewall_reducer().value?;
+    if reducer_ref.starts_with("local:") {
+        return None;
+    }
+    let provider = if effective.provider_names().contains(&reducer_ref) {
+        reducer_ref
+    } else {
+        project
+            .and_then(|p| {
+                p.entitlements()
+                    .iter()
+                    .find(|(name, _)| *name == reducer_ref)
+            })
+            .or_else(|| {
+                user.entitlements()
+                    .iter()
+                    .find(|(name, _)| *name == reducer_ref)
+            })
+            .and_then(|(_, entitlement)| entitlement.provider())?
+            .to_owned()
+    };
+    withheld_credential_notice(&withheld_provider_credentials(
+        &effective,
+        secrets,
+        Some(&provider),
+    ))
+}
+
 fn disposable_reducer(
     runtime: &Runtime,
     user: &UserConfig,

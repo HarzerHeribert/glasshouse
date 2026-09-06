@@ -997,11 +997,11 @@ fn start_session(
     }
     let mut launch = HarnessLaunch::new(selection.into_executable(), app_runtime.project())
         .args(args)
-        .size(size);
-    // Map line 1973: the same scrub `main.rs::launch_session` applies —
-    // without it the child inherits every configured entitlement's
-    // credential variable from this process's environment, not only the one
-    // serving this session.
+        .size(size)
+        .without_provider_credentials(&effective);
+    // Map lines 1973 and 488: the scrubs `launch_session` applies — the child
+    // inherits neither another entitlement's credential variable from this
+    // process's environment nor any configured provider's.
     let entitlement =
         match effective.entitlement_for(launch_profile.harness, &launch_profile.backend) {
             Ok(entitlement) => entitlement,
@@ -1124,11 +1124,10 @@ fn resume_session(
     // `NotLive` here only means the entry was already gone.
     let _ = live.close(&resumable.id);
 
-    // Map line 1973, on the resume path — the same scrub `start_session`
-    // applies above, for the same reason: the resumed child must not inherit
-    // every configured entitlement's credential variable. The record's own
-    // launch profile, with the same Native fallback, resolved before
-    // `selection` is consumed below.
+    // Map lines 1973 and 488 on the resume path — the same scrubs
+    // `start_session` applies above. The record's own launch profile, with
+    // the same Native fallback, resolved before `selection` is consumed
+    // below.
     let resume_profile = record
         .launch_profile
         .as_deref()
@@ -1149,7 +1148,8 @@ fn resume_session(
         };
     let mut launch = HarnessLaunch::new(selection.into_executable(), app_runtime.project())
         .args(args)
-        .size(size);
+        .size(size)
+        .without_provider_credentials(&effective);
     for var in effective.foreign_entitlement_credential_vars(entitlement.as_ref().map(|e| e.name()))
     {
         launch = launch.env_remove(var);

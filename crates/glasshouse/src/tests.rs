@@ -1052,6 +1052,180 @@ fn a_failed_extraction_is_reported_with_its_trigger_and_its_reason() {
     );
 }
 
+/// Map line 488's consequence for the extraction hook, said out loud: a
+/// configured provider whose credential resolves from neither the hook's
+/// environment nor the native store is named — provider and variable — on
+/// the one stderr line the hook has, with the store instruction, and a
+/// provider whose credential does resolve produces no notice and no value
+/// anywhere. Built through the production seams (`withheld_provider_credentials`,
+/// `noting_withheld_credentials`, `lost_extraction_notice`) against the
+/// environment store alone, so no keychain and no network is touched.
+#[test]
+fn a_withheld_provider_credential_is_named_by_the_extraction_notice_and_never_its_value() {
+    use glasshouse::config::{EffectiveConfig, UserConfig};
+
+    const VAR: &str = "GLASSHOUSE_TEST_WITHHELD_KEY";
+    const SET_VAR: &str = "GLASSHOUSE_TEST_WITHHELD_SET_KEY";
+    const VALUE: &str = "hunter2-placeholder-never-a-real-key";
+    assert!(
+        std::env::var_os(VAR).is_none(),
+        "test setup: {VAR} is already set"
+    );
+
+    let user: UserConfig = toml::from_str(&format!(
+        "version = 1\n\n[providers.withheld]\ntemplate = \"openrouter\"\ncredential_env = \
+         [\"{VAR}\"]\n"
+    ))
+    .expect("user config");
+    let effective = EffectiveConfig::new(&user, None);
+    let secrets = glasshouse::secret::EnvironmentSecretStore::new();
+
+    let withheld = crate::commands::routing_classification::withheld_provider_credentials(
+        &effective, &secrets, None,
+    );
+    assert_eq!(
+        withheld.len(),
+        1,
+        "one configured provider, one withheld credential"
+    );
+    assert_eq!(withheld[0].provider, "withheld");
+    assert_eq!(withheld[0].vars, [VAR.to_owned()]);
+
+    let model = crate::commands::memory_extraction::noting_withheld_credentials(
+        Box::new(crate::commands::memory_extraction::NoExtractionModel),
+        &withheld,
+    );
+    let mut outcome = recorded_nothing();
+    outcome.model = model.describe();
+    outcome.failure = Some(glasshouse::memory::extract::ExtractionFailure::Model(
+        glasshouse::memory::ModelError::Unavailable,
+    ));
+    let notice = crate::commands::memory_extraction::lost_extraction_notice("stop", Some(&outcome))
+        .expect("an unavailable model is a lost memory");
+    assert!(
+        notice.contains(VAR),
+        "the notice must name the variable: {notice}"
+    );
+    assert!(
+        notice.contains("provider `withheld`"),
+        "the notice must name the provider: {notice}"
+    );
+    assert!(
+        notice.contains("map line 488") && notice.contains("hooks it runs"),
+        "the notice must say what Glasshouse withholds and from whom: {notice}"
+    );
+    assert!(
+        notice.contains(&glasshouse::integrations::store_credential_instruction(VAR)),
+        "the notice must give the store instruction: {notice}"
+    );
+
+    // A provider whose credential resolves — through either of its two
+    // variables — is not withheld, so nothing is said and no value is read.
+    let user: UserConfig = toml::from_str(&format!(
+        "version = 1\n\n[providers.resolving]\ntemplate = \"openrouter\"\ncredential_env = \
+         [\"{VAR}\", \"{SET_VAR}\"]\n"
+    ))
+    .expect("user config");
+    let effective = EffectiveConfig::new(&user, None);
+    // SAFETY: a name unique to this test, removed again before any assertion
+    // can panic, so no other test observes it.
+    unsafe {
+        std::env::set_var(SET_VAR, VALUE);
+    }
+    let withheld = crate::commands::routing_classification::withheld_provider_credentials(
+        &effective, &secrets, None,
+    );
+    unsafe {
+        std::env::remove_var(SET_VAR);
+    }
+    assert!(
+        withheld.is_empty(),
+        "a resolving credential is not withheld"
+    );
+    assert!(
+        crate::commands::routing_classification::withheld_credential_notice(&withheld).is_none()
+    );
+    let untouched = crate::commands::memory_extraction::noting_withheld_credentials(
+        Box::new(crate::commands::memory_extraction::NoExtractionModel),
+        &withheld,
+    );
+    assert!(!untouched.describe().contains(VALUE));
+    assert!(
+        !notice.contains(VALUE),
+        "value leaked (withheld from this message)"
+    );
+}
+
+/// The context-firewall hook's half of the same notice: the configured
+/// reducer's provider — named directly or through an entitlement — is
+/// reported when its credential is withheld; a `local:` reducer and an
+/// absent reducer say nothing. Through `reducer_credential_notice`, the
+/// hook's own seam, against the environment store alone.
+#[test]
+fn the_firewall_reducer_notice_names_the_withheld_variable_and_never_a_value() {
+    use glasshouse::config::UserConfig;
+
+    const VAR: &str = "GLASSHOUSE_TEST_REDUCER_WITHHELD_KEY";
+    assert!(
+        std::env::var_os(VAR).is_none(),
+        "test setup: {VAR} is already set"
+    );
+    let secrets = glasshouse::secret::EnvironmentSecretStore::new();
+    let providers = format!(
+        "[providers.reducer-provider]\ntemplate = \"openrouter\"\ncredential_env = [\"{VAR}\"]\n"
+    );
+
+    let direct: UserConfig = toml::from_str(&format!(
+        "version = 1\n\n{providers}\n[context_firewall]\nreducer = \"reducer-provider\"\n"
+    ))
+    .expect("user config");
+    let notice =
+        crate::commands::context_firewall::reducer_credential_notice(&direct, None, &secrets)
+            .expect("a withheld reducer credential is reported");
+    assert!(
+        notice.contains(VAR),
+        "the notice must name the variable: {notice}"
+    );
+    assert!(
+        notice.contains("provider `reducer-provider`") && notice.contains("map line 488"),
+        "the notice must name the provider and the rule: {notice}"
+    );
+    assert!(
+        notice.contains(&glasshouse::integrations::store_credential_instruction(VAR)),
+        "the notice must give the store instruction: {notice}"
+    );
+
+    let via_entitlement: UserConfig = toml::from_str(&format!(
+        "version = 1\n\n{providers}\n[entitlements.support]\nprovider = \
+         \"reducer-provider\"\n\n[context_firewall]\nreducer = \"support\"\n"
+    ))
+    .expect("user config");
+    let notice = crate::commands::context_firewall::reducer_credential_notice(
+        &via_entitlement,
+        None,
+        &secrets,
+    )
+    .expect("an entitlement's provider is resolved to its credential");
+    assert!(notice.contains(VAR), "{notice}");
+
+    let local: UserConfig = toml::from_str(&format!(
+        "version = 1\n\n{providers}\n[context_firewall]\nreducer = \"local:summarise\"\n"
+    ))
+    .expect("user config");
+    assert!(
+        crate::commands::context_firewall::reducer_credential_notice(&local, None, &secrets)
+            .is_none(),
+        "a local tool has no credential to withhold"
+    );
+    let none: UserConfig =
+        toml::from_str(&format!("version = 1\n\n{providers}")).expect("user config");
+    assert!(
+        crate::commands::context_firewall::reducer_credential_notice(&none, None, &secrets)
+            .is_none(),
+        "no reducer, no notice"
+    );
+}
+
 /// A session with no activity has no memory to have lost, and a warning
 /// here would fire on every compaction of a session that had not done
 /// anything yet.

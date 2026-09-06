@@ -54,12 +54,12 @@ the authoritative specification and tracks what is done.
 <!-- progress:start -->
 ## Progress
 
-`█████████████████████████████████████░░░` **1331 closed** · **89 active committed open** (93%)
+`█████████████████████████████████████░░░` **1338 closed** · **82 active committed open** (94%)
 
 Separately tracked, and not release-blocking: **0 deferred gate criteria** (Phase 52, Phase 53) awaiting a decision, and **229 parked experimental lines** under Maybe / Experimental.
 
 <details>
-<summary>Per-phase breakdown (90 of 110 active phases complete)</summary>
+<summary>Per-phase breakdown (94 of 110 active phases complete)</summary>
 
 | Phase | Done |
 |---|---|
@@ -83,7 +83,7 @@ Separately tracked, and not release-blocking: **0 deferred gate criteria** (Phas
 | Phase 9D — Built-in provider templates | 14/14 ✅ |
 | Phase 9E — Secret storage | 13/13 ✅ |
 | Phase 9F — Direct provider launch profiles | 13/13 ✅ |
-| Phase 9G — Glasshouse local gateway process | 18/19 |
+| Phase 9G — Glasshouse local gateway process | 19/19 ✅ |
 | Phase 9H — Sticky gateway routing for harness-backed interactive sessions | 13/14 |
 | Phase 9I — Free-pool routing | 14/14 ✅ |
 | Phase 9J — Harness-model pairing model | 20/20 ✅ |
@@ -94,12 +94,12 @@ Separately tracked, and not release-blocking: **0 deferred gate criteria** (Phas
 | Phase 12 — Unified lifecycle event bus | 8/8 ✅ |
 | Phase 13 — Direct session messaging | 7/7 ✅ |
 | Phase 14 — Orchestrator role | 11/11 ✅ |
-| Phase 15 — Orchestrator wake-up flow | 7/8 |
+| Phase 15 — Orchestrator wake-up flow | 8/8 ✅ |
 | Phase 16 — Worker transparency | 7/7 ✅ |
 | Phase 17 — cmux optional integration | 10/10 ✅ |
 | Phase 18 — Raw event recording | 10/10 ✅ |
 | Phase 19 — Portable session checkpoints | 14/14 ✅ |
-| Phase 20 — Minimal durable project memory | 16/18 |
+| Phase 20 — Minimal durable project memory | 18/18 ✅ |
 | Phase 21 — Memory extraction | 13/13 ✅ |
 | Phase 21A — Memory authority classes | 12/12 ✅ |
 | Phase 21B — Decision provenance and assumptions | 11/11 ✅ |
@@ -121,9 +121,9 @@ Separately tracked, and not release-blocking: **0 deferred gate criteria** (Phas
 | Phase 28 — File-aware memory lookup | 5/5 ✅ |
 | Phase 29 — Memory commits | 8/8 ✅ |
 | Phase 30 — Session context metadata | 8/8 ✅ |
-| Phase 31 — Compaction-aware behavior | 5/7 |
+| Phase 31 — Compaction-aware behavior | 7/7 ✅ |
 | Phase 32 — Resource registry | 12/12 ✅ |
-| Phase 32A — Unified quota and capacity model | 19/21 |
+| Phase 32A — Unified quota and capacity model | 20/21 |
 | Phase 32B — Quota telemetry sources | 14/14 ✅ |
 | Phase 32C — Subscription capacity estimation | 11/12 |
 | Phase 32D — Normalized remaining-capacity score | 11/12 |

@@ -198,8 +198,11 @@ pub(super) fn spawn_session(
             .map(|arg| arg.to_string_lossy().into_owned()),
     );
 
-    let launch =
-        HarnessLaunch::new(selection.executable().clone(), runtime.project()).args(launch_args);
+    // Map line 488: the same strip `launch_session` applies — a configured
+    // provider's credential stays inside the Glasshouse process.
+    let launch = HarnessLaunch::new(selection.executable().clone(), runtime.project())
+        .args(launch_args)
+        .without_provider_credentials(&effective);
 
     // Line 1125's context-selection step, between the spawn and the task.
     // Run here — before the runtime lock, and only when there is a task to

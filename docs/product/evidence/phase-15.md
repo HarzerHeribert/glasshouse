@@ -61,3 +61,14 @@ distinction 740 needs — and which `memory/extract/lifecycle.rs:187` also reads
 request carries it, the client sets it, `SessionApi` stops hard-wiring it. Note
 it is an *attribution* boundary, not a security one — same user, peer-credential
 checked — so a caller that lies is out of scope.
+
+
+---
+
+### Line 740 — closed 2026-09-06: the wake-up does not close, lock or mark read-only the worker it reports on
+
+State: **COMPLETE** — `GH-PROVE-IT-BATCH-2` (Sonnet, Green, tests only; report `.agent-runtime/report-prove-it-batch-2.md`). The refusal above rested on 745; 745 closed with `GH-WORKER-READ`, and the register's disputed row was re-derived on 2026-09-06 (`refusal-register.md`, *Rulings on the census's sixteen disputed rows*).
+
+Contract: given a worker session whose turn has ended and whose completion has reached the orchestrator through the wake-up flow, when a message is sent to that worker, Glasshouse delivers it and the session is still not closed, while preserving that nothing in the wake-up path mutates the worker's lifecycle.
+
+Production: the `Stop` hook → `watch_worker`'s notification (the fixture of `a_workers_completion_reported_by_a_lifecycle_hook_wakes_the_orchestrator`) → `api/unix/sessions.rs :: send_through_pane` through the JSON door. Test: `worker_wakeup::send_message_still_delivers_to_a_worker_after_its_wake_up_completion` (`--test worker_wakeup`: 10 passed). Green: no mutation owed; the worker's hand-made removal (a stopped worker reported as `closed`) was reverted without a gate run and is not counted. Limit: proves the wake-up path; an explicit `close_session` elsewhere is out of this line's scope.

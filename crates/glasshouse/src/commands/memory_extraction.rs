@@ -35,6 +35,44 @@ impl glasshouse::memory::ExtractionModel for NoExtractionModel {
     }
 }
 
+/// `model`, with map line 488's withheld-credential notice on its
+/// description when `withheld` is non-empty; `model` itself otherwise.
+///
+/// `describe` is what [`glasshouse::memory::ExtractionOutcome::model`]
+/// stores and what [`lost_extraction_notice`] prints for an unavailable
+/// model, so the sentence reaches the one stderr line a hook has without a
+/// second channel. `complete` is delegated untouched.
+pub(crate) fn noting_withheld_credentials(
+    model: Box<dyn glasshouse::memory::ExtractionModel>,
+    withheld: &[crate::commands::routing_classification::WithheldCredential],
+) -> Box<dyn glasshouse::memory::ExtractionModel> {
+    match crate::commands::routing_classification::withheld_credential_notice(withheld) {
+        Some(notice) => Box::new(CredentialWithheld {
+            inner: model,
+            notice,
+        }),
+        None => model,
+    }
+}
+
+struct CredentialWithheld {
+    inner: Box<dyn glasshouse::memory::ExtractionModel>,
+    notice: String,
+}
+
+impl glasshouse::memory::ExtractionModel for CredentialWithheld {
+    fn describe(&self) -> String {
+        format!("{}; {}", self.inner.describe(), self.notice)
+    }
+
+    fn complete(
+        &self,
+        prompt: &glasshouse::memory::extract::Prompt,
+    ) -> Result<String, glasshouse::memory::ModelError> {
+        self.inner.complete(prompt)
+    }
+}
+
 /// How long a hook process will wait for extraction before going on without
 /// it.
 ///
@@ -272,6 +310,20 @@ pub(crate) fn lost_extraction_notice(
         // The one failure that is not a loss.
         if matches!(failure, ExtractionFailure::NothingToExtract) {
             return None;
+        }
+        // An unavailable model is the one failure whose cause is on the
+        // outcome's own description — the routed rationale, and map line
+        // 488's withheld-credential notice when a provider's key resolved
+        // from nowhere this hook can see — so that line says more than the
+        // fixed phrase. Every other failure keeps the fixed phrase alone.
+        if matches!(
+            failure,
+            ExtractionFailure::Model(glasshouse::memory::ModelError::Unavailable)
+        ) {
+            return Some(format!(
+                "memory extraction for `{trigger}` recorded nothing: {failure} ({})",
+                outcome.model
+            ));
         }
         return Some(format!(
             "memory extraction for `{trigger}` recorded nothing: {failure}"

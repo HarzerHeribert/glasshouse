@@ -24,6 +24,7 @@ use std::ffi::OsString;
 use anyhow::Context;
 
 use crate::Project;
+use crate::config::EffectiveConfig;
 use std::path::Path;
 
 use crate::platform::exec::{LaunchKind, ResolvedExecutable};
@@ -196,6 +197,36 @@ impl<'a> HarnessLaunch<'a> {
         let key = key.into();
         self.env_changes.retain(|change| change.key() != &key);
         self.env_changes.push(EnvChange::Remove(key));
+        self
+    }
+
+    /// Strip every configured provider's credential variables from the child.
+    ///
+    /// Invariant (map line 488): a credential Glasshouse's configuration
+    /// reads from the environment stays inside the Glasshouse process — the
+    /// harness child never inherits it. Exactly the names the configured
+    /// providers read their credential from are removed, in sorted order
+    /// with duplicates collapsed: [`crate::provider::Provider::credential_env`]
+    /// as [`EffectiveConfig::configured_provider`] resolves it, which is the
+    /// template's own names when an entry leaves `credential_env` empty. No
+    /// guess list of well-known variables is consulted, so a configuration
+    /// with no providers removes nothing, and an entry that does not resolve
+    /// (unknown template) contributes nothing — nothing can read a credential
+    /// through it either. Values are never read or logged here.
+    ///
+    /// Call this **before** an overlay applies: a later [`HarnessLaunch::env`]
+    /// for the same key wins, which is how the gateway's own address or
+    /// token reaches the child while the raw key does not.
+    pub fn without_provider_credentials(mut self, effective: &EffectiveConfig<'_>) -> Self {
+        let names: std::collections::BTreeSet<String> = effective
+            .provider_names()
+            .iter()
+            .filter_map(|name| effective.configured_provider(name).ok())
+            .flat_map(|provider| provider.value.credential_env)
+            .collect();
+        for name in names {
+            self = self.env_remove(name);
+        }
         self
     }
 
@@ -444,6 +475,169 @@ mod tests {
                 .env_overrides()
                 .iter()
                 .any(|(k, v)| k == "OTHER" && v == "kept")
+        );
+    }
+
+    /// Map line 488: the names a configured provider reads its credential
+    /// from are what gets stripped — the entry's own `credential_env` when it
+    /// gives one, the template's default when it does not — and nothing
+    /// else. Two providers name two variables; a third relies on its
+    /// template; the launch reports all three as removals and no other.
+    #[test]
+    fn configured_provider_credential_names_are_removed_from_the_child() {
+        use crate::config::{ProviderConfig, UserConfig};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let executable = direct_executable(&tmp.path().join("fake-harness"));
+        let (_guard, project) = project_at("proj");
+
+        let mut user = UserConfig::default();
+        let mut alpha = ProviderConfig::new("openrouter");
+        alpha.set_credential_env(vec!["GLASSHOUSE_TEST_A_KEY".to_owned()]);
+        user.providers_mut().set("alpha", alpha);
+        let mut beta = ProviderConfig::new("openrouter");
+        beta.set_credential_env(vec![
+            "GLASSHOUSE_TEST_B_KEY".to_owned(),
+            // Named twice across providers: removed once.
+            "GLASSHOUSE_TEST_A_KEY".to_owned(),
+        ]);
+        user.providers_mut().set("beta", beta);
+        // No `credential_env` of its own: the template's default name is
+        // the one this provider's credential is read from.
+        user.providers_mut()
+            .set("groq", ProviderConfig::new("groq"));
+        let effective = EffectiveConfig::new(&user, None);
+
+        let launch =
+            HarnessLaunch::new(executable, &project).without_provider_credentials(&effective);
+        let command = launch.build_command().expect("safe arguments");
+
+        assert_eq!(
+            command.env_removals(),
+            &[
+                OsString::from("GLASSHOUSE_TEST_A_KEY"),
+                OsString::from("GLASSHOUSE_TEST_B_KEY"),
+                OsString::from("GROQ_API_KEY"),
+            ]
+        );
+        assert!(
+            command.env_overrides().is_empty(),
+            "stripping must not set anything"
+        );
+    }
+
+    /// The ordering half of map line 488: an overlay `env` pushed after the
+    /// strip wins for its key — the gateway hands the child its own value
+    /// under a name a provider also reads — and every other stripped name
+    /// stays stripped.
+    #[test]
+    fn an_overlay_env_after_the_strip_wins_for_its_own_key_only() {
+        use crate::config::{ProviderConfig, UserConfig};
+
+        let tmp = tempfile::tempdir().unwrap();
+        let executable = direct_executable(&tmp.path().join("fake-harness"));
+        let (_guard, project) = project_at("proj");
+
+        let mut user = UserConfig::default();
+        let mut alpha = ProviderConfig::new("openrouter");
+        alpha.set_credential_env(vec![
+            "GLASSHOUSE_TEST_A_KEY".to_owned(),
+            "GLASSHOUSE_TEST_B_KEY".to_owned(),
+        ]);
+        user.providers_mut().set("alpha", alpha);
+        let effective = EffectiveConfig::new(&user, None);
+
+        let launch = HarnessLaunch::new(executable, &project)
+            .without_provider_credentials(&effective)
+            .env("GLASSHOUSE_TEST_A_KEY", "gateway-owned-value");
+        let command = launch.build_command().expect("safe arguments");
+
+        assert_eq!(
+            command.env_removals(),
+            &[OsString::from("GLASSHOUSE_TEST_B_KEY")],
+            "a later env for A_KEY must cancel its removal and nothing else's"
+        );
+        assert_eq!(
+            command.env_overrides(),
+            &[(
+                OsString::from("GLASSHOUSE_TEST_A_KEY"),
+                OsString::from("gateway-owned-value")
+            )]
+        );
+    }
+
+    /// Zero configured providers: the strip is a no-op, so a launch with
+    /// none configured assembles exactly the command it assembled before
+    /// map line 488 was wired.
+    #[test]
+    fn no_configured_providers_strips_nothing() {
+        use crate::config::UserConfig;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let executable = direct_executable(&tmp.path().join("fake-harness"));
+        let (_guard, project) = project_at("proj");
+        let user = UserConfig::default();
+        let effective = EffectiveConfig::new(&user, None);
+
+        let launch =
+            HarnessLaunch::new(executable, &project).without_provider_credentials(&effective);
+        let command = launch.build_command().expect("safe arguments");
+        assert!(command.env_removals().is_empty());
+        assert!(command.env_overrides().is_empty());
+    }
+
+    /// Map line 488 holds only if *every* production site that builds a
+    /// `HarnessLaunch` strips — the first cut wired `launch_session` alone
+    /// and left the shell's two starters, the API's spawn door and
+    /// `resume_session` inheriting the credential. Source scan over the
+    /// files that own those sites: each `HarnessLaunch::new(` in production
+    /// code must be followed by `.without_provider_credentials(` within a
+    /// short window. A test module below a `#[cfg(test)]` marker is skipped;
+    /// the count of sites found is asserted so a scan that sees nothing
+    /// cannot pass.
+    #[test]
+    fn every_production_harness_launch_site_strips_provider_credentials() {
+        const SOURCES: &[(&str, &str)] = &[
+            ("commands/launch.rs", include_str!("commands/launch.rs")),
+            ("commands/resume.rs", include_str!("commands/resume.rs")),
+            ("shell/mod.rs", include_str!("shell/mod.rs")),
+            ("api/unix/sessions.rs", include_str!("api/unix/sessions.rs")),
+        ];
+        const WINDOW: usize = 20;
+        // One per known site: launch_session, resume_session, the shell's
+        // start and embedded resume, the API spawn door.
+        const EXPECTED_SITES: usize = 5;
+
+        let mut sites = 0;
+        let mut unstripped = Vec::new();
+        for (name, source) in SOURCES {
+            let production: Vec<&str> = source
+                .lines()
+                .take_while(|line| line.trim_end() != "#[cfg(test)]")
+                .collect();
+            for (index, line) in production.iter().enumerate() {
+                if line.trim_start().starts_with("//") || !line.contains("HarnessLaunch::new(") {
+                    continue;
+                }
+                sites += 1;
+                let window = &production[index..production.len().min(index + WINDOW)];
+                if !window
+                    .iter()
+                    .any(|line| line.contains(".without_provider_credentials("))
+                {
+                    unstripped.push(format!("{name}:{}", index + 1));
+                }
+            }
+        }
+        assert_eq!(
+            sites, EXPECTED_SITES,
+            "the scan found a different number of production HarnessLaunch::new sites than \
+             it knows about; update EXPECTED_SITES after checking the new site strips"
+        );
+        assert!(
+            unstripped.is_empty(),
+            "production HarnessLaunch sites that do not strip configured provider \
+             credentials (map line 488): {unstripped:?}"
         );
     }
 

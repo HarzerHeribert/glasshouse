@@ -433,6 +433,65 @@ fn a_workers_completion_reported_by_a_lifecycle_hook_wakes_the_orchestrator() {
     );
 }
 
+/// Capability map line 740 — "Preserve the user's ability to enter and
+/// modify a worker session before the orchestrator acts on its result."
+///
+/// The wake-up path (a `Stop` hook reported, the orchestrator woken) must
+/// not itself close, lock or mark the worker read-only: `send_message`
+/// still delivers to it afterward, and `session_state` still reports it
+/// rather than refusing as `NotLive`.
+#[test]
+fn send_message_still_delivers_to_a_worker_after_its_wake_up_completion() {
+    let fixture = Fixture::new();
+    let root = fixture.project_root("alpha");
+    let server = Server::start(&fixture, &root);
+
+    let worker = server.spawn("worker");
+    let orchestrator = server.spawn("orchestrator");
+    wait_for("both harnesses to start", || {
+        fixture.argv(&root, &worker).is_some() && fixture.argv(&root, &orchestrator).is_some()
+    });
+
+    let registered = server.call(serde_json::json!({
+        "op": "watch_worker", "session": worker, "notify": orchestrator,
+    }));
+    assert_eq!(registered["status"], "ok", "{registered}");
+
+    fixture.hook(&root, &worker, "UserPromptSubmit");
+    fixture.hook(&root, &worker, "Stop");
+    wait_for("the orchestrator to be woken", || {
+        fixture
+            .received(&root, &orchestrator)
+            .is_some_and(|text| !completions(&text).is_empty())
+    });
+
+    // The worker's turn has ended and the orchestrator has been notified.
+    // Sending to the worker now must still work: nothing about the wake-up
+    // itself may refuse or lock the session out.
+    const AFTER: &str = "still reachable after the completion";
+    let sent = server.call(serde_json::json!({
+        "op": "send_message", "session": worker, "text": AFTER,
+    }));
+    assert_eq!(
+        sent["status"], "ok",
+        "a send to a worker that just reported completion must not be \
+         refused as not-live: {sent}"
+    );
+
+    let state = server.call(serde_json::json!({ "op": "session_state", "session": worker }));
+    assert_eq!(state["status"], "ok", "{state}");
+    assert_ne!(
+        state["result"]["lifecycle"], "closed",
+        "the wake-up path must not have closed the session: {state}"
+    );
+
+    wait_for("the worker to receive the post-completion message", || {
+        fixture
+            .received(&root, &worker)
+            .is_some_and(|text| text.contains(AFTER))
+    });
+}
+
 /// Line 733: registering interest is a statement about what happens next.
 ///
 /// A watch registered after a worker has already finished a turn must not

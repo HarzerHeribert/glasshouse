@@ -485,7 +485,7 @@ Fixed architectural requirements
 ☑ Use an ephemeral local port by default so multiple Glasshouse instances can coexist.
 ☑ Generate an ephemeral per-instance gateway authentication token for child harnesses.
 ☑ Never expose provider API keys to a child harness when the local gateway can hold the credential itself.
-☐ Keep provider credentials inside the Glasshouse process or secure secret-store boundary.
+☑ Keep provider credentials inside the Glasshouse process or secure secret-store boundary.
 ☑ Expose an Anthropic Messages-compatible ingress for gateway-backed Claude Code profiles when implemented.
 ☑ Expose an OpenAI Responses-compatible ingress for gateway-backed Codex profiles when implemented.
 ☑ Expose an OpenAI Chat-compatible ingress for compatible disposable jobs and harnesses when implemented.
@@ -737,7 +737,7 @@ Phase 15 — Orchestrator wake-up flow
 ☑ Include the worker session ID, harness, lifecycle result, and concise result summary in the completion notification.
 ☑ Allow the orchestrator to inspect the worker directly after receiving the notification.
 ☑ Avoid waking the orchestrator repeatedly for duplicate completion events.
-☐ Preserve the user’s ability to enter and modify a worker session before the orchestrator acts on its result.
+☑ Preserve the user’s ability to enter and modify a worker session before the orchestrator acts on its result.
 
 Phase 16 — Worker transparency
 
@@ -825,8 +825,8 @@ Fixed architectural requirements
 ☑ Support at least the statuses active, superseded, rejected, resolved, needs_review, and invalidated.
 ☑ Do not store raw conversation filler as project memory.
 ☑ Do not store temporary step-by-step plans as durable project memory unless they become an accepted project constraint or decision.
-☐ Do not store obvious source-code facts when rereading the source is cheaper and more reliable than maintaining the memory.
-☐ Prefer storing information whose rediscovery would require significant exploration or reasoning.
+☑ Do not store obvious source-code facts when rereading the source is cheaper and more reliable than maintaining the memory.
+☑ Prefer storing information whose rediscovery would require significant exploration or reasoning.
 
 Phase 21 — Memory extraction
 
@@ -1167,12 +1167,12 @@ Phase 30 — Session context metadata
 Phase 31 — Compaction-aware behavior
 
 ☑ Never compact a session solely because its prompt cache is estimated to be cold.
-☐ Prefer continuing a relevant native session when its contextual value outweighs the cost of rehydrating it.
+☑ Prefer continuing a relevant native session when its contextual value outweighs the cost of rehydrating it.
 ☑ Prefer creating or refreshing a portable checkpoint before intentional compaction when practical.
 ☑ Prefer compaction at semantic task boundaries over arbitrary elapsed-time boundaries.
 ☑ Allow the native harness to perform its own compaction mechanism rather than replacing it with a Glasshouse-specific history format.
 ☑ Record enough pre-compaction durable memory that important project decisions do not depend solely on a lossy native compact summary.
-☐ Allow a fresh session to bootstrap from a checkpoint when a huge cold native session is no longer economically or semantically attractive.
+☑ Allow a fresh session to bootstrap from a checkpoint when a huge cold native session is no longer economically or semantically attractive.
 
 Phase 32 — Resource registry
 
@@ -1213,7 +1213,7 @@ Phase 32A — Unified quota and capacity model
 ☑ Track concurrent-request limits when they materially affect routability.
 ☑ Track requests-per-minute limits when known.
 ☑ Track tokens-per-minute limits when known.
-☐ Track requests-per-day or equivalent long-window request pools when known.
+☑ Track requests-per-day or equivalent long-window request pools when known.
 ☑ Preserve the provider-native quota units alongside any normalized percentage.
 ☑ Never discard raw telemetry merely because Glasshouse also computes a normalized capacity score.
 

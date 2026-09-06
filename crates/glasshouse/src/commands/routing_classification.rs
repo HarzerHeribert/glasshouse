@@ -458,6 +458,79 @@ fn configured_extraction_choice(
     effective.memory_extraction_model().value
 }
 
+/// A configured provider whose credential variables resolve from neither the
+/// native secure store nor this process's environment — map line 488's
+/// consequence for a hook. Names only: nothing here reads a value past
+/// [`glasshouse::secret::SecretStore::is_present`].
+pub(crate) struct WithheldCredential {
+    pub(crate) provider: String,
+    pub(crate) vars: Vec<String>,
+}
+
+/// Every configured provider — or the one `only` names — whose credential
+/// variables all fail to resolve through `secrets`.
+///
+/// Invariant (map line 488): the harness child, and every hook it runs, no
+/// longer inherits a provider key the launching shell exported, so a hook
+/// that finds no credential says which provider and which variable rather
+/// than falling silent. A provider naming no variable needs none and is
+/// never listed; an entry that does not resolve contributes nothing, since
+/// nothing can read a credential through it either.
+pub(crate) fn withheld_provider_credentials(
+    effective: &EffectiveConfig<'_>,
+    secrets: &dyn glasshouse::secret::SecretStore,
+    only: Option<&str>,
+) -> Vec<WithheldCredential> {
+    use glasshouse::secret::SecretRef;
+
+    effective
+        .provider_names()
+        .into_iter()
+        .filter(|name| only.is_none_or(|only| only == name))
+        .filter_map(|name| {
+            effective
+                .configured_provider(&name)
+                .ok()
+                .map(|layered| (name, layered.value.credential_env))
+        })
+        .filter(|(_, vars)| {
+            !vars.is_empty()
+                && !vars
+                    .iter()
+                    .any(|var| secrets.is_present(&SecretRef::Environment { var: var.clone() }))
+        })
+        .map(|(provider, vars)| WithheldCredential { provider, vars })
+        .collect()
+}
+
+/// The one sentence both hooks print when [`withheld_provider_credentials`]
+/// found something, or `None`. It says what Glasshouse withholds and why
+/// (map line 488), names each provider and its variables, and gives the
+/// store instruction — a value never enters this function.
+pub(crate) fn withheld_credential_notice(withheld: &[WithheldCredential]) -> Option<String> {
+    if withheld.is_empty() {
+        return None;
+    }
+    let listed: Vec<String> = withheld
+        .iter()
+        .map(|entry| {
+            format!(
+                "provider `{}`'s credential ({}) resolves from neither this hook's environment \
+                 nor the native secure store — {}",
+                entry.provider,
+                entry.vars.join(", "),
+                glasshouse::integrations::store_credential_instruction(&entry.vars[0]),
+            )
+        })
+        .collect();
+    Some(format!(
+        "Glasshouse withholds provider credentials from the harness and the hooks it runs (map \
+         line 488), so a key exported only in the launching shell no longer reaches memory \
+         extraction or the context-firewall reducer: {}",
+        listed.join("; ")
+    ))
+}
+
 /// The provider behind a name the user's own configuration holds, resolved
 /// through the layering rule every other reader applies — project winning
 /// over user.
@@ -1058,7 +1131,16 @@ pub(crate) fn disposable_extraction_model(
         glasshouse::evaluation::now_unix(),
     );
 
-    Box::new(routed)
+    // Map line 488, said out loud: when the extraction provider's credential
+    // resolves from nowhere this hook can see, the model's own description —
+    // the string the outcome stores and the hook's stderr line prints —
+    // carries the notice. The routed model itself is untouched.
+    let withheld = withheld_provider_credentials(
+        &effective,
+        &secrets,
+        consented.as_ref().map(|chosen| chosen.provider()),
+    );
+    crate::commands::memory_extraction::noting_withheld_credentials(Box::new(routed), &withheld)
 }
 
 /// `[memory] rerank_model` resolved into a callable model, for

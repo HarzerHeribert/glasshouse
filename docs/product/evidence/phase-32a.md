@@ -265,7 +265,8 @@ constructs is recorded as open, with what is missing named.
 - **1215 — tokens-per-minute limits.** **OPEN — Phase 32B.** M8 proves it
   does not alias 1214's field.
 - **1216 — requests-per-day or equivalent long-window request pools.**
-  **OPEN — Phase 32B.** `LongWindowRequests` carries its own
+  **COMPLETE, 2026-09-06** (`GH-PROVE-IT-BATCH-2`, tests only; the entry at
+  the end of this file). `LongWindowRequests` carries its own
   `window_seconds`, so "or equivalent" needs no new variant for a weekly or
   hourly pool.
 - **1217 — preserve provider-native quota units alongside any normalized
@@ -768,3 +769,14 @@ State: **COMPLETE — decided-out**, ruled 2026-09-06 by the orchestrator under 
 
 Limits: no behaviour is verified; the box records that the input the line depends on is not Glasshouse's to produce. It comes back off the day a provider states the window with the ceiling — that package cites this entry in its Phase −1.
 
+
+
+---
+
+### Line 1216 — closed 2026-09-06: a window longer than a minute is tracked as a long-window pool carrying its period
+
+State: **COMPLETE** — `GH-PROVE-IT-BATCH-2` (Sonnet, Green; report `.agent-runtime/report-prove-it-batch-2.md`). Ruled by the primary against the register's Cluster E row: unlike the five Cluster E lines closed as decided-out under decision 5, this reader exists and is wired, and the line says *when known*.
+
+Contract: given a provider response whose rate-limit policy states a window longer than 60 s, when the gateway reads it, Glasshouse tracks a long-window request pool carrying that limit and that period and the capacity model can read it back, while preserving that the per-minute reading is untouched.
+
+Production: `provider/telemetry :: RateLimitHeaders::read` → `apply_to` → `CapacityState::rate_ceilings().long_window_requests()` (`provider/quota/mod.rs :: LongWindowRequests { limit, window_seconds }`); rendered by `provider/resources/mod.rs :: render_rate_ceilings`. Test: `provider::telemetry::tests::a_ceiling_over_a_longer_window_becomes_a_long_window_pool_carrying_its_period` (existing; `ratelimit-policy: 300;w=3600` → limit 300, window 3600). Limits: no observed provider has ever sent a window longer than 60 s — the proof is a synthetic header; the `resources` render is exercised only with an unmeasured pool by the existing suite.

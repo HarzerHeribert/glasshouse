@@ -1417,7 +1417,11 @@ pub(crate) fn resume_session(
         ),
     );
 
-    let mut launch = HarnessLaunch::new(selection.into_executable(), runtime.project()).args(args);
+    // Map line 488: the same strip `launch_session` applies — a configured
+    // provider's credential stays inside the Glasshouse process.
+    let mut launch = HarnessLaunch::new(selection.into_executable(), runtime.project())
+        .args(args)
+        .without_provider_credentials(&effective);
     // Map line 1973, on the path that continues a session — the same scrub
     // `launch_session` applies, for the same reason: the child inherits this
     // process's environment, and another account's credential variable has

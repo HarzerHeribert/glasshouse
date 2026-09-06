@@ -232,6 +232,41 @@ fn one_memory_of_each_kind_ends_up_as_six_rows_of_the_right_kind() {
     assert_eq!(kinds_seen, expected);
 }
 
+/// Lines 828/829, the other half of the pair pinned in section E below: the
+/// prompt *asks* the model to omit an obvious, cheaply-rereadable source-code
+/// fact, but nothing in `judge` enforces it — a well-formed memory whose body
+/// is exactly that kind of fact is accepted and stored like any other. That
+/// is `refusal-register.md`'s own ruling (*"a keyword heuristic ... refuses
+/// real memories and admits fake ones"*): the rule is the model's to follow,
+/// and Glasshouse pins only that it is asked, not that it is obeyed.
+#[test]
+fn a_rediscoverable_source_fact_the_prompt_asks_to_omit_is_still_accepted_by_the_validator() {
+    let tmp = tempdir();
+    let fixture = Fixture::new(tmp.path(), "alpha");
+    let memory = fixture.memory();
+    let store = memory.store();
+
+    let obvious = MemoryJson::new(
+        "finding",
+        "main.rs's command match has an arm for every subcommand",
+    )
+    .authority("historical")
+    .disposition("accepted");
+
+    let model = Canned::new(envelope(&[obvious]));
+    let chunk = chunk_of(&["we read main.rs"]);
+    let outcome = Extractor::new(&store, &model).run(&chunk, ExtractionTrigger::Manual);
+
+    assert_eq!(
+        outcome.stored(),
+        1,
+        "the validator refused a memory that names no credential and fills every \
+         required field, solely for being cheaply rediscoverable: {:?}",
+        outcome.rejected
+    );
+    assert!(outcome.rejected.is_empty(), "{:?}", outcome.rejected);
+}
+
 /// Every stored memory carries the chunk's session id and commit as its
 /// provenance.
 #[test]
@@ -869,6 +904,15 @@ fn the_recorded_prompt_carries_the_contract_the_schema_and_the_activity() {
     assert!(prompt.contains("NEVER include a credential"));
     assert!(prompt.contains("\"memories\""));
     assert!(prompt.contains("we chose blocking threads for the pty reader"));
+    // Lines 828/829: the rule that lets the model tell an obvious
+    // source-code fact (828, cheap to reread) from one worth remembering
+    // (829, expensive to rediscover) is this one sentence — asserted on
+    // the recorded prompt the model actually saw, not on `PROMPT_CONTRACT`
+    // in isolation.
+    assert!(
+        prompt.contains("could not cheaply rediscover by reading the code"),
+        "the recorded prompt never asks the model to omit rediscoverable facts: {prompt}"
+    );
 }
 
 /// `RESPONSE_SCHEMA` names every `MemoryKind` and every `MemoryAuthority`

@@ -1352,6 +1352,25 @@ fn write_provider_report(
             })
             .collect();
         let _ = writeln!(out, "      credential env: {}", statuses.join(", "));
+        // Map line 488: a key only this process's environment holds is one
+        // the harness, and every hook it runs, no longer sees. One line per
+        // such variable, naming the fix; the native store is the boundary.
+        for var in &provider.credential_env {
+            let reference = crate::secret::SecretRef::Environment { var: var.clone() };
+            let in_native_store = secrets
+                .native()
+                .ok()
+                .is_some_and(|native| crate::secret::SecretStore::is_present(native, &reference));
+            if !in_native_store && crate::secret::SecretStore::is_present(secrets, &reference) {
+                let _ = writeln!(
+                    out,
+                    "      map line 488: {var} is in the environment only — the harness and the \
+                     hooks it runs (memory extraction, the context-firewall reducer) cannot see \
+                     it; {}",
+                    store_credential_instruction(var)
+                );
+            }
+        }
     }
 
     // A configuration that says "this key is in the OS store" and a store
@@ -1382,6 +1401,38 @@ fn write_provider_report(
             stored.service(),
             stored.account(),
         );
+    }
+}
+
+/// How a user puts the credential for `var` inside the boundary map line 488
+/// keeps: the native secure store, filed under
+/// [`crate::secret::native::SERVICE`] with the variable name as the account,
+/// which is exactly where every store here reads it back from. An
+/// instruction that never takes the value — on macOS `security` prompts for
+/// it, so nothing crosses a command line or a shell history — and, on a
+/// platform with no native store, the plain statement that there is none.
+pub fn store_credential_instruction(var: &str) -> String {
+    let service = crate::secret::native::SERVICE;
+    if cfg!(target_os = "macos") {
+        format!(
+            "store it in the macOS Keychain: `security add-generic-password -s {service} -a \
+             {var} -w` (it prompts for the value)"
+        )
+    } else if cfg!(target_os = "windows") {
+        format!(
+            "store it in Windows Credential Manager as a generic credential with target \
+             `{var}.{service}`"
+        )
+    } else if cfg!(target_os = "linux") {
+        format!(
+            "store it in the Secret Service keyring: `secret-tool store --label={service} \
+             service {service} username {var}` (it prompts for the value; the backend's \
+             attribute is `username`, not `account`)"
+        )
+    } else {
+        "this platform has no secure store Glasshouse can use yet, so nothing the harness runs \
+         can reach this credential"
+            .to_owned()
     }
 }
 
