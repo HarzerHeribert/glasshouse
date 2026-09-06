@@ -53,15 +53,17 @@ use oxc::syntax::scope::ScopeFlags;
 /// its own bindings — see [`CellError::ReservedName`].
 pub const RESERVED_PREFIX: &str = "__pane_";
 
-/// The names the isolate puts on the persistent scope: the four tools and
-/// the three handle functions. A top-level binding may not take one, because
-/// the capture that makes a handle persist would overwrite it for the whole
-/// task.
+/// The names the isolate puts on the persistent scope: the four tools, the
+/// three handle functions and `yieldNow`. A top-level binding may not take
+/// one, because the capture that makes a handle persist would overwrite it
+/// for the whole task.
 ///
 /// `console` is deliberately absent: it is not a capability, shadowing it
 /// costs the model only its own logging, and a program that assigns to it is
 /// doing something it can undo.
-pub const HOST_FUNCTIONS: [&str; 7] = ["read", "glob", "grep", "bash", "keep", "free", "handles"];
+pub const HOST_FUNCTIONS: [&str; 8] = [
+    "read", "glob", "grep", "bash", "keep", "free", "handles", "yieldNow",
+];
 
 /// The one runtime binding a generated cell carries: the host object whose
 /// `s` captures a completed binding and whose `e` marks that the body ran

@@ -50,9 +50,12 @@ pub struct CellView {
     pub table: Option<String>,
     /// A throw, `runtime-contract.md` §5.
     pub error: Option<CellError>,
-    /// A top-level `return`'s value, already previewed by the caller through
-    /// the runtime's one preview renderer (§1).
+    /// A top-level `return`'s terminal response, already rendered by the
+    /// caller (§1, `runtime-contract.md` §9.2).
     pub returned: Option<String>,
+    /// Why the cell yielded on purpose (§9.3), drawn in the output region
+    /// beside the table and never in the error region: it is not an error.
+    pub yield_reason: Option<String>,
     /// Whether the user message that follows this cell is the runtime's own
     /// answer to it rather than a person typing. Every section of that answer
     /// is already on screen as this cell's output, error and return regions,
@@ -180,6 +183,31 @@ pub fn notebook_height(
 /// same rule the sidebar keeps for an unmetered request.
 const NO_OUTPUTS: &str = "(no outputs)";
 
+/// How many cells the conversation holds, counted the one way the screen
+/// numbers them: the task is the first message and is drawn as a header, a
+/// cell is an assistant message after it -- **except the terminal
+/// response**, the assistant message that follows a cell whose view
+/// returned (`runtime-contract.md` §9.2). That message is the model's reply,
+/// not a program, and numbering it would put the next task's first cell one
+/// off from its view. The session reads this to place each new view.
+pub fn cell_ordinal(conversation: &Conversation, notebook: &Notebook) -> usize {
+    let mut cells = 0usize;
+    let mut after_return = false;
+    for message in conversation.messages.iter().skip(1) {
+        match message.role {
+            Role::Assistant if after_return => after_return = false,
+            Role::Assistant => {
+                cells += 1;
+                after_return = notebook
+                    .cell(cells)
+                    .is_some_and(|view| view.returned.is_some());
+            }
+            Role::User => after_return = false,
+        }
+    }
+    cells
+}
+
 fn render_conversation(
     frame: &mut Frame,
     area: Rect,
@@ -220,21 +248,25 @@ fn notebook_lines(
         lines.push(Line::from(message_text(task)));
     }
 
-    let total_cells = conversation
-        .messages
-        .iter()
-        .skip(1)
-        .filter(|message| message.role == Role::Assistant)
-        .count();
+    let total_cells = cell_ordinal(conversation, notebook);
 
     let mut cell = 0usize;
     let mut answered = false;
+    let mut after_return = false;
     for message in messages {
         match message.role {
+            // The assistant message after a cell that returned is the
+            // terminal response -- the model's reply, drawn as its turn
+            // rather than as a cell (`runtime-contract.md` §9.2).
+            Role::Assistant if after_return => {
+                after_return = false;
+                push_text_region(&mut lines, &format!("assistant: {}", message_text(message)));
+            }
             Role::Assistant => {
                 cell += 1;
                 let view = notebook.cell(cell);
                 answered = view.is_some_and(|view| view.answered);
+                after_return = view.is_some_and(|view| view.returned.is_some());
 
                 lines.push(Line::from(format!("[{cell}] in")));
                 push_text_region(&mut lines, &input_region(message));
@@ -248,6 +280,9 @@ fn notebook_lines(
                     ),
                     None => lines.push(Line::from(NO_OUTPUTS)),
                 }
+                if let Some(reason) = view.and_then(|view| view.yield_reason.as_deref()) {
+                    lines.push(Line::from(format!("yielded: {reason}")));
+                }
 
                 if let Some(error) = view.and_then(|view| view.error.as_ref()) {
                     lines.push(Line::from(format!("[{cell}] error")));
@@ -259,6 +294,7 @@ fn notebook_lines(
                 }
             }
             Role::User => {
+                after_return = false;
                 if answered {
                     answered = false;
                     continue;

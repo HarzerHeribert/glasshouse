@@ -1433,3 +1433,280 @@ fn a_token_set_during_a_call_cancels_it_and_the_cell_is_answered_as_a_throw() {
     assert!(runtime.is_live("before"), "{}", runtime.render_handles());
     assert_eq!(handle(&outcome, "before").preview, "1");
 }
+
+// --- §9: ending a task from inside the program -------------------------
+
+/// `yieldNow(reason?)` ends the cell in the yield slot at once, from inside
+/// a nested guard, before or after an `await`, and no `try`/`catch` in the
+/// program intercepts it: the bindings made before it are live, the ones
+/// after it never ran, and the next cell finds the isolate warm. It is not
+/// an error, and the reason rides the turn.
+#[test]
+fn yield_now_ends_the_cell_in_the_yield_slot_and_is_not_an_error() {
+    let fixture = Fixture::new("yield-now");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("yield-now-session");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+
+    let outcome = runtime.run_cell(
+        "const before = 1;\nif (before === 1) {\n  if (true) { try { yieldNow(\"why\"); } catch (e) \
+         { keep(\"caught\", e.name); } }\n}\nconst after = 2;\n",
+    );
+    let CellOutcome::Yielded { turn } = &outcome else {
+        panic!("yieldNow must yield, got {outcome:?}");
+    };
+    assert_eq!(turn.yield_reason.as_deref(), Some("why"));
+    assert_eq!(
+        turn.record.outcome,
+        pane::runtime::outcome::CellOutcomeKind::Yielded
+    );
+    assert!(!outcome.ends_the_task());
+    assert!(runtime.is_live("before"), "{}", turn.table);
+    assert!(!runtime.is_live("after"), "a statement after yieldNow ran");
+    assert!(
+        !runtime.is_live("caught"),
+        "a try/catch in the program intercepted the yield: {}",
+        turn.table
+    );
+
+    // After an `await`, from a microtask, the same.
+    let later =
+        runtime.run_cell("const x = await 5;\nif (x === 5) { yieldNow(); }\nconst never = 1;\n");
+    let CellOutcome::Yielded { turn } = &later else {
+        panic!("yieldNow after an await must yield, got {later:?}");
+    };
+    assert_eq!(turn.yield_reason, None);
+    assert!(runtime.is_live("x"), "{}", turn.table);
+    assert!(!runtime.is_live("never"));
+
+    // And nothing leaked into the next cell.
+    let next = runtime.run_cell("return before + x;\n");
+    assert_eq!(returned(&next), &Value::Number(6.0), "{next:?}");
+}
+
+/// §9.2: a returned string over the response cap is not a return. The cell
+/// yields with the size and the cap as its reason, the task continues, and
+/// a string at the cap returns verbatim and in full. Bytes, not characters.
+#[test]
+fn a_response_over_the_cap_yields_with_the_cap_as_its_reason() {
+    let fixture = Fixture::new("response-cap");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("response-cap-session");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+    let cap = pane::runtime::isolate::DEFAULT_RESPONSE_BYTE_CAP;
+    assert_eq!(cap, 16_384);
+
+    let over = runtime.run_cell(&format!("return \"x\".repeat({});\n", cap + 1));
+    let CellOutcome::Yielded { turn } = &over else {
+        panic!("a response over the cap must yield, got {over:?}");
+    };
+    assert_eq!(
+        turn.yield_reason.as_deref(),
+        Some("the response is 16,385 bytes, over the cap of 16,384 bytes; return less or yield")
+    );
+    assert_eq!(
+        turn.record.outcome,
+        pane::runtime::outcome::CellOutcomeKind::Yielded
+    );
+    assert!(!over.ends_the_task());
+
+    let at = runtime.run_cell(&format!("return \"x\".repeat({cap});\n"));
+    let CellOutcome::Returned { terminal, .. } = &at else {
+        panic!("a response at the cap returns, got {at:?}");
+    };
+    assert_eq!(
+        terminal,
+        &pane::runtime::outcome::Terminal::Text("x".repeat(cap))
+    );
+
+    // Two-byte characters count twice: 8,193 of them are over, 8,192 are not.
+    let wide_over = runtime.run_cell("return \"é\".repeat(8193);\n");
+    assert!(
+        matches!(&wide_over, CellOutcome::Yielded { turn } if turn.yield_reason.as_deref().is_some_and(|r| r.starts_with("the response is 16,386 bytes"))),
+        "{wide_over:?}"
+    );
+    let wide_at = runtime.run_cell("return \"é\".repeat(8192);\n");
+    assert!(
+        matches!(&wide_at, CellOutcome::Returned { terminal: pane::runtime::outcome::Terminal::Text(text), .. } if text.len() == cap),
+        "{wide_at:?}"
+    );
+}
+
+/// §9.1 and §9.4: a guard that did not hold executed nothing, fired no hook
+/// and appears nowhere in the trajectory -- the trajectory names only the
+/// call that ran.
+#[cfg(unix)]
+#[test]
+fn a_branch_not_taken_performs_no_call() {
+    let fixture = Fixture::new("untaken");
+    let log = fixture.root.join("hook.log");
+    let script = fake_glasshouse(&fixture.root, &log);
+    let glasshouse = Glasshouse::Command { glasshouse: script };
+    let session = SessionId::new("untaken-session");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+
+    let outcome = runtime.run_cell(
+        "const ran = await bash({ command: \"echo ran\" });\nif (ran.stdout === \"never\") { await \
+         bash({ command: \"echo untaken\" }); }\n",
+    );
+    assert!(
+        matches!(outcome, CellOutcome::Yielded { .. }),
+        "{outcome:?}"
+    );
+
+    let calls = &outcome.turn().record.calls;
+    assert_eq!(
+        calls.len(),
+        1,
+        "the trajectory names only the call that ran: {calls:?}"
+    );
+    assert_eq!(calls[0].tool, "bash");
+    assert_eq!(
+        calls[0].args.get("command").map(String::as_str),
+        Some("echo ran")
+    );
+    assert_eq!(calls[0].ended, pane::runtime::outcome::Ended::Ok);
+
+    let recorded = std::fs::read_to_string(&log).expect("the hook was delivered");
+    assert_eq!(
+        recorded
+            .matches(r#""hook_event_name":"PreToolUse""#)
+            .count(),
+        1,
+        "{recorded}"
+    );
+    assert!(
+        !recorded.contains("echo untaken"),
+        "the untaken branch's call reached a hook: {recorded}"
+    );
+}
+
+/// §9.4: every call that ran, in order, with its arguments **as checked**
+/// -- the resolved path, never the program's spelling -- and how it ended:
+/// ok, or denied with the deciding rule. A refused call is in the
+/// trajectory too, because it was attempted.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[test]
+fn a_cells_trajectory_names_every_call_that_ran_as_checked() {
+    let fixture = Fixture::new("trajectory");
+    let file = fixture.write(&fixture.root.join("sub").join("one.txt"), "hello\n");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("trajectory-session");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+
+    // The program spells the path with a `..` in it; the record carries the
+    // path the child was given.
+    let spelled = format!("{}/sub/../sub/one.txt", fixture.root.display());
+    let program = format!(
+        "const doc = await read({{ path: {spelled:?} }});\nconst out = await bash({{ command: \
+         \"echo two\" }});\nlet refused = \"\";\ntry {{ await bash({{ command: \"rm -rf /\" }}); \
+         }} catch (e) {{ refused = e.name; }}\n"
+    );
+    let outcome = runtime.run_cell(&program);
+    assert!(
+        matches!(outcome, CellOutcome::Yielded { .. }),
+        "{outcome:?}"
+    );
+    assert!(
+        handle(&outcome, "refused")
+            .preview
+            .contains("\"PermissionDenied\""),
+        "the refused call was caught inside the program: {:?}",
+        handle(&outcome, "refused")
+    );
+
+    let calls = &outcome.turn().record.calls;
+    let tools: Vec<&str> = calls.iter().map(|call| call.tool.as_str()).collect();
+    assert_eq!(tools, vec!["read", "bash", "bash"], "{calls:?}");
+
+    let resolved = file.canonicalize().unwrap();
+    assert_eq!(
+        calls[0].args.get("path").map(String::as_str),
+        Some(resolved.to_string_lossy().as_ref()),
+        "the path is recorded as checked, not as spelled: {calls:?}"
+    );
+    assert_ne!(
+        calls[0].args.get("path").map(String::as_str),
+        Some(spelled.as_str())
+    );
+    assert_eq!(calls[0].ended, pane::runtime::outcome::Ended::Ok);
+
+    assert_eq!(
+        calls[1].args.get("command").map(String::as_str),
+        Some("echo two")
+    );
+    assert_eq!(calls[1].ended, pane::runtime::outcome::Ended::Ok);
+
+    assert!(
+        matches!(&calls[2].ended, pane::runtime::outcome::Ended::Denied { rule } if !rule.is_empty()),
+        "{calls:?}"
+    );
+    assert!(
+        calls[2].args.is_empty(),
+        "a spelling the profile refused is not recorded as admitted: {calls:?}"
+    );
+}
+
+/// The two windows after `execute` in which the model's own code still runs
+/// -- the end-of-cell preview refresh, and the walk that reads a returned
+/// value -- neither let a termination reach the next cell nor pass a stopped
+/// read off as a completed return.
+#[test]
+fn a_getter_that_yields_during_the_refresh_terminates_nothing_later() {
+    let fixture = Fixture::new("late-getter");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("late-getter-session");
+    let mut runtime = runtime(&fixture, &glasshouse, &session);
+
+    // The declaration line's capture reads `y`, so the cell yields there;
+    // the refresh after the cell reads `y` again and asks a second time.
+    let outcome = runtime
+        .run_cell("const x = { get y() { yieldNow(\"late\"); return 1; } };\nconst z = 2;\n");
+    assert!(
+        matches!(outcome, CellOutcome::Yielded { .. }),
+        "{outcome:?}"
+    );
+
+    // The next cell runs to its own ending rather than into a termination
+    // nobody asked for.
+    let next = runtime.run_cell("return 41 + 1;\n");
+    assert_eq!(returned(&next), &Value::Number(42.0), "{next:?}");
+}
+
+#[test]
+fn a_result_whose_getter_never_returns_is_a_timeout_not_a_result() {
+    let fixture = Fixture::new("result-getter");
+    let glasshouse = Glasshouse::None;
+    let session = SessionId::new("result-getter-session");
+    let limit = Duration::from_millis(500);
+    let mut runtime = Runtime::with_limits(
+        &fixture.profile(),
+        &glasshouse,
+        &session,
+        DEFAULT_HEAP_LIMIT_BYTES,
+        limit,
+    );
+
+    let started = Instant::now();
+    let outcome = runtime.run_cell("return { get spin() { while (true) {} } };\n");
+    let elapsed = started.elapsed();
+    let error = threw(&outcome);
+    assert_eq!(error.class, "RuntimeTimeout", "{outcome:?}");
+    assert!(!outcome.ends_the_task(), "a stopped read became a return");
+    assert!(
+        elapsed < limit + Duration::from_secs(2),
+        "the read took {elapsed:?} against a {limit:?} limit"
+    );
+
+    let after = runtime.run_cell("return 7;\n");
+    assert_eq!(returned(&after), &Value::Number(7.0), "{after:?}");
+
+    // A getter that throws while the result is read is the cell's throw,
+    // at the model's own line, and the task goes on.
+    let thrown = runtime.run_cell("return { get boom() { throw new TypeError(\"no\"); } };\n");
+    let error = threw(&thrown);
+    assert_eq!(error.class, "TypeError", "{thrown:?}");
+    assert_eq!(error.message, "no");
+    assert_eq!(error.line, Some(1), "{error:?}");
+    assert!(!thrown.ends_the_task());
+}

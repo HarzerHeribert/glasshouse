@@ -1,7 +1,7 @@
 //! Acceptance tests for GH-PANE-61E-PROMPT against
 //! `docs/product/pane/model-contract.md`.
 
-use pane::prompt::{self, Budget, CellResult, ErrorSection, Extracted};
+use pane::prompt::{self, Budget, CellResult, ErrorSection, ExhaustedReason, Extracted};
 use pane::runtime::handles::{HandleMeta, HandleTable, render_table};
 use pane::runtime::preview::{
     ArrayValue, FileValue, PREVIEW_TOKEN_CAP, StringValue, TABLE_TOKEN_CAP, Value,
@@ -110,6 +110,7 @@ fn the_worked_turn_renders_byte_for_byte() {
         cell: 1,
         elapsed_ms: 412,
         error: None,
+        yield_reason: None,
         handle_table: handle_table.clone(),
         stdout_tail: None,
         budget: Budget {
@@ -128,7 +129,7 @@ fn the_worked_turn_renders_byte_for_byte() {
 /// without this test noticing.
 #[test]
 fn the_preamble_is_the_contracts_verbatim() {
-    let expected = "You act by writing TypeScript. Each turn you emit exactly one code block\ntagged `pane`; pane runs it in a persistent V8 isolate and answers with\nwhat your program produced.\n\nTool results are live objects, not text. `await grep(...)` returns an\narray you can filter, index and count in the next line of the same\nprogram. You are shown each object's name and a short preview; you are\nnever shown its payload, and you never need it.\n\nBindings persist. A top-level `const` in one cell is in scope in the\nnext. Redeclaring a name replaces the object and frees the old one.\n\nA cell that runs off the end yields: you get the handle table and another\nturn. A top-level `return` ends the task with that value. Return when the\ntask is answered, not before.\n\nA cell that throws is answered, not retried. You get the error, the line,\nand every binding that completed before the throw. Write the next cell.\n\nA call outside this session's sandbox grant throws PermissionDenied. It\nis catchable and it is final: nothing you write widens a grant.";
+    let expected = "You act by writing TypeScript. Each turn you emit exactly one code block\ntagged `pane`; pane runs it in a persistent V8 isolate and answers with\nwhat your program produced.\n\nTool results are live objects, not text. `await grep(...)` returns an\narray you can filter, index and count in the next line of the same\nprogram. You are shown each object's name and a short preview; you are\nnever shown its payload, and you never need it.\n\nBindings persist. A top-level `const` in one cell is in scope in the\nnext. Redeclaring a name replaces the object and frees the old one.\n\nA cell that runs off the end yields: you get the handle table and another\nturn. A top-level `return` ends the task with that value. Return when the\ntask is answered, not before.\n\nReturning a string answers the person directly — it is rendered and kept\nas your reply, and nothing is asked of you afterwards, so fill it from what\nthe run actually produced rather than from what you expected it to. Do not\nanswer from a call that threw, was refused, was cancelled, or whose guard\ndid not hold: yield instead and say what you found. Call `yieldNow(reason)`\nto hand back from inside a branch; it is a yield, not an error.\n\nA cell that throws is answered, not retried. You get the error, the line,\nand every binding that completed before the throw. Write the next cell.\n\nA call outside this session's sandbox grant throws PermissionDenied. It\nis catchable and it is final: nothing you write widens a grant.";
     assert_eq!(prompt::PREAMBLE, expected);
 }
 
@@ -173,6 +174,7 @@ fn a_result_block_omits_empty_sections_and_writes_none_for_an_empty_table() {
         cell: 1,
         elapsed_ms: 5,
         error: None,
+        yield_reason: None,
         handle_table: String::new(),
         stdout_tail: None,
         budget: Budget {
@@ -193,6 +195,7 @@ fn a_result_block_omits_empty_sections_and_writes_none_for_an_empty_table() {
         cell: 2,
         elapsed_ms: 5,
         error: None,
+        yield_reason: None,
         handle_table: "x  number\n1".to_string(),
         stdout_tail: Some("hello".to_string()),
         budget: Budget {
@@ -213,10 +216,10 @@ fn a_result_block_omits_empty_sections_and_writes_none_for_an_empty_table() {
         error: Some(ErrorSection {
             class: "TypeError".to_string(),
             message: "bad thing".to_string(),
-            line: 2,
-            column: 4,
+            position: Some((2, 4)),
             frames: vec!["cell 3, line 2".to_string()],
         }),
+        yield_reason: None,
         handle_table: String::new(),
         stdout_tail: None,
         budget: Budget {
@@ -247,6 +250,7 @@ fn the_budget_line_warns_at_ninety_percent_and_the_exhausted_preamble_is_one_sen
         cell: 1,
         elapsed_ms: 1,
         error: None,
+        yield_reason: None,
         handle_table: String::new(),
         stdout_tail: None,
         budget: Budget {
@@ -263,6 +267,7 @@ fn the_budget_line_warns_at_ninety_percent_and_the_exhausted_preamble_is_one_sen
         cell: 1,
         elapsed_ms: 1,
         error: None,
+        yield_reason: None,
         handle_table: String::new(),
         stdout_tail: None,
         budget: Budget {
@@ -278,10 +283,19 @@ fn the_budget_line_warns_at_ninety_percent_and_the_exhausted_preamble_is_one_sen
             .contains("turn cap 8,000 · task 360,000/400,000 · cells 1/40 — finish or return")
     );
 
-    let sentence = prompt::exhausted_preamble();
-    assert!(!sentence.contains('\n'));
-    assert_eq!(sentence.matches('.').count(), 1);
-    assert!(sentence.contains("return"));
+    for reason in [
+        ExhaustedReason::TaskBudget,
+        ExhaustedReason::ThreeTurnsWithoutAProgram,
+    ] {
+        let sentence = prompt::exhausted_preamble(reason);
+        assert!(!sentence.contains('\n'));
+        assert_eq!(sentence.matches('.').count(), 1);
+        assert!(sentence.contains("return"));
+    }
+    assert!(
+        prompt::exhausted_preamble(ExhaustedReason::ThreeTurnsWithoutAProgram)
+            .starts_with("Three turns without a program;")
+    );
 }
 
 #[test]
@@ -320,4 +334,89 @@ fn the_prompt_module_never_names_a_tool_use_block() {
             "{label} names runtime::preview"
         );
     }
+}
+
+/// Addendum 4: a throw the runtime could not attribute to a line of the
+/// model's program gets no position line at all -- never `line 0, column 0`,
+/// which names a place that does not exist. An attributed one still does.
+#[test]
+fn an_unattributed_throw_omits_the_position_line() {
+    let result = |position: Option<(u64, u64)>| CellResult {
+        cell: 3,
+        elapsed_ms: 5,
+        error: Some(ErrorSection {
+            class: "RuntimeTimeout".to_string(),
+            message: "the cell ran for 30,000 ms".to_string(),
+            position,
+            frames: vec!["cell 3, line 2".to_string()],
+        }),
+        yield_reason: None,
+        handle_table: String::new(),
+        stdout_tail: None,
+        budget: Budget {
+            turn_cap: 8_000,
+            task_used: 1,
+            task_cap: 400_000,
+            cells_used: 1,
+            cells_cap: 40,
+        },
+    };
+
+    let unattributed = prompt::render_result(&result(None));
+    assert!(
+        unattributed
+            .contains("## Error\nRuntimeTimeout: the cell ran for 30,000 ms\n  at cell 3, line 2"),
+        "{unattributed}"
+    );
+    assert!(!unattributed.contains("line 0, column 0"), "{unattributed}");
+    assert!(!unattributed.contains(", column "), "{unattributed}");
+
+    let attributed = prompt::render_result(&result(Some((2, 4))));
+    assert!(
+        attributed.contains("## Error\nRuntimeTimeout: the cell ran for 30,000 ms\nline 2, column 4\n  at cell 3, line 2"),
+        "{attributed}"
+    );
+}
+
+/// `runtime-contract.md` §9.3: a yield's reason is one line directly under
+/// the cell line, before `## Handles` -- and it is never rendered with
+/// `threw`, because a throw is not a yield whatever else was filled in.
+#[test]
+fn a_yield_reason_is_one_line_under_the_cell_line() {
+    let result = |error: Option<ErrorSection>| CellResult {
+        cell: 3,
+        elapsed_ms: 5,
+        error,
+        yield_reason: Some("the tests did not run; the target is missing".to_string()),
+        handle_table: "x  number\n1".to_string(),
+        stdout_tail: None,
+        budget: Budget {
+            turn_cap: 8_000,
+            task_used: 1,
+            task_cap: 400_000,
+            cells_used: 1,
+            cells_cap: 40,
+        },
+    };
+
+    let yielded = prompt::render_result(&result(None));
+    assert!(
+        yielded.starts_with(
+            "[cell 3 yielded in 5 ms]\nthe tests did not run; the target is missing\n\n## Handles\nx  number"
+        ),
+        "{yielded}"
+    );
+    assert!(!yielded.contains("## Error"), "{yielded}");
+
+    let threw = prompt::render_result(&result(Some(ErrorSection {
+        class: "TypeError".to_string(),
+        message: "bad thing".to_string(),
+        position: None,
+        frames: Vec::new(),
+    })));
+    assert!(
+        threw.starts_with("[cell 3 threw in 5 ms]\n\n## Handles"),
+        "{threw}"
+    );
+    assert!(!threw.contains("the tests did not run"), "{threw}");
 }

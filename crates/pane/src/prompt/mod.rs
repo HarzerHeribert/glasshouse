@@ -16,12 +16,31 @@ use crate::tools::registry::{Arg, Tool};
 
 /// `model-contract.md` §2, verbatim. Compared byte for byte by
 /// `prompt_bytes.rs::the_preamble_is_the_contracts_verbatim`.
-pub const PREAMBLE: &str = "You act by writing TypeScript. Each turn you emit exactly one code block\ntagged `pane`; pane runs it in a persistent V8 isolate and answers with\nwhat your program produced.\n\nTool results are live objects, not text. `await grep(...)` returns an\narray you can filter, index and count in the next line of the same\nprogram. You are shown each object's name and a short preview; you are\nnever shown its payload, and you never need it.\n\nBindings persist. A top-level `const` in one cell is in scope in the\nnext. Redeclaring a name replaces the object and frees the old one.\n\nA cell that runs off the end yields: you get the handle table and another\nturn. A top-level `return` ends the task with that value. Return when the\ntask is answered, not before.\n\nA cell that throws is answered, not retried. You get the error, the line,\nand every binding that completed before the throw. Write the next cell.\n\nA call outside this session's sandbox grant throws PermissionDenied. It\nis catchable and it is final: nothing you write widens a grant.";
+pub const PREAMBLE: &str = "You act by writing TypeScript. Each turn you emit exactly one code block\ntagged `pane`; pane runs it in a persistent V8 isolate and answers with\nwhat your program produced.\n\nTool results are live objects, not text. `await grep(...)` returns an\narray you can filter, index and count in the next line of the same\nprogram. You are shown each object's name and a short preview; you are\nnever shown its payload, and you never need it.\n\nBindings persist. A top-level `const` in one cell is in scope in the\nnext. Redeclaring a name replaces the object and frees the old one.\n\nA cell that runs off the end yields: you get the handle table and another\nturn. A top-level `return` ends the task with that value. Return when the\ntask is answered, not before.\n\nReturning a string answers the person directly — it is rendered and kept\nas your reply, and nothing is asked of you afterwards, so fill it from what\nthe run actually produced rather than from what you expected it to. Do not\nanswer from a call that threw, was refused, was cancelled, or whose guard\ndid not hold: yield instead and say what you found. Call `yieldNow(reason)`\nto hand back from inside a branch; it is a yield, not an error.\n\nA cell that throws is answered, not retried. You get the error, the line,\nand every binding that completed before the throw. Write the next cell.\n\nA call outside this session's sandbox grant throws PermissionDenied. It\nis catchable and it is final: nothing you write widens a grant.";
 
-/// The one sentence a spent task budget replaces the preamble with —
-/// §6's last paragraph. The only permitted action is a top-level `return`.
-pub fn exhausted_preamble() -> &'static str {
-    "The task budget is exhausted; the only action this turn may take is a top-level `return`."
+/// Why the preamble is being replaced: §6's spent task budget, or three
+/// prose turns in a row (the primary's addendum of 2026-09-06 — a model that
+/// never programs must not spend hundreds of requests to find out).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExhaustedReason {
+    TaskBudget,
+    ThreeTurnsWithoutAProgram,
+}
+
+/// The one sentence that replaces the preamble when the task is exhausted —
+/// §6's last paragraph, naming the reason. The only permitted action is a
+/// top-level `return`.
+pub fn exhausted_preamble(reason: ExhaustedReason) -> &'static str {
+    match reason {
+        ExhaustedReason::TaskBudget => {
+            "The task budget is exhausted; the only action this turn may take is a top-level \
+             `return`."
+        }
+        ExhaustedReason::ThreeTurnsWithoutAProgram => {
+            "Three turns without a program; the only action this turn may take is a top-level \
+             `return`."
+        }
+    }
 }
 
 /// §1's system block: the preamble, one declaration per tool in `tools`'
@@ -68,6 +87,10 @@ pub struct CellResult {
     pub cell: u64,
     pub elapsed_ms: u64,
     pub error: Option<ErrorSection>,
+    /// Why the cell yielded on purpose — `runtime-contract.md` §9.3's one
+    /// line under the cell line. Never rendered beside an error: a throw is
+    /// not a yield, whatever else the caller filled in.
+    pub yield_reason: Option<String>,
     pub handle_table: String,
     pub stdout_tail: Option<String>,
     pub budget: Budget,
@@ -78,8 +101,10 @@ pub struct CellResult {
 pub struct ErrorSection {
     pub class: String,
     pub message: String,
-    pub line: u64,
-    pub column: u64,
+    /// The line and column inside the model's own program, when the runtime
+    /// attributed the throw to one. Absent, no position line is written —
+    /// never `line 0, column 0`, which names a place that does not exist.
+    pub position: Option<(u64, u64)>,
     pub frames: Vec<String>,
 }
 
@@ -103,6 +128,12 @@ pub fn render_result(result: &CellResult) -> String {
         "yielded"
     };
     let mut out = format!("[cell {} {verb} in {} ms]", result.cell, result.elapsed_ms);
+    if result.error.is_none()
+        && let Some(reason) = &result.yield_reason
+    {
+        out.push('\n');
+        out.push_str(reason);
+    }
 
     out.push_str("\n\n## Handles\n");
     if result.handle_table.is_empty() {
@@ -113,8 +144,10 @@ pub fn render_result(result: &CellResult) -> String {
 
     if let Some(error) = &result.error {
         out.push_str("\n\n## Error\n");
-        out.push_str(&format!("{}: {}\n", error.class, error.message));
-        out.push_str(&format!("line {}, column {}", error.line, error.column));
+        out.push_str(&format!("{}: {}", error.class, error.message));
+        if let Some((line, column)) = error.position {
+            out.push_str(&format!("\nline {line}, column {column}"));
+        }
         for frame in error.frames.iter().take(3) {
             out.push_str(&format!("\n  at {frame}"));
         }
