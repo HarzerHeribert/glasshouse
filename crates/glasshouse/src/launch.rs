@@ -30,6 +30,23 @@ use std::path::Path;
 use crate::platform::exec::{LaunchKind, ResolvedExecutable};
 use crate::pty::{PtyOutput, PtyProcess, TerminalCommand, TerminalSize};
 
+/// Non-secret identity inherited by a managed harness and its Glasshouse
+/// subprocesses. Pane uses it only to distinguish models selectable on this
+/// pinned gateway route from catalogues belonging to other accounts.
+pub const ACTIVE_ENTITLEMENT_ENV: &str = "GLASSHOUSE_ACTIVE_ENTITLEMENT";
+
+/// Apply the account identity after every other environment overlay so a
+/// stale inherited marker can neither replace nor survive the selected route.
+pub fn with_active_entitlement<'a>(
+    launch: HarnessLaunch<'a>,
+    entitlement: Option<&str>,
+) -> HarnessLaunch<'a> {
+    match entitlement {
+        Some(name) => launch.env(ACTIVE_ENTITLEMENT_ENV, name),
+        None => launch.env_remove(ACTIVE_ENTITLEMENT_ENV),
+    }
+}
+
 /// Why a particular executable cannot be launched in a particular directory,
 /// or `None` when the combination is fine.
 ///
@@ -475,6 +492,59 @@ mod tests {
                 .env_overrides()
                 .iter()
                 .any(|(k, v)| k == "OTHER" && v == "kept")
+        );
+    }
+
+    #[test]
+    fn active_entitlement_marker_is_set_or_removed_after_other_overlays() {
+        let tmp = tempfile::tempdir().unwrap();
+        let executable = direct_executable(&tmp.path().join("fake-harness"));
+        let (_guard, project) = project_at("proj");
+
+        let selected = with_active_entitlement(
+            HarnessLaunch::new(executable.clone(), &project).env(ACTIVE_ENTITLEMENT_ENV, "stale"),
+            Some("gemini-sub"),
+        )
+        .build_command()
+        .unwrap();
+        assert!(
+            selected
+                .env_overrides()
+                .iter()
+                .any(|(name, value)| { name == ACTIVE_ENTITLEMENT_ENV && value == "gemini-sub" })
+        );
+
+        let unpinned = with_active_entitlement(
+            HarnessLaunch::new(executable, &project).env(ACTIVE_ENTITLEMENT_ENV, "stale"),
+            None,
+        )
+        .build_command()
+        .unwrap();
+        assert!(
+            unpinned
+                .env_overrides()
+                .iter()
+                .all(|(name, _)| name != ACTIVE_ENTITLEMENT_ENV)
+        );
+        assert_eq!(
+            unpinned.env_removals(),
+            &[OsString::from(ACTIVE_ENTITLEMENT_ENV)]
+        );
+    }
+
+    #[test]
+    fn fresh_and_resumed_sessions_both_apply_the_active_entitlement_marker() {
+        let launch = include_str!("commands/launch.rs");
+        let resume = include_str!("commands/resume.rs");
+        assert_eq!(
+            launch.matches("with_active_entitlement(").count(),
+            1,
+            "the fresh launch path must apply the marker helper"
+        );
+        assert_eq!(
+            resume.matches("with_active_entitlement(").count(),
+            1,
+            "the resume path must apply the same marker helper"
         );
     }
 

@@ -148,3 +148,84 @@ fn logout_removes_only_the_selected_accounts_auth_directory() {
         b"other-secret"
     );
 }
+
+#[test]
+fn entitlement_refresh_reads_the_connected_brokers_live_model_catalogue() {
+    let fixture = Fixture::new();
+    let auth = fixture.auth_dir();
+    fs::create_dir_all(&auth).unwrap();
+    fs::write(auth.join("account.json"), b"opaque-auth-material").unwrap();
+
+    let fake = fixture._temp.path().join("catalogue-cliproxyapi");
+    fs::write(
+        &fake,
+        r#"#!/usr/bin/python3
+import socket, sys
+
+config_path = sys.argv[sys.argv.index("-config") + 1]
+with open(config_path, "r", encoding="utf-8") as handle:
+    lines = handle.read().splitlines()
+port = int(next(line.split(":", 1)[1].strip() for line in lines if line.startswith("port:")))
+listener = socket.socket()
+listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+listener.bind(("127.0.0.1", port))
+listener.listen()
+payload = b'{"data":[{"id":"claude-live-b"},{"id":"claude-live-a"}]}'
+while True:
+    connection, _ = listener.accept()
+    request = b""
+    while b"\r\n\r\n" not in request:
+        chunk = connection.recv(4096)
+        if not chunk:
+            break
+        request += chunk
+    if b"GET /v1/models" in request and b"authorization: bearer " in request.lower():
+        connection.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + str(len(payload)).encode() + b"\r\nConnection: close\r\n\r\n" + payload)
+    else:
+        connection.sendall(b"HTTP/1.1 401 Unauthorized\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+    connection.close()
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).unwrap();
+
+    let output = fixture.run(&["entitlements", "--json", "--refresh"], Some(&fake));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let body: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(body["accounts"][0]["provider"], "claude");
+    assert_eq!(body["accounts"][0]["scope"], "account-declared");
+    assert_eq!(
+        body["accounts"][0]["models"],
+        serde_json::json!(["claude-live-a", "claude-live-b"])
+    );
+    let text = String::from_utf8(output.stdout).unwrap();
+    assert!(!text.contains("opaque-auth-material"));
+    assert!(!text.to_ascii_lowercase().contains("authorization"));
+}
+
+#[test]
+fn entitlement_refresh_refuses_a_symlinked_broker_auth_directory() {
+    use std::os::unix::fs::symlink;
+
+    let fixture = Fixture::new();
+    let outside = fixture._temp.path().join("outside-auth");
+    fs::create_dir_all(&outside).unwrap();
+    fs::write(outside.join("opaque.json"), b"outside-secret").unwrap();
+    let auth = fixture.auth_dir();
+    fs::create_dir_all(auth.parent().unwrap()).unwrap();
+    symlink(&outside, &auth).unwrap();
+
+    let output = fixture.run(&["entitlements", "--json", "--refresh"], None);
+    assert!(!output.status.success());
+    let said = String::from_utf8_lossy(&output.stderr);
+    assert!(said.contains("not a private directory"), "{said}");
+    assert!(!said.contains("outside-secret"));
+    assert_eq!(
+        fs::read(outside.join("opaque.json")).unwrap(),
+        b"outside-secret"
+    );
+}

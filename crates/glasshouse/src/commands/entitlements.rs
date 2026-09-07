@@ -1,5 +1,6 @@
 //! `commands::entitlements` -- moved verbatim from `main.rs` (Phase 59 decomposition).
 
+use anyhow::Context as _;
 use glasshouse::Runtime;
 use glasshouse::config::{self, EffectiveConfig, UserConfig};
 use glasshouse::session::ProjectSessions;
@@ -385,20 +386,54 @@ pub(crate) fn entitlements_json(runtime: &Runtime, refresh: bool) -> anyhow::Res
         refresh_missing_catalogues(runtime, &effective)?;
     }
     let entries = entitlement_pool_with_telemetry(runtime, &effective)?;
-    let mut accounts: Vec<_> = entries.iter().map(|entry| {
-        let provider = match entry.backing() {
-            EntitlementBacking::Provider(name) => Some(name.as_str()),
-            _ => None,
-        };
-        let (mut models, scope) = match entry.models() {
-            Some(EntitlementModels::Declared { models, .. }) => (models.clone(), "provider-declared"),
-            Some(EntitlementModels::HarnessDecided) => (vec![], "harness-decides"),
-            None => (vec![], "unknown"),
-        };
-        models.sort();
-        models.dedup();
-        serde_json::json!({"account":entry.name(),"provider":provider,"models":models,"scope":scope})
-    }).collect();
+    let active_entitlement = std::env::var(glasshouse::launch::ACTIVE_ENTITLEMENT_ENV).ok();
+    let mut accounts: Vec<_> = entries
+        .iter()
+        .map(|entry| {
+            let provider = match entry.backing() {
+                EntitlementBacking::Provider(name) => Some(name.to_owned()),
+                EntitlementBacking::SubscriptionBroker { broker, .. } => Some(
+                    entry
+                        .vendor()
+                        .map(|vendor| vendor.as_str())
+                        .unwrap_or_else(|| broker.as_str())
+                        .to_owned(),
+                ),
+                _ => None,
+            };
+            let (mut models, scope) = match entry.models() {
+                Some(EntitlementModels::Declared { models, .. }) => (
+                    models.clone(),
+                    if entry.backing().subscription_broker().is_some() {
+                        "account-declared"
+                    } else {
+                        "provider-declared"
+                    },
+                ),
+                Some(EntitlementModels::HarnessDecided) => (vec![], "harness-decides"),
+                None => (vec![], "unknown"),
+            };
+            models.sort();
+            models.dedup();
+            let selectable = active_entitlement
+                .as_deref()
+                .is_none_or(|active| active == entry.name());
+            let unavailable_reason = (!selectable).then(|| {
+                format!(
+                    "current gateway route is pinned to `{}`",
+                    active_entitlement.as_deref().unwrap_or_default()
+                )
+            });
+            serde_json::json!({
+                "account":entry.name(),
+                "provider":provider,
+                "models":models,
+                "scope":scope,
+                "selectable":selectable,
+                "unavailable_reason":unavailable_reason,
+            })
+        })
+        .collect();
     accounts.sort_by(|a, b| a["account"].as_str().cmp(&b["account"].as_str()));
     Ok(serde_json::to_string(&serde_json::json!({"version":1,"accounts":accounts}))? + "\n")
 }
@@ -416,22 +451,32 @@ fn refresh_missing_catalogues(
     let cache = ModelCache::new(runtime.paths());
     let entries = entitlement_pool_with_telemetry(runtime, effective)?;
     let mut providers = std::collections::BTreeMap::new();
+    let mut broker_accounts = Vec::new();
     for entry in entries {
-        let EntitlementBacking::Provider(name) = entry.backing() else {
-            continue;
-        };
-        if cache.load(name).is_some() {
-            continue;
+        match entry.backing() {
+            EntitlementBacking::Provider(name) => {
+                if cache.load(name).is_some() {
+                    continue;
+                }
+                let Ok(provider) = effective.configured_provider(name) else {
+                    continue;
+                };
+                if !provider.value.model_list_endpoint.is_known_present() {
+                    continue;
+                }
+                providers
+                    .entry(name.clone())
+                    .or_insert((provider.value, entry.credential().cloned()));
+            }
+            EntitlementBacking::SubscriptionBroker { .. } => {
+                if cache.load(entry.name()).is_none()
+                    && subscription_auth_present(runtime.paths(), entry.name())?
+                {
+                    broker_accounts.push(entry.name().to_owned());
+                }
+            }
+            EntitlementBacking::NativeHarness(_) | EntitlementBacking::Unstated => {}
         }
-        let Ok(provider) = effective.configured_provider(name) else {
-            continue;
-        };
-        if !provider.value.model_list_endpoint.is_known_present() {
-            continue;
-        }
-        providers
-            .entry(name.clone())
-            .or_insert((provider.value, entry.credential().cloned()));
     }
     let jobs: Vec<_> = providers.into_values().collect();
     for batch in jobs.chunks(4) {
@@ -471,5 +516,133 @@ fn refresh_missing_catalogues(
             }
         });
     }
+    for batch in broker_accounts.chunks(4) {
+        std::thread::scope(|scope| {
+            for entitlement in batch {
+                let paths = runtime.paths().clone();
+                let cache_root = cache.root().to_path_buf();
+                scope.spawn(move || {
+                    let Ok(broker) =
+                        glasshouse::gateway::subscription_broker::RunningSubscriptionBroker::start(
+                            &paths,
+                            entitlement,
+                        )
+                    else {
+                        return;
+                    };
+                    let base_url = format!("{}/v1", broker.base_url());
+                    let endpoint = format!("{base_url}/models");
+                    let Ok(document) = broker.model_catalogue_document() else {
+                        return;
+                    };
+                    let Ok(models) = parse_broker_catalogue(&document) else {
+                        return;
+                    };
+                    let catalogue = ModelCatalogue::new(
+                        entitlement,
+                        base_url,
+                        endpoint,
+                        glasshouse::provider::cache::now_unix_seconds(),
+                        models,
+                    );
+                    let _ = ModelCache::at(cache_root).store(&catalogue);
+                });
+            }
+        });
+    }
     Ok(())
+}
+
+fn parse_broker_catalogue(
+    document: &[u8],
+) -> anyhow::Result<Vec<glasshouse::provider::cache::ModelEntry>> {
+    use glasshouse::provider::cache::ModelEntry;
+
+    let value: serde_json::Value = serde_json::from_slice(document)
+        .map_err(|_| anyhow::anyhow!("the subscription broker model catalogue was not JSON"))?;
+    let entries = value
+        .get("data")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            anyhow::anyhow!("the subscription broker model catalogue had no model list")
+        })?;
+    let models: Vec<ModelEntry> = entries
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .filter(|id| !id.is_empty())
+                .map(ModelEntry::new)
+        })
+        .collect();
+    if models.is_empty() {
+        anyhow::bail!("the subscription broker model catalogue contained no model identifiers");
+    }
+    Ok(models)
+}
+
+/// A connected broker account has at least one regular auth file. Contents
+/// remain owned by the broker and are never opened by this catalogue path.
+fn subscription_auth_present(
+    paths: &glasshouse::RuntimePaths,
+    entitlement: &str,
+) -> anyhow::Result<bool> {
+    let directory = paths.subscription_broker_auth_dir(entitlement);
+    let metadata = match std::fs::symlink_metadata(&directory) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => {
+            return Err(error)
+                .with_context(|| "could not inspect the subscription broker auth directory");
+        }
+    };
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        anyhow::bail!("the subscription broker auth location is not a private directory");
+    }
+    let entries = std::fs::read_dir(directory)
+        .with_context(|| "could not inspect the subscription broker auth directory")?;
+    for entry in entries {
+        let entry = entry
+            .with_context(|| "could not inspect a subscription broker auth directory entry")?;
+        if entry
+            .file_type()
+            .with_context(|| "could not inspect a subscription broker auth directory entry")?
+            .is_file()
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+#[cfg(test)]
+mod broker_catalogue_tests {
+    use super::parse_broker_catalogue;
+
+    #[test]
+    fn broker_catalogue_parser_reads_ids_and_ignores_other_fields() {
+        let models = parse_broker_catalogue(
+            br#"{"data":[{"id":"model-b","owned_by":"peer"},{"id":"model-a"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            models.iter().map(|model| model.id()).collect::<Vec<_>>(),
+            ["model-b", "model-a"]
+        );
+    }
+
+    #[test]
+    fn malformed_broker_catalogues_fail_without_echoing_peer_text() {
+        let planted = "peer-secret-that-must-not-be-repeated";
+        let document = format!(r#"{{"data":[{{"name":"{planted}"}}]}}"#);
+        let error = parse_broker_catalogue(document.as_bytes())
+            .unwrap_err()
+            .to_string();
+        assert_eq!(
+            error,
+            "the subscription broker model catalogue contained no model identifiers"
+        );
+        assert!(!error.contains(planted));
+    }
 }

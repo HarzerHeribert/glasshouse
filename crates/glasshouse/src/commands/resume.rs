@@ -1636,6 +1636,10 @@ pub(crate) fn resume_session(
         }
         None => (launch, None, None),
     };
+    let launch = glasshouse::launch::with_active_entitlement(
+        launch,
+        resume_entitlement.as_ref().map(|entry| entry.name()),
+    );
 
     note_resume(&store, &resumable);
 

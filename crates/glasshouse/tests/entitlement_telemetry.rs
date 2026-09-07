@@ -284,7 +284,16 @@ impl Fixture {
 
     /// The shipped binary, pointed at this project.
     fn glasshouse(&self, args: &[&str]) -> Output {
-        Command::new(env!("CARGO_BIN_EXE_glasshouse"))
+        self.glasshouse_with_active_entitlement(args, None)
+    }
+
+    fn glasshouse_with_active_entitlement(
+        &self,
+        args: &[&str],
+        entitlement: Option<&str>,
+    ) -> Output {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_glasshouse"));
+        command
             .arg("--scope")
             .arg(&self.root)
             .arg("--data-dir")
@@ -293,6 +302,11 @@ impl Fixture {
             .arg(self.base.join("config"))
             .args(args)
             .env("PATH", self.base.join("empty-path"))
+            .env_remove("GLASSHOUSE_ACTIVE_ENTITLEMENT");
+        if let Some(entitlement) = entitlement {
+            command.env("GLASSHOUSE_ACTIVE_ENTITLEMENT", entitlement);
+        }
+        command
             .output()
             .expect("the glasshouse binary must be runnable")
     }
@@ -620,9 +634,89 @@ fn entitlement_json_exposes_sorted_catalogues_without_credentials() {
         body["accounts"][0]["models"],
         serde_json::json!(["a-model", "z-model"])
     );
+    assert_eq!(body["accounts"][0]["provider"], "alpha-probe");
+    assert_eq!(body["accounts"][0]["scope"], "provider-declared");
+    assert_eq!(body["accounts"][0]["selectable"], true);
+    assert_eq!(
+        body["accounts"][0]["unavailable_reason"],
+        serde_json::Value::Null
+    );
     assert_eq!(body["accounts"][2]["scope"], "harness-decides");
     let text = String::from_utf8(output.stdout).unwrap();
     assert!(!text.contains(VAR_A) && !text.contains(VAR_B) && !text.contains("credential"));
+}
+
+#[test]
+fn broker_catalogues_keep_provider_and_account_identity_and_lock_other_routes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let fixture = Fixture::new(tmp.path());
+    std::fs::write(
+        fixture.base.join("config/config.toml"),
+        "version = 1\n\n\
+         [entitlements.claude-sub]\nkind = \"claude\"\nvendor = \"claude\"\n\
+         subscription_broker = \"cliproxyapi\"\nnative_harness = \"claude-code\"\n\n\
+         [entitlements.gemini-sub]\nkind = \"gemini\"\nvendor = \"google\"\n\
+         subscription_broker = \"cliproxyapi\"\nnative_harness = \"antigravity\"\n",
+    )
+    .unwrap();
+    let cache = ModelCache::at(tmp.path().join("data/providers"));
+    cache
+        .store(&ModelCatalogue::new(
+            "claude-sub",
+            "http://127.0.0.1:1/v1",
+            "http://127.0.0.1:1/v1/models",
+            glasshouse::provider::cache::now_unix_seconds(),
+            vec![ModelEntry::new("claude-account-model")],
+        ))
+        .unwrap();
+    cache
+        .store(&ModelCatalogue::new(
+            "gemini-sub",
+            "http://127.0.0.1:2/v1",
+            "http://127.0.0.1:2/v1/models",
+            glasshouse::provider::cache::now_unix_seconds(),
+            vec![ModelEntry::new("gemini-account-model")],
+        ))
+        .unwrap();
+
+    let output =
+        fixture.glasshouse_with_active_entitlement(&["entitlements", "--json"], Some("gemini-sub"));
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let body: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    let accounts = body["accounts"].as_array().unwrap();
+    let claude = accounts
+        .iter()
+        .find(|account| account["account"] == "claude-sub")
+        .unwrap();
+    let gemini = accounts
+        .iter()
+        .find(|account| account["account"] == "gemini-sub")
+        .unwrap();
+    assert_eq!(claude["provider"], "claude");
+    assert_eq!(gemini["provider"], "google");
+    assert_eq!(claude["scope"], "account-declared");
+    assert_eq!(gemini["scope"], "account-declared");
+    assert_eq!(
+        claude["models"],
+        serde_json::json!(["claude-account-model"])
+    );
+    assert_eq!(
+        gemini["models"],
+        serde_json::json!(["gemini-account-model"])
+    );
+    assert_eq!(claude["selectable"], false);
+    assert_eq!(gemini["selectable"], true);
+    assert_eq!(gemini["unavailable_reason"], serde_json::Value::Null);
+    assert!(
+        claude["unavailable_reason"]
+            .as_str()
+            .unwrap()
+            .contains("gemini-sub")
+    );
 }
 
 #[test]

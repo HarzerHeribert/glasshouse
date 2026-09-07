@@ -1763,6 +1763,10 @@ pub(crate) fn launch_session(
     // The overlay is the only thing that may put its own arguments or
     // environment onto the launch — see `LaunchOverlay::apply`'s doc.
     let launch = overlay.apply(launch);
+    let launch = glasshouse::launch::with_active_entitlement(
+        launch,
+        entitlement.as_ref().map(|entry| entry.name()),
+    );
     // A checkpoint's handoff, if one was named, as the harness's opening
     // prompt — exactly where a person typing it after `--` would have put it.
     let launch = match &bootstrap {

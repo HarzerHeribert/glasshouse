@@ -108,7 +108,7 @@ while True:
             break
         body += chunk
     request = head + b"\r\n\r\n" + body
-    if b"GET /v1/models" in request and b"Authorization: Bearer " in request:
+    if b"GET /v1/models" in request and b"authorization: bearer " in request.lower():
         payload = b'{"data":[]}' if mode == "empty" else b'{"data":[{"id":"ready"}]}'
         connection.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + str(len(payload)).encode() + b"\r\nConnection: close\r\n\r\n" + payload)
     elif b"POST /v1/messages" in request:
@@ -365,6 +365,26 @@ while True:
         assert_ne!(first.internal_api_key(), second.internal_api_key());
         assert!(first.auth_dir().is_dir());
         assert!(second.auth_dir().is_dir());
+    }
+
+    #[test]
+    fn catalogue_is_read_through_the_account_sidecar_without_exposing_its_key() {
+        let data = tempfile::tempdir().unwrap();
+        let fake = Fake::new();
+        let broker = start(
+            &data,
+            &fake,
+            "catalogue-account",
+            "ready",
+            Duration::from_secs(3),
+        )
+        .unwrap();
+
+        let document = broker.model_catalogue_document().unwrap();
+        assert_eq!(document, br#"{"data":[{"id":"ready"}]}"#);
+        let rendered = format!("{broker:?}");
+        assert!(!rendered.contains(broker.internal_api_key()));
+        assert!(rendered.contains(REDACTED));
     }
 
     #[test]

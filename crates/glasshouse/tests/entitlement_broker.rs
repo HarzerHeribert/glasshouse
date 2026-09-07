@@ -836,6 +836,11 @@ mod shared_fixture_proof {
             "the shared, env-driven fixture must still dump this fixture's own \
              child environment into its own env log"
         );
+        assert!(
+            child_env.contains("GLASSHOUSE_ACTIVE_ENTITLEMENT"),
+            "the child and its Glasshouse subprocesses need the serving account identity: \
+             {child_env}"
+        );
     }
 }
 

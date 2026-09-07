@@ -15,6 +15,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
+use ureq::Agent;
+use ureq::config::AutoHeaderValue;
 
 use crate::paths::RuntimePaths;
 use crate::routing::CredentialId;
@@ -30,6 +32,7 @@ const INSTANCE_ID_BYTES: usize = 16;
 const READY_TIMEOUT: Duration = Duration::from_secs(5);
 const READY_POLL: Duration = Duration::from_millis(20);
 const READY_STABILITY: Duration = Duration::from_millis(250);
+const MODEL_CATALOGUE_MAX_BYTES: u64 = 8 * 1024 * 1024;
 
 /// The in-memory credential accepted only by one loopback sidecar.
 ///
@@ -258,6 +261,46 @@ impl RunningSubscriptionBroker {
     /// Stable directory containing only this entitlement's OAuth material.
     pub fn auth_dir(&self) -> &Path {
         &self.auth_dir
+    }
+
+    /// Read this account's model catalogue through its authenticated sidecar.
+    ///
+    /// The bearer value never leaves this module, redirects are disabled so
+    /// it cannot be forwarded to another origin, and every failure sentence
+    /// is fixed text rather than an upstream response or transport rendering.
+    pub fn model_catalogue_document(&self) -> Result<Vec<u8>> {
+        let agent = Agent::new_with_config(
+            Agent::config_builder()
+                .http_status_as_error(false)
+                .max_redirects(0)
+                .accept_encoding(AutoHeaderValue::None)
+                .timeout_connect(Some(crate::provider::discovery::CONNECT_TIMEOUT))
+                .timeout_recv_response(Some(crate::provider::discovery::RESPONSE_TIMEOUT))
+                .timeout_global(Some(crate::provider::discovery::TOTAL_TIMEOUT))
+                .build(),
+        );
+        let url = format!("{}/v1/models", self.base_url);
+        let mut response = agent
+            .get(&url)
+            .header(
+                "authorization",
+                format!("Bearer {}", self.internal_key.expose()),
+            )
+            .call()
+            .map_err(|_| {
+                anyhow::anyhow!("the subscription broker model catalogue did not answer")
+            })?;
+        if !response.status().is_success() {
+            bail!("the subscription broker refused its model catalogue request");
+        }
+        response
+            .body_mut()
+            .with_config()
+            .limit(MODEL_CATALOGUE_MAX_BYTES)
+            .read_to_vec()
+            .map_err(|_| {
+                anyhow::anyhow!("the subscription broker model catalogue could not be read")
+            })
     }
 
     fn terminate(&mut self) {
