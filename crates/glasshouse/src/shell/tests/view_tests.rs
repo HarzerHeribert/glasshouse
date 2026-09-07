@@ -492,32 +492,12 @@ fn the_status_bar_always_shows_the_key_bindings() {
     );
 }
 
-/// A key that could not do anything must explain itself in the status bar,
-/// or it reads as a broken keyboard.
-///
-/// Measured at 120 columns rather than 100. Phase 4's `N headless` took
-/// the control-mode bindings to about seventy columns, and the bindings
-/// are written first on purpose, so at a hundred there is no longer room
-/// for a whole note beside them — the same trade the footer's own doc
-/// comment records paying when `t`/`m` arrived. It is paid here rather
-/// than by dropping the binding because a binding nobody can see is a
-/// feature nobody has, while a clipped note is still a note; and the
-/// refusals *this* phase depends on are shown inside the overview
-/// popup, where they are never clipped — see `render_overview`.
+/// Feedback and the primary navigation keys both fit a normal terminal.
 #[test]
 fn the_status_bar_shows_a_note_next_to_the_bindings() {
     let mut state = ShellState::new("p", "/p", "0.1.0", vec![lone_session()]);
     state.handle_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE));
-
-    // 120 columns fit the note alongside the bindings before Phase 47
-    // added `e events`, and 132 after; Phase 25's `k knowledge` pushed
-    // the row past 132, so this became 150; Phase 47's `r routes`
-    // (batch 43) pushed it past 150, so this became 170; line 1765's
-    // `h health` added eleven more columns, so this was 182; `d
-    // decisions` adds fourteen, so this is 196 — the same margin this
-    // test always had, measured against the longer row rather than
-    // assumed.
-    let bottom = last_row(&state, 196, 24);
+    let bottom = last_row(&state, 80, 24);
     assert!(
         bottom.contains("only one session"),
         "the note must reach the status bar: `{bottom}`"
@@ -554,7 +534,7 @@ fn a_note_is_dropped_rather_than_crowding_out_the_bindings() {
 /// cannot be rendering one. Box-drawing characters used for borders are a
 /// different range and stay allowed.
 #[test]
-fn nothing_draws_with_block_elements_so_the_design_stays_text_first() {
+fn compact_views_and_diagnostic_overlays_keep_readable_text() {
     let mut state = sample();
     let mut screens = vec![rendered(&state, 100, 30)];
     state.handle_key(KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE));
@@ -696,12 +676,12 @@ fn an_empty_viewport_keeps_the_existing_placeholder() {
 /// placeholder keeps its border since there is no harness screen yet to
 /// compete with it.
 #[test]
-fn the_viewport_border_is_dropped_once_a_live_grid_is_shown() {
+fn landing_and_live_viewport_leave_the_terminal_unboxed() {
     let mut state = sample();
     let placeholder = rendered(&state, 40, 10);
     assert!(
-        placeholder.contains('┌'),
-        "the placeholder keeps its border:\n{placeholder}"
+        !placeholder.contains('┌') && placeholder.contains("YOUR WORK, IN VIEW"),
+        "the landing stays transparent and unboxed:\n{placeholder}"
     );
 
     state.set_viewport_grid(grid_from_lines(&["hello"]));
@@ -3631,4 +3611,41 @@ mod settings_tests {
             "the refusal error must actually be visible on screen, not clipped:\n{text}"
         );
     }
+}
+
+#[test]
+fn appearance_controls_stay_local_and_motion_can_pause() {
+    let mut state = sample();
+    let first = state.theme().name();
+    state.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
+    assert_ne!(state.theme().name(), first);
+    assert!(rendered(&state, 140, 30).contains(state.theme().name()));
+    assert!((0..6).any(|_| state.advance_artwork()));
+    state.handle_key(KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE));
+    let paused = state.artwork_frame();
+    assert!(!(0..30).any(|_| state.advance_artwork()));
+    assert_eq!(state.artwork_frame(), paused);
+    state.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+    let selected_theme = state.theme().name();
+    let action = state.handle_key(KeyEvent::new(KeyCode::Char('t'), KeyModifiers::NONE));
+    assert_ne!(action, super::super::state::Action::Redraw);
+    assert_eq!(
+        state.theme().name(),
+        selected_theme,
+        "session input belongs to its harness"
+    );
+}
+
+#[test]
+fn wide_landing_is_expressive_without_covering_a_native_terminal() {
+    let mut state = sample();
+    let landing = rendered(&state, 140, 32);
+    assert!(landing.contains("YOUR WORK, IN VIEW"));
+    assert!(landing.contains("waiting for you"));
+    assert!(landing.chars().any(|c| c == '▀' || c == '▄'));
+    state.set_viewport_grid(grid_from_lines(&["NATIVE SESSION CONTENT"]));
+    let live = rendered(&state, 140, 32);
+    assert!(live.contains("NATIVE SESSION CONTENT"));
+    assert!(!live.contains("YOUR WORK, IN VIEW"));
+    assert!(!state.advance_artwork());
 }

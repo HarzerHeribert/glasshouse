@@ -9,6 +9,9 @@
 //! not panic on a tiny terminal" requirement gets violated, and the tests at
 //! the bottom render at 1x1 to keep it honest.
 
+mod chrome;
+use chrome::{render_footer, render_root, render_session_bar, render_title};
+
 use ratatui::Frame;
 use ratatui::buffer::Buffer;
 use ratatui::layout::{Constraint, Direction, Layout, Rect};
@@ -81,87 +84,6 @@ pub fn render(state: &ShellState, frame: &mut Frame) {
     }
 }
 
-/// The project's name and the session currently presented.
-fn render_title(state: &ShellState, frame: &mut Frame, area: Rect) {
-    let mut spans = vec![
-        Span::styled(
-            format!("glasshouse {}", state.version()),
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("  "),
-        Span::styled(
-            state.project_name().to_owned(),
-            Style::default().add_modifier(Modifier::BOLD),
-        ),
-    ];
-    if let Some(session) = state.active_session() {
-        spans.push(Span::raw("  ·  "));
-        spans.push(Span::styled(
-            format!("{} {}", session.harness, short_id(session)),
-            Style::default().fg(Color::Yellow),
-        ));
-    }
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
-}
-
-/// The active canonical project root, on its own line, on every frame.
-///
-/// This is the value the entire isolation model rests on — which project's
-/// memory, state, and sessions the user is looking at — so it gets a dedicated
-/// line rather than being tucked into a corner. When the line is too narrow the
-/// *head* is dropped, not the tail: `…/work/glasshouse` still identifies the
-/// project, while `/Users/someone/very/long/…` does not.
-fn render_root(state: &ShellState, frame: &mut Frame, area: Rect) {
-    let root = state.project_root().display().to_string();
-    let label = "root ";
-    let available = usize::from(area.width).saturating_sub(label.chars().count());
-    frame.render_widget(
-        Paragraph::new(Line::from(vec![
-            Span::styled(label, Style::default().fg(Color::DarkGray)),
-            Span::styled(
-                truncate_start(&root, available),
-                Style::default().fg(Color::White),
-            ),
-        ])),
-        area,
-    );
-}
-
-/// Every session known to the project, as a bar of tabs.
-fn render_session_bar(state: &ShellState, frame: &mut Frame, area: Rect) {
-    if state.sessions().is_empty() {
-        frame.render_widget(
-            Paragraph::new(Span::styled(
-                "no sessions yet — start one with `glasshouse launch`",
-                Style::default().fg(Color::DarkGray),
-            )),
-            area,
-        );
-        return;
-    }
-
-    let mut spans = Vec::new();
-    for (index, session) in state.sessions().iter().enumerate() {
-        let active = index == state.selected_index();
-        let style = if active {
-            Style::default()
-                .fg(Color::Black)
-                .bg(Color::Cyan)
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default().fg(Color::Gray)
-        };
-        spans.push(Span::styled(
-            format!(" {} {} ", index + 1, session.harness),
-            style,
-        ));
-        spans.push(Span::raw(" "));
-    }
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
-}
-
 /// Draws a [`ViewportGrid`] cell by cell into whatever area it is given.
 ///
 /// A plain [`Widget`] rather than a free function taking `&mut Buffer`
@@ -232,10 +154,8 @@ impl Widget for GridView<'_> {
 ///
 /// A live grid gets the *whole* area, with no border: Phase 5 requires the
 /// embedded harness to stay visually dominant while Glasshouse's own chrome
-/// stays minimal, and a border spends one row and two columns of every frame
-/// on Glasshouse instead of the product it is hosting. The placeholder keeps
-/// its border and title, since there is no harness screen yet for a border
-/// to compete with.
+/// stays minimal. When no terminal is attached, the transparent landing
+/// surface shows navigation and recorded session metadata.
 fn render_viewport(state: &ShellState, frame: &mut Frame, area: Rect) {
     // A headless session never becomes the viewport's, and this is the last
     // place that could go wrong. `shell::run` already declines to *build* a
@@ -259,108 +179,9 @@ fn render_viewport(state: &ShellState, frame: &mut Frame, area: Rect) {
         return;
     }
 
-    let block = Block::default().borders(Borders::ALL).title(
-        state
-            .active_session()
-            .map(|session| format!(" {} ", session.harness))
-            .unwrap_or_else(|| " session ".to_owned()),
-    );
-    let inner = block.inner(area);
-    frame.render_widget(block, area);
-
-    let lines = match state.active_session() {
-        Some(session) => vec![
-            Line::from(Span::styled(
-                format!("session {}", session.id),
-                Style::default().add_modifier(Modifier::BOLD),
-            )),
-            Line::from(format!("harness       {}", session.harness)),
-            Line::from(format!("state         {}", session.lifecycle)),
-            Line::from(format!("presented     {}", session.presentation)),
-            Line::from(format!("role          {}", session.role)),
-            Line::from(""),
-            Line::from(Span::styled(
-                // A headless session has a screen and is deliberately not
-                // shown it — see `shell::run`'s viewport-grid build. Saying
-                // which of the two cases this is matters: an empty viewport
-                // for a session that is running fine otherwise reads as a
-                // broken renderer.
-                if session.presentation == SessionPresentation::Headless {
-                    "This session is headless: it runs with no viewport."
-                } else {
-                    "This viewport is reserved for the session's own terminal."
-                },
-                Style::default().fg(Color::DarkGray),
-            )),
-        ],
-        None => vec![
-            Line::from(Span::styled(
-                "No session is active.",
-                Style::default().add_modifier(Modifier::BOLD),
-            )),
-            Line::from(""),
-            Line::from(Span::styled(
-                "Run `glasshouse launch` to start one.",
-                Style::default().fg(Color::DarkGray),
-            )),
-        ],
-    };
-    frame.render_widget(Paragraph::new(lines), inner);
-}
-
-/// The bottom status bar: which mode owns the keyboard, Glasshouse's own key
-/// bindings, plus a note when the last key needs explaining.
-///
-/// All on one compact row. A note takes the right-hand side rather than
-/// replacing the hints, so learning the keys and being told why one did nothing
-/// are not mutually exclusive.
-///
-/// In session mode this is the *only* thing on screen that says how to get
-/// back — see the design note: "A user who cannot see how to get out is the
-/// failure this design exists to prevent." so the escape chord is shown here
-/// on every frame session mode is active, not just the first.
-fn render_footer(state: &ShellState, frame: &mut Frame, area: Rect) {
-    let hint = match (state.mode(), state.overlay()) {
-        (Mode::Session, _) => "SESSION MODE -- keys go to the session -- ctrl-] for glasshouse",
-        (Mode::Control, Some(Overlay::Overview)) => {
-            "up/down pick   m send text   c interrupt   esc back to session   q quit"
-        }
-        (Mode::Control, Some(Overlay::Settings)) => {
-            "tab section   up/down move   space toggle   section keys edit   \
-             w save   W project   r setup   esc close"
-        }
-        (Mode::Control, Some(Overlay::ProjectOverview)) => "esc back to session   q quit",
-        (Mode::Control, Some(Overlay::SessionEvents)) => "esc back to session   q quit",
-        (Mode::Control, Some(Overlay::ProjectKnowledge)) => "esc back to session   q quit",
-        (Mode::Control, Some(Overlay::RouteEvidence)) => "esc back to session   q quit",
-        (Mode::Control, Some(Overlay::RouteHealth)) => "esc back to session   q quit",
-        (Mode::Control, Some(Overlay::RouteDecisions)) => "esc back to session   q quit",
-        (Mode::Control, Some(Overlay::ProjectMemory)) => "esc back to session   q quit",
-        (Mode::Control, None) => {
-            "tab session   enter session   n new   N headless   o overview   p project   \
-             k knowledge   M memory   e events   r routes   h health   d decisions   q quit"
-        }
-    };
-    let mut spans = vec![Span::styled(hint, Style::default().fg(Color::DarkGray))];
-
-    if let Some(status) = state.status() {
-        spans.push(Span::raw("   "));
-        spans.push(Span::styled(status, Style::default().fg(Color::Yellow)));
+    if state.overlay().is_none() {
+        chrome::render_landing(state, frame, area);
     }
-
-    // Order is the whole mechanism: the bindings are written first, so when the
-    // row is too narrow it is the note that gets clipped away — and within the
-    // bindings, the ones that come first are the ones that survive. Adding
-    // `t`/`m` for Phase 9D pushed the row past a realistic hundred columns and
-    // clipped `w save` off the end, which is how the ordering below came to put
-    // saving ahead of the secret-store keys: losing "how do I keep my edits" is
-    // worse than losing "how do I store a credential", and something had to go. The bindings are
-    // needed permanently and the note only once, so that is the right thing to
-    // lose. An earlier version measured the remaining width and truncated the
-    // note itself, which turned out to be an elaborate way of duplicating the
-    // clipping Ratatui already does — and a mutation removing the measurement
-    // changed nothing on screen, which is how it was found.
-    frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
 /// The session overview, drawn over the shell rather than replacing it.
@@ -375,7 +196,8 @@ fn render_overview(state: &ShellState, frame: &mut Frame, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" sessions ")
-        .style(Style::default().bg(Color::Black));
+        .border_style(Style::default().fg(state.theme().accent()))
+        .style(Style::default().bg(Color::Reset));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
@@ -523,7 +345,8 @@ fn render_project_overview(state: &ShellState, frame: &mut Frame, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" project ")
-        .style(Style::default().bg(Color::Black));
+        .border_style(Style::default().fg(state.theme().accent()))
+        .style(Style::default().bg(Color::Reset));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
@@ -714,7 +537,8 @@ fn render_session_events(state: &ShellState, frame: &mut Frame, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" session events ")
-        .style(Style::default().bg(Color::Black));
+        .border_style(Style::default().fg(state.theme().accent()))
+        .style(Style::default().bg(Color::Reset));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
@@ -786,7 +610,8 @@ fn render_project_knowledge(state: &ShellState, frame: &mut Frame, area: Rect) {
         } else {
             " project knowledge "
         })
-        .style(Style::default().bg(Color::Black));
+        .border_style(Style::default().fg(state.theme().accent()))
+        .style(Style::default().bg(Color::Reset));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
@@ -974,7 +799,8 @@ fn render_project_memory(state: &ShellState, frame: &mut Frame, area: Rect) {
         } else {
             " project memory "
         })
-        .style(Style::default().bg(Color::Black));
+        .border_style(Style::default().fg(state.theme().accent()))
+        .style(Style::default().bg(Color::Reset));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
@@ -1035,7 +861,8 @@ fn render_route_evidence(state: &ShellState, frame: &mut Frame, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" route evidence ")
-        .style(Style::default().bg(Color::Black));
+        .border_style(Style::default().fg(state.theme().accent()))
+        .style(Style::default().bg(Color::Reset));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
@@ -1107,7 +934,8 @@ fn render_route_decisions(state: &ShellState, frame: &mut Frame, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" routing decisions ")
-        .style(Style::default().bg(Color::Black));
+        .border_style(Style::default().fg(state.theme().accent()))
+        .style(Style::default().bg(Color::Reset));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
@@ -1198,7 +1026,8 @@ fn render_route_health(state: &ShellState, frame: &mut Frame, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" route health ")
-        .style(Style::default().bg(Color::Black));
+        .border_style(Style::default().fg(state.theme().accent()))
+        .style(Style::default().bg(Color::Reset));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
@@ -1515,7 +1344,8 @@ fn render_settings(state: &ShellState, frame: &mut Frame, area: Rect) {
     let block = Block::default()
         .borders(Borders::ALL)
         .title(" settings ")
-        .style(Style::default().bg(Color::Black));
+        .border_style(Style::default().fg(state.theme().accent()))
+        .style(Style::default().bg(Color::Reset));
     let inner = block.inner(popup);
     frame.render_widget(block, popup);
 
