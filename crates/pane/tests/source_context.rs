@@ -95,6 +95,267 @@ fn rust_braces_in_strings_and_comments_do_not_clip_definition() {
 }
 
 #[test]
+fn typescript_parser_packs_decorated_target_and_ranks_tests() {
+    let f = Fixture::new("typescript");
+    let padding = "// padding padding padding padding\n".repeat(600);
+    let source = format!(
+        "import {{ helper }} from './helper';\n\nexport function nearby() {{ return helper(); }}\n\n/** Service documentation. */\n@sealed\nexport class Target {{\n    run(value: string) {{\n        const template = `literal }}}} ${{value}}`;\n        const pattern = /[}}]/u;\n        return {{ template, pattern }};\n    }}\n}}\n\nexport function after() {{ return 'outside'; }}\n{padding}"
+    );
+    let target = f.put("src/target.ts", &source);
+    f.put(
+        "src/caller.ts",
+        "import { Target } from './target';\nnew Target().run('x');\n",
+    );
+    f.put(
+        "tests/target.test.ts",
+        "import { Target } from '../src/target';\ntest('Target', () => new Target());\n",
+    );
+
+    let got = pack(&f.profile(), &target, Some("Target")).unwrap();
+    assert!(got.complete);
+    assert_eq!(got.language, "typescript");
+    assert!(
+        got.target
+            .text
+            .starts_with("/** Service documentation. */\n@sealed")
+    );
+    assert!(got.target.text.contains("`literal }} ${value}`"));
+    assert!(got.target.text.contains("/[}]/u"));
+    assert!(!got.target.text.contains("function after"));
+    assert!(got.supporting.iter().any(|excerpt| {
+        excerpt.role == ContextRole::NearbyDefinition && excerpt.text.contains("function nearby")
+    }));
+    let references: Vec<_> = got
+        .supporting
+        .iter()
+        .filter(|excerpt| matches!(excerpt.role, ContextRole::Test | ContextRole::Caller))
+        .collect();
+    assert_eq!(references[0].role, ContextRole::Test);
+}
+
+#[test]
+fn malformed_typescript_uses_truthful_bounded_fallback() {
+    let f = Fixture::new("typescript-malformed");
+    let padding = "// padding padding padding padding\n".repeat(600);
+    let source = format!(
+        "export function target() {{\n    const broken = `unterminated;\n    return 1;\n}}\n{padding}"
+    );
+    let target = f.put("src/target.ts", &source);
+    let got = pack(&f.profile(), &target, Some("target")).unwrap();
+
+    assert!(!got.complete);
+    assert!(got.target.text.contains("function target"));
+    assert!(
+        got.omissions
+            .iter()
+            .any(|note| { note.contains("complete definition boundary unavailable") })
+    );
+}
+
+#[test]
+fn javascript_parser_handles_template_and_regex_braces() {
+    let f = Fixture::new("javascript");
+    let padding = "// padding padding padding padding\n".repeat(600);
+    let source = format!(
+        "function target(value) {{\n    const template = `literal }}}} ${{value}}`;\n    const pattern = /[}}]/u;\n    return pattern.test(template);\n}}\n\nfunction after() {{ return false; }}\n{padding}"
+    );
+    let target = f.put("src/target.js", &source);
+    let got = pack(&f.profile(), &target, Some("target")).unwrap();
+
+    assert!(got.complete);
+    assert_eq!(got.language, "javascript");
+    assert!(got.target.text.contains("`literal }} ${value}`"));
+    assert!(got.target.text.contains("/[}]/u"));
+    assert!(!got.target.text.contains("function after"));
+}
+
+#[test]
+fn go_scanner_packs_documented_target_and_ranks_tests() {
+    let f = Fixture::new("go");
+    let padding = "// padding padding padding padding\n".repeat(600);
+    let source = format!(
+        "package quota\n\nimport \"strings\"\n\ntype Service struct {{}}\n\nfunc helper() string {{ return \"ok\" }}\n\n/* func (Service) target() string {{ return \"comment\" }} */\n\n// target reserves capacity.\nfunc (Service) target(value string) string {{\n\traw := `literal }}}}`\n\tquoted := \"}}\"\n\t/* a block comment with }} */\n\tif strings.TrimSpace(value) != \"\" {{ return raw + quoted + helper() }}\n\treturn \"empty\"\n}}\n\nfunc after() string {{ return \"outside\" }}\n{padding}"
+    );
+    let target = f.put("quota.go", &source);
+    f.put(
+        "caller.go",
+        "package quota\n\nvar result = Service{}.target(\"x\")\n",
+    );
+    f.put(
+        "quota_test.go",
+        "package quota\n\nfunc TestTarget(t *testing.T) { _ = Service{}.target(\"x\") }\n",
+    );
+
+    let got = pack(&f.profile(), &target, Some("target")).unwrap();
+    assert!(got.complete);
+    assert_eq!(got.language, "go");
+    assert!(got.target.text.starts_with("// target reserves capacity."));
+    assert!(got.target.text.contains("`literal }}`"));
+    assert!(got.target.text.contains("return \"empty\""));
+    assert!(!got.target.text.contains("func after"));
+    assert!(got.supporting.iter().any(|excerpt| {
+        excerpt.role == ContextRole::NearbyDefinition && excerpt.text.contains("func helper")
+    }));
+    let references: Vec<_> = got
+        .supporting
+        .iter()
+        .filter(|excerpt| matches!(excerpt.role, ContextRole::Test | ContextRole::Caller))
+        .collect();
+    assert_eq!(references[0].role, ContextRole::Test);
+}
+
+#[test]
+fn java_scanner_packs_annotated_target_and_ranks_tests() {
+    let f = Fixture::new("java");
+    let padding = "// padding padding padding padding\n".repeat(600);
+    let source = format!(
+        "package quota;\n\nimport java.util.regex.Pattern;\n\nclass Helpers {{ static int helper() {{ return 1; }} }}\n\npublic class Target {{\n    /* public int reserve(String value) {{ return 0; }} */\n\n    /** Reserve capacity. */\n    @Override\n    public int reserve(String value) {{\n        String brace = \"}}\";\n        String block = \"\"\"\n            literal }}}}\n            \"\"\";\n        /* }} is not the method boundary */\n        if (Pattern.matches(\"[}}]\", value)) {{ return Helpers.helper(); }}\n        return block.length() + brace.length();\n    }}\n}}\n\nclass After {{}}\n{padding}"
+    );
+    let target = f.put("src/Target.java", &source);
+    f.put(
+        "src/Caller.java",
+        "class Caller { int call() { return new Target().reserve(\"x\"); } }\n",
+    );
+    f.put(
+        "src/test/TargetTest.java",
+        "class TargetTest { void targetWorks() { new Target().reserve(\"x\"); } }\n",
+    );
+
+    let got = pack(&f.profile(), &target, Some("reserve")).unwrap();
+    assert!(got.complete);
+    assert_eq!(got.language, "java");
+    assert!(
+        got.target
+            .text
+            .starts_with("    /** Reserve capacity. */\n    @Override")
+    );
+    assert!(got.target.text.contains("literal }}"));
+    assert!(got.target.text.contains("return block.length()"));
+    assert!(!got.target.text.contains("class After"));
+    assert!(got.supporting.iter().any(|excerpt| {
+        excerpt.role == ContextRole::NearbyDefinition && excerpt.text.contains("class Helpers")
+    }));
+    let references: Vec<_> = got
+        .supporting
+        .iter()
+        .filter(|excerpt| matches!(excerpt.role, ContextRole::Test | ContextRole::Caller))
+        .collect();
+    assert_eq!(references[0].role, ContextRole::Test);
+}
+
+#[test]
+fn malformed_go_and_java_use_truthful_bounded_fallbacks() {
+    let f = Fixture::new("brace-malformed");
+    let padding = "// padding padding padding padding\n".repeat(600);
+    for (path, symbol, source) in [
+        (
+            "target.go",
+            "target",
+            format!("package bad\nfunc target() {{\n    value := `unterminated\n}}\n{padding}"),
+        ),
+        (
+            "Target.java",
+            "Target",
+            format!(
+                "class Target {{\n    String value = \"\"\"\n        unterminated\n}}\n{padding}"
+            ),
+        ),
+        (
+            "missing.go",
+            "target",
+            format!("package bad\nfunc target()\nfunc after() {{}}\n{padding}"),
+        ),
+        (
+            "Missing.java",
+            "target",
+            format!(
+                "abstract class Missing {{\n    abstract int target();\n    int after() {{ return 1; }}\n}}\n{padding}"
+            ),
+        ),
+    ] {
+        let target = f.put(path, &source);
+        let got = pack(&f.profile(), &target, Some(symbol)).unwrap();
+        assert!(!got.complete, "{path}");
+        assert!(
+            got.omissions
+                .iter()
+                .any(|note| { note.contains("complete definition boundary unavailable") })
+        );
+    }
+}
+
+#[test]
+fn added_language_definition_caps_refuse_oversized_targets() {
+    let f = Fixture::new("language-definition-caps");
+    let cases = [
+        (
+            "target.ts",
+            format!(
+                "export function target() {{\n{}return 1;\n}}\n",
+                "    // target padding padding padding\n".repeat(900)
+            ),
+            "target",
+        ),
+        (
+            "target.go",
+            format!(
+                "package cap\nfunc target() int {{\n{}return 1\n}}\n",
+                "    // target padding padding padding\n".repeat(900)
+            ),
+            "target",
+        ),
+        (
+            "Target.java",
+            format!(
+                "class Target {{\n{}int value() {{ return 1; }}\n}}\n",
+                "    // target padding padding padding\n".repeat(900)
+            ),
+            "Target",
+        ),
+    ];
+    for (path, source, symbol) in cases {
+        let target = f.put(path, &source);
+        let error = pack(&f.profile(), &target, Some(symbol)).unwrap_err();
+        assert!(
+            error.0.contains("definition exceeds the 24000 byte cap"),
+            "{path}: {error:?}"
+        );
+    }
+}
+
+#[test]
+fn added_languages_infer_one_incomplete_definition() {
+    let f = Fixture::new("language-inference");
+    let padding = "// padding padding padding padding\n".repeat(600);
+    for (path, source) in [
+        (
+            "target.ts",
+            format!(
+                "export function target() {{\n    // TODO: implement\n    return 1;\n}}\n{padding}"
+            ),
+        ),
+        (
+            "target.go",
+            format!(
+                "package infer\nfunc target() int {{\n    // TODO: implement\n    return 1\n}}\n{padding}"
+            ),
+        ),
+        (
+            "Target.java",
+            format!(
+                "class Target {{\n    int target() {{\n        // TODO: implement\n        return 1;\n    }}\n}}\n{padding}"
+            ),
+        ),
+    ] {
+        let target = f.put(path, &source);
+        let got = pack(&f.profile(), &target, None).unwrap();
+        assert!(got.complete, "{path}");
+        assert_eq!(got.symbol.as_deref(), Some("target"), "{path}");
+        assert!(got.omissions.iter().any(|note| note.contains("inferred")));
+    }
+}
+
+#[test]
 fn small_generic_file_is_returned_whole_with_typed_range() {
     let f = Fixture::new("small");
     let p = f.put("notes.xyz", "alpha\nβeta\nomega\n");

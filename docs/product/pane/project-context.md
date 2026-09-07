@@ -80,3 +80,20 @@ and 2,048 description characters. Frames are capped at 8 MiB and each exchange
 has a 10-second deadline; excess content fails explicitly instead of appearing
 as a complete truncated result. Windows continues to refuse process startup
 until its existing confinement applier is enabled.
+
+The source-context packer returns a complete small file or, for a large file,
+a named definition with nearby definitions, imports, callers, and tests. It
+recognizes definition boundaries in Python, Rust, JavaScript/TypeScript, Go,
+and Java. JavaScript and TypeScript boundaries come from the same parser Pane
+uses for cells, including JSX, decorators, template literals, and regular
+expressions. Go and Java use conservative lexical scanners that exclude braces
+inside comments and language string forms, including Go raw strings and Java
+text blocks. Leading documentation comments, decorators, and annotations stay
+with their definition.
+
+The packer only marks a definition complete when its language-specific parser
+or scanner establishes both boundaries. Malformed or ambiguous syntax uses the
+bounded language-agnostic window and records an omission. The existing 1 MiB
+source cap, 24,000-byte definition cap, 18 supporting-excerpt cap, traversal
+cap, permission checks, version hash, and rendered delivery cap apply equally
+to every supported language.

@@ -216,6 +216,12 @@ pub fn infer_incomplete_target(
 enum Lang {
     Py,
     Rs,
+    Js,
+    Jsx,
+    Ts,
+    Tsx,
+    Go,
+    Java,
     Other,
 }
 impl Lang {
@@ -223,6 +229,12 @@ impl Lang {
         match p.extension().and_then(|x| x.to_str()) {
             Some("py") => Self::Py,
             Some("rs") => Self::Rs,
+            Some("js" | "mjs" | "cjs") => Self::Js,
+            Some("jsx") => Self::Jsx,
+            Some("ts" | "mts" | "cts") => Self::Ts,
+            Some("tsx") => Self::Tsx,
+            Some("go") => Self::Go,
+            Some("java") => Self::Java,
             _ => Self::Other,
         }
     }
@@ -230,6 +242,10 @@ impl Lang {
         match self {
             Self::Py => "python",
             Self::Rs => "rust",
+            Self::Js | Self::Jsx => "javascript",
+            Self::Ts | Self::Tsx => "typescript",
+            Self::Go => "go",
+            Self::Java => "java",
             Self::Other => "other",
         }
     }
@@ -265,8 +281,593 @@ fn definition(l: &[&str], n: &str, g: Lang) -> Option<(usize, usize)> {
     match g {
         Lang::Py => py_def(l, n),
         Lang::Rs => rs_def(l, n),
+        Lang::Js | Lang::Jsx | Lang::Ts | Lang::Tsx => js_def(l, n, g),
+        Lang::Go => go_def(l, n),
+        Lang::Java => java_def(l, n),
         _ => None,
     }
+}
+
+fn js_def(lines: &[&str], name: &str, lang: Lang) -> Option<(usize, usize)> {
+    use oxc::{
+        allocator::Allocator,
+        ast::ast::{
+            Class, Function, MethodDefinition, TSEnumDeclaration, TSInterfaceDeclaration,
+            TSTypeAliasDeclaration, VariableDeclaration,
+        },
+        ast_visit::{Visit, walk},
+        parser::Parser,
+        span::{SourceType, Span},
+    };
+
+    struct Definitions<'n> {
+        name: &'n str,
+        spans: Vec<Span>,
+    }
+    impl<'a> Visit<'a> for Definitions<'_> {
+        fn visit_function(
+            &mut self,
+            function: &Function<'a>,
+            flags: oxc::syntax::scope::ScopeFlags,
+        ) {
+            if function.body.is_some()
+                && function.id.as_ref().is_some_and(|id| id.name == self.name)
+            {
+                self.spans.push(function.span);
+            }
+            walk::walk_function(self, function, flags);
+        }
+
+        fn visit_class(&mut self, class: &Class<'a>) {
+            if class.id.as_ref().is_some_and(|id| id.name == self.name) {
+                self.spans.push(class.span);
+            }
+            walk::walk_class(self, class);
+        }
+
+        fn visit_method_definition(&mut self, method: &MethodDefinition<'a>) {
+            if method.value.body.is_some() && method.key.is_specific_static_name(self.name) {
+                self.spans.push(method.span);
+            }
+            walk::walk_method_definition(self, method);
+        }
+
+        fn visit_variable_declaration(&mut self, declaration: &VariableDeclaration<'a>) {
+            if declaration.declarations.iter().any(|item| {
+                item.id
+                    .get_binding_identifier()
+                    .is_some_and(|id| id.name == self.name)
+            }) {
+                self.spans.push(declaration.span);
+            }
+            walk::walk_variable_declaration(self, declaration);
+        }
+
+        fn visit_ts_enum_declaration(&mut self, declaration: &TSEnumDeclaration<'a>) {
+            if declaration.id.name == self.name {
+                self.spans.push(declaration.span);
+            }
+            walk::walk_ts_enum_declaration(self, declaration);
+        }
+
+        fn visit_ts_interface_declaration(&mut self, declaration: &TSInterfaceDeclaration<'a>) {
+            if declaration.id.name == self.name {
+                self.spans.push(declaration.span);
+            }
+            walk::walk_ts_interface_declaration(self, declaration);
+        }
+
+        fn visit_ts_type_alias_declaration(&mut self, declaration: &TSTypeAliasDeclaration<'a>) {
+            if declaration.id.name == self.name {
+                self.spans.push(declaration.span);
+            }
+            walk::walk_ts_type_alias_declaration(self, declaration);
+        }
+    }
+
+    let source = lines.join("\n");
+    let source_type = match lang {
+        Lang::Js => SourceType::unambiguous(),
+        Lang::Jsx => SourceType::jsx(),
+        Lang::Ts => SourceType::ts(),
+        Lang::Tsx => SourceType::tsx(),
+        _ => return None,
+    };
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, &source, source_type).parse();
+    if !parsed.diagnostics.is_empty() {
+        return None;
+    }
+    let mut definitions = Definitions {
+        name,
+        spans: vec![],
+    };
+    definitions.visit_program(&parsed.program);
+    definitions.spans.sort_by_key(|span| (span.start, span.end));
+    definitions
+        .spans
+        .into_iter()
+        .next()
+        .map(|span| span_lines(lines, span.start as usize, span.end as usize))
+        .map(|range| (leading_definition_start(lines, range.0, true), range.1))
+}
+
+fn span_lines(lines: &[&str], start: usize, end: usize) -> (usize, usize) {
+    let mut offset = 0;
+    let mut start_line = 0;
+    let mut end_line = lines.len();
+    for (index, line) in lines.iter().enumerate() {
+        let next = offset + line.len() + 1;
+        if offset <= start && start < next {
+            start_line = index;
+        }
+        if end <= next {
+            end_line = index + 1;
+            break;
+        }
+        offset = next;
+    }
+    (start_line, end_line)
+}
+
+fn leading_definition_start(lines: &[&str], mut start: usize, decorators: bool) -> usize {
+    let mut in_block_comment = false;
+    while start > 0 {
+        let previous = lines[start - 1].trim();
+        let belongs = if previous.ends_with("*/") {
+            in_block_comment = !previous.starts_with("/*");
+            true
+        } else if in_block_comment {
+            if previous.starts_with("/*") {
+                in_block_comment = false;
+            }
+            true
+        } else {
+            previous.starts_with("//")
+                || previous.starts_with("///")
+                || previous.starts_with("//! ")
+                || (decorators && previous.starts_with('@'))
+        };
+        if !belongs {
+            break;
+        }
+        start -= 1;
+    }
+    start
+}
+
+fn go_def(lines: &[&str], name: &str) -> Option<(usize, usize)> {
+    let declarations = declaration_lines(lines, BraceLanguage::Go)?;
+    declarations.iter().enumerate().find_map(|(line, source)| {
+        let column = go_decl(source, name)?;
+        if source.trim_start().starts_with("func ")
+            && !go_function_preamble_is_unambiguous(&declarations, line, column)
+        {
+            return None;
+        }
+        let (_, end) = brace_definition(lines, line, column, BraceLanguage::Go)?;
+        Some((leading_definition_start(lines, line, false), end))
+    })
+}
+
+fn go_decl(line: &str, name: &str) -> Option<usize> {
+    let code = line.split("//").next().unwrap_or("");
+    let leading = code.len() - code.trim_start().len();
+    let trimmed = code.trim_start();
+    if let Some(rest) = trimmed.strip_prefix("type ") {
+        let offset = rest.len() - rest.trim_start().len();
+        let rest = rest.trim_start();
+        if rest.strip_prefix(name).is_some_and(|tail| {
+            tail.starts_with(char::is_whitespace)
+                && matches!(tail.split_whitespace().next(), Some("struct" | "interface"))
+        }) {
+            return Some(leading + "type ".len() + offset);
+        }
+    }
+    let mut rest = trimmed.strip_prefix("func ")?;
+    let mut consumed = leading + "func ".len();
+    let whitespace = rest.len() - rest.trim_start().len();
+    rest = rest.trim_start();
+    consumed += whitespace;
+    if rest.starts_with('(') {
+        let mut depth = 0usize;
+        let mut receiver_end = None;
+        for (index, byte) in rest.bytes().enumerate() {
+            match byte {
+                b'(' => depth += 1,
+                b')' => {
+                    depth = depth.checked_sub(1)?;
+                    if depth == 0 {
+                        receiver_end = Some(index + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let receiver_end = receiver_end?;
+        consumed += receiver_end;
+        rest = &rest[receiver_end..];
+        let whitespace = rest.len() - rest.trim_start().len();
+        rest = rest.trim_start();
+        consumed += whitespace;
+    }
+    rest.strip_prefix(name)
+        .filter(|tail| {
+            tail.starts_with('(') || tail.starts_with('[') || tail.starts_with(char::is_whitespace)
+        })
+        .map(|_| consumed)
+}
+
+fn go_function_preamble_is_unambiguous(lines: &[String], start: usize, column: usize) -> bool {
+    let mut preamble = String::new();
+    let mut parens = 0usize;
+    let mut brackets = 0usize;
+    for (line, source) in lines.iter().enumerate().skip(start).take(32) {
+        let source = if line == start {
+            &source[column..]
+        } else {
+            source
+        };
+        let open = source.find('{');
+        let before_open = open.map_or(source, |index| &source[..index]);
+        for byte in before_open.bytes() {
+            match byte {
+                b'(' => parens += 1,
+                b')' => {
+                    let Some(next) = parens.checked_sub(1) else {
+                        return false;
+                    };
+                    parens = next;
+                }
+                b'[' => brackets += 1,
+                b']' => {
+                    let Some(next) = brackets.checked_sub(1) else {
+                        return false;
+                    };
+                    brackets = next;
+                }
+                b';' => return false,
+                _ => {}
+            }
+        }
+        preamble.push_str(before_open);
+        if open.is_some() {
+            return parens == 0
+                && brackets == 0
+                && !["struct", "interface", "func", "type"]
+                    .iter()
+                    .any(|keyword| {
+                        preamble
+                            .match_indices(keyword)
+                            .any(|(index, _)| boundary(&preamble, index, keyword.len()))
+                    });
+        }
+        preamble.push('\n');
+        if parens == 0 && brackets == 0 {
+            return false;
+        }
+    }
+    false
+}
+
+fn java_def(lines: &[&str], name: &str) -> Option<(usize, usize)> {
+    let declarations = declaration_lines(lines, BraceLanguage::Java)?;
+    declarations.iter().enumerate().find_map(|(line, source)| {
+        let column = java_decl(source, name)?;
+        if !java_preamble_is_unambiguous(&declarations, line, column) {
+            return None;
+        }
+        let (_, end) = brace_definition(lines, line, column, BraceLanguage::Java)?;
+        Some((leading_definition_start(lines, line, true), end))
+    })
+}
+
+fn java_preamble_is_unambiguous(lines: &[String], start: usize, column: usize) -> bool {
+    let mut parens = 0usize;
+    for (line, source) in lines.iter().enumerate().skip(start).take(32) {
+        let source = if line == start {
+            &source[column..]
+        } else {
+            source
+        };
+        let brace = source.find('{').unwrap_or(source.len());
+        if source[..brace].contains(';') {
+            return false;
+        }
+        for byte in source[..brace].bytes() {
+            match byte {
+                b'(' => parens += 1,
+                b')' => {
+                    let Some(next) = parens.checked_sub(1) else {
+                        return false;
+                    };
+                    parens = next;
+                }
+                _ => {}
+            }
+        }
+        if brace < source.len() {
+            return parens == 0;
+        }
+        if line > start && java_name(source).is_some() {
+            return false;
+        }
+    }
+    false
+}
+
+fn java_decl(line: &str, name: &str) -> Option<usize> {
+    let code = line.split("//").next().unwrap_or("");
+    for keyword in ["class", "interface", "enum", "record"] {
+        let declaration = format!("{keyword} {name}");
+        if let Some((index, _)) = code
+            .match_indices(&declaration)
+            .find(|(index, _)| boundary(code, *index, declaration.len()))
+        {
+            return Some(index);
+        }
+    }
+    code.match_indices(name).find_map(|(index, _)| {
+        if !boundary(code, index, name.len())
+            || !code[index + name.len()..].trim_start().starts_with('(')
+        {
+            return None;
+        }
+        let prefix = code[..index].trim();
+        if prefix.is_empty()
+            || prefix
+                .bytes()
+                .any(|byte| matches!(byte, b'=' | b'.' | b';' | b'{' | b'}' | b'(' | b')'))
+        {
+            return None;
+        }
+        let last = prefix
+            .split_whitespace()
+            .next_back()?
+            .trim_matches(|character: char| matches!(character, '<' | '>' | '[' | ']'));
+        (!matches!(
+            last,
+            "public"
+                | "protected"
+                | "private"
+                | "static"
+                | "final"
+                | "abstract"
+                | "native"
+                | "synchronized"
+                | "default"
+                | "if"
+                | "for"
+                | "while"
+                | "switch"
+                | "return"
+                | "throw"
+                | "new"
+        ))
+        .then_some(index)
+    })
+}
+
+#[derive(Clone, Copy)]
+enum BraceLanguage {
+    Go,
+    Java,
+}
+
+#[derive(Default)]
+struct BraceLexer {
+    block_comment: bool,
+    raw: bool,
+    text_block: bool,
+}
+
+fn declaration_lines(lines: &[&str], language: BraceLanguage) -> Option<Vec<String>> {
+    let mut lexer = BraceLexer::default();
+    let mut masked = Vec::with_capacity(lines.len());
+    for line in lines {
+        let bytes = line.as_bytes();
+        let mut output = bytes.to_vec();
+        let mut quote = None;
+        let mut escape = false;
+        let mut index = 0;
+        while index < bytes.len() {
+            if lexer.block_comment {
+                output[index] = b' ';
+                if bytes.get(index..index + 2) == Some(b"*/") {
+                    output[index + 1] = b' ';
+                    lexer.block_comment = false;
+                    index += 2;
+                } else {
+                    index += 1;
+                }
+                continue;
+            }
+            if lexer.raw {
+                output[index] = b' ';
+                if bytes[index] == b'`' {
+                    lexer.raw = false;
+                }
+                index += 1;
+                continue;
+            }
+            if lexer.text_block {
+                output[index] = b' ';
+                if bytes.get(index..index + 3) == Some(b"\"\"\"") && !escaped(bytes, index) {
+                    output[index + 1] = b' ';
+                    output[index + 2] = b' ';
+                    lexer.text_block = false;
+                    index += 3;
+                } else {
+                    index += 1;
+                }
+                continue;
+            }
+            if let Some(delimiter) = quote {
+                output[index] = b' ';
+                if escape {
+                    escape = false;
+                } else if bytes[index] == b'\\' {
+                    escape = true;
+                } else if bytes[index] == delimiter {
+                    quote = None;
+                }
+                index += 1;
+                continue;
+            }
+            if bytes.get(index..index + 2) == Some(b"//") {
+                output[index..].fill(b' ');
+                break;
+            }
+            if bytes.get(index..index + 2) == Some(b"/*") {
+                output[index] = b' ';
+                output[index + 1] = b' ';
+                lexer.block_comment = true;
+                index += 2;
+                continue;
+            }
+            if matches!(language, BraceLanguage::Java)
+                && bytes.get(index..index + 3) == Some(b"\"\"\"")
+            {
+                output[index..index + 3].fill(b' ');
+                lexer.text_block = true;
+                index += 3;
+                continue;
+            }
+            if matches!(language, BraceLanguage::Go) && bytes[index] == b'`' {
+                output[index] = b' ';
+                lexer.raw = true;
+                index += 1;
+                continue;
+            }
+            if matches!(bytes[index], b'\"' | b'\'') {
+                output[index] = b' ';
+                quote = Some(bytes[index]);
+            }
+            index += 1;
+        }
+        if quote.is_some() {
+            return None;
+        }
+        masked.push(String::from_utf8(output).ok()?);
+    }
+    lexer.complete().then_some(masked)
+}
+
+fn escaped(bytes: &[u8], index: usize) -> bool {
+    bytes[..index]
+        .iter()
+        .rev()
+        .take_while(|&&byte| byte == b'\\')
+        .count()
+        % 2
+        == 1
+}
+
+impl BraceLexer {
+    fn scan(&mut self, line: &str, language: BraceLanguage) -> Option<Vec<bool>> {
+        let bytes = line.as_bytes();
+        let mut braces = vec![];
+        let mut quote = None;
+        let mut escape = false;
+        let mut index = 0;
+        while index < bytes.len() {
+            if self.block_comment {
+                if bytes.get(index..index + 2) == Some(b"*/") {
+                    self.block_comment = false;
+                    index += 2;
+                } else {
+                    index += 1;
+                }
+                continue;
+            }
+            if self.raw {
+                if bytes[index] == b'`' {
+                    self.raw = false;
+                }
+                index += 1;
+                continue;
+            }
+            if self.text_block {
+                if bytes.get(index..index + 3) == Some(b"\"\"\"") && !escaped(bytes, index) {
+                    self.text_block = false;
+                    index += 3;
+                } else {
+                    index += 1;
+                }
+                continue;
+            }
+            if let Some(delimiter) = quote {
+                if escape {
+                    escape = false;
+                } else if bytes[index] == b'\\' {
+                    escape = true;
+                } else if bytes[index] == delimiter {
+                    quote = None;
+                }
+                index += 1;
+                continue;
+            }
+            if bytes.get(index..index + 2) == Some(b"//") {
+                break;
+            }
+            if bytes.get(index..index + 2) == Some(b"/*") {
+                self.block_comment = true;
+                index += 2;
+                continue;
+            }
+            if matches!(language, BraceLanguage::Java)
+                && bytes.get(index..index + 3) == Some(b"\"\"\"")
+            {
+                self.text_block = true;
+                index += 3;
+                continue;
+            }
+            match bytes[index] {
+                b'`' if matches!(language, BraceLanguage::Go) => self.raw = true,
+                b'\"' | b'\'' => quote = Some(bytes[index]),
+                b'{' => braces.push(true),
+                b'}' => braces.push(false),
+                _ => {}
+            }
+            index += 1;
+        }
+        quote.is_none().then_some(braces)
+    }
+
+    fn complete(&self) -> bool {
+        !self.block_comment && !self.raw && !self.text_block
+    }
+}
+
+fn brace_definition(
+    lines: &[&str],
+    start: usize,
+    column: usize,
+    language: BraceLanguage,
+) -> Option<(usize, usize)> {
+    let mut lexer = BraceLexer::default();
+    let mut opened = false;
+    let mut depth = 0usize;
+    for (line, source) in lines.iter().enumerate().skip(start) {
+        let source = if line == start {
+            source.get(column..)?
+        } else {
+            source
+        };
+        for opening in lexer.scan(source, language)? {
+            if opening {
+                opened = true;
+                depth += 1;
+            } else {
+                depth = depth.checked_sub(1)?;
+                if opened && depth == 0 {
+                    return lexer.complete().then_some((start, line + 1));
+                }
+            }
+        }
+    }
+    None
 }
 fn infer_incomplete_symbol(lines: &[&str], lang: Lang) -> Option<String> {
     let markers: Vec<_> = lines
@@ -454,6 +1055,13 @@ fn imports(l: &[&str], p: &str, g: Lang) -> Vec<SourceExcerpt> {
                 Lang::Rs => {
                     t.starts_with("use ") || t.starts_with("pub use ") || t.starts_with("mod ")
                 }
+                Lang::Js | Lang::Jsx | Lang::Ts | Lang::Tsx => {
+                    t.starts_with("import ")
+                        || (t.starts_with("export ") && t.contains(" from "))
+                        || t.contains("require(")
+                }
+                Lang::Go => t.starts_with("import ") || t == "import (",
+                Lang::Java => t.starts_with("import "),
                 _ => false,
             }
         })
@@ -472,6 +1080,12 @@ fn imports(l: &[&str], p: &str, g: Lang) -> Vec<SourceExcerpt> {
         .collect()
 }
 fn name(l: &str, g: Lang) -> Option<&str> {
+    if g == Lang::Go {
+        return go_name(l);
+    }
+    if g == Lang::Java {
+        return java_name(l);
+    }
     let t = l.trim_start();
     let ks: &[&str] = match g {
         Lang::Py => &["def ", "async def ", "class "],
@@ -485,16 +1099,110 @@ fn name(l: &str, g: Lang) -> Option<&str> {
             "trait ",
             "type ",
         ],
+        Lang::Js | Lang::Jsx | Lang::Ts | Lang::Tsx => &[
+            "function ",
+            "async function ",
+            "export function ",
+            "export async function ",
+            "class ",
+            "export class ",
+            "interface ",
+            "export interface ",
+            "type ",
+            "export type ",
+            "enum ",
+            "export enum ",
+            "const ",
+            "let ",
+            "var ",
+            "export const ",
+            "export let ",
+            "export var ",
+        ],
         _ => &[],
     };
-    ks.iter().find_map(|k| {
+    let declaration = ks.iter().find_map(|k| {
         t.strip_prefix(k)
             .and_then(|r| {
                 r.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
                     .next()
             })
             .filter(|x| !x.is_empty())
+    });
+    declaration.or_else(|| {
+        matches!(g, Lang::Js | Lang::Jsx | Lang::Ts | Lang::Tsx)
+            .then(|| js_method_name(l))
+            .flatten()
     })
+}
+fn js_method_name(line: &str) -> Option<&str> {
+    let code = line.split("//").next().unwrap_or("");
+    let paren = code.find('(')?;
+    let prefix = code[..paren].trim_end();
+    let start = prefix
+        .char_indices()
+        .rev()
+        .find(|(_, character)| !ident(*character))
+        .map_or(0, |(index, character)| index + character.len_utf8());
+    let candidate = &prefix[start..];
+    (!candidate.is_empty() && js_decl(code, candidate)).then_some(candidate)
+}
+fn go_name(line: &str) -> Option<&str> {
+    let trimmed = line.split("//").next().unwrap_or("").trim_start();
+    if let Some(rest) = trimmed.strip_prefix("type ") {
+        return rest
+            .trim_start()
+            .split(|character: char| !ident(character))
+            .next()
+            .filter(|name| !name.is_empty());
+    }
+    let mut rest = trimmed.strip_prefix("func ")?.trim_start();
+    if rest.starts_with('(') {
+        let mut depth = 0usize;
+        let mut end = None;
+        for (index, byte) in rest.bytes().enumerate() {
+            match byte {
+                b'(' => depth += 1,
+                b')' => {
+                    depth = depth.checked_sub(1)?;
+                    if depth == 0 {
+                        end = Some(index + 1);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        rest = rest.get(end?..)?.trim_start();
+    }
+    rest.split(|character: char| !ident(character))
+        .next()
+        .filter(|name| !name.is_empty())
+}
+fn java_name(line: &str) -> Option<&str> {
+    let code = line.split("//").next().unwrap_or("");
+    for keyword in ["class ", "interface ", "enum ", "record "] {
+        if let Some(start) = code.find(keyword) {
+            let rest = &code[start + keyword.len()..];
+            if let Some(name) = rest
+                .split(|character: char| !ident(character))
+                .next()
+                .filter(|name| !name.is_empty())
+                && java_decl(code, name).is_some()
+            {
+                return Some(name);
+            }
+        }
+    }
+    let paren = code.find('(')?;
+    let prefix = code[..paren].trim_end();
+    let start = prefix
+        .char_indices()
+        .rev()
+        .find(|(_, character)| !ident(*character))
+        .map_or(0, |(index, character)| index + character.len_utf8());
+    let candidate = &prefix[start..];
+    (!candidate.is_empty() && java_decl(code, candidate).is_some()).then_some(candidate)
 }
 fn nearby(l: &[&str], p: &str, target: (usize, usize), g: Lang) -> Vec<SourceExcerpt> {
     let mut v = vec![];
@@ -561,10 +1269,9 @@ fn references(profile: &Profile, target: &Path, symbol: &str) -> (Vec<SourceExce
     for p in files {
         let Ok(t) = read(&p, SCAN_CAP) else { continue };
         let l: Vec<&str> = t.lines().collect();
-        let Some(i) = l
-            .iter()
-            .position(|x| has_ident(x, symbol) && (p != target || !def_line(x, symbol)))
-        else {
+        let Some(i) = l.iter().position(|x| {
+            has_ident(x, symbol) && (p != target || !def_line(x, symbol, Lang::of(&p)))
+        }) else {
             continue;
         };
         let rel = relative(profile, &p);
@@ -657,13 +1364,58 @@ fn boundary(l: &str, i: usize, n: usize) -> bool {
 fn ident(c: char) -> bool {
     c.is_ascii_alphanumeric() || c == '_'
 }
-fn def_line(l: &str, n: &str) -> bool {
-    py_decl(l, n) || rs_decl(l, n)
+fn def_line(l: &str, n: &str, lang: Lang) -> bool {
+    match lang {
+        Lang::Py => py_decl(l, n),
+        Lang::Rs => rs_decl(l, n),
+        Lang::Js | Lang::Jsx | Lang::Ts | Lang::Tsx => js_decl(l, n),
+        Lang::Go => go_decl(l, n).is_some(),
+        Lang::Java => java_decl(l, n).is_some(),
+        _ => false,
+    }
+}
+fn js_decl(line: &str, name: &str) -> bool {
+    let code = line.split("//").next().unwrap_or("");
+    [
+        "function",
+        "class",
+        "interface",
+        "type",
+        "enum",
+        "const",
+        "let",
+        "var",
+    ]
+    .iter()
+    .any(|keyword| {
+        let declaration = format!("{keyword} {name}");
+        code.match_indices(&declaration)
+            .any(|(index, _)| boundary(code, index, declaration.len()))
+    }) || code.match_indices(name).any(|(index, _)| {
+        boundary(code, index, name.len())
+            && code[index + name.len()..].trim_start().starts_with('(')
+    })
 }
 fn source(p: &Path) -> bool {
     matches!(
         p.extension().and_then(|x| x.to_str()),
-        Some("rs" | "py" | "ts" | "tsx" | "js" | "jsx" | "go" | "java" | "c" | "h" | "cpp" | "cc")
+        Some(
+            "rs" | "py"
+                | "ts"
+                | "tsx"
+                | "mts"
+                | "cts"
+                | "js"
+                | "jsx"
+                | "mjs"
+                | "cjs"
+                | "go"
+                | "java"
+                | "c"
+                | "h"
+                | "cpp"
+                | "cc"
+        )
     )
 }
 fn is_test(p: &str) -> bool {
